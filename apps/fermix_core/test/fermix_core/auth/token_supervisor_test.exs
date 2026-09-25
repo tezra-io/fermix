@@ -2,8 +2,13 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
   # async: false — mutates FERMIX_HOME so Store's default path is hermetic.
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
+  alias FermixTestSupport.SafeRm
 
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix_ts_#{System.unique_integer([:positive])}")
@@ -145,6 +150,113 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     profile = "tesla_#{System.unique_integer([:positive])}:primary"
     on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
     profile
+  end
+
+  # TOKEN-6: a CLI logout deleted the entry in its own VM; the daemon's
+  # `auth_forget` then lets go of what this VM still holds for the profile.
+  describe "forget_signed_out/1" do
+    test "drops a child's tokens and token file, stops it, and serves a later sign-in" do
+      profile = "google_calendar:signout-#{System.unique_integer([:positive])}"
+      on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
+      root = SafeRm.make_tmp_dir!("ts-signout-store")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      DistStore.ensure!(root)
+      token_file = DistStore.token_file(root, profile)
+
+      :ok = Store.write(profile, google_entry("old_at"))
+      assert :ok = TokenSupervisor.enable_token_file(profile, token_file)
+      assert %{"access_token" => "old_at"} = token_file |> File.read!() |> Jason.decode!()
+      [{manager, _value}] = Registry.lookup(FermixCore.Auth.TokenRegistry, profile)
+      down = Process.monitor(manager)
+
+      # The CLI VM's logout.
+      :ok = Store.delete_provider(profile)
+      assert :ok = TokenSupervisor.forget_signed_out(profile)
+
+      refute File.exists?(token_file)
+      assert_receive {:DOWN, ^down, :process, ^manager, _reason}
+
+      # The next use starts a fresh manager from auth.json, so a sign-in made
+      # after the logout is served rather than refused.
+      :ok = Store.write(profile, google_entry("fresh_at"))
+      assert {:ok, "fresh_at"} = TokenSupervisor.get_token(profile)
+    end
+
+    test "tells the top-level Codex manager to forget, and leaves it running" do
+      assert Process.whereis(TokenManager) == nil
+      :ok = Store.write("openai_codex", %{anthropic_entry() | provider: "openai"})
+
+      manager =
+        start_supervised!({TokenManager, name: TokenManager, fermix_auth_path: Store.path()})
+
+      assert {:ok, "old_at"} = TokenManager.get_token(TokenManager)
+
+      :ok = Store.delete_provider("openai_codex")
+      assert :ok = TokenSupervisor.forget_signed_out("openai_codex")
+
+      assert {:error, :auth_invalidated} = TokenManager.get_token(TokenManager)
+      assert Process.alive?(manager)
+    end
+
+    test "starts no manager for a profile nothing holds" do
+      profile = "github:signout-#{System.unique_integer([:positive])}"
+
+      assert :ok = TokenSupervisor.forget_signed_out(profile)
+      assert Registry.lookup(FermixCore.Auth.TokenRegistry, profile) == []
+    end
+
+    # A manager can stop between the lookup and the call (a plugin reload, a
+    # concurrent stop). The call then exits `:noproc`, the shape a stand-in
+    # that exits with that reason on the call reproduces: nothing is held, so
+    # the daemon must not report a failed forget.
+    test "a child that is gone by the time it is called held nothing" do
+      profile = "github:signout-gone-#{System.unique_integer([:positive])}"
+
+      gone_on_call(fn ->
+        {:ok, _owner} = Registry.register(FermixCore.Auth.TokenRegistry, profile, nil)
+      end)
+
+      assert :ok = TokenSupervisor.forget_signed_out(profile)
+    end
+
+    test "a Codex manager that is gone by the time it is called held nothing" do
+      assert Process.whereis(TokenManager) == nil
+      gone_on_call(fn -> Process.register(self(), TokenManager) end)
+
+      assert :ok = TokenSupervisor.forget_signed_out("openai_codex")
+    end
+  end
+
+  # A stand-in manager, registered by `register`, that exits `:noproc` on the
+  # first call it receives: to its caller, a manager that died just before it.
+  defp gone_on_call(register) do
+    parent = self()
+
+    stand_in =
+      spawn(fn ->
+        register.()
+        send(parent, {:stand_in_registered, self()})
+
+        receive do
+          {:"$gen_call", _from, :forget} -> exit(:noproc)
+        end
+      end)
+
+    on_exit(fn -> Process.exit(stand_in, :kill) end)
+    assert_receive {:stand_in_registered, ^stand_in}
+    stand_in
+  end
+
+  defp google_entry(access_token) do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      granted_scopes: [],
+      tokens: %{access_token: access_token, refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
   end
 
   describe "refresh_entry/3 — plugin oauth providers (registry path)" do
@@ -384,6 +496,82 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
 
       assert {:ok, stored} = Store.read("github:primary")
       assert stored.status == "reauthorization_required"
+    end
+
+    # AGENTS.md rule 7: the quarantine status write can fail. Its error is
+    # logged and answered rather than dropped.
+    test "a failed reauthorization_required write is logged and answered" do
+      :ok = Store.write("github:primary", plugin_oauth_entry("github"))
+      {:ok, entry} = Store.read("github:primary")
+      File.write!(Store.path(), "{ not json ")
+
+      {result, log} =
+        with_log(fn ->
+          TokenSupervisor.refresh_entry("github:primary", entry, plug: &permanent_400_plug/1)
+        end)
+
+      assert {:error, {:malformed_auth_file, _path, _backup, {:invalid_json, _err}}} = result
+      assert log =~ "could not record reauthorization_required for github:primary"
+    end
+
+    # TOKEN-2 (tla/specs/token_refresh, check 15): `fermix plugins auth
+    # refresh` in a tree-less VM refreshes directly. While the daemon's manager
+    # holds the profile lock mid-refresh, the direct refresh waits, then reads
+    # the manager's rotation instead of presenting the token it consumed, and
+    # its status write can no longer put that consumed token back.
+    test "a direct refresh waits for the profile lock, then refreshes the newest token" do
+      :ok = Store.write("github:primary", plugin_oauth_entry("github"))
+      parent = self()
+
+      holder =
+        Task.async(fn ->
+          Store.with_profile_lock("github:primary", Store.path(), fn ->
+            send(parent, :held)
+
+            receive do
+              :go -> :ok
+            end
+
+            {:ok, entry} = Store.read("github:primary")
+            rotated = %{access_token: "mgr_at", refresh_token: "mgr_rt"}
+            Store.write("github:primary", %{entry | tokens: rotated})
+          end)
+        end)
+
+      assert_receive :held
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(parent, {:direct_sent, URI.decode_query(body)})
+        refresh_plug(conn)
+      end
+
+      direct = Task.async(fn -> TokenSupervisor.direct_refresh("github:primary", plug: plug) end)
+      refute_receive {:direct_sent, _form}, 300
+
+      send(holder.pid, :go)
+      assert :ok = Task.await(holder)
+      assert {:ok, "new_at"} = Task.await(direct)
+      assert_received {:direct_sent, %{"refresh_token" => "mgr_rt"}}
+
+      assert {:ok, %{status: "ready", tokens: %{refresh_token: "new_rt"}}} =
+               Store.read("github:primary")
+    end
+
+    # Config.auth_profile is operator-settable, so a profile name is untrusted
+    # input to the lockfile name: it stays beside auth.json in FERMIX_HOME.
+    test "a profile name with path separators keeps its lockfile in FERMIX_HOME" do
+      home = Path.dirname(Store.path())
+      profile = "../../outside/github:primary"
+
+      lock_dir =
+        Store.with_profile_lock(profile, Store.path(), fn ->
+          home |> File.ls!() |> Enum.filter(&String.ends_with?(&1, ".lock"))
+        end)
+
+      assert lock_dir == [Path.basename(Store.profile_lock_path(profile, Store.path()))]
+      assert Path.dirname(Store.profile_lock_path(profile, Store.path())) == home
+      refute File.exists?(Path.join(home |> Path.dirname() |> Path.dirname(), "outside"))
     end
   end
 

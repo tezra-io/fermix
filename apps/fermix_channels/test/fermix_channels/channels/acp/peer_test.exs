@@ -18,6 +18,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
   alias FermixChannels.Channels.Acp.Wire
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Gateway.QueueSupervisor
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
   alias FermixTestSupport.SafeRm
@@ -108,18 +109,19 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       SafeRm.rm_rf!(home)
     end)
 
-    task_supervisor = start_supervised!({Task.Supervisor, []})
     agent = start_supervised!({StubAgent, test_pid: self()}, id: :stub_agent)
     queue = :"acp_queue_#{System.unique_integer([:positive])}"
 
-    start_supervised!(
-      {Queue,
-       name: queue,
-       main_agent: agent,
-       turn_runner: ScriptedRunner,
-       task_supervisor: task_supervisor},
-      id: :acp_queue
-    )
+    # The production shape: the Queue and its turn tasks' supervisor under
+    # `QueueSupervisor` (`:one_for_all`), so a killed Queue takes its turns along.
+    queue_sup =
+      start_supervised!(
+        {QueueSupervisor,
+         name: :"acp_queue_sup_#{System.unique_integer([:positive])}",
+         turn_tasks: :"acp_turn_tasks_#{System.unique_integer([:positive])}",
+         queue: [name: queue, main_agent: agent, turn_runner: ScriptedRunner]},
+        id: :acp_queue
+      )
 
     start_supervised!(
       {Acp.Supervisor,
@@ -128,7 +130,11 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       id: :acp_supervisor
     )
 
-    {:ok, socket_path: socket_path, queue: queue, identity_dir: IdentityStore.dir()}
+    {:ok,
+     socket_path: socket_path,
+     queue: queue,
+     queue_sup: queue_sup,
+     identity_dir: IdentityStore.dir()}
   end
 
   describe "bridge handshake (§6.2)" do
@@ -652,6 +658,135 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     end
   end
 
+  # A Queue that dies takes its turn tasks with it (`QueueSupervisor`), and no
+  # process is left to send their results (turn_queue QUEUE-8). The Peer watches
+  # the Queue it handed each prompt to, so the prompt is answered anyway, once,
+  # and the session stays usable.
+  describe "a Queue crash" do
+    test "answers the prompt in flight as a failed turn, once, and accepts the next", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, msg, runner}, 5_000
+      runner_ref = Process.monitor(runner)
+
+      {{frames, response}, log} =
+        with_log(fn ->
+          Process.exit(GenServer.whereis(ctx.queue), :kill)
+          recv_response(client, 3)
+        end)
+
+      # The failed-turn answer: nothing was done yet, so an error the client may retry.
+      assert frames == []
+      assert response["error"]["code"] == -32_603
+      assert log =~ "queue_down"
+
+      # The turn died with its Queue. A result sent for it anyway is fenced off.
+      assert_receive {:DOWN, ^runner_ref, :process, ^runner, _reason}, 5_000
+      Acp.build_turn_result(inbound_message(msg)).({:completed})
+      _ = :sys.get_state(peer)
+      assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
+
+      # Served only once the supervisor finished the restart that killed the runner.
+      assert is_pid(queue_child(ctx.queue_sup))
+
+      prompt(client, 4, session_id, [%{"type" => "text", "text" => "again"}])
+      assert_receive {:turn_started, _msg, next_runner}, 5_000
+      finish(next_runner, "done")
+      assert {_frames, %{"result" => %{"stopReason" => "end_turn"}}} = recv_response(client, 4)
+    end
+
+    test "answers every prompt the dead Queue held, in every session", ctx do
+      client = initialized(ctx)
+      first = new_session(client, 2)
+      second = new_session(client, 3)
+      prompt(client, 4, first, [%{"type" => "text", "text" => "one"}])
+      prompt(client, 5, second, [%{"type" => "text", "text" => "two"}])
+      assert_receive {:turn_started, _msg_a, _runner_a}, 5_000
+      assert_receive {:turn_started, _msg_b, _runner_b}, 5_000
+
+      {responses, _log} =
+        with_log(fn ->
+          Process.exit(GenServer.whereis(ctx.queue), :kill)
+          recv_responses(client, [4, 5])
+        end)
+
+      assert %{4 => %{"error" => %{"code" => -32_603}}, 5 => %{"error" => %{"code" => -32_603}}} =
+               responses
+    end
+
+    # The Queue calls no provider, so its exit is never a credential refusal,
+    # however its stack reads: a frame at line 401 must not send Buzz to
+    # dead-letter the prompt instead of retrying it.
+    test "a Queue exit that reads like an auth failure is still an internal error", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, _msg, _runner}, 5_000
+
+      frame =
+        {Queue, :handle_cast, 2, [file: ~c"lib/fermix_channels/gateway/queue.ex", line: 401]}
+
+      reason = {%RuntimeError{message: "boom"}, [frame]}
+
+      {{_frames, response}, _log} =
+        with_log(fn ->
+          Process.exit(GenServer.whereis(ctx.queue), reason)
+          recv_response(client, 3)
+        end)
+
+      assert response["error"]["code"] == -32_603
+      refute response["error"]["message"] =~ "Re-authenticate"
+    end
+
+    test "a prompt that finds no Queue running is refused, not left waiting", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      :ok = stop_supervised(:acp_queue)
+
+      {{_frames, response}, log} =
+        with_log(fn ->
+          prompt(client, 3, session_id, [%{"type" => "text", "text" => "hi"}])
+          recv_response(client, 3)
+        end)
+
+      assert response["error"]["code"] == -32_603
+      assert response["error"]["message"] =~ "could not be queued"
+      assert log =~ "queue_unavailable"
+    end
+
+    test "a prompt answered normally leaves no watch on the Queue", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      queue = GenServer.whereis(ctx.queue)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "hi"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      # Served after the Peer finished handing the prompt over.
+      _ = :sys.get_state(peer)
+      assert {:monitors, [process: ^queue]} = Process.info(peer, :monitors)
+
+      finish(runner, "done")
+      assert {_frames, %{"result" => %{"stopReason" => "end_turn"}}} = recv_response(client, 3)
+      assert {:monitors, []} = Process.info(peer, :monitors)
+    end
+
+    test "a prompt cancelled by request id leaves no watch on the Queue", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, _msg, _runner}, 5_000
+
+      notify(client, "$/cancel_request", %{"requestId" => 3})
+
+      assert {[], %{"error" => %{"code" => -32_800}}} = recv_response(client, 3)
+      assert {:monitors, []} = Process.info(peer, :monitors)
+    end
+  end
+
   # A prompt is answered with a JSON-RPC error only while re-running it is safe.
   # An error invites the client to retry the whole turn (buzz-acp requeues a
   # batch up to ten times), so a turn that has ALREADY acted on the world is
@@ -1084,6 +1219,24 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     end
   end
 
+  # Reads frames until every id in `ids` has its response, in whatever order the
+  # responses arrive, and returns them by id. Bounded like `recv_response/4`.
+  defp recv_responses(client, ids, acc \\ %{}, attempts \\ 200)
+
+  defp recv_responses(_client, ids, acc, _attempts) when map_size(acc) == length(ids), do: acc
+
+  defp recv_responses(_client, ids, _acc, 0), do: flunk("no responses for ids #{inspect(ids)}")
+
+  defp recv_responses(client, ids, acc, attempts) do
+    frame = recv_frame(client, 5_000)
+
+    if frame["id"] in ids and not Map.has_key?(frame, "method") do
+      recv_responses(client, ids, Map.put(acc, frame["id"], frame), attempts - 1)
+    else
+      recv_responses(client, ids, acc, attempts - 1)
+    end
+  end
+
   defp closed?(client, timeout \\ 1_000) do
     :gen_tcp.recv(client, 0, timeout) == {:error, :closed}
   end
@@ -1112,6 +1265,18 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       Message,
       Map.take(core_msg, [:id, :content, :sender, :channel, :chat_id, :reply_target, :metadata])
     )
+  end
+
+  defp peer_of(session_id) do
+    [{peer, _value}] = Registry.lookup(Acp.registry(), session_id)
+    peer
+  end
+
+  defp queue_child(queue_sup) do
+    Enum.find_value(Supervisor.which_children(queue_sup), fn
+      {Queue, pid, :worker, _modules} when is_pid(pid) -> pid
+      _child -> nil
+    end)
   end
 
   defp wait_until(fun, attempts \\ 150)

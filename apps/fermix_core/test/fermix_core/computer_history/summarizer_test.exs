@@ -17,6 +17,7 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.Locality
+  alias FermixCore.ComputerHistory.Purge
   alias FermixCore.ComputerHistory.Recall
   alias FermixCore.ComputerHistory.Summarizer
   alias FermixCore.ComputerHistory.Summarizer.Sessions
@@ -26,6 +27,8 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
   defmodule FakeAdapter do
     @behaviour FermixCore.Providers.Adapter
+
+    alias FermixCore.Memory.Repo
 
     @impl true
     def chat(messages, _capabilities, opts) do
@@ -38,8 +41,19 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
       }
 
       Process.put(:ch_calls, [call | Process.get(:ch_calls, [])])
+      purge_mid_call(Process.delete(:ch_purge))
 
       respond(Process.get(:ch_behavior, :ok), opts)
+    end
+
+    # The read-infer-write race, reproduced exactly: the owner purges while this
+    # call is in flight, after the batch was read (the roll-up test's precedent).
+    # Once only, so a later call in the same cycle is not a second purge.
+    defp purge_mid_call(nil), do: :ok
+
+    defp purge_mid_call({repo, from_ts, to_ts}) do
+      {:ok, _counts} = Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: repo)
+      :ok
     end
 
     defp respond(:error, _opts), do: {:error, :provider_unavailable}
@@ -74,6 +88,38 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
         model: model
       }
     end
+  end
+
+  # Stands in for the Repo: forwards every call to the real one, and purges
+  # `window` once, right after it has served the first `read` request and before
+  # it replies. That is a purge landing exactly between the batch read and
+  # whatever the summarizer asks next, the one gap the purge mark's placement
+  # (taken BEFORE the read) decides. `read` is the Repo request's tag.
+  defmodule PurgeAfterRead do
+    use GenServer
+
+    alias FermixCore.Memory.Repo
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(request, _from, state) do
+      reply = GenServer.call(state.repo, request)
+      {:reply, reply, purge_once(request, state)}
+    end
+
+    defp purge_once(request, %{read: read, window: {from_ts, to_ts}} = state)
+         when is_tuple(request) and elem(request, 0) == read do
+      {:ok, _counts} =
+        Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: state.repo)
+
+      %{state | window: nil}
+    end
+
+    defp purge_once(_request, state), do: state
   end
 
   setup do
@@ -1293,13 +1339,13 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
     end
 
     # The outcome word has to describe what the store actually holds: a memory the
-    # purge watermark refused is not an `ok` batch.
+    # purge guard refused is not an `ok` batch.
     test "a note the repo refuses is never logged as ok", %{repo: repo} do
       enable(summarizer: :local)
-      # A purge issued for everything up to now sets the watermark; events inserted
-      # afterwards still fall inside it, so the write refuses the memory.
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
       insert(repo, [event(1, 1_000, "typed a note")])
+      # The owner purges the sitting's window while its call is in flight, after the
+      # batch was read: the write refuses the note built from the erased rows.
+      Process.put(:ch_purge, {repo, 0, 5_000})
 
       log =
         capture_log([level: :info], fn ->
@@ -1319,6 +1365,61 @@ defmodule FermixCore.ComputerHistory.SummarizerTest do
 
       assert {:ok, %{sessions: 2, empty_batches: 2, events: 2, memory_written: false}} =
                Summarizer.run_cycle(local_opts(repo, limit: 1))
+    end
+  end
+
+  # --- the purge guard (§12): only a purge issued after the read refuses ---
+
+  describe "purge intervals and the note write" do
+    # CH-5: `purge all` used to leave a far-future watermark that refused every
+    # later note for good.
+    test "a note is written for activity after purge all", %{repo: repo} do
+      enable(summarizer: :local)
+      assert {:ok, _purged} = Purge.purge(:all, now: 5_000, repo: repo)
+      insert(repo, [event(1, 6_000, "typed a note")])
+
+      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
+    end
+
+    # The purge ran before the read, so its rows were already gone: the sitting
+    # around the window is summarized from what remains, not voided.
+    test "a purge issued before the read does not void a sitting that spans it", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "typed a note"), event(2, 1_500, "typed more")])
+      assert {:ok, %{events: 0}} = Purge.purge({:last, 1_000}, now: 3_000, repo: repo)
+      insert(repo, [event(3, 3_500, "typed after the purge")])
+
+      assert {:ok, %{memory_written: true, events: 3}} = Summarizer.run_cycle(local_opts(repo))
+      assert %{provenance_from_ts: 1_000, provenance_to_ts: 3_500} = stored_memory(repo)
+    end
+
+    # The mark is taken before the batch read, so a purge landing right after the
+    # read counts as issued after it and refuses the note. A mark taken after the
+    # read would already count that purge as seen, and write a note built from
+    # erased rows.
+    test "a purge landing right after the batch read refuses the note", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "typed a note")])
+
+      proxy =
+        start_supervised!(
+          {PurgeAfterRead,
+           repo: repo, read: :computer_history_events_after_id, window: {0, 5_000}}
+        )
+
+      assert {:ok, %{memory_written: false}} = Summarizer.run_cycle(local_opts(proxy))
+      assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
+      assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+    end
+
+    test "a purge issued after the read that misses the sitting leaves its note", %{repo: repo} do
+      enable(summarizer: :local)
+      insert(repo, [event(1, 1_000, "typed a note")])
+      Process.put(:ch_purge, {repo, 5_000, 6_000})
+
+      assert {:ok, %{memory_written: true}} = Summarizer.run_cycle(local_opts(repo))
+      assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
     end
   end
 

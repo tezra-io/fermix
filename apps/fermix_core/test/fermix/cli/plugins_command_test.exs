@@ -15,6 +15,7 @@ defmodule Fermix.CLI.PluginsCommandTest do
   alias FermixTestSupport.DistFetcherStub
   alias FermixTestSupport.DistFixtures
   alias FermixTestSupport.DistVerifierStub
+  alias FermixTestSupport.FakeDaemonSocket
   alias FermixTestSupport.TreeLessSecretWriter
 
   setup do
@@ -206,6 +207,150 @@ defmodule Fermix.CLI.PluginsCommandTest do
 
     assert stderr =~ "fermix plugins: " <> ClientRejection.sentence(detail)
     refute stderr =~ "[REDACTED]"
+  end
+
+  # TOKEN-6: the logout deletes the entry here, then tells a running daemon to
+  # drop the tokens it still holds for the profile, and its plugin child's token
+  # file, the way the other verbs ask it to re-apply their config.
+  describe "auth logout" do
+    setup do
+      socket_home = FakeDaemonSocket.fermix_home!()
+      profile = "google_calendar:cli-logout"
+
+      Application.put_env(:fermix_core, :plugins,
+        enabled: ["google_calendar"],
+        entries: %{"google_calendar" => [auth_profile: profile]}
+      )
+
+      :ok =
+        Store.write(profile, %{
+          auth_mode: "oauth2",
+          provider: "google",
+          granted_scopes: [],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+          last_refresh: nil,
+          status: "ready"
+        })
+
+      %{socket_home: socket_home, profile: profile}
+    end
+
+    test "with no daemon running, it logs out here and says only that", %{profile: profile} do
+      stderr =
+        capture_io(:stderr, fn ->
+          output =
+            capture_io(fn ->
+              assert PluginsCommand.run(["auth", "logout", "google_calendar"]) == 0
+            end)
+
+          assert output == "logged out google_calendar\n"
+        end)
+
+      assert stderr == ""
+      assert {:error, {:provider_missing, _}} = Store.read(profile)
+    end
+
+    test "tells a running daemon to forget the plugin's profile", ctx do
+      daemon = FakeDaemonSocket.serve_once(ctx.socket_home, %{"status" => "ok"})
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert PluginsCommand.run(["auth", "logout", "google_calendar"]) == 0
+          end)
+        end)
+
+      profile = ctx.profile
+
+      assert_receive {:fake_daemon_request,
+                      %{"method" => "auth_forget", "params" => %{"profile" => ^profile}}}
+
+      Task.await(daemon)
+      assert stderr =~ "daemon dropped any tokens it held for #{profile}"
+      assert {:error, {:provider_missing, _}} = Store.read(profile)
+    end
+
+    test "a daemon that cannot forget fails the logout loudly, and says the entry is gone",
+         ctx do
+      daemon =
+        FakeDaemonSocket.serve_once(ctx.socket_home, %{"status" => "error", "reason" => "wedged"})
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            assert PluginsCommand.run(["auth", "logout", "google_calendar"]) == 1
+          end)
+        end)
+
+      assert_receive {:fake_daemon_request, %{"method" => "auth_forget"}}
+      Task.await(daemon)
+
+      assert stderr =~
+               "fermix plugins: logged out google_calendar here (its #{ctx.profile} entry is removed)"
+
+      assert stderr =~ "the running daemon could not drop its tokens: wedged"
+
+      # Production runs the daemon from the macOS app, so the CLI restart is
+      # offered only for a daemon the operator runs.
+      assert stderr =~
+               "restart the daemon (from the Fermix app, or `fermix restart` for a daemon " <>
+                 "you run yourself)"
+
+      assert {:error, {:provider_missing, _}} = Store.read(ctx.profile)
+    end
+
+    # A logout whose notice failed leaves the grant gone and the daemon holding
+    # the account; running it again must reach the daemon, as `fermix auth
+    # logout` does, instead of failing on the missing grant.
+    test "a grant that is already gone is a logout, and still tells the daemon", ctx do
+      :ok = Store.delete_provider(ctx.profile)
+      daemon = FakeDaemonSocket.serve_once(ctx.socket_home, %{"status" => "ok"})
+      parent = self()
+
+      stderr =
+        capture_io(:stderr, fn ->
+          output =
+            capture_io(fn ->
+              send(parent, {:status, PluginsCommand.run(["auth", "logout", "google_calendar"])})
+            end)
+
+          send(parent, {:stdout, output})
+        end)
+
+      profile = ctx.profile
+
+      assert_receive {:fake_daemon_request,
+                      %{"method" => "auth_forget", "params" => %{"profile" => ^profile}}}
+
+      Task.await(daemon)
+      assert_received {:status, 0}
+      assert_received {:stdout, "google_calendar was already logged out\n"}
+      assert stderr =~ "daemon dropped any tokens it held for #{profile}"
+    end
+
+    # The logout takes the profile lock with the refreshers' bounded wait, so a
+    # profile another Fermix process keeps busy fails in seconds with a
+    # sentence, and the grant stays.
+    test "a busy profile fails the logout with the try-again sentence", ctx do
+      File.write!(Store.profile_lock_path(ctx.profile, Store.path()), "0 a-refresh\n")
+      parent = self()
+
+      stderr =
+        capture_io(:stderr, fn ->
+          capture_io(fn ->
+            send(parent, {:status, PluginsCommand.run(["auth", "logout", "google_calendar"])})
+          end)
+        end)
+
+      assert_received {:status, 1}
+
+      assert stderr ==
+               "fermix plugins: Another Fermix process is refreshing or signing in to this " <>
+                 "account. Try again shortly.\n"
+
+      assert {:ok, _entry} = Store.read(ctx.profile)
+    end
   end
 
   # M27 §7.1: the secret reaches `auth set` through a masked terminal read or

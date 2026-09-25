@@ -8,6 +8,11 @@ defmodule FermixCore.Auth.CodexImport do
   Codex file is never read again after this — the refresh attempt is the
   sole authoritative validity test per the M4.8 design.
 
+  The refresh spends the Codex CLI's refresh token, so the `openai_codex`
+  profile lock is taken before it and held through the write. A profile busy
+  past the lock's wait refuses with `{:error, :profile_busy}` and the Codex
+  CLI's token unspent.
+
   Refusing to ship a degraded path: if the refresh fails, this returns
   the failure reason. Callers (the wizard) re-prompt with the remaining
   options instead of falling back to a stale token.
@@ -31,10 +36,21 @@ defmodule FermixCore.Auth.CodexImport do
     req_options = Keyword.get(opts, :req_options, [])
 
     with {:ok, codex} <- read_codex(codex_path),
-         {:ok, refreshed} <- RefreshClient.refresh(codex.refresh_token, req_options),
-         entry <- to_entry(refreshed),
-         :ok <- Store.write(:openai_codex, entry, fermix_path) do
+         {:ok, entry} <-
+           Store.with_profile_lock(:openai_codex, fermix_path, fn ->
+             refresh_and_store(codex.refresh_token, fermix_path, req_options)
+           end) do
       Logger.info("CodexImport: imported and persisted refreshed tokens to #{fermix_path}")
+      {:ok, entry}
+    end
+  end
+
+  # Runs under the Codex profile lock, which is not reentrant: nothing here
+  # takes it again or calls a TokenManager.
+  defp refresh_and_store(refresh_token, fermix_path, req_options) do
+    with {:ok, refreshed} <- RefreshClient.refresh(refresh_token, req_options),
+         entry = to_entry(refreshed),
+         :ok <- Store.write(:openai_codex, entry, fermix_path) do
       {:ok, entry}
     end
   end

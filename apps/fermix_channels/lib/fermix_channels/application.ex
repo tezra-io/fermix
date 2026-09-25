@@ -53,7 +53,8 @@ defmodule FermixChannels.Application do
 
     children =
       [
-        FermixChannels.Gateway.Queue,
+        # The Queue and the Task.Supervisor its turns run under, :one_for_all.
+        FermixChannels.Gateway.QueueSupervisor,
         # After the queue, deliberately: the bridge ingests through it, so a
         # delegation accepted before the queue is up has nowhere to run.
         FermixChannels.Voice.Supervisor,

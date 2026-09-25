@@ -227,10 +227,16 @@ defmodule FermixChannels.Channels.DiscordTest do
            ]}
         )
 
+      task_supervisor = start_supervised!(Task.Supervisor)
+
       queue =
         start_supervised!(
           {FermixChannels.Gateway.Queue,
-           [name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent]}
+           [
+             name: :"queue_#{System.unique_integer([:positive])}",
+             main_agent: agent,
+             task_supervisor: task_supervisor
+           ]}
         )
 
       Req.Test.stub(:discord, fn conn ->

@@ -203,6 +203,12 @@ options for WebSockets, and `Net.Guard` the public-URL checks.
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
 
+Architecture Invariant: `auth.json` has two lockfiles beside it, shared by every
+VM on the host. Every read-modify-write of the file holds the store lock, and a
+refresh, sign-in, import or logout of a profile first holds that profile's lock.
+The order is always profile, then store; neither lock is reentrant, and no
+locked section calls a `TokenManager`.
+
 ### `FermixCore.Capabilities` and Tools
 
 A `Capabilities.Capability` is a struct, not a behaviour: a kind (`:builtin`,
@@ -369,7 +375,13 @@ never compile-depends on channels, and `OwnerInbox` is the one resolver for the
 owner's inbox.
 
 Architecture Invariant: a delivery destination is resolved once, at acceptance,
-and stored on the row; send time resolves only the adapter.
+and stored on the row; send time resolves only the adapter. A send watched by
+`ChannelSend.with_timeout` is linked to its caller, so it never outlives it.
+
+Architecture Invariant: a job is `running` only while one of its runs is queued
+or running. The claim takes the job and inserts the run in one transaction, and
+`Repo.settle_job_run` writes the run's final row and releases the job in
+another; owner edits write only the columns they own.
 
 ### Sandbox and Command Execution
 
@@ -662,10 +674,20 @@ the real agent path: behavioral suites (`benchmark/suites/*.yaml`,
 Fermix relies on OTP supervision, not service boundaries. The core supervisor
 uses `:rest_for_one` because later runtime processes depend on earlier command
 hosting, registry, memory, and trace processes. Channel and web apps run their
-own `:one_for_one` trees.
+own top-level `:one_for_one` trees. Inside the channels tree,
+`Gateway.QueueSupervisor` is `:one_for_all`: it pairs `Gateway.Queue` with the `Task.Supervisor` its
+turn tasks run under, so a Queue that dies takes its turns with it and the
+restarted Queue never runs a turn beside a survivor. Nothing then sends those
+turns' results, so `Acp.Peer` watches the Queue process it handed each prompt
+to and answers the prompt as a failed turn. Mobile's `RequestCoordinator`
+fences the request on the Queue it finds after the hand-off and releases it when
+that Queue dies (a restart between the hand-off and that lookup leaves the
+attempt running until its fence expires). Voice does not watch (accepted: a
+call is bounded and the operator can cancel it).
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
-dedicated supervised process, and external commands run in a `CommandHost`.
+dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s
+`Gateway.TurnTasks`), and external commands run in a `CommandHost`.
 GenServer callbacks should enqueue, delegate, or update state, not perform slow
 provider or network work inline.
 

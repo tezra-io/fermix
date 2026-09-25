@@ -247,17 +247,32 @@ defmodule Fermix.CLI.PluginsCommand do
     end
   end
 
+  # A grant that is already gone is the state the verb asks for, not a failure,
+  # and a running daemon is still told: a logout whose notice failed leaves the
+  # grant gone and the daemon holding the account, and running it again is how
+  # the operator retries, the way `fermix auth logout` does.
   defp auth_logout(name, argv) do
     with {:ok, opts} <- parse_opts(argv, @json_switches),
-         :ok <- Auth.logout(name) do
+         {:ok, message} <- logged_out(Auth.logout(name), name),
+         {:ok, [plugin]} <- selected_plugins(name) do
       print(%{plugin: name, logged_out: true}, Keyword.get(opts, :json, false), fn _ ->
-        IO.puts("logged out #{name}")
+        IO.puts(message)
       end)
+
+      forget_in_daemon(name, Config.auth_profile(plugin))
     else
       :error -> invalid_options("auth logout")
       {:error, reason} -> error(reason)
     end
   end
+
+  defp logged_out(:ok, name), do: {:ok, "logged out #{name}"}
+  defp logged_out({:error, :no_auth_file}, name), do: {:ok, "#{name} was already logged out"}
+
+  defp logged_out({:error, {:provider_missing, _profile}}, name),
+    do: {:ok, "#{name} was already logged out"}
+
+  defp logged_out({:error, _reason} = error, _name), do: error
 
   # The credential is read from the terminal or from stdin — never from argv,
   # where `ps`, the shell history file, and process-listing telemetry would
@@ -486,6 +501,33 @@ defmodule Fermix.CLI.PluginsCommand do
     end
   end
 
+  # The logout above deleted the entry in this VM, or found it already gone. A
+  # running daemon still holds the profile's tokens, and its plugin child's
+  # token file, until it is told (§11: the CLI and the daemon are separate VMs).
+  # No daemon: nothing holds them, and nothing more is printed. Messages go to
+  # stderr like apply_to_daemon's, so `--json` stdout stays parseable.
+  defp forget_in_daemon(name, profile) do
+    case DaemonClient.forget_auth_profile(profile) do
+      :ok ->
+        IO.puts(:stderr, "daemon dropped any tokens it held for #{profile}")
+        0
+
+      :not_running ->
+        0
+
+      {:error, reason} ->
+        IO.puts(
+          :stderr,
+          "fermix plugins: logged out #{name} here (its #{profile} entry is removed), " <>
+            "but the running daemon could not drop its tokens: #{reason} — " <>
+            "restart the daemon (from the Fermix app, or `fermix restart` for a daemon " <>
+            "you run yourself)"
+        )
+
+        1
+    end
+  end
+
   defp installed_row(entry) do
     %{name: entry.name, version: entry.version, status: entry.status, reason: entry.reason}
   end
@@ -695,6 +737,13 @@ defmodule Fermix.CLI.PluginsCommand do
   # client, which signing in again cannot fix until the client is updated.
   defp error({:oauth_client_rejected, detail}) do
     IO.puts(:stderr, "fermix plugins: #{ClientRejection.sentence(detail)}")
+    1
+  end
+
+  # auth login, reauthorize and logout: another Fermix process held the
+  # account's profile lock past the wait, and nothing was spent or removed.
+  defp error(:profile_busy) do
+    IO.puts(:stderr, "fermix plugins: #{Store.busy_sentence()}")
     1
   end
 

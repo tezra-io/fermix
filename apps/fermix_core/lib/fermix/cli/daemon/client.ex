@@ -4,8 +4,10 @@ defmodule Fermix.CLI.Daemon.Client do
 
   `request_v1/3` speaks the management protocol and is what `fermix status`,
   `fermix doctor`, and `fermix logs` use. `request/2` speaks the historical
-  unversioned protocol that `fermix stop`, mobile pairing, and the remaining
-  introspection verbs still use; a caller never has both for one answer.
+  unversioned protocol that `fermix stop`, mobile pairing, the remaining
+  introspection verbs, and the plugin and auth verbs' notices to the daemon
+  (`plugins_apply`, `auth_forget`) still use; a caller never has both for one
+  answer.
 
   Returns `{:error, :not_running}` when the socket is missing or
   unreachable — callers treat that as the authoritative "not
@@ -15,6 +17,10 @@ defmodule Fermix.CLI.Daemon.Client do
   alias FermixCore.Management.Protocol
 
   @default_timeout_ms 3_000
+  # Above the daemon's own bound on a forget (the manager's GenServer.call
+  # default of 5 s), so a slow forget arrives as the daemon's error rather than
+  # as this side's timeout.
+  @forget_timeout_ms 10_000
 
   # Upper bound on one reply frame. Without it a corrupt or version-skewed
   # header (e.g. a pre-packet-4 daemon's newline-framed JSON, whose first 4
@@ -40,6 +46,31 @@ defmodule Fermix.CLI.Daemon.Client do
   def mobile_request(method, params, opts)
       when is_binary(method) and is_map(params) and is_list(opts) do
     request(method, Keyword.put(opts, :params, params))
+  end
+
+  @doc """
+  Tells a running daemon to let go of the tokens of a profile this VM has just
+  signed out of (`auth_forget`), so it stops serving the account at once rather
+  than at its manager's next refresh.
+
+  The answer is one of three: `:ok`, `:not_running` (no daemon, so nothing
+  holds the tokens), or `{:error, sentence}` for a daemon that answered with an
+  error or did not answer in time.
+  """
+  @spec forget_auth_profile(String.t(), keyword()) :: :ok | :not_running | {:error, String.t()}
+  def forget_auth_profile(profile, opts \\ [])
+      when is_binary(profile) and profile != "" and is_list(opts) do
+    opts =
+      opts
+      |> Keyword.put(:params, %{"profile" => profile})
+      |> Keyword.put_new(:timeout, @forget_timeout_ms)
+
+    case request("auth_forget", opts) do
+      {:ok, %{"status" => "ok"}} -> :ok
+      {:ok, %{"status" => "error", "reason" => reason}} -> {:error, reason}
+      {:error, :not_running} -> :not_running
+      {:error, reason} -> {:error, inspect(reason)}
+    end
   end
 
   @doc "Runs bounded request exchanges over one control-socket connection."

@@ -203,22 +203,8 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   def handle_call(:forget, _from, state) do
-    if is_reference(state.refresh_timer), do: Process.cancel_timer(state.refresh_timer)
-
     Logger.info("TokenManager: forgot tokens for #{inspect(state.auth_profile)}")
-
-    forgotten =
-      refresh_token_file(%{
-        state
-        | access_token: nil,
-          refresh_token: nil,
-          expires_at: nil,
-          entry: nil,
-          refresh_timer: nil,
-          refusal: permanent_reason(state.auth_profile)
-      })
-
-    {:reply, :ok, forgotten}
+    {:reply, :ok, drop_tokens(state)}
   end
 
   def handle_call({:enable_token_file, path}, _from, state) do
@@ -290,12 +276,58 @@ defmodule FermixCore.Auth.TokenManager do
     {:error, :no_refresh_token, state}
   end
 
+  # One refresher of this profile at a time, across processes and VMs: the
+  # entry is read, refreshed and its outcome written under the profile lock
+  # (`Store.with_profile_lock/3`), so a CLI VM or the Codex image backend never
+  # presents the refresh token this refresh is consuming, and a logout never
+  # lands inside it. The manager's own state and the token-file projection
+  # change only after the lock is released.
   defp do_refresh(state) do
-    entry = latest_entry(state)
+    locked =
+      Store.with_profile_lock(state.auth_profile, state.fermix_path, fn ->
+        refresh_stored(state)
+      end)
 
-    case refresh_entry(state.auth_profile, entry, state.fermix_path, state.req_options) do
+    case locked do
       {:ok, entry} ->
         {:ok, apply_entry(state, entry)}
+
+      {:refused, refusal} ->
+        refuse(state, refusal)
+
+      {:refused, refusal, write_error} ->
+        {:error, _refusal, refused} = refuse(state, refusal)
+        {:error, write_error, refused}
+
+      {:signed_out, reason} ->
+        signed_out(state, reason)
+
+      # Transient, the lock included (another refresher held it past the wait,
+      # and `Store` has logged it): the state is kept for the next trigger.
+      {:error, reason} ->
+        {:error, reason, state}
+    end
+  end
+
+  # Runs under the profile lock, which is not reentrant: nothing here takes it
+  # again or calls a TokenManager.
+  defp refresh_stored(state) do
+    case latest_entry(state) do
+      {:ok, entry} -> refresh_outcome(state, entry)
+      {:error, reason} -> stored_entry_error(reason)
+    end
+  end
+
+  # A manager's tokens only ever come from disk (`init/1`, `:reload`), so an
+  # entry that is gone was signed out since it loaded them.
+  defp stored_entry_error({:provider_missing, _provider} = reason), do: {:signed_out, reason}
+  defp stored_entry_error(:no_auth_file), do: {:signed_out, :no_auth_file}
+  defp stored_entry_error(reason), do: {:error, reason}
+
+  defp refresh_outcome(state, entry) do
+    case refresh_entry(state.auth_profile, entry, state.fermix_path, state.req_options) do
+      {:ok, refreshed} ->
+        {:ok, refreshed}
 
       # The grant cannot renew under this client, so it is quarantined under its
       # true cause. A sign-in with the same client, or a restart, cannot fix it.
@@ -306,7 +338,7 @@ defmodule FermixCore.Auth.TokenManager do
         )
 
         mark_client_rejected(state.auth_profile, entry, state.fermix_path)
-        refuse(state, reason)
+        {:refused, reason}
 
       {:error, {:permanent, status, body}} ->
         Logger.error(
@@ -314,12 +346,53 @@ defmodule FermixCore.Auth.TokenManager do
             "Recover with `fermix auth login`, then restart the daemon."
         )
 
-        mark_reauthorization_required(state.auth_profile, entry, state.fermix_path)
-        refuse(state, permanent_reason(state.auth_profile))
+        permanently_refused(state, entry)
 
       {:error, reason} ->
-        {:error, reason, state}
+        {:error, reason}
     end
+  end
+
+  # The provider has rejected the grant, so the manager refuses it whether or
+  # not its status reached the store. A status write that failed (logged by
+  # mark_reauthorization_required/3) is this caller's answer.
+  defp permanently_refused(state, entry) do
+    refusal = permanent_reason(state.auth_profile)
+
+    case mark_reauthorization_required(state.auth_profile, entry, state.fermix_path) do
+      :ok -> {:refused, refusal}
+      {:error, reason} -> {:refused, refusal, reason}
+    end
+  end
+
+  # The stored entry is gone: a logout ran since this manager loaded it, for example a
+  # CLI logout whose `auth_forget` notice has not yet reached, or was refused by, this
+  # daemon. Refreshing the in-memory copy would write the account back, so the manager
+  # drops its tokens as `forget/1` does, and sends and writes nothing.
+  defp signed_out(state, reason) do
+    Logger.warning(
+      "TokenManager: #{state.auth_profile} has no stored sign-in " <>
+        "(#{Redaction.format(reason)}); dropping its tokens instead of refreshing them"
+    )
+
+    dropped = drop_tokens(state)
+    {:error, dropped.refusal, dropped}
+  end
+
+  # Signed out: nothing is held or served again until a reload brings a fresh
+  # sign-in in, and a plugin child's projection is deleted with the tokens.
+  defp drop_tokens(state) do
+    if is_reference(state.refresh_timer), do: Process.cancel_timer(state.refresh_timer)
+
+    refresh_token_file(%{
+      state
+      | access_token: nil,
+        refresh_token: nil,
+        expires_at: nil,
+        entry: nil,
+        refresh_timer: nil,
+        refusal: permanent_reason(state.auth_profile)
+    })
   end
 
   defp apply_entry(state, %{tokens: tokens, expires_at: expires_at} = entry) do
@@ -414,31 +487,12 @@ defmodule FermixCore.Auth.TokenManager do
   # Refresh from the newest persisted entry, not the in-memory copy. Another
   # refresher (a CLI/doctor probe, or a prior refresh) may have rotated the
   # refresh token in the store; Codex invalidates the whole session if a
-  # rotated (consumed) refresh token is reused, so always start from disk.
+  # rotated (consumed) refresh token is reused, so always start from disk. A
+  # failed read is the answer: there is no in-memory fallback to refresh from.
   defp latest_entry(state) do
-    case Store.read(state.auth_profile, state.fermix_path) do
-      {:ok, entry} -> Map.merge(state.entry || %{}, entry)
-      {:error, _reason} -> entry_from_state(state)
+    with {:ok, entry} <- Store.read(state.auth_profile, state.fermix_path) do
+      {:ok, Map.merge(state.entry || %{}, entry)}
     end
-  end
-
-  defp entry_from_state(state) do
-    base =
-      state.entry ||
-        %{
-          auth_mode: "chatgpt",
-          tokens: %{access_token: state.access_token, refresh_token: state.refresh_token},
-          expires_at: state.expires_at,
-          last_refresh: nil
-        }
-
-    base
-    |> Map.put(:tokens, %{
-      access_token: state.access_token,
-      refresh_token: state.refresh_token
-    })
-    |> Map.put(:expires_at, state.expires_at)
-    |> Map.put(:last_refresh, Map.get(base, :last_refresh))
   end
 
   defp refresh_entry(:openai_codex, entry, path, req_options) do
@@ -532,8 +586,18 @@ defmodule FermixCore.Auth.TokenManager do
   defp mark_reauthorization_required("openai_codex", _entry, _path), do: :ok
 
   defp mark_reauthorization_required(auth_profile, entry, path) do
-    _ = Store.write(auth_profile, %{entry | status: "reauthorization_required"}, path)
-    :ok
+    case Store.write(auth_profile, %{entry | status: "reauthorization_required"}, path) do
+      :ok ->
+        :ok
+
+      {:error, reason} = error ->
+        Logger.error(
+          "TokenManager: could not record reauthorization_required for #{auth_profile}: " <>
+            Redaction.format(reason)
+        )
+
+        error
+    end
   end
 
   # A successful sign-in or refresh rewrites the status to "ready", which is

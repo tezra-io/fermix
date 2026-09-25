@@ -8,6 +8,7 @@ defmodule FermixCore.Harness.ManagerTest do
   alias FermixCore.Harness.Adapters.ClaudeHeadless
   alias FermixCore.Harness.Adapters.CodexExec
   alias FermixCore.Harness.Continuation
+  alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.DeliveryWorker
   alias FermixCore.Harness.Ledger
   alias FermixCore.Harness.Manager
@@ -47,6 +48,40 @@ defmodule FermixCore.Harness.ManagerTest do
       end
 
       Application.get_env(:fermix_core, :harness_test_continuation_reply, :ok)
+    end
+  end
+
+  # Hand-off gates (HARNESS-1): a send or a dispatch that tells the sink it has
+  # started, then waits for the test to release it, so a test can tick the
+  # DeliveryWorker while the Manager's inline attempt is still in flight. An
+  # unreleased gate answers an error after 5 s instead of blocking forever.
+  defmodule GatedAdapter do
+    def send_message(destination, text, _opts) do
+      send(
+        Application.fetch_env!(:fermix_core, :harness_test_sink),
+        {:gate, self(), destination, text}
+      )
+
+      receive do
+        :release -> :ok
+      after
+        5_000 -> {:error, :gate_not_released}
+      end
+    end
+  end
+
+  defmodule GatedDispatcher do
+    def dispatch(notice) do
+      send(
+        Application.fetch_env!(:fermix_core, :harness_test_sink),
+        {:dispatch_gate, self(), notice}
+      )
+
+      receive do
+        :release -> Application.get_env(:fermix_core, :harness_test_continuation_reply, :ok)
+      after
+        5_000 -> {:error, :gate_not_released}
+      end
     end
   end
 
@@ -408,8 +443,17 @@ defmodule FermixCore.Harness.ManagerTest do
       assert {:ok, row} = Ledger.get(run_id, server: ctx.repo)
       assert row.delivery_status == "pending"
 
+      # The terminal write leased the row to the Manager's inline attempt, so a
+      # tick on the real clock selects nothing; the worker owns the row once the
+      # lease has ended.
       worker = start_delivery_worker(ctx)
       _ = tick_worker(worker)
+      refute_received {:delivered, _destination, _text}
+
+      later =
+        start_delivery_worker(ctx, now_fn: fn -> DateTime.add(DateTime.utc_now(), 3, :minute) end)
+
+      _ = tick_worker(later)
       assert_receive {:delivered, "123", text}, 5_000
       assert text =~ "[run #{run_id}]"
       assert await_delivery(ctx.repo, run_id).delivery_status == "delivered"
@@ -571,6 +615,94 @@ defmodule FermixCore.Harness.ManagerTest do
     end
   end
 
+  # --- Hand-off lease (HARNESS-1) -----------------------------------------
+  #
+  # The terminal write leases the row to the Manager's inline first attempt
+  # (`next_delivery_at` in the future), so the DeliveryWorker, which selects
+  # only due rows, cannot race that attempt. Each test ticks the worker while
+  # the Manager is held inside its send or dispatch; the tick runs its select
+  # and any send synchronously, so the `:sys.get_state` barrier in
+  # `tick_worker/1` means anything it sent has already arrived.
+  describe "hand-off lease (HARNESS-1)" do
+    test "a worker tick during the inline text hand-off sends nothing", ctx do
+      manager = start_manager(ctx, delivery_opts: [adapter: GatedAdapter])
+      {:ok, run_id} = Manager.start_run(scheduled_request(ctx, completing_stub(ctx)), manager)
+
+      assert_receive {:gate, sender, "123", text}, 5_000
+      assert text =~ "[run #{run_id}]"
+
+      worker = start_delivery_worker(ctx, delivery_opts: [adapter: GatedAdapter])
+      _ = tick_worker(worker)
+      refute_received {:gate, _sender, _destination, _text}
+
+      send(sender, :release)
+      assert await_delivery(ctx.repo, run_id).delivery_status == "delivered"
+      _ = tick_worker(worker)
+      refute_received {:gate, _sender, _destination, _text}
+    end
+
+    test "a worker tick during the continuation dispatch sends no text", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: GatedDispatcher)
+      {:ok, run_id} = Manager.start_run(chat_request(ctx, completing_stub(ctx)), manager)
+
+      assert_receive {:dispatch_gate, dispatch, _notice}, 5_000
+
+      worker = start_delivery_worker(ctx)
+      _ = tick_worker(worker)
+      refute_received {:delivered, _destination, _text}
+
+      send(dispatch, :release)
+      assert await_delivery(ctx.repo, run_id).delivery_status == "delivered"
+      _ = tick_worker(worker)
+      refute_received {:delivered, _destination, _text}
+    end
+
+    # The worker resolves `acp` through the channels map, as production does,
+    # so its send to the client-owned origin is refused. Before the lease that
+    # refused attempt landed before the Manager's dead letter and bumped
+    # `delivery_attempts`; the order that also overwrote the named cause cannot
+    # be forced, so the attempt count is the discriminator.
+    test "a worker tick during a failing client-owned dispatch leaves the dead letter alone",
+         ctx do
+      Application.put_env(
+        :fermix_core,
+        :harness_test_continuation_reply,
+        {:error, :identity_gone}
+      )
+
+      manager = start_manager(ctx, continuation_dispatcher: GatedDispatcher)
+      {:ok, run_id} = Manager.start_run(client_request(ctx, completing_stub(ctx)), manager)
+
+      assert_receive {:dispatch_gate, dispatch, _notice}, 5_000
+
+      worker =
+        start_delivery_worker(ctx, delivery_opts: [channels: %{"telegram" => RecordingAdapter}])
+
+      _ = tick_worker(worker)
+
+      send(dispatch, :release)
+      row = await_delivery_status(ctx.repo, run_id, "dead_letter")
+      assert row.delivery_attempts == 0
+      assert row.last_delivery_error =~ "identity_gone"
+
+      lease_s = div(Manager.handoff_lease_ms(), 1_000)
+      assert_in_delta DateTime.diff(row.next_delivery_at, row.completed_at, :second), lease_s, 5
+    end
+
+    # The budget the lease must cover. Its clock starts before the terminal
+    # write is served, and it must last until the delivery mark: the terminal
+    # write (one Repo call), the memory write-back (at most two), the inline
+    # watchdog (a text send or a continuation dispatch), then the mark (one).
+    # Each Repo call is bounded by GenServer.call's 5 s default.
+    test "the lease outlasts the longest inline hand-off" do
+      repo_call_ms = 5_000
+      lease_ms = Manager.handoff_lease_ms()
+
+      assert lease_ms >= Delivery.deliver_timeout_ms() + 4 * repo_call_ms
+      assert lease_ms >= Continuation.dispatch_timeout_ms() + 4 * repo_call_ms
+    end
+  end
+
   # --- cancel + stop_all --------------------------------------------------
 
   describe "cancel" do
@@ -591,6 +723,44 @@ defmodule FermixCore.Harness.ManagerTest do
       {:ok, run_id} = Manager.start_run(chat_request(ctx, completing_stub(ctx)), manager)
       assert await_status(ctx.repo, run_id, "completed")
       assert {:error, :already_terminal} = Manager.cancel(run_id, :owner, manager)
+    end
+
+    # HARNESS-4: a local run whose terminal write failed is dropped from the
+    # Manager's runs map while its row stays active, holding its locks and
+    # capacity slot. `timer_enabled: false` skips boot reconciliation, which
+    # leaves exactly that state: an active row with no live run behind it.
+    test "an active local row with no live run is cancelled, never answered already_terminal",
+         ctx do
+      run_id = seed_active_run(ctx.repo, ctx.workspace)
+      manager = start_manager(ctx)
+
+      assert :ok = Manager.cancel(run_id, :owner, manager)
+      assert await_status(ctx.repo, run_id, "cancelled")
+
+      assert_receive {:delivered, "123", text}, 5_000
+      assert text =~ "[run #{run_id}] cancelled"
+      assert {:ok, []} = Ledger.active_runs(server: ctx.repo)
+    end
+
+    test "an active cloud row the Manager does not track answers vendor_cancel_unsupported",
+         ctx do
+      cloud_id = seed_submitting_cloud_run(ctx)
+      manager = start_manager(ctx)
+
+      assert {:error, {:vendor_cancel_unsupported, _task_url}} =
+               Manager.cancel(cloud_id, :owner, manager)
+
+      assert {:ok, %{status: "submitting"}} = Ledger.get(cloud_id, server: ctx.repo)
+    end
+
+    # A ledger read error is the answer, never a false "no such run". A
+    # disabled Repo answers every read `{:error, :disabled}`.
+    test "a ledger read error on an untracked run is returned as itself", ctx do
+      repo = :"harness_manager_disabled_repo_#{System.unique_integer([:positive])}"
+      start_supervised!(Supervisor.child_spec({Repo, name: repo, enabled: false}, id: repo))
+      manager = start_manager(%{ctx | repo: repo})
+
+      assert {:error, :disabled} = Manager.cancel("hr_deadbeef0000", :owner, manager)
     end
   end
 
@@ -718,25 +888,30 @@ defmodule FermixCore.Harness.ManagerTest do
 
   # A per-test DeliveryWorker sharing the manager's repo + recording adapter, with
   # its timer disabled so ticks are driven explicitly (no fixed-sleep coordination).
-  defp start_delivery_worker(ctx) do
+  # `overrides` replaces any worker option (`:delivery_opts`, `:now_fn`).
+  defp start_delivery_worker(ctx, overrides \\ []) do
     name = :"harness_delivery_worker_#{System.unique_integer([:positive])}"
 
-    opts = [
-      name: name,
-      repo: ctx.repo,
-      timer_enabled: false,
-      delivery_opts: [adapter: RecordingAdapter]
-    ]
+    opts =
+      [
+        name: name,
+        repo: ctx.repo,
+        timer_enabled: false,
+        delivery_opts: [adapter: RecordingAdapter]
+      ]
+      |> Keyword.merge(overrides)
 
     start_supervised!(%{id: name, start: {DeliveryWorker, :start_link, [opts]}})
     name
   end
 
   # `send/2` then a `:sys.get_state/1` barrier: FIFO processing means the read
-  # blocks until the drained tick has fully run (no sleeps).
+  # blocks until the drained tick has fully run (no sleeps). The bound outlasts
+  # a hand-off gate's own 5 s, so a tick stuck in a gate fails the test's
+  # assertion rather than the barrier.
   defp tick_worker(worker) do
     send(worker, :tick)
-    :sys.get_state(worker)
+    :sys.get_state(worker, 10_000)
     :ok
   end
 

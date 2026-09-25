@@ -2,6 +2,9 @@ defmodule FermixCore.Management.AuthTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Auth.ClientRejection
+  alias FermixCore.Auth.CodexImport
+  alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenManager
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Jobs
@@ -225,6 +228,54 @@ defmodule FermixCore.Management.AuthTest do
       assert done["failure"]["sentence"] == "No existing sign-in was found on this Mac."
     end
 
+    # The real importer, through the job the app starts. The import spends the
+    # Codex CLI's refresh token, so a Codex profile another process keeps busy
+    # (a live refresh, or a lockfile a dead VM left) must refuse before that and
+    # inside the job's budget, and say what to do. It used to refresh first and
+    # then wait out the stale lock past the job's 60 s, losing both sessions.
+    test "a Codex import that meets a busy profile refuses before it spends anything", %{
+      jobs: jobs
+    } do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("mgmt-codex-import-busy")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      codex_path = Path.join(dir, "codex_auth.json")
+      File.write!(codex_path, Jason.encode!(%{"tokens" => %{"refresh_token" => "codex_rt"}}))
+      fermix_path = Path.join(dir, "auth.json")
+      File.write!(Store.profile_lock_path(:openai_codex, fermix_path), "0 a-refresh\n")
+      owner = self()
+
+      token_endpoint = fn conn ->
+        send(owner, :token_endpoint_called)
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{"access_token" => "at", "refresh_token" => "rt", "expires_in" => 3600})
+        )
+      end
+
+      importer = fn ->
+        CodexImport.import_tokens(
+          codex_path: codex_path,
+          fermix_path: fermix_path,
+          req_options: [plug: token_endpoint]
+        )
+      end
+
+      assert {:ok, started} = Auth.import_start("codex_cli", jobs: jobs, importer: importer)
+      assert {:ok, done} = terminal(jobs, started["job_id"], 1_500)
+
+      assert done["status"] == "failed"
+
+      assert done["failure"]["sentence"] ==
+               "Another Fermix process is refreshing or signing in to this account. " <>
+                 "Try again shortly."
+
+      refute_received :token_endpoint_called
+      refute File.exists?(fermix_path)
+    end
+
     test "an unknown source is refused by field", %{jobs: jobs} do
       assert {:error, {:invalid_params, "source", _sentence}} =
                Auth.import_start("gemini_cli", jobs: jobs)
@@ -322,6 +373,69 @@ defmodule FermixCore.Management.AuthTest do
                  forget: fn _profile -> {:error, {:provider_missing, "openai_codex"}} end,
                  drop_live_tokens: drop
                )
+    end
+
+    # TOKEN-4 (tla/specs/token_refresh, check 13): a sign-out during the Codex
+    # manager's own refresh was undone when that refresh renamed its rotation
+    # after the delete; `forget` only queued behind it. The delete now takes
+    # the profile lock, so it waits for the refresh, deletes after it, and
+    # `forget` finds the manager idle.
+    test "a sign-out waits for the Codex refresh in flight, and sticks" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("auth-logout-race")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      path = Path.join(dir, "auth.json")
+      expires_at = DateTime.add(DateTime.utc_now(), 3600, :second)
+      :ok = Store.write(:openai_codex, %{@entry | expires_at: expires_at}, path)
+      owner = self()
+
+      plug = fn conn ->
+        send(owner, {:in_flight, self()})
+
+        receive do
+          :release -> :ok
+        end
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(
+          200,
+          Jason.encode!(%{
+            "access_token" => "new_at",
+            "refresh_token" => "new_rt",
+            "expires_in" => 3600
+          })
+        )
+      end
+
+      name = :"auth_logout_race_#{System.unique_integer([:positive])}"
+
+      start_supervised!(
+        {TokenManager, name: name, fermix_auth_path: path, req_options: [plug: plug]}
+      )
+
+      refresh = Task.async(fn -> TokenManager.refresh(name) end)
+      assert_receive {:in_flight, plug_pid}
+
+      forget = fn profile ->
+        send(owner, :deleting)
+        result = Store.delete_provider(profile, path)
+        send(owner, :deleted)
+        result
+      end
+
+      drop = fn "openai_codex", _profile -> TokenManager.forget(name) end
+
+      logout =
+        Task.async(fn -> Auth.logout("openai_codex", forget: forget, drop_live_tokens: drop) end)
+
+      assert_receive :deleting
+      refute_receive :deleted, 300
+
+      send(plug_pid, :release)
+      assert {:ok, "new_at"} = Task.await(refresh)
+      assert {:ok, _result} = Task.await(logout)
+      assert {:error, {:provider_missing, :openai_codex}} = Store.read(:openai_codex, path)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
     end
 
     test "a provider with no stored sign-in at all is refused by field" do

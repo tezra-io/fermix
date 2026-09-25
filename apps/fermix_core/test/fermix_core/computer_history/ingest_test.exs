@@ -7,6 +7,8 @@ defmodule FermixCore.ComputerHistory.IngestTest do
   """
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.Memory.Repo
 
@@ -830,6 +832,78 @@ defmodule FermixCore.ComputerHistory.IngestTest do
 
       assert {:ok, %{written: 2, collapsed: 0}} =
                Ingest.ingest(events, repo: repo, apps: ["com.microsoft.VSCode"])
+    end
+  end
+
+  # MILESTONE_32 §14.2 inv. 12: no event stamped inside a pause lands in the
+  # spool, whenever its batch is flushed. Each event is judged by its own stamp,
+  # not by the moment its batch reaches Ingest.
+  describe "pause horizon (inv. 12)" do
+    @horizon ~U[2026-01-01 00:00:10.000Z]
+
+    defp pause_until(repo, horizon) do
+      :ok = Repo.computer_history_set_pause_until(DateTime.to_iso8601(horizon), server: repo)
+    end
+
+    defp horizon_ms, do: DateTime.to_unix(@horizon, :millisecond)
+
+    defp stamped(seq, ts), do: base(seq, %{ts: ts, type: "app.activated", bundle_id: "com.a"})
+
+    test "an event stamped inside a pause is dropped even when flushed after the horizon", %{
+      repo: repo
+    } do
+      pause_until(repo, @horizon)
+      events = [stamped(1, horizon_ms() - 1_000), stamped(2, horizon_ms() + 1_000)]
+      after_horizon = DateTime.add(@horizon, 2, :second)
+
+      assert {:ok, %{written: 1, dropped: 1}} =
+               Ingest.ingest(events, repo: repo, apps: ["com.a"], now: after_horizon)
+
+      assert [%{source_seq: 2}] = stored(repo)
+    end
+
+    # Regression pin for the `now` half of the rule, not a failing-first test:
+    # while the pause is in force, an event stamped after the horizon (a clock
+    # that runs ahead) is still dropped.
+    test "while the pause is in force, an event stamped after the horizon is dropped", %{
+      repo: repo
+    } do
+      pause_until(repo, @horizon)
+      before_horizon = DateTime.add(@horizon, -2, :second)
+
+      assert {:ok, %{written: 0, dropped: 1}} =
+               Ingest.ingest([stamped(1, horizon_ms() + 5_000)],
+                 repo: repo,
+                 apps: ["com.a"],
+                 now: before_horizon
+               )
+
+      assert stored(repo) == []
+    end
+
+    test "an unparseable horizon drops every event, a future-stamped one too", %{repo: repo} do
+      :ok = Repo.computer_history_set_pause_until("not-a-timestamp", server: repo)
+
+      log =
+        capture_log(fn ->
+          assert {:ok, %{written: 0, dropped: 1}} =
+                   Ingest.ingest([stamped(1, horizon_ms() + 60_000)], repo: repo, apps: ["com.a"])
+        end)
+
+      assert log =~ "pause_until unparseable"
+      assert stored(repo) == []
+    end
+
+    test "an event with no integer stamp is dropped while a horizon is set (fail closed)", %{
+      repo: repo
+    } do
+      pause_until(repo, @horizon)
+      after_horizon = DateTime.add(@horizon, 2, :second)
+
+      assert {:ok, %{written: 0, dropped: 1}} =
+               Ingest.ingest([stamped(1, nil)], repo: repo, apps: ["com.a"], now: after_horizon)
+
+      assert stored(repo) == []
     end
   end
 end

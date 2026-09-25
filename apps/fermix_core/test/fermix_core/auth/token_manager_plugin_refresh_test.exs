@@ -302,6 +302,112 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
     assert {:error, :reauthorization_required} = TokenManager.get_token(name)
   end
 
+  # AGENTS.md rule 7: the quarantine status write after a dead grant can fail
+  # (a malformed auth.json, a busy store lock). The failure is logged and
+  # answered rather than dropped, and the manager refuses the dead grant all the
+  # same.
+  test "a failed reauthorization_required write is logged and answered", %{dir: dir} do
+    fermix_path = write_auth_file(dir, "github:primary", "github")
+
+    plug = fn conn ->
+      File.write!(fermix_path, "{ not json ")
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(400, Jason.encode!(%{"error" => "invalid_grant"}))
+    end
+
+    name =
+      start_manager(
+        auth_profile: "github:primary",
+        fermix_auth_path: fermix_path,
+        req_options: [plug: plug]
+      )
+
+    {result, log} = with_log(fn -> TokenManager.refresh(name) end)
+
+    assert {:error, {:malformed_auth_file, ^fermix_path, _backup, {:invalid_json, _err}}} = result
+    assert log =~ "could not record reauthorization_required for github:primary"
+    assert {:error, :reauthorization_required} = TokenManager.get_token(name)
+  end
+
+  # TOKEN-5 (tla/specs/token_refresh, check 14): `fermix plugins auth logout`
+  # deletes the entry in a tree-less VM and never reaches the daemon's manager.
+  # That manager's next refresh must not send the grant or write it back, and
+  # its plugin child must lose the projected token.
+  test "a refresh after a CLI logout refuses, sends nothing and writes nothing", %{dir: dir} do
+    fermix_path = write_auth_file(dir, "github:primary", "github")
+    token_file = Path.join(dir, "github-primary.token.json")
+    parent = self()
+
+    plug = fn conn ->
+      send(parent, :refresh_sent)
+      __MODULE__.refresh_plug(conn)
+    end
+
+    name =
+      start_manager(
+        auth_profile: "github:primary",
+        fermix_auth_path: fermix_path,
+        req_options: [plug: plug]
+      )
+
+    assert :ok = TokenManager.enable_token_file(name, token_file)
+    assert File.exists?(token_file)
+
+    :ok = Store.delete_provider("github:primary", fermix_path)
+
+    {result, log} = with_log(fn -> TokenManager.refresh(name) end)
+
+    assert {:error, :reauthorization_required} = result
+    assert log =~ "github:primary"
+    refute_received :refresh_sent
+
+    assert {:error, {:provider_missing, "github:primary"}} =
+             Store.read("github:primary", fermix_path)
+
+    assert {:error, :reauthorization_required} = TokenManager.get_token(name)
+    refute File.exists?(token_file)
+  end
+
+  # TOKEN-4 (check 12): a plugin logout whose delete landed inside the
+  # profile's own refresh was undone when that refresh renamed its rotation.
+  # The delete takes the profile lock, so it waits and deletes after it.
+  test "a logout's delete waits for the profile's refresh in flight", %{dir: dir} do
+    fermix_path = write_auth_file(dir, "github:primary", "github")
+    parent = self()
+
+    plug = fn conn ->
+      send(parent, {:in_flight, self()})
+
+      receive do
+        :release -> :ok
+      end
+
+      __MODULE__.refresh_plug(conn)
+    end
+
+    name =
+      start_manager(
+        auth_profile: "github:primary",
+        fermix_auth_path: fermix_path,
+        req_options: [plug: plug]
+      )
+
+    refresh = Task.async(fn -> TokenManager.refresh(name) end)
+    assert_receive {:in_flight, plug_pid}
+
+    delete = Task.async(fn -> Store.delete_provider("github:primary", fermix_path) end)
+    assert Task.yield(delete, 300) == nil
+
+    send(plug_pid, :release)
+    assert {:ok, "new_at"} = Task.await(refresh)
+    assert :ok = Task.await(delete)
+
+    assert {:error, {:provider_missing, "github:primary"}} =
+             Store.read("github:primary", fermix_path)
+  end
+
   # A grant minted for the wrong region is real and unexpired, so nothing stops
   # it being handed out on its own: every call it authorises is refused by the
   # provider from the wrong host. The manager reads the quarantine off the stored

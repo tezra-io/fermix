@@ -119,6 +119,13 @@ defmodule FermixCore.Harness.Continuation do
   end
 
   @doc """
+  The watchdog bound on one `dispatch/4` (unless `opts[:timeout_ms]` overrides
+  it). The Manager's hand-off lease is sized against it.
+  """
+  @spec dispatch_timeout_ms() :: pos_integer()
+  def dispatch_timeout_ms, do: @dispatch_timeout_ms
+
+  @doc """
   Resolves the configured dispatcher module: `opts[:dispatcher]` (the test seam)
   or `config :fermix_core, :harness_continuation_dispatcher`. `:none` when no
   dispatcher is configured (continuation is off) or the configured module cannot

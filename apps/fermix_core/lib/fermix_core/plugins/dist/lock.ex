@@ -5,6 +5,9 @@ defmodule FermixCore.Plugins.Dist.Lock do
   CLI process) cannot interleave a mutating pipeline. A GenServer mailbox only
   serializes within one VM; this is the layer that crosses processes.
 
+  `FermixCore.Auth.Store` takes the same lock around `auth.json`, with its own
+  waits and stale thresholds and its own stale-threshold invariant.
+
   Implemented as an `O_EXCL` lockfile (atomic create-or-fail on the same
   filesystem). Acquisition is **bounded** — a fixed number of attempts with a
   delay, then fail loud (`{:error, :lock_unavailable}`), never an indefinite
@@ -63,7 +66,7 @@ end
 
 defmodule FermixCore.Plugins.Dist.Lock.Owner do
   @moduledoc """
-  The process that owns one plugin-store lockfile for the length of one
+  The process that owns one lockfile for the length of one
   critical section.
 
   It is linked to the holder and traps exits, so the holder's death — a crash,
@@ -137,7 +140,7 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
   @impl true
   def handle_info({:EXIT, holder, reason}, %{holder: holder} = state) do
     Logger.warning(
-      "plugin store lock #{state.lock_path} released: holder #{inspect(holder)} exited " <>
+      "lock #{state.lock_path} released: holder #{inspect(holder)} exited " <>
         inspect(reason)
     )
 
@@ -153,7 +156,7 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
         :ok
 
       {:error, reason} ->
-        Logger.error("plugin store lock #{lock_path} could not be removed: #{inspect(reason)}")
+        Logger.error("lock #{lock_path} could not be removed: #{inspect(reason)}")
     end
   end
 

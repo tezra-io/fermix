@@ -2,6 +2,7 @@ defmodule FermixCore.Setup.RuntimeTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
@@ -864,6 +865,51 @@ defmodule FermixCore.Setup.RuntimeTest do
                )
 
       assert message =~ "codex import failed"
+      refute File.exists?(fermix_auth)
+    end
+
+    # The import spends the Codex CLI's refresh token, so a Codex profile
+    # another Fermix process keeps busy refuses it first, and setup says to
+    # retry rather than printing the reason's atom.
+    test "a busy Codex profile refuses the import with the try-again sentence" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+
+      prepare(home)
+      codex_path = write_codex_auth(home)
+      fermix_auth = Path.join(home, "auth.json")
+      File.write!(AuthStore.profile_lock_path(:openai_codex, fermix_auth), "0 x\n")
+      parent = self()
+
+      token_endpoint = fn conn ->
+        send(parent, :token_endpoint_called)
+        success_plug(conn)
+      end
+
+      {puts, _collector} = puts_collector()
+
+      setup =
+        Task.async(fn ->
+          Runtime.run(
+            [
+              import_codex: true,
+              codex_auth_path: codex_path,
+              fermix_auth_path: fermix_auth,
+              req_options: [plug: token_endpoint]
+            ],
+            puts: puts,
+            prompt: fn _ -> "" end
+          )
+        end)
+
+      assert {:ok, {:error, message}} =
+               Task.yield(setup, 15_000) || Task.shutdown(setup, :brutal_kill)
+
+      assert message ==
+               "codex import failed: Another Fermix process is refreshing or signing in " <>
+                 "to this account. Try again shortly."
+
+      refute_received :token_endpoint_called
       refute File.exists?(fermix_auth)
     end
   end

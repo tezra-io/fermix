@@ -432,6 +432,9 @@ defmodule FermixCore.Management.Auth do
 
   defp sign_in_sentence(:timeout), do: "The sign-in was not completed in time."
 
+  # Refused before the code was spent, so signing in again is the whole fix.
+  defp sign_in_sentence(:profile_busy), do: Store.busy_sentence()
+
   defp sign_in_sentence({endpoint, _url})
        when endpoint in [:insecure_token_endpoint, :untrusted_token_endpoint],
        do: "The sign-in was sent to an address this daemon does not trust."
@@ -470,6 +473,9 @@ defmodule FermixCore.Management.Auth do
 
   defp import_sentence(:claude_code_credentials_expired),
     do: "The sign-in on this Mac has expired, so there was nothing to adopt."
+
+  # Refused before the other tool's token was spent, so it is still signed in.
+  defp import_sentence(:profile_busy), do: Store.busy_sentence()
 
   defp import_sentence(unreadable)
        when unreadable in [

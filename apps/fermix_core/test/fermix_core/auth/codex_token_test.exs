@@ -2,6 +2,7 @@ defmodule FermixCore.Auth.CodexTokenTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.Store
 
   def refresh_plug(conn) do
     {:ok, body, conn} = Plug.Conn.read_body(conn)
@@ -42,6 +43,24 @@ defmodule FermixCore.Auth.CodexTokenTest do
     )
 
     path
+  end
+
+  # Guard: only a due entry takes the profile lock, so a live token is served
+  # at once even while a refresh of the profile holds the lock elsewhere.
+  test "a live token is served without waiting for the profile lock" do
+    dir = tmp_dir()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    path =
+      write_auth_file(dir, %{
+        "auth_mode" => "chatgpt",
+        "tokens" => %{"access_token" => "store_at", "refresh_token" => "rt"},
+        "expires_at" => future_iso8601(3600)
+      })
+
+    File.write!(Store.profile_lock_path(:openai_codex, path), "0 a-refresh\n")
+
+    assert {:ok, "store_at"} = CodexToken.get_token(fermix_auth_path: path)
   end
 
   test "reads a usable token from the Fermix auth store" do

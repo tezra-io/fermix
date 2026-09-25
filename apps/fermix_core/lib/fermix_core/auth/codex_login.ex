@@ -26,12 +26,27 @@ defmodule FermixCore.Auth.CodexLogin do
   def login(opts \\ []) when is_list(opts) do
     path = Keyword.get(opts, :fermix_auth_path, Store.path())
 
-    with {:ok, tokens} <- OAuthFlow.start_loopback(flow_opts(opts)),
-         entry <- entry_from_tokens(tokens) do
-      case Store.write(:openai_codex, entry, path) do
-        :ok -> {:ok, entry}
-        {:error, reason} -> {:error, {:persist_failed, reason}}
-      end
+    opts
+    |> flow_opts()
+    |> Keyword.put(:redeem, &redeem(&1, path))
+    |> OAuthFlow.start_loopback()
+  end
+
+  # The exchange spends the code, so the Codex profile lock is taken first and
+  # held through the write: a busy profile refuses with the code unspent
+  # (`{:error, :profile_busy}`), and no refresh of the profile can put the old
+  # grant's rotation back over the new one. The caller reloads the manager
+  # after this returns.
+  defp redeem(exchange, path) do
+    Store.with_profile_lock(:openai_codex, path, fn ->
+      with {:ok, tokens} <- exchange.(), do: persist(entry_from_tokens(tokens), path)
+    end)
+  end
+
+  defp persist(entry, path) do
+    case Store.write(:openai_codex, entry, path) do
+      :ok -> {:ok, entry}
+      {:error, reason} -> {:error, {:persist_failed, reason}}
     end
   end
 

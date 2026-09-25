@@ -20,6 +20,7 @@ defmodule FermixChannels.Gateway.Commands.History do
   alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Capturer
   alias FermixCore.ComputerHistory.Config
+  alias FermixCore.ComputerHistory.Controller
   alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.Memory.Repo
@@ -48,16 +49,19 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   @impl true
   def execute(message, reply_fn, context) do
-    dispatch(args(message), reply_fn, {repo(context), macos?(context)})
+    dispatch(args(message), reply_fn, {repo(context), macos?(context), controller(context)})
   end
 
-  # `:computer_history_repo` / `:computer_history_macos?` in context are test-only
-  # injection seams; production dispatch runs in the daemon against the default
-  # single-writer Repo and the real platform.
+  # `:computer_history_repo` / `:computer_history_macos?` /
+  # `:computer_history_controller` in context are test-only injection seams;
+  # production dispatch runs in the daemon against the default single-writer
+  # Repo, the real platform and the real Controller.
   defp repo(context), do: Map.get(context, :computer_history_repo, Repo)
 
   defp macos?(context),
     do: Map.get(context, :computer_history_macos?, ComputerHistory.macos?())
+
+  defp controller(context), do: Map.get(context, :computer_history_controller, Controller)
 
   defp args(message), do: String.split(message.content, ~r/\s+/, trim: true)
 
@@ -67,16 +71,20 @@ defmodule FermixChannels.Gateway.Commands.History do
   defp dispatch(["pause"], reply_fn, _host),
     do: reply(reply_fn, "Usage: /history pause 10m|1h|24h")
 
-  defp dispatch(["pause", duration], reply_fn, {repo, _macos?}),
+  defp dispatch(["pause", duration], reply_fn, {repo, _macos?, _controller}),
     do: pause(duration, reply_fn, repo)
 
-  defp dispatch(["purge", window], reply_fn, {repo, _macos?}), do: purge(window, reply_fn, repo)
-  defp dispatch(["off" | _rest], reply_fn, _host), do: off(reply_fn)
+  defp dispatch(["purge", window], reply_fn, {repo, _macos?, _controller}),
+    do: purge(window, reply_fn, repo)
+
+  defp dispatch(["off" | _rest], reply_fn, {_repo, macos?, controller}),
+    do: off(reply_fn, macos?, controller)
+
   defp dispatch(_other, reply_fn, _host), do: reply(reply_fn, usage())
 
   # --- status -------------------------------------------------------------
 
-  defp status_text({repo, macos?}) do
+  defp status_text({repo, macos?, _controller}) do
     if macos? do
       [
         enabled_line(),
@@ -112,6 +120,7 @@ defmodule FermixChannels.Gateway.Commands.History do
     do: "standing down (another daemon on this Mac holds it)"
 
   defp capture_phrase(%{mode: :not_running}), do: "not running"
+  defp capture_phrase(%{mode: :not_answering}), do: "not answering (it may still be running)"
 
   defp capture_phrase(%{mode: :degraded, reason: reason}),
     do: "degraded — #{degrade_phrase(reason)}"
@@ -401,11 +410,11 @@ defmodule FermixChannels.Gateway.Commands.History do
     case Purge.purge(window, repo: repo) do
       {:ok, %{events: events, memories: memories}} ->
         "Purged #{events} event(s) and #{memories} activity memory(ies). Threads that drew on " <>
-          "that window were removed too; they are rebuilt at the next roll-up from what remains. " <>
-          "This cannot reach: replies already delivered, any summaries already sent to a remote " <>
-          "provider, backups you keep yourself, or another daemon's store on the same Mac. Purge " <>
-          "is logical deletion — rows leave every query, but raw bytes may linger in the database " <>
-          "until overwritten."
+          "that window were removed too; the next roll-up rewrites the thread list from the " <>
+          "surviving threads and the session notes written since the last roll-up. This cannot " <>
+          "reach: replies already delivered, any summaries already sent to a remote provider, " <>
+          "backups you keep yourself, or another daemon's store on the same Mac. Purge is logical " <>
+          "deletion — rows leave every query, but raw bytes may linger in the database until overwritten."
 
       {:error, reason} ->
         "Purge failed: #{inspect(reason)}."
@@ -414,39 +423,71 @@ defmodule FermixChannels.Gateway.Commands.History do
 
   # --- off ----------------------------------------------------------------
 
-  defp off(reply_fn) do
-    case disable() do
-      :ok ->
-        reply(
-          reply_fn,
-          "Computer history disabled — nothing new is captured and the tools are hidden from the next turn. " <>
-            "Stored data stays until you `/history purge`; re-enable in setup to resume with the same allowlist."
-        )
+  defp off(reply_fn, macos?, controller),
+    do: reply(reply_fn, off_text(disable(macos?, controller)))
 
-      {:error, reason} ->
-        # The live rail IS stopped (env flipped + reconciled) — only the durable
-        # half failed, and saying otherwise would let a privacy-relevant disable
-        # silently evaporate at the next restart.
-        reply(
-          reply_fn,
-          "Computer history capture is stopped for now, but saving the setting failed " <>
-            "(#{inspect(reason)}) — it will turn back ON at the next daemon restart. " <>
-            "Fix config.toml write access and run /history off again."
-        )
-    end
+  # One reply per {stop, save} outcome. "Nothing new is captured" goes out only
+  # when the Controller confirmed the stop: its reconcile returns only once the
+  # Capturer has exited.
+  defp off_text({:ok, :ok}) do
+    "Computer history disabled — nothing new is captured and the tools are hidden from the next turn. " <>
+      "Stored data stays until you `/history purge`; re-enable in setup to resume with the same allowlist."
   end
+
+  # The live rail IS stopped (env flipped + the stop confirmed) — only the
+  # durable half failed, and saying otherwise would let a privacy-relevant
+  # disable silently evaporate at the next restart.
+  defp off_text({:ok, {:error, reason}}) do
+    "Computer history capture is stopped for now, but saving the setting failed " <>
+      "(#{inspect(reason)}) — it will turn back ON at the next daemon restart. " <>
+      "Fix config.toml write access and run /history off again."
+  end
+
+  # Nobody confirmed the recorder stopped, so the reply must not say it did.
+  defp off_text({{:error, stop_reason}, :ok}) do
+    "Computer history disabled and the setting is saved, but the recorder could not be confirmed " <>
+      "stopped (#{unconfirmed_phrase(stop_reason)}) — it may still be capturing. Check `/history status`: " <>
+      "\"Capture: not running\" means it has stopped; if it has not, run /history off again. " <>
+      "The tools are hidden from the next turn; stored data stays until you `/history purge`."
+  end
+
+  defp off_text({{:error, stop_reason}, {:error, save_reason}}) do
+    "Computer history is disabled for now, but the recorder could not be confirmed stopped " <>
+      "(#{unconfirmed_phrase(stop_reason)}) and saving the setting failed (#{inspect(save_reason)}) — " <>
+      "capture may still be running, and it will turn back ON at the next daemon restart. " <>
+      "Fix config.toml write access, run /history off again and check `/history status`."
+  end
+
+  # Why the stop is unconfirmed, in words; the full exit reason is in the error
+  # log `ComputerHistory.reconcile_runtime/1` wrote.
+  defp unconfirmed_phrase({:reconcile_failed, {:noproc, _call}}),
+    do: "its controller is not running"
+
+  defp unconfirmed_phrase({:reconcile_failed, {:timeout, _call}}),
+    do: "its controller did not answer in time"
+
+  defp unconfirmed_phrase({:reconcile_failed, _exit}), do: "its controller failed mid-call"
 
   # Flip app env for the immediate un-advertise, stop the live capture rail, then
   # persist to config.toml so the disable survives a restart (§5.4). The persisted
   # snapshot is built from live app env (already normalized at boot), the wizard's
   # own save pattern. Reconcile AFTER the env flip so the controller reads the
-  # disabled posture and tears the capturer down now, not on the next boot.
-  defp disable do
+  # disabled posture and tears the capturer down now, not on the next boot. The
+  # save runs whatever the stop's outcome: the durable disable must not depend on
+  # the live stop. Returns both outcomes for the reply.
+  defp disable(macos?, controller) do
     current = Application.get_env(:fermix_core, :computer_history, [])
     Application.put_env(:fermix_core, :computer_history, Keyword.put(current, :enabled, false))
 
-    ComputerHistory.reconcile_runtime()
+    {stop_capture(macos?, controller), save_disabled()}
+  end
 
+  # The rail runs only on macOS (`FermixCore.Application` starts its supervisor
+  # there alone), so elsewhere there is no recorder to stop.
+  defp stop_capture(true, controller), do: ComputerHistory.reconcile_runtime(controller)
+  defp stop_capture(false, _controller), do: :ok
+
+  defp save_disabled do
     snapshot = ConfigStore.current_snapshot()
 
     case ConfigStore.save_snapshot(snapshot) do

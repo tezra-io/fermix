@@ -2,6 +2,8 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
   @moduledoc "MILESTONE_32 §5.3 — the /history owner management command."
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixChannels.Gateway.Authorization, as: IngressAuthorization
   alias FermixChannels.Gateway.Commands.History
   alias FermixChannels.Gateway.Message
@@ -112,6 +114,14 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     capturer(:handshaking, nil)
 
     assert status_reply(ctx) =~ "Capture: starting the recorder."
+  end
+
+  # An unconfirmed `/history off` points the owner here, so a recorder too busy
+  # to answer must not read as stopped.
+  test "status says a recorder that does not answer may still be running", %{ctx: ctx} do
+    capturer(:not_answering, nil)
+
+    assert status_reply(ctx) =~ "Capture: not answering (it may still be running)."
   end
 
   test "status keeps naming the version a numeric mismatch reported", %{ctx: ctx} do
@@ -329,7 +339,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert text =~ "Usage"
   end
 
-  test "pause is ENFORCED at ingest: events inside the window never reach the spool",
+  test "pause is ENFORCED at ingest: events stamped before the horizon never reach the spool",
        %{ctx: ctx, repo: repo} do
     assert :ok = History.execute(message("pause 30m"), reply_fn(self()), ctx)
     assert_receive {:reply, text}
@@ -343,14 +353,18 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
 
     # The horizon passing resumes capture with no timer to arm — each batch
-    # re-reads the persisted state.
+    # re-reads the persisted state. The event stamped before the horizon stays
+    # out even when it is flushed after it (M32 inv. 12); one stamped after the
+    # horizon is written.
     past = DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
     assert :ok = Repo.computer_history_set_pause_until(past, server: repo)
+    resumed = %{event | source_seq: 2, ts: System.system_time(:millisecond)}
 
-    assert {:ok, %{written: 1, dropped: 0}} =
-             Ingest.ingest([event], repo: repo, apps: ["com.a"])
+    assert {:ok, %{written: 1, dropped: 1}} =
+             Ingest.ingest([event, resumed], repo: repo, apps: ["com.a"])
 
-    assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
+    assert {:ok, [%{source_seq: 2}]} =
+             Repo.computer_history_events_after_id(0, 10, server: repo)
   end
 
   test "an unparseable pause horizon fails CLOSED (capture stays off)", %{repo: repo} do
@@ -418,6 +432,7 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
                  }
                ],
                now - 3_600_000,
+               %{purge_mark: 0, from_ts: now - 7_200_000, to_ts: now - 7_000_000},
                server: repo
              )
 
@@ -449,8 +464,15 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert_receive {:reply, text}
     assert text =~ "Purged"
     assert text =~ "cannot reach"
-    # Threads drew on the purged window, so they go too — and come back rebuilt.
-    assert text =~ "rebuilt at the next roll-up"
+    # Threads drew on the purged window, so they go too. The next roll-up reads
+    # only the surviving threads and the notes since the last roll-up, so an older
+    # note that only a removed thread cited backs no thread again: the reply
+    # promises exactly that much, not that the removed threads come back.
+    assert text =~
+             "the next roll-up rewrites the thread list from the surviving threads and the " <>
+               "session notes written since the last roll-up"
+
+    refute text =~ "rebuilt at the next roll-up from what remains"
 
     assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
   end
@@ -461,11 +483,89 @@ defmodule FermixChannels.Gateway.Commands.HistoryTest do
     assert text =~ "Usage"
   end
 
-  test "off flips the enable bit (un-advertises next turn)", %{ctx: ctx} do
+  # Stand-in for the Controller behind the `:computer_history_controller` seam:
+  # `:ok` confirms the stop (and tells the test it was asked), `:raise` crashes
+  # mid-call.
+  defmodule ControllerStub do
+    @moduledoc false
+    use GenServer
+
+    def start_link({name, behaviour, test_pid}),
+      do: GenServer.start_link(__MODULE__, {behaviour, test_pid}, name: name)
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(:reconcile, _from, {:ok, test_pid} = state) do
+      send(test_pid, :reconciled)
+      {:reply, :ok, state}
+    end
+
+    def handle_call(:reconcile, _from, {:raise, _test_pid}), do: raise("reconcile failed")
+  end
+
+  defp controller_stub(behaviour) do
+    name = :"history_ctrl_stub_#{System.unique_integer([:positive])}"
+    spec = {ControllerStub, {name, behaviour, self()}}
+    start_supervised!(Supervisor.child_spec(spec, restart: :temporary))
+    name
+  end
+
+  defp off_reply(ctx) do
     assert :ok = History.execute(message("off"), reply_fn(self()), ctx)
     assert_receive {:reply, text}
-    assert text =~ "disabled"
+    text
+  end
 
+  test "off flips the enable bit and replies once the stop is confirmed", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    text = off_reply(ctx)
+    assert_received :reconciled
+    assert text =~ "disabled — nothing new is captured"
+
+    refute ComputerHistoryConfig.enabled?()
+  end
+
+  # CH-3: an exit of the reconcile call (no Controller, a crash mid-call, a
+  # timeout) is not a confirmed stop, so the reply must not say capture stopped.
+  test "off never says nothing is captured when no controller confirmed the stop", %{ctx: ctx} do
+    absent = :"absent_ch_controller_#{System.unique_integer([:positive])}"
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_controller, absent)
+
+    {text, log} = with_log(fn -> off_reply(ctx) end)
+
+    refute text =~ "nothing new is captured"
+    assert text =~ "could not be confirmed stopped"
+    assert text =~ "the setting is saved"
+    assert log =~ "reconcile_runtime failed"
+    refute ComputerHistoryConfig.enabled?()
+  end
+
+  test "off never says nothing is captured when the controller crashes mid-call", %{ctx: ctx} do
+    ctx = ctx |> macos_ctx() |> Map.put(:computer_history_controller, controller_stub(:raise))
+
+    {text, log} = with_log(fn -> off_reply(ctx) end)
+
+    refute text =~ "nothing new is captured"
+    assert text =~ "could not be confirmed stopped"
+    assert log =~ "reconcile failed"
+    refute ComputerHistoryConfig.enabled?()
+  end
+
+  # The rail exists only on macOS, so elsewhere there is nothing to stop: a
+  # second configuration, not a second path. Passes before the CH-3 fix too; it
+  # pins that the new call is macOS-only.
+  test "off on a non-macOS host never calls the controller", %{ctx: ctx} do
+    ctx =
+      ctx
+      |> Map.put(:computer_history_macos?, false)
+      |> Map.put(:computer_history_controller, controller_stub(:ok))
+
+    text = off_reply(ctx)
+    refute_received :reconciled
+    assert text =~ "disabled — nothing new is captured"
     refute ComputerHistoryConfig.enabled?()
   end
 

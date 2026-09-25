@@ -3,8 +3,11 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
 
   defmodule TestPluginsRuntime do
@@ -44,6 +47,19 @@ defmodule Fermix.CLI.DaemonTest do
          },
          realtime: :skipped
        }}
+    end
+  end
+
+  defmodule TestTokenSupervisor do
+    # One profile whose forget never finishes, the way a manager wedged behind
+    # a lock wait exits its caller's GenServer.call.
+    def forget_signed_out("wedged:primary"),
+      do: exit({:timeout, {GenServer, :call, [:manager, :forget, 5_000]}})
+
+    def forget_signed_out(profile) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:forget_signed_out, profile})
+      :ok
     end
   end
 
@@ -877,6 +893,134 @@ defmodule Fermix.CLI.DaemonTest do
     assert error =~ "broken"
     assert_receive :plugins_apply_called
   end
+
+  # TOKEN-6: a CLI logout deletes the entry in its own VM, then asks the
+  # daemon to let go of the tokens it still holds for that profile.
+  describe "auth_forget" do
+    setup do
+      socket_dir = mkdir!()
+      socket_path = Path.join(socket_dir, "forget.sock")
+      sup = :"#{__MODULE__}.ForgetSup#{System.unique_integer([:positive])}"
+      {:ok, _sup} = Task.Supervisor.start_link(name: sup)
+
+      {:ok, daemon} =
+        Daemon.start_link(
+          name: :"forget_daemon_#{System.unique_integer([:positive, :monotonic])}",
+          socket_path: socket_path,
+          task_supervisor: sup,
+          token_supervisor: TestTokenSupervisor
+        )
+
+      on_exit(fn ->
+        await_process_exit(daemon)
+        FermixTestSupport.SafeRm.rm_rf(socket_dir)
+      end)
+
+      %{forget_socket: socket_path}
+    end
+
+    test "has the daemon let go of the profile a CLI logout signed out of", ctx do
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("auth_forget",
+                 params: %{"profile" => "github:primary"},
+                 socket_path: ctx.forget_socket,
+                 timeout: 1_000
+               )
+
+      assert_receive {:forget_signed_out, "github:primary"}
+    end
+
+    test "refuses a profile it cannot name, and lets go of nothing", ctx do
+      oversized = String.duplicate("p", 257)
+
+      for params <- [%{}, %{"profile" => ""}, %{"profile" => 7}, %{"profile" => oversized}] do
+        assert {:ok, %{"status" => "error", "reason" => "invalid profile"}} =
+                 Client.request("auth_forget",
+                   params: params,
+                   socket_path: ctx.forget_socket,
+                   timeout: 1_000
+                 )
+      end
+
+      refute_received {:forget_signed_out, _profile}
+    end
+
+    test "reports a forget that did not finish instead of answering ok", ctx do
+      {reply, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          Client.request("auth_forget",
+            params: %{"profile" => "wedged:primary"},
+            socket_path: ctx.forget_socket,
+            timeout: 1_000
+          )
+        end)
+
+      assert {:ok, %{"status" => "error", "reason" => reason}} = reply
+      assert reason =~ "timeout"
+      assert log =~ "Daemon kept the wedged:primary tokens after a CLI logout"
+    end
+
+    # The daemon's own default, not the stand-in: a real manager holding a
+    # plugin child's token file lets go of both once the CLI deleted the entry.
+    test "drops a live manager's tokens and token file through the real supervisor" do
+      home = mkdir!()
+      previous_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", home)
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("daemon-forget-store")
+      DistStore.ensure!(root)
+      profile = "google_calendar:daemon-forget-#{System.unique_integer([:positive])}"
+      socket_path = Path.join(home, "real.sock")
+      sup = :"#{__MODULE__}.RealForgetSup#{System.unique_integer([:positive])}"
+      {:ok, _sup} = Task.Supervisor.start_link(name: sup)
+
+      {:ok, daemon} =
+        Daemon.start_link(
+          name: :"real_forget_daemon_#{System.unique_integer([:positive, :monotonic])}",
+          socket_path: socket_path,
+          task_supervisor: sup
+        )
+
+      on_exit(fn ->
+        await_process_exit(daemon)
+        TokenSupervisor.stop_profile(profile)
+        restore_env("FERMIX_HOME", previous_home)
+        FermixTestSupport.SafeRm.rm_rf!(root)
+        FermixTestSupport.SafeRm.rm_rf(home)
+      end)
+
+      :ok = Store.write(profile, google_entry())
+      token_file = DistStore.token_file(root, profile)
+      assert :ok = TokenSupervisor.enable_token_file(profile, token_file)
+      [{manager, _value}] = Registry.lookup(FermixCore.Auth.TokenRegistry, profile)
+      down = Process.monitor(manager)
+      :ok = Store.delete_provider(profile)
+
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("auth_forget",
+                 params: %{"profile" => profile},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+
+      refute File.exists?(token_file)
+      assert_receive {:DOWN, ^down, :process, ^manager, _reason}
+    end
+  end
+
+  defp google_entry do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      granted_scopes: [],
+      tokens: %{access_token: "at", refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 
   # M27 §7.8: the remote-MCP status table lives in the daemon's memory, so a
   # one-shot CLI VM (`fermix doctor`) can only read it over this socket op.

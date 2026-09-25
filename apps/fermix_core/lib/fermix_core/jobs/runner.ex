@@ -197,11 +197,11 @@ defmodule FermixCore.Jobs.Runner do
 
     case result do
       {:ok, result} ->
-        completed_run = mark_completed(state, result)
+        {completed_run, job} = mark_completed(state, result)
         completed_state = %{state | run: completed_run}
 
         persist_run_summary_memory(completed_state, result)
-        finalize_job(completed_state)
+        update_memory_source(job, completed_run.completed_at, state.repo)
         finalize_delivery(completed_state, result.response)
 
       {:timeout, reason} ->
@@ -231,6 +231,11 @@ defmodule FermixCore.Jobs.Runner do
     run
   end
 
+  # The final run row and the job's release land in one settle
+  # (`Repo.settle_job_run/2`): a runner that dies after it leaves a released
+  # job, one that dies before it leaves a run the Scheduler's reaper settles.
+  # The release now lands before the run summary memory; a job's next run reads
+  # that memory through tools, never at prompt build, so the order is safe.
   defp mark_completed(state, result) do
     now = DateTime.utc_now()
     {:ok, output_ref} = write_run_artifact(state, "output.md", success_artifact(state, result))
@@ -250,9 +255,9 @@ defmodule FermixCore.Jobs.Runner do
         updated_at: now
       })
 
-    {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    {:ok, {run, job}} = Repo.settle_job_run(attrs, server: state.repo)
     JobTelemetry.run_complete(state.job, run, result)
-    run
+    {run, job}
   end
 
   defp persist_run_summary_memory(state, result) do
@@ -313,10 +318,10 @@ defmodule FermixCore.Jobs.Runner do
         updated_at: now
       })
 
-    {:ok, run} = Repo.upsert_job_run(attrs, server: state.repo)
+    {:ok, {run, job}} = Repo.settle_job_run(attrs, server: state.repo)
     failed_state = %{state | run: run}
     JobTelemetry.run_error(state.job, run, status, error)
-    finalize_failed_job(failed_state, status, error)
+    update_memory_source_status(job, status, now, state.repo)
     finalize_delivery(failed_state, text)
   end
 
@@ -360,40 +365,6 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
-  defp finalize_job(state) do
-    now = state.run.completed_at || DateTime.utc_now()
-
-    case Repo.get_scheduled_job(state.job.id, server: state.repo) do
-      {:ok, current_job} ->
-        job_attrs =
-          current_job
-          |> Map.merge(final_job_state(current_job, state.job.schedule_kind))
-          |> Map.merge(%{
-            last_run_at: now,
-            last_status: "ok",
-            last_error: nil,
-            updated_at: now
-          })
-
-        {:ok, updated_job} = Repo.upsert_scheduled_job(job_attrs, server: state.repo)
-        update_memory_source(updated_job, now, state.repo)
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, reason} ->
-        raise "failed to finalize scheduled job #{state.job.id}: #{inspect(reason)}"
-    end
-  end
-
-  defp final_job_state(_current_job, "once") do
-    %{enabled?: false, state: "completed", next_run_at: nil}
-  end
-
-  defp final_job_state(%{state: "running"}, _schedule_kind), do: %{state: "scheduled"}
-
-  defp final_job_state(_current_job, _schedule_kind), do: %{}
-
   defp update_memory_source(job, now, repo) do
     case Repo.get_memory_source(job.memory_source_id, server: repo) do
       {:ok, source} ->
@@ -410,32 +381,6 @@ defmodule FermixCore.Jobs.Runner do
 
       {:error, _reason} ->
         :ok
-    end
-  end
-
-  defp finalize_failed_job(state, status, error) do
-    now = state.run.completed_at || DateTime.utc_now()
-
-    case Repo.get_scheduled_job(state.job.id, server: state.repo) do
-      {:ok, current_job} ->
-        job_attrs =
-          current_job
-          |> Map.merge(final_job_state(current_job, state.job.schedule_kind))
-          |> Map.merge(%{
-            last_run_at: now,
-            last_status: status,
-            last_error: error,
-            updated_at: now
-          })
-
-        {:ok, updated_job} = Repo.upsert_scheduled_job(job_attrs, server: state.repo)
-        update_memory_source_status(updated_job, status, now, state.repo)
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, reason} ->
-        raise "failed to finalize failed scheduled job #{state.job.id}: #{inspect(reason)}"
     end
   end
 

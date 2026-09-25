@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.Runtime do
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -153,9 +154,14 @@ defmodule FermixCore.Setup.Runtime do
         {:ok, [provider: "openai_codex"]}
 
       {:error, reason} ->
-        {:error, "codex import failed: #{inspect(reason)}"}
+        {:error, "codex import failed: #{reason_text(reason)}"}
     end
   end
+
+  # Another Fermix process held the Codex profile lock past the wait, and
+  # nothing was spent: the one reason with a sentence of its own.
+  defp reason_text(:profile_busy), do: AuthStore.busy_sentence()
+  defp reason_text(reason), do: inspect(reason)
 
   defp provider_missing?(%{failures: failures}) do
     Enum.any?(failures, &(&1.component in ["provider:openai", "provider:openai_codex"]))
@@ -439,7 +445,7 @@ defmodule FermixCore.Setup.Runtime do
         end
 
       {:error, reason} ->
-        {:error, "codex oauth login failed: #{inspect(reason)}"}
+        {:error, "codex oauth login failed: #{reason_text(reason)}"}
     end
   end
 

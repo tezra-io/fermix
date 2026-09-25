@@ -2,8 +2,11 @@ defmodule FermixCore.ComputerHistory.Purge do
   @moduledoc """
   Owner purge executor (MILESTONE_32 §12). `/history purge 10m|1h|24h|all`
   erases a recent window from the spool **and** the activity memories whose
-  provenance window intersects it, and advances a purge watermark that blocks
-  an in-flight summarizer write from re-materializing just-purged events.
+  provenance window intersects it, and records the window as a purge interval.
+  The interval fences the spool insert, so an event stamped inside the window
+  that was still buffered or in flight never lands after the purge, and it
+  refuses a session note or thread whose batch was read before the purge and
+  reaches the window, so an in-flight summarizer write cannot re-materialize it.
 
   Purge is **logical deletion**: rows leave every query, but `memory.db` runs
   in WAL mode with no `secure_delete`, so raw bytes may linger in the `-wal`
@@ -13,17 +16,13 @@ defmodule FermixCore.ComputerHistory.Purge do
   own backups; the acknowledgment (Stage 6) states this plainly.
 
   Runs in the daemon process so it shares the summarizer's in-flight-purge
-  watermark check (§15.3) — the CLI routes mutations here over the control
-  socket rather than opening `memory.db` in a second tree.
+  check (§15.3) — the CLI routes mutations here over the control socket rather
+  than opening `memory.db` in a second tree.
   """
 
   require Logger
 
   alias FermixCore.Memory.Repo
-
-  # Everything up to "now" for an `all` purge — a far-future ceiling so no real
-  # (past-dated) event escapes the window.
-  @max_ts 9_999_999_999_999
 
   @type window :: :all | {:last, non_neg_integer()}
   @type result :: %{
@@ -58,7 +57,7 @@ defmodule FermixCore.ComputerHistory.Purge do
     repo = Keyword.get(opts, :repo, Repo)
     {from_ts, to_ts} = bounds(window, now)
 
-    case Repo.computer_history_purge_window(from_ts, to_ts, server: repo) do
+    case Repo.computer_history_purge_window(from_ts, to_ts, now, server: repo) do
       {:ok, counts} ->
         Logger.info(
           "computer_history purge removed #{counts.events} event(s), " <>
@@ -73,6 +72,10 @@ defmodule FermixCore.ComputerHistory.Purge do
     end
   end
 
-  defp bounds(:all, _now), do: {0, @max_ts}
+  # `all` is everything up to now, never a far-future ceiling: an interval that
+  # reached past now would fence every later event and refuse every later note.
+  # A row stamped in the future (a backwards clock step) is therefore not
+  # covered; the retention sweep deletes it 48 h after its stamp.
+  defp bounds(:all, now), do: {0, now}
   defp bounds({:last, ms}, now), do: {now - ms, now}
 end

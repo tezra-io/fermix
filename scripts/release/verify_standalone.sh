@@ -142,6 +142,45 @@ esac
 grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DISCORD" "$keychain_log" 2>/dev/null ||
   fail "plugins auth clear never ran the stand-in keychain helper, so this stage proved nothing"
 
+# ── auth logout, run tree-less from this artifact ───────────────────────────
+# `fermix auth logout` runs without the supervision tree. It takes the two
+# cross-VM lockfiles beside auth.json (the profile lock, then the store lock),
+# whose owner processes this VM has to start and stop on its own, and then dials
+# $FERMIX_HOME/daemon.sock to tell a running daemon to let go of the account.
+# ExUnit boots the tree, so only this stage proves the packaged binary takes and
+# releases those locks and reads a missing socket as "no daemon". It runs before
+# the migrate-to-app stage because that stage ends the script on a Linux target.
+#
+# The home is a fresh one with one seeded Codex entry and no daemon. Codex has no
+# auth-mode route to revert, so the verb touches no config and no keychain: it
+# must exit 0, remove the entry and leave no lockfile.
+logout_home="$runtime_root/logout-home"
+mkdir -m 700 "$logout_home"
+cat > "$logout_home/auth.json" <<'AUTH'
+{"version": 2, "providers": {"openai_codex": {"auth_mode": "chatgpt", "tokens": {"access_token": "verify-at", "refresh_token": "verify-rt"}}}}
+AUTH
+chmod 600 "$logout_home/auth.json"
+
+logout_status=0
+logout_output="$(
+  env -u FERMIX_OPIK_ENABLED \
+    HOME="$home" \
+    FERMIX_HOME="$logout_home" \
+    "$artifact" auth logout 2>&1
+)" || logout_status=$?
+printf '%s\n' "$logout_output"
+
+[ "$logout_status" -eq 0 ] || fail "auth logout must exit 0 in the throwaway world, got $logout_status"
+case "$logout_output" in
+  *"Logged out. Removed openai_codex entry"*) ;;
+  *) fail "auth logout did not report the removed entry" ;;
+esac
+if grep -Fq '"openai_codex"' "$logout_home/auth.json"; then
+  fail "auth logout left the openai_codex entry in auth.json"
+fi
+logout_locks="$(find "$logout_home" -name '*.lock' -print)"
+[ -z "$logout_locks" ] || fail "auth logout left a lockfile behind: $logout_locks"
+
 # ── the browser-bridge pump, run from this artifact ─────────────────────────
 # `fermix browser-bridge` is the class of verb that works from source and breaks
 # packaged: it is started by Chrome with no shell environment, its stdout IS the

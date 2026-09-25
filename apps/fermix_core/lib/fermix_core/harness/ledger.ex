@@ -60,7 +60,10 @@ defmodule FermixCore.Harness.Ledger do
   @doc """
   Terminalizes a run, releasing its workspace locks. `fields` carries the
   terminal columns (`reason`, `exit_code`, `usage`, `diagnostics_tail`, …);
-  `completed_at` is set automatically unless provided.
+  `completed_at` is set automatically unless provided. The Manager also passes
+  `next_delivery_at`, its hand-off lease, so the terminal status and the lease
+  land in the same guarded UPDATE and the row is never due before the Manager's
+  inline delivery attempt has had its chance.
   """
   @spec terminalize(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()}

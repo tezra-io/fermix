@@ -16,6 +16,14 @@ defmodule FermixCore.Auth.OAuthFlow do
   race that occurs when two tools share a refresh token.
 
   `start_loopback/2` accepts provider metadata for first-party plugins.
+
+  The exchange spends the authorization code, so a sign-in passes `:redeem`: a
+  function given the exchange (a zero-arity function) that takes the profile
+  lock before running it and writes the grant before releasing the lock
+  (`Auth.Store.with_profile_lock/3`). A busy profile then refuses after the
+  browser step with the code unspent. The flow returns what `:redeem` returns;
+  without it, the tokens. Every request the flow makes sets
+  `RefreshClient.request_bounds/0`, since it runs under that lock.
   """
 
   alias FermixCore.Auth.Browser
@@ -23,6 +31,7 @@ defmodule FermixCore.Auth.OAuthFlow do
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Auth.RefreshClient
 
   require Logger
 
@@ -49,22 +58,30 @@ defmodule FermixCore.Auth.OAuthFlow do
           expires_at: DateTime.t() | nil
         }
 
+  @typedoc """
+  Runs the code exchange it is given and returns the flow's result. A sign-in's
+  takes the profile lock first and stores the grant before releasing it.
+  """
+  @type redeem :: ((-> {:ok, map()} | {:error, term()}) -> {:ok, term()} | {:error, term()})
+
   @type loopback_opts :: [
           port: :inet.port_number(),
           opener: (String.t() -> :ok | {:error, term()}) | nil,
           timeout_ms: pos_integer(),
           port_fallbacks: non_neg_integer(),
           req_options: keyword(),
-          puts: (String.t() -> any())
+          puts: (String.t() -> any()),
+          redeem: redeem()
         ]
 
-  @spec start_loopback(loopback_opts()) :: {:ok, tokens()} | {:error, term()}
+  @spec start_loopback(loopback_opts()) :: {:ok, term()} | {:error, term()}
   def start_loopback(opts \\ []) when is_list(opts) do
     port = Keyword.get(opts, :port, @redirect_port)
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     opener = Keyword.get(opts, :opener, &open_browser/1)
     req_options = Keyword.get(opts, :req_options, [])
     puts = Keyword.get(opts, :puts, &IO.puts/1)
+    redeem = Keyword.get(opts, :redeem, &exchange_only/1)
 
     pkce = generate_pkce()
     url = authorize_url(pkce)
@@ -74,7 +91,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         result =
           with :ok <- announce_and_open(puts, opener, url),
                {:ok, code} <- await_callback(listener, pkce.state, timeout_ms) do
-            exchange_code(code, pkce.code_verifier, req_options)
+            redeem.(codex_exchange(code, pkce.code_verifier, req_options))
           end
 
         :ok = :gen_tcp.close(listener)
@@ -85,14 +102,13 @@ defmodule FermixCore.Auth.OAuthFlow do
     end
   end
 
-  @spec start_loopback(OAuthProvider.t(), loopback_opts()) :: {:ok, map()} | {:error, term()}
+  @spec start_loopback(OAuthProvider.t(), loopback_opts()) :: {:ok, term()} | {:error, term()}
   def start_loopback(%OAuthProvider{} = provider, opts) when is_list(opts) do
     port = Keyword.get(opts, :port, provider.redirect_port)
     timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
     opener = Keyword.get(opts, :opener, &open_browser/1)
-    req_options = Keyword.get(opts, :req_options, [])
-    userinfo_req_options = Keyword.get(opts, :userinfo_req_options, [])
     puts = Keyword.get(opts, :puts, &IO.puts/1)
+    redeem = Keyword.get(opts, :redeem, &exchange_only/1)
 
     pkce = generate_pkce()
 
@@ -104,13 +120,8 @@ defmodule FermixCore.Auth.OAuthFlow do
 
         result =
           with :ok <- announce_and_open_optional(puts, opener, url),
-               {:ok, code} <- await_callback(listener, pkce.state, timeout_ms),
-               {:ok, tokens} <-
-                 exchange_code(provider, code, pkce.code_verifier, redirect_uri, req_options) do
-            userinfo =
-              fetch_userinfo_best_effort(provider, tokens.access_token, userinfo_req_options)
-
-            {:ok, Map.put(tokens, :userinfo, userinfo)}
+               {:ok, code} <- await_callback(listener, pkce.state, timeout_ms) do
+            redeem.(provider_exchange(provider, code, pkce, redirect_uri, opts))
           end
 
         :ok = :gen_tcp.close(listener)
@@ -118,6 +129,28 @@ defmodule FermixCore.Auth.OAuthFlow do
 
       {:error, _reason} = err ->
         err
+    end
+  end
+
+  # The flow without a sign-in around it: the exchange alone, for a caller
+  # that stores nothing.
+  defp exchange_only(exchange), do: exchange.()
+
+  # The exchange `:redeem` is handed: nothing is spent until it is called.
+  defp codex_exchange(code, code_verifier, req_options),
+    do: fn -> exchange_code(code, code_verifier, req_options) end
+
+  defp provider_exchange(provider, code, pkce, redirect_uri, opts),
+    do: fn -> exchange_with_userinfo(provider, code, pkce, redirect_uri, opts) end
+
+  defp exchange_with_userinfo(provider, code, pkce, redirect_uri, opts) do
+    req_options = Keyword.get(opts, :req_options, [])
+    userinfo_req_options = Keyword.get(opts, :userinfo_req_options, [])
+
+    with {:ok, tokens} <-
+           exchange_code(provider, code, pkce.code_verifier, redirect_uri, req_options) do
+      userinfo = fetch_userinfo_best_effort(provider, tokens.access_token, userinfo_req_options)
+      {:ok, Map.put(tokens, :userinfo, userinfo)}
     end
   end
 
@@ -190,10 +223,12 @@ defmodule FermixCore.Auth.OAuthFlow do
 
     request =
       Req.new(
-        url: @token_url,
-        method: :post,
-        body: body,
-        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        [
+          url: @token_url,
+          method: :post,
+          body: body,
+          headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        ] ++ RefreshClient.request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
@@ -230,10 +265,12 @@ defmodule FermixCore.Auth.OAuthFlow do
 
     request =
       Req.new(
-        url: provider.token_url,
-        method: :post,
-        body: body,
-        headers: OAuthProvider.token_request_headers(provider)
+        [
+          url: provider.token_url,
+          method: :post,
+          body: body,
+          headers: OAuthProvider.token_request_headers(provider)
+        ] ++ RefreshClient.request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
@@ -268,9 +305,11 @@ defmodule FermixCore.Auth.OAuthFlow do
       when is_binary(access_token) and is_list(req_options) do
     request =
       Req.new(
-        method: :get,
-        url: provider.userinfo_url,
-        headers: [{"authorization", "Bearer #{access_token}"}]
+        [
+          method: :get,
+          url: provider.userinfo_url,
+          headers: [{"authorization", "Bearer #{access_token}"}]
+        ] ++ RefreshClient.request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do

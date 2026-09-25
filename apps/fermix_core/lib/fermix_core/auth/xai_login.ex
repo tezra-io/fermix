@@ -37,12 +37,24 @@ defmodule FermixCore.Auth.XAILogin do
     provider = Keyword.get_lazy(opts, :provider, fn -> OAuthProvider.xai() end)
     fermix_path = Keyword.get(opts, :fermix_path, Store.path())
 
-    with :ok <- validate_token_endpoint(provider.token_url),
-         {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
-         entry = entry_from_tokens(tokens),
-         :ok <- persist(entry, fermix_path) do
-      {:ok, entry}
+    with :ok <- validate_token_endpoint(provider.token_url) do
+      flow_opts = Keyword.put(flow_opts(opts), :redeem, &redeem(&1, fermix_path))
+      OAuthFlow.start_loopback(provider, flow_opts)
     end
+  end
+
+  # The exchange spends the code, so the xai_oauth profile lock is taken first
+  # and held through the write: a busy profile refuses with the code unspent
+  # (`{:error, :profile_busy}`), and no refresh of the profile can put the old
+  # grant's rotation back over the new one.
+  defp redeem(exchange, fermix_path) do
+    Store.with_profile_lock(@auth_profile, fermix_path, fn ->
+      with {:ok, tokens} <- exchange.(),
+           entry = entry_from_tokens(tokens),
+           :ok <- persist(entry, fermix_path) do
+        {:ok, entry}
+      end
+    end)
   end
 
   defp flow_opts(opts) do

@@ -92,6 +92,13 @@ defmodule FermixCore.Harness.Delivery do
   end
 
   @doc """
+  The watchdog bound on one `deliver/2` channel send (unless `opts[:timeout_ms]`
+  overrides it). The Manager's hand-off lease is sized against it.
+  """
+  @spec deliver_timeout_ms() :: pos_integer()
+  def deliver_timeout_ms, do: @deliver_timeout_ms
+
+  @doc """
   Makes ONE bounded send attempt for `row`, returning `{:ok, :sent | :skipped}`
   or `{:error, reason}` for the caller (Manager inline / DeliveryWorker) to
   record. Mode `none` → `:skipped`; `local` → `:sent` without a channel send.
@@ -272,7 +279,7 @@ defmodule FermixCore.Harness.Delivery do
 
   defp deliver_to_channel(row, opts) do
     text = compose(row, result_text_for(row))
-    timeout_ms = Keyword.get(opts, :timeout_ms, @deliver_timeout_ms)
+    timeout_ms = Keyword.get(opts, :timeout_ms, deliver_timeout_ms())
 
     result =
       ChannelSend.with_timeout(timeout_ms, fn ->

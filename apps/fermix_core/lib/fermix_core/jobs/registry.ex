@@ -40,7 +40,7 @@ defmodule FermixCore.Jobs.Registry do
 
   @spec pause_job(String.t(), keyword()) :: {:ok, Repo.scheduled_job_row()} | {:error, term()}
   def pause_job(id, opts \\ []) when is_binary(id) and is_list(opts) do
-    update_job_state(id, %{enabled?: false, state: "paused"}, "paused", opts)
+    update_job_fields(id, %{enabled?: false, state: "paused"}, "paused", opts)
   end
 
   @spec resume_job(String.t(), keyword()) :: {:ok, Repo.scheduled_job_row()} | {:error, term()}
@@ -49,8 +49,8 @@ defmodule FermixCore.Jobs.Registry do
 
     with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)),
          {:ok, next_run_at} <- next_run_at_for_resume(job, now) do
-      update_existing_job_state(
-        job,
+      update_job_fields(
+        id,
         %{enabled?: true, state: "scheduled", next_run_at: next_run_at},
         "enabled",
         opts
@@ -90,25 +90,25 @@ defmodule FermixCore.Jobs.Registry do
     Repo.list_memory_sources(memory_source_selector(opts), repo_opts(opts))
   end
 
-  defp update_job_state(id, patch, source_status, opts) do
-    with {:ok, job} <- Repo.get_scheduled_job(id, repo_opts(opts)) do
-      update_existing_job_state(job, patch, source_status, opts)
-    end
-  end
+  # Pause and resume write only the columns they own (enabled, state, and
+  # resume's next_run_at), never a whole row from an earlier read: a run's
+  # settle can land in between, and a stale copy would revert its release.
+  defp update_job_fields(id, fields, source_status, opts) do
+    fields = Map.put(fields, :updated_at, DateTime.utc_now())
 
-  defp update_existing_job_state(job, patch, source_status, opts) do
-    with attrs <- job |> Map.merge(patch) |> Map.put(:updated_at, DateTime.utc_now()),
-         {:ok, updated} <- Repo.upsert_scheduled_job(attrs, repo_opts(opts)),
+    with {:ok, updated} <- Repo.update_scheduled_job_fields(id, fields, repo_opts(opts)),
          :ok <- mark_source(updated.memory_source_id, source_status, opts) do
       notify_scheduler(opts)
       {:ok, updated}
     end
   end
 
+  # An edit writes only the fields it changes, never state, enabled or last_*,
+  # so it cannot put back a `running` the run's settle has already released.
   defp apply_job_update(job, job_patch, source_patch, now, opts) do
-    attrs = job |> Map.merge(job_patch) |> Map.put(:updated_at, now)
+    fields = Map.put(job_patch, :updated_at, now)
 
-    with {:ok, updated} <- Repo.upsert_scheduled_job(attrs, repo_opts(opts)),
+    with {:ok, updated} <- Repo.update_scheduled_job_fields(job.id, fields, repo_opts(opts)),
          :ok <- update_source(updated.memory_source_id, source_patch, opts) do
       notify_scheduler(opts)
       {:ok, updated}

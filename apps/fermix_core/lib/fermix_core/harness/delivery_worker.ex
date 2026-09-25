@@ -4,9 +4,9 @@ defmodule FermixCore.Harness.DeliveryWorker do
 
   Every tick (default 30s, self-rearming) it pulls up to `@max_rows_per_tick` due
   pending deliveries from `Ledger.pending_deliveries/2` (already excludes active
-  rows and rows whose `next_delivery_at` is in the future), makes ONE bounded
-  send attempt each through `Harness.Delivery.deliver/2`, and records the outcome
-  durably:
+  rows and rows whose `next_delivery_at` is in the future: a backoff, or the
+  Manager's hand-off lease), makes ONE bounded send attempt each through
+  `Harness.Delivery.deliver/2`, and records the outcome durably:
 
     * success (`:sent` / `:skipped`) → `delivered`;
     * failure → `delivery_attempts + 1`, exponential-backoff `next_delivery_at`
@@ -15,11 +15,16 @@ defmodule FermixCore.Harness.DeliveryWorker do
     * at `delivery_max_attempts` or past `delivery_max_age_hours` → `dead_letter`
       (surfaced by doctor and `list_coding_runs`).
 
-  The immediate first attempt happens inline on terminalization (Manager); this
-  worker owns every subsequent attempt — it naturally sees a row only because the
-  Manager marks `delivered` only on success. A failing tick (e.g. the query
-  itself errors) re-arms no sooner than `@min_rearm_ms` so the worker never
-  hot-loops.
+  The immediate first attempt happens inline on terminalization (Manager), and
+  the terminal write leases the row to it (`next_delivery_at`,
+  `Manager.handoff_lease_ms/0`): this worker sees the row only after that lease
+  ends, so while the wall clock runs normally it does not race the inline
+  attempt (a sleep or clock jump past the lease mid-hand-off is the designed
+  at-least-once duplicate), and it owns every subsequent attempt. A successful
+  hand-off marks the row `delivered` and a failed client-owned one dead-letters
+  it, so the worker takes over only a failed attempt or one whose Manager died.
+  A failing tick (e.g. the query itself errors) re-arms no sooner than
+  `@min_rearm_ms` so the worker never hot-loops.
 
   Draining is **unconditional** (spec §5): the outbox is finished in-flight work,
   not a new admission, so `Config.enabled?` does NOT gate it — flipping the

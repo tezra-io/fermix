@@ -48,6 +48,72 @@ defmodule FermixCore.Jobs.SchedulerTest do
     def supports_streaming?, do: false
   end
 
+  defmodule FailingAdapter do
+    @moduledoc false
+    # Every model call fails with a non-transient error, so the run ends
+    # through mark_failed with its failure text still to deliver.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts), do: {:error, :boom}
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule HeldAdapter do
+    @moduledoc false
+    # The model call parks until the test sends :release to the pid it reports,
+    # so a test can act while a run is known to be inside its AgentLoop.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:adapter_held, self()})
+
+      receive do
+        :release ->
+          {:ok,
+           %{
+             content: "Released.",
+             tool_calls: [],
+             provider_state: %{},
+             usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+             model: "mock"
+           }}
+      after
+        5_000 -> {:error, :never_released}
+      end
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   defmodule CrashingRunner do
     def child_spec(opts) do
       %{
@@ -82,8 +148,10 @@ defmodule FermixCore.Jobs.SchedulerTest do
           notify = Keyword.fetch!(opts, :notify)
           now = DateTime.utc_now()
 
-          {:ok, _run} =
-            Repo.upsert_job_run(
+          # The real runner's final write: the run row and the job release
+          # in one settle.
+          {:ok, {_run, _job}} =
+            Repo.settle_job_run(
               Map.merge(run, %{
                 status: "ok",
                 completed_at: now,
@@ -94,7 +162,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
               server: repo
             )
 
-          send(notify, {:job_runner, :pending_delivery, run.id, run.job_id})
+          send(notify, {:job_runner, :pending_delivery, run.id, run.job_id, self()})
           exit(:after_pending_delivery)
         end)
 
@@ -137,6 +205,147 @@ defmodule FermixCore.Jobs.SchedulerTest do
         1_000 -> {:error, :label_timeout}
       end
     end
+  end
+
+  defmodule PendingDeliveryLiveRunner do
+    @moduledoc false
+    # A runner past its final write and still delivering: it publishes its run
+    # id like the real Runner, settles its run ok with the delivery pending,
+    # reports, then parks as if waiting on the send.
+    alias FermixCore.Jobs.Runner
+    alias FermixCore.Memory.Repo
+
+    def child_spec(opts) do
+      %{
+        id: {__MODULE__, Keyword.fetch!(opts, :run).id},
+        start: {__MODULE__, :start_link, [opts]},
+        restart: :temporary
+      }
+    end
+
+    def start_link(opts) do
+      run = Keyword.fetch!(opts, :run)
+      notify = Keyword.fetch!(opts, :notify)
+      repo = Keyword.fetch!(opts, :repo)
+      parent = self()
+
+      pid =
+        spawn_link(fn ->
+          :ok = Runner.put_run_id(run.id)
+          send(parent, {:labelled, self()})
+          settle_pending_delivery(run, repo)
+          send(notify, {:job_runner, :pending_delivery, run.id, run.job_id, self()})
+          Process.sleep(:infinity)
+        end)
+
+      receive do
+        {:labelled, ^pid} -> {:ok, pid}
+      after
+        1_000 -> {:error, :label_timeout}
+      end
+    end
+
+    defp settle_pending_delivery(run, repo) do
+      now = DateTime.utc_now()
+
+      {:ok, {_run, _job}} =
+        Repo.settle_job_run(
+          Map.merge(run, %{
+            status: "ok",
+            completed_at: now,
+            final_response: "Still delivering.",
+            delivery_status: "pending",
+            updated_at: now
+          }),
+          server: repo
+        )
+    end
+  end
+
+  defmodule KillAfterFinalRunWriteRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo. For the first request that
+    # carries a final job_runs row (status ok/error/timeout), it forwards the
+    # request, reports {:killed_after_final_write, caller} to the test, and kills
+    # the caller before replying: the write has landed, the caller never sees
+    # it. It matches the attrs map structurally, whatever the request tag, and
+    # disarms after one kill. `armed: false` waits for `arm/1`.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    def arm(proxy), do: GenServer.call(proxy, :__arm__)
+
+    @impl true
+    def init(opts) do
+      {:ok,
+       %{
+         real: Keyword.fetch!(opts, :real),
+         notify: Keyword.fetch!(opts, :notify),
+         armed: Keyword.get(opts, :armed, true)
+       }}
+    end
+
+    @impl true
+    def handle_call(:__arm__, _from, state), do: {:reply, :ok, %{state | armed: true}}
+
+    def handle_call(request, {caller, _tag}, %{real: real, armed: armed} = state) do
+      reply = GenServer.call(real, request)
+
+      if armed and final_run_write?(request) do
+        send(state.notify, {:killed_after_final_write, caller})
+        Process.exit(caller, :kill)
+        {:reply, reply, %{state | armed: false}}
+      else
+        {:reply, reply, state}
+      end
+    end
+
+    defp final_run_write?(request) when is_tuple(request) do
+      request |> Tuple.to_list() |> Enum.any?(&final_run_attrs?/1)
+    end
+
+    defp final_run_write?(_request), do: false
+
+    defp final_run_attrs?(%{job_id: _job_id, status: status}),
+      do: status in ["ok", "error", "timeout"]
+
+    defp final_run_attrs?(_value), do: false
+  end
+
+  defmodule InjectBeforeJobWriteRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo. Before forwarding the
+    # first request that writes the job row after a run (a whole-row upsert, or
+    # the run's settle), it runs `inject` against the real Repo: an owner
+    # action landing in the release's window, forced rather than raced.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    def arm(proxy, inject) when is_function(inject, 0),
+      do: GenServer.call(proxy, {:__arm__, inject})
+
+    @impl true
+    def init(opts), do: {:ok, %{real: Keyword.fetch!(opts, :real), inject: nil}}
+
+    @impl true
+    def handle_call({:__arm__, inject}, _from, state),
+      do: {:reply, :ok, %{state | inject: inject}}
+
+    def handle_call(request, _from, %{real: real, inject: inject} = state) do
+      if is_function(inject, 0) and job_row_write?(request) do
+        :ok = inject.()
+        {:reply, GenServer.call(real, request), %{state | inject: nil}}
+      else
+        {:reply, GenServer.call(real, request), state}
+      end
+    end
+
+    defp job_row_write?(request) when is_tuple(request),
+      do: elem(request, 0) in [:upsert_scheduled_job, :settle_job_run]
+
+    defp job_row_write?(_request), do: false
   end
 
   defmodule RecordingRepo do
@@ -430,29 +639,18 @@ defmodule FermixCore.Jobs.SchedulerTest do
         runner_delay_ms: 0
       )
 
+    job_id = job.id
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
-    assert_receive {:job_runner, :pending_delivery, run_id, job_id}
-    assert job_id == job.id
-
-    assert eventually(fn ->
-             {:ok, run} = Repo.get_job_run(run_id, server: repo)
-             run.delivery_status == "failed"
-           end)
+    assert_receive {:job_runner, :pending_delivery, run_id, ^job_id, runner}
+    await_reaped(runner, scheduler)
 
     assert {:ok, run} = Repo.get_job_run(run_id, server: repo)
     assert run.status == "ok"
     assert run.delivery_status == "failed"
     assert run.delivery_error =~ "runner crashed"
 
-    # The reaper writes the run's failed delivery and then the job's reset
-    # (running -> scheduled) as two separate Repo writes; the delivery wait
-    # above only gates on the first. Wait for the job write too, or this races
-    # and reads "running" on a slow runner.
-    assert eventually(fn ->
-             {:ok, current} = Registry.get_job(job.id, repo: repo)
-             current.state == "scheduled"
-           end)
-
+    # The runner's settle released the job with the run's outcome; the reaper
+    # wrote only the delivery.
     assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
     assert updated_job.state == "scheduled"
     assert updated_job.last_status == "ok"
@@ -666,6 +864,24 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert {:ok, updated_job} = Registry.get_job(job_id, repo: repo)
     assert updated_job.next_run_at == ~U[2026-05-02 14:15:00Z]
     assert updated_job.state == "scheduled"
+  end
+
+  test "run_now of a one-off before its instant runs it and is done", %{
+    repo: repo,
+    runner_supervisor: runner_supervisor
+  } do
+    {:ok, job} = seed_one_off_job(repo, "One-off Run Early", "2099-05-03T09:00:00Z")
+    scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+    job_id = job.id
+
+    assert {:ok, run} = Scheduler.run_now(scheduler, job_id, now: ~U[2026-05-02 14:03:00Z])
+    run_id = run.id
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+
+    assert {:ok, done} = Registry.get_job(job_id, repo: repo)
+    assert done.state == "completed"
+    assert done.enabled? == false
+    assert done.next_run_at == nil
   end
 
   test "run_now rejects a job that already has an active run", %{
@@ -940,6 +1156,33 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
       assert_due_timer_backoff(scheduler)
     end
+
+    # A resume mid-run puts the job back to "scheduled" while its run is still
+    # active, so the next due claim is refused as :already_running. That is
+    # backpressure, not a clean drain: the re-arm must floor at the backoff,
+    # never spin the Repo at 0 ms until the run ends.
+    test "a due claim refused because the previous run is still active re-arms at the backoff floor",
+         %{repo: repo, runner_supervisor: runner_supervisor} do
+      job = seed_due_job(repo, name: "Still Running")
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(repo, runner_supervisor, runner_module: LiveRunner, timer_enabled: true)
+
+      assert_receive {:job_runner, :started, _run_id, ^job_id}
+
+      # Resumed as if 20 minutes ago: next_run_at lands 5 minutes in the past,
+      # due and inside the freshness window.
+      resumed_at = DateTime.add(DateTime.utc_now(), -20 * 60, :second)
+
+      assert {:ok, %{state: "scheduled"}} =
+               Registry.resume_job(job_id, repo: repo, scheduler: scheduler, now: resumed_at)
+
+      # Served after resume's :job_changed cast (same sender), so the claim it
+      # makes is refused by the run LiveRunner still holds.
+      assert :ok = Scheduler.tick(scheduler, now: DateTime.utc_now())
+      assert_due_timer_backoff(scheduler)
+    end
   end
 
   describe "admission control" do
@@ -1068,7 +1311,55 @@ defmodule FermixCore.Jobs.SchedulerTest do
              end)
     end
 
-    test "every reconciliation pass scans active runs under a bounded limit", %{
+    test "a pending delivery left by a dead runner is failed at boot", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Stranded Delivery")
+
+      stranded =
+        seed_stuck_run(repo, job,
+          status: "ok",
+          delivery_status: "pending",
+          job_state: "scheduled"
+        )
+
+      # init reconciles synchronously inside start_supervised!.
+      _scheduler = start_scheduler(repo, runner_supervisor, runner_delay_ms: 1)
+
+      assert {:ok, reaped} = Repo.get_job_run(stranded.id, server: repo)
+      assert reaped.status == "ok"
+      assert reaped.delivery_status == "failed"
+      assert reaped.delivery_error =~ "no live runner"
+      assert {:ok, %{state: "scheduled"}} = Registry.get_job(job.id, repo: repo)
+    end
+
+    test "a runner past its final write is adopted after a scheduler restart", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Delivering Check")
+      job_id = job.id
+
+      first = start_scheduler(repo, runner_supervisor, runner_module: PendingDeliveryLiveRunner)
+      assert :ok = Scheduler.tick(first, now: ~U[2026-05-02 14:15:00Z])
+      # Sent after the runner's final write: the restarted Scheduler's scan
+      # below reads the row as ok/pending, never as queued.
+      assert_receive {:job_runner, :pending_delivery, run_id, ^job_id, runner}
+
+      stop_supervised!(Scheduler)
+      second = start_scheduler(repo, runner_supervisor, runner_module: PendingDeliveryLiveRunner)
+
+      Process.exit(runner, :kill)
+      await_reaped(runner, second)
+
+      assert {:ok, run} = Repo.get_job_run(run_id, server: repo)
+      assert run.status == "ok"
+      assert run.delivery_status == "failed"
+      assert run.delivery_error =~ "runner crashed"
+    end
+
+    test "every reconciliation pass scans unsettled runs under a bounded limit", %{
       repo: repo,
       runner_supervisor: runner_supervisor
     } do
@@ -1078,13 +1369,230 @@ defmodule FermixCore.Jobs.SchedulerTest do
       recording = start_recording_repo(repo, self())
       scheduler = start_scheduler(recording, runner_supervisor, runner_delay_ms: 1)
 
-      assert_receive {:repo_request, {:active_job_runs, limit}}
+      assert_receive {:repo_request, {:unsettled_job_runs, limit}}
       assert is_integer(limit)
       assert limit > 0 and limit <= 50
 
       # The periodic pass is bounded the same way, not just the init pass.
       send(scheduler, :reconcile_tick)
-      assert_receive {:repo_request, {:active_job_runs, ^limit}}
+      assert_receive {:repo_request, {:unsettled_job_runs, ^limit}}
+    end
+  end
+
+  # A run's final write and its job's release are one settle. Each test forces
+  # a death or an owner action into the window the old two-write release left
+  # open, and checks the job is never left wedged or rewritten.
+  describe "final write and job release" do
+    test "a runner killed right after its final run write leaves its job claimable", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Killed After Settle")
+      job_id = job.id
+      proxy = start_kill_after_final_write_repo(repo)
+      scheduler = start_scheduler(proxy, runner_supervisor, runner_delay_ms: 1)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:killed_after_final_write, runner}
+      await_reaped(runner, scheduler)
+
+      # delivery_mode "none": the run is final at once, so the reaper has
+      # nothing of its own to settle.
+      assert {:ok, %{status: "ok", delivery_status: "none"}} =
+               Repo.get_job_run(run_id, server: repo)
+
+      assert {:ok, released} = Registry.get_job(job_id, repo: repo)
+      assert released.state == "scheduled"
+      assert released.last_status == "ok"
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:30:00Z])
+      assert_receive {:job_runner, :started, next_run_id, ^job_id}
+      assert next_run_id != run_id
+      assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}
+    end
+
+    test "a scheduler killed right after its reap write leaves the job claimable", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Reaper Killed")
+      proxy = start_kill_after_final_write_repo(repo, armed: false)
+
+      scheduler =
+        start_scheduler(proxy, runner_supervisor, runner_delay_ms: 1, restart: :temporary)
+
+      scheduler_pid = Process.whereis(scheduler)
+      stuck = seed_stuck_run(repo, job)
+      :ok = KillAfterFinalRunWriteRepo.arm(proxy)
+
+      send(scheduler, :reconcile_tick)
+      assert_receive {:killed_after_final_write, ^scheduler_pid}
+
+      assert {:ok, reaped} = Repo.get_job_run(stuck.id, server: repo)
+      assert reaped.status == "error"
+      assert reaped.error =~ "no live runner"
+
+      assert {:ok, released} = Registry.get_job(job.id, repo: repo)
+      assert released.state == "scheduled"
+      assert released.last_status == "error"
+    end
+
+    test "a failed run whose runner dies after its final write releases the job and fails the failure-text delivery",
+         %{repo: repo, runner_supervisor: runner_supervisor} do
+      assert {:ok, job} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Failing Delivery Check",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Fail, and report the failure.",
+                   delivery_mode: "channel",
+                   delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+                 },
+                 repo: repo,
+                 now: ~U[2026-05-02 14:00:00Z]
+               )
+
+      job_id = job.id
+      proxy = start_kill_after_final_write_repo(repo)
+      scheduler = start_scheduler(proxy, runner_supervisor, adapter: FailingAdapter)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:killed_after_final_write, runner}
+      await_reaped(runner, scheduler)
+
+      assert {:ok, run} = Repo.get_job_run(run_id, server: repo)
+      assert run.status == "error"
+      assert run.delivery_status == "failed"
+      assert run.delivery_error =~ "runner crashed"
+
+      assert {:ok, released} = Registry.get_job(job_id, repo: repo)
+      assert released.state == "scheduled"
+      assert released.last_status == "error"
+    end
+
+    test "a pause landing just before the run's release is kept", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Paused At Release")
+      job_id = job.id
+      proxy = start_inject_before_job_write_repo(repo)
+      scheduler = start_scheduler(proxy, runner_supervisor, adapter: HeldAdapter)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:adapter_held, loop}
+
+      :ok =
+        InjectBeforeJobWriteRepo.arm(proxy, fn ->
+          {:ok, _paused} = Registry.pause_job(job_id, repo: repo, scheduler: nil)
+          :ok
+        end)
+
+      send(loop, :release)
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+
+      assert {:ok, current} = Registry.get_job(job_id, repo: repo)
+      assert current.state == "paused"
+      assert current.enabled? == false
+      assert current.last_status == "ok"
+    end
+
+    test "a resume landing just before the run's release is kept", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Resumed At Release")
+      job_id = job.id
+      proxy = start_inject_before_job_write_repo(repo)
+      scheduler = start_scheduler(proxy, runner_supervisor, adapter: HeldAdapter)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:adapter_held, loop}
+
+      # Paused while the run is inside its loop, then resumed inside the
+      # release's window.
+      assert {:ok, %{state: "paused"}} = Registry.pause_job(job_id, repo: repo, scheduler: nil)
+
+      :ok =
+        InjectBeforeJobWriteRepo.arm(proxy, fn ->
+          {:ok, _resumed} =
+            Registry.resume_job(job_id,
+              repo: repo,
+              scheduler: nil,
+              now: ~U[2026-05-02 14:20:00Z]
+            )
+
+          :ok
+        end)
+
+      send(loop, :release)
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+
+      assert {:ok, current} = Registry.get_job(job_id, repo: repo)
+      assert current.state == "scheduled"
+      assert current.enabled? == true
+      assert current.next_run_at == ~U[2026-05-02 14:35:00Z]
+    end
+
+    test "an edit that turns a running recurring job into a one-off is kept by its release", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Edited Into One-off")
+      job_id = job.id
+      scheduler = start_scheduler(repo, runner_supervisor, adapter: HeldAdapter)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:adapter_held, loop}
+
+      assert {:ok, %{schedule_kind: "once"}} =
+               Registry.update_job(job_id, %{schedule: "2099-05-03T09:00:00Z"},
+                 repo: repo,
+                 scheduler: nil,
+                 now: ~U[2026-05-02 14:20:00Z]
+               )
+
+      send(loop, :release)
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+
+      assert {:ok, current} = Registry.get_job(job_id, repo: repo)
+      assert current.state == "scheduled"
+      assert current.enabled? == true
+      assert current.next_run_at == ~U[2099-05-03 09:00:00Z]
+    end
+
+    test "a manual run of a one-off keeps the instant an edit set while it ran", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_one_off_job(repo, "Moved While Running", "2099-05-03T09:00:00Z")
+      job_id = job.id
+      scheduler = start_scheduler(repo, runner_supervisor, adapter: HeldAdapter)
+
+      assert {:ok, run} = Scheduler.run_now(scheduler, job_id, now: ~U[2026-05-02 14:03:00Z])
+      run_id = run.id
+      assert_receive {:adapter_held, loop}
+
+      assert {:ok, _moved} =
+               Registry.update_job(job_id, %{schedule: "2099-06-01T09:00:00Z"},
+                 repo: repo,
+                 scheduler: nil,
+                 now: ~U[2026-05-02 14:05:00Z]
+               )
+
+      send(loop, :release)
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+
+      assert {:ok, current} = Registry.get_job(job_id, repo: repo)
+      assert current.state == "scheduled"
+      assert current.enabled? == true
+      assert current.next_run_at == ~U[2099-06-01 09:00:00Z]
     end
   end
 
@@ -1160,17 +1668,35 @@ defmodule FermixCore.Jobs.SchedulerTest do
     )
   end
 
+  defp seed_one_off_job(repo, name, instant) do
+    Registry.create_job(
+      %{
+        created_by_trust: "operator",
+        name: name,
+        schedule: instant,
+        task_prompt: "Run once."
+      },
+      repo: repo,
+      now: ~U[2026-05-02 14:00:00Z]
+    )
+  end
+
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
   # A job left mid-run by a daemon that died: the job row still says "running"
   # and its run row is still active — exactly the pair that makes
   # `ensure_no_active_job_run` refuse every future claim for that job.
+  # `:status`, `:delivery_status` and `:job_state` seed the other rows a dead
+  # runner can leave: a final run whose delivery is still pending, with its job
+  # already released.
   defp seed_stuck_run(repo, job, opts \\ []) do
     now = Keyword.get(opts, :now, ~U[2026-05-02 14:15:00Z])
+    status = Keyword.get(opts, :status, "running")
+    job_state = Keyword.get(opts, :job_state, "running")
 
-    {:ok, _running_job} =
-      Repo.upsert_scheduled_job(%{job | state: "running", updated_at: now}, server: repo)
+    {:ok, _job} =
+      Repo.upsert_scheduled_job(%{job | state: job_state, updated_at: now}, server: repo)
 
     {:ok, run} =
       Repo.upsert_job_run(
@@ -1179,10 +1705,11 @@ defmodule FermixCore.Jobs.SchedulerTest do
           job_id: job.id,
           session_id: "cron_#{job.id}_stuck",
           trigger: "schedule",
-          status: "running",
+          status: status,
           claimed_at: now,
           started_at: now,
-          delivery_status: "none",
+          completed_at: if(status in ["queued", "running"], do: nil, else: now),
+          delivery_status: Keyword.get(opts, :delivery_status, "none"),
           created_at: now,
           updated_at: now
         },
@@ -1202,6 +1729,31 @@ defmodule FermixCore.Jobs.SchedulerTest do
     pid
   end
 
+  defp start_kill_after_final_write_repo(real, opts \\ []) do
+    {:ok, pid} =
+      start_supervised(
+        {KillAfterFinalRunWriteRepo,
+         real: real, notify: self(), armed: Keyword.get(opts, :armed, true)}
+      )
+
+    pid
+  end
+
+  defp start_inject_before_job_write_repo(real) do
+    {:ok, pid} = start_supervised({InjectBeforeJobWriteRepo, real: real})
+    pid
+  end
+
+  # A barrier, not a wait: the DOWN proves `pid` is dead, and the Scheduler's
+  # own monitor fired at that same exit, so one :sys.get_state round trip
+  # returns only after its DOWN handler (the reaper) has run.
+  defp await_reaped(pid, scheduler) do
+    ref = Process.monitor(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    _state = :sys.get_state(scheduler)
+    :ok
+  end
+
   defp assert_due_timer_backoff(scheduler) do
     state = :sys.get_state(scheduler)
     assert is_reference(state.due_timer)
@@ -1215,7 +1767,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
   defp start_scheduler(repo, runner_supervisor, opts) do
     name = :"jobs_scheduler_#{System.unique_integer([:positive])}"
 
-    start_supervised!(
+    child =
       {Scheduler,
        [
          name: name,
@@ -1234,12 +1786,16 @@ defmodule FermixCore.Jobs.SchedulerTest do
                opts,
                :response,
                "Fake scheduled job run completed for Frequent Check."
-             )
+             ),
+           test_pid: self()
          ],
          runner_notify: self(),
          runner_delay_ms: Keyword.get(opts, :runner_delay_ms, 0),
          max_active_runs: Keyword.get(opts, :max_active_runs, 4)
        ]}
+
+    start_supervised!(
+      Supervisor.child_spec(child, restart: Keyword.get(opts, :restart, :permanent))
     )
 
     name

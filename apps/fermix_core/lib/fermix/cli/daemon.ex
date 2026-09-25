@@ -12,6 +12,10 @@ defmodule Fermix.CLI.Daemon do
 
       {"method":"shutdown"}  -> {"status":"shutting_down"}  then :init.stop()
 
+  and the two a sibling CLI VM sends after changing state on disk:
+  `plugins_apply` (re-read the config) and `auth_forget` (let go of the tokens
+  of a profile the CLI just signed out of).
+
   `status` and `overview` were unversioned methods until `fermix status` moved
   onto `hello` plus `overview.get`; they were deleted rather than kept, so one
   answer never has two live paths.
@@ -30,6 +34,7 @@ defmodule Fermix.CLI.Daemon do
 
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
@@ -61,6 +66,9 @@ defmodule Fermix.CLI.Daemon do
   @max_frame_bytes 4_194_304
   @route_failure_frames 5
   @route_failure_reason_bytes 512
+  # An auth profile is a provider's fixed name or an operator-set plugin
+  # profile; either is a short printable string.
+  @max_profile_bytes 256
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -137,6 +145,7 @@ defmodule Fermix.CLI.Daemon do
            socket_path: socket_path,
            task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
            plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
+           token_supervisor: Keyword.get(opts, :token_supervisor, TokenSupervisor),
            runtime_status: Keyword.get(opts, :runtime_status, McpRuntimeStatus),
            mobile_provider: Keyword.get(opts, :mobile_provider),
            management_opts: Keyword.get(opts, :management_opts, []),
@@ -550,6 +559,8 @@ defmodule Fermix.CLI.Daemon do
   defp handle_method("plugins_runtime_status", _request, state),
     do: plugins_runtime_status_reply(state)
 
+  defp handle_method("auth_forget", request, state), do: auth_forget_reply(request, state)
+
   defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
   defp handle_method("observability", _request, _state), do: observability_reply()
   defp handle_method("mobile_pair_begin", _request, state), do: mobile_begin_reply(state)
@@ -770,6 +781,38 @@ defmodule Fermix.CLI.Daemon do
       {:ok, {:ok, summary}} -> %{status: "ok", reload: plugins_apply_summary(summary)}
       {:ok, {:error, reason}} -> %{status: "error", reason: inspect(reason)}
       {:error, reason} -> %{status: "error", reason: inspect(reason)}
+    end
+  end
+
+  # A sibling CLI VM signed a profile out (`fermix auth logout`, `fermix plugins
+  # auth logout): it deleted the stored entry itself, and this is how the
+  # daemon's manager learns it at once rather than at its next refresh. A
+  # forget that does not finish is an error the CLI reports, never an "ok".
+  defp auth_forget_reply(request, state) do
+    case forget_profile(request) do
+      {:ok, profile} -> forget_signed_out(profile, state)
+      {:error, reason} -> error_reply(reason)
+    end
+  end
+
+  defp forget_signed_out(profile, state) do
+    case safe_daemon_call(fn -> state.token_supervisor.forget_signed_out(profile) end) do
+      {:ok, :ok} ->
+        %{status: "ok"}
+
+      {:error, reason} ->
+        Logger.warning("Daemon kept the #{profile} tokens after a CLI logout: #{inspect(reason)}")
+        error_reply(reason)
+    end
+  end
+
+  defp forget_profile(request) do
+    case Map.get(request_params(request), "profile") do
+      profile when is_binary(profile) and byte_size(profile) in 1..@max_profile_bytes ->
+        if String.printable?(profile), do: {:ok, profile}, else: {:error, "invalid profile"}
+
+      _other ->
+        {:error, "invalid profile"}
     end
   end
 

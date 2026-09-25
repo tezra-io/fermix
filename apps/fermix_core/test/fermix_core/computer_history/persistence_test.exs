@@ -22,8 +22,29 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
-    %{repo: repo_name}
+    %{repo: repo_name, db_path: db_path}
   end
+
+  # Rows of `sql`, read on a second connection to the same file (WAL allows it).
+  defp raw_rows(db_path, sql) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readonly)
+
+    try do
+      {:ok, stmt} = Sqlite3.prepare(conn, sql)
+      {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+      rows
+    after
+      Sqlite3.close(conn)
+    end
+  end
+
+  defp intervals(db_path),
+    do:
+      raw_rows(
+        db_path,
+        "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id"
+      )
 
   defp event(boot_id, seq, ts, extra \\ %{}) do
     Map.merge(%{boot_id: boot_id, source_seq: seq, ts: ts, type: "app.activated"}, extra)
@@ -213,7 +234,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
                  server: repo
                )
 
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
+      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
       # Only the read recorded outside the purge window survives.
       assert {:ok, {1, 9_000}} = Repo.computer_history_access_stats(server: repo)
     end
@@ -275,6 +296,24 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       },
       attrs
     )
+  end
+
+  # What a roll-up read: the purge mark taken before the read and the window
+  # spanning every note and thread the call saw.
+  defp read(mark, from_ts, to_ts), do: %{purge_mark: mark, from_ts: from_ts, to_ts: to_ts}
+
+  defp proposed_thread(subject, ids, from_ts, to_ts) do
+    %{
+      subject: subject,
+      summary: "state of #{subject}",
+      source_ids: Jason.encode!(ids),
+      last_touched_ts: to_ts,
+      created_at: 7_000,
+      provenance_from_ts: from_ts,
+      provenance_to_ts: to_ts,
+      model: "ollama",
+      event_count: 0
+    }
   end
 
   describe "migration 28" do
@@ -376,6 +415,141 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       start_supervised!({Repo, name: second, enabled: true, database_path: db_path}, id: :second)
       assert {:ok, ^versions} = Repo.migration_versions(server: second)
       assert {:ok, 0} = Repo.computer_history_count_memories(server: second)
+    end
+  end
+
+  # MILESTONE_32 §12: the one high-water purge watermark becomes recorded purge
+  # intervals. A stored watermark W becomes one interval [0, min(W, now)], issued
+  # at the migration, and the column is gone.
+  describe "migration 32" do
+    defp seed_watermark!(path, watermark) do
+      {:ok, conn} = Sqlite3.open(path, mode: :readwrite)
+
+      :ok =
+        Sqlite3.execute(conn, """
+        INSERT INTO computer_history_state (id, purge_watermark_ts) VALUES (1, #{watermark});
+        """)
+
+      :ok = Sqlite3.close(conn)
+    end
+
+    defp start_seeded_repo!(label, watermark) do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-ch-#{label}-#{unique}.db")
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      seed_v27_database!(db_path)
+      if watermark, do: seed_watermark!(db_path, watermark)
+      repo_name = :"ch_purges_repo_#{unique}"
+
+      before = System.system_time(:millisecond)
+
+      start_supervised!({Repo, name: repo_name, enabled: true, database_path: db_path},
+        id: :seeded
+      )
+
+      {repo_name, db_path, before, System.system_time(:millisecond)}
+    end
+
+    # The old column stays, unread and unchanged: `fermix upgrade` can roll back
+    # to the previous engine after this migration ran, and that engine reads it
+    # on every state read.
+    test "a stored watermark becomes one interval and its column is left for a rollback" do
+      {repo, db_path, before, later} = start_seeded_repo!("wm", 2_000)
+
+      assert {:ok, versions} = Repo.migration_versions(server: repo)
+      assert 32 in versions
+
+      assert [[0, 2_000, issued_at]] = intervals(db_path)
+      assert issued_at in before..later
+
+      assert [[2_000]] =
+               raw_rows(
+                 db_path,
+                 "SELECT purge_watermark_ts FROM computer_history_state WHERE id = 1"
+               )
+    end
+
+    # CH-5: the `purge all` sentinel is clamped to the migration's now, so the
+    # fence and the note guard both work again from the first event after it.
+    test "the purge-all sentinel is clamped to the migration's now, and capture stores again" do
+      {repo, db_path, before, later} = start_seeded_repo!("sentinel", 9_999_999_999_999)
+
+      assert [[0, to_ts, issued_at]] = intervals(db_path)
+      assert to_ts == issued_at
+      assert issued_at in before..later
+
+      event = %{boot_id: "b2", source_seq: 1, ts: later + 1_000, type: "app.activated"}
+      assert {:ok, 1} = Repo.computer_history_insert_events([event], server: repo)
+      assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+    end
+
+    test "a store that never purged gains an empty table" do
+      {repo, db_path, _before, _later} = start_seeded_repo!("none", nil)
+
+      assert intervals(db_path) == []
+      assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
+    end
+  end
+
+  describe "purge intervals" do
+    # Rule 6: opts that are not a keyword list fail at the call itself, not
+    # inside the option lookup.
+    test "the purge mark refuses opts that are not a keyword list" do
+      error =
+        assert_raise FunctionClauseError, fn ->
+          Repo.computer_history_purge_mark(%{server: :x})
+        end
+
+      assert {error.module, error.function, error.arity} ==
+               {Repo, :computer_history_purge_mark, 1}
+    end
+
+    test "every purge is recorded in issue order, and the mark names the latest", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      assert {:ok, 0} = Repo.computer_history_purge_mark(server: repo)
+
+      assert {:ok, _first} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
+      assert {:ok, 1} = Repo.computer_history_purge_mark(server: repo)
+
+      assert {:ok, _second} =
+               Repo.computer_history_purge_window(8_000, 9_000, 9_000, server: repo)
+
+      assert {:ok, 2} = Repo.computer_history_purge_mark(server: repo)
+
+      assert intervals(db_path) == [[0, 5_000, 5_000], [8_000, 9_000, 9_000]]
+    end
+
+    # An interval matters to the fence while a row stamped inside it could still
+    # arrive or be kept, and to the note guard while a batch read before it could
+    # still be written. Both have ended once it was issued, and ended, before the
+    # retention cutoff: no such row is kept, and no cycle lives that long.
+    test "the retention sweep prunes the intervals that can no longer matter", %{
+      repo: repo,
+      db_path: db_path
+    } do
+      assert {:ok, _old} = Repo.computer_history_purge_window(0, 1_000, 1_000, server: repo)
+      assert {:ok, _new} = Repo.computer_history_purge_window(0, 9_000, 9_000, server: repo)
+      assert {:ok, _edge} = Repo.computer_history_purge_window(0, 5_000, 5_000, server: repo)
+
+      assert {:ok, 0} = Repo.computer_history_sweep_expired_events(5_000, server: repo)
+
+      # Issued before the cutoff: gone. At or after it: kept (the edge is kept,
+      # as a row stamped exactly at the cutoff is).
+      assert intervals(db_path) == [[0, 9_000, 9_000], [0, 5_000, 5_000]]
+      # The mark still names the latest purge; a later one still reads as later.
+      assert {:ok, 3} = Repo.computer_history_purge_mark(server: repo)
+    end
+
+    test "a purge refuses a window that ends before it starts", %{repo: repo} do
+      assert_raise FunctionClauseError, fn ->
+        Repo.computer_history_purge_window(5_000, 1_000, 5_000, server: repo)
+      end
     end
   end
 
@@ -495,7 +669,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       ]
 
       assert {:ok, %{written: 1, retired: 1, purged: 0, subjects: ["Apollo migration"]}} =
-               Repo.computer_history_write_rollup(threads, 7_000, server: repo)
+               Repo.computer_history_write_rollup(threads, 7_000, read(0, 500, 1_000),
+                 server: repo
+               )
 
       assert {:ok, [thread]} = Repo.computer_history_active_threads(8, server: repo)
       assert thread.subject == "Apollo migration"
@@ -509,15 +685,16 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert note.id == note_id
     end
 
-    # S1: a purge issued while the roll-up call was in flight. The watermark is
-    # the only thing standing between a thread built from a note the owner just
-    # erased and a stored row citing a deleted id.
+    # S1: a purge issued while the roll-up call was in flight. The purge mark taken
+    # before the read is the only thing standing between a thread built from a
+    # note the owner just erased and a stored row citing a deleted id.
     test "a thread whose window was purged during the call is not written", %{repo: repo} do
       note_id = session_memory(repo, %{provenance_from_ts: 500, provenance_to_ts: 1_000})
       # The prior thread sits OUTSIDE the purge window, so it must survive intact.
       session_memory(repo, thread_row("Still current", [note_id], 9_000))
 
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
+      assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
+      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 6_000, server: repo)
 
       proposed = [
         %{
@@ -534,7 +711,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       ]
 
       assert {:ok, %{written: 0, retired: 0, purged: 1, subjects: []}} =
-               Repo.computer_history_write_rollup(proposed, 7_000, server: repo)
+               Repo.computer_history_write_rollup(proposed, 7_000, read(mark, 500, 1_000),
+                 server: repo
+               )
 
       assert {:ok, [survivor]} = Repo.computer_history_active_threads(8, server: repo)
       assert survivor.subject == "Still current"
@@ -543,42 +722,65 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
       assert state.last_rollup_ts == nil
     end
 
-    test "the threads the purge did not reach are still written", %{repo: repo} do
+    # The call saw every note and thread it read, and any proposed thread can carry
+    # any of it: a purge issued after the read that reaches anything the call read
+    # refuses the whole set, whichever notes each thread ends up citing.
+    test "a purge after the read that reaches what the call read refuses every thread",
+         %{repo: repo} do
       purged_note = session_memory(repo, %{provenance_from_ts: 500, provenance_to_ts: 1_000})
       kept_note = session_memory(repo, %{provenance_from_ts: 8_000, provenance_to_ts: 9_000})
 
-      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, server: repo)
+      assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
+      assert {:ok, _counts} = Repo.computer_history_purge_window(0, 5_000, 9_500, server: repo)
 
       proposed = [
-        %{
-          subject: "Purged work",
-          summary: "Drawn from the erased window.",
-          source_ids: Jason.encode!([purged_note]),
-          last_touched_ts: 1_000,
-          created_at: 7_000,
-          provenance_from_ts: 500,
-          provenance_to_ts: 1_000,
-          model: "ollama",
-          event_count: 0
-        },
-        %{
-          subject: "Surviving work",
-          summary: "Drawn from outside it.",
-          source_ids: Jason.encode!([kept_note]),
-          last_touched_ts: 9_000,
-          created_at: 7_000,
-          provenance_from_ts: 8_000,
-          provenance_to_ts: 9_000,
-          model: "ollama",
-          event_count: 0
-        }
+        proposed_thread("Purged work", [purged_note], 500, 1_000),
+        proposed_thread("Surviving work", [kept_note], 8_000, 9_000)
       ]
 
-      assert {:ok, %{written: 1, purged: 1, subjects: ["Surviving work"]}} =
-               Repo.computer_history_write_rollup(proposed, 10_000, server: repo)
+      assert {:ok, %{written: 0, retired: 0, purged: 2, subjects: []}} =
+               Repo.computer_history_write_rollup(proposed, 10_000, read(mark, 500, 9_000),
+                 server: repo
+               )
 
-      assert {:ok, [thread]} = Repo.computer_history_active_threads(8, server: repo)
-      assert thread.subject == "Surviving work"
+      assert Repo.computer_history_active_threads(8, server: repo) == {:ok, []}
+      {:ok, state} = Repo.computer_history_ensure_state(server: repo)
+      assert state.last_rollup_ts == nil
+    end
+
+    test "a purge after the read that misses what the call read refuses nothing",
+         %{repo: repo} do
+      note_id = session_memory(repo, %{provenance_from_ts: 500, provenance_to_ts: 1_000})
+
+      assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
+
+      assert {:ok, _counts} =
+               Repo.computer_history_purge_window(8_000, 9_000, 9_000, server: repo)
+
+      assert {:ok, %{written: 1, purged: 0, subjects: ["Apollo"]}} =
+               Repo.computer_history_write_rollup(
+                 [proposed_thread("Apollo", [note_id], 500, 1_000)],
+                 10_000,
+                 read(mark, 500, 1_000),
+                 server: repo
+               )
+    end
+
+    # A purge issued BEFORE the read deleted its rows first, so nothing the call
+    # read came from the window: a thread spanning it is still written.
+    test "a purge issued before the read refuses nothing", %{repo: repo} do
+      before = session_memory(repo, %{provenance_from_ts: 100, provenance_to_ts: 400})
+      later = session_memory(repo, %{provenance_from_ts: 8_000, provenance_to_ts: 9_000})
+      assert {:ok, _counts} = Repo.computer_history_purge_window(500, 5_000, 5_000, server: repo)
+      assert {:ok, mark} = Repo.computer_history_purge_mark(server: repo)
+
+      assert {:ok, %{written: 1, purged: 0}} =
+               Repo.computer_history_write_rollup(
+                 [proposed_thread("Apollo", [before, later], 100, 9_000)],
+                 10_000,
+                 read(mark, 100, 9_000),
+                 server: repo
+               )
 
       {:ok, state} = Repo.computer_history_ensure_state(server: repo)
       assert state.last_rollup_ts == 10_000
@@ -587,7 +789,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
     test "refuses an empty thread set instead of superseding everything", %{repo: repo} do
       session_memory(repo, thread_row("Still current", [1], 1_000))
 
-      assert {:error, :no_threads} = Repo.computer_history_write_rollup([], 7_000, server: repo)
+      assert {:error, :no_threads} =
+               Repo.computer_history_write_rollup([], 7_000, read(0, 0, 0), server: repo)
+
       assert {:ok, [_still_there]} = Repo.computer_history_active_threads(8, server: repo)
 
       {:ok, state} = Repo.computer_history_ensure_state(server: repo)
@@ -694,14 +898,17 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
         }
       ]
 
-      assert {:ok, _counts} = Repo.computer_history_write_rollup(threads, 7_000, server: repo)
+      assert {:ok, _counts} =
+               Repo.computer_history_write_rollup(threads, 7_000, read(0, 500, 1_000),
+                 server: repo
+               )
 
       # The superseded thread is gone from search; the new one is found.
       assert {:ok, []} = Repo.computer_history_search_memories("retiring", 10, server: repo)
       assert {:ok, [_new]} = Repo.computer_history_search_memories("apollo", 10, server: repo)
 
       # Purge removes the row AND its index entry.
-      assert {:ok, _purged} = Repo.computer_history_purge_window(0, 9_999, server: repo)
+      assert {:ok, _purged} = Repo.computer_history_purge_window(0, 9_999, 9_999, server: repo)
       assert {:ok, []} = Repo.computer_history_search_memories("quarterly", 10, server: repo)
     end
   end

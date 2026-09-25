@@ -24,7 +24,12 @@ defmodule FermixCore.Harness.Manager do
       untrusted-provenance memory write-back (completed only), and the outcome
       hand-off: a chat-origin run inside the chain cap re-enters its conversation
       through `Harness.Continuation` (§23.2), everything else takes one inline
-      delivery attempt (`DeliveryWorker` owns every subsequent attempt).
+      delivery attempt (`DeliveryWorker` owns every subsequent attempt). The
+      terminal write also leases the row to that inline attempt
+      (`next_delivery_at`, `handoff_lease_ms/0`), so the worker sees the row only
+      after the lease ends. While the wall clock runs normally it does not race
+      the hand-off; a sleep or clock jump past the lease mid-hand-off is the
+      designed at-least-once duplicate.
     * **Monitoring.** An abnormal `Harness.Run` DOWN with a still-active row →
       `failed/:run_crashed` + delivery, exactly mirroring the scheduler's monitor
       map + `:normal`/`:shutdown` drop-only handling.
@@ -32,7 +37,11 @@ defmodule FermixCore.Harness.Manager do
       finalized `interrupted` with resume guidance in the delivery, then a bounded
       artifact GC runs and the daily GC timer is armed. Never blocks the
       supervisor. Cloud (`submitting`/`polling`) rows are P2 — logged, not
-      touched.
+      touched. An interrupted local row usually belongs to a run that died with
+      the daemon, but it can belong to a run that finished and whose report was
+      still queued in this process's mailbox when a restart took it (the report
+      is a message, not a durable write). That run's result stays readable: its
+      `result.txt` is untouched and `get_coding_run` returns it.
 
   GenServer callbacks stay thin; every branch delegates to a private function.
   """
@@ -71,6 +80,19 @@ defmodule FermixCore.Harness.Manager do
   # Matches `DeliveryWorker`'s ceiling for the same column.
   @delivery_error_max 500
   @cloud_prompt_file "prompt.md"
+  # The hand-off lease (§9.1): the terminal write sets `next_delivery_at` this far
+  # ahead, so the DeliveryWorker, which selects only due rows, skips the row while
+  # the Manager's inline first attempt runs. That holds while the wall clock runs
+  # normally; a sleep or clock jump past the lease mid-hand-off lets a tick race
+  # the resumed send, the designed at-least-once duplicate. The lease clock starts
+  # before the terminal write is served, so the lease must outlast all of it up to
+  # the delivery mark or dead letter: the terminal write (one Repo call), the
+  # memory write-back (at most two), the inline watchdog
+  # (`Delivery.deliver_timeout_ms/0`, 60 s, or `Continuation.dispatch_timeout_ms/0`,
+  # 15 s), then the mark (one). Each Repo call is bounded by GenServer.call's 5 s
+  # default, so the hand-off takes at most 80 s; 120 s leaves margin. A test locks
+  # the invariant.
+  @handoff_lease_ms 120_000
 
   @type run_id :: String.t()
   @type request :: %{
@@ -138,12 +160,22 @@ defmodule FermixCore.Harness.Manager do
   end
 
   @doc """
-  Requests owner cancellation of an active run (terminalizes `cancelled`). A run
-  that is already terminal is `{:error, :already_terminal}`; an unknown id is
-  `{:error, :not_found}`.
+  Requests owner cancellation of an active run (terminalizes `cancelled`); `:ok`
+  means cancelling. A tracked local run is stopped through its `Harness.Run`. An
+  active local row this process no longer tracks (its terminal write failed, or
+  the boot scan did) has no live run, and is terminalized `cancelled` right after
+  the reply. A cloud run is `{:error, {:vendor_cancel_unsupported, task_url}}`:
+  the vendor has no cancel. A run that is already terminal is
+  `{:error, :already_terminal}`; an unknown id is `{:error, :not_found}`; a ledger
+  read error is `{:error, reason}`.
   """
-  @spec cancel(run_id(), :owner, GenServer.server()) ::
-          :ok | {:error, :not_found | :already_terminal}
+  # The error is `term()` on purpose. A ledger read error is the Repo's own
+  # reason, which no type constrains, and a union that ends in `term()`
+  # swallows every reason listed beside it, for dialyzer and for a reader. The
+  # doc above names the reasons this function adds itself: `:not_found`,
+  # `:already_terminal` and `{:vendor_cancel_unsupported, task_url}`; any
+  # other is the ledger's.
+  @spec cancel(run_id(), :owner, GenServer.server()) :: :ok | {:error, term()}
   def cancel(run_id, :owner, server \\ __MODULE__) when is_binary(run_id) do
     GenServer.call(server, {:cancel, run_id, :owner})
   end
@@ -183,6 +215,13 @@ defmodule FermixCore.Harness.Manager do
     GenServer.call(server, {:block_scheduled_cloud, block})
   end
 
+  @doc """
+  How long the terminal write leases a row to the Manager's inline first
+  delivery attempt before the `DeliveryWorker` may select it.
+  """
+  @spec handoff_lease_ms() :: pos_integer()
+  def handoff_lease_ms, do: @handoff_lease_ms
+
   # --- GenServer ----------------------------------------------------------
 
   @impl true
@@ -212,10 +251,10 @@ defmodule FermixCore.Harness.Manager do
     stop_tracking_call(run_id, state)
   end
 
-  def handle_call({:cancel, run_id, :owner}, _from, state) do
+  def handle_call({:cancel, run_id, :owner}, from, state) do
     case Map.get(state.runs, run_id) do
       nil ->
-        {:reply, terminal_cancel_reply(run_id, state), state}
+        cancel_untracked(run_id, from, state)
 
       %{cloud: true} = info ->
         {:reply, {:error, {:vendor_cancel_unsupported, info.task_url}}, state}
@@ -924,11 +963,31 @@ defmodule FermixCore.Harness.Manager do
     :ok
   end
 
-  defp terminal_cancel_reply(run_id, state) do
+  # A run this process does not track. Its row is normally terminal, but a local
+  # run whose terminal write failed was dropped (`after_terminalize_error/4`), as
+  # is every active row a failed boot scan leaves behind: the row still reads
+  # active and holds its locks and capacity slot. Every live local run this
+  # process starts is tracked in the same callback that launches it, so such a
+  # row has no live Run, and the owner's cancel terminalizes it. The reply comes
+  # first (`:ok` means "cancelling", as for a tracked run) because the terminal
+  # write runs the inline hand-off, which can outlast the caller's call timeout;
+  # it goes through `terminalize_and_notify/4` so the hand-off lease applies. An
+  # untracked active cloud row answers what a tracked one does. Never a false
+  # "already finished", and a ledger read error is returned as itself.
+  defp cancel_untracked(run_id, from, state) do
     case Ledger.get(run_id, server: state.repo) do
-      {:ok, _row} -> {:error, :already_terminal}
-      {:error, :not_found} -> {:error, :not_found}
-      {:error, _reason} -> {:error, :not_found}
+      {:ok, %{rail: "local", status: status}} when status in ["starting", "running"] ->
+        GenServer.reply(from, :ok)
+        {:noreply, terminalize_and_notify(state, run_id, stranded_cancel_outcome(), nil)}
+
+      {:ok, %{rail: "cloud", status: status} = row} when status in ["submitting", "polling"] ->
+        {:reply, {:error, {:vendor_cancel_unsupported, Map.get(row, :task_url)}}, state}
+
+      {:ok, _terminal_row} ->
+        {:reply, {:error, :already_terminal}, state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -967,12 +1026,24 @@ defmodule FermixCore.Harness.Manager do
     end
   end
 
+  # Every terminal write goes through here. The same guarded UPDATE that writes
+  # the status also leases the row to this process's inline first attempt
+  # (`@handoff_lease_ms`), so the row is never terminal and due at once. A
+  # successful hand-off marks it delivered and a client-owned failure
+  # dead-letters it; a failed attempt or a Manager death leaves it pending, and
+  # the DeliveryWorker takes it over when the lease ends.
   defp terminalize_and_notify(state, run_id, outcome, run_info) do
-    case Ledger.terminalize(run_id, outcome.status, outcome.ledger_fields, server: state.repo) do
+    fields = Map.put(outcome.ledger_fields, :next_delivery_at, handoff_lease_end(state))
+
+    case Ledger.terminalize(run_id, outcome.status, fields, server: state.repo) do
       {:ok, row} -> post_terminal(state, run_id, row, outcome, run_info)
       {:error, :already_terminal} -> resolve_after_race(state, run_id, run_info)
       {:error, reason} -> after_terminalize_error(state, run_id, reason, run_info)
     end
+  end
+
+  defp handoff_lease_end(state) do
+    DateTime.add(state.now_fn.(), @handoff_lease_ms, :millisecond)
   end
 
   # A tracked cloud run whose terminal write hit a transient ledger error: the
@@ -1017,13 +1088,19 @@ defmodule FermixCore.Harness.Manager do
     drop_run(state, run_id, run_info)
   end
 
-  # The terminal outcome hand-off (§23.2). A chat-origin run inside the chain cap
-  # re-enters its conversation: on a successful dispatch the row is marked
-  # `delivered` (the agent's turn IS the notification — no text push, no
-  # double-notify); on a failed dispatch the row stays `pending` so the
-  # DeliveryWorker delivers the text. Everything else — scheduled/cron origins, a
-  # depth-capped chain, a host with no dispatcher configured — takes the plain
-  # inline delivery attempt of §9.1.
+  # The terminal outcome hand-off (§23.2), made while the terminal write's lease
+  # keeps the DeliveryWorker off the row. A chat-origin run inside the chain cap
+  # re-enters its conversation: on a CONFIRMED dispatch (the dispatcher answered
+  # `:ok`) the row is marked `delivered` (the agent's turn IS the notification —
+  # no text push, and no double-notify while the lease holds; a lease lapsed by a
+  # sleep or clock jump lets the worker's text land beside the turn). Any other
+  # answer leaves the row `pending`, and the DeliveryWorker delivers the text
+  # once the lease ends. That includes a dispatch the gateway accepted but the
+  # Manager could not confirm (a watchdog expiry after the ingest, or a Manager
+  # death after it), so the owner can hear that outcome twice: notification is
+  # at-least-once, execution at-most-once (§23.2). Everything else —
+  # scheduled/cron origins, a depth-capped chain, a host with no dispatcher
+  # configured — takes the plain inline delivery attempt of §9.1.
   #
   # A CLIENT-OWNED origin (M29 §17.6(d)) has no text path at all, so both "else"
   # arms above become a named dead-letter instead of a delivery the platform
@@ -1091,7 +1168,7 @@ defmodule FermixCore.Harness.Manager do
   end
 
   # Left `pending` on purpose: the durable outbox is the at-least-once path, so
-  # the DeliveryWorker's next tick delivers the outcome as text.
+  # the DeliveryWorker delivers the outcome as text once the hand-off lease ends.
   defp log_continuation_failed(row, reason) do
     Logger.warning(
       "harness continuation dispatch failed for #{row.id}: #{inspect(reason)}; " <>
@@ -1221,6 +1298,13 @@ defmodule FermixCore.Harness.Manager do
 
   defp interrupted_outcome do
     %{status: "interrupted", ledger_fields: %{}, result_text: nil, error_class: "interrupted"}
+  end
+
+  # The owner's cancel of a row with no live Run records the owner's intent
+  # (§12.1): `cancelled`, not reconciliation's `interrupted`, which a chat origin
+  # would continue, inviting the agent to relaunch the work the owner stopped.
+  defp stranded_cancel_outcome do
+    %{status: "cancelled", ledger_fields: %{}, result_text: nil, error_class: "cancelled"}
   end
 
   # The consent block carries the approve-coding-agents guidance in its

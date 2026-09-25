@@ -158,23 +158,36 @@ defmodule FermixCore.ComputerHistory.Ingest do
   @doc """
   Run a batch of raw events through the pipeline and write the survivors.
   Returns `{:ok, %{written, dropped, collapsed, refused}}` or the write error.
-  `written` excludes idempotent-duplicate rows; `dropped` is the **allowlist**
-  count only; `collapsed` counts repeated title frames dropped inside this batch;
-  `refused` breaks the admission refusals out by kind (`:private` — a private
-  window, `:state` — a navigation whose private-window verdict this gate does not
-  recognize, `:url` — a navigation address that is not a usable http(s) page).
-  They stay distinct because they are three different operator problems and one
-  total would hide which. `opts`: `:repo`, `:apps` (each defaults to the
-  configured value) for hermetic testing.
+  `written` excludes idempotent-duplicate rows; `dropped` counts the events the
+  **allowlist** and the **pause horizon** dropped (the paused ones are added to
+  the allowlist's count); `collapsed` counts repeated title frames dropped inside
+  this batch; `refused` breaks the admission refusals out by kind (`:private` — a
+  private window, `:state` — a navigation whose private-window verdict this gate
+  does not recognize, `:url` — a navigation address that is not a usable http(s)
+  page). They stay distinct because they are three different operator problems and
+  one total would hide which. `opts`: `:repo`, `:apps` (each defaults to the
+  configured value) and `:now` (a `DateTime`, defaults to `DateTime.utc_now/0`) for
+  hermetic testing.
   """
   @spec ingest([map()], keyword()) :: {:ok, stats()} | {:error, term()}
   def ingest(events, opts \\ []) when is_list(events) do
     repo = Keyword.get(opts, :repo, Repo)
+    horizon = pause_horizon(repo)
+    now_ms = opts |> Keyword.get_lazy(:now, &DateTime.utc_now/0) |> DateTime.to_unix(:millisecond)
 
-    if capture_paused?(repo, opts) do
-      {:ok, %{written: 0, dropped: length(events), collapsed: 0, refused: no_refusals()}}
-    else
-      write_batch(events, repo, opts)
+    {paused, unpaused} = Enum.split_with(events, &paused?(&1, horizon, now_ms))
+    write_unpaused(unpaused, length(paused), repo, opts)
+  end
+
+  # Every event paused: nothing to write, so no Repo transaction at all.
+  defp write_unpaused([], paused_count, _repo, _opts),
+    do: {:ok, %{written: 0, dropped: paused_count, collapsed: 0, refused: no_refusals()}}
+
+  # `dropped` counts the paused events too, beside the allowlist's.
+  defp write_unpaused(events, paused_count, repo, opts) do
+    case write_batch(events, repo, opts) do
+      {:ok, stats} -> {:ok, %{stats | dropped: stats.dropped + paused_count}}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -201,25 +214,30 @@ defmodule FermixCore.ComputerHistory.Ingest do
     end
   end
 
-  # --- pause horizon (§7.3) ------------------------------------------------
+  # --- pause horizon (§7.3, §14.2 inv. 12) --------------------------------
 
-  # `/history pause` is enforced HERE, at the single writer: an event arriving
-  # while `now < pause_until` never reaches the spool, and the horizon passing
-  # resumes capture with no timer to arm (each batch re-reads the persisted
-  # state, so the pause also survives a mid-pause daemon restart). An
-  # unparseable horizon fails CLOSED — this is a privacy control, so a corrupt
-  # value keeps capture off, error-logged, with the raw value visible in
-  # `/history status` for repair.
-  defp capture_paused?(repo, opts) do
-    case pause_horizon(repo) do
-      nil -> false
-      :unparseable -> true
-      {:until, until} -> before_horizon?(Keyword.get(opts, :now), until)
-    end
-  end
+  # `/history pause` is enforced HERE, at the single writer, by each event's own
+  # stamp: an event is dropped when `min(ts, now) < pause_until`. An event
+  # stamped inside the pause therefore never reaches the spool, even when its
+  # batch is flushed after the horizon (inv. 12: no event stamped after the
+  # pause ack lands in the spool), and while the pause is in force a
+  # later-stamped event is dropped too. An event still buffered from before the
+  # pause is dropped as well: its stamp is before the horizon (§7.1 allows that
+  # discard). The horizon passing resumes capture with no timer to arm (each
+  # batch re-reads the persisted state, so the pause also survives a mid-pause
+  # daemon restart). An unparseable horizon fails CLOSED — this is a privacy
+  # control, so a corrupt value keeps capture off, error-logged, with the raw
+  # value visible in `/history status` for repair.
+  defp paused?(_event, nil, _now_ms), do: false
+  defp paused?(_event, :unparseable, _now_ms), do: true
 
-  defp before_horizon?(nil, until), do: DateTime.compare(DateTime.utc_now(), until) == :lt
-  defp before_horizon?(%DateTime{} = now, until), do: DateTime.compare(now, until) == :lt
+  defp paused?(%{ts: ts}, {:until, until_ms}, now_ms) when is_integer(ts),
+    do: min(ts, now_ms) < until_ms
+
+  # An event with no integer stamp cannot be placed after the horizon, so it
+  # fails closed while one is set. Every real event carries one (the sidecar's
+  # frame `ts`, the capturer's gap rows; the column is NOT NULL).
+  defp paused?(_no_integer_ts, {:until, _until_ms}, _now_ms), do: true
 
   defp pause_horizon(repo) do
     case Repo.computer_history_ensure_state(server: repo) do
@@ -236,7 +254,7 @@ defmodule FermixCore.ComputerHistory.Ingest do
   defp parse_horizon(until) do
     case DateTime.from_iso8601(until) do
       {:ok, horizon, _offset} ->
-        {:until, horizon}
+        {:until, DateTime.to_unix(horizon, :millisecond)}
 
       {:error, reason} ->
         Logger.error(

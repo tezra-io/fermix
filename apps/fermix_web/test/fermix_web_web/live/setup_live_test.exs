@@ -3867,6 +3867,37 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert entry.tokens.access_token == "codex_access_token"
     end
 
+    # A sign-in that meets another Fermix process refreshing or signing in the
+    # same account refuses before it spends anything; the flash says to retry
+    # rather than showing the reason's atom.
+    test "a Codex sign-in refused by a busy profile says to try again", %{conn: conn} do
+      Application.put_env(:fermix_web, :codex_login_runner, fn _opts ->
+        {:error, :profile_busy}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai_codex",
+          default_model: "gpt-5.5",
+          reasoning_effort: "high"
+        }
+      )
+      |> render_change()
+
+      view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
+
+      html = render_until(view, "Try again shortly.")
+
+      assert html =~
+               "Another Fermix process is refreshing or signing in to this account. " <>
+                 "Try again shortly."
+
+      refute html =~ "profile_busy"
+    end
+
     test "Codex OAuth completion marks it primary without an explicit save", %{
       conn: conn,
       tmp_home: tmp_home

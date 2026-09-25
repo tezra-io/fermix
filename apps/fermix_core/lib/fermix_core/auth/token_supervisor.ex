@@ -20,6 +20,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
   @dynamic_supervisor FermixCore.Auth.TokenDynamicSupervisor
   @stop_wait_attempts 10
   @stop_wait_ms 10
+  @codex_profile Store.profile(:openai_codex)
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -126,6 +127,46 @@ defmodule FermixCore.Auth.TokenSupervisor do
       {:ok, server} -> TokenManager.forget(server)
       :none -> :ok
     end
+  end
+
+  @doc """
+  Lets go of a profile a tree-less CLI VM has just signed out of
+  (`fermix auth logout`, `fermix plugins auth logout`): the daemon's side of
+  its `auth_forget` request.
+
+  The CLI deleted the stored entry; this VM may still hold the tokens. The
+  manager serving the profile drops them, and deletes its plugin child's token
+  file, through `forget/1`. A child of this supervisor is then stopped, so its
+  next use starts a fresh manager from auth.json and serves a sign-in made
+  after the logout instead of refusing it. The Codex profile's manager is the
+  top-level `TokenManager`, which this supervisor does not own: it is only told
+  to forget, and a restart (or a reload after the next sign-in) brings it back.
+  Never starts a manager, and a manager that stopped between its lookup and
+  the call held nothing, so that is `:ok` too.
+
+  A `get_token` call queued on a child at the moment it is stopped exits in its
+  caller instead of answering `{:error, :auth_invalidated}`: a window of one
+  message, which a plugin logout's stop (`Plugins.Auth.logout/1`) already has.
+  """
+  @spec forget_signed_out(String.t()) :: :ok
+  def forget_signed_out(@codex_profile) do
+    case Process.whereis(TokenManager) do
+      nil -> :ok
+      pid -> forget_live(fn -> TokenManager.forget(pid) end)
+    end
+  end
+
+  def forget_signed_out(auth_profile) when is_binary(auth_profile) and auth_profile != "" do
+    :ok = forget_live(fn -> forget(auth_profile) end)
+    stop_profile(auth_profile)
+  end
+
+  # `:noproc` is the lookup's "no manager", observed a moment later. Every
+  # other exit (a wedged manager's timeout) still reaches the caller.
+  defp forget_live(forget) do
+    forget.()
+  catch
+    :exit, {:noproc, _call} -> :ok
   end
 
   defp running_manager(auth_profile) do
@@ -268,11 +309,23 @@ defmodule FermixCore.Auth.TokenSupervisor do
     end
   end
 
-  defp direct_refresh(auth_profile) do
-    with {:ok, entry} <- Store.read(auth_profile),
-         {:ok, refreshed} <- refresh_entry(auth_profile, entry, []) do
-      {:ok, refreshed.tokens.access_token}
-    end
+  defp direct_refresh(auth_profile), do: direct_refresh(auth_profile, [])
+
+  # A tree-less VM refreshes with no manager, so it takes the profile lock the
+  # daemon's manager takes (`Store.with_profile_lock/3`) and reads the entry
+  # under it: it never presents a refresh token another refresher is consuming,
+  # and its status write after a 4xx can never land over that refresher's
+  # rotation. Public for tests, which inject `req_options`.
+  @doc false
+  @spec direct_refresh(String.t(), keyword()) :: {:ok, String.t()} | {:error, term()}
+  def direct_refresh(auth_profile, req_options)
+      when is_binary(auth_profile) and is_list(req_options) do
+    Store.with_profile_lock(auth_profile, Store.path(), fn ->
+      with {:ok, entry} <- Store.read(auth_profile),
+           {:ok, refreshed} <- refresh_entry(auth_profile, entry, req_options) do
+        {:ok, refreshed.tokens.access_token}
+      end
+    end)
   end
 
   # Public for tests: the direct (process-less) refresh dispatch is a real
@@ -374,8 +427,18 @@ defmodule FermixCore.Auth.TokenSupervisor do
   end
 
   defp mark_reauthorization_required(auth_profile, entry) do
-    _ = Store.write(auth_profile, %{entry | status: "reauthorization_required"})
-    {:error, :reauthorization_required}
+    case Store.write(auth_profile, %{entry | status: "reauthorization_required"}) do
+      :ok ->
+        {:error, :reauthorization_required}
+
+      {:error, reason} = error ->
+        Logger.error(
+          "TokenSupervisor: could not record reauthorization_required for #{auth_profile}: " <>
+            Redaction.format(reason)
+        )
+
+        error
+    end
   end
 
   # The grant cannot renew under the refused client, so it is quarantined under

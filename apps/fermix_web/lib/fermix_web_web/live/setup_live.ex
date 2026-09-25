@@ -281,7 +281,7 @@ defmodule FermixWebWeb.SetupLive do
          )}
 
       {:error, reason} ->
-        {:noreply, flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")}
+        {:noreply, flash_error(socket, sign_in_failure("Anthropic", reason))}
     end
   end
 
@@ -3238,8 +3238,14 @@ defmodule FermixWebWeb.SetupLive do
   defp plugin_auth_failure(_task, {:oauth_client_rejected, detail}),
     do: ClientRejection.sentence(detail)
 
-  defp plugin_auth_failure(task, reason),
-    do: "#{task.display_name} sign-in failed: #{Redaction.format(reason)}"
+  defp plugin_auth_failure(task, reason), do: sign_in_failure(task.display_name, reason)
+
+  # Another Fermix process held the account's profile lock past the wait, and
+  # nothing was spent: the flash says to retry rather than naming the reason.
+  defp sign_in_failure(_label, :profile_busy), do: Store.busy_sentence()
+
+  defp sign_in_failure(label, reason),
+    do: "#{label} sign-in failed: #{Redaction.format(reason)}"
 
   defp maybe_clear_plugin_auth_url(socket, name, url) do
     case socket.assigns.plugin_auth_url do
@@ -3554,7 +3560,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:codex_auth_tasks, tasks)
     |> assign(:codex_auth_url, nil)
-    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+    |> flash_error(sign_in_failure(task.display_name, reason))
   end
 
   # A completed OAuth connection in setup means the user chose this provider, so
@@ -3717,7 +3723,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:xai_auth_tasks, tasks)
     |> assign(:xai_auth_url, nil)
-    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+    |> flash_error(sign_in_failure(task.display_name, reason))
   end
 
   defp xai_auth_running?(tasks), do: map_size(tasks) > 0
@@ -3745,7 +3751,7 @@ defmodule FermixWebWeb.SetupLive do
       )
     else
       {:error, reason} ->
-        flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")
+        flash_error(socket, sign_in_failure("Anthropic", reason))
     end
   end
 

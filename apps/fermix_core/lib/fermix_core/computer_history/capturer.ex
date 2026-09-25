@@ -46,6 +46,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   alias Compux.Frame
   alias Compux.Port, as: SidecarPort
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.SingletonLock
@@ -81,7 +82,14 @@ defmodule FermixCore.ComputerHistory.Capturer do
   @restart_backoff_ms 1_000
 
   @type mode ::
-          :bootstrapping | :handshaking | :capturing | :restarting | :standing_down | :degraded
+          :bootstrapping
+          | :handshaking
+          | :capturing
+          | :restarting
+          | :standing_down
+          | :degraded
+          | :not_running
+          | :not_answering
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -90,20 +98,39 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   @doc "Introspection for `/history status` and the doctor row."
-  @spec status(GenServer.server()) :: %{
+  @spec status(GenServer.server(), non_neg_integer()) :: %{
           mode: mode(),
           reason: term(),
           lock_holder: term(),
           stale_deadlines_ignored: non_neg_integer()
         }
-  def status(server \\ __MODULE__) do
-    GenServer.call(server, :status)
+  def status(server \\ __MODULE__, timeout \\ 5_000) when is_integer(timeout) and timeout >= 0 do
+    GenServer.call(server, :status, timeout)
   catch
-    :exit, _reason -> %{mode: :not_running, reason: nil, lock_holder: nil}
+    # A Capturer busy past the timeout (say, blocked in a flush's Repo call) is
+    # still alive, and may still be capturing: it must not read as stopped.
+    :exit, {:timeout, _call} -> %{mode: :not_answering, reason: nil, lock_holder: nil}
+    # Every other exit of the call means the process was not there, or died
+    # before it answered.
+    :exit, _gone -> %{mode: :not_running, reason: nil, lock_holder: nil}
   end
 
+  # Every start (the Controller's, and every DynamicSupervisor restart) re-reads
+  # the one resolver the Controller decides by, and declines while the feature
+  # is off. A restart that races `/history off` therefore cannot bring capture
+  # back behind the Controller's stop (CH-4). `:ignore` comes before anything is
+  # trapped or built, so a declined start leaves nothing to tear down.
   @impl true
   def init(opts) do
+    if Keyword.get(opts, :operative_fun, &ComputerHistory.operative?/0).() do
+      init_capture(opts)
+    else
+      Logger.info("computer_history capturer not started: the feature is off")
+      :ignore
+    end
+  end
+
+  defp init_capture(opts) do
     # Trap exits so `terminate/2` — the SOLE path that releases the singleton
     # lock, `observe_stop`s, kills the sidecar pgid, and does the final flush —
     # actually runs on a supervisor `:shutdown` (`/history off`'s

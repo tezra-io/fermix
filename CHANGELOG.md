@@ -25,6 +25,43 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inside the daemon." Error details such as a network timeout are now logged
   safely, and the sign-in fails with a sentence that names the problem and asks
   you to sign in again.
+- **A scheduled job no longer stops running for good after a badly timed
+  restart.** A run finishing while the daemon stopped, or while it restarted a
+  part of itself, could leave its recurring job marked running forever: it
+  never fired again and "run now" refused it. A run's result and the job's
+  release are now written together, jobs already stuck this way are freed on
+  upgrade, and an interrupted delivery is settled instead of showing as pending
+  forever. A pause, resume or edit made while a job is running now sticks when
+  the run ends, and a job resumed while its run is still going no longer
+  busy-loops the scheduler.
+- **Refreshing an account no longer revokes it or brings a logged-out account
+  back.** Two processes refreshing the same account at once could send the
+  same refresh token twice, which ends a ChatGPT sign-in, and a refresh racing
+  a logout could write the account back. Every refresh, sign-in, import and
+  logout now takes that account's lock first. A sign-in that meets a busy lock
+  says so before anything is spent, so signing in again is enough. A logout
+  from the command line now also tells a running daemon to drop the account at
+  once.
+- **`/stop` answers the messages it cancels.** Messages still waiting behind the
+  stopped turn are now reported as cancelled to the app or client that sent
+  them, instead of being dropped silently. A turn that has already answered is
+  no longer cut off, and a turn that crashes is closed in the history so the
+  next turn does not answer it again. An ACP session no longer hangs when the
+  queue behind it restarts.
+- **Computer history keeps its promises.** A pause now covers the activity
+  recorded during it even when it is saved after the pause ends, and a purged
+  window stays purged. After `/history purge all`, session summaries are written
+  again (they had stopped for good), and a purge no longer throws away the
+  summary of the session you are in. `/history off` says so when it cannot
+  confirm the recorder stopped, and a recorder that restarts after `off` stays
+  off.
+- **A coding run's result is announced once.** A finished run could send its
+  message twice when the delivery worker ran while the result was being handed
+  over. `cancel_coding_run` now also stops a run that was left marked running
+  after a failed database write.
+- **A reminder is no longer sent by a sender that was already stopped.** A send
+  whose sender was restarted kept running on its own, so the same reminder
+  could arrive twice, or after you had changed or cancelled it.
 
 ## [0.11.0] - 2026-09-23
 

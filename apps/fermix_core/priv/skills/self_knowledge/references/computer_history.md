@@ -219,11 +219,13 @@ session-note id **the store still holds** (the new notes plus the prior threads'
 cited notes, fetched by id — so a purged or invented id drops, and a block left
 with none drops with it), one thread per subject, the set is capped at eight by
 last-touched, each state passes the same bounds and the same verbatim guard as a
-note, and the write is one transaction that **re-reads the purge watermark**: a
-thread built from a window the owner erased mid-call is dropped rather than
-resurrected. A reply with no usable thread writes nothing and does not move the
-write mark — but the attempt is recorded, so an unusable reply is retried tomorrow
-rather than at every tick, and the notes it read stay ahead of the cursor.
+note, and the write is one transaction that **checks the recorded purges**: when
+the owner purged any part of what the roll-up read while its call was in flight,
+no thread is written, rather than resurrecting the erased window. A purge made
+before the roll-up read its notes refuses nothing. A reply with no usable thread
+writes nothing and does not move the write mark — but the attempt is recorded, so
+an unusable reply is retried tomorrow rather than at every tick, and the notes it
+read stay ahead of the cursor.
 
 When a day produced more notes than one call can carry, the **newest** reach the
 input (they are the ones that describe current work) and the log says how many of
@@ -275,7 +277,8 @@ search can never return activity.
 - `/history status` — capture/summarizer/allowlist/spool overview. Its `Capture:`
   line is the live state of the recorder: running, starting (the start request is
   sent and the recorder has not answered yet), restarting, standing down because
-  another daemon on this Mac holds capture, or degraded with the reason — the
+  another daemon on this Mac holds capture, not running, not answering (too busy
+  to reply in time, so it may still be running), or degraded with the reason — the
   recorder never answered the start request, it speaks a protocol older than the
   one capture requires, it refuses to start observing, it keeps exiting, or its
   binary is missing. A degraded recorder releases the machine-wide hold, so the
@@ -300,14 +303,28 @@ search can never return activity.
   when there is nothing to say, so a roll-up that stopped happening is visible
   before "what am I working on" goes stale.
 - `/history pause 10m|1h|24h` — persist a capture pause horizon (survives restart).
+  The pause is judged by each event's own timestamp: an event stamped before the
+  horizon is never stored, even when it is written after the pause has ended.
 - `/history purge 10m|1h|24h|all` — erase a window from the spool and the
   intersecting activity memories of **both** layers; a thread whose provenance
-  touched the window goes with it, and the ack says the threads are rebuilt at the
-  next roll-up from what remains. The ack also states what purge cannot reach
+  touched the window goes with it. The next roll-up rewrites the thread list from
+  the surviving threads and the session notes written since the last roll-up, and
+  the ack says so: an older note that only a removed thread cited stays in the
+  journal (recall still finds it) but backs no thread again. `all` means
+  everything up to the moment of the purge. Every purge is recorded as a window: an event stamped inside it that was
+  still on its way to the spool never lands afterwards, and a session note or
+  thread is refused only when a purge made while it was being written reaches
+  what it was built from, so notes and threads keep coming for activity after a
+  purge, `purge all` included. The ack also states what purge cannot reach
   (delivered replies, remote copies, backups, another daemon's store) and that it
   is logical deletion (bytes may linger until overwritten).
 - `/history off` — disable (un-advertises next turn); stored data stays until
-  purged; re-enable in setup reuses the persisted allowlist.
+  purged; re-enable in setup reuses the persisted allowlist. The setting is
+  always written to config.toml (a failed write is reported), and the reply says
+  nothing new is captured only once the recorder is confirmed stopped; when it
+  cannot be confirmed, the reply says so and points to `/history status`
+  ("Capture: not running" means it stopped; "not answering" means it may still
+  be running).
 - `fermix doctor`'s `computer history` row reports availability (macOS only),
   on/off, the summarizer posture, the app-allowlist size, and the same chain
   sentence — and **warns** when history is enabled but cannot surface in chat.

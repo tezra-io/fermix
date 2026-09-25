@@ -28,7 +28,8 @@ defmodule FermixChannels.Channels.Acp.Session do
   In-flight turn state: the wire id of the `session/prompt` request it answers,
   the fence `seq`, how many bytes of the reply have been written as chunks, the
   tool cards minted so far (each an id and the ACP kind computed at its start),
-  and how many externally-visible effects the turn has already performed.
+  how many externally-visible effects the turn has already performed, and the
+  Peer's monitor on the Queue it handed the turn to (nil until the hand-off).
   """
   @type turn :: %{
           seq: pos_integer(),
@@ -37,7 +38,8 @@ defmodule FermixChannels.Channels.Acp.Session do
           final_seen?: boolean(),
           tool_seq: non_neg_integer(),
           tools: %{String.t() => {String.t(), String.t()}},
-          effects: non_neg_integer()
+          effects: non_neg_integer(),
+          queue_ref: reference() | nil
         }
 
   @type t :: %__MODULE__{
@@ -101,7 +103,8 @@ defmodule FermixChannels.Channels.Acp.Session do
       final_seen?: false,
       tool_seq: 0,
       tools: %{},
-      effects: 0
+      effects: 0,
+      queue_ref: nil
     }
 
     {%{session | turn_seq: seq, turn: turn}, seq}
@@ -219,6 +222,22 @@ defmodule FermixChannels.Channels.Acp.Session do
   @spec effects(t()) :: non_neg_integer()
   def effects(%__MODULE__{turn: %{effects: effects}}), do: effects
   def effects(%__MODULE__{turn: nil}), do: 0
+
+  @doc """
+  Record the Peer's monitor on the Queue the open turn was handed to. The Peer
+  answers the turn from that monitor's `:DOWN` if the Queue dies first, and
+  drops the monitor when the turn closes.
+  """
+  @spec put_queue_ref(t(), reference()) :: t()
+  def put_queue_ref(%__MODULE__{turn: turn} = session, ref)
+      when is_map(turn) and is_reference(ref) do
+    %{session | turn: %{turn | queue_ref: ref}}
+  end
+
+  @doc "The open turn's monitor on its Queue, or nil."
+  @spec queue_ref(t()) :: reference() | nil
+  def queue_ref(%__MODULE__{turn: %{queue_ref: ref}}), do: ref
+  def queue_ref(%__MODULE__{turn: nil}), do: nil
 
   defp fold_block(%{"type" => "text", "text" => text}) when is_binary(text), do: {:ok, text}
 

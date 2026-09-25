@@ -6,7 +6,9 @@ defmodule FermixChannels.Channels.MobileTest do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Queue
   alias FermixChannels.Mobile.MediaStore
+  alias FermixCore.Memory.ConversationStore
 
   defmodule StoreStub do
     def append(profile_id, attrs, _opts) do
@@ -61,6 +63,44 @@ defmodule FermixChannels.Channels.MobileTest do
       send(self(), {:thumbnail_attached, profile, server_seq, descriptor})
       {:ok, %{server_seq: server_seq, media_refs: [descriptor]}}
     end
+  end
+
+  # Reports each request settlement to the test by name: the Queue fires a
+  # turn's outcome from a process of its own, not from the test process.
+  defmodule SettlementStore do
+    def fail_client_request(profile, client_id, attempt, fields, _opts) do
+      send(:mobile_settlement_test, {:request_failed, profile, client_id, attempt, fields})
+      {:ok, %{status: "failed", attempt: attempt, result_server_seq: 73}}
+    end
+  end
+
+  # Stands in for MainAgent's turn-state checkout.
+  defmodule CheckoutStub do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_call({:checkout_turn_state, _msg}, _from, test_pid),
+      do: {:reply, {:ok, %{test_pid: test_pid}, :hit}, test_pid}
+  end
+
+  # Announces its turn, then holds it until the test stops it.
+  defmodule HeldRunner do
+    def run(msg, turn_state, _deliver) do
+      send(turn_state.test_pid, {:turn_started, msg.content})
+
+      receive do
+        :never -> {:ok, "", 0}
+      after
+        15_000 -> {:error, :held_runner_timeout}
+      end
+    end
+
+    def error_reply(_reason), do: "error reply"
   end
 
   defmodule HealthyManagement do
@@ -387,6 +427,45 @@ defmodule FermixChannels.Channels.MobileTest do
     assert File.read!(path) == bytes
   end
 
+  # A mobile request is `running` in the store from the moment it is accepted,
+  # even while it waits behind another turn. A stop that drops it must settle
+  # it, or it stays `running` and is re-run at the next boot.
+  test "a stop settles the queued request it drops as failed, not left running" do
+    Process.register(self(), :mobile_settlement_test)
+    Application.put_env(:fermix_channels, :mobile_store, SettlementStore)
+
+    store =
+      start_supervised!(
+        {ConversationStore, name: :"mobile_cs_#{System.unique_integer([:positive])}", repo: nil}
+      )
+
+    queue =
+      start_supervised!(
+        {Queue,
+         name: :"mobile_queue_#{System.unique_integer([:positive])}",
+         main_agent: start_supervised!({CheckoutStub, self()}),
+         turn_runner: HeldRunner,
+         task_supervisor: start_supervised!(Task.Supervisor),
+         conversation_store: store}
+      )
+
+    Queue.enqueue(queue, queued_mobile_turn("client-1"))
+    assert_receive {:turn_started, "client-1"}, 5_000
+    Queue.enqueue(queue, queued_mobile_turn("client-2"))
+
+    assert {:ok, %{active_stopped: 1, pending_cleared: 1}} =
+             Queue.stop_conversation({"mobile", "main", :root}, queue)
+
+    assert_receive {:request_failed, "main", "client-1", 2, _fields}, 5_000
+    assert_receive {:request_failed, "main", "client-2", 2, _fields}, 5_000
+
+    assert_receive {:mobile_event, "main",
+                    %{"t" => "turn_error", "turn_id" => "turn-client-2", "code" => "cancelled"}},
+                   5_000
+
+    refute_received {:turn_started, "client-2"}
+  end
+
   test "multiple output parts schedule one push at terminal completion" do
     message = mobile_message()
 
@@ -564,6 +643,30 @@ defmodule FermixChannels.Channels.MobileTest do
     assert {:error, :unsupported_transport} = Mobile.parse_webhook(%{})
     assert {:error, :unsupported_transport} = Mobile.verify_webhook(%Plug.Conn{})
     assert Mobile.reaction_capability() == :any_emoji
+  end
+
+  # The Gateway's queue message for one accepted mobile request, carrying the
+  # channel's real turn-result closure.
+  defp queued_mobile_turn(client_id) do
+    message =
+      Message.new!(%{
+        id: client_id,
+        content: client_id,
+        sender: "iPhone",
+        channel: "mobile",
+        chat_id: "main",
+        reply_target: "main",
+        metadata: %{client_msg_id: client_id, mobile_attempt: 2, turn_id: "turn-" <> client_id}
+      })
+
+    %{
+      content: client_id,
+      sender: "iPhone",
+      channel: "mobile",
+      chat_id: "main",
+      reply_fn: fn _part -> :ok end,
+      turn_result_fn: Mobile.build_turn_result(message)
+    }
   end
 
   defp mobile_message do

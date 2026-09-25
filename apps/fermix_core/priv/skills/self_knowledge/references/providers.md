@@ -110,8 +110,17 @@ the provider's own 400.
   `claude setup-token` or a Claude Code login import. A stored token is inert
   until `auth_mode = "oauth"`, so connecting in the web page and
   `fermix auth login --provider xai|anthropic` both set `auth_mode = oauth` in
-  config, and `fermix auth logout` reverts it to `api_key`. The change reaches the
-  daemon on restart.
+  config, and `fermix auth logout` reverts it to `api_key`. The route change
+  reaches the daemon on restart, but the logout also has a running daemon drop
+  the signed-out account's tokens at once, so it stops calling as that account
+  immediately; a daemon that cannot let go fails the logout, which says the
+  stored sign-in is already gone.
+- A sign-in, an import (Claude Code, Codex CLI) or a setup-token save that meets
+  another Fermix process refreshing or signing in the same account is refused
+  within about ten seconds, before anything is spent: no sign-in code is
+  exchanged and the Codex CLI's own session is left signed in. The CLI verbs,
+  the setup page and the macOS app's sign-in and import say so and ask to try
+  again shortly, which is the whole fix.
 - The Ollama pane detects the server with a single probe: the configured URL
   either serves `GET /api/tags` or it does not. A reachable server lists **only
   the locally installed models** in the model picker; an unreachable one shows the

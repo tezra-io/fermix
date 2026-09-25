@@ -27,9 +27,10 @@ defmodule FermixCore.Jobs.Scheduler do
   @max_startup_stagger_ms 5_000
 
   # A due tick that could not fully drain its work — a DB fault on any path, a
-  # timer-lookup failure, or admission backpressure — re-arms the next tick no
-  # sooner than this, so a persistently past-due-but-unclaimable job can never
-  # spin the scheduler at 0ms (Rule #2). One constant, no escalation ladder.
+  # timer-lookup failure, admission backpressure, or a due job whose previous
+  # run is still active — re-arms the next tick no sooner than this, so a
+  # persistently past-due-but-unclaimable job can never spin the scheduler at
+  # 0ms (Rule #2). One constant, no escalation ladder.
   @due_error_backoff_ms 5_000
 
   # Armed-delay ceiling. `Process.send_after/3` takes a bounded delay (it raises
@@ -41,9 +42,9 @@ defmodule FermixCore.Jobs.Scheduler do
   # fresh (smaller) delay.
   @max_due_delay_ms 86_400_000
 
-  # Crash-recovery scan bound: the most active job_runs rows one reconciliation
-  # pass inspects. Anything beyond this is picked up by the next pass, so a large
-  # backlog can never make a single tick unbounded.
+  # Crash-recovery scan bound: the most unsettled job_runs rows one
+  # reconciliation pass inspects. Anything beyond this is picked up by the next
+  # pass, so a large backlog can never make a single tick unbounded.
   @reconcile_run_limit 50
 
   # Error text for a run reaped by reconciliation. It names the cause in the run
@@ -221,13 +222,15 @@ defmodule FermixCore.Jobs.Scheduler do
   # scheduler-subtree restart) drops every monitor while job_runs rows stay
   # "queued"/"running", and `ensure_no_active_job_run` then refuses every future
   # claim for those jobs — wedged forever, with no timer that ever reclaims them.
-  # Liveness is the signal, never age: the runner supervisor is the authority on
-  # which runs still exist. Runs it still holds are adopted; the rest are failed
-  # through the same path a monitored crash takes.
+  # A runner past its final write can die the same way with its delivery still
+  # "pending", which nothing else would ever settle. So the pass reads every
+  # unsettled run. Liveness is the signal, never age: the runner supervisor is
+  # the authority on which runs still exist. Runs it still holds are adopted;
+  # the rest are failed through the same path a monitored crash takes.
   defp reconcile_active_runs(%{enabled?: false} = state), do: state
 
   defp reconcile_active_runs(state) do
-    case Repo.active_job_runs(server: state.repo, limit: @reconcile_run_limit) do
+    case Repo.unsettled_job_runs(server: state.repo, limit: @reconcile_run_limit) do
       {:ok, runs} ->
         live = live_runner_pids(state)
         Enum.reduce(runs, state, &reconcile_active_run(&1, live, &2))
@@ -292,9 +295,10 @@ defmodule FermixCore.Jobs.Scheduler do
   defp put_live_runner({_id, _no_pid, _type, _modules}, live), do: live
 
   # One due tick, run then re-armed. The tick outcome — `:ok` (drained),
-  # `:busy` (admission backpressure), or `:error` (a fault on any path) — decides
-  # whether the next timer floors at the backoff interval so a stuck past-due job
-  # never hot-loops the scheduler.
+  # `:busy` (backpressure: the run ceiling, or a due job whose previous run is
+  # still active), or `:error` (a fault on any path) — decides whether the next
+  # timer floors at the backoff interval so a stuck past-due job never
+  # hot-loops the scheduler.
   defp run_due_and_rearm(state, now) do
     {outcome, state} = run_due_jobs(state, now)
     schedule_due_timer(state, outcome)
@@ -444,8 +448,11 @@ defmodule FermixCore.Jobs.Scheduler do
       {:ok, {claimed_job, run}} ->
         {:ok, start_or_mark_failed(claimed_job, run, state)}
 
+      # The previous run still holds the job (a resume put it back to
+      # "scheduled" mid-run). Backpressure, not a clean drain: the re-arm floors
+      # at the backoff, and the job is claimed once that run settles.
       {:error, :already_running} ->
-        {:ok, state}
+        {:busy, state}
 
       {:error, :not_due} ->
         {:ok, state}
@@ -456,10 +463,10 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  # Out-of-band manual run: claim immediately regardless of the schedule, but
-  # keep next_run_at so the timed cadence is undisturbed, and tag the run
-  # `trigger: "manual"`. The runner dispatch and monitoring are the same as the
-  # timed path — no second execution path.
+  # Out-of-band manual run: claim immediately regardless of the schedule, keep
+  # a recurring job's next_run_at so its cadence is undisturbed (a one-off is
+  # consumed), and tag the run `trigger: "manual"`. The runner dispatch and
+  # monitoring are the same as the timed path — no second execution path.
   defp manual_run(job_id, now, state) do
     case Repo.get_scheduled_job(job_id, server: state.repo) do
       {:ok, job} -> manual_run_job(job, now, state)
@@ -484,7 +491,7 @@ defmodule FermixCore.Jobs.Scheduler do
 
   defp claim_manual_run(job, now, state) do
     run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "manual")
-    job_patch = %{state: "running", updated_at: now}
+    job_patch = manual_claim_patch(job, now)
 
     case Repo.claim_job_now(job.id, job_patch, run_attrs, server: state.repo) do
       {:ok, {claimed_job, run}} ->
@@ -605,6 +612,15 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
+  # A manual claim of a one-off consumes it the way a due claim does: a cleared
+  # next_run_at is what the settle reads as "done" (Repo release_settled_job),
+  # while an instant an edit sets mid-run survives it.
+  defp manual_claim_patch(%{schedule_kind: "once"} = _job, now) do
+    %{state: "running", next_run_at: nil, updated_at: now}
+  end
+
+  defp manual_claim_patch(_job, now), do: %{state: "running", updated_at: now}
+
   defp run_attrs(job, now) do
     %{
       id: "run_#{random_id()}",
@@ -658,150 +674,85 @@ defmodule FermixCore.Jobs.Scheduler do
     mark_run_failed(run_id, job_id, "runner crashed: #{inspect(reason)}", state)
   end
 
-  # Shared terminal write for a run that ended without finalizing itself, whether
+  # Shared terminal write for a run that ended without settling itself, whether
   # the scheduler watched it die (monitor) or found it abandoned (reconciliation).
   # The caller supplies the operator-facing cause; everything after is identical.
   defp mark_run_failed(run_id, job_id, error, state) when is_binary(error) do
     now = DateTime.utc_now()
 
-    case mark_run_error(run_id, error, now, state.repo) do
-      {:active_run_marked, _run} ->
-        mark_job_error(job_id, error, now, state.repo)
+    case Repo.get_job_run(run_id, server: state.repo) do
+      {:ok, run} ->
+        mark_run_error(run, error, now, state.repo)
 
-      {:pending_delivery_marked, run} ->
-        mark_job_completed_after_delivery_crash(job_id, run, now, state.repo)
-
-      :ok ->
+      {:error, :not_found} ->
         :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "Scheduled job #{job_id} run #{run_id} crash lookup failed: #{inspect(reason)}"
+        )
     end
 
     state
   end
 
-  defp mark_run_error(run_id, error, now, repo) do
+  # A run that still holds its job is settled as "error" and its job released
+  # in the same write (`Repo.settle_job_run/2`). A settled run whose delivery
+  # never finished, whatever its status, gets only its delivery marked failed:
+  # its job was released by its own settle. Any other row is already final.
+  defp mark_run_error(%{status: status} = run, error, now, repo)
+       when status in ["queued", "running"] do
+    attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
+
+    case Repo.settle_job_run(attrs, server: repo) do
+      {:ok, {_run, job}} ->
+        mark_source_error(job, now, repo)
+
+      # The runner's own settle landed after all (a call that timed out still
+      # runs), so what may be left is that run's delivery.
+      {:error, :run_not_active} ->
+        fail_delivery_after_settle(run.id, error, now, repo)
+
+      {:error, reason} ->
+        Logger.error("Scheduled job run #{run.id} crash settle failed: #{inspect(reason)}")
+    end
+  end
+
+  defp mark_run_error(%{delivery_status: "pending"} = run, error, now, repo) do
+    mark_pending_delivery_failed(run, error, now, repo)
+  end
+
+  defp mark_run_error(_final_run, _error, _now, _repo), do: :ok
+
+  defp fail_delivery_after_settle(run_id, error, now, repo) do
     case Repo.get_job_run(run_id, server: repo) do
-      {:ok, %{status: status} = run} when status in ["queued", "running"] ->
-        mark_active_run_crashed(run, run_id, error, now, repo)
+      {:ok, %{delivery_status: "pending"} = run} ->
+        mark_pending_delivery_failed(run, error, now, repo)
 
-      {:ok, %{status: "ok", delivery_status: "pending"} = run} ->
-        mark_pending_delivery_failed(run, run_id, error, now, repo)
-
-      {:ok, _finished_run} ->
-        :ok
-
-      {:error, :not_found} ->
+      {:ok, _final_run} ->
         :ok
 
       {:error, reason} ->
-        Logger.error("Scheduled job run #{run_id} crash update failed: #{inspect(reason)}")
+        Logger.error(
+          "Scheduled job run #{run_id} re-read after settle failed: #{inspect(reason)}"
+        )
     end
   end
 
-  defp mark_active_run_crashed(run, run_id, error, now, repo) do
+  defp mark_pending_delivery_failed(run, error, now, repo) do
     run
-    |> Map.merge(%{
-      status: "error",
-      completed_at: now,
-      error: error,
-      updated_at: now
-    })
-    |> update_reaped_run(run_id, repo, :active_run_marked, "crash update")
-  end
-
-  defp mark_pending_delivery_failed(run, run_id, error, now, repo) do
-    run
-    |> Map.merge(%{
-      delivery_status: "failed",
-      delivery_error: error,
-      updated_at: now
-    })
-    |> update_reaped_run(run_id, repo, :pending_delivery_marked, "pending delivery update")
-  end
-
-  defp update_reaped_run(run, run_id, repo, success_tag, log_context) do
-    case Repo.upsert_job_run(run, server: repo) do
-      {:ok, updated_run} ->
-        {success_tag, updated_run}
-
-      {:error, reason} ->
-        Logger.error("Scheduled job run #{run_id} #{log_context} failed: #{inspect(reason)}")
-        :ok
-    end
-  end
-
-  defp mark_job_completed_after_delivery_crash(job_id, run, now, repo) do
-    run_at = run.completed_at || now
-
-    case Repo.get_scheduled_job(job_id, server: repo) do
-      {:ok, job} ->
-        job
-        |> Map.merge(completed_job_state(job))
-        |> Map.merge(%{
-          last_run_at: run_at,
-          last_status: "ok",
-          last_error: nil,
-          updated_at: now
-        })
-        |> Repo.upsert_scheduled_job(server: repo)
-        |> case do
-          {:ok, updated_job} ->
-            mark_source_ok(updated_job, run_at, now, repo)
-
-          {:error, reason} ->
-            Logger.error(
-              "Scheduled job #{job_id} delivery crash update failed: #{inspect(reason)}"
-            )
-        end
-
-      {:error, :not_found} ->
+    |> Map.merge(%{delivery_status: "failed", delivery_error: error, updated_at: now})
+    |> Repo.upsert_job_run(server: repo)
+    |> case do
+      {:ok, _run} ->
         :ok
 
       {:error, reason} ->
-        Logger.error("Scheduled job #{job_id} delivery crash lookup failed: #{inspect(reason)}")
+        Logger.error(
+          "Scheduled job run #{run.id} pending delivery update failed: #{inspect(reason)}"
+        )
     end
   end
-
-  defp completed_job_state(%{schedule_kind: "once"}) do
-    %{enabled?: false, state: "completed", next_run_at: nil}
-  end
-
-  defp completed_job_state(%{state: "running"}), do: %{state: "scheduled"}
-  defp completed_job_state(_job), do: %{}
-
-  defp mark_job_error(job_id, error, now, repo) do
-    case Repo.get_scheduled_job(job_id, server: repo) do
-      {:ok, job} ->
-        job
-        |> Map.merge(failed_job_state(job))
-        |> Map.merge(%{
-          last_run_at: now,
-          last_status: "error",
-          last_error: error,
-          updated_at: now
-        })
-        |> Repo.upsert_scheduled_job(server: repo)
-        |> case do
-          {:ok, updated_job} ->
-            mark_source_error(updated_job, now, repo)
-
-          {:error, reason} ->
-            Logger.error("Scheduled job #{job_id} crash update failed: #{inspect(reason)}")
-        end
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error("Scheduled job #{job_id} crash lookup failed: #{inspect(reason)}")
-    end
-  end
-
-  defp failed_job_state(%{schedule_kind: "once"}) do
-    %{enabled?: false, state: "completed", next_run_at: nil}
-  end
-
-  defp failed_job_state(%{state: "running"}), do: %{state: "scheduled"}
-  defp failed_job_state(_job), do: %{}
 
   defp mark_source_error(job, now, repo) do
     case Repo.get_memory_source(job.memory_source_id, server: repo) do
@@ -816,23 +767,6 @@ defmodule FermixCore.Jobs.Scheduler do
       {:error, reason} ->
         Logger.error(
           "Scheduled job source #{job.memory_source_id} crash update failed: #{inspect(reason)}"
-        )
-    end
-  end
-
-  defp mark_source_ok(job, run_at, now, repo) do
-    case Repo.get_memory_source(job.memory_source_id, server: repo) do
-      {:ok, source} ->
-        source
-        |> Map.merge(%{last_run_at: run_at, last_status: "ok", updated_at: now})
-        |> Repo.upsert_memory_source(server: repo)
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "Scheduled job source #{job.memory_source_id} delivery crash update failed: #{inspect(reason)}"
         )
     end
   end
@@ -922,8 +856,9 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   # A clean tick fires at the next wakeup (0ms floor for a past-due job). A tick
-  # that errored or hit admission backpressure re-arms no sooner than the backoff
-  # floor, so a persistently past-due-but-unclaimable job cannot spin at 0ms.
+  # that errored, hit admission backpressure, or found a due job's previous run
+  # still active re-arms no sooner than the backoff floor, so a persistently
+  # past-due-but-unclaimable job cannot spin at 0ms.
   # The floor applies first, then the ceiling: the two never overlap (5s vs 24h),
   # so the order is only there to make the intent readable.
   defp due_delay_ms(next_run_at, outcome) do

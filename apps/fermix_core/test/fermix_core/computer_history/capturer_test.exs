@@ -14,6 +14,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.ComputerHistory.Capturer
+  alias FermixCore.ComputerHistory.Controller
   alias FermixCore.Memory.Repo
 
   @fake Path.expand("fake_capture_sidecar.pl", __DIR__)
@@ -66,7 +67,10 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       lock_path: ctx.lock_path,
       apps: ["com.apple.Safari"],
       flush_interval_ms: 25,
-      batch_size: 50
+      batch_size: 50,
+      # The Capturer re-reads the feature's resolver at every start; these cases
+      # run the rail itself, on any host, whatever the app env says.
+      operative_fun: fn -> true end
     ]
 
     start_supervised!({Capturer, Keyword.merge(defaults, opts)}, id: id)
@@ -678,6 +682,95 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         eventually(fn ->
           if Enum.any?(stored(ctx.repo), &(&1.source_seq == 1)), do: {:ok, :done}, else: :retry
         end)
+    end
+  end
+
+  # `/history status` is what an unconfirmed `/history off` tells the owner to
+  # check, so "not running" must mean the process is gone, never merely busy.
+  describe "status/2" do
+    test "a Capturer that does not answer in time is not reported as not running" do
+      busy = start_supervised!({Agent, fn -> :ok end}, id: :busy)
+      :ok = :sys.suspend(busy)
+
+      try do
+        assert %{mode: :not_answering} = Capturer.status(busy, 50)
+      after
+        :sys.resume(busy)
+      end
+    end
+
+    # Rule 6: a malformed timeout fails at the call, never reads as a
+    # recorder that is not running.
+    test "a malformed timeout is refused at the call" do
+      for timeout <- [-1, "5000"] do
+        error = assert_raise FunctionClauseError, fn -> Capturer.status(:absent, timeout) end
+        assert {error.module, error.function, error.arity} == {Capturer, :status, 2}
+      end
+    end
+
+    # Regression pin, not a failing-first test: a Capturer that is gone still
+    # reads as not running.
+    test "a Capturer that is gone is reported as not running" do
+      absent = :"absent_ch_capturer_#{System.unique_integer([:positive])}"
+
+      assert %{mode: :not_running} = Capturer.status(absent)
+    end
+  end
+
+  # CH-4: a Capturer that crashed just as `/history off` ran was restarted by its
+  # DynamicSupervisor after the Controller's `whereis` had found nothing, and it
+  # kept capturing until the next boot. Every start now re-reads the one
+  # resolver, so a restart after the flip declines.
+  describe "a restart racing /history off (CH-4)" do
+    test "a Capturer its DynamicSupervisor restarts after the feature is off stays down", ctx do
+      operative = start_supervised!({Agent, fn -> true end}, id: :operative)
+      operative_fun = fn -> Agent.get(operative, & &1) end
+      sup = start_supervised!({DynamicSupervisor, strategy: :one_for_one}, id: :capturer_sup)
+      name = :"ch_capturer_#{System.unique_integer([:positive])}"
+
+      opts = [
+        name: name,
+        repo: ctx.repo,
+        binary_path: @fake,
+        lock_path: ctx.lock_path,
+        apps: ["com.apple.Safari"],
+        operative_fun: operative_fun
+      ]
+
+      {:ok, pid} = DynamicSupervisor.start_child(sup, {Capturer, opts})
+      ref = Process.monitor(pid)
+
+      # Hold the crashed Capturer's EXIT in the DynamicSupervisor's mailbox: the
+      # window in which the Controller's `whereis` finds no process (check 13).
+      :ok = :sys.suspend(sup)
+
+      try do
+        capture_log(fn ->
+          catch_exit(GenServer.call(pid, :crash))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+        end)
+
+        # `/history off`: the flip, then the Controller's reconcile finds nothing.
+        Agent.update(operative, fn _operative -> false end)
+
+        controller =
+          start_supervised!(
+            {Controller,
+             name: :"ch_ctrl_#{System.unique_integer([:positive])}",
+             dynamic_supervisor: sup,
+             operative_fun: operative_fun,
+             installed_fun: fn -> true end,
+             children: [%{name: name, spec: {Capturer, opts}}]}
+          )
+
+        assert :ok = Controller.reconcile(controller)
+      after
+        :sys.resume(sup)
+      end
+
+      # Queued behind the EXIT, so the restart has been decided when this answers.
+      assert %{active: 0} = DynamicSupervisor.count_children(sup)
+      assert Process.whereis(name) == nil
     end
   end
 end

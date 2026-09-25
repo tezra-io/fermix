@@ -8,6 +8,7 @@ defmodule FermixCore.Plugins.Auth do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
@@ -30,9 +31,8 @@ defmodule FermixCore.Plugins.Auth do
 
     with {:ok, plugin} <- fetch_oauth_plugin(name),
          {:ok, provider} <- oauth_provider(plugin, opts),
-         {:ok, tokens} <- OAuthFlow.start_loopback(provider, flow_opts(opts)),
-         entry <- minted_entry(plugin, provider, tokens, opts),
-         :ok <- Store.write(Config.default_auth_profile(plugin), entry),
+         flow_opts = Keyword.put(flow_opts(opts), :redeem, &redeem(&1, plugin, provider, opts)),
+         {:ok, entry} <- OAuthFlow.start_loopback(provider, flow_opts),
          {:ok, _snapshot} <- Config.enable(plugin.name, Keyword.take(opts, [:supervised])) do
       reload_token_manager(plugin)
       report(:login, plugin.name, {:ok, login_tag(entry)}, started_at)
@@ -186,6 +186,25 @@ defmodule FermixCore.Plugins.Auth do
     end
   end
 
+  # The exchange spends the code, so the plugin's profile lock is taken first
+  # and held through the write: a busy profile refuses with the code unspent
+  # (`{:error, :profile_busy}`), and no refresh of the profile can put the old
+  # grant's rotation back over the new one. The account lookup and the region
+  # probe run inside it, each one bounded attempt (`RefreshClient`); enabling
+  # the plugin and reloading its manager run after the release.
+  defp redeem(exchange, plugin, provider, opts) do
+    profile = Config.default_auth_profile(plugin)
+    path = Store.path()
+
+    Store.with_profile_lock(profile, path, fn ->
+      with {:ok, tokens} <- exchange.(),
+           entry = minted_entry(plugin, provider, tokens, opts),
+           :ok <- Store.write(profile, entry, path) do
+        {:ok, entry}
+      end
+    end)
+  end
+
   defp granted_scopes(%{scope: scope}, provider, _requested)
        when is_binary(scope) and scope != "" do
     split_scopes(scope, provider.scope_delimiter)
@@ -230,10 +249,12 @@ defmodule FermixCore.Plugins.Auth do
   defp probe_region(%OAuthProvider{region_probe: probe} = provider, access_token, req_options) do
     request =
       Req.new(
-        method: :get,
-        url: probe.url,
-        headers: [{"authorization", "Bearer #{access_token}"}],
-        redirect: false
+        [
+          method: :get,
+          url: probe.url,
+          headers: [{"authorization", "Bearer #{access_token}"}],
+          redirect: false
+        ] ++ RefreshClient.request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do

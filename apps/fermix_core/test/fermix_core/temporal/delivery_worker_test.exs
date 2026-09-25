@@ -35,6 +35,18 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
     defp next([head | tail]), do: {head, tail}
   end
 
+  # A send that never answers. It tells the process registered under the
+  # destination name which process is sending, then blocks, so a test can tear
+  # its worker down mid-send.
+  defmodule BlockingAdapter do
+    @moduledoc false
+
+    def send_message(destination, _text, _opts) do
+      destination |> String.to_existing_atom() |> send({:send_started, self()})
+      Process.sleep(:infinity)
+    end
+  end
+
   # A stand-in for `Temporal.FollowupSupervisor`. `DynamicSupervisor.start_child/2`
   # is a plain `GenServer.call({:start_child, validated_spec})`, so a GenServer
   # that answers it records exactly what the worker asked for — the child spec,
@@ -457,6 +469,35 @@ defmodule FermixCore.Temporal.DeliveryWorkerTest do
 
       assert settled.status == "failed"
       assert settled.last_error == "delivery_crashed:worker_crash"
+    end
+  end
+
+  # `terminate_child` sends the worker the same exit(:shutdown) a
+  # `:rest_for_one` teardown or a clean daemon stop does. The worker does not
+  # trap exits, so it dies inside its send; the send must die with it (REMIND-2),
+  # and the row is left `delivering` for the boot sweep.
+  describe "supervision teardown" do
+    test "a worker torn down mid-send takes its send with it", ctx do
+      Process.register(self(), ctx.channel)
+      create!(ctx, birthday_spec(day_of_rules()))
+      row = claim!(ctx, @day_of_due)
+
+      {:ok, worker} =
+        DeliverySupervisor.start_delivery(ctx.supervisor, DeliveryWorker, %{
+          reminder: row,
+          repo: ctx.repo,
+          now_fn: fn -> @day_of_due end,
+          delivery_opts: [adapter: BlockingAdapter]
+        })
+
+      assert_receive {:send_started, send_pid}
+      on_exit(fn -> Process.exit(send_pid, :kill) end)
+      ref = Process.monitor(send_pid)
+
+      :ok = DynamicSupervisor.terminate_child(ctx.supervisor, worker)
+
+      assert_receive {:DOWN, ^ref, :process, ^send_pid, :shutdown}
+      assert {:ok, %{status: "delivering"}} = Repo.get_temporal_reminder(row.id, server: ctx.repo)
     end
   end
 

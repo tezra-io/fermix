@@ -125,4 +125,35 @@ defmodule FermixCore.Auth.RefreshClientTest do
       assert form["client_id"] == "client-id"
     end
   end
+
+  # A refresh runs under the profile lock, whose stale threshold is sized from
+  # these bounds (Store's "lock bounds" tests). Unset, the connect wait is
+  # Mint's 30 s default and three attempts outlast the threshold.
+  describe "per-attempt timeouts" do
+    defp recording_adapter(parent) do
+      fn request ->
+        send(parent, {:request_options, request.options})
+        body = %{"access_token" => "new_at", "refresh_token" => "new_rt", "expires_in" => 3600}
+        {request, Req.Response.new(status: 200, body: body)}
+      end
+    end
+
+    test "both refresh paths bound pool checkout, connect and receive" do
+      assert {:ok, _tokens} = RefreshClient.refresh("old_rt", adapter: recording_adapter(self()))
+      assert_received {:request_options, codex}
+
+      assert {:ok, _tokens} =
+               RefreshClient.refresh(provider("github"), "old_rt",
+                 adapter: recording_adapter(self())
+               )
+
+      assert_received {:request_options, plugin}
+
+      for options <- [codex, plugin] do
+        assert Map.get(options, :pool_timeout) == 5_000
+        assert Map.get(options, :connect_options) == [timeout: 10_000]
+        assert Map.get(options, :receive_timeout) == 15_000
+      end
+    end
+  end
 end

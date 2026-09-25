@@ -5,11 +5,13 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   # only from Repo's `handle_call`s, so the single-writer architecture is
   # unchanged; the split keeps `repo.ex` bounded (the TemporalSql precedent).
   #
-  # Four tables, five additive migrations (23/24/25/27/28):
+  # Five tables, six migrations (23/24/25/27/28 additive; 32 moves the purge
+  # watermark into the purges table and leaves its old column unread):
   #   * computer_history_events   — the <=48h raw interaction-event spool
   #   * computer_history_memories — durable, derived activity summaries
   #   * computer_history_state    — the summarizer singleton (claim + cursor)
   #   * computer_history_access   — metadata-only audit rows for agent reads (§22.8)
+  #   * computer_history_purges   — the recorded purge intervals (§12)
   #
   # The spool's identity is a DB-generated `id` (AUTOINCREMENT), NOT the
   # capturer's per-boot `source_seq` (which restarts at 1 each boot): the id is
@@ -117,7 +119,6 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
     :status,
     :last_status,
     :last_summarized_id,
-    :purge_watermark_ts,
     :paused_reason,
     :pause_until,
     :summarizer_route,
@@ -271,6 +272,30 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   INSERT INTO computer_history_memories_fts(computer_history_memories_fts) VALUES('rebuild');
   """
 
+  # Migration 32 (§12): recorded purge intervals replace the one high-water purge
+  # watermark. One row per purge, in issue order (`id`): `[from_ts, to_ts]` is the
+  # window it erased, inclusive like its DELETE, and `issued_at` is when (epoch ms).
+  # The spool insert refuses a row stamped inside any interval; a note or thread
+  # write refuses when an interval issued after its batch was read reaches it. A
+  # stored watermark W (the `purge all` sentinel included) becomes one interval
+  # [0, min(W, now)] issued now. Its column stays, unread (nothing reads or writes
+  # a watermark any more), so an engine an upgrade rolled back to still opens the
+  # store; a later release drops it. Every store has the column (migration 25).
+  @purges_schema_sql_template """
+  CREATE TABLE IF NOT EXISTS computer_history_purges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    from_ts INTEGER NOT NULL,
+    to_ts INTEGER NOT NULL,
+    issued_at INTEGER NOT NULL,
+    CHECK (from_ts <= to_ts)
+  );
+  INSERT INTO computer_history_purges (from_ts, to_ts, issued_at)
+    SELECT 0, MIN(purge_watermark_ts, {{migrated_at}}), {{migrated_at}}
+    FROM computer_history_state
+    WHERE id = 1 AND purge_watermark_ts IS NOT NULL;
+  -- purge_watermark_ts stays, unread, so a rolled-back engine still opens the store.
+  """
+
   # The two kinds, as stored. `:all` is the kind-blind read (counts and purge).
   @kinds %{session: "session", thread: "thread"}
   @default_kind "session"
@@ -298,13 +323,24 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @spec sessions_schema_sql() :: String.t()
   def sessions_schema_sql, do: @sessions_schema_sql
 
+  @doc """
+  Migration 32 — the purge intervals, with a stored watermark carried over as one
+  interval issued at `migrated_at` (epoch ms). The old column stays, unread.
+  """
+  @spec purges_schema_sql(integer()) :: String.t()
+  def purges_schema_sql(migrated_at) when is_integer(migrated_at) do
+    String.replace(@purges_schema_sql_template, "{{migrated_at}}", Integer.to_string(migrated_at))
+  end
+
   # --- events -------------------------------------------------------------
 
   @doc """
   Insert a batch of spool events idempotently. Each event is a map keyed by a
   subset of `@event_columns`; absent keys bind NULL. `INSERT OR IGNORE` +
-  `UNIQUE(boot_id, source_seq)` makes a re-delivered event a no-op. Returns the
-  count of rows actually inserted (ignored duplicates do not count).
+  `UNIQUE(boot_id, source_seq)` makes a re-delivered event a no-op. An event
+  stamped inside a recorded purge interval is refused (the purge fence, §12) and
+  the refused count is logged. Returns the count of rows actually inserted
+  (ignored duplicates and fenced rows do not count).
   """
   @spec insert_events(term(), [map()]) :: {:ok, non_neg_integer()} | {:error, term()}
   def insert_events(conn, events) when is_list(events) do
@@ -324,26 +360,86 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
       "INSERT OR IGNORE INTO computer_history_events (#{@event_insert_columns}) " <>
         "VALUES (#{@event_insert_placeholders})"
 
-    Enum.reduce_while(events, {:ok, 0}, fn event, {:ok, inserted} ->
-      params = Enum.map(@event_columns, fn column -> to_param(Map.get(event, column)) end)
+    result =
+      Enum.reduce_while(events, {:ok, 0, 0}, fn event, {:ok, inserted, fenced} ->
+        case insert_unless_purged(conn, sql, event) do
+          {:ok, :fenced} -> {:cont, {:ok, inserted, fenced + 1}}
+          {:ok, count} -> {:cont, {:ok, inserted + count, fenced}}
+          {:error, reason} -> {:halt, {:error, reason}}
+        end
+      end)
 
-      case execute(conn, sql, params) do
-        :ok -> {:cont, {:ok, inserted + changed(conn)}}
-        {:error, reason} -> {:halt, {:error, reason}}
-      end
-    end)
+    with {:ok, inserted, fenced} <- result do
+      log_fenced(fenced)
+      {:ok, inserted}
+    end
+  end
+
+  # The purge fence (§12): a row stamped inside any recorded purge interval is
+  # refused here, inside the insert's own transaction. That is the one placement
+  # that also stops a batch already past Ingest's pause check when the purge
+  # committed: the purge and this insert are each one transaction on the single
+  # writer, so either the purge's DELETE removes the row or this check sees its
+  # interval. A row with no integer `ts` is left to the insert's NOT NULL refusal,
+  # as before the fence.
+  defp insert_unless_purged(conn, sql, event) do
+    case stamped_in_purge?(conn, Map.get(event, :ts)) do
+      {:ok, true} -> {:ok, :fenced}
+      {:ok, false} -> insert_event(conn, sql, event)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # Every recorded interval fences, whenever it was issued: ids start at 1.
+  defp stamped_in_purge?(conn, ts) when is_integer(ts), do: purge_reaches?(conn, 0, ts, ts)
+  defp stamped_in_purge?(_conn, _ts), do: {:ok, false}
+
+  defp insert_event(conn, sql, event) do
+    params = Enum.map(@event_columns, fn column -> to_param(Map.get(event, column)) end)
+
+    with :ok <- execute(conn, sql, params), do: {:ok, changed(conn)}
+  end
+
+  # Counts only (§15.1). A fenced row is expected right after a purge, and never
+  # silent: `written` alone would just read lower.
+  defp log_fenced(0), do: :ok
+
+  defp log_fenced(count) do
+    Logger.info(
+      "computer_history spool insert fenced #{count} event(s) stamped inside a purged window"
+    )
   end
 
   @doc """
   Delete every spool event older than `cutoff_ts` (epoch ms) — the 48h retention
-  sweep. Returns the count deleted. (The byte-ceiling backstop is
+  sweep — and prune the purge intervals that can no longer matter. Returns the
+  count of events deleted. (The byte-ceiling backstop is
   `sweep_spool_over_bytes/2`, which deletes by id, not time.)
   """
   @spec sweep_expired_events(term(), integer()) :: {:ok, non_neg_integer()} | {:error, term()}
   def sweep_expired_events(conn, cutoff_ts) when is_integer(cutoff_ts) do
-    with :ok <- execute(conn, "DELETE FROM computer_history_events WHERE ts < ?", [cutoff_ts]) do
-      {:ok, changed(conn)}
+    with :ok <- execute(conn, "DELETE FROM computer_history_events WHERE ts < ?", [cutoff_ts]),
+         deleted <- changed(conn),
+         :ok <- prune_purges(conn, cutoff_ts) do
+      {:ok, deleted}
     end
+  end
+
+  # An interval matters to the fence while a row stamped inside it could still
+  # arrive or be kept, and to the note and thread guard while a batch read before
+  # it was issued could still be written. Once it both ended and was issued before
+  # the retention cutoff, neither holds: this sweep deletes rows stamped that early,
+  # no flush is that late (the Capturer buffers at most one 2 s flush and loses it
+  # on a restart), and no cycle is that old (the Scheduler kills one after 15
+  # minutes). So the table holds at most one retention window of purges. Pruning
+  # never lowers a later purge's id (AUTOINCREMENT never reuses one), so a purge
+  # mark still orders every purge after it.
+  defp prune_purges(conn, cutoff_ts) do
+    execute(
+      conn,
+      "DELETE FROM computer_history_purges WHERE issued_at < ? AND to_ts < ?",
+      [cutoff_ts, cutoff_ts]
+    )
   end
 
   # Estimated content bytes per spool row: the four unbounded text columns plus a
@@ -500,17 +596,20 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   @doc """
   Purge a `[from_ts, to_ts]` window (epoch ms), atomically: delete spool events
   in the window, delete activity memories whose provenance window **intersects**
-  it, and advance the purge watermark to `to_ts` (§12). The watermark blocks an
-  in-flight summarizer write from re-materializing just-purged events. Returns
-  the deleted counts.
+  it, delete the access rows recorded in it, and record the interval, issued at
+  `issued_at` (§12). The interval fences the spool insert against a row stamped
+  inside it that arrives later, and refuses a note or thread whose batch was read
+  before it. Returns the deleted counts.
   """
-  @spec purge_window(term(), integer(), integer()) ::
+  @spec purge_window(term(), integer(), integer(), integer()) ::
           {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
-  def purge_window(conn, from_ts, to_ts) when is_integer(from_ts) and is_integer(to_ts) do
-    in_transaction(conn, fn -> purge_window_in_tx(conn, from_ts, to_ts) end)
+  def purge_window(conn, from_ts, to_ts, issued_at)
+      when is_integer(from_ts) and is_integer(to_ts) and from_ts <= to_ts and
+             is_integer(issued_at) do
+    in_transaction(conn, fn -> purge_window_in_tx(conn, from_ts, to_ts, issued_at) end)
   end
 
-  defp purge_window_in_tx(conn, from_ts, to_ts) do
+  defp purge_window_in_tx(conn, from_ts, to_ts, issued_at) do
     with :ok <-
            execute(
              conn,
@@ -538,17 +637,38 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
          :ok <-
            execute(
              conn,
-             "INSERT INTO computer_history_state (id) VALUES (1) ON CONFLICT(id) DO NOTHING",
-             []
-           ),
-         :ok <-
-           execute(
-             conn,
-             "UPDATE computer_history_state " <>
-               "SET purge_watermark_ts = MAX(COALESCE(purge_watermark_ts, 0), ?) WHERE id = 1",
-             [to_ts]
+             "INSERT INTO computer_history_purges (from_ts, to_ts, issued_at) VALUES (?, ?, ?)",
+             [from_ts, to_ts, issued_at]
            ) do
       {:ok, %{events: events_deleted, memories: memories_deleted}}
+    end
+  end
+
+  @doc """
+  The purge mark: the id of the latest recorded purge, or 0 (§12). A reader takes
+  it BEFORE it reads a batch and hands it to the write, which refuses when a purge
+  issued after it (a higher id) reaches what was read. Ids only grow, so no clock
+  is compared: a clock step cannot reorder a purge and a read.
+  """
+  @spec purge_mark(term()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def purge_mark(conn) do
+    sql = "SELECT COALESCE(MAX(id), 0) FROM computer_history_purges"
+
+    with {:ok, [[mark]]} <- query_all(conn, sql, []), do: {:ok, mark}
+  end
+
+  # Does a purge with an id above `after_id` reach [from_ts, to_ts]? The one
+  # question the fence (every purge, `after_id` 0) and the note and thread guard
+  # (the purges issued after the batch was read) both ask. Intersection, inclusive
+  # like the purge's own DELETEs. A NULL bound matches nothing.
+  defp purge_reaches?(conn, after_id, from_ts, to_ts) do
+    sql =
+      "SELECT EXISTS(SELECT 1 FROM computer_history_purges " <>
+        "WHERE id > ? AND from_ts <= ? AND to_ts >= ?)"
+
+    case query_all(conn, sql, [after_id, to_ts, from_ts]) do
+      {:ok, [[hit]]} -> {:ok, hit == 1}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -978,12 +1098,13 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   end
 
   @doc """
-  Write a sitting's result atomically (§10, §12): if a note was produced and its
-  provenance does not intersect a purge issued during the cycle (the watermark
-  guard), insert it beside the existing memories; then advance the
-  `last_summarized_id` cursor to the last summarized event. A `nil` memory
-  (empty/abstained output) only advances the cursor. Nothing is superseded here
-  — see the module comment.
+  Write a sitting's result atomically (§10, §12): if a note was produced and no
+  purge issued after its batch was read (an id above `purge_mark`, taken before
+  the read) intersects its provenance, insert it beside the existing memories;
+  then advance the `last_summarized_id` cursor to the last summarized event. A
+  purge issued before the read cannot matter: its rows were deleted and fenced
+  first. A `nil` memory (empty/abstained output) only advances the cursor. Nothing
+  is superseded here — see the module comment.
 
   A `nil` `last_status` advances the cursor and **keeps** the recorded outcome: it
   is how consuming a boundary marker — which is not a sitting and has no outcome —
@@ -994,55 +1115,39 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
           non_neg_integer(),
           map() | nil,
           DateTime.t(),
-          String.t() | nil
+          String.t() | nil,
+          non_neg_integer()
         ) ::
           {:ok, %{memory_written: boolean()}} | {:error, term()}
-  def write_cycle_result(conn, last_id, memory, %DateTime{} = now, last_status) do
+  def write_cycle_result(conn, last_id, memory, %DateTime{} = now, last_status, purge_mark)
+      when is_integer(purge_mark) and purge_mark >= 0 do
     in_transaction(conn, fn ->
-      write_cycle_result_in_tx(conn, last_id, memory, now, last_status)
+      write_cycle_result_in_tx(conn, last_id, memory, now, last_status, purge_mark)
     end)
   end
 
-  defp write_cycle_result_in_tx(conn, last_id, memory, now, last_status) do
+  defp write_cycle_result_in_tx(conn, last_id, memory, now, last_status, purge_mark) do
     with {:ok, _row} <- ensure_state(conn),
-         {:ok, watermark} <- read_watermark(conn),
-         {:ok, written?} <- maybe_write_memory(conn, memory, watermark),
+         {:ok, written?} <- maybe_write_memory(conn, memory, purge_mark),
          :ok <- advance_cursor(conn, last_id, now, last_status) do
       {:ok, %{memory_written: written?}}
     end
   end
 
-  defp read_watermark(conn) do
-    with {:ok, rows} <-
-           query_all(
-             conn,
-             "SELECT purge_watermark_ts FROM computer_history_state WHERE id = 1",
-             []
-           ) do
-      case rows do
-        [[watermark]] -> {:ok, watermark}
-        _empty -> {:ok, nil}
-      end
+  # No memory, or a purge issued after its batch was read reaches its provenance
+  # ⇒ do not (re-)materialize: that purge erased rows the batch still held.
+  defp maybe_write_memory(_conn, nil, _purge_mark), do: {:ok, false}
+
+  defp maybe_write_memory(conn, %{} = memory, purge_mark) do
+    from_ts = Map.get(memory, :provenance_from_ts)
+    to_ts = Map.get(memory, :provenance_to_ts)
+
+    case purge_reaches?(conn, purge_mark, from_ts, to_ts) do
+      {:ok, true} -> {:ok, false}
+      {:ok, false} -> with {:ok, _id} <- insert_memory(conn, memory), do: {:ok, true}
+      {:error, reason} -> {:error, reason}
     end
   end
-
-  # No memory, or its window intersects an issued purge ⇒ do not (re-)materialize.
-  defp maybe_write_memory(_conn, nil, _watermark), do: {:ok, false}
-
-  defp maybe_write_memory(conn, %{} = memory, watermark) do
-    if purged?(memory, watermark) do
-      {:ok, false}
-    else
-      with {:ok, _id} <- insert_memory(conn, memory), do: {:ok, true}
-    end
-  end
-
-  defp purged?(_memory, nil), do: false
-
-  defp purged?(%{provenance_from_ts: from_ts}, watermark) when is_integer(watermark),
-    do: from_ts <= watermark
-
-  defp purged?(_memory, _watermark), do: false
 
   # Cursor + outcome only; the `status` (idle/running) lifecycle is owned by the
   # scheduler's claim/release so a paused or errored cycle can't leave a
@@ -1065,18 +1170,26 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
   An empty set is REFUSED rather than superseding the whole active set: "the
   model returned nothing" must not read as "the owner is working on nothing".
 
-  The **purge watermark is re-read here**, inside the transaction, and a thread
-  whose provenance reaches into a purge issued while the roll-up call was in
-  flight is dropped — the same read-infer-write race `write_cycle_result` closes
-  for notes (§12). A roll-up whose every thread was purged supersedes nothing and
-  does not stamp the mark: the erased window must not come back as a thread
-  citing a deleted row.
+  The **purge intervals are checked here**, inside the transaction, against
+  `read`: the purge mark taken before the roll-up read its input and the window
+  spanning every note and thread that input held. When a purge issued after the
+  read (an id above the mark) reaches that window, every proposed thread is
+  dropped — the same read-infer-write race `write_cycle_result` closes for notes
+  (§12). The whole input, not each thread's own provenance, because the call saw
+  all of it and any thread's state can carry any of it. Such a roll-up supersedes
+  nothing and does not stamp the mark: the erased window must not come back as a
+  thread citing a deleted row. A purge issued before the read refuses nothing: its
+  rows were gone before the input was read.
 
-  Returns how many rows were written, how many retired, how many the watermark
-  dropped, and the subjects actually stored (so the caller's log names what the
-  store holds, not what the model proposed).
+  Returns how many rows were written, how many retired, how many a purge dropped,
+  and the subjects actually stored (so the caller's log names what the store
+  holds, not what the model proposed).
   """
-  @spec write_rollup(term(), [map()], integer()) ::
+  @spec write_rollup(term(), [map()], integer(), %{
+          purge_mark: non_neg_integer(),
+          from_ts: integer(),
+          to_ts: integer()
+        }) ::
           {:ok,
            %{
              written: non_neg_integer(),
@@ -1085,29 +1198,35 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
              subjects: [String.t()]
            }}
           | {:error, term()}
-  def write_rollup(conn, threads, now_ts) when is_list(threads) and is_integer(now_ts) do
+  def write_rollup(conn, threads, now_ts, %{purge_mark: mark, from_ts: from_ts, to_ts: to_ts})
+      when is_list(threads) and is_integer(now_ts) and is_integer(mark) and mark >= 0 and
+             is_integer(from_ts) and is_integer(to_ts) do
     cond do
-      threads == [] -> {:error, :no_threads}
-      not Enum.all?(threads, &is_map/1) -> {:error, :invalid_threads}
-      true -> in_transaction(conn, fn -> write_rollup_in_tx(conn, threads, now_ts) end)
+      threads == [] ->
+        {:error, :no_threads}
+
+      not Enum.all?(threads, &is_map/1) ->
+        {:error, :invalid_threads}
+
+      true ->
+        in_transaction(conn, fn ->
+          write_rollup_in_tx(conn, threads, now_ts, mark, {from_ts, to_ts})
+        end)
     end
   end
 
-  defp write_rollup_in_tx(conn, threads, now_ts) do
+  # A purge after the read reached the input: nothing is superseded and the mark
+  # stays put, so the next roll-up rebuilds from what survived.
+  defp write_rollup_in_tx(conn, threads, now_ts, mark, {from_ts, to_ts}) do
     with {:ok, _row} <- ensure_state(conn),
-         {:ok, watermark} <- read_watermark(conn) do
-      threads
-      |> Enum.reject(&purged?(&1, watermark))
-      |> write_surviving_threads(conn, now_ts, length(threads))
+         {:ok, purged?} <- purge_reaches?(conn, mark, from_ts, to_ts) do
+      if purged?,
+        do: {:ok, %{written: 0, retired: 0, purged: length(threads), subjects: []}},
+        else: write_threads(threads, conn, now_ts)
     end
   end
 
-  # Every proposed thread drew on a purged window: nothing is superseded and the
-  # mark stays put, so the next roll-up rebuilds from what survived.
-  defp write_surviving_threads([], _conn, _now_ts, proposed),
-    do: {:ok, %{written: 0, retired: 0, purged: proposed, subjects: []}}
-
-  defp write_surviving_threads(threads, conn, now_ts, proposed) do
+  defp write_threads(threads, conn, now_ts) do
     with :ok <- supersede_threads(conn, now_ts),
          retired <- changed(conn),
          {:ok, written} <- insert_threads(conn, threads),
@@ -1116,7 +1235,7 @@ defmodule FermixCore.Memory.Repo.ComputerHistorySql do
        %{
          written: written,
          retired: retired,
-         purged: proposed - length(threads),
+         purged: 0,
          subjects: Enum.map(threads, &Map.get(&1, :subject))
        }}
     end

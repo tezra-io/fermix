@@ -3,6 +3,20 @@ defmodule FermixCore.Auth.RefreshClient do
   Bare HTTP refresh against OAuth token endpoints.
 
   Keeps OpenAI Codex and plugin-provider refresh requests in one place.
+
+  **Time bound.** A refresh runs under its profile's lock
+  (`FermixCore.Auth.Store.with_profile_lock/3`), which another refresher breaks
+  once its mtime is 120 s old by the wall clock, so a live refresh must finish
+  sooner (a sleep or clock step mid-refresh can still make it look stale). Each
+  request sets its own bounds instead of Mint's 30 s connect default: pool 5 s,
+  connect 10 s, receive 15 s, and no Req retry (`request_bounds/0`). Three 30 s
+  attempts, the 350 ms and 700 ms sleeps and two 8 s store-lock waits come to
+  about 107 s (`worst_case_ms/0`, held below the threshold by a test). The
+  receive wait bounds each socket read; a token response is one small body. It
+  stays at Req's 15 s default: a shorter wait would abandon slow successes, and
+  an abandoned success loses a rotation. A sign-in's requests under the same
+  lock (the code exchange, the account lookup, a region probe) set the same
+  bounds.
   """
 
   require Logger
@@ -16,6 +30,21 @@ defmodule FermixCore.Auth.RefreshClient do
   @token_url "https://auth.openai.com/oauth/token"
   @max_attempts 3
   @retry_base_ms 350
+
+  @pool_timeout_ms 5_000
+  @connect_timeout_ms 10_000
+  @receive_timeout_ms 15_000
+
+  # The longest one refresh can take: every attempt at its full timeouts, plus
+  # the sleeps between them. Public so a test can hold it under the profile
+  # lock's stale threshold.
+  @doc false
+  @spec worst_case_ms() :: pos_integer()
+  def worst_case_ms do
+    attempt_ms = @pool_timeout_ms + @connect_timeout_ms + @receive_timeout_ms
+    sleeps_ms = Enum.sum(for attempt <- 1..(@max_attempts - 1), do: @retry_base_ms * attempt)
+    @max_attempts * attempt_ms + sleeps_ms
+  end
 
   @type tokens :: %{
           access_token: String.t(),
@@ -44,10 +73,12 @@ defmodule FermixCore.Auth.RefreshClient do
 
     request =
       Req.new(
-        url: @token_url,
-        method: :post,
-        body: body,
-        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        [
+          url: @token_url,
+          method: :post,
+          body: body,
+          headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        ] ++ request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
@@ -89,10 +120,12 @@ defmodule FermixCore.Auth.RefreshClient do
 
     request =
       Req.new(
-        url: provider.token_url,
-        method: :post,
-        body: body,
-        headers: OAuthProvider.token_request_headers(provider)
+        [
+          url: provider.token_url,
+          method: :post,
+          body: body,
+          headers: OAuthProvider.token_request_headers(provider)
+        ] ++ request_bounds()
       )
 
     response = request |> Req.merge(req_options) |> Req.request()
@@ -136,6 +169,23 @@ defmodule FermixCore.Auth.RefreshClient do
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  The bounds every request made under a profile lock sets: pool 5 s, connect
+  10 s, receive 15 s, and no Req retry, so each request is one attempt of at
+  most 30 s. Req retries a GET on a transient failure up to three more times
+  and honours a `Retry-After` of any length, which no lock's stale threshold
+  could bound. A refresh does its own bounded retries.
+  """
+  @spec request_bounds() :: keyword()
+  def request_bounds do
+    [
+      retry: false,
+      pool_timeout: @pool_timeout_ms,
+      connect_options: [timeout: @connect_timeout_ms],
+      receive_timeout: @receive_timeout_ms
+    ]
   end
 
   defp parse_token_response(%{"access_token" => access} = body) when is_binary(access) do

@@ -104,11 +104,24 @@ defmodule FermixCore.Auth.CodexToken do
   def refresh_entry(_entry, path, refresh_opts) when is_binary(path) and is_list(refresh_opts),
     do: {:error, :no_refresh_token}
 
+  # Only a due entry takes the profile lock, so a live token costs no lockfile.
+  # Under the lock the entry is read again: the refresher that held it (the
+  # daemon's Codex manager, another CLI probe, a parallel image generation) may
+  # have just rotated it, and a waiter that sent the token it read first would
+  # present a consumed one, which ends the Codex session.
   defp refresh_if_needed(entry, path, refresh_opts) do
     if TokenExpiry.refresh_due?(entry.expires_at) do
-      refresh_entry(entry, path, refresh_opts)
+      Store.with_profile_lock(:openai_codex, path, fn -> refresh_latest(path, refresh_opts) end)
     else
       {:ok, entry}
+    end
+  end
+
+  defp refresh_latest(path, refresh_opts) do
+    with {:ok, entry} <- read_entry(path) do
+      if TokenExpiry.refresh_due?(entry.expires_at),
+        do: refresh_entry(entry, path, refresh_opts),
+        else: {:ok, entry}
     end
   end
 

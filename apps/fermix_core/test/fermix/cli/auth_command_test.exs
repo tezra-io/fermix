@@ -5,6 +5,7 @@ defmodule Fermix.CLI.AuthCommandTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
+  alias FermixTestSupport.FakeDaemonSocket
 
   setup do
     dir = Path.join(System.tmp_dir!(), "fermix_auth_cli_#{System.unique_integer([:positive])}")
@@ -58,6 +59,93 @@ defmodule Fermix.CLI.AuthCommandTest do
       output = capture_out(fn -> AuthCommand.run(["logout"]) end)
       assert output =~ "Already logged out"
     end
+
+    # No daemon answers in this home, so the logout is the local one alone. Codex
+    # has no auth-mode route, so nothing waits for a daemon restart and no
+    # restart is asked for.
+    test "with no daemon running, the logout and its message are the local ones", %{dir: dir} do
+      seed_codex_entry(dir, "AT", "RT", future_iso(3600))
+      path = Path.join(dir, "auth.json")
+
+      stderr =
+        capture_err(fn ->
+          output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
+
+          assert output == "Logged out. Removed openai_codex entry from #{path}.\n"
+        end)
+
+      assert stderr == ""
+      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex, path)
+    end
+  end
+
+  # TOKEN-6: the CLI deletes the entry itself, then tells a running daemon to
+  # drop the tokens it still holds for that profile, the way the plugin verbs
+  # ask it to re-apply their config.
+  describe "auth logout with a running daemon" do
+    setup do
+      %{home: FakeDaemonSocket.fermix_home!()}
+    end
+
+    test "tells the daemon to forget the signed-out profile", %{home: home} do
+      seed_codex_entry(home, "AT", "RT", future_iso(3600))
+      daemon = FakeDaemonSocket.serve_once(home, %{"status" => "ok"})
+
+      stderr =
+        capture_err(fn ->
+          output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
+          assert output =~ "Logged out. Removed openai_codex entry"
+        end)
+
+      assert_receive {:fake_daemon_request,
+                      %{"method" => "auth_forget", "params" => %{"profile" => "openai_codex"}}}
+
+      Task.await(daemon)
+      assert stderr =~ "daemon dropped any tokens it held for openai_codex"
+      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex)
+    end
+
+    # A previous logout whose daemon call failed leaves the entry gone and the
+    # daemon holding the account; running the logout again must reach it.
+    test "tells the daemon even when the entry is already gone", %{home: home} do
+      daemon = FakeDaemonSocket.serve_once(home, %{"status" => "ok"})
+
+      capture_err(fn ->
+        output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
+        assert output =~ "Already logged out"
+      end)
+
+      assert_receive {:fake_daemon_request,
+                      %{"method" => "auth_forget", "params" => %{"profile" => "openai_codex"}}}
+
+      Task.await(daemon)
+    end
+
+    test "a daemon that cannot forget fails the logout loudly, and says the entry is gone",
+         %{home: home} do
+      seed_codex_entry(home, "AT", "RT", future_iso(3600))
+      path = Path.join(home, "auth.json")
+      daemon = FakeDaemonSocket.serve_once(home, %{"status" => "error", "reason" => "wedged"})
+
+      stderr =
+        capture_err(fn ->
+          capture_out(fn -> assert AuthCommand.run(["logout"]) == 1 end)
+        end)
+
+      assert_receive {:fake_daemon_request, %{"method" => "auth_forget"}}
+      Task.await(daemon)
+
+      assert stderr =~ "fermix auth: removed the openai_codex entry from #{path}"
+      assert stderr =~ "the running daemon could not drop its openai_codex tokens: wedged"
+
+      # Production runs the daemon from the macOS app, so the CLI restart is
+      # offered only for a daemon the operator runs.
+      assert stderr =~
+               "Restart the daemon (from the Fermix app, or `fermix restart` for a daemon " <>
+                 "you run yourself)."
+
+      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex, path)
+    end
   end
 
   describe "auth --provider anthropic" do
@@ -103,6 +191,34 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       {:ok, entry} = Store.read("anthropic_oauth", Path.join(dir, "auth.json"))
       assert entry.tokens.access_token == "flag-token"
+    end
+
+    # A sign-in takes the profile lock with the refreshers' bounded wait, so one
+    # that meets another Fermix process refreshing or signing in the account
+    # fails in seconds and says to retry, instead of waiting minutes.
+    test "login meeting a busy profile fails with the try-again sentence", %{dir: dir} do
+      path = Path.join(dir, "auth.json")
+      File.write!(Store.profile_lock_path("anthropic_oauth", path), "0 a-refresh\n")
+      parent = self()
+
+      login =
+        Task.async(fn ->
+          capture_err(fn ->
+            status =
+              AuthCommand.run(["login", "--provider", "anthropic", "--setup-token", "sk-ant-x"])
+
+            send(parent, {:status, status})
+          end)
+        end)
+
+      assert {:ok, stderr} = Task.yield(login, 15_000) || Task.shutdown(login, :brutal_kill)
+      assert_received {:status, 1}
+
+      assert stderr ==
+               "fermix auth: anthropic login failed: Another Fermix process is refreshing " <>
+                 "or signing in to this account. Try again shortly.\n"
+
+      refute File.exists?(path)
     end
 
     test "login without any token source errors with guidance" do
@@ -194,11 +310,13 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert provider_auth_mode(:anthropic) == :oauth
 
-      assert 0 ==
-               capture_out_status(fn ->
-                 AuthCommand.run(["logout", "--provider", "anthropic"])
-               end)
+      output = capture_out(fn -> AuthCommand.run(["logout", "--provider", "anthropic"]) end)
 
+      # The route revert is a config change the daemon reads at start, so the
+      # logout says when it lands, and names no CLI restart the app-managed
+      # daemon does not take.
+      assert output =~ "The auth_mode change reaches the daemon on its next restart.\n"
+      refute output =~ "fermix restart"
       assert provider_auth_mode(:anthropic) == :api_key
     end
 

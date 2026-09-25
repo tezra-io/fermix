@@ -56,6 +56,29 @@ defmodule FermixCore.Auth.AnthropicLoginTest do
       assert stored.provider == "anthropic"
     end
 
+    # A sign-in write takes the profile lock (TOKEN-4's sign-in half), so it
+    # cannot land inside a refresh of the same profile and be overwritten by it.
+    test "waits while a refresh of the anthropic_oauth profile holds its lock" do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("anthropic-login-lock")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      path = fermix_path(dir)
+      lock = Store.profile_lock_path("anthropic_oauth", path)
+      File.write!(lock, "0 a-refresh\n")
+
+      sign_in =
+        Task.async(fn ->
+          AnthropicLogin.store_setup_token("sk-ant-oat01-xyz", fermix_path: path)
+        end)
+
+      assert Task.yield(sign_in, 300) == nil
+
+      FermixTestSupport.SafeRm.rm!(lock)
+      assert {:ok, _entry} = Task.await(sign_in)
+
+      assert {:ok, %{tokens: %{access_token: "sk-ant-oat01-xyz"}}} =
+               Store.read("anthropic_oauth", path)
+    end
+
     test "rejects a blank token" do
       assert_raise ArgumentError, fn ->
         AnthropicLogin.store_setup_token("   ", fermix_path: fermix_path(tmp_dir()))

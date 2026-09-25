@@ -50,6 +50,19 @@ defmodule FermixChannels.Channels.Acp.Peer do
   is cleared and late events are dropped-and-logged (§8.5). Terminal responses
   are therefore exactly one per prompt: the response clears the fence that would
   admit a second one.
+
+  ## The Queue fence
+
+  A prompt is handed to one `Gateway.Queue` process, the one its name resolves
+  to at that moment, and the Peer monitors that process until the prompt is
+  answered, as mobile's `RequestCoordinator` fences a request on the Queue that
+  owns it. If the Queue dies first, its turn tasks die with it
+  (`Gateway.QueueSupervisor`) and nothing would ever send the turn's result, so
+  the `:DOWN` answers the prompt as a failed turn, through the same path as any
+  failed turn, and the session accepts its next prompt. Closing a turn drops
+  its monitor (flushing a `:DOWN` already queued), and the wire fence drops a
+  result that arrives after the `:DOWN` answered: one answer per prompt still.
+  A prompt that finds no Queue running is refused at once.
   """
 
   use GenServer, restart: :temporary
@@ -163,6 +176,10 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   def handle_info({:acp_event, session_id, seq, payload}, state) do
     {:noreply, route_event(session_id, seq, payload, state)}
+  end
+
+  def handle_info({:DOWN, ref, :process, _queue, reason}, state) do
+    {:noreply, settle_queue_down(ref, reason, state)}
   end
 
   @impl true
@@ -515,13 +532,14 @@ defmodule FermixChannels.Channels.Acp.Peer do
     message = build_message(session, seq, content, session_env)
     state = put_session(state, session)
 
-    {result, duration_us} = Telemetry.timed_us(fn -> ingest(message, state) end)
+    {result, duration_us} = Telemetry.timed_us(fn -> hand_off(message, state) end)
     ChannelTelemetry.emit_message(:acp, :inbound, 1, duration_us)
 
     handle_ingest(result, session, request_id, state)
   end
 
-  defp handle_ingest(:ok, _session, _request_id, state), do: state
+  defp handle_ingest({:ok, queue_ref}, session, _request_id, state),
+    do: put_session(state, Session.put_queue_ref(session, queue_ref))
 
   # The turn will never run, so nothing else can answer this request: close it
   # here rather than leave the client waiting on its idle timer.
@@ -529,16 +547,26 @@ defmodule FermixChannels.Channels.Acp.Peer do
     Logger.error("ACP prompt was not accepted for #{session.id}: #{inspect(reason)}")
 
     state
-    |> put_session(Session.clear_turn(session))
+    |> close_turn(session)
     |> write(Wire.encode_error(request_id, Wire.internal_error("the prompt could not be queued")))
   end
 
-  defp ingest(message, state) do
-    Gateway.ingest([message],
-      channel: Acp,
-      agent: state.agent,
-      agent_server: state.agent_server
-    )
+  # The Queue fence (moduledoc): the prompt goes to the process the Queue's name
+  # resolves to now, and the Peer watches that same process, so the monitor is
+  # on the Queue that holds the prompt. A monitor set after that Queue died still
+  # delivers its `:DOWN`.
+  defp hand_off(message, state) do
+    case GenServer.whereis(state.agent_server) do
+      queue when is_pid(queue) -> watch_queue(ingest(message, queue, state), queue)
+      nil -> {:error, {:queue_unavailable, state.agent_server}}
+    end
+  end
+
+  defp watch_queue(:ok, queue), do: {:ok, Process.monitor(queue)}
+  defp watch_queue({:error, _reason} = error, _queue), do: error
+
+  defp ingest(message, queue, state) do
+    Gateway.ingest([message], channel: Acp, agent: state.agent, agent_server: queue)
   end
 
   defp build_message(session, seq, content, session_env) do
@@ -637,8 +665,9 @@ defmodule FermixChannels.Channels.Acp.Peer do
   # there is exactly one place a prompt is answered from.
   #
   # A cancel that races an enqueue the Queue has not processed yet finds nothing
-  # to stop; the turn then completes normally and answers `end_turn`. That is the
-  # truth of what happened, so it is left alone rather than papered over.
+  # to stop; the turn then completes normally and answers `end_turn`. A turn
+  # that already claimed its outcome is likewise left to answer with it. That is
+  # the truth of what happened, so it is left alone rather than papered over.
   defp stop_turn(%Session{} = session, state) do
     Logger.info("ACP cancelling the turn in flight for #{session.id}")
     _ = Queue.stop_conversation(conversation_key(session.id), state.agent_server)
@@ -658,7 +687,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
   defp cancel_prompt_request(session, request_id, state) do
     session
     |> stop_turn(state)
-    |> put_session(Session.clear_turn(session))
+    |> close_turn(session)
     |> write(Wire.encode_error(request_id, Wire.request_cancelled()))
   end
 
@@ -788,7 +817,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
     request_id = Session.request_id(session)
 
     state
-    |> put_session(Session.clear_turn(session))
+    |> close_turn(session)
     |> write(terminal_frame(request_id, outcome, session))
   end
 
@@ -841,9 +870,50 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   @auth_markers ["401", "unauthorized", "invalid api key", "expired credentials"]
 
+  # A dead Queue's exit reason is a process failure, never a provider's
+  # credential refusal: the Queue calls no provider (its turns run in unlinked
+  # tasks). Its stack frames and exception text must not read as one.
+  defp auth_failure?({:queue_down, _exit_reason}), do: false
+
   defp auth_failure?(reason) do
     text = reason |> inspect() |> String.downcase()
     Enum.any?(@auth_markers, &String.contains?(text, &1))
+  end
+
+  # --- The Queue fence (moduledoc) ---
+
+  # The Queue this prompt was handed to died before the turn's result arrived,
+  # and took the turn with it: answered here as the failed turn it is. A result
+  # that arrived first closed the turn and flushed this `:DOWN`, so every
+  # `:DOWN` that reaches this point belongs to an open turn.
+  defp settle_queue_down(ref, reason, state) do
+    case Enum.find(Map.values(state.sessions), &(Session.queue_ref(&1) == ref)) do
+      %Session{} = session -> apply_turn_result(session, {:failed, {:queue_down, reason}}, state)
+      nil -> log_unowned_down(ref, reason, state)
+    end
+  end
+
+  defp log_unowned_down(ref, reason, state) do
+    Logger.warning(
+      "ACP peer got a :DOWN (#{inspect(reason)}) for #{inspect(ref)}, which no open turn " <>
+        "watches; closing a turn should have flushed it"
+    )
+
+    state
+  end
+
+  # Every answer closes the turn here: the wire fence shuts, and the monitor on
+  # the turn's Queue goes with any `:DOWN` it already queued.
+  defp close_turn(state, session) do
+    demonitor_queue(Session.queue_ref(session))
+    put_session(state, Session.clear_turn(session))
+  end
+
+  defp demonitor_queue(nil), do: :ok
+
+  defp demonitor_queue(ref) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    :ok
   end
 
   # --- Frames ---
