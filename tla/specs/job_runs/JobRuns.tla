@@ -38,7 +38,7 @@
 (* RunnerSupervisor with its linked runners and the Scheduler. Two         *)
 (* processes are not linked and would survive it: the send helper         *)
 (* (spawn_monitor, channel_send.ex:205) and the AgentLoop process          *)
-(* (runner.ex:1024). The fold kills them too. That is harmless for the     *)
+(* (runner.ex:1032). The fold kills them too. That is harmless for the     *)
 (* properties: a surviving helper can land at most one more copy of the    *)
 (* final text, which no row records. Process-local values a step no longer *)
 (* needs are cleared, so that dead values do not multiply the states.      *)
@@ -65,7 +65,7 @@
 (* after init, "scan" in the 60 s tick, "idle" after a DOWN.               *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/scheduler.ex @ 1e942183055a
-\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ e3e19e979178
+\* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner.ex @ 500357e14ece
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/runner_supervisor.ex @ 6a21dfe6cfad
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/delivery.ex @ 4eb42c517b57
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 28835c6acffd
@@ -116,7 +116,7 @@ VARIABLES
     \* --- each Runner process (process-local, per run) ---
     pc,          \* pc[r]: where the runner of r is; "off" = never started, "gone" = dead
     resp,        \* resp[r]: the AgentLoop's final text: "text" or "silent" ([SILENT])
-    finSnap,     \* finSnap[r]: the job row finalize_job read (runner.ex:358 / :411)
+    finSnap,     \* finSnap[r]: the job row finalize_job read (runner.ex:366 / :419)
     outcome,     \* outcome[r]: the delivery result the runner will record
     \* --- the delivery helper each runner spawns (channel_send.ex:204) ---
     helper,      \* helper[r]: "none" | "sending" | "accepted" (answer pending) | "ok" | "err"
@@ -208,7 +208,7 @@ JobRow == [en |-> jobEnabled, st |-> jobState, next |-> nextRun]
 
 \* The job upsert every read-then-write path does: the whole row from its
 \* earlier read, with final_job_state/failed_job_state/completed_job_state
-\* applied (runner.ex:385, scheduler.ex:768, :803): "running" becomes
+\* applied (runner.ex:393, scheduler.ex:768, :803): "running" becomes
 \* "scheduled" for a recurring job, anything else is kept.
 WriteBack(s) ==
     /\ jobEnabled' = s.en
@@ -385,7 +385,7 @@ ReconcileRows ==
                    reapQ, sSnap>>
 
 \* live_runner_pids: DynamicSupervisor.which_children + the run id each
-\* runner published in its init (scheduler.ex:232, :278-289; runner.ex:157).
+\* runner published in its init (scheduler.ex:232, :278-289; runner.ex:158).
 \* Live runs are adopted: monitored if not already (adopt_live_run, :253-261;
 \* the monitor call is folded in: monitoring a pid that just died delivers
 \* DOWN at once, the same outcome as reaping it). The rest are orphans.
@@ -475,7 +475,7 @@ Claim ==
 
 \* start_or_mark_failed (scheduler.ex:586-596): RunnerSupervisor.start_run
 \* runs Runner.init synchronously (runner_supervisor.ex:20-23), which
-\* publishes the run id (runner.ex:157); then Process.monitor.
+\* publishes the run id (runner.ex:158); then Process.monitor.
 Start ==
     /\ sPc = "start"
     /\ pc' = [pc EXCEPT ![sRun] = "start"]
@@ -512,7 +512,7 @@ SchedStep ==
 Move(r, s) == pc' = [pc EXCEPT ![r] = s]
 RunnerQuiet == <<jobVars, ownerVars, envVars, schedVars>>
 
-\* handle_continue(:run) -> mark_running (runner.ex:163-166, :214-231):
+\* handle_continue(:run) -> mark_running (runner.ex:164-167, :215-232):
 \* Repo.upsert_job_run with status "running".
 MarkRunning(r) ==
     /\ pc[r] = "start"
@@ -521,7 +521,7 @@ MarkRunning(r) ==
     /\ UNCHANGED <<RunnerQuiet, delivery, resp, finSnap, outcome, helperVars>>
 
 \* The whole AgentLoop, run in a spawned process the runner watches
-\* (runner.ex:189, :1014-1036): final text, [SILENT], or an error/timeout.
+\* (runner.ex:190, :1022-1044): final text, [SILENT], or an error/timeout.
 Loop(r) ==
     /\ pc[r] = "loop"
     /\ \/ \E res \in {"text", "silent"} :
@@ -532,7 +532,7 @@ Loop(r) ==
           /\ UNCHANGED resp
     /\ UNCHANGED <<RunnerQuiet, rowVars, finSnap, outcome, helperVars>>
 
-\* mark_completed (runner.ex:199, :233-255): write output.md (folded in),
+\* mark_completed (runner.ex:200, :234-256): write output.md (folded in),
 \* then Repo.upsert_job_run: status "ok", delivery "pending", or "skipped"
 \* for [SILENT] (Delivery.initial_status, delivery.ex:24-31).
 MarkCompleted(r) ==
@@ -543,14 +543,14 @@ MarkCompleted(r) ==
     /\ resp' = [resp EXCEPT ![r] = "-"]
     /\ UNCHANGED <<RunnerQuiet, finSnap, outcome, helperVars>>
 
-\* persist_run_summary_memory (runner.ex:202, :257-294): Repo.upsert_memory
+\* persist_run_summary_memory (runner.ex:203, :258-295): Repo.upsert_memory
 \* (skipped for [SILENT]). No modelled row changes; it is a crash point.
 Memory(r) ==
     /\ pc[r] = "memo"
     /\ Move(r, "finread")
     /\ UNCHANGED <<RunnerQuiet, rowVars, resp, finSnap, outcome, helperVars>>
 
-\* mark_failed (runner.ex:207-210, :296-319): write error.md (folded in),
+\* mark_failed (runner.ex:208-211, :297-321): write error.md (folded in),
 \* then Repo.upsert_job_run: status "error", delivery "pending" for the
 \* failure text.
 MarkFailed(r) ==
@@ -561,7 +561,7 @@ MarkFailed(r) ==
     /\ UNCHANGED <<RunnerQuiet, resp, finSnap, outcome, helperVars>>
 
 \* finalize_job / finalize_failed_job, first half: Repo.get_scheduled_job
-\* (runner.ex:358 / :411).
+\* (runner.ex:366 / :419).
 FinRead(r) ==
     /\ pc[r] = "finread"
     /\ Move(r, "finwrite")
@@ -569,9 +569,9 @@ FinRead(r) ==
     /\ UNCHANGED <<RunnerQuiet, rowVars, resp, outcome, helperVars>>
 
 \* ... second half: Repo.upsert_scheduled_job of the row it read, with
-\* final_job_state applied (runner.ex:360-370 / :413-423, :381-387; the
+\* final_job_state applied (runner.ex:368-378 / :421-431, :389-395; the
 \* memory-source update after it is folded in). Then finalize_delivery
-\* (runner.ex:204, :321-329): a pending delivery spawns the monitored send
+\* (runner.ex:205, :329-337): a pending delivery spawns the monitored send
 \* helper (Delivery.deliver_with_timeout -> ChannelSend.with_timeout,
 \* delivery.ex:53-78, channel_send.ex:200-205); a skipped one is immediate.
 FinWrite(r) ==
@@ -595,8 +595,8 @@ GotResult(r) ==
     /\ Move(r, "mark")
     /\ UNCHANGED <<RunnerQuiet, rowVars, resp, finSnap, tries, delivered>>
 
-\* mark_delivery (runner.ex:331-353): Repo.upsert_job_run with the result,
-\* then {:stop, :normal} (runner.ex:175). The Scheduler's DOWN :normal
+\* mark_delivery (runner.ex:339-361): Repo.upsert_job_run with the result,
+\* then {:stop, :normal} (runner.ex:176). The Scheduler's DOWN :normal
 \* handler only drops the monitor (scheduler.ex:211-212); it is folded in.
 MarkDelivery(r) ==
     /\ pc[r] = "mark"
@@ -614,14 +614,14 @@ RunnerStep(r) ==
     \/ FinRead(r) \/ FinWrite(r) \/ GotResult(r) \/ MarkDelivery(r)
 
 \* The runner dies at one of its Repo calls (a GenServer.call timeout exits
-\* it, a failed {:ok, _} match or finalize_job's raise, runner.ex:370, :377).
+\* it, a failed {:ok, _} match or finalize_job's raise, runner.ex:378, :385).
 \* A failed output.md/error.md write also kills it ({:ok, _} match,
-\* runner.ex:235, :299); that write is folded into MarkCompleted/MarkFailed,
+\* runner.ex:236, :302); that write is folded into MarkCompleted/MarkFailed,
 \* so it is the crash at "complete"/"fail". The memory-source calls after the
-\* job upsert (runner.ex:371, :424) are a crash point with no pc of its own:
+\* job upsert (runner.ex:379, :432) are a crash point with no pc of its own:
 \* a crash there leaves the rows a crash at "mark" leaves, minus the send.
 \* It raises nowhere while it waits in receive (the loop or a send). Its
-\* supervisor does not restart it (restart: :temporary, runner.ex:111); a
+\* supervisor does not restart it (restart: :temporary, runner.ex:112); a
 \* Scheduler that monitors it gets a DOWN.
 RunnerCrash(r) ==
     /\ RunnerCanCrash
@@ -670,7 +670,7 @@ HelperSend(r) ==
                   /\ tries' = [tries EXCEPT ![r] = 0]
     /\ UNCHANGED <<RunnerQuiet, rowVars, runnerVars>>
 
-\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1303):
+\* The runner's own delivery timer (delivery_timeout_ms, runner.ex:1332):
 \* no result yet, so it kills the helper and returns {:error,
 \* :delivery_timeout} (channel_send.ex:214-218). It cannot tell whether the
 \* platform already took the message.

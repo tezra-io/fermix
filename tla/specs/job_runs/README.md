@@ -41,7 +41,7 @@ exactly one check):
 - `RetriesOnlyUnsent`: a send is retried only when it never reached the
   platform (`channel_send.ex:126-129`, `:180-188`). This is the mechanism for
   platforms that do not dedupe. The runner tags its send with the proactive
-  key `job:<run id>` (`runner.ex:1302`). The mobile channel keeps one row per
+  key `job:<run id>` (`runner.ex:1331`). The mobile channel keeps one row per
   key (`mobile_sql.ex:41-43`), so a retry there would not show twice.
 - `ReconcilesRuns`: at init and every 60 s the Scheduler reaps queued/running
   runs with no live runner and adopts live ones (`scheduler.ex:167`,
@@ -158,12 +158,12 @@ shortest and can change between runs.
     crash of a runner that was not adopted.
 - **Code:**
   - The claim sets the job to `running` (`repo.ex:5559-5566`,
-    `scheduler.ex:602-606`). Only `finalize_job` (`runner.ex:355-372`), the
+    `scheduler.ex:602-606`). Only `finalize_job` (`runner.ex:363-380`), the
     crash path (`scheduler.ex:664-679`) and `resume_job`
     (`registry.ex:47-59`) ever set it back.
   - Each writer first makes the run row final, then writes the job row in a
     separate Repo call:
-    - the runner: `runner.ex:252` then `:370`, and on the error path `:314`
+    - the runner: `runner.ex:253` then `:378`, and on the error path `:316`
       then `:423`, with the memory write (`:279`) in between;
     - the reaper: the run row at `scheduler.ex:667`/`:722`, then the job row
       at `:669` → `:772`/`:782`.
@@ -193,8 +193,8 @@ shortest and can change between runs.
     `mark_completed`, so its reconcile scan does not adopt the runner. The
     runner then crashes, and no monitor sees it.
 - **Code:** `mark_completed` sets `delivery_status: "pending"`
-  (`runner.ex:248`, `delivery.ex:24-31`). Only `mark_delivery`
-  (`runner.ex:331-353`) or a monitored crash (`scheduler.ex:686-687`) settles
+  (`runner.ex:249`, `delivery.ex:24-31`). Only `mark_delivery`
+  (`runner.ex:339-361`) or a monitored crash (`scheduler.ex:686-687`) settles
   it. Reconciliation and adoption read only queued/running rows
   (`repo.ex:5900-5915`, `scheduler.ex:241-246`). The window covers the whole
   send, up to `delivery_timeout_ms` (60 s by default).
@@ -225,7 +225,7 @@ shortest and can change between runs.
     (`delivery_mode "none"`, the default at `registry.ex:263`,
     `delivery.ex:27`) and error with any delivery status.
   - The runner dies there when `get_scheduled_job` returns an error
-    (`finalize_job` raises, `runner.ex:377`, `:430`), when the upsert does
+    (`finalize_job` raises, `runner.ex:385`, `:438`), when the upsert does
     not match `{:ok, _}` (`:370`, `:423`), or when a Repo call takes longer
     than `GenServer.call`'s 5 s default.
 - **Impact:** as in JOB-1, the job never runs again until the owner resumes
@@ -245,7 +245,7 @@ shortest and can change between runs.
   - Check 17: the same interleaving with a resume. The paused row it read is
     written back over the resume.
 - **Code:** `finalize_job` and `finalize_failed_job` call `get_scheduled_job`,
-  then upsert the whole row (`runner.ex:358-370`, `:411-423`). The upsert
+  then upsert the whole row (`runner.ex:366-378`, `:419-431`). The upsert
   writes every column (`repo.ex:5682-5770`). Pause and resume are
   read-then-upsert calls too (`registry.ex:42-59`, `:93-106`). The crash
   path's job write has the same shape (`scheduler.ex:735-745`, `:772-782`).
@@ -277,7 +277,7 @@ shortest and can change between runs.
     (`scheduler.ex:735-745`, `:768`, `:803`).
 - **Impact:** each spin makes three Repo calls, one of them a `BEGIN
   IMMEDIATE` transaction, for as long as the active run lasts (30 min by
-  default, `runner.ex:29`). That burns CPU and slows every other Repo
+  default, `runner.ex:30`). That burns CPU and slows every other Repo
   caller.
 
 ### JOB-6: a delivery recorded as `failed` may have reached the user
@@ -291,7 +291,7 @@ shortest and can change between runs.
   - Check 21: the send succeeds, then the runner dies at `mark_delivery`. The
     crash path marks the still-pending delivery `failed`.
 - **Code:** `ChannelSend.with_timeout` cannot tell whether the platform
-  already took the message (`channel_send.ex:214-218`, `runner.ex:326-327`).
+  already took the message (`channel_send.ex:214-218`, `runner.ex:334-335`).
   `mark_pending_delivery_failed` (`scheduler.ex:711-719`) assumes an
   unrecorded send failed.
 - **Impact:** the operator sees a failed delivery for a message the user has.
@@ -305,10 +305,10 @@ shortest and can change between runs.
   not modelled. A `:busy` claim would take the 5 s backoff instead.
 - A runner dies only at a Repo call or a file write, never while it waits in
   `receive` (the AgentLoop or a send). Nothing in its own code raises there.
-  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:235`, `:299`) are
+  - The `{:ok, _} = write_run_artifact` writes (`runner.ex:236`, `:302`) are
     folded into `MarkCompleted`/`MarkFailed`, so they share the `complete` and
     `fail` crash points.
-  - The memory-source calls after `finalize_job`'s upsert (`runner.ex:371`,
+  - The memory-source calls after `finalize_job`'s upsert (`runner.ex:379`,
     `:424`) are a crash point with no pc of their own. A crash there leaves
     the rows a crash at `mark` leaves, minus the send.
 - `delivery_mode` `"none"`/`"local"` behaves like a `[SILENT]` result: the
@@ -317,7 +317,7 @@ shortest and can change between runs.
   interleavings whose outcome the unfolded code also reaches.
 - The daemon crash also stands for a Repo or `RunnerSupervisor` crash. Those
   leave the send helper and the AgentLoop process alive: they are
-  `spawn_monitor`ed, not linked (`channel_send.ex:205`, `runner.ex:1024`). The
+  `spawn_monitor`ed, not linked (`channel_send.ex:205`, `runner.ex:1032`). The
   model kills them. A surviving helper can land at most one more copy of the
   final text, which no row records.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
@@ -325,7 +325,7 @@ shortest and can change between runs.
   "none"` is modelled as `skipped`.
 - The due timer is modelled from the row as it is now. The code arms it once
   and does not re-arm it when `FinWrite` or the reaper writes an older
-  `next_run_at` back (`runner.ex:370`, `scheduler.ex:782`: no
+  `next_run_at` back (`runner.ex:378`, `scheduler.ex:782`: no
   `:job_changed`). So the model's `DueTimerFires` can tick earlier than the
   code. The verdicts survive: the 60 s reconcile tick runs the same scan,
   may fire at any point and is strongly fair.
