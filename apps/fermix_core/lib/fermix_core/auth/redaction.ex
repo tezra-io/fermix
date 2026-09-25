@@ -8,6 +8,10 @@ defmodule FermixCore.Auth.Redaction do
   @bearer ~r/Bearer\s+[A-Za-z0-9._~+\/=-]+/i
 
   @spec redact(term()) :: term()
+  # A struct is a map that does not enumerate, so its fields are redacted and its
+  # type kept: an error such as `%Req.TransportError{}` still reads as itself.
+  def redact(%_{} = struct), do: Map.merge(struct, struct |> Map.from_struct() |> redact())
+
   def redact(value) when is_map(value) do
     value
     |> Enum.map(fn {key, inner} -> redact_pair(key, inner) end)

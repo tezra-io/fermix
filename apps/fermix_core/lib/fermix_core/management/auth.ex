@@ -436,6 +436,19 @@ defmodule FermixCore.Management.Auth do
        when endpoint in [:insecure_token_endpoint, :untrusted_token_endpoint],
        do: "The sign-in was sent to an address this daemon does not trust."
 
+  # The browser half can finish while the request that collects the tokens
+  # after it never gets through, so the sentence names the network, not the user.
+  defp sign_in_sentence(%Req.TransportError{reason: :timeout} = reason) do
+    log("the sign-in server did not answer in time", reason)
+
+    "The provider's sign-in server did not answer in time. Check your connection and sign in again."
+  end
+
+  defp sign_in_sentence(%Req.TransportError{} = reason) do
+    log("the sign-in server could not be reached", reason)
+    "The provider's sign-in server could not be reached. Check your connection and sign in again."
+  end
+
   defp sign_in_sentence({:persist_failed, reason}) do
     log("the credentials could not be stored", reason)
     "The sign-in succeeded but the credentials could not be stored. See the daemon log."

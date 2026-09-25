@@ -4,6 +4,17 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A sign-in that loses the network now says so.** When the provider's sign-in
+  server timed out or could not be reached after the browser step, the daemon
+  crashed while logging the error, and the app showed only "The operation failed
+  inside the daemon." Error details such as a network timeout are now logged
+  safely, and the sign-in fails with a sentence that names the problem and asks
+  you to sign in again.
+
 ## [0.11.0] - 2026-09-23
 
 ### Added

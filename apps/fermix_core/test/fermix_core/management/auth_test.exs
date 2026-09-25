@@ -3,6 +3,7 @@ defmodule FermixCore.Management.AuthTest do
 
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Management.Auth
+  alias FermixCore.Management.Copy
   alias FermixCore.Management.Jobs
 
   @entry %{
@@ -131,6 +132,31 @@ defmodule FermixCore.Management.AuthTest do
       assert_receive :opened
 
       assert {:error, {:busy, "auth"}} = Auth.start("openai_codex", jobs: jobs, login: login)
+    end
+
+    # The browser half finished and the token request after it got no answer.
+    # Logging that reason used to crash the job, so the client saw only "The
+    # operation failed inside the daemon." instead of what went wrong.
+    test "a sign-in whose provider does not answer in time says so", %{jobs: jobs} do
+      done = failed_sign_in(jobs, %Req.TransportError{reason: :timeout})
+
+      assert done["failure"]["code"] == "unavailable"
+
+      assert done["failure"]["sentence"] ==
+               "The provider's sign-in server did not answer in time. Check your connection and sign in again."
+
+      assert Copy.violations(done["failure"]["sentence"], :prose) == []
+    end
+
+    test "a sign-in that cannot reach its provider says so", %{jobs: jobs} do
+      done = failed_sign_in(jobs, %Req.TransportError{reason: :nxdomain})
+
+      assert done["failure"]["code"] == "unavailable"
+
+      assert done["failure"]["sentence"] ==
+               "The provider's sign-in server could not be reached. Check your connection and sign in again."
+
+      assert Copy.violations(done["failure"]["sentence"], :prose) == []
     end
   end
 
@@ -401,6 +427,20 @@ defmodule FermixCore.Management.AuthTest do
     assert Auth.browser_flows() == ~w(openai_codex xai)
     assert Auth.import_sources() == ~w(claude_code codex_cli)
     assert Auth.plugin_prefix() == "plugin:"
+  end
+
+  # A ChatGPT sign-in whose browser half finished and whose token request then
+  # failed with `reason`, followed to its terminal view.
+  defp failed_sign_in(jobs, reason) do
+    login = fn opts ->
+      :ok = Keyword.fetch!(opts, :oauth_opener).("https://auth.example/authorize")
+      {:error, reason}
+    end
+
+    assert {:ok, view} = Auth.start("openai_codex", jobs: jobs, login: login)
+    assert {:ok, done} = terminal(jobs, view["job_id"])
+    assert done["status"] == "failed"
+    done
   end
 
   defp terminal(jobs, job_id, attempts \\ 200)
