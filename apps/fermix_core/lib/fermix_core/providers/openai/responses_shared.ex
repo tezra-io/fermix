@@ -20,6 +20,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.ScreenshotRetention
+  alias FermixCore.Providers.ToolResultRetention
   alias FermixCore.Telemetry
 
   @type tool_result :: %{required(:call_id) => String.t(), required(:output) => term()}
@@ -214,6 +215,30 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   defp elide_screenshot_item(item),
     do: %{item | content: [%{type: "input_text", text: @image_followup_elided}]}
 
+  @doc """
+  Replace the `output` of every replayed `function_call_output` item whose
+  `call_id` has an entry in `substitutions` (in-loop compaction,
+  IN_LOOP_CONTEXT_OVERFLOW.md §3.3). Items are never added, dropped or
+  reordered; an empty map returns `input` unchanged. Applied to the replayed
+  history only — the outputs a continuation appends are the loop's to
+  substitute. Shared by the Responses and Codex adapters.
+  """
+  @spec substitute_tool_results([map()], ToolResultRetention.substitutions()) :: [map()]
+  def substitute_tool_results(input, substitutions)
+      when is_list(input) and is_map(substitutions) do
+    ToolResultRetention.substitute(
+      input,
+      substitutions,
+      &function_call_output_id/1,
+      &replace_function_call_output/2
+    )
+  end
+
+  defp function_call_output_id(%{type: "function_call_output", call_id: call_id}), do: call_id
+  defp function_call_output_id(_item), do: nil
+
+  defp replace_function_call_output(item, text), do: %{item | output: text}
+
   @context_length_markers [
     "context_length_exceeded",
     "maximum context length",
@@ -225,10 +250,10 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   @doc """
   True if an OpenAI-family error `body` (a decoded map or a JSON string) is a
-  context-length / too-many-tokens error. Shared by the Codex and Responses
-  adapters so a turn that overflows the model's context window surfaces a clear,
-  actionable reason (start a fresh session / compact) instead of a generic API
-  error.
+  context-length / too-many-tokens error. Shared by the Codex, Responses and
+  Chat Completions adapters so a turn that overflows the model's context window
+  surfaces a clear, actionable reason (start a fresh session / compact) instead
+  of a generic API error.
   """
   @spec context_length_error?(term()) :: boolean()
   def context_length_error?(body) do

@@ -127,6 +127,22 @@ defmodule FermixCore.Trace.TelemetryHandler do
       trace_type: :agent_event,
       agent_field: :name,
       trace_event: "timeout"
+    },
+    # In-loop context compaction (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md §5):
+    # one row per reduction applied to a turn's tool results, and one per
+    # recovery round after the provider refused a request as too large, so
+    # the JSONL trace shows the compaction the Opik spans show.
+    %{
+      event: [:fermix, :agent_loop, :context_compaction],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "context_compaction"
+    },
+    %{
+      event: [:fermix, :agent_loop, :context_recovery],
+      trace_type: :agent_event,
+      agent_field: :agent,
+      trace_event: "context_recovery"
     }
   ]
 

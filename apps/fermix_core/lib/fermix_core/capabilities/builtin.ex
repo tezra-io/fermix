@@ -31,6 +31,14 @@ defmodule FermixCore.Capabilities.Builtin do
     # Owner-only on-device activity recall (MILESTONE_32 §11.2); the Gate is the
     # real barrier, this pins the guest filter and classification.
     "recall_activity" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # The run's own tool results, read back by call id after in-loop compaction
+    # (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md §3.1): what the model already
+    # received on this run, never another surface's data.
+    "tool_result_recall" => %{
+      policy_class: :read_only,
+      hidden_from_agent?: false,
+      owner_only?: false
+    },
     "skill_create" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_reload" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "skill_view" => %{policy_class: :exec, hidden_from_agent?: false, owner_only?: false},

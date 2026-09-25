@@ -122,8 +122,14 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     text = text_field(opts)
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
 
+    history =
+      ResponsesShared.substitute_tool_results(
+        prior_input,
+        Keyword.get(opts, :tool_result_substitutions, %{})
+      )
+
     next_input =
-      (prior_input ++ output_items ++ outputs)
+      (history ++ output_items ++ outputs)
       |> ResponsesShared.retain_screenshots(Keyword.get(opts, :max_retained_screenshots))
 
     body =

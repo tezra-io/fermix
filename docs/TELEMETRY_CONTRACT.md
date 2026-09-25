@@ -165,6 +165,26 @@ A subagent or scheduled job is a *run*. New run kinds (anything that calls
 3. route those events into the JSONL trace stream via
    `FermixCore.Trace.TelemetryHandler` (`event_definitions/0`).
 
+## In-loop context compaction
+
+When a turn's tool results near or exceed the model's context window, the agent
+loop compresses older results into digests and retries the provider call. Each
+reduction applied emits `[:fermix, :agent_loop, :context_compaction]`
+(measurements `%{count: 1, results, bytes_before, bytes_after}`; metadata
+`session_id`, optional `parent_session`, `agent`, `iteration`, `level`,
+`trigger` in `:budget | :recovery`). Each recovery round after a provider
+refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
+(measurements `%{count: 1}`; metadata `session_id`, optional `parent_session`,
+`agent`, `iteration`, `round` 1..3, `outcome` in `:recovered | :refused_again |
+:nothing_left | :digest_failed`). Both are point events. `FermixOpik` renders
+them via `Mapper.context_compaction_span` / `Mapper.context_recovery_span` as
+`general` spans named `context_compaction` / `context_recovery`, nested under
+the compacting run by `session_id`; the span metadata is `agent`, `iteration`
+and the event's own keys (`level`, `trigger`, `results`, `bytes_before`,
+`bytes_after`, or `round`, `outcome`), with atoms as strings. A digest call is
+an ordinary provider call carrying `agent: "tool_result_digest"` and needs nothing
+here.
+
 ## Plugin distribution ops
 
 Plugin `install`/`uninstall`/`gc` emit `[:fermix, :plugin, :dist]`

@@ -394,4 +394,30 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.provider_for_model("definitely-not-a-real-model") == nil
     end
   end
+
+  describe "context_window_for/3 with unknown_model_telemetry: false" do
+    test "answers the default for an unknown model without emitting" do
+      test_pid = self()
+      handler_id = "catalog-quiet-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :model_catalog, :unknown_model],
+        fn event, measurements, metadata, _config ->
+          if self() == test_pid, do: send(test_pid, {:telemetry, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert ModelCatalog.context_window_for(:mock, "no-such-model",
+               unknown_model_telemetry: false
+             ) == ModelCatalog.context_window_for(:mock, "no-such-model")
+
+      # exactly one event: from the default-emitting call, none from the quiet one
+      assert_receive {:telemetry, [:fermix, :model_catalog, :unknown_model], _, _}
+      refute_receive {:telemetry, [:fermix, :model_catalog, :unknown_model], _, _}
+    end
+  end
 end

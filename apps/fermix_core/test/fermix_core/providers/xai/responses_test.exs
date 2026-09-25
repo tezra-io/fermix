@@ -2,6 +2,7 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.XAI.Responses
 
   defp capability do
@@ -213,6 +214,51 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
 
       types = Enum.map(second["input"], & &1["type"])
       assert "function_call_output" in types
+    end
+
+    test "continue/3 substitutes digested tool results in the replayed history only" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      prior_input = [
+        %{role: "user", content: [%{type: "input_text", text: "go"}]},
+        %{type: "function_call_output", call_id: "old_1", output: "raw a"},
+        %{type: "function_call_output", call_id: "old_2", output: "raw b"}
+      ]
+
+      provider_state = %{
+        input: prior_input,
+        output_items: [],
+        tools: [],
+        capabilities: [],
+        invariant_metrics: ResponsesShared.invariant_metrics([], [])
+      }
+
+      substitutions = %{"old_1" => "digest a", "fresh" => "never applied"}
+
+      {:ok, _turn} =
+        Responses.continue(
+          provider_state,
+          [%{call_id: "fresh", output: "fresh raw"}],
+          Keyword.put(chat_opts(), :tool_result_substitutions, substitutions)
+        )
+
+      assert_receive {:request_body, body}
+
+      outputs = Enum.filter(body["input"], &(&1["type"] == "function_call_output"))
+
+      assert Enum.map(outputs, &{&1["call_id"], &1["output"]}) == [
+               {"old_1", "digest a"},
+               {"old_2", "raw b"},
+               {"fresh", "fresh raw"}
+             ]
+
+      assert length(body["input"]) == length(prior_input) + 1
     end
 
     test "provider errors say :xai, never :openai" do

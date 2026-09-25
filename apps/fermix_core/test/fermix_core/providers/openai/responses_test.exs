@@ -396,6 +396,98 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
 
       assert turn.content == "Hello user"
     end
+
+    # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: the loop's `call_id => digest` map
+    # rewrites replayed history only; this step's outputs are the loop's own.
+    test "replayed function_call_outputs carry their substitution; this step's do not" do
+      baseline = substitution_continue_input([])
+
+      substituted =
+        substitution_continue_input(
+          tool_result_substitutions: %{"call_a" => "digest a", "call_new" => "digest new"}
+        )
+
+      # History, this step's function_call, its output: nothing added or dropped.
+      assert length(substituted) == length(substitution_prior_input()) + 2
+      assert substituted == List.update_at(baseline, 2, &Map.put(&1, "output", "digest a"))
+      assert Enum.at(substituted, 4)["output"] == "raw b"
+
+      assert List.last(substituted) == %{
+               "type" => "function_call_output",
+               "call_id" => "call_new",
+               "output" => "fresh"
+             }
+    end
+
+    test "an absent or empty substitution map leaves the replayed input as it is today" do
+      baseline = substitution_continue_input([])
+      prior = substitution_prior_input()
+
+      assert substitution_continue_input(tool_result_substitutions: %{}) == baseline
+      assert Enum.take(baseline, length(prior)) == prior |> Jason.encode!() |> Jason.decode!()
+    end
+
+    defp substitution_prior_input do
+      [
+        %{role: "user", content: [%{type: "input_text", text: "Hi"}]},
+        %{
+          "type" => "function_call",
+          "call_id" => "call_a",
+          "name" => "echo",
+          "arguments" => "{}"
+        },
+        %{type: "function_call_output", call_id: "call_a", output: "raw a"},
+        %{
+          "type" => "function_call",
+          "call_id" => "call_b",
+          "name" => "echo",
+          "arguments" => "{}"
+        },
+        %{type: "function_call_output", call_id: "call_b", output: "raw b"}
+      ]
+    end
+
+    defp substitution_continue_input(extra_opts) do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:continue_input, Jason.decode!(body)["input"]})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        input: substitution_prior_input(),
+        output_items: [
+          %{
+            "type" => "function_call",
+            "id" => "fc_new",
+            "call_id" => "call_new",
+            "name" => "echo",
+            "arguments" => "{}"
+          }
+        ],
+        tools: [],
+        capabilities: [capability()]
+      }
+
+      opts =
+        Keyword.merge(
+          [
+            api_key: "sk-test",
+            model: "gpt-5.4-mini",
+            base_url: "https://api.openai.com/v1",
+            req_options: [plug: {Req.Test, __MODULE__}]
+          ],
+          extra_opts
+        )
+
+      {:ok, _turn} =
+        Responses.continue(provider_state, [%{call_id: "call_new", output: "fresh"}], opts)
+
+      assert_receive {:continue_input, input}
+      input
+    end
   end
 
   describe "supports_streaming?/0" do

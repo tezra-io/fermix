@@ -800,6 +800,154 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
     end
   end
 
+  # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: the loop hands continue/3 a map
+  # `call_id => digest`; the adapter swaps the text of the replayed
+  # `tool_result` blocks it names, and nothing else.
+  describe "continue/3 — tool result substitution" do
+    defp capture_continue(provider_state, tool_results, opts) do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:body, Jason.decode!(body)})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} = Messages.continue(provider_state, tool_results, opts)
+      assert_receive {:body, decoded}
+      decoded
+    end
+
+    defp tool_use_block(id),
+      do: %{"type" => "tool_use", "id" => id, "name" => "shell", "input" => %{"command" => "ls"}}
+
+    defp tool_result_block(id, content),
+      do: %{type: "tool_result", tool_use_id: id, content: content}
+
+    # Three replayed tool_result carriers: t1 alone, t2 and t3 sharing a message.
+    defp substitution_history do
+      [
+        %{role: "user", content: [%{type: "text", text: "Hi"}]},
+        %{role: "assistant", content: [tool_use_block("t1")]},
+        %{role: "user", content: [tool_result_block("t1", "raw one")]},
+        %{role: "assistant", content: [tool_use_block("t2"), tool_use_block("t3")]},
+        %{
+          role: "user",
+          content: [tool_result_block("t2", "raw two"), tool_result_block("t3", "raw three")]
+        }
+      ]
+    end
+
+    defp substitution_state(history) do
+      %{
+        system: nil,
+        messages: history,
+        assistant_content: [tool_use_block("t4")],
+        tools: [],
+        capabilities: []
+      }
+    end
+
+    defp json_roundtrip(term), do: term |> Jason.encode!() |> Jason.decode!()
+
+    defp tool_result_ids(messages) do
+      messages
+      |> Enum.flat_map(fn message -> List.wrap(message["content"]) end)
+      |> Enum.filter(&match?(%{"type" => "tool_result"}, &1))
+      |> Enum.map(& &1["tool_use_id"])
+    end
+
+    test "only the mapped replayed tool results carry the substituted text" do
+      history = substitution_history()
+
+      decoded =
+        capture_continue(
+          substitution_state(history),
+          [%{call_id: "t4", output: "fresh"}],
+          chat_opts(tool_result_substitutions: %{"t1" => "digest one", "t3" => "digest three"})
+        )
+
+      messages = decoded["messages"]
+
+      expected_history =
+        history
+        |> List.replace_at(2, %{role: "user", content: [tool_result_block("t1", "digest one")]})
+        |> List.replace_at(4, %{
+          role: "user",
+          content: [tool_result_block("t2", "raw two"), tool_result_block("t3", "digest three")]
+        })
+
+      # Nothing added or dropped: the history, this step's assistant turn, its results.
+      assert length(messages) == length(history) + 2
+      assert Enum.take(messages, length(history)) == json_roundtrip(expected_history)
+      assert tool_result_ids(messages) == ["t1", "t2", "t3", "t4"]
+      assert hd(List.last(messages)["content"])["content"] == "fresh"
+    end
+
+    test "the results this call appends are never substituted, even when mapped" do
+      history = substitution_history()
+
+      decoded =
+        capture_continue(
+          substitution_state(history),
+          [%{call_id: "t4", output: "fresh"}],
+          chat_opts(tool_result_substitutions: %{"t4" => "digest four"})
+        )
+
+      assert Enum.take(decoded["messages"], length(history)) == json_roundtrip(history)
+
+      assert [%{"tool_use_id" => "t4", "content" => "fresh"}] =
+               List.last(decoded["messages"])["content"]
+    end
+
+    test "a text + image carrier keeps its image block and gets one leading text block" do
+      image = %{
+        type: "image",
+        source: %{type: "base64", media_type: "image/png", data: Base.encode64(<<137, 80>>)}
+      }
+
+      carrier_content = [%{type: "text", text: "narration"}, image, %{type: "text", text: "tail"}]
+
+      history = [
+        %{role: "user", content: [%{type: "text", text: "Hi"}]},
+        %{role: "assistant", content: [tool_use_block("shot")]},
+        %{role: "user", content: [tool_result_block("shot", carrier_content)]}
+      ]
+
+      decoded =
+        capture_continue(
+          substitution_state(history),
+          [%{call_id: "t4", output: "fresh"}],
+          chat_opts(tool_result_substitutions: %{"shot" => "digest of the look"})
+        )
+
+      assert [block] = Enum.at(decoded["messages"], 2)["content"]
+      assert block["tool_use_id"] == "shot"
+
+      assert block["content"] == [
+               %{"type" => "text", "text" => "digest of the look"},
+               json_roundtrip(image)
+             ]
+    end
+
+    test "an absent or empty map leaves the request body as it is today" do
+      history = substitution_history()
+      tool_results = [%{call_id: "t4", output: "fresh"}]
+
+      absent = capture_continue(substitution_state(history), tool_results, chat_opts())
+
+      empty =
+        capture_continue(
+          substitution_state(history),
+          tool_results,
+          chat_opts(tool_result_substitutions: %{})
+        )
+
+      assert empty == absent
+      assert Enum.take(absent["messages"], length(history)) == json_roundtrip(history)
+    end
+  end
+
   describe "chat/3 — error handling" do
     test "401 becomes a structured auth error" do
       assert {:error, {:provider_error, error}} =

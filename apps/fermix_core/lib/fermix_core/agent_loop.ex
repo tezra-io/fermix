@@ -13,18 +13,22 @@ defmodule FermixCore.AgentLoop do
 
   require Logger
 
+  alias FermixCore.Agents.ToolResultDigest
+  alias FermixCore.Agents.ToolResultStore
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Deferral
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.ComputerUse
+  alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.Transient
   alias FermixCore.Telemetry
+  alias FermixCore.Text
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @max_iterations 25
@@ -47,6 +51,23 @@ defmodule FermixCore.AgentLoop do
   # alternative is failing a whole run (or turn) on one transient stall.
   @continuation_retry_attempts 2
   @continuation_retry_backoff_ms 2_000
+
+  # In-loop context compaction (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md). The
+  # step being answered and the @raw_steps before it keep their raw tool
+  # results. Before every continuation the estimated request is held under
+  # the route's budget by digesting older results, oldest step first (§3.4);
+  # a provider refusal runs the recovery ladder (§3.5): at most
+  # @recovery_rounds re-issues of the provider call, each after a reduction
+  # that had candidates, never a tool re-run. Every raw result stays in the
+  # run's ToolResultStore for `tool_result_recall`.
+  @raw_steps 2
+  @recovery_rounds 3
+  @bytes_per_token 4
+  # Wire framing per result (ids, block scaffolding) on top of its text.
+  @frame_overhead_bytes 200
+  # The task excerpt each digest call carries; a long user message must not
+  # ride whole in every summarizer prompt.
+  @task_excerpt_bytes 4_000
 
   @typedoc """
   Channel-streaming events emitted through `stream_callback` (see
@@ -104,6 +125,7 @@ defmodule FermixCore.AgentLoop do
           model: String.t(),
           temperature: float(),
           max_iterations: pos_integer(),
+          context_window: pos_integer(),
           loop_detection_window: pos_integer(),
           loop_detection_warn_threshold: pos_integer(),
           loop_detection_kill_threshold: pos_integer(),
@@ -130,7 +152,17 @@ defmodule FermixCore.AgentLoop do
 
   @spec run(loop_opts()) :: {:ok, loop_result()} | {:error, term()}
   def run(opts) do
-    state = build_state(opts)
+    store = ToolResultStore.new()
+
+    try do
+      run_with_store(opts, store)
+    after
+      ToolResultStore.delete(store)
+    end
+  end
+
+  defp run_with_store(opts, store) do
+    state = build_state(opts, store)
     emit_stream(state, {:session_started, Map.get(state.context, :session_id)})
 
     case initial_chat(state) do
@@ -139,7 +171,7 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
-  defp build_state(opts) do
+  defp build_state(opts, store) do
     capability_registry = Keyword.get(opts, :capability_registry, CapabilityRegistry)
     allowed_tools = Keyword.get(opts, :allowed_tools)
     policy = Keyword.get(opts, :policy)
@@ -149,7 +181,10 @@ defmodule FermixCore.AgentLoop do
     {first_route_key, _first_opts} = hd(routes)
 
     context =
-      stamp_effective_surface(Keyword.get(opts, :context, %{}), trust, policy, allowed_tools)
+      opts
+      |> Keyword.get(:context, %{})
+      |> stamp_effective_surface(trust, policy, allowed_tools)
+      |> Map.put(:tool_result_store, store)
 
     {{capabilities, dispatchable}, capability_duration_us} =
       Telemetry.timed_us(fn ->
@@ -195,6 +230,12 @@ defmodule FermixCore.AgentLoop do
       total_tokens: 0,
       context_tokens: 0,
       tool_failures: 0,
+      store: store,
+      substitutions: %{},
+      not_compressible: MapSet.new(),
+      context_window: Keyword.get(opts, :context_window),
+      last_usage: %{prompt: 0, completion: 0},
+      task: task_excerpt(Keyword.fetch!(opts, :messages)),
       loop_detector: loop_detector_state(opts),
       activity_callback: Keyword.get(opts, :activity_callback),
       stream_callback: Keyword.get(opts, :stream_callback),
@@ -298,9 +339,17 @@ defmodule FermixCore.AgentLoop do
       state
       | adapter: adapter || Adapter.for_route(route_key),
         route_key: route_key,
-        adapter_opts: adapter_opts
+        adapter_opts: adapter_opts,
+        context_window: state.context_window || catalog_window(route_key)
     }
   end
+
+  # An explicit `context_window` (tests, callers that know better) wins over
+  # the catalog; the catalog answers a default for a model it does not know,
+  # quietly: this runs on every route bind, and the unknown-model event
+  # already fires where the model was chosen.
+  defp catalog_window(%{provider: provider, model: model}),
+    do: ModelCatalog.context_window_for(provider, model, unknown_model_telemetry: false)
 
   # The emitted? flag (§5 Streaming Boundary): the loop wraps the stream
   # callback so it KNOWS whether user-visible content was flushed — the
@@ -396,7 +445,8 @@ defmodule FermixCore.AgentLoop do
            bound
            | iteration: bound.iteration + 1,
              total_tokens: bound.total_tokens + turn.usage.total_tokens,
-             context_tokens: peak_context_tokens(bound, turn)
+             context_tokens: peak_context_tokens(bound, turn),
+             last_usage: last_usage(turn)
          }}
 
       {:error, reason} ->
@@ -530,7 +580,8 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp continue_turn(turn, tool_results, warning, state) do
-    with {:ok, next_turn, state} <-
+    with {:ok, state} <- keep_within_budget(tool_results, state),
+         {:ok, next_turn, state} <-
            continuation_call(turn.provider_state, tool_results, warning, state) do
       continue_until_terminal(next_turn, state)
     end
@@ -574,8 +625,8 @@ defmodule FermixCore.AgentLoop do
     start = System.monotonic_time(:millisecond)
     emit_stream(state, {:iteration_started, state.iteration + 1})
 
-    case continue_with_retry(provider_state, tool_results, state) do
-      {:ok, next_turn} ->
+    case continue_or_recover(provider_state, tool_results, state) do
+      {:ok, next_turn, state} ->
         emit_activity(state, :provider_response)
         duration_ms = System.monotonic_time(:millisecond) - start
         emit_telemetry(state.iteration + 1, duration_ms, next_turn.tool_calls != [])
@@ -585,7 +636,8 @@ defmodule FermixCore.AgentLoop do
            state
            | iteration: state.iteration + 1,
              total_tokens: state.total_tokens + next_turn.usage.total_tokens,
-             context_tokens: peak_context_tokens(state, next_turn)
+             context_tokens: peak_context_tokens(state, next_turn),
+             last_usage: last_usage(next_turn)
          }}
 
       {:error, reason} ->
@@ -608,11 +660,13 @@ defmodule FermixCore.AgentLoop do
   defp continue_with_retry(provider_state, tool_results, state) do
     emitted_before = stream_content_count(state.stream)
 
+    adapter_opts = continuation_opts(state)
+
     Failover.run_chain(
-      [{state.route_key, state.adapter_opts}],
+      [{state.route_key, adapter_opts}],
       fn _route ->
         emit_activity(state, :provider_start)
-        state.adapter.continue(provider_state, tool_results, state.adapter_opts)
+        state.adapter.continue(provider_state, tool_results, adapter_opts)
       end,
       eligible?: fn _reason -> false end,
       retryable?: fn reason ->
@@ -651,6 +705,343 @@ defmodule FermixCore.AgentLoop do
 
   defp continuation_transient?(_reason), do: false
 
+  # --- In-loop context compaction (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md) ---
+
+  # The substitution map rides only when it has entries, so a run that never
+  # compacts sends byte-identical adapter opts.
+  defp continuation_opts(%{substitutions: subs} = state) when map_size(subs) == 0,
+    do: state.adapter_opts
+
+  defp continuation_opts(state),
+    do: Keyword.put(state.adapter_opts, :tool_result_substitutions, state.substitutions)
+
+  defp last_usage(%{usage: usage}) do
+    %{
+      prompt: Map.get(usage, :prompt_tokens, 0),
+      completion: Map.get(usage, :completion_tokens, 0)
+    }
+  end
+
+  # §3.4: the next request is the last one the provider measured, plus the
+  # reply it produced, plus the results about to be appended. Held under
+  # `threshold × context_window` by digesting older results, oldest step
+  # first. Images are not estimated; screenshot retention bounds them.
+  defp keep_within_budget(tool_results, state) do
+    estimate = context_estimate(tool_results, state)
+    budget = context_budget(state)
+
+    if estimate <= budget, do: {:ok, state}, else: reduce_to_budget(state, estimate, budget)
+  end
+
+  defp context_estimate(tool_results, state) do
+    new_bytes =
+      Enum.reduce(tool_results, 0, fn %{output: output}, acc ->
+        acc + byte_size(to_string(output)) + @frame_overhead_bytes
+      end)
+
+    state.last_usage.prompt + state.last_usage.completion + div(new_bytes, @bytes_per_token)
+  end
+
+  defp context_budget(%{context_window: window}) when is_integer(window) and window > 0,
+    do: trunc(CompactionConfig.threshold() * window)
+
+  # One step per pass; a substituted or not-compressible result leaves the
+  # candidate set, so the passes are bounded by the eligible steps.
+  defp reduce_to_budget(state, estimate, budget) do
+    case oldest_eligible_step(state) do
+      [] -> {:ok, state}
+      batch -> reduce_step_to_budget(batch, state, estimate, budget)
+    end
+  end
+
+  defp reduce_step_to_budget(batch, state, estimate, budget) do
+    with {:ok, state, saved_bytes} <- digest_entries(batch, :budget, state) do
+      estimate = estimate - div(saved_bytes, @bytes_per_token)
+      if estimate <= budget, do: {:ok, state}, else: reduce_to_budget(state, estimate, budget)
+    end
+  end
+
+  defp oldest_eligible_step(state) do
+    oldest_raw = oldest_raw_step(state)
+    older = eligible_entries(state, fn entry -> entry.step < oldest_raw end)
+
+    case Enum.min_by(older, & &1.step, fn -> nil end) do
+      nil -> []
+      %{step: step} -> Enum.filter(older, &(&1.step == step))
+    end
+  end
+
+  # The step being answered carries `state.iteration`; it and the @raw_steps
+  # before it stay raw.
+  defp oldest_raw_step(state), do: state.iteration - @raw_steps
+
+  # Metadata only; a body is fetched when its entry is chosen.
+  defp eligible_entries(state, predicate) do
+    state.store
+    |> ToolResultStore.index()
+    |> Enum.filter(fn meta ->
+      meta.bytes > ToolResultDigest.target_bytes() and
+        not Map.has_key?(state.substitutions, meta.call_id) and
+        not MapSet.member?(state.not_compressible, meta.call_id) and
+        predicate.(meta)
+    end)
+  end
+
+  # §3.5: a refusal re-issues the provider call after the next reduction that
+  # has candidates: older than the raw window, then the raw window, then the
+  # step being answered (its raw text is in the store, and a digest is the
+  # only way it can reach the model at all). Never a tool re-run. Only a call
+  # that streamed nothing is re-issued, exactly like the transient retry.
+  # Round 0 is the ordinary continuation; rounds 1..@recovery_rounds each
+  # follow one reduction.
+  defp continue_or_recover(provider_state, tool_results, state),
+    do: attempt_continuation(provider_state, tool_results, state, 0)
+
+  defp attempt_continuation(provider_state, tool_results, state, round) do
+    emitted_before = stream_content_count(state.stream)
+
+    case continue_with_retry(provider_state, tool_results, state) do
+      {:ok, next_turn} ->
+        note_round(state, round, :recovered)
+        {:ok, next_turn, state}
+
+      {:error, :context_length_exceeded} ->
+        note_round(state, round, :refused_again)
+        refused(provider_state, tool_results, state, emitted_before, round + 1)
+
+      {:error, reason} ->
+        note_round(state, round, :error)
+        {:error, reason}
+    end
+  end
+
+  defp note_round(_state, 0, _outcome), do: :ok
+  defp note_round(state, round, outcome), do: emit_recovery(state, round, outcome)
+
+  defp refused(_provider_state, _tool_results, _state, _emitted_before, round)
+       when round > @recovery_rounds,
+       do: {:error, :context_overflow_after_compaction}
+
+  defp refused(provider_state, tool_results, state, emitted_before, round) do
+    if stream_content_count(state.stream) == emitted_before,
+      do: recovery_round(provider_state, tool_results, state, round),
+      else: {:error, :context_length_exceeded}
+  end
+
+  defp recovery_round(provider_state, tool_results, state, round) do
+    case next_reduction(tool_results, state) do
+      :nothing_left ->
+        emit_recovery(state, round, :nothing_left)
+        {:error, :context_overflow_after_compaction}
+
+      {:error, reason} ->
+        emit_recovery(state, round, :digest_failed)
+        {:error, reason}
+
+      {:ok, state} ->
+        attempt_continuation(
+          provider_state,
+          substitute_results(tool_results, state),
+          state,
+          round
+        )
+    end
+  end
+
+  defp next_reduction(tool_results, state) do
+    current = MapSet.new(tool_results, & &1.call_id)
+    oldest_raw = oldest_raw_step(state)
+
+    candidates =
+      Enum.find_value(
+        [
+          fn entry -> entry.step < oldest_raw end,
+          fn entry -> entry.step >= oldest_raw and not MapSet.member?(current, entry.call_id) end,
+          fn entry -> MapSet.member?(current, entry.call_id) end
+        ],
+        fn predicate -> non_empty(eligible_entries(state, predicate)) end
+      )
+
+    case candidates do
+      nil ->
+        :nothing_left
+
+      batch ->
+        with {:ok, state, _saved} <- digest_entries(batch, :recovery, state), do: {:ok, state}
+    end
+  end
+
+  defp non_empty([]), do: nil
+  defp non_empty(entries), do: entries
+
+  # The step being answered is substituted by the loop itself: adapters only
+  # substitute their replayed history.
+  defp substitute_results(tool_results, %{substitutions: subs}) do
+    Enum.map(tool_results, fn %{call_id: call_id} = result ->
+      case Map.fetch(subs, call_id) do
+        {:ok, text} -> %{result | output: text}
+        :error -> result
+      end
+    end)
+  end
+
+  # One reduction: digest every entry of `batch`, stop at the first digest
+  # failure. Returns the state with the substitutions and the bytes saved;
+  # the event fires only when something was actually substituted.
+  defp digest_entries(batch, trigger, state) do
+    empty_tally = %{results: 0, before: 0, after: 0}
+
+    case Enum.reduce_while(batch, {:ok, state, empty_tally}, &digest_into/2) do
+      {:ok, state, %{results: 0}} ->
+        {:ok, state, 0}
+
+      {:ok, state, tally} ->
+        emit_compaction(state, trigger, tally)
+        {:ok, state, tally.before - tally.after}
+
+      {:error, {:digest_failed, reason}} ->
+        {:error, {:context_recovery_failed, reason}}
+    end
+  end
+
+  defp digest_into(entry, {:ok, state, tally}) do
+    case digest_entry(entry, state) do
+      {:ok, state, delta} -> {:cont, {:ok, state, add_tally(tally, delta)}}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  defp digest_entry(meta, state) do
+    {:ok, entry} = ToolResultStore.fetch(state.store, meta.call_id)
+
+    case ToolResultDigest.digest(entry.output, digest_opts(entry, state)) do
+      {:ok, digest, tokens} ->
+        substitute_if_shorter(entry, digest_text(entry, digest, state), tokens, state)
+
+      {:not_compressible, tokens} ->
+        {:ok, mark_not_compressible(entry, tokens, state), no_tally()}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
+  # The rule is "never larger than what it replaces", judged on the text that
+  # will actually ride in the transcript: digest plus its frames.
+  defp substitute_if_shorter(entry, text, tokens, state) when byte_size(text) < entry.bytes do
+    state = %{
+      state
+      | substitutions: Map.put(state.substitutions, entry.call_id, text),
+        total_tokens: state.total_tokens + tokens
+    }
+
+    {:ok, state, %{results: 1, before: entry.bytes, after: byte_size(text)}}
+  end
+
+  defp substitute_if_shorter(entry, _text, tokens, state),
+    do: {:ok, mark_not_compressible(entry, tokens, state), no_tally()}
+
+  defp mark_not_compressible(entry, tokens, state) do
+    %{
+      state
+      | not_compressible: MapSet.put(state.not_compressible, entry.call_id),
+        total_tokens: state.total_tokens + tokens
+    }
+  end
+
+  defp no_tally, do: %{results: 0, before: 0, after: 0}
+
+  defp digest_opts(entry, state) do
+    [
+      task: state.task,
+      tool_name: entry.tool_name,
+      adapter: state.adapter,
+      route: {state.route_key, state.adapter_opts},
+      context_window: state.context_window,
+      before_call: fn -> emit_activity(state, :provider_start) end,
+      retry_delay_fn: state.retry_delay_fn
+    ]
+  end
+
+  # The digest frame names the call id so the model can read the original
+  # back, but only on a run that can actually call the recall tool (a
+  # tool-narrowed job or a confined worker may not); the digest itself is
+  # framed as untrusted when the result was.
+  defp digest_text(entry, digest, state) do
+    "[digest of a #{entry.bytes}-byte result from #{entry.tool_name} (call_id " <>
+      "#{entry.call_id}), compressed to keep the context within budget. Facts, numbers, " <>
+      "ids, URLs and error lines were kept; " <>
+      recall_advice(entry, state) <> "]\n" <> ToolResultStore.frame(entry, digest)
+  end
+
+  defp recall_advice(entry, state) do
+    if recall_available?(state),
+      do: "for anything else, or for exact totals, use tool_result_recall on #{entry.call_id}.",
+      else: "the rest of this result is not retrievable on this run."
+  end
+
+  defp recall_available?(state) do
+    Map.has_key?(state.capabilities_by_name, "tool_result_recall") and
+      capability_allowed?("tool_result_recall", state.allowed_tools)
+  end
+
+  defp add_tally(tally, delta) do
+    %{
+      results: tally.results + delta.results,
+      before: tally.before + delta.before,
+      after: tally.after + delta.after
+    }
+  end
+
+  defp task_excerpt(messages) do
+    messages
+    |> Enum.reverse()
+    |> Enum.find_value("", fn
+      %{role: "user", content: content} -> content_text(content)
+      _message -> nil
+    end)
+    |> Text.truncate_utf8(@task_excerpt_bytes)
+  end
+
+  defp content_text(content) when is_binary(content), do: content
+
+  defp content_text(parts) when is_list(parts) do
+    Enum.map_join(parts, "\n", fn
+      %{text: text} when is_binary(text) -> text
+      %{"text" => text} when is_binary(text) -> text
+      _part -> ""
+    end)
+  end
+
+  defp content_text(_content), do: ""
+
+  defp emit_compaction(state, trigger, tally) do
+    :telemetry.execute(
+      [:fermix, :agent_loop, :context_compaction],
+      %{count: 1, results: tally.results, bytes_before: tally.before, bytes_after: tally.after},
+      Map.merge(loop_event_meta(state), %{level: 1, trigger: trigger})
+    )
+
+    :ok
+  end
+
+  defp emit_recovery(state, round, outcome) do
+    :telemetry.execute(
+      [:fermix, :agent_loop, :context_recovery],
+      %{count: 1},
+      Map.merge(loop_event_meta(state), %{round: round, outcome: outcome})
+    )
+  end
+
+  defp loop_event_meta(state) do
+    state.context
+    |> Telemetry.correlation()
+    |> Map.merge(%{
+      agent: to_string(context_agent(state.context) || "unknown"),
+      iteration: state.iteration
+    })
+  end
+
   # At most ONE `:channel`-category call executes per iteration: the first one.
   # Every later one comes back as an error tool result the MODEL reads and can
   # act on, and non-channel calls in the same batch run normally, in order.
@@ -679,10 +1070,12 @@ defmodule FermixCore.AgentLoop do
   end
 
   defp executed_outcome(tool_call, state) do
-    %{output: output, images: images, terminal: terminal, status: status} =
+    %{output: output, images: images, terminal: terminal, status: status, external?: external?} =
       run_tool_call(tool_call, state)
 
-    {build_tool_result(tool_call.call_id, sanitize_tool_output(output), images), terminal, status}
+    output = sanitize_tool_output(output)
+    record_tool_result(state, tool_call, output, external?)
+    {build_tool_result(tool_call.call_id, output, images), terminal, status}
   end
 
   # Not executed, so no `:tool_start`/`:tool_finish` activity — but it IS one
@@ -694,7 +1087,21 @@ defmodule FermixCore.AgentLoop do
         "`#{name}` was not executed. Call it again in your next step."
 
     %{output: output} = trace_unexecuted(name, tool_call.arguments, message, state)
-    {build_tool_result(call_id, sanitize_tool_output(output), []), false, :error}
+    output = sanitize_tool_output(output)
+    record_tool_result(state, tool_call, output, false)
+    {build_tool_result(call_id, output, []), false, :error}
+  end
+
+  # Every result the model receives is kept for the run (§3.1), under the
+  # step whose tool calls produced it, before the provider sees it.
+  defp record_tool_result(state, %{call_id: call_id, name: name}, output, external?) do
+    ToolResultStore.put(state.store, %{
+      call_id: call_id,
+      step: state.iteration,
+      tool_name: name,
+      output: to_string(output),
+      external?: external?
+    })
   end
 
   # A turn ends without a continuation LLM call only when its ONE tool call was a
@@ -763,7 +1170,7 @@ defmodule FermixCore.AgentLoop do
   # the provider), carried so the `:tool_finish` activity event reports the real
   # outcome instead of a caller re-deriving it from the output text.
   defp text_result(output, status) when is_binary(output) and status in [:ok, :error],
-    do: %{output: output, images: [], terminal: false, status: status}
+    do: %{output: output, images: [], terminal: false, status: status, external?: false}
 
   defp invoke_capability(name, arguments, state) do
     if capability_allowed?(name, state.allowed_tools) do
@@ -804,7 +1211,15 @@ defmodule FermixCore.AgentLoop do
   defp capability_allowed?(_name, nil), do: true
   defp capability_allowed?(name, allowed) when is_list(allowed), do: name in allowed
 
+  # `external?` rides every outcome so the store can frame a digest or a
+  # recalled slice of the result the way the original was framed.
   defp dispatch_capability(%Capability{} = capability, arguments, context) do
+    capability
+    |> dispatch_capability_result(arguments, context)
+    |> Map.put(:external?, UntrustedContent.external?(capability))
+  end
+
+  defp dispatch_capability_result(%Capability{} = capability, arguments, context) do
     case Capability.execute(capability, arguments, context) do
       {:ok, %{success: true, output: output} = result} ->
         %{

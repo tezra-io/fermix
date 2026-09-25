@@ -5,6 +5,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -2260,7 +2261,9 @@ defmodule FermixCore.Jobs.RunnerTest do
         Keyword.take(opts, [
           :max_transient_attempts,
           :transient_backoff_ms,
-          :max_transient_retry_ms
+          :max_transient_retry_ms,
+          :delivery_adapter,
+          :delivery_opts
         ])
 
       # Own the exit observation from the spawn: see assert_runner_exits_normally.
@@ -2268,6 +2271,107 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       {:ok, pid} = Runner.start_link(base ++ overrides)
       assert_receive {:EXIT, ^pid, :normal}, 2_000
+    end
+  end
+
+  # A failed run's delivered text leads with a sentence the owner can act on;
+  # the raw reason follows as detail, and the ledger keeps the machine-readable
+  # reason exactly as before.
+  describe "failure delivery text" do
+    test "an error run leads with the job sentence and keeps the raw reason as detail", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Overflow Check",
+                 task_prompt: "Read every log.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: :context_overflow_after_compaction]
+      )
+
+      sentence = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :job)
+      assert sentence =~ "smaller jobs"
+
+      assert_receive {:delivery_send, "123", text, _opts}
+
+      assert text ==
+               """
+               Scheduled job "Overflow Check" finished with error.
+               #{sentence}
+
+               Run ID: #{run.id}
+               Detail: :context_overflow_after_compaction
+               """
+               |> String.trim()
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
+      assert stored_run.error == ":context_overflow_after_compaction"
+      assert stored_run.delivery_status == "sent"
+
+      assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
+      assert updated_job.last_error == ":context_overflow_after_compaction"
+
+      artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
+      assert artifact =~ "## Error\n\n#{sentence}\n\nDetail: :context_overflow_after_compaction\n"
+    end
+
+    test "a timeout run's delivered text is unchanged", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Timeout Delivery Check",
+                 task_prompt: "This adapter will stop responding.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        inactivity_timeout_ms: 20,
+        adapter_opts: [sleep_ms: 200],
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "too late"}]
+      )
+
+      assert_receive {:delivery_send, "123", text, _opts}
+
+      assert text ==
+               """
+               Scheduled job "Timeout Delivery Check" finished with timeout.
+
+               Run ID: #{run.id}
+               Error: inactivity timeout after 20ms
+               """
+               |> String.trim()
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "timeout"
+      assert stored_run.error == "inactivity timeout after 20ms"
+
+      artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
+      assert artifact =~ "## Error\n\ninactivity timeout after 20ms\n"
     end
   end
 

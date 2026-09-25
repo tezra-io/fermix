@@ -330,6 +330,39 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["ms"] == 30_000
   end
 
+  test "agent_loop:context_compaction and :context_recovery events create agent_event traces",
+       %{dir: dir, server: server} do
+    :telemetry.execute(
+      [:fermix, :agent_loop, :context_compaction],
+      %{count: 1, results: 2, bytes_before: 24_000, bytes_after: 900},
+      %{agent: "main", session_id: "s_1", iteration: 4, level: 1, trigger: :budget}
+    )
+
+    :telemetry.execute(
+      [:fermix, :agent_loop, :context_recovery],
+      %{count: 1},
+      %{agent: "main", session_id: "s_1", iteration: 4, round: 1, outcome: :recovered}
+    )
+
+    sync(server)
+
+    entries = read_entries(dir, :agent_event)
+    compaction = find_entry!(entries, &(&1["event"] == "context_compaction"))
+    assert compaction["agent"] == "main"
+    assert compaction["session_id"] == "s_1"
+    assert compaction["iteration"] == 4
+    assert compaction["level"] == 1
+    assert compaction["trigger"] == "budget"
+    assert compaction["results"] == 2
+    assert compaction["bytes_before"] == 24_000
+    assert compaction["bytes_after"] == 900
+
+    recovery = find_entry!(entries, &(&1["event"] == "context_recovery"))
+    assert recovery["agent"] == "main"
+    assert recovery["round"] == 1
+    assert recovery["outcome"] == "recovered"
+  end
+
   test "channel:message event creates channel_msg trace", %{dir: dir, server: server} do
     :telemetry.execute(
       [:fermix, :channel, :message],

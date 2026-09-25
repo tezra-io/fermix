@@ -108,3 +108,33 @@ scenarios:
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: "Identifies test/support/safe_rm.ex and grounded SafeRm references in tests/docs; a denial or invented match fails."
+
+  - id: large_result_planted_facts
+    title: "Reads a file larger than one result can hold and reports planted facts"
+    # A 450 KB ledger the file_read cap forces into several reads. The turn must
+    # end with the exact planted facts in the reply: the answer is judged on
+    # correctness, not on the absence of a failure sentence. On a large-window
+    # model this exercises the result store without triggering compaction; the
+    # compaction path itself is proven by ExUnit and the owner's live smoke
+    # (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md §6).
+    severity: normal
+    tags: [files, read, context]
+    cases:
+      - id: flagged_invoice_and_error_line
+        query: "In __EVAL_REPO_ROOT__/benchmark/suites/fixtures/context/ledger_large.txt there is one line marked FLAGGED and one ERROR line. Tell me the invoice number and total on the FLAGGED line, and what the ERROR line says."
+        expect:
+          tools_any: [file_read, content_search]
+          reply_matches: "(?s)(?=.*INV-4471)(?=.*1284\\.50)(?=.*node-7)"
+          reply_not_matches: "(?i)larger than the model's context window"
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: "Reports invoice INV-4471 with total 1284.50 from the FLAGGED line, and the ERROR line about the disk quota exceeded on node-7 (job 8812), read from the file rather than guessed."
+      - id: vendor_count_and_error_date
+        query: "Using __EVAL_REPO_ROOT__/benchmark/suites/fixtures/context/ledger_large.txt: how many lines have vendor Tailspin, and what date is on the ERROR line?"
+        expect:
+          tools_any: [content_search, shell, file_read]
+          reply_matches: "(?s)(?=.*\\b950\\b)(?=.*2026-03-29)"
+          reply_not_matches: "(?i)larger than the model's context window"
+          max_cost_usd: 1.5
+          max_duration_ms: 180000
+        rubric: "Gives exactly 950 as the number of Tailspin lines and 2026-03-29 as the ERROR line's date, computed from the file (a search or a count over the file, not an estimate from a partial read)."

@@ -88,7 +88,11 @@ defmodule FermixCore.Providers.XAI.Responses do
     } = provider_state
 
     outputs = ResponsesShared.build_function_call_outputs(tool_results)
-    next_input = prior_input ++ output_items ++ outputs
+    substitutions = Keyword.get(opts, :tool_result_substitutions, %{})
+
+    next_input =
+      ResponsesShared.substitute_tool_results(prior_input, substitutions) ++
+        output_items ++ outputs
 
     body = build_body(model, next_input, nil, tools, opts)
 

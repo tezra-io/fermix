@@ -187,6 +187,48 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # Returns a result well above the digest target (12,000 bytes of numbered
+  # rows), so it is a compaction candidate once it ages out of the raw window.
+  defmodule BigTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "big_tool"
+    @impl true
+    def description, do: "Returns a large result"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    def output, do: Enum.map_join(1..600, "\n", &"row #{&1}: value #{&1 * 7}")
+
+    @impl true
+    def execute(_args, _ctx) do
+      send(self(), :big_tool_executed)
+      {:ok, Tool.success(output())}
+    end
+  end
+
+  # Reports the run's stored results (call ids and steps) to the test.
+  defmodule StoreProbeTool do
+    @behaviour Tool
+
+    alias FermixCore.Agents.ToolResultStore
+
+    @impl true
+    def name, do: "store_probe"
+    @impl true
+    def description, do: "Reports the store"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{}}
+
+    @impl true
+    def execute(_args, ctx) do
+      store = Map.fetch!(ctx, :tool_result_store)
+      send(self(), {:store_probe, store, ToolResultStore.entries(store)})
+      {:ok, Tool.success("probed")}
+    end
+  end
+
   # -- Helpers --
 
   defp turn(content, opts \\ []) do
@@ -2597,6 +2639,379 @@ defmodule FermixCore.AgentLoopTest do
 
       assert_received {:chat, :continue_fail}
       refute_received {:chat, :recovering}
+    end
+  end
+
+  # -- In-loop context compaction (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md) --
+
+  describe "run/1 in-loop context compaction" do
+    # Four big-tool steps; results become compaction candidates only once they
+    # are older than the step being answered and the two before it.
+    # Distinct arguments per step keep the repeated-call loop detector quiet.
+    defp big_step(n, opts \\ []) do
+      calls = [tool_call("call_#{n}", "big_tool", %{"step" => n})]
+      turn("", Keyword.merge([tool_calls: calls], opts))
+    end
+
+    defp four_big_steps(last_opts \\ []) do
+      [big_step(1), big_step(2), big_step(3), big_step(4, last_opts)]
+    end
+
+    defp digest_calls,
+      do: Enum.filter(mock_calls(), fn {_m, _c, opts} -> opts[:agent] == "tool_result_digest" end)
+
+    defp substitutions_of({_state, _results, opts}),
+      do: Keyword.get(opts, :tool_result_substitutions)
+
+    defp attach_loop_events do
+      test_pid = self()
+      handler_id = "test-loop-events-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach_many(
+        handler_id,
+        [[:fermix, :agent_loop, :context_compaction], [:fermix, :agent_loop, :context_recovery]],
+        fn event, measurements, metadata, _config ->
+          if self() == test_pid, do: send(test_pid, {:loop_event, event, measurements, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+    end
+
+    test "a run that never nears the budget makes no digest call and sends byte-identical opts",
+         %{registry: registry} do
+      register_caps(registry, [BigTool])
+      set_mock_responses(four_big_steps() ++ [turn("done")])
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert digest_calls() == []
+      assert Enum.all?(mock_continues(), &is_nil(substitutions_of(&1)))
+    end
+
+    test "digests results older than the raw window when the estimate exceeds the budget",
+         %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [BigTool, FermixCore.Tools.ToolResultRecall])
+      # 40,000-token window → 34,000-token budget, and one result is one
+      # summarizer chunk. The first three continuations estimate ~3,000 tokens;
+      # the fourth reports 40,000 already used, so the oldest step past the raw
+      # window (step 1) is digested before the call.
+      set_mock_responses(four_big_steps(total_tokens: 40_000) ++ [turn("DIGEST-1"), turn("done")])
+
+      assert {:ok, result} = run_loop(capability_registry: registry, context_window: 40_000)
+
+      assert [{[system, user], [], digest_opts}] = digest_calls()
+      assert system.content =~ "Output only the digest"
+      assert user.content =~ "hello"
+      assert user.content =~ "big_tool (part 1 of 1)"
+      refute Keyword.has_key?(digest_opts, :stream_callback)
+      assert digest_opts[:model] == "mock"
+
+      [c1, c2, c3, c4] = mock_continues()
+      assert Enum.all?([c1, c2, c3], &is_nil(substitutions_of(&1)))
+      assert %{"call_1" => text} = substitutions_of(c4)
+      assert map_size(substitutions_of(c4)) == 1
+      big_bytes = byte_size(BigTool.output())
+      assert text =~ "[digest of a #{big_bytes}-byte result from big_tool (call_id call_1)"
+      assert text =~ "tool_result_recall on call_1"
+      assert String.ends_with?(text, "DIGEST-1")
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_compaction],
+                       %{
+                         count: 1,
+                         results: 1,
+                         bytes_before: ^big_bytes,
+                         bytes_after: after_bytes
+                       }, %{agent: "test", iteration: 4, level: 1, trigger: :budget}}
+
+      assert after_bytes == byte_size(text)
+      # the digest call's tokens count toward the run
+      assert result.total_tokens == 3 * 10 + 40_000 + 10 + 10
+    end
+
+    test "a digest no shorter than its result marks it not compressible, once",
+         %{registry: registry} do
+      register_caps(registry, [BigTool])
+
+      # The digest is shorter than the raw result, but with its frame it is
+      # not: the rule is judged on what would ride in the transcript.
+      nearly_raw = String.duplicate("x", byte_size(BigTool.output()) - 100)
+
+      set_mock_responses(
+        four_big_steps(total_tokens: 40_000) ++
+          [turn(nearly_raw), big_step(5, total_tokens: 40_000), turn("D2"), turn("done")]
+      )
+
+      assert {:ok, _result} = run_loop(capability_registry: registry, context_window: 40_000)
+
+      # step 4's budget check digests step 1 and gets a longer text back; step
+      # 5's check skips it and digests step 2, now the oldest past the window
+      assert length(digest_calls()) == 2
+      [_c1, _c2, _c3, c4, c5] = mock_continues()
+      assert is_nil(substitutions_of(c4))
+      assert Map.keys(substitutions_of(c5)) == ["call_2"]
+    end
+
+    test "a refusal runs the recovery ladder and re-issues only the provider call",
+         %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [BigTool, SpyTool])
+
+      set_mock_responses([
+        big_step(1),
+        big_step(2),
+        big_step(3),
+        turn("",
+          tool_calls: [
+            tool_call("call_4", "big_tool", %{}),
+            tool_call("call_spy", "spy_tool", %{})
+          ]
+        ),
+        {:error, :context_length_exceeded},
+        turn("D1"),
+        {:error, :context_length_exceeded},
+        turn("D2"),
+        turn("D3"),
+        turn("recovered")
+      ])
+
+      assert {:ok, %{response: "recovered"}} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      # every tool ran exactly once: recovery re-issues the provider call only
+      assert_received :spy_tool_executed
+      refute_received :spy_tool_executed
+      for _ <- 1..4, do: assert_received(:big_tool_executed)
+      refute_received :big_tool_executed
+
+      assert [_c1, _c2, _c3, refused, round1, round2] = mock_continues()
+      assert is_nil(substitutions_of(refused))
+      assert Map.keys(substitutions_of(round1)) == ["call_1"]
+      assert Map.keys(substitutions_of(round2)) |> Enum.sort() == ["call_1", "call_2", "call_3"]
+
+      # the step being answered stays raw through both rounds
+      {_state, round2_results, _opts} = round2
+      assert Enum.map(round2_results, & &1.call_id) == ["call_4", "call_spy"]
+      assert hd(round2_results).output =~ "row 600"
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_compaction], _,
+                       %{trigger: :recovery, level: 1}}
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_recovery], %{count: 1},
+                       %{round: 1, outcome: :refused_again, iteration: 4}}
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_recovery], %{count: 1},
+                       %{round: 2, outcome: :recovered}}
+    end
+
+    test "the third round digests the step being answered; a further refusal fails loud",
+         %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [BigTool])
+
+      set_mock_responses(
+        four_big_steps() ++
+          [
+            {:error, :context_length_exceeded},
+            turn("D1"),
+            {:error, :context_length_exceeded},
+            turn("D2"),
+            turn("D3"),
+            {:error, :context_length_exceeded},
+            turn("D4"),
+            {:error, :context_length_exceeded}
+          ]
+      )
+
+      assert {:error, :context_overflow_after_compaction} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert [_c1, _c2, _c3, _refused, _round1, _round2, round3] = mock_continues()
+      {_state, [result], opts} = round3
+      assert result.call_id == "call_4"
+
+      assert result.output =~
+               "[digest of a #{byte_size(BigTool.output())}-byte result from big_tool (call_id call_4)"
+
+      assert String.ends_with?(result.output, "D4")
+
+      assert Map.keys(Keyword.fetch!(opts, :tool_result_substitutions)) |> Enum.sort() ==
+               ["call_1", "call_2", "call_3", "call_4"]
+
+      for round <- 1..3 do
+        assert_received {:loop_event, [:fermix, :agent_loop, :context_recovery], _,
+                         %{round: ^round, outcome: :refused_again}}
+      end
+    end
+
+    test "nothing left to compress fails loud without a re-issue", %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [EchoTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "echo", %{"text" => "hi"})]),
+        {:error, :context_length_exceeded}
+      ])
+
+      assert {:error, :context_overflow_after_compaction} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert length(mock_continues()) == 1
+      assert digest_calls() == []
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_recovery], _,
+                       %{round: 1, outcome: :nothing_left}}
+    end
+
+    test "a failed digest call fails the turn with the provider's reason inside",
+         %{registry: registry} do
+      attach_loop_events()
+      register_caps(registry, [BigTool])
+      reason = {:provider_error, %{kind: :auth, provider: :mock}}
+
+      set_mock_responses(
+        four_big_steps() ++ [{:error, :context_length_exceeded}, {:error, reason}]
+      )
+
+      assert {:error, {:context_recovery_failed, ^reason}} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert length(mock_continues()) == 4
+
+      assert_received {:loop_event, [:fermix, :agent_loop, :context_recovery], _,
+                       %{round: 1, outcome: :digest_failed}}
+    end
+
+    test "content already streamed suppresses the re-issue", %{registry: registry} do
+      register_caps(registry, [BigTool])
+
+      set_mock_responses(
+        four_big_steps() ++
+          [
+            fn opts ->
+              opts[:stream_callback].({:text_delta, "partial"})
+              {:error, :context_length_exceeded}
+            end
+          ]
+      )
+
+      assert {:error, :context_length_exceeded} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 stream_callback: fn _event -> :ok end
+               )
+
+      assert length(mock_continues()) == 4
+      assert digest_calls() == []
+    end
+
+    test "every result is recorded in the store under its step, and the store dies with the run",
+         %{registry: registry} do
+      register_caps(registry, [EchoTool, StoreProbeTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "echo", %{"text" => "hi"})]),
+        turn("", tool_calls: [tool_call("call_2", "store_probe", %{})]),
+        turn("done")
+      ])
+
+      assert {:ok, _result} = run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert_received {:store_probe, store, entries}
+
+      assert [
+               %{
+                 call_id: "call_1",
+                 step: 1,
+                 tool_name: "echo",
+                 output: "Echo: hi",
+                 external?: false
+               }
+             ] =
+               entries
+
+      assert :ets.info(store) == :undefined
+    end
+
+    test "the store is deleted when the run fails", %{registry: registry} do
+      register_caps(registry, [StoreProbeTool])
+
+      set_mock_responses([
+        turn("", tool_calls: [tool_call("call_1", "store_probe", %{})]),
+        {:error, {:provider_error, %{kind: :auth, provider: :mock}}}
+      ])
+
+      assert {:error, _reason} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      assert_received {:store_probe, store, _entries}
+      assert :ets.info(store) == :undefined
+    end
+
+    test "a run that cannot call the recall tool is not pointed at it", %{registry: registry} do
+      register_caps(registry, [BigTool, FermixCore.Tools.ToolResultRecall])
+
+      set_mock_responses(
+        four_big_steps() ++ [{:error, :context_length_exceeded}, turn("D1"), turn("ok")]
+      )
+
+      assert {:ok, _result} =
+               run_loop(
+                 capability_registry: registry,
+                 context_window: 1_000_000,
+                 allowed_tools: ["big_tool"]
+               )
+
+      %{"call_1" => text} = substitutions_of(List.last(mock_continues()))
+      refute text =~ "tool_result_recall"
+      assert text =~ "not retrievable on this run"
+    end
+
+    test "a digest failure on the budget path fails the turn the same way", %{registry: registry} do
+      register_caps(registry, [BigTool])
+      reason = {:provider_error, %{kind: :auth, provider: :mock}}
+      set_mock_responses(four_big_steps(total_tokens: 40_000) ++ [{:error, reason}])
+
+      assert {:error, {:context_recovery_failed, ^reason}} =
+               run_loop(capability_registry: registry, context_window: 40_000)
+    end
+
+    test "the recall tool is advertised and reads a digested result back", %{registry: registry} do
+      register_caps(registry, [BigTool, FermixCore.Tools.ToolResultRecall])
+
+      set_mock_responses(
+        four_big_steps() ++
+          [
+            {:error, :context_length_exceeded},
+            turn("D1"),
+            turn("",
+              tool_calls: [
+                tool_call("call_r", "tool_result_recall", %{
+                  "call_id" => "call_1",
+                  "query" => "row 7:"
+                })
+              ]
+            ),
+            turn("done")
+          ]
+      )
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, context_window: 1_000_000)
+
+      [{_messages, advertised, _opts}] =
+        Enum.reject(mock_calls(), fn {_m, _c, o} -> o[:agent] == "tool_result_digest" end)
+
+      assert "tool_result_recall" in Enum.map(advertised, & &1.name)
+
+      {_state, [recalled], _opts} = List.last(mock_continues())
+      assert recalled.call_id == "call_r"
+      assert recalled.output =~ "7: row 7: value 49"
+      refute recalled.output =~ "row 8:"
     end
   end
 end

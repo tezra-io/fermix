@@ -731,6 +731,19 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
   end
 
+  # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
+  # the recovery rounds after a provider refused a request as too large
+  # ([:fermix, :agent_loop, :context_recovery]): point spans under the run that
+  # was compacting, via the shared session_id (parent_session nests a subagent's
+  # under its delegating turn). session_id nil → place_under no-ops.
+  def apply_event(state, [:fermix, :agent_loop, :context_compaction], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.context_compaction_span(meta, meas, &1))
+  end
+
+  def apply_event(state, [:fermix, :agent_loop, :context_recovery], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.context_recovery_span(meta, meas, &1))
+  end
+
   # Proactive reminder lifecycle ([:fermix, :reminder, :lifecycle]). A reminder
   # delivery is not an agent run — no provider call, no turn, and by design no
   # session_id (M30 §6.4) — so every phase is a point event that becomes its own

@@ -1375,6 +1375,102 @@ defmodule FermixCore.Providers.OpenAI.CodexTest do
       assert is_binary(turn.provider_state.instructions)
       assert turn.provider_state.instructions != ""
     end
+
+    # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: the loop's `call_id => digest` map
+    # rewrites replayed history only; this step's outputs are the loop's own.
+    test "replayed function_call_outputs carry their substitution; this step's do not" do
+      baseline = codex_substitution_input([])
+
+      substituted =
+        codex_substitution_input(
+          tool_result_substitutions: %{"call_a" => "digest a", "call_new" => "digest new"}
+        )
+
+      # History, this step's function_call, its output: nothing added or dropped.
+      assert length(substituted) == length(codex_substitution_prior_input()) + 2
+      assert substituted == List.update_at(baseline, 2, &Map.put(&1, "output", "digest a"))
+      assert Enum.at(substituted, 4)["output"] == "raw b"
+
+      assert List.last(substituted) == %{
+               "type" => "function_call_output",
+               "call_id" => "call_new",
+               "output" => "fresh"
+             }
+    end
+
+    test "an absent or empty substitution map leaves the replayed input as it is today" do
+      baseline = codex_substitution_input([])
+      prior = codex_substitution_prior_input()
+
+      assert codex_substitution_input(tool_result_substitutions: %{}) == baseline
+      assert Enum.take(baseline, length(prior)) == prior |> Jason.encode!() |> Jason.decode!()
+    end
+
+    defp codex_substitution_prior_input do
+      [
+        %{role: "user", content: [%{type: "input_text", text: "Hi"}]},
+        %{
+          "type" => "function_call",
+          "call_id" => "call_a",
+          "name" => "echo",
+          "arguments" => "{}"
+        },
+        %{type: "function_call_output", call_id: "call_a", output: "raw a"},
+        %{
+          "type" => "function_call",
+          "call_id" => "call_b",
+          "name" => "echo",
+          "arguments" => "{}"
+        },
+        %{type: "function_call_output", call_id: "call_b", output: "raw b"}
+      ]
+    end
+
+    defp codex_substitution_input(extra_opts) do
+      test_id = :"codex_substitution_#{System.unique_integer([:positive])}"
+      test_pid = self()
+
+      Req.Test.stub(test_id, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:continue_input, Jason.decode!(body)["input"]})
+
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, terminal_message_sse("ok"))
+      end)
+
+      provider_state = %{
+        input: codex_substitution_prior_input(),
+        output_items: [
+          %{
+            "type" => "function_call",
+            "call_id" => "call_new",
+            "name" => "echo",
+            "arguments" => "{}"
+          }
+        ],
+        tools: [],
+        capabilities: [capability()],
+        instructions: "be terse"
+      }
+
+      opts =
+        Keyword.merge(
+          [
+            access_token: @jwt_with_sub,
+            model: "gpt-5",
+            base_url: "https://chatgpt.test/codex/responses",
+            req_options: [plug: {Req.Test, test_id}]
+          ],
+          extra_opts
+        )
+
+      {:ok, _turn} =
+        Codex.continue(provider_state, [%{call_id: "call_new", output: "fresh"}], opts)
+
+      assert_receive {:continue_input, input}
+      input
+    end
   end
 
   describe "chat/3 — streaming wiring" do

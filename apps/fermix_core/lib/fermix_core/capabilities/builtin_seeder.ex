@@ -66,6 +66,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.MemoryStore,
     FermixCore.Tools.MemoryRecall,
     FermixCore.Tools.RecallActivity,
+    FermixCore.Tools.ToolResultRecall,
     FermixCore.Tools.ScheduleJob,
     FermixCore.Tools.UpdateJob,
     FermixCore.Tools.ListJobs,

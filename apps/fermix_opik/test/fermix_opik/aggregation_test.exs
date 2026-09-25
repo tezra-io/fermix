@@ -187,6 +187,100 @@ defmodule FermixOpik.AggregationTest do
     assert timeout.error_info.exception_type == "Timeout"
   end
 
+  @compaction_event [:fermix, :agent_loop, :context_compaction]
+  @recovery_event [:fermix, :agent_loop, :context_recovery]
+
+  describe "in-loop context compaction" do
+    test "the reporter subscribes to both events" do
+      assert @compaction_event in FermixOpik.Reporter.events()
+      assert @recovery_event in FermixOpik.Reporter.events()
+    end
+
+    test "a compaction and a recovery round nest as point spans under the turn" do
+      {_state, closed} =
+        run([
+          {@compaction_event, %{count: 1, results: 3, bytes_before: 350_000, bytes_after: 12_000},
+           %{session_id: "main-1", agent: "main", iteration: 4, level: 1, trigger: :recovery}},
+          {@recovery_event, %{count: 1},
+           %{session_id: "main-1", agent: "main", iteration: 4, round: 1, outcome: :recovered}},
+          {[:fermix, :agent, :message], %{iterations: 5, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      wrapper = span_named(spans, "agent:main")
+      compaction = span_named(spans, "context_compaction")
+      recovery = span_named(spans, "context_recovery")
+
+      assert compaction.type == "general"
+      assert compaction.parent_span_id == wrapper.id
+      assert compaction.trace_id == trace.id
+
+      assert compaction.metadata == %{
+               agent: "main",
+               iteration: 4,
+               level: 1,
+               trigger: "recovery",
+               results: 3,
+               bytes_before: 350_000,
+               bytes_after: 12_000
+             }
+
+      assert recovery.type == "general"
+      assert recovery.parent_span_id == wrapper.id
+      assert recovery.trace_id == trace.id
+
+      assert recovery.metadata == %{
+               agent: "main",
+               iteration: 4,
+               round: 1,
+               outcome: "recovered"
+             }
+    end
+
+    test "a subagent's compaction hangs off the subagent's wrapper, not the turn's" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :start], %{},
+           %{name: "coder", role: "worker", session_id: "sub-abc", parent_session: "main-1"}},
+          {@compaction_event, %{count: 1, results: 2, bytes_before: 90_000, bytes_after: 4_000},
+           %{
+             session_id: "sub-abc",
+             parent_session: "main-1",
+             agent: "coder",
+             iteration: 2,
+             level: 1,
+             trigger: :budget
+           }},
+          {[:fermix, :agent, :task_complete], %{duration_ms: 800, iterations: 2},
+           %{name: "coder", role: "worker", session_id: "sub-abc", parent_session: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 3, total_tokens: 37},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      sub_wrap = span_named(spans, "subagent:coder")
+      compaction = span_named(spans, "context_compaction")
+
+      assert compaction.parent_span_id == sub_wrap.id
+      assert compaction.trace_id == trace.id
+    end
+
+    test "an event without a session_id opens no trace" do
+      {state, closed} =
+        run([
+          {@recovery_event, %{count: 1},
+           %{agent: "main", iteration: 1, round: 2, outcome: :nothing_left}}
+        ])
+
+      assert closed == []
+      assert map_size(state.sessions) == 0
+      assert map_size(state.traces) == 0
+    end
+  end
+
   test "a main turn becomes one trace with nested llm and tool spans" do
     {_state, closed} =
       run([

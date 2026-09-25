@@ -11,6 +11,7 @@ defmodule FermixCore.Jobs.Runner do
 
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Delivery
   alias FermixCore.Jobs.MediaBridge
@@ -176,7 +177,7 @@ defmodule FermixCore.Jobs.Runner do
 
       {:error, reason} ->
         run = mark_running(state, fallback_loop_input(state, reason))
-        failed_run = mark_failed(%{state | run: run}, "error", inspect(reason))
+        failed_run = mark_failed(%{state | run: run}, "error", reason)
         notify(state.notify, {:job_runner, :completed, failed_run.id, state.job.id})
         {:stop, :normal, %{state | run: failed_run}}
     end
@@ -207,7 +208,7 @@ defmodule FermixCore.Jobs.Runner do
         mark_failed(state, "timeout", reason)
 
       {:error, reason} ->
-        mark_failed(state, "error", inspect(reason))
+        mark_failed(state, "error", reason)
     end
   end
 
@@ -293,11 +294,13 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
-  defp mark_failed(state, status, error) when status in ["error", "timeout"] do
+  defp mark_failed(state, status, reason) when status in ["error", "timeout"] do
     now = DateTime.utc_now()
+    error = persisted_error(status, reason)
+    text = failure_delivery_text(state, status, reason)
 
     {:ok, output_ref} =
-      write_run_artifact(state, "error.md", failure_artifact(state, status, error))
+      write_run_artifact(state, "error.md", failure_artifact(state, status, reason))
 
     attrs =
       state.run
@@ -306,8 +309,7 @@ defmodule FermixCore.Jobs.Runner do
         completed_at: now,
         output_ref: output_ref,
         error: error,
-        delivery_status:
-          Delivery.initial_status(state.job, failure_delivery_text(state, status, error)),
+        delivery_status: Delivery.initial_status(state.job, text),
         updated_at: now
       })
 
@@ -315,8 +317,14 @@ defmodule FermixCore.Jobs.Runner do
     failed_state = %{state | run: run}
     JobTelemetry.run_error(state.job, run, status, error)
     finalize_failed_job(failed_state, status, error)
-    finalize_delivery(failed_state, failure_delivery_text(state, status, error))
+    finalize_delivery(failed_state, text)
   end
+
+  # The ledger's machine-readable reason (run row, job row, telemetry): a
+  # watchdog timeout's reason is already its own sentence; an error keeps the
+  # inspected term.
+  defp persisted_error("timeout", reason) when is_binary(reason), do: reason
+  defp persisted_error("error", reason), do: inspect(reason)
 
   defp finalize_delivery(state, text) do
     case Delivery.deliver_with_timeout(state.job, text, delivery_opts(state)) do
@@ -1181,7 +1189,7 @@ defmodule FermixCore.Jobs.Runner do
     """
   end
 
-  defp failure_artifact(state, status, error) do
+  defp failure_artifact(state, status, reason) do
     """
     # Scheduled Job Failure
 
@@ -1193,19 +1201,40 @@ defmodule FermixCore.Jobs.Runner do
 
     ## Error
 
-    #{error}
+    #{failure_artifact_error(status, reason)}
     """
   end
 
-  defp failure_delivery_text(state, status, error) do
+  defp failure_artifact_error("timeout", reason), do: persisted_error("timeout", reason)
+
+  defp failure_artifact_error("error", reason) do
+    "#{job_error_sentence(reason)}\n\nDetail: #{persisted_error("error", reason)}"
+  end
+
+  defp failure_delivery_text(state, "timeout", reason) do
     """
-    Scheduled job "#{state.job.name}" finished with #{status}.
+    Scheduled job "#{state.job.name}" finished with timeout.
 
     Run ID: #{state.run.id}
-    Error: #{error}
+    Error: #{persisted_error("timeout", reason)}
     """
     |> String.trim()
   end
+
+  # An error leads with a sentence the owner can act on; the raw reason follows
+  # as the detail the ledger keeps.
+  defp failure_delivery_text(state, "error", reason) do
+    """
+    Scheduled job "#{state.job.name}" finished with error.
+    #{job_error_sentence(reason)}
+
+    Run ID: #{state.run.id}
+    Detail: #{persisted_error("error", reason)}
+    """
+    |> String.trim()
+  end
+
+  defp job_error_sentence(reason), do: TurnRunner.error_reply(reason, surface: :job)
 
   defp job_config_snapshot(job, loop_input) do
     %{

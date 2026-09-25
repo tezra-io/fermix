@@ -1486,6 +1486,100 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # In-loop compaction: an overflow inside a turn is not fixed by /new or
+  # /compact (resending repeats it), and a scheduled job has no "message" and no
+  # chat to type a command into, so the surface picks the advice.
+  describe "error_reply/2" do
+    test "a summarizer refusal inside a failed compression names it instead of the generic reply" do
+      reply = TurnRunner.error_reply({:context_recovery_failed, :empty_summary}, surface: :job)
+      assert reply =~ "couldn't compress earlier results"
+      assert reply =~ "empty_summary"
+      refute reply =~ "The run failed with an error"
+    end
+
+    test "the chat surface is the default" do
+      assert TurnRunner.error_reply(:context_length_exceeded, surface: :chat) ==
+               TurnRunner.error_reply(:context_length_exceeded)
+
+      assert TurnRunner.error_reply(:context_length_exceeded, []) ==
+               TurnRunner.error_reply(:context_length_exceeded)
+    end
+
+    test "an overflow after compaction on chat asks for a narrower slice, not /new" do
+      reply = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :chat)
+
+      assert reply ==
+               "That request produced more tool output than the model's context window can " <>
+                 "hold, even after I compressed earlier results. Ask for a narrower slice, " <>
+                 "or split the request."
+
+      refute reply =~ "/new"
+      refute reply =~ "/compact"
+    end
+
+    test "an overflow after compaction on a job asks to narrow or split the job" do
+      reply = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :job)
+
+      assert reply ==
+               "The run's tool results grew larger than the model's context window, even " <>
+                 "after earlier results were compressed. Narrow the task or split it into " <>
+                 "smaller jobs."
+    end
+
+    test "a context-length overflow on a job carries job advice, not chat commands" do
+      reply = TurnRunner.error_reply(:context_length_exceeded, surface: :job)
+
+      assert reply ==
+               "This run's conversation grew larger than the model's context window. " <>
+                 "Narrow the task or split it into smaller jobs."
+
+      assert TurnRunner.error_reply("maximum context length exceeded", surface: :job) == reply
+    end
+
+    test "the generic fallback on a job names the run, not a message" do
+      assert TurnRunner.error_reply("some unexpected failure", surface: :job) ==
+               "The run failed with an error."
+
+      assert TurnRunner.error_reply("some unexpected failure", surface: :chat) ==
+               "Sorry, I encountered an error processing your message."
+    end
+
+    test "a failed compression carries the provider's own sentence on both surfaces" do
+      inner =
+        ProviderError.api(:openai, :openai, 429, %{"error" => %{"message" => "slow down"}})
+
+      for surface <- [:chat, :job] do
+        reply = TurnRunner.error_reply({:context_recovery_failed, inner}, surface: surface)
+
+        assert reply ==
+                 "The context filled and I couldn't compress earlier results: " <>
+                   TurnRunner.error_reply(inner, surface: surface)
+
+        assert reply =~ "rate-limited"
+      end
+    end
+
+    test "a failed compression threads the surface into the inner reason" do
+      assert TurnRunner.error_reply({:context_recovery_failed, "boom"}, surface: :job) ==
+               "The context filled and I couldn't compress earlier results: " <>
+                 "The run failed with an error."
+
+      assert TurnRunner.error_reply({:context_recovery_failed, "boom"}) ==
+               "The context filled and I couldn't compress earlier results: " <>
+                 "Sorry, I encountered an error processing your message."
+    end
+
+    test "an unknown surface or option fails loudly" do
+      assert_raise ArgumentError, fn ->
+        TurnRunner.error_reply(:context_length_exceeded, surface: :voice)
+      end
+
+      assert_raise ArgumentError, fn ->
+        TurnRunner.error_reply(:context_length_exceeded, channel: :job)
+      end
+    end
+  end
+
   # CHANNEL_LONGFORM_PRESENTATION §7: the presentation note rides the same
   # per-turn seam as the date note, spliced ahead of it.
   describe "channel presentation note" do
