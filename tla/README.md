@@ -205,6 +205,7 @@ must equal the `holds` check it covers, and the runner checks this.
 | [harness_delivery](specs/harness_delivery/README.md) | Coding-run outcomes: one terminal write, the inline hand-off versus the delivery worker, and continuations |
 | [reminder_delivery](specs/reminder_delivery/README.md) | Reminders: the single claimer, attempt cap, boot sweep, validity window and duplicate sends |
 | [computer_history](specs/computer_history/README.md) | The capture buffer against pause, `/history off` and purge: M32 invariant 12 |
+| [realtime_session](specs/realtime_session/README.md) | One voice call: how a tool result reaches the next spoken response, and keeping one upstream OpenAI socket across drops and reconnects |
 
 ## Learning TLA+
 
