@@ -32,8 +32,8 @@ make -C tla repin SPECS="turn_queue"    # after committing and re-reading a stal
 make -C tla tests                       # the runner's own tests
 ```
 
-`tla/bin/check.py` takes the same arguments directly. Each spec runs in
-seconds. The exit status is 0 when everything is ok and nothing is stale, and 1
+`tla/bin/check.py` takes the same arguments directly. Each check runs in
+under a minute. The exit status is 0 when everything is ok and nothing is stale, and 1
 otherwise.
 
 ## Reading the results
@@ -200,7 +200,7 @@ must equal the `holds` check it covers, and the runner checks this.
 | Spec | Covers |
 |---|---|
 | [turn_queue](specs/turn_queue/README.md) | One conversation's turn queue: FIFO, `/stop`, crashes, Queue restarts, and how each turn's result reaches ACP, mobile and voice |
-| [job_runs](specs/job_runs/README.md) | Scheduled jobs: the atomic claim, runner finish steps, reconciliation, pause/resume, and delivery |
+| [job_runs](specs/job_runs/README.md) | Scheduled jobs: the atomic claim and settle, reconciliation, owner pause/resume/edit and run now, and delivery |
 | [token_refresh](specs/token_refresh/README.md) | OAuth refresh across per-profile managers, the CLI and `auth.json`: rotation, reuse and logout |
 | [harness_delivery](specs/harness_delivery/README.md) | Coding-run outcomes: one terminal write, the inline hand-off versus the delivery worker, and continuations |
 | [reminder_delivery](specs/reminder_delivery/README.md) | Reminders: the single claimer, attempt cap, boot sweep, validity window and duplicate sends |
