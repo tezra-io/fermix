@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "generated_at": "2026-09-22T01:48:43Z",
+  "generated_at": "2026-09-25T21:39:29Z",
   "plugins": [
     {
       "name": "agentmail",
@@ -110,6 +110,41 @@
               "sha256": "eba2a8341d271bd0b91b9092fc1b5650633942545c702a19ed2bfa6b2f623be7",
               "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/discord/v1.0.0/discord-1.0.0.tar.gz.sig",
               "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/discord/v1.0.0/discord-1.0.0.tar.gz.pem"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "name": "games",
+      "display_name": "Games",
+      "category": "games",
+      "description": "Play the games on fermix.ai with Fermix. It finds each game's lobby from the site's games index and plays through the page's own WebMCP tools in its managed browser. Adds one skill and no tools; nothing runs outside Fermix.",
+      "short_description": "Play chess and the other fermix.ai games with your agent",
+      "developer_name": "Fermix",
+      "brand_color": null,
+      "logo": {
+        "mime": "image/svg+xml",
+        "data_base64": "PHN2ZyB3aWR0aD0iMTAwIiBoZWlnaHQ9IjEwMCIgdmlld0JveD0iMCAwIDEwMCAxMDAiIGZpbGw9Im5vbmUiIHhtbG5zPSJodHRwOi8vd3d3LnczLm9yZy8yMDAwL3N2ZyIgcm9sZT0iaW1nIiBhcmlhLWxhYmVsPSJHYW1lcyI+CiAgPHJlY3Qgd2lkdGg9IjEwMCIgaGVpZ2h0PSIxMDAiIHJ4PSIyMiIgZmlsbD0iIzJiNWNmZiIvPgogIDxnIGZpbGw9IiNmZmYiPgogICAgPGNpcmNsZSBjeD0iNTAiIGN5PSIzMSIgcj0iMTEiLz4KICAgIDxyZWN0IHg9IjM3IiB5PSI0MiIgd2lkdGg9IjI2IiBoZWlnaHQ9IjciIHJ4PSIzLjUiLz4KICAgIDxwYXRoIGQ9Ik00NCA0OWgxMmMxIDkgNCAxNSA4IDIxSDM2YzQtNiA3LTEyIDgtMjF6Ii8+CiAgICA8cmVjdCB4PSIzMCIgeT0iNzAiIHdpZHRoPSI0MCIgaGVpZ2h0PSI4IiByeD0iMyIvPgogICAgPHJlY3QgeD0iMjUiIHk9Ijc5IiB3aWR0aD0iNTAiIGhlaWdodD0iNyIgcng9IjMuNSIvPgogIDwvZz4KPC9zdmc+Cg=="
+      },
+      "auth_type": "none",
+      "auth_provider": null,
+      "rails": [],
+      "latest": "1.0.0",
+      "yanked": [],
+      "versions": [
+        {
+          "version": "1.0.0",
+          "published_at": "2026-09-25T21:37:27Z",
+          "min_core_version": "0.11.0",
+          "plugin_api": 2,
+          "artifacts": [
+            {
+              "target": "any",
+              "url": "https://github.com/tezra-io/fermix-plugins/releases/download/games/v1.0.0/games-1.0.0.tar.gz",
+              "sha256": "92aadc94c22b108ecf5587f1ead7102160fc5e8988a077c21ff9a20a47995810",
+              "sig_url": "https://github.com/tezra-io/fermix-plugins/releases/download/games/v1.0.0/games-1.0.0.tar.gz.sig",
+              "cert_url": "https://github.com/tezra-io/fermix-plugins/releases/download/games/v1.0.0/games-1.0.0.tar.gz.pem"
             }
           ]
         }

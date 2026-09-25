@@ -6,6 +6,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **A Games plugin is in the catalog.** Install it from the setup Plugins
+  page or the macOS app's Available list, with nothing to connect, and Fermix
+  knows where its games are: ask it to play chess, or which games it can
+  play, and it reads the games index on fermix.ai itself, opens the game's
+  lobby in its own browser and plays through the page's WebMCP tools. No link
+  or address needs to be pasted. The plugin is one skill and no tools, and it
+  carries the rules of play in a chat: a game is played move by move, because
+  a page's wait tool holds the conversation while it waits.
+
 ### Fixed
 
 - **A sign-in that loses the network now says so.** When the provider's sign-in
