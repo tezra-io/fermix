@@ -674,7 +674,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       |> Enum.reduce({[], 0, [], nil}, &unmark_step/2)
 
     ranges = if open, do: [%{start: open, length: offset - open} | ranges], else: ranges
-    {text |> Enum.reverse() |> Enum.join(), Enum.reverse(ranges)}
+
+    {text |> Enum.reverse() |> Enum.join(),
+     ranges |> Enum.reverse() |> Enum.filter(&(&1.length > 0))}
   end
 
   defp unmark_step(@match_open, {text, offset, ranges, _open}),

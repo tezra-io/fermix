@@ -1,0 +1,21 @@
+{"type":"server_hello","min_version":1,"max_version":1}
+{"type":"accepted","client_msg_id":"mac-1","duplicate":false}
+{"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
+{"type":"turn_started","profile_id":"main","turn_id":"turn-mac-1","in_reply_to":"mac-1"}
+{"type":"text_delta","turn_id":"turn-mac-1","text":"You have "}
+{"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"start"}
+{"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"stop","detail":"%{status: :ok}"}
+{"type":"text_done","turn_id":"turn-mac-1","server_seq":13,"text":"You have one meeting, at 10."}
+{"type":"turn_error","turn_id":"turn-mac-3","code":"cancelled","message":"cancelled"}
+{"type":"approval","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","kind":"sandbox","text":"Allow reading ~/Documents?","token":"opaque-token","ttl_s":60,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
+{"type":"approval_resolved","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","outcome":"approved"}
+{"type":"read_state","profile_id":"main","read_up_to_seq":13}
+{"type":"history_page","profile_id":"main","messages":[{"server_seq":12,"role":"user","content":"What is on my calendar today?","kind":"text","client_msg_id":"mac-1","ts":"2026-09-25T09:00:00Z","media_refs":[]},{"server_seq":13,"role":"assistant","content":"You have one meeting, at 10.","kind":"text","in_reply_to":"mac-1","metadata":{"turn_id":"turn-mac-1"},"ts":"2026-09-25T09:00:04Z","media_refs":[]}],"history_head_seq":13,"next_after_seq":13}
+{"type":"history_page","profile_id":"main","messages":[{"server_seq":70,"role":"assistant","content":"Done.","ts":"2026-09-20T18:30:00Z","media_refs":[]}],"history_head_seq":130,"next_before_seq":70}
+{"type":"search_results","profile_id":"main","query":"dentist","hits":[{"server_seq":88,"role":"user","ts":"2026-09-24T09:15:00Z","excerpt":"book the dentist for Friday","ranges":[{"start":9,"length":7}]}],"next_before_seq":88}
+{"type":"error","reason":"handshake_required"}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"type":"error","reason":"client_message_conflict","client_msg_id":"mac-2"}
+{"type":"error","reason":"invalid_field","field":"limit"}
+{"type":"error","reason":"request_failed","message":":timeout","client_msg_id":"mac-4"}
+{"type":"error","reason":"max_clients_reached"}

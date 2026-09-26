@@ -37,10 +37,28 @@ defmodule FermixChannels.Companion.Connection do
   @max_error_message 512
   @handover_timeout_ms 5_000
 
+  # The closed vocabulary of `error.reason` this socket sends, besides
+  # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's), the
+  # field and event errors that name what they refused, and `request_failed`,
+  # which every other failure becomes.
+  @named_reasons ~w(
+    invalid_json invalid_event missing_type attachments_unsupported missing_protocol_version
+    invalid_protocol_version line_too_large handshake_required unexpected_client_hello
+    client_message_conflict unsupported_profile request_backlog_full
+  )a
+
   @type state :: map()
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts), do: GenServer.start_link(__MODULE__, opts)
+
+  @doc "Every `error.reason` this socket can send."
+  @spec error_reasons() :: [String.t()]
+  def error_reasons do
+    Enum.map(@named_reasons, &Atom.to_string/1) ++
+      ~w(missing_field invalid_field unknown_event unsupported_protocol_version
+         max_clients_reached request_failed)
+  end
 
   @doc """
   Recover one stored companion request at boot. Nobody is waiting for its
@@ -361,7 +379,8 @@ defmodule FermixChannels.Companion.Connection do
 
   defp error_fields({:unknown_event, type}), do: %{"reason" => "unknown_event", "event" => type}
 
-  defp error_fields(reason) when is_atom(reason), do: %{"reason" => Atom.to_string(reason)}
+  defp error_fields(reason) when reason in @named_reasons,
+    do: %{"reason" => Atom.to_string(reason)}
 
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.

@@ -370,6 +370,14 @@ defmodule FermixChannels.Companion.ConnectionTest do
              Timeline.get_client_request("main", "mac-9", ctx.store_opts)
   end
 
+  test "the exported protocol documents every error reason the socket sends" do
+    protocol = File.read!(Application.app_dir(:fermix_core, "priv/companion/PROTOCOL.md"))
+
+    for reason <- Connection.error_reasons() do
+      assert protocol =~ "`#{reason}`", "PROTOCOL.md does not document error #{reason}"
+    end
+  end
+
   defp forward(test_pid) do
     receive do
       message -> send(test_pid, message)

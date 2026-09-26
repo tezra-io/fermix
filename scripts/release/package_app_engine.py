@@ -240,8 +240,8 @@ def _validate_identity(
 
 
 def _validate_protocols(protocols):
-    _exact_keys(protocols, {"management", "realtime"}, "protocols")
-    for name in ("management", "realtime"):
+    _exact_keys(protocols, {"management", "realtime", "companion"}, "protocols")
+    for name in ("management", "realtime", "companion"):
         value = protocols[name]
         _exact_keys(value, {"current_version", "minimum_version", "maximum_version"}, name)
         current = _positive_integer(value["current_version"], f"{name}.current_version")
