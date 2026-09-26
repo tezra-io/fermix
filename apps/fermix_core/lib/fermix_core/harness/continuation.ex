@@ -44,6 +44,7 @@ defmodule FermixCore.Harness.Continuation do
 
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Delivery.ChannelSend
+  alias FermixCore.Harness.VendorConfig
 
   @max_depth 3
   @result_text_max 8_192
@@ -63,6 +64,7 @@ defmodule FermixCore.Harness.Continuation do
   @request_source "launching_request"
   @request_label "The request this run was launched from, quoted verbatim — read it for where the outcome belongs:"
   @closing "Continue the request this run was for; if it is already satisfied, just report the outcome."
+  @vendor_config_relay "Name these files to the owner, since a coding agent they start there themselves runs them too."
   # Appended on a CLIENT-OWNED origin (M29 §17.6(c)), where the reply Fermix
   # returns reaches only the client's own session viewer. Stated as the principle
   # and nothing else: no surface, no tool, no command. The concrete tooling comes
@@ -175,8 +177,9 @@ defmodule FermixCore.Harness.Continuation do
   @doc """
   The system-voiced notice text (pure, golden-tested): the run tag, the
   vendor/status/cwd line, the bounded outcome body inside the untrusted-content
-  frame, the launching request (client-owned origins only, in a frame of its
-  own), and the closing instruction.
+  frame, the files of auto-executing vendor config the run changed (in Fermix's
+  own voice, outside the frame), the launching request (client-owned origins
+  only, in a frame of its own), and the closing instruction.
   """
   @spec notice_text(map(), String.t() | nil) :: String.t()
   def notice_text(row, result_text) when is_map(row) do
@@ -184,11 +187,22 @@ defmodule FermixCore.Harness.Continuation do
       "[coding run #{Map.get(row, :id)} finished]",
       status_line(row),
       body(row, result_text),
+      vendor_config_note(row),
       launching_request(row),
       closing(row)
     ]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
+  end
+
+  # The files are named to the agent in Fermix's own voice, and the agent is told
+  # to pass them on: the owner's own coding-agent session in that repo runs them
+  # too, and this notice is the only word of them the owner gets.
+  defp vendor_config_note(row) do
+    case VendorConfig.note(row) do
+      "" -> ""
+      note -> note <> " " <> @vendor_config_relay
+    end
   end
 
   # The origin's own closing, plus — on a client-owned origin — the publishing

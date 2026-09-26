@@ -25,9 +25,11 @@ defmodule FermixCore.Harness.Delivery do
   line (vendor · cwd tail · duration), and — on a non-completing run — the
   vendor's own error text (when it reported one), the reason, a diagnostics tail,
   and the vendor resume hint (or an explicit "not resumable (ephemeral)" line).
-  A chat-origin run whose continuation chain hit its cap closes with
-  `Harness.Continuation.note/0`, so the owner is told the automatic follow-up
-  stopped (§23.2) rather than wondering why nothing happened.
+  A run that changed auto-executing vendor config names those files
+  (`Harness.VendorConfig.note/1`). A chat-origin run whose continuation chain
+  hit its cap closes with `Harness.Continuation.note/0`, so the owner is told
+  the automatic follow-up stopped (§23.2) rather than wondering why nothing
+  happened.
   """
 
   require Logger
@@ -38,6 +40,7 @@ defmodule FermixCore.Harness.Delivery do
   alias FermixCore.Harness.Adapters.CodexExec
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Continuation
+  alias FermixCore.Harness.VendorConfig
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -133,7 +136,7 @@ defmodule FermixCore.Harness.Delivery do
   """
   @spec compose(map(), String.t() | nil) :: String.t()
   def compose(row, result_text) when is_map(row) do
-    [header_line(row), body(row, result_text), cap_note(row)]
+    [header_line(row), body(row, result_text), VendorConfig.note(row), cap_note(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end

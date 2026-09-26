@@ -111,6 +111,8 @@ defmodule FermixCore.Memory.RepoJobRunsMigrationTest do
     :ok = Sqlite3.execute(conn, MobileSql.schema_sql())
     :ok = Sqlite3.execute(conn, MobileSql.client_message_schema_sql())
     :ok = Sqlite3.execute(conn, MobileSql.attempt_fence_schema_sql())
+    # The harness table a v28 store holds: migration 35 alters it.
+    :ok = Sqlite3.execute(conn, Repo.harness_runs_schema_sql())
     # The computer-history tables a v28 store holds: a later migration (32) reads
     # one of them, and a store that claims 28 without them is not a real one.
     :ok = Sqlite3.execute(conn, ComputerHistorySql.events_schema_sql())

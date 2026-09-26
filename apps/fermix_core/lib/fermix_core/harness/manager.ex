@@ -10,18 +10,24 @@ defmodule FermixCore.Harness.Manager do
 
     * **Admission (`start_run/2`).** All lifecycle state is persisted before any
       OS spawn: build the adapter plan, resolve the canonical git worktree lock
-      root, check the artifact quota, then `Ledger.admit` the row `starting`
-      (holding its workspace locks and a capacity slot) — and only then start the
+      root, check the artifact quota and for an earlier run's unresolved change to
+      auto-executing vendor config in its roots (`Harness.VendorConfig`), then
+      `Ledger.admit` the row `starting` with the vendor-config fingerprint of its
+      roots and of each directory down to its cwd (holding its workspace locks
+      and a capacity slot) — and only then start the
       run under the supervisor, monitor it, and emit the single `run_start`
       event. Param/validation errors return `{:error, _}` with no row; the
-      environmental blocks (`cli_unavailable`, `artifact_quota`) are ledgered as
+      environmental blocks (`cli_unavailable`, `artifact_quota`,
+      `vendor_config_changed`) are ledgered as
       `blocked` + delivered only for a scheduled origin (the owner must hear),
       while an attended chat gets the refusal inline (design §12.1 / spec D8).
     * **Terminalization (`report_terminal`).** `Harness.Run` never writes the
       terminal ledger row — it reports to this process, which is the single
       terminal writer: `Ledger.terminalize` (the P0 `:already_terminal` guard is
-      the idempotence backstop), then `run_complete`/`run_error` telemetry, the
-      untrusted-provenance memory write-back (completed only), and the outcome
+      the idempotence backstop; a local run's write also carries any change to
+      the vendor config its admission fingerprinted), then
+      `run_complete`/`run_error` telemetry, the untrusted-provenance memory
+      write-back (completed only), and the outcome
       hand-off: a chat-origin run inside the chain cap re-enters its conversation
       through `Harness.Continuation` (§23.2), everything else takes one inline
       delivery attempt (`DeliveryWorker` owns every subsequent attempt). The
@@ -65,6 +71,7 @@ defmodule FermixCore.Harness.Manager do
   alias FermixCore.Harness.Run
   alias FermixCore.Harness.RunSupervisor
   alias FermixCore.Harness.Telemetry
+  alias FermixCore.Harness.VendorConfig
   alias FermixCore.Harness.Vendors
   alias FermixCore.Harness.Workspace
   alias FermixCore.Memory.Repo
@@ -120,7 +127,10 @@ defmodule FermixCore.Harness.Manager do
   @doc """
   Admits and starts a local run, returning its id. Refusals: `:max_active`
   (capacity), `{:workspace_locked, root}` (contention), `:cli_unavailable`
-  (missing binary), `{:artifact_quota, detail}`, or a plan/param error term.
+  (missing binary), `{:artifact_quota, detail}`, `{:vendor_config_changed,
+  %{run_id, changes}}` (an earlier run's unresolved change to auto-executing
+  vendor config in one of this run's roots, `Harness.VendorConfig`), or a
+  plan/param error term.
   """
   @spec start_run(request(), GenServer.server()) :: {:ok, run_id()} | {:error, term()}
   def start_run(request, server \\ __MODULE__) when is_map(request) do
@@ -323,15 +333,63 @@ defmodule FermixCore.Harness.Manager do
 
   defp admit_with_worktree(request, plan, worktree_root, state) do
     case Artifacts.admission_check(state.artifacts_opts) do
-      :ok -> admit_and_spawn(request, plan, worktree_root, state)
+      :ok -> admit_past_vendor_config(request, plan, worktree_root, state)
       {:error, {:artifact_quota, _detail} = reason} -> block_or_error(request, reason, state)
     end
   end
 
-  defp admit_and_spawn(request, plan, worktree_root, state) do
-    run_id = Ledger.generate_id()
+  # GAP3-1: an earlier run's unresolved change to auto-executing vendor config in
+  # one of this run's roots refuses the launch — an environmental block, so a
+  # scheduled origin hears it. The tool layer turns the attended refusal into one
+  # `/confirm` prompt. A ledger read error is not a block and returns as itself.
+  defp admit_past_vendor_config(request, plan, worktree_root, state) do
     lock_roots = Enum.uniq([worktree_root | plan.extra_lock_roots])
-    attrs = admit_attrs(request, plan, run_id, worktree_root, lock_roots, "starting", state)
+
+    case vendor_config_gate(lock_roots, state) do
+      :ok ->
+        admit_and_spawn(request, plan, worktree_root, lock_roots, state)
+
+      {:error, {:vendor_config_changed, _change} = reason} ->
+        block_or_error(request, reason, state)
+
+      {:error, reason} ->
+        {{:error, reason}, state}
+    end
+  end
+
+  defp vendor_config_gate(lock_roots, state) do
+    with {:ok, rows} <- Ledger.unresolved_vendor_config(server: state.repo) do
+      rows
+      |> Enum.filter(&VendorConfig.touches?(&1.vendor_config_changes, lock_roots))
+      |> Enum.reduce_while(:ok, fn row, :ok -> settle_vendor_config(row, state) end)
+    end
+  end
+
+  # A change the owner has since reverted or committed resolves on its own, and
+  # is marked resolved, so a later edit of that file by the owner never revives it.
+  defp settle_vendor_config(row, state) do
+    case VendorConfig.unresolved(row.vendor_config_changes) do
+      pending when map_size(pending) == 0 -> clear_vendor_config(row, state)
+      pending -> {:halt, {:error, {:vendor_config_changed, %{run_id: row.id, changes: pending}}}}
+    end
+  end
+
+  defp clear_vendor_config(row, state) do
+    case Ledger.clear_vendor_config(row.id, server: state.repo) do
+      {:ok, _row} -> {:cont, :ok}
+      {:error, reason} -> {:halt, {:error, reason}}
+    end
+  end
+
+  # The fingerprint rides the admitted row, persisted before the child spawns,
+  # so even a run the daemon loses mid-flight is diffed at reconciliation.
+  defp admit_and_spawn(request, plan, worktree_root, lock_roots, state) do
+    run_id = Ledger.generate_id()
+
+    attrs =
+      request
+      |> admit_attrs(plan, run_id, worktree_root, lock_roots, "starting", state)
+      |> Map.put(:vendor_config, VendorConfig.fingerprint(lock_roots, plan.cwd))
 
     case Ledger.admit(attrs, server: state.repo) do
       {:ok, row} -> launch(row, plan, request, state)
@@ -354,7 +412,7 @@ defmodule FermixCore.Harness.Manager do
     ref = Process.monitor(pid)
     Telemetry.run_start(row, request.prompt, max_duration_ms(request))
 
-    run_info = %{pid: pid, ref: ref}
+    run_info = %{pid: pid, ref: ref, vendor_config: row.vendor_config}
 
     %{
       state
@@ -976,9 +1034,10 @@ defmodule FermixCore.Harness.Manager do
   # "already finished", and a ledger read error is returned as itself.
   defp cancel_untracked(run_id, from, state) do
     case Ledger.get(run_id, server: state.repo) do
-      {:ok, %{rail: "local", status: status}} when status in ["starting", "running"] ->
+      {:ok, %{rail: "local", status: status} = row} when status in ["starting", "running"] ->
         GenServer.reply(from, :ok)
-        {:noreply, terminalize_and_notify(state, run_id, stranded_cancel_outcome(), nil)}
+        outcome = with_vendor_config_changes(stranded_cancel_outcome(), row)
+        {:noreply, terminalize_and_notify(state, run_id, outcome, nil)}
 
       {:ok, %{rail: "cloud", status: status} = row} when status in ["submitting", "polling"] ->
         {:reply, {:error, {:vendor_cancel_unsupported, Map.get(row, :task_url)}}, state}
@@ -999,7 +1058,8 @@ defmodule FermixCore.Harness.Manager do
         log_unknown_report(run_id, state)
 
       run_info ->
-        terminalize_and_notify(state, run_id, reported_outcome(status, fields), run_info)
+        outcome = with_vendor_config_changes(reported_outcome(status, fields), run_info)
+        terminalize_and_notify(state, run_id, outcome, run_info)
     end
   end
 
@@ -1021,8 +1081,12 @@ defmodule FermixCore.Harness.Manager do
 
   defp mark_run_crashed(run_id, state) do
     case Map.get(state.runs, run_id) do
-      nil -> state
-      run_info -> terminalize_and_notify(state, run_id, crash_outcome(), run_info)
+      nil ->
+        state
+
+      run_info ->
+        outcome = with_vendor_config_changes(crash_outcome(), run_info)
+        terminalize_and_notify(state, run_id, outcome, run_info)
     end
   end
 
@@ -1300,6 +1364,20 @@ defmodule FermixCore.Harness.Manager do
     %{status: "interrupted", ledger_fields: %{}, result_text: nil, error_class: "interrupted"}
   end
 
+  # GAP3-1: re-fingerprints the directories a local run's admission persisted a
+  # fingerprint of. A change rides the terminal write, so every notice
+  # composed from the row (inline, retried or continued) names it. `source` is
+  # the tracked run info or, for a run with no live process, its row; a cloud run
+  # and a row admitted before the tripwire carry no fingerprint.
+  defp with_vendor_config_changes(outcome, %{vendor_config: start}) when is_map(start) do
+    case VendorConfig.changes(start) do
+      changes when map_size(changes) == 0 -> outcome
+      changes -> put_in(outcome, [:ledger_fields, :vendor_config_changes], changes)
+    end
+  end
+
+  defp with_vendor_config_changes(outcome, _source), do: outcome
+
   # The owner's cancel of a row with no live Run records the owner's intent
   # (§12.1): `cancelled`, not reconciliation's `interrupted`, which a chat origin
   # would continue, inviting the agent to relaunch the work the owner stopped.
@@ -1316,6 +1394,20 @@ defmodule FermixCore.Harness.Manager do
       ledger_fields: %{reason: "consent_required", diagnostics_tail: Consent.scheduled_guidance()},
       result_text: nil,
       error_class: "consent_required"
+    }
+  end
+
+  # The same sentence the attended refusal gives, naming the files and both ways
+  # to clear them, so the owner of a scheduled job hears how to unblock it.
+  defp block_outcome({:vendor_config_changed, change}) do
+    %{
+      status: "blocked",
+      ledger_fields: %{
+        reason: "vendor_config_changed",
+        diagnostics_tail: VendorConfig.guidance(change)
+      },
+      result_text: nil,
+      error_class: "vendor_config_changed"
     }
   end
 
@@ -1350,7 +1442,8 @@ defmodule FermixCore.Harness.Manager do
 
   defp reconcile_row(%{rail: "local", status: status} = row, state)
        when status in ["starting", "running"] do
-    terminalize_and_notify(state, row.id, interrupted_outcome(), nil)
+    outcome = with_vendor_config_changes(interrupted_outcome(), row)
+    terminalize_and_notify(state, row.id, outcome, nil)
   end
 
   # A cloud `submitting` row WITHOUT a task id: the daemon may have died after the

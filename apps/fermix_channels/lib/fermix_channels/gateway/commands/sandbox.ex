@@ -10,6 +10,7 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
+  alias FermixCore.Harness.Ledger
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.Mode
@@ -29,8 +30,14 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   @typedoc "Enough of the original inbound message to faithfully re-ingest it after the grant is confirmed."
   @type grant_resume :: %{content: String.t(), reply_target: String.t(), sender: String.t()}
 
-  @typedoc "The access request the `request_directory_access` tool passes to the injected approval closure."
-  @type grant_request :: %{path: String.t(), reason: String.t(), diff: String.t()}
+  @typedoc """
+  What core passes to the injected approval closure: a directory grant from the
+  `request_directory_access` tool, or a coding run's vendor-config change for
+  the owner to acknowledge before the next harness launch (GAP3-1).
+  """
+  @type grant_request ::
+          %{path: String.t(), reason: String.t(), diff: String.t()}
+          | %{acknowledge_vendor_config: String.t()}
 
   @impl true
   def name, do: "sandbox"
@@ -169,14 +176,15 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   Store (or dedupe) an agent-initiated grant request as a pending confirmation,
   bound to the owner's conversation origin. This is the channels-side seam the
   gateway's injected `approval_fn` closure calls from inside an operator turn
-  (the `request_directory_access` tool). Returns `{:ok, token, :existing}` when a
-  live pending record for the same mutation + origin already exists (no second
-  owner prompt), otherwise stores a new record and returns `{:ok, token, :new}`.
+  (the `request_directory_access` tool, and a coding-harness launch waiting on a
+  vendor-config acknowledgment). Returns `{:ok, token, :existing}` when a live
+  pending record for the same mutation + origin already exists (no second owner
+  prompt), otherwise stores a new record and returns `{:ok, token, :new}`.
   """
   @spec store_pending_grant(grant_request(), grant_origin()) ::
           {:ok, String.t(), :new | :existing}
-  def store_pending_grant(%{path: path}, %{} = origin) when is_binary(path) do
-    mutation = {:add_allowed_root, path}
+  def store_pending_grant(request, %{} = origin) when is_map(request) do
+    mutation = grant_mutation(request)
 
     case find_live_pending(mutation, origin) do
       {:ok, token} ->
@@ -188,6 +196,11 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
         {:ok, token, :new}
     end
   end
+
+  defp grant_mutation(%{path: path}) when is_binary(path), do: {:add_allowed_root, path}
+
+  defp grant_mutation(%{acknowledge_vendor_config: run_id}) when is_binary(run_id),
+    do: {:acknowledge_vendor_config, run_id}
 
   defp find_live_pending(mutation, origin) do
     now = now_ms()
@@ -233,12 +246,34 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   defp deny(token, message, reply_fn, context) do
     case take_pending(token, message) do
-      {:ok, _record} ->
+      {:ok, record} ->
         :ok = notify_approval(context, :sandbox, token, :denied)
-        reply(reply_fn, "Sandbox change denied — the pending grant was discarded.")
+        reply(reply_fn, denied_text(record))
 
       {:error, reason} ->
         reply(reply_fn, "Denial failed: #{inspect(reason)}")
+    end
+  end
+
+  defp denied_text(%{mutation: {:acknowledge_vendor_config, _run_id}}) do
+    "Not acknowledged — coding runs there stay paused until you confirm the change " <>
+      "when the next one asks, or revert or commit it."
+  end
+
+  defp denied_text(_grant), do: "Sandbox change denied — the pending grant was discarded."
+
+  # A coding run's vendor-config change, acknowledged by the owner (GAP3-1): the
+  # ledger row is marked resolved, so the next harness launch there proceeds, and
+  # the request that was waiting on it resumes like an agent-initiated grant.
+  defp apply_confirmed(
+         %{mutation: {:acknowledge_vendor_config, run_id}} = record,
+         token,
+         reply_fn,
+         context
+       ) do
+    case Ledger.clear_vendor_config(run_id, server: Map.fetch!(context, :memory_repo)) do
+      {:ok, _row} -> finish_acknowledge(record, token, reply_fn, context)
+      {:error, reason} -> reply(reply_fn, "Acknowledgment failed: #{format_error(reason)}")
     end
   end
 
@@ -301,6 +336,19 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
       {:ok, nil} ->
         reply(reply_fn, "Sandbox updated. Access granted — re-run your request.\n#{diff}")
+    end
+  end
+
+  # Always an agent-initiated record, so it carries a resume intent: a chat
+  # re-ingests the waiting request, a one-shot origin (CLI) re-runs it.
+  defp finish_acknowledge(record, token, reply_fn, context) do
+    case Map.fetch!(record, :resume) do
+      %{content: _content} = resume ->
+        reply(reply_fn, "Acknowledged — resuming your request.")
+        resume_request(record, resume, token, context)
+
+      nil ->
+        reply(reply_fn, "Acknowledged — re-run your request.")
     end
   end
 

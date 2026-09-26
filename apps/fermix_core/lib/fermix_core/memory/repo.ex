@@ -48,6 +48,7 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_purges_migration_version 32
   @companion_migration_version 33
   @companion_cancel_migration_version 34
+  @harness_vendor_config_migration_version 35
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -543,6 +544,17 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE harness_runs ADD COLUMN client_origin_json TEXT;
   """
 
+  # The repo-local vendor config a coding CLI runs at launch (GAP3-1,
+  # `Harness.VendorConfig`): the fingerprint admission takes before the child
+  # spawns, what the terminal pass found changed, and when that change was
+  # resolved (acknowledged, reverted or committed). Appended by ALTER for the
+  # positional-read reason `client_origin_json` was.
+  @harness_vendor_config_schema_sql """
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_json TEXT;
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_changes_json TEXT;
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_cleared_at TEXT;
+  """
+
   # Durable counts-only skill-usage counters (MILESTONE_26_SKILL_CURATION §6.9):
   # one row per skill, upserted on skill_view/skill_run, bounded by the skill
   # inventory by construction. No content is stored — staleness is a counter
@@ -631,7 +643,8 @@ defmodule FermixCore.Memory.Repo do
     :delivered_at,
     :next_delivery_at,
     :next_poll_at,
-    :poll_deadline
+    :poll_deadline,
+    :vendor_config_cleared_at
   ]
   @harness_run_bool_cols [:resumable, :artifact_truncated]
   # `:status` is deliberately absent: the only legitimate status writer is
@@ -2458,6 +2471,16 @@ defmodule FermixCore.Memory.Repo do
     call({:pending_harness_deliveries, now}, opts)
   end
 
+  @doc """
+  Runs whose vendor-config change (GAP3-1) is recorded and not yet resolved,
+  oldest first.
+  """
+  @spec unresolved_harness_vendor_config(keyword()) ::
+          {:ok, [harness_run_row()]} | {:error, term()}
+  def unresolved_harness_vendor_config(opts \\ []) do
+    call(:unresolved_harness_vendor_config, opts)
+  end
+
   @spec upsert_memory_source(memory_source_attrs(), keyword()) ::
           {:ok, memory_source_row()} | {:error, term()}
   def upsert_memory_source(attrs, opts \\ []) when is_map(attrs) do
@@ -2885,6 +2908,17 @@ defmodule FermixCore.Memory.Repo do
   """
   @spec base_schema_sql() :: String.t()
   def base_schema_sql, do: @base_schema_sql
+
+  @doc """
+  The `harness_runs` table as a store holds it from migration 14 on. Public for
+  the same reason as `base_schema_sql/0`: a later migration alters this table
+  (35 appends the vendor-config columns).
+  """
+  @spec harness_runs_schema_sql() :: String.t()
+  def harness_runs_schema_sql do
+    @harness_runs_schema_sql <>
+      @harness_continuation_schema_sql <> @harness_client_origin_schema_sql
+  end
 
   @spec journal_mode(keyword()) :: {:ok, String.t()} | {:error, term()}
   def journal_mode(opts \\ []) do
@@ -3806,6 +3840,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call(:unresolved_harness_vendor_config, _from, state) do
+    reply = with_connection(state, &fetch_unresolved_harness_vendor_config/1)
+    {:reply, reply, state}
+  end
+
   def handle_call({:upsert_memory_source, attrs}, _from, state) do
     reply = with_connection(state, &upsert_memory_source_row(&1, attrs))
     {:reply, reply, state}
@@ -3921,7 +3960,8 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_release_wedged_jobs_migration(conn, versions),
          :ok <- apply_computer_history_purges_migration(conn, versions),
          :ok <- apply_companion_migration(conn, versions),
-         :ok <- apply_companion_cancel_migration(conn, versions) do
+         :ok <- apply_companion_cancel_migration(conn, versions),
+         :ok <- apply_harness_vendor_config_migration(conn, versions) do
       :ok
     end
   end
@@ -4005,6 +4045,22 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{ComputerHistorySql.purges_schema_sql(migrated_at)}
         INSERT INTO schema_migrations(version) VALUES (#{@computer_history_purges_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_vendor_config_migration(conn, versions) do
+    if Enum.member?(versions, @harness_vendor_config_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_vendor_config_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_vendor_config_migration_version});
         COMMIT;
         """
       )
@@ -6410,9 +6466,10 @@ defmodule FermixCore.Memory.Repo do
                completed_at,
                delivered_at,
                continuation_depth,
-               client_origin_json
+               client_origin_json,
+               vendor_config_json
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              """,
              harness_run_insert_params(run)
            ),
@@ -6568,6 +6625,23 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY created_at ASC, id ASC
              """,
              [timestamp_string(now)]
+           ) do
+      {:ok, Enum.map(rows, &harness_run_row/1)}
+    end
+  end
+
+  defp fetch_unresolved_harness_vendor_config(conn) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM harness_runs
+             WHERE vendor_config_changes_json IS NOT NULL
+               AND vendor_config_cleared_at IS NULL
+             ORDER BY created_at ASC, id ASC
+             """,
+             []
            ) do
       {:ok, Enum.map(rows, &harness_run_row/1)}
     end
@@ -6867,6 +6941,7 @@ defmodule FermixCore.Memory.Repo do
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
       client_origin: Map.get(attrs, :client_origin),
+      vendor_config: Map.get(attrs, :vendor_config),
       parent_job_id: optional_string!(attrs, :parent_job_id),
       delivery_mode: fetch_string!(attrs, :delivery_mode),
       platform: optional_string!(attrs, :platform),
@@ -7210,7 +7285,8 @@ defmodule FermixCore.Memory.Repo do
       run.completed_at,
       run.delivered_at,
       run.continuation_depth,
-      encode_metadata(run.client_origin)
+      encode_metadata(run.client_origin),
+      encode_metadata(run.vendor_config)
     ]
   end
 
@@ -7236,6 +7312,10 @@ defmodule FermixCore.Memory.Repo do
 
   defp harness_run_set_entry({:usage, value}) do
     {"usage_json = ?", encode_metadata(value)}
+  end
+
+  defp harness_run_set_entry({:vendor_config_changes, value}) do
+    {"vendor_config_changes_json = ?", encode_metadata(value)}
   end
 
   defp harness_run_set_entry({key, value}) when key in @harness_run_plain_cols do
@@ -8043,7 +8123,10 @@ defmodule FermixCore.Memory.Repo do
          completed_at,
          delivered_at,
          continuation_depth,
-         client_origin_json
+         client_origin_json,
+         vendor_config_json,
+         vendor_config_changes_json,
+         vendor_config_cleared_at
        ]) do
     %{
       id: id,
@@ -8066,6 +8149,9 @@ defmodule FermixCore.Memory.Repo do
       origin_session_id: origin_session_id,
       continuation_depth: continuation_depth,
       client_origin: decode_metadata(client_origin_json),
+      vendor_config: decode_metadata(vendor_config_json),
+      vendor_config_changes: decode_metadata(vendor_config_changes_json),
+      vendor_config_cleared_at: parse_optional_timestamp(vendor_config_cleared_at),
       parent_job_id: parent_job_id,
       delivery_mode: delivery_mode,
       platform: platform,

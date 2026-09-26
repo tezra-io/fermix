@@ -9,6 +9,10 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
 
   @fixtures Path.expand("../../../fixtures/harness", __DIR__)
   @base ["-p", "--output-format", "stream-json", "--verbose"]
+  # GAP3-1: every child is denied edits to Codex's config and the shared `.agents`
+  # tree. Claude guards its own config dirs from its own agent, not the other
+  # vendor's; `Edit(...)` covers every file-editing tool, Write included.
+  @vendor_denials "Edit(.codex/**),Edit(**/.codex/**),Edit(.agents/**),Edit(**/.agents/**)"
 
   setup do
     workspace = FermixTestSupport.SafeRm.make_tmp_dir!("harness-claude-adapter")
@@ -46,7 +50,28 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
       assert plan.resumable == true
       assert plan.extra_lock_roots == []
       assert plan.env_names == []
-      assert plan.argv == @base ++ [:prompt]
+      assert plan.argv == @base ++ ["--disallowed-tools", @vendor_denials, "--", :prompt]
+    end
+
+    # claude's `--allowed-tools`, `--disallowed-tools` and `--add-dir` are variadic:
+    # a prompt rendered straight after one is read as one more list entry, and
+    # `claude -p` exits before the model runs ("Input must be provided ...").
+    test "the prompt follows `--`, so no variadic option can take it as a value", %{
+      workspace: workspace,
+      ctx: ctx
+    } do
+      File.mkdir_p!(Path.join(workspace, "extra"))
+
+      for params <- [
+            %{},
+            %{allowed_tools: ["Read"]},
+            %{disallowed_tools: ["WebSearch"]},
+            %{add_dirs: [Path.join(workspace, "extra")]}
+          ] do
+        assert {:ok, plan} = ClaudeHeadless.plan(params, ctx)
+        assert Enum.take(plan.argv, -2) == ["--", :prompt]
+        assert Enum.count(plan.argv, &(&1 == "--")) == 1
+      end
     end
 
     test "model, effort and permission_mode render their flags", %{ctx: ctx} do
@@ -59,7 +84,9 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
                "--effort",
                "high",
                "--permission-mode",
-               "acceptEdits"
+               "acceptEdits",
+               "--disallowed-tools",
+               @vendor_denials
              ]
     end
 
@@ -80,25 +107,49 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
                "--allowed-tools",
                "Bash,Edit",
                "--disallowed-tools",
-               "WebSearch"
+               "WebSearch," <> @vendor_denials
              ]
+    end
+
+    test "the vendor-config denials ride every plan, resume and bare included", %{ctx: ctx} do
+      for params <- [%{}, %{resume: "sess-1"}, %{continue: true}, %{bare: true}] do
+        assert {:ok, plan} = ClaudeHeadless.plan(params, ctx)
+        assert ["--disallowed-tools", @vendor_denials] in Enum.chunk_every(plan.argv, 2, 1)
+      end
+    end
+
+    test "a model-supplied disallowed list cannot displace the vendor-config denials", %{ctx: ctx} do
+      assert {:ok, plan} = ClaudeHeadless.plan(%{disallowed_tools: []}, ctx)
+      assert opts(plan.argv) == ["--disallowed-tools", @vendor_denials]
     end
 
     test "append_system_prompt renders the string content", %{ctx: ctx} do
       assert {:ok, plan} = ClaudeHeadless.plan(%{append_system_prompt: "be terse"}, ctx)
-      assert opts(plan.argv) == ["--append-system-prompt", "be terse"]
+
+      assert opts(plan.argv) ==
+               ["--disallowed-tools", @vendor_denials, "--append-system-prompt", "be terse"]
     end
 
     test "max_turns and json_schema render", %{ctx: ctx} do
       assert {:ok, plan} =
                ClaudeHeadless.plan(%{max_turns: 5, json_schema: ~s({"type":"object"})}, ctx)
 
-      assert opts(plan.argv) == ["--max-turns", "5", "--json-schema", ~s({"type":"object"})]
+      assert opts(plan.argv) ==
+               [
+                 "--disallowed-tools",
+                 @vendor_denials,
+                 "--max-turns",
+                 "5",
+                 "--json-schema",
+                 ~s({"type":"object"})
+               ]
     end
 
     test "a map json_schema is encoded", %{ctx: ctx} do
       assert {:ok, plan} = ClaudeHeadless.plan(%{json_schema: %{"type" => "object"}}, ctx)
-      assert opts(plan.argv) == ["--json-schema", ~s({"type":"object"})]
+
+      assert opts(plan.argv) ==
+               ["--disallowed-tools", @vendor_denials, "--json-schema", ~s({"type":"object"})]
     end
 
     test "dangerously_skip_permissions and bare are flag-only", %{ctx: ctx} do
@@ -140,7 +191,7 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
                "--allowed-tools",
                "Bash",
                "--disallowed-tools",
-               "Edit",
+               "Edit," <> @vendor_denials,
                "--append-system-prompt",
                "hi",
                "--max-turns",
@@ -161,7 +212,9 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
       {:ok, resolved} = Sandbox.read_path(file, :harness_input, ctx)
 
       assert {:ok, plan} = ClaudeHeadless.plan(%{append_system_prompt_file: file}, ctx)
-      assert opts(plan.argv) == ["--append-system-prompt-file", resolved]
+
+      assert opts(plan.argv) ==
+               ["--disallowed-tools", @vendor_denials, "--append-system-prompt-file", resolved]
     end
 
     test "add_dirs are write-gated, resolved, and become lock roots", %{
@@ -173,7 +226,7 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
       {:ok, resolved} = Sandbox.write_path(sub, :harness_add_dir, ctx)
 
       assert {:ok, plan} = ClaudeHeadless.plan(%{add_dirs: [sub]}, ctx)
-      assert opts(plan.argv) == ["--add-dir", resolved]
+      assert opts(plan.argv) == ["--disallowed-tools", @vendor_denials, "--add-dir", resolved]
       assert plan.extra_lock_roots == [resolved]
     end
 
@@ -191,7 +244,7 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
   describe "plan/2 — resume/continue" do
     test "resume renders --resume with the session id", %{ctx: ctx} do
       assert {:ok, plan} = ClaudeHeadless.plan(%{resume: "sess-42"}, ctx)
-      assert opts(plan.argv) == ["--resume", "sess-42"]
+      assert opts(plan.argv) == ["--disallowed-tools", @vendor_denials, "--resume", "sess-42"]
     end
 
     test "resume and continue together are rejected", %{ctx: ctx} do
@@ -272,10 +325,10 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadlessTest do
     Enum.find_value(events, fn event -> Map.get(ClaudeHeadless.extract(event), key) end)
   end
 
-  # The rendered option args: everything between the fixed prefix and the prompt slot.
+  # The rendered option args: everything between the fixed prefix and the
+  # `-- <prompt>` tail every plan ends with.
   defp opts(argv) do
-    argv
-    |> Enum.drop(length(@base))
-    |> Enum.reject(&(&1 == :prompt))
+    {options, ["--", :prompt]} = argv |> Enum.drop(length(@base)) |> Enum.split(-2)
+    options
   end
 end

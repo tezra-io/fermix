@@ -99,6 +99,25 @@ defmodule FermixCore.Harness.Ledger do
   end
 
   @doc """
+  Every run whose change to auto-executing vendor config (`Harness.VendorConfig`)
+  is recorded and not yet resolved — the rows the next admission checks.
+  """
+  @spec unresolved_vendor_config(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def unresolved_vendor_config(opts \\ []) when is_list(opts) do
+    Repo.unresolved_harness_vendor_config(opts)
+  end
+
+  @doc """
+  Marks a run's vendor-config change resolved: the owner acknowledged it through
+  `/confirm`, or admission found every file reverted or committed.
+  """
+  @spec clear_vendor_config(String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found | term()}
+  def clear_vendor_config(id, opts \\ []) when is_binary(id) and is_list(opts) do
+    Repo.update_harness_run(id, %{vendor_config_cleared_at: DateTime.utc_now()}, opts)
+  end
+
+  @doc """
   Records the vendor session id once the harness reports it (resume handle).
   """
   @spec record_session(String.t(), String.t(), keyword()) ::

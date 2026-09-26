@@ -13,6 +13,8 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Harness.Ledger
+  alias FermixCore.Memory.Repo
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.PathPolicy
 
@@ -226,6 +228,74 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     end
   end
 
+  # GAP3-1: a coding run changed vendor config that runs at the next harness
+  # launch, so that launch asks the owner once. The acknowledgment rides the same
+  # pending-record + `/confirm` + auto-resume path as a directory grant.
+  describe "vendor-config acknowledgment" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-grant-harness-#{unique}.db")
+      repo = :"grant_harness_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo, run_id: seed_changed_run(repo)}
+    end
+
+    test "builds an origin-bound record for the run's acknowledgment", %{run_id: run_id} do
+      origin = chat_origin("owner-1", resume: nil)
+
+      assert {:ok, token, :new} = SandboxCommand.store_pending_grant(ack(run_id), origin)
+      assert {:ok, ^token, :existing} = SandboxCommand.store_pending_grant(ack(run_id), origin)
+      assert {:ok, record} = Confirmations.take(token)
+      assert record.mutation == {:acknowledge_vendor_config, run_id}
+    end
+
+    test "/confirm clears the change and re-ingests the verbatim request", %{
+      repo: repo,
+      run_id: run_id
+    } do
+      origin =
+        chat_origin("owner-1",
+          resume: %{content: "now have Claude review it", reply_target: "chat-1", sender: "alice"}
+        )
+
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(ack(run_id), origin)
+
+      assert :ok = confirm(token, "owner-1", Map.put(agent_ctx(), :memory_repo, repo))
+      assert_receive {:sandbox_reply, reply}
+      assert reply =~ "resuming your request"
+      refute reply =~ "Sandbox updated"
+
+      assert {:ok, %{vendor_config_cleared_at: %DateTime{}}} = Ledger.get(run_id, server: repo)
+      assert {:ok, []} = Ledger.unresolved_vendor_config(server: repo)
+
+      assert_receive {:resumed, resumed}, 2_000
+      assert resumed.content == "now have Claude review it"
+      assert resumed.metadata.resumed_from_grant == token
+    end
+
+    test "/deny discards the prompt and leaves the change unresolved", %{
+      repo: repo,
+      run_id: run_id
+    } do
+      {:ok, token, :new} =
+        SandboxCommand.store_pending_grant(ack(run_id), chat_origin("owner-1", resume: nil))
+
+      message = telegram_message("/deny #{token}", "owner-1")
+      assert :ok = dispatch(message, Map.put(agent_ctx(), :memory_repo, repo))
+      assert_receive {:sandbox_reply, reply}
+      refute reply =~ "Sandbox"
+      assert reply =~ "revert or commit"
+
+      assert {:ok, [%{id: ^run_id}]} = Ledger.unresolved_vendor_config(server: repo)
+      refute_receive {:resumed, _}, 200
+    end
+  end
+
   # The inline "Approve" button synthesizes the same inbound message a typed
   # /confirm would, then funnels through the UNCHANGED confirm path. These tests
   # drive `Telegram.parse_update/1` on a real callback_query so the button and the
@@ -304,6 +374,37 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
 
   defp request(root),
     do: %{path: root, reason: "the task needs it", diff: "allowed_roots + #{root}"}
+
+  defp ack(run_id), do: %{acknowledge_vendor_config: run_id}
+
+  # A finished coding run whose child planted Claude's local settings.
+  defp seed_changed_run(repo) do
+    change = %{"before" => nil, "after" => "sha256:bb", "commit_clears" => true}
+
+    {:ok, run} =
+      Ledger.admit(
+        %{
+          vendor: "codex",
+          rail: "local",
+          status: "starting",
+          cwd: "/repo",
+          worktree_root: "/repo",
+          lock_roots: ["/repo"],
+          artifacts_dir: "/repo/.fermix/artifacts/run",
+          origin_kind: "chat",
+          origin_session_id: "telegram:chat-1:root",
+          delivery_mode: "origin"
+        },
+        server: repo
+      )
+
+    changes = %{"/repo" => %{".claude/settings.local.json" => change}}
+
+    {:ok, _row} =
+      Ledger.terminalize(run.id, "completed", %{vendor_config_changes: changes}, server: repo)
+
+    run.id
+  end
 
   defp chat_origin(user_id, opts) do
     %{

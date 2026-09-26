@@ -108,6 +108,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   on the ACP surface can no longer start or drive desktop control, and no
   unattended run can take over a desktop-control session an attended turn left
   open.
+- **A coding run that changes a coding agent's own config asks before the next
+  one.** When a run changes files coding agents act on by themselves at start
+  (Claude Code settings, `.mcp.json`, Codex config, the `.agents` folder, VS
+  Code tasks and settings), its outcome names them, and the next coding run in
+  that repo asks you to confirm the change once, unless you revert or commit it
+  first. A scheduled job waits and tells you how to clear it. Claude Code runs
+  can no longer edit Codex's config or the `.agents` folder.
 
 ## [0.11.0] - 2026-09-23
 
