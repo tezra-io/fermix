@@ -248,8 +248,9 @@ defmodule FermixCore.Companion.TimelineSearchTest do
              DROP TRIGGER mobile_timeline_fts_ad;
              DROP TRIGGER mobile_timeline_fts_au;
              DROP TABLE mobile_timeline_fts;
+             ALTER TABLE mobile_client_requests DROP COLUMN cancelled_at;
              ALTER TABLE mobile_client_requests DROP COLUMN transport;
-             DELETE FROM schema_migrations WHERE version = 33;
+             DELETE FROM schema_migrations WHERE version IN (33, 34);
              """)
   end
 

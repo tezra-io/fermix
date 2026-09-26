@@ -47,6 +47,7 @@ defmodule FermixCore.Memory.Repo do
   @release_wedged_jobs_migration_version 31
   @computer_history_purges_migration_version 32
   @companion_migration_version 33
+  @companion_cancel_migration_version 34
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -755,6 +756,7 @@ defmodule FermixCore.Memory.Repo do
           runner_epoch: String.t() | nil,
           attempt: non_neg_integer(),
           transport: String.t(),
+          cancelled_at: DateTime.t() | nil,
           claimed_at: DateTime.t(),
           expires_at: DateTime.t(),
           updated_at: DateTime.t()
@@ -1273,6 +1275,23 @@ defmodule FermixCore.Memory.Repo do
   def get_mobile_client_request(selector, client_msg_id, opts \\ [])
       when is_map(selector) and is_binary(client_msg_id) do
     call({:get_mobile_client_request, selector, client_msg_id}, opts)
+  end
+
+  @doc """
+  Record a cancel on an unsettled request (`MobileSql.cancel_request/4`):
+  `:marked` when the mark is on it now, `:settled` when it already ended.
+  """
+  @spec cancel_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:marked | :settled, mobile_client_request_row()}}
+          | {:error, :not_found | term()}
+  def cancel_mobile_client_request(selector, client_msg_id, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) do
+    call({:cancel_mobile_client_request, selector, client_msg_id, now}, opts)
   end
 
   @spec start_mobile_client_request(
@@ -3105,6 +3124,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:cancel_mobile_client_request, selector, client_msg_id, now}, _from, state) do
+    reply = with_connection(state, &MobileSql.cancel_request(&1, selector, client_msg_id, now))
+    {:reply, reply, state}
+  end
+
   def handle_call(
         {:start_mobile_client_request, selector, client_msg_id, epoch, now},
         _from,
@@ -3896,8 +3920,25 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_runs_pending_delivery_migration(conn, versions),
          :ok <- apply_release_wedged_jobs_migration(conn, versions),
          :ok <- apply_computer_history_purges_migration(conn, versions),
-         :ok <- apply_companion_migration(conn, versions) do
+         :ok <- apply_companion_migration(conn, versions),
+         :ok <- apply_companion_cancel_migration(conn, versions) do
       :ok
+    end
+  end
+
+  defp apply_companion_cancel_migration(conn, versions) do
+    if Enum.member?(versions, @companion_cancel_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.cancel_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@companion_cancel_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

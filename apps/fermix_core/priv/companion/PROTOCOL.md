@@ -225,8 +225,13 @@ daemon's turn queue:
 leaves its user's row (announced as a `row` when it was written) with no
 answer after it. `cancel` names the request whose turn to stop, whichever
 client sent it and whether it runs or still waits; it never stops another
-turn, and the daemon never answers it itself. A turn that had already
-finished when the cancel arrived ends with its `text_done`, not an error.
+turn, and the daemon never answers it itself. It is recorded on the request
+before anything else, so a cancel that arrives after `accepted` but before
+the request has reached the turn queue is not lost: the request is never
+queued and ends with `turn_error` (code `cancelled`), and a request the
+daemon recovers after a restart is not run again. A turn that had already
+finished when the cancel arrived ends with its `text_done`, not an error, and
+a cancel for a request that already ended changes nothing.
 
 ## Approvals
 

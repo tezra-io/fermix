@@ -106,6 +106,18 @@ defmodule FermixChannels.Companion.Requests do
     end
   end
 
+  @doc """
+  Record a cancel on a request that has not settled (`:marked`), or report that
+  it already did (`:settled`). The mark is what the hand-off to the queue and
+  boot recovery read.
+  """
+  @spec cancel(String.t(), String.t(), keyword()) ::
+          {:ok, {:marked | :settled, map()}} | {:error, term()}
+  def cancel(profile, client_id, opts)
+      when is_binary(profile) and is_binary(client_id) and is_list(opts) do
+    store(opts).cancel_client_request(profile, client_id, store_opts(opts))
+  end
+
   @doc "Answer one `history_search` with a page of hits to this client."
   @spec search(map(), transport(), keyword()) :: :ok | {:error, term()}
   def search(payload, transport, opts) when is_map(payload) and is_list(opts) do

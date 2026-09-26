@@ -600,7 +600,11 @@ Current channels:
   `Mobile.RequestCoordinator` instance reruns only its own unfinished requests
   at boot. A companion-socket turn reaches the Queue through `Companion.Turns`,
   which writes its replies and sends `text_done` only on the `{:completed}`
-  outcome, and its `cancel` stops one named turn (`Queue.stop_turn/3`). Every
+  outcome, and its `cancel` stops one named turn: the cancel is recorded on
+  the request (`cancelled_at`), and `Companion.Turns`, which owns the hand-off
+  to the queue, reads that mark as it enqueues and sends any
+  `Queue.stop_turn/3` itself, so a cancel is never lost between claim and
+  queue, and boot recovery never reruns a cancelled request. Every
   other timeline row, whichever transport or job writes it, is announced to
   the socket's connections as a `row` the moment it is written
   (`Channels.Companion.announce_row/3`).

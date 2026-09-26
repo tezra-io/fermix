@@ -29,7 +29,6 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
-  alias FermixChannels.Gateway.Queue
   alias FermixCore.Companion.Protocol
 
   @profile "main"
@@ -87,7 +86,7 @@ defmodule FermixChannels.Companion.Connection do
       pending: [],
       worker: nil,
       registry: Keyword.get(opts, :registry, Companion.registry()),
-      queue: Keyword.get(opts, :queue, Queue),
+      turns: Keyword.get(opts, :turns, Turns),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       request_opts: Keyword.get(opts, :request_opts, [])
     }
@@ -235,14 +234,27 @@ defmodule FermixChannels.Companion.Connection do
     {:stop, state}
   end
 
-  # Stops the one turn the request named, running or waiting, and writes
-  # nothing itself: the turn ends on the wire from the queue's outcome, a
-  # `turn_error` (code `cancelled`), or its `text_done` when it had already
-  # finished. Other clients' turns in the conversation are untouched.
+  # Stops the one turn the request named and writes nothing itself. The cancel
+  # is recorded on the request first; then `Companion.Turns`, which hands every
+  # turn to the queue, stops it there if it was handed off. A request not
+  # queued yet never is, one already settled is left alone, and other turns in
+  # the conversation are untouched. The turn ends on the wire from its outcome:
+  # a `turn_error` (code `cancelled`), or its `text_done` when it had already
+  # finished.
   defp cancel(%{"profile_id" => @profile, "client_msg_id" => client_msg_id}, state) do
-    key = Companion.conversation_key(@profile)
-    {:ok, _stopped} = Queue.stop_turn(key, client_msg_id, state.queue)
-    {:cont, state}
+    case Requests.cancel(@profile, client_msg_id, request_opts(state)) do
+      {:ok, {:marked, _request}} ->
+        answer(Turns.cancel(@profile, client_msg_id, state.turns), state)
+
+      {:ok, {:settled, _request}} ->
+        {:cont, state}
+
+      {:error, :not_found} ->
+        {:cont, state}
+
+      {:error, reason} ->
+        answer({:error, reason}, state)
+    end
   end
 
   defp cancel(_payload, state), do: answer({:error, :unsupported_profile}, state)

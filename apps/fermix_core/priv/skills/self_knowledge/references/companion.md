@@ -51,9 +51,11 @@ the daemon lost to a restart of its queue ends as interrupted. An offline
 client later sees the user's message with no answer after it.
 
 Cancel names **one request by its client message id** and stops that turn
-whether it is already running or still waiting behind another turn; it never
-touches any other turn, and a turn that had already finished when the cancel
-arrived ends normally with its answer. `/stop` is still the stop-everything
+whether it is already running, still waiting behind another turn, or not yet
+queued at all (the cancel is recorded on the request, so it is never queued
+and a restart does not run it again); it never touches any other turn, and a
+turn that had already finished when the cancel arrived ends normally with its
+answer. `/stop` is still the stop-everything
 command: every active turn and every queued message, each settled as cancelled
 so it is not run again at the next boot.
 

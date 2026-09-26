@@ -19,6 +19,15 @@ defmodule FermixChannels.Companion.Turns do
     * the queue it was handed to dying (a restart loses every outcome it held)
       ends the turn the same way, with code `interrupted`.
 
+  This process also owns the hand-off to the queue and every stop of a turn
+  handed to it, so a `cancel` is never lost between the two. `cancel` records
+  its mark on the request before asking here; a hand-off reads that mark and
+  enqueues in one step of this process, so a request cancelled before it was
+  queued never is (it ends with `turn_error`, code `cancelled`), and a stop for
+  a turn already handed off is sent to the queue by the process that sent the
+  turn, so it can never overtake it. A request recovered at boot is handed off
+  here too, so recovery respects the mark.
+
   The queue fires one outcome per turn, so the wire carries one ending: a
   turn is never announced as cancelled and answered. A reply or an outcome
   that arrives after its turn ended (a turn of a dead queue that still
@@ -54,13 +63,22 @@ defmodule FermixChannels.Companion.Turns do
 
   @doc """
   The Gateway's agent contract (`agent.handle_message(message, agent_server)`):
-  track the turn, then hand it to the queue.
+  hand the turn to the queue and track it, unless its request carries a cancel.
   """
   @spec handle_message(map(), GenServer.server()) :: :ok | {:error, term()}
   def handle_message(message, queue) when is_map(message) do
-    with :ok <- GenServer.call(__MODULE__, {:track, message, queue}) do
-      Queue.handle_message(message, queue)
-    end
+    GenServer.call(__MODULE__, {:hand_off, message, queue})
+  end
+
+  @doc """
+  Stop the turn of a request whose cancel is already recorded on it: a turn
+  handed to the queue is stopped there, running or waiting. A request not
+  handed off yet needs nothing more, because its hand-off reads the mark.
+  """
+  @spec cancel(String.t(), String.t(), GenServer.server()) :: :ok
+  def cancel(profile_id, client_msg_id, server \\ __MODULE__)
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    GenServer.call(server, {:cancel, profile_id, client_msg_id})
   end
 
   @doc "Hold one reply of a tracked turn, or write it now for anything else."
@@ -87,10 +105,25 @@ defmodule FermixChannels.Companion.Turns do
   end
 
   @impl true
-  def handle_call({:track, message, queue}, _from, state) do
+  def handle_call({:hand_off, message, queue}, _from, state) do
     case GenServer.whereis(queue) do
-      pid when is_pid(pid) -> {:reply, :ok, track(state, message, pid)}
+      pid when is_pid(pid) -> hand_off(state, new_turn(message, pid), message)
       nil -> {:reply, {:error, {:queue_unavailable, queue}}, state}
+    end
+  end
+
+  # Sent from here, after the enqueue this process sent, so the stop cannot
+  # reach the queue ahead of the turn it names.
+  def handle_call({:cancel, profile, client_id}, _from, state) do
+    case Map.get(state.turns, {profile, client_id}) do
+      nil ->
+        {:reply, :ok, state}
+
+      turn ->
+        {:ok, _stopped} =
+          Queue.stop_turn(Companion.conversation_key(profile), client_id, turn.queue)
+
+        {:reply, :ok, state}
     end
   end
 
@@ -127,10 +160,36 @@ defmodule FermixChannels.Companion.Turns do
     {:noreply, state}
   end
 
-  defp track(state, message, queue) do
+  # The mark is read and the turn enqueued in this one step, so a cancel
+  # recorded before it is always seen, and one recorded after it finds the turn
+  # tracked here and stops it in the queue.
+  defp hand_off(state, turn, message) do
+    case cancel_recorded(state, turn) do
+      {:ok, true} ->
+        {:reply, :ok, fail(state, turn, :cancelled)}
+
+      {:ok, false} ->
+        state = track(state, turn)
+        {:reply, Queue.handle_message(message, turn.queue), state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
+    end
+  end
+
+  # A turn with no request behind it (a re-ingested resume) has no mark to read.
+  defp cancel_recorded(_state, %{attempt: nil}), do: {:ok, false}
+
+  defp cancel_recorded(state, turn) do
+    with {:ok, request} <- store(state).get_client_request(turn.profile, turn.client_id, []) do
+      {:ok, not is_nil(Map.get(request, :cancelled_at))}
+    end
+  end
+
+  defp new_turn(message, queue) do
     metadata = Map.get(message, :metadata) || %{}
 
-    turn = %{
+    %{
       key: turn_key(message),
       profile: Map.fetch!(message, :chat_id),
       client_id: Map.get(metadata, :client_msg_id) || Map.fetch!(message, :id),
@@ -139,8 +198,14 @@ defmodule FermixChannels.Companion.Turns do
       queue: queue,
       replies: []
     }
+  end
 
-    %{state | turns: Map.put(state.turns, turn.key, turn), queues: watch(state.queues, queue)}
+  defp track(state, turn) do
+    %{
+      state
+      | turns: Map.put(state.turns, turn.key, turn),
+        queues: watch(state.queues, turn.queue)
+    }
   end
 
   defp watch(queues, queue) do

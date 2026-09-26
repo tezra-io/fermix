@@ -18,8 +18,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Answers `Queue.stop_turn/3` and reports it.
-  defmodule QueueStub do
+  # Answers `Companion.Turns.cancel/3` and reports it.
+  defmodule TurnsStub do
     use GenServer
 
     def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
@@ -28,9 +28,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
     def init(test_pid), do: {:ok, test_pid}
 
     @impl true
-    def handle_call({:stop_turn, key, message_id}, _from, test_pid) do
-      send(test_pid, {:stop_turn, key, message_id})
-      {:reply, {:ok, :not_found}, test_pid}
+    def handle_call({:cancel, profile, client_msg_id}, _from, test_pid) do
+      send(test_pid, {:turns_cancel, profile, client_msg_id})
+      {:reply, :ok, test_pid}
     end
   end
 
@@ -79,7 +79,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
          recover?: false}
       )
 
-    queue = start_supervised!({QueueStub, self()})
+    turns = start_supervised!({TurnsStub, self()})
 
     start_supervised!(
       Supervisor.child_spec({DynamicSupervisor, name: connections, strategy: :one_for_one},
@@ -101,7 +101,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
        socket_path: socket_path,
        max_clients: 2,
        connection_supervisor: connections,
-       connection_opts: [registry: registry, queue: queue, request_opts: request_opts]}
+       connection_opts: [registry: registry, turns: turns, request_opts: request_opts]}
     )
 
     %{
@@ -396,10 +396,28 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert %{"type" => "text_done", "server_seq" => 9} = recv(client)
   end
 
-  test "cancel stops only the named request's turn and answers nothing itself", ctx do
+  test "cancel records itself on the named request before stopping its turn, and answers nothing",
+       ctx do
     client = hello(ctx.socket_path)
+    send_line(client, message("mac-7", "a long answer, please"))
+    assert %{"type" => "accepted", "duplicate" => false} = recv(client)
+    assert %{"type" => "row", "client_msg_id" => "mac-7"} = recv(client)
+    assert_receive {:gateway_ingest, _message, _opts}, 2_000
+
     send_line(client, %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-7"})
-    assert_receive {:stop_turn, {"companion", "main", :root}, "mac-7"}, 2_000
+    assert_receive {:turns_cancel, "main", "mac-7"}, 2_000
+    assert {:error, :timeout} = :gen_tcp.recv(client, 0, 200)
+
+    assert {:ok, %{status: "running", cancelled_at: %DateTime{}}} =
+             Timeline.get_client_request("main", "mac-7", ctx.store_opts)
+
+    # A request that already settled, or one never claimed, is left alone.
+    assert {:ok, _request} =
+             Timeline.complete_client_request("main", "mac-7", 1, %{}, ctx.store_opts)
+
+    send_line(client, %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-7"})
+    send_line(client, %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-8"})
+    refute_receive {:turns_cancel, _profile, _id}, 200
     assert {:error, :timeout} = :gen_tcp.recv(client, 0, 200)
 
     send_line(client, %{"type" => "cancel", "profile_id" => "work", "client_msg_id" => "mac-7"})

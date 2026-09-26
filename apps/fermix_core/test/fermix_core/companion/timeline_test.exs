@@ -456,6 +456,48 @@ defmodule FermixCore.Companion.TimelineTest do
              Timeline.get_client_request("main", "client-settled", store_opts(repo))
   end
 
+  test "a cancel marks an unsettled request once and leaves a settled one as it was", %{
+    repo: repo
+  } do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-cancel")
+
+    assert {:ok, {:marked, %{status: "accepted", cancelled_at: first}}} =
+             Timeline.cancel_client_request(
+               "main",
+               "client-cancel",
+               store_opts(repo, now: at(1))
+             )
+
+    assert DateTime.compare(first, at(1)) == :eq
+
+    assert {:ok, {:started, %{attempt: 1, cancelled_at: ^first}}} =
+             start_request(repo, "client-cancel")
+
+    # A second cancel keeps the first mark.
+    assert {:ok, {:marked, %{status: "running", cancelled_at: ^first}}} =
+             Timeline.cancel_client_request(
+               "main",
+               "client-cancel",
+               store_opts(repo, now: at(2))
+             )
+
+    # Boot recovery reads the mark on the request it would rerun.
+    assert {:ok, [%{client_msg_id: "client-cancel", cancelled_at: ^first}]} =
+             Timeline.recoverable_client_requests("boot-b", store_opts(repo, now: at(3)))
+
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-done")
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-done")
+
+    assert {:ok, %{status: "completed"}} =
+             Timeline.complete_client_request("main", "client-done", 1, %{}, store_opts(repo))
+
+    assert {:ok, {:settled, %{status: "completed", cancelled_at: nil}}} =
+             Timeline.cancel_client_request("main", "client-done", store_opts(repo))
+
+    assert {:error, :not_found} =
+             Timeline.cancel_client_request("main", "client-unknown", store_opts(repo))
+  end
+
   test "new request claims require an authenticated device id", %{repo: repo} do
     opts =
       repo

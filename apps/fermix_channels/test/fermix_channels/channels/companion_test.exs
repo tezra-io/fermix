@@ -34,6 +34,12 @@ defmodule FermixChannels.Channels.CompanionTest do
       send(test_pid, {:enqueued, message.id})
       {:noreply, test_pid}
     end
+
+    @impl true
+    def handle_call({:stop_turn, key, message_id}, _from, test_pid) do
+      send(test_pid, {:stop_turn, key, message_id})
+      {:reply, {:ok, :dequeued}, test_pid}
+    end
   end
 
   # Reports to the test by name: `Companion.Turns` writes from its own process.
@@ -70,6 +76,15 @@ defmodule FermixChannels.Channels.CompanionTest do
       send(:companion_adapter_test, {:failed, profile, client_id, attempt, fields})
       {:ok, %{status: "failed"}}
     end
+
+    # A request is cancelled when the test recorded a cancel on it.
+    def get_client_request(profile, client_id, _opts) do
+      cancelled = :persistent_term.get({__MODULE__, :cancelled}, [])
+      mark = if client_id in cancelled, do: ~U[2026-09-26 09:00:00Z]
+
+      {:ok,
+       %{profile_id: profile, client_msg_id: client_id, status: "running", cancelled_at: mark}}
+    end
   end
 
   setup do
@@ -80,6 +95,8 @@ defmodule FermixChannels.Channels.CompanionTest do
     start_supervised!(Turns)
 
     on_exit(fn ->
+      :persistent_term.erase({StoreStub, :cancelled})
+
       case previous do
         {:ok, value} -> Application.put_env(:fermix_channels, :companion_store, value)
         :error -> Application.delete_env(:fermix_channels, :companion_store)
@@ -286,6 +303,52 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_received {:completed, _profile, _id, _attempt}
     refute_received {:companion_event, %{"t" => "text_done"}}
     refute_received {:telemetry, _measurements, %{direction: :outbound}}
+  end
+
+  test "a request cancelled before its hand-off never reaches the queue" do
+    :persistent_term.put({StoreStub, :cancelled}, ["mac-1"])
+    queue = start_supervised!({QueueSink, self()}, id: :queue_sink)
+    message = request_message()
+
+    assert :ok = Turns.handle_message(Map.from_struct(message), queue)
+
+    refute_receive {:enqueued, "mac-1"}, 100
+    assert_received {:failed, "main", "mac-1", 3, %{error: ":cancelled"}}
+
+    assert_received {:companion_event,
+                     %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "cancelled"}}
+
+    # Its turn has ended: a stop finds nothing to stop, and a late outcome is dropped.
+    assert :ok = Turns.cancel("main", "mac-1")
+    refute_received {:stop_turn, _key, _id}
+    assert :ok = Companion.build_turn_result(message).({:completed})
+    refute_receive {:completed, _profile, _id, _attempt}, 100
+  end
+
+  # Boot recovery hands a request off through the same step, as a new attempt.
+  test "a recovered request with a cancel on it ends cancelled instead of running again" do
+    :persistent_term.put({StoreStub, :cancelled}, ["mac-1"])
+    queue = start_supervised!({QueueSink, self()}, id: :queue_sink)
+    recovered = request_message()
+    recovered = %{recovered | metadata: %{recovered.metadata | companion_attempt: 4}}
+
+    assert :ok = Turns.handle_message(Map.from_struct(recovered), queue)
+
+    refute_receive {:enqueued, "mac-1"}, 100
+    assert_received {:failed, "main", "mac-1", 4, _fields}
+    assert_received {:companion_event, %{"t" => "turn_error", "code" => "cancelled"}}
+  end
+
+  test "a cancel for a turn already handed off is stopped in the queue by the hand-off's owner" do
+    queue = start_supervised!({QueueSink, self()}, id: :queue_sink)
+    track(request_message(), queue)
+
+    assert :ok = Turns.cancel("main", "mac-1")
+    assert_receive {:stop_turn, {"companion", "main", :root}, "mac-1"}
+
+    # Another request's cancel never stops this turn.
+    assert :ok = Turns.cancel("main", "mac-2")
+    refute_receive {:stop_turn, _key, "mac-2"}, 100
   end
 
   test "a failed turn ends with its failure's code" do

@@ -133,6 +133,14 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   INSERT INTO mobile_timeline_fts(mobile_timeline_fts) VALUES ('rebuild');
   """
 
+  # Migration 34, cancel before the queue. A `cancel` can reach a request that
+  # was claimed and acknowledged but not yet handed to the queue; the mark on
+  # the request is what the hand-off and boot recovery read, so the cancel is
+  # not lost in that window.
+  @cancel_schema_sql """
+  ALTER TABLE mobile_client_requests ADD COLUMN cancelled_at TEXT;
+  """
+
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
 
@@ -144,6 +152,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @spec companion_schema_sql() :: String.t()
   def companion_schema_sql, do: @companion_schema_sql
+
+  @spec cancel_schema_sql() :: String.t()
+  def cancel_schema_sql, do: @cancel_schema_sql
 
   @spec append(term(), map()) :: {:ok, map()} | {:error, term()}
   def append(conn, attrs) do
@@ -349,6 +360,43 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            ) do
       request_result(rows)
     end
+  end
+
+  @doc """
+  Record a cancel on a request that has not settled, in one step: the mark
+  (`cancelled_at`, set once) is what the hand-off to the queue and boot
+  recovery read, so a cancel that arrives before the request is queued is
+  never lost. A settled request is left as it is.
+  """
+  @spec cancel_request(term(), map(), String.t(), DateTime.t()) ::
+          {:ok, {:marked | :settled, map()}} | {:error, term()}
+  def cancel_request(conn, selector, client_msg_id, now) do
+    profile = normalize_profile(selector)
+
+    transaction(conn, fn ->
+      with {:ok, rows} <-
+             query_all(
+               conn,
+               """
+               UPDATE mobile_client_requests
+               SET cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+               WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
+                 AND status IN ('accepted', 'running')
+               RETURNING *
+               """,
+               [timestamp(now), timestamp(now)] ++ profile_params(profile) ++ [client_msg_id]
+             ) do
+        cancelled_request(conn, profile, client_msg_id, rows)
+      end
+    end)
+  end
+
+  defp cancelled_request(_conn, _profile, _client_msg_id, [row]),
+    do: {:ok, {:marked, request_row(row)}}
+
+  defp cancelled_request(conn, profile, client_msg_id, []) do
+    with {:ok, request} <- get_request(conn, profile, client_msg_id),
+         do: {:ok, {:settled, request}}
   end
 
   @spec start_request(term(), map(), String.t(), String.t(), DateTime.t()) ::
@@ -1349,7 +1397,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          authenticated_device_id,
          runner_epoch,
          attempt,
-         transport
+         transport,
+         cancelled_at
        ]) do
     %{
       agent_id: agent_id,
@@ -1367,6 +1416,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       runner_epoch: runner_epoch,
       attempt: attempt,
       transport: transport,
+      cancelled_at: cancelled_at && parse_timestamp!(cancelled_at),
       claimed_at: parse_timestamp!(claimed_at),
       expires_at: parse_timestamp!(expires_at),
       updated_at: parse_timestamp!(updated_at)

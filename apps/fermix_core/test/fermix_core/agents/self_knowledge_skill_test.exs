@@ -127,7 +127,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     for required <- [
-          "running or still waiting",
+          "still waiting behind another turn, or not yet queued",
           "/stop",
           "forward",
           "backward",

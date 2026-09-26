@@ -189,6 +189,25 @@ defmodule FermixCore.Companion.Timeline do
     )
   end
 
+  @doc """
+  Record a cancel on a request before it settles. `:marked` means the mark is
+  on the request: a request not yet handed to the queue never is, and boot
+  recovery ends it as cancelled instead of running it. `:settled` means it had
+  already ended, and nothing changed.
+  """
+  @spec cancel_client_request(String.t(), String.t(), keyword()) ::
+          {:ok, {:marked | :settled, Repo.mobile_client_request_row()}}
+          | {:error, :not_found | term()}
+  def cancel_client_request(profile_id, client_msg_id, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    Repo.cancel_mobile_client_request(
+      profile_selector(profile_id, opts),
+      client_msg_id,
+      now(opts),
+      repo_opts(opts)
+    )
+  end
+
   @spec start_client_request(String.t(), String.t(), String.t(), keyword()) ::
           {:ok, {:started | :active | :completed | :failed, Repo.mobile_client_request_row()}}
           | {:error, term()}
