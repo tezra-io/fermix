@@ -693,6 +693,115 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # Live publishes no turn boundaries and cannot cancel a reply, so the daemon,
+  # as the relay both audio streams pass through, reads the turn from them.
+  describe "turn state" do
+    test "a reply that has had time to play out returns the pet to listening", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 10)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "audio_delta"}}
+
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
+    end
+
+    test "a later chunk of the same reply keeps it speaking", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 200)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      Process.sleep(120)
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+
+      refute_receive {:realtime, %{type: "state", state: "listening"}}, 150
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
+    end
+
+    test "the rest of a stopped reply is dropped, and a later reply plays", %{clock: clock} do
+      session = listening_session(clock)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "audio_delta"}}
+
+      assert :ok = SessionControl.interrupt(session, 10)
+      assert_receive {:realtime, %{type: "playback_stop"}}
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      Agent.update(clock, &(&1 + 100))
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      sync(session)
+      refute_received {:realtime, %{type: "audio_delta"}}
+      refute_received {:realtime, %{type: "state", state: "speaking"}}
+
+      Agent.update(clock, &(&1 + 5_000))
+      send(session, {:openai_live_event, {:audio_delta, "NEXT"}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: "NEXT"}}
+    end
+
+    test "the operator falling quiet after speaking announces thinking", %{clock: clock} do
+      session = listening_session(clock)
+
+      mic(session, clock, 0, :speech)
+      mic(session, clock, 200, :silence)
+      refute_received {:realtime, %{type: "state", state: "thinking"}}
+
+      mic(session, clock, 2_000, :silence)
+      assert_received {:realtime, %{type: "state", state: "thinking"}}
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+    end
+
+    test "speaking again while thinking returns to listening", %{clock: clock} do
+      session = listening_session(clock)
+
+      mic(session, clock, 0, :speech)
+      mic(session, clock, 2_000, :silence)
+      assert_received {:realtime, %{type: "state", state: "thinking"}}
+
+      mic(session, clock, 2_100, :speech)
+      assert_received {:realtime, %{type: "state", state: "listening"}}
+    end
+
+    test "thinking gives way to listening when no reply comes", %{clock: clock} do
+      session = listening_session(clock)
+
+      mic(session, clock, 0, :speech)
+      mic(session, clock, 2_000, :silence)
+      assert_received {:realtime, %{type: "state", state: "thinking"}}
+
+      mic(session, clock, 60_000, :silence)
+      assert_received {:realtime, %{type: "state", state: "listening"}}
+    end
+
+    # The app does no echo cancellation: the pet's own reply reaches its
+    # microphone, and must not be taken for the operator speaking.
+    test "the reply heard back through the microphone is not the operator", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 10)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(1_000)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+
+      mic(session, clock, 500, :speech)
+      mic(session, clock, 4_000, :silence)
+
+      refute_received {:realtime, %{type: "state", state: "thinking"}}
+    end
+
+    test "a muted microphone never announces thinking", %{clock: clock} do
+      session = listening_session(clock)
+      assert :ok = SessionControl.mute(session, true)
+
+      mic(session, clock, 0, :speech)
+      mic(session, clock, 2_000, :silence)
+
+      refute_received {:realtime, %{type: "state", state: "thinking"}}
+    end
+  end
+
   describe "teardown" do
     test "call_stop closes gracefully and finalizes usage from session.closed", %{clock: clock} do
       Process.flag(:trap_exit, true)
@@ -925,6 +1034,34 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   # A synchronous round trip through the session's own mailbox: everything sent
   # before it has been handled by the time it returns. No sleeps.
   defp sync(session), do: :sys.get_state(session)
+
+  # A started call on the provider's side, its first `listening` consumed.
+  defp listening_session(clock, opts \\ []) do
+    session = start_session(Keyword.put(opts, :clock, clock))
+    :ok = SessionControl.call_start(session)
+    start_provider_session(session)
+    assert_receive {:realtime, %{type: "state", state: "listening"}}
+    session
+  end
+
+  # `ms` of the assistant's voice as Live sends it: base64 24 kHz PCM16.
+  defp reply_audio(ms), do: Base.encode64(:binary.copy(<<0, 0>>, 24 * ms))
+
+  # 100 ms of the microphone at clock time `at_ms`: a square wave well above
+  # speech level, or silence.
+  defp mic(session, clock, at_ms, kind) do
+    Agent.update(clock, fn _ -> at_ms end)
+    sample = if kind == :speech, do: 3_000, else: 0
+
+    pcm =
+      for index <- 1..2_400, into: <<>> do
+        value = if rem(index, 2) == 0, do: sample, else: -sample
+        <<value::little-signed-16>>
+      end
+
+    :ok = SessionControl.audio_chunk(session, pcm)
+    sync(session)
+  end
 
   defp start_capability_registry do
     registry = :"live_session_capabilities_#{System.unique_integer([:positive, :monotonic])}"

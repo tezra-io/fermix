@@ -40,6 +40,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.LiveTranscript
+  alias FermixCore.Realtime.LiveTurn
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.VoiceBridge
 
@@ -53,6 +54,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @close_deadline_ms 15_000
   @usage_tick_ms 5_000
   @context_wait_ms 1_000
+  # How long after its audio has had time to play a reply counts as over: the
+  # pet buffers a little before it plays.
+  @reply_margin_ms 300
 
   # How far back a delegation's request reads. Long enough for a correction and
   # a confirmation, short enough that an unrelated earlier topic cannot be
@@ -133,6 +137,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       close_deadline_ms: Keyword.get(opts, :close_deadline_ms, @close_deadline_ms),
       usage_tick_ms: Keyword.get(opts, :usage_tick_ms, @usage_tick_ms),
       context_wait_ms: Keyword.get(opts, :context_wait_ms, @context_wait_ms),
+      reply_margin_ms: Keyword.get(opts, :reply_margin_ms, @reply_margin_ms),
       provider_ready?: false,
       provider_session_id: nil,
       expires_at: nil,
@@ -140,6 +145,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       muted?: false,
       provider_muted?: false,
       speaking?: false,
+      turn: LiveTurn.new(),
       closing?: false,
       closed_report: :never,
       ledger: LiveLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
@@ -151,6 +157,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       start_timer: nil,
       max_session_timer: nil,
       usage_timer: nil,
+      reply_timer: nil,
       context_timers: %{}
     }
   end
@@ -169,7 +176,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.playback_stop())
 
     state =
-      state
+      %{state | turn: LiveTurn.interrupted(state.turn, now(state))}
+      |> cancel_reply_timer()
       |> notify_state("listening")
       |> send_append(
         OpenAILiveClient.instructions_append_event(
@@ -189,7 +197,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # operator's room while it waited.
   def handle_call({:mute, enabled?}, _from, state) do
     state =
-      %{state | muted?: enabled?}
+      %{state | muted?: enabled?, turn: LiveTurn.muted(state.turn)}
       |> notify_state(if(enabled?, do: "muted", else: "listening"))
       |> send_mute(enabled?)
 
@@ -220,7 +228,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def handle_cast({:audio_chunk, audio}, state) do
     case audio_drop_reason(state, audio) do
       nil ->
-        {:noreply, send_provider(state, OpenAILiveClient.audio_append_event(audio))}
+        state = send_provider(state, OpenAILiveClient.audio_append_event(audio))
+        {:noreply, read_operator_turn(state, audio)}
 
       reason ->
         Logger.debug("voice_live: dropped microphone chunk (#{reason})")
@@ -272,6 +281,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify_usage(state)
     enforce_ceiling(schedule_usage_tick(state))
   end
+
+  def handle_info({:reply_played_out, token}, %{reply_timer: {_timer, token}} = state) do
+    state = %{state | reply_timer: nil}
+    {:noreply, if(state.speaking?, do: notify_state(state, "listening"), else: state)}
+  end
+
+  def handle_info({:reply_played_out, _stale_token}, state), do: {:noreply, state}
 
   def handle_info({:context_wait_expired, delegation_id}, state) do
     state = %{state | context_timers: Map.delete(state.context_timers, delegation_id)}
@@ -408,9 +424,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp handle_live_event({:audio_delta, delta}, state) do
-    state = if state.speaking?, do: state, else: notify_state(state, "speaking")
-    notify(state, LiveFrames.audio_delta(delta))
-    {:noreply, state}
+    case LiveTurn.output(state.turn, delta, now(state)) do
+      {:drop, turn} ->
+        {:noreply, %{state | turn: turn}}
+
+      {:forward, turn, plays_for_ms} ->
+        {:noreply, forward_reply_audio(%{state | turn: turn}, delta, plays_for_ms)}
+    end
   end
 
   defp handle_live_event({:transcript_delta, speaker, delta, start_ms, end_ms}, state) do
@@ -857,6 +877,27 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp resume_listening(%{speaking?: true} = state, :user), do: notify_state(state, "listening")
   defp resume_listening(state, _speaker), do: state
 
+  # The reply's audio goes to the pet, and the pet hears when it has played out
+  # (Live sends no end of a reply).
+  defp forward_reply_audio(state, delta, plays_for_ms) do
+    state = if state.speaking?, do: state, else: notify_state(state, "speaking")
+    notify(state, LiveFrames.audio_delta(delta))
+    arm_reply_timer(state, plays_for_ms + state.reply_margin_ms)
+  end
+
+  # What the microphone says about the operator's turn: finished speaking, or
+  # speaking again. Live reports neither.
+  defp read_operator_turn(state, audio) do
+    {signal, turn} = LiveTurn.input(state.turn, audio, now(state), state.speaking?)
+    state = %{state | turn: turn}
+
+    case signal do
+      nil -> state
+      :thinking -> notify_state(state, "thinking")
+      :listening -> notify_state(state, "listening")
+    end
+  end
+
   defp notify_call_ready(state) do
     notify(
       state,
@@ -1086,7 +1127,29 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       &cancel_timer/1
     )
 
-    %{state | start_timer: nil, max_session_timer: nil, usage_timer: nil, context_timers: %{}}
+    %{
+      cancel_reply_timer(state)
+      | start_timer: nil,
+        max_session_timer: nil,
+        usage_timer: nil,
+        context_timers: %{}
+    }
+  end
+
+  # Re-armed by every chunk of the reply, so it fires once the last of it has
+  # had time to play. The token tells a stale expiry from the current one.
+  defp arm_reply_timer(state, delay_ms) do
+    state = cancel_reply_timer(state)
+    token = make_ref()
+    timer = Process.send_after(self(), {:reply_played_out, token}, delay_ms)
+    %{state | reply_timer: {timer, token}}
+  end
+
+  defp cancel_reply_timer(%{reply_timer: nil} = state), do: state
+
+  defp cancel_reply_timer(%{reply_timer: {timer, _token}} = state) do
+    cancel_timer(timer)
+    %{state | reply_timer: nil}
   end
 
   defp cancel_timer(nil), do: true

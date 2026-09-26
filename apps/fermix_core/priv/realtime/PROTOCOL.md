@@ -156,6 +156,12 @@ Under `openai_live` the daemon speaks to the pet in this order. Every frame
 except `call_ready` is optional and may repeat; there is no spoken-response
 completion event, so nothing here waits for one.
 
+Live publishes no turn boundaries either, so the daemon reads the turn from the
+audio it relays: `thinking` once the microphone, having carried speech, has
+been quiet for a moment and no reply has started (the microphone is not read
+while the reply can still be heard), and `listening` once the audio of a reply
+has had time to play out. They drive only the pet's presentation.
+
 ```
 pet  -> daemon:  call_start
                  daemon opens the provider session and the backend bridge
@@ -163,7 +169,9 @@ daemon -> pet:   call_ready { engine: "openai_live", call_id, provider_session_i
 daemon -> pet:   state { state: "listening" }
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
+daemon -> pet:   state { state: "thinking" }       (the operator has stopped speaking)
 daemon -> pet:   audio_delta … / state { speaking }
+daemon -> pet:   state { state: "listening" }      (the reply has had time to play out)
 daemon -> pet:   task { delegation_id, revision, status: "running" }      (backend work started)
 pet  -> daemon:  task_cancel { delegation_id }                            (optional)
 daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary? }
@@ -173,6 +181,10 @@ pet  -> daemon:  call_stop
 daemon -> pet:   state { state: "idle" }
 daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
 ```
+
+Live cannot cancel a reply, so an `interrupt` stops it at the relay: the daemon
+answers `playback_stop` and `state: "listening"`, and forwards none of the rest
+of that reply. Audio after its stream has been quiet for a moment is a new reply.
 
 The final `usage` is the settled bill for the call: `accounting: "incomplete"`
 says the provider never reported a terminal duration, and an incomplete total is
