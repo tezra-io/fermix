@@ -542,10 +542,16 @@ defmodule FermixCore.Companion.TimelineTest do
     assert first.attempt == 1
 
     assert {:ok, []} =
-             Timeline.recoverable_client_requests("boot-a", store_opts(repo, limit: 20, now: at(2)))
+             Timeline.recoverable_client_requests(
+               "boot-a",
+               store_opts(repo, limit: 20, now: at(2))
+             )
 
     assert {:ok, [recoverable]} =
-             Timeline.recoverable_client_requests("boot-b", store_opts(repo, limit: 20, now: at(2)))
+             Timeline.recoverable_client_requests(
+               "boot-b",
+               store_opts(repo, limit: 20, now: at(2))
+             )
 
     assert recoverable.client_msg_id == "client-recover"
     assert recoverable.payload == %{"content" => "same"}
@@ -610,7 +616,10 @@ defmodule FermixCore.Companion.TimelineTest do
     end)
 
     assert {:ok, rows} =
-             Timeline.recoverable_client_requests("boot-a", store_opts(repo, limit: 2, now: at(1)))
+             Timeline.recoverable_client_requests(
+               "boot-a",
+               store_opts(repo, limit: 2, now: at(1))
+             )
 
     assert Enum.map(rows, &{&1.profile_id, &1.client_msg_id}) == [
              {"main", "client-a"},
@@ -922,10 +931,16 @@ defmodule FermixCore.Companion.TimelineTest do
              )
 
     assert {:ok, []} =
-             Timeline.recoverable_client_requests("boot-b", store_opts(repo, limit: 200, now: at(5)))
+             Timeline.recoverable_client_requests(
+               "boot-b",
+               store_opts(repo, limit: 200, now: at(5))
+             )
 
     assert {:error, {:invalid_recovery_limit, 201}} =
-             Timeline.recoverable_client_requests("boot-b", store_opts(repo, limit: 201, now: at(5)))
+             Timeline.recoverable_client_requests(
+               "boot-b",
+               store_opts(repo, limit: 201, now: at(5))
+             )
   end
 
   test "proactive output dedupe inserts one durable row and returns it thereafter", context do
