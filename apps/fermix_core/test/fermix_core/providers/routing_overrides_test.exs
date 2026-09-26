@@ -99,6 +99,24 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
                      RoutingOverrides.parse([cron_reasoning_effort: "turbo"], :cron)
                    end
     end
+
+    # MGMT-1: a slug is one line. The ends a paste carries are trimmed; a control
+    # character left inside is refused by name, whichever layer handed it over.
+    test "a model slug is trimmed, and one carrying a control character raises naming the key" do
+      assert %{model: "gpt-5.4-mini"} =
+               RoutingOverrides.parse([subagent_model: " gpt-5.4-mini\n"], :subagent)
+
+      assert_raise ArgumentError, ~r/\[fermix_core.routing\] subagent_model = .*control/, fn ->
+        RoutingOverrides.parse(
+          [subagent_model: "x\n[fermix_core.providers.anthropic]"],
+          :subagent
+        )
+      end
+
+      assert_raise ArgumentError, ~r/subagents argument "model" = .*control/, fn ->
+        RoutingOverrides.parse_tool_args(%{"model" => "gpt\t5"})
+      end
+    end
   end
 
   describe "parse_tool_args/1 (pure)" do

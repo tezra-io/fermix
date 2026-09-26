@@ -372,6 +372,11 @@ Notes that the shapes alone do not carry:
   off-list value is accepted wherever the key's own validator takes it, and a
   native picker may send any zone the database knows or any model the vendor
   ships. `suggestions` is `false` on every non-choice kind.
+- **A text value that names something is one line.** `settings.apply` trims the
+  ends of a text, suggestion or list value, so a pasted trailing line break
+  saves, and refuses one with a control character left inside it (`This setting
+  takes a single line of text.`). The two prose rows, the meeting announcement
+  and the communication style, take line breaks and keep them as sent.
 - **A `disabled` option is shown and cannot be chosen.** Its `hint` is never
   null and says why: show the option unselectable, with its hint inline or on
   hover, rather than hiding it. `settings.apply` refuses a disabled value with

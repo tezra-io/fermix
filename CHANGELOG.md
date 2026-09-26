@@ -75,6 +75,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again. The reply to the result is now sent once the other reply ends. In the
   rare case where that reply had already read the result, you may hear about it
   twice.
+- **A setting with a line break in it is saved as written.** A value holding a
+  line break, such as a multi-line meeting announcement, was written to
+  `config.toml` as it was, so the next load kept only its first line and could
+  read a later line as a setting of its own, one that could even stop the
+  daemon from starting. Every value is now written with its line breaks, tabs
+  and other control characters escaped, and reads back exactly as it was saved.
+  A list entry holding a comma, such as a folder path, now reads back as one
+  entry instead of several. A `\n`, `\t` or `\r` typed by hand inside a quoted
+  value in `config.toml` now reads as a line break, tab or carriage return, as
+  TOML defines it. A sub-agent model with a line break inside it is refused,
+  and the app's single-line settings drop a pasted trailing line break and
+  refuse one inside.
 - **Only you can have Fermix send files into a chat.** A guest in a shared or
   allow-listed chat could ask for a file from your folders to be sent into that
   chat. Attachments are now sent on your own turns only. `fermix doctor` warns

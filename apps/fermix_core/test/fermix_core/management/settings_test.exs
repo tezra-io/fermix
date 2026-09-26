@@ -853,6 +853,46 @@ defmodule FermixCore.Management.SettingsTest do
                Settings.apply("personalization", %{"communication_style" => "Terse, no preamble."})
     end
 
+    # MGMT-1 shaping. A value that names something is one line: the line break a
+    # paste carries at its end is trimmed, and one left inside is refused before
+    # anything is written.
+    test "an identifier value takes one trimmed line and refuses a control character inside" do
+      assert {:ok, _result} =
+               Settings.apply("meetings", %{"meetings_zoom_account_id" => "acct-1\n"})
+
+      assert %{"value" => "acct-1"} = row("meetings", "meetings_zoom_account_id")
+
+      for {section, key, value} <- [
+            {"meetings", "meetings_zoom_account_id", "acct-1\n[fermix_core.providers.anthropic]"},
+            {"providers.anthropic", "default_model", "claude\topus"},
+            {"computer_history", "computer_history_apps", ["com.apple.Safari\n[sandbox]"]}
+          ] do
+        assert {:error, {:invalid_params, ^key, sentence}} =
+                 Settings.apply(section, %{key => value})
+
+        assert sentence == "This setting takes a single line of text."
+      end
+
+      assert %{"value" => "acct-1"} = row("meetings", "meetings_zoom_account_id")
+    end
+
+    # The two rows that are prose keep their lines, and the settings file carries
+    # them back exactly as they were sent.
+    test "the announcement and the communication style keep their line breaks" do
+      announcement = "Hello team.\nI take notes for Ana, and \"nothing\" else."
+      style = "Terse.\n\tNo preamble."
+
+      assert {:ok, _result} =
+               Settings.apply("meetings", %{"meetings_announce_message" => announcement})
+
+      assert {:ok, _result} =
+               Settings.apply("personalization", %{"communication_style" => style})
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+      assert persisted[:fermix_core][:meetings][:announce_message] == announcement
+      assert persisted[:fermix_core][:personalization][:communication_style] == style
+    end
+
     test "an unknown section is refused" do
       assert Settings.apply("nonesuch", %{}) == {:error, {:unknown_section, "nonesuch"}}
     end

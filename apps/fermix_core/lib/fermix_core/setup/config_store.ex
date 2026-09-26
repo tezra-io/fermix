@@ -1195,14 +1195,12 @@ defmodule FermixCore.Setup.ConfigStore do
     end)
   end
 
-  defp encode_value(value) when is_binary(value) do
-    escaped =
-      value
-      |> String.replace("\\", "\\\\")
-      |> String.replace("\"", "\\\"")
-
-    "\"#{escaped}\""
-  end
+  # A TOML basic string: the backslash, the quote and every control character
+  # (C0 and DEL) are escaped, so a value is always exactly one line. The parser
+  # reads the file line by line and a later assignment wins, so a raw line break
+  # in any value used to write lines of its own (MGMT-1).
+  defp encode_value(value) when is_binary(value),
+    do: "\"" <> Regex.replace(~r/[\\"\x00-\x1F\x7F]/, value, &escape_char/1) <> "\""
 
   defp encode_value(value) when is_boolean(value), do: to_string(value)
   defp encode_value(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
@@ -1212,6 +1210,13 @@ defmodule FermixCore.Setup.ConfigStore do
   defp encode_value(value) when is_list(value) do
     "[#{value |> Enum.map(&encode_value/1) |> Enum.join(", ")}]"
   end
+
+  defp escape_char("\\"), do: "\\\\"
+  defp escape_char("\""), do: "\\\""
+  defp escape_char("\n"), do: "\\n"
+  defp escape_char("\t"), do: "\\t"
+  defp escape_char("\r"), do: "\\r"
+  defp escape_char(<<byte>>), do: "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0")
 
   defp parse_document(contents) do
     document =
@@ -1321,20 +1326,41 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  defp parse_quoted_value(value) do
-    value
-    |> String.trim_leading("\"")
-    |> String.trim_trailing("\"")
-    |> String.replace("\\\"", "\"")
-    |> String.replace("\\\\", "\\")
+  # Exactly one quote off each end: trimming every trailing quote also dropped
+  # the escaped one a value ending in `"` carries before its closing quote.
+  defp parse_quoted_value(value) when byte_size(value) >= 2,
+    do: value |> binary_part(1, byte_size(value) - 2) |> unescape_string()
+
+  defp parse_quoted_value(_lone_quote), do: ""
+
+  # The one reader of what `encode_value/1` writes, in a single left-to-right
+  # pass, so an escaped backslash never starts a second escape. A backslash
+  # sequence the writer never emits is kept as written, which is how this parser
+  # has always read it, so a hand-edited file reads the same.
+  defp unescape_string(value) do
+    Regex.replace(~r/\\(u00[01][0-9A-Fa-f]|u007[Ff]|[\\"ntr])/, value, fn _escape, code ->
+      unescape_char(code)
+    end)
   end
 
+  defp unescape_char("\\"), do: "\\"
+  defp unescape_char("\""), do: "\""
+  defp unescape_char("n"), do: "\n"
+  defp unescape_char("t"), do: "\t"
+  defp unescape_char("r"), do: "\r"
+  defp unescape_char("u" <> hex), do: <<String.to_integer(hex, 16)>>
+
+  # An element is a quoted string, with any comma or escaped quote inside it, or
+  # a bare piece up to the next comma. Splitting on every comma read the quoted
+  # `/tmp/a,/,b` as three elements, one of them `/`.
   defp parse_list_value(value) do
-    value
-    |> String.trim_leading("[")
-    |> String.trim_trailing("]")
-    |> String.split(",", trim: true)
-    |> Enum.map(&parse_value(String.trim(&1)))
+    elements =
+      value
+      |> String.trim_leading("[")
+      |> String.trim_trailing("]")
+
+    for [element] <- Regex.scan(~r/(?:"(?:[^"\\]|\\.)*"|[^,"]|")+/, elements),
+        do: parse_value(String.trim(element))
   end
 
   defp parse_float_value(value) do
