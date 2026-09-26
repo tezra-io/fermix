@@ -310,11 +310,12 @@ owner_user_id = "123456789"
 command_allowlist = ["987654321"]
 ```
 
-If `owner_user_id` is absent, Fermix can derive the command owner from a single
-configured ingress allowlist entry. Multiple allowed users still require an
-explicit `owner_user_id` or `command_allowlist`. Use `/whoami` from the target
-account to discover the id, then persist it with `fermix setup --reconfigure` or
-by editing `~/.fermix/config.toml`.
+If `owner_user_id` is absent, every allowed sender chats at guest trust, even
+when your own id is the only allowlist entry: read-only chat with no file access
+or attachments, and only the slash commands `command_allowlist` opens to
+non-owners. `fermix doctor` warns about such a channel in its `command owners`
+row. Use `/whoami` from the target account to discover the id, then persist it
+with `fermix setup --reconfigure` or by editing `~/.fermix/config.toml`.
 
 Automatic conversation compaction is controlled by:
 

@@ -79,10 +79,13 @@ defmodule FermixCore.Capabilities.Builtin do
       owner_only?: true
     },
     "browser" => %{policy_class: :network, hidden_from_agent?: false, owner_only?: false},
+    # Uploads any file under the owner's sandbox roots into the chat the turn
+    # replies to: the bytes `file_read` returns, so the same owner-only bound.
+    # A guest turn replies into the guest's own chat.
     "send_attachment" => %{
       policy_class: :read_only,
       hidden_from_agent?: false,
-      owner_only?: false
+      owner_only?: true
     },
     "react" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
     "generate_image" => %{

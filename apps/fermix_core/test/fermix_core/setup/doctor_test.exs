@@ -716,12 +716,59 @@ defmodule FermixCore.Setup.DoctorTest do
                channel: :telegram,
                enabled: true,
                owner_user_id: "111",
+               sole_allowed_id?: false,
                command_allowlist: ["222", "333"]
              } in report
 
-      assert %{channel: :signal, enabled: true, owner_user_id: nil, command_allowlist: []} in report
+      assert %{
+               channel: :signal,
+               enabled: true,
+               owner_user_id: nil,
+               sole_allowed_id?: false,
+               command_allowlist: []
+             } in report
 
-      assert %{channel: :mobile, enabled: true, owner_user_id: nil, command_allowlist: []} in report
+      assert %{
+               channel: :mobile,
+               enabled: true,
+               owner_user_id: nil,
+               sole_allowed_id?: false,
+               command_allowlist: []
+             } in report
+    end
+
+    # The gateway trusts only an explicit `owner_user_id`. A sole allow-listed id
+    # is most likely the owner, yet it chats at guest trust, so the report names
+    # the owner the gateway trusts and flags that sole id apart.
+    test "reports the explicit owner and flags a sole allow-listed id apart" do
+      Application.put_env(:fermix_channels, :whatsapp,
+        enabled: true,
+        allowed_sender_ids: ["+15550001111"]
+      )
+
+      Application.put_env(:fermix_channels, :discord,
+        enabled: true,
+        owner_user_id: "42",
+        allowed_user_ids: ["42", "43"]
+      )
+
+      report = Doctor.command_owner_report()
+
+      assert %{
+               channel: :whatsapp,
+               enabled: true,
+               owner_user_id: nil,
+               sole_allowed_id?: true,
+               command_allowlist: []
+             } in report
+
+      assert %{
+               channel: :discord,
+               enabled: true,
+               owner_user_id: "42",
+               sole_allowed_id?: false,
+               command_allowlist: []
+             } in report
     end
   end
 

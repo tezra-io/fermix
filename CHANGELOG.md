@@ -75,6 +75,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   again. The reply to the result is now sent once the other reply ends. In the
   rare case where that reply had already read the result, you may hear about it
   twice.
+- **Only you can have Fermix send files into a chat.** A guest in a shared or
+  allow-listed chat could ask for a file from your folders to be sent into that
+  chat. Attachments are now sent on your own turns only. `fermix doctor` warns
+  when a channel has no `owner_user_id`: until it is set, everyone allow-listed
+  there, you included, chats as a guest.
 
 ## [0.11.0] - 2026-09-23
 

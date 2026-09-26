@@ -77,6 +77,7 @@ defmodule FermixCore.Setup.Doctor do
           channel: atom(),
           enabled: boolean(),
           owner_user_id: String.t() | nil,
+          sole_allowed_id?: boolean(),
           command_allowlist: [String.t()]
         }
   @type web_search_report :: %{
@@ -361,19 +362,33 @@ defmodule FermixCore.Setup.Doctor do
     }
   end
 
+  @doc """
+  Per-channel command-owner configuration. `owner_user_id` is the owner the
+  gateway trusts (`Config.channel_explicit_owner_user_id/1`), so a channel
+  without one runs every allow-listed sender at guest trust. `sole_allowed_id?`
+  marks such a channel that allow-lists exactly one id — most likely the owner's
+  own, which the gateway still treats as a guest.
+  """
   @spec command_owner_report() :: [command_owner_report()]
   def command_owner_report do
     Enum.map(@command_channels, fn channel ->
       config = Application.get_env(:fermix_channels, channel, [])
+      owner = FermixCore.Config.channel_explicit_owner_user_id(channel)
 
       %{
         channel: channel,
         enabled: Keyword.get(config, :enabled, false) == true,
-        owner_user_id: FermixCore.Config.channel_command_owner_user_id(channel),
+        owner_user_id: owner,
+        sole_allowed_id?: sole_allowed_id?(channel, owner),
         command_allowlist: FermixCore.Config.channel_command_allowlist(channel)
       }
     end)
   end
+
+  defp sole_allowed_id?(_channel, owner) when is_binary(owner), do: false
+
+  defp sole_allowed_id?(channel, nil),
+    do: is_binary(FermixCore.Config.channel_command_owner_user_id(channel))
 
   @type streaming_report :: %{
           channel: atom(),

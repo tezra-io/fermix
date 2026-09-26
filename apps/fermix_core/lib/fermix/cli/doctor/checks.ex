@@ -2271,10 +2271,15 @@ defmodule Fermix.CLI.Doctor.Checks do
       [] ->
         ok("command owners", detail)
 
+      # The gateway trusts only an explicit owner_user_id, so this is also the
+      # row that tells an owner who allow-listed only their own id why chat
+      # there cannot read their files.
       channels ->
         warn(
           "command owners",
-          "missing command owner for enabled channels: #{Enum.join(channels, ", ")}; #{detail}"
+          "owner_user_id not set for enabled channels: #{Enum.join(channels, ", ")}; " <>
+            "their allow-listed senders chat at guest trust (no file access or " <>
+            "attachments) until it is set; #{detail}"
         )
     end
   end
@@ -2804,17 +2809,21 @@ defmodule Fermix.CLI.Doctor.Checks do
          channel: channel,
          enabled: enabled,
          owner_user_id: owner_user_id,
+         sole_allowed_id?: sole_allowed_id?,
          command_allowlist: allowlist
        }) do
-    owner_state = command_owner_state(channel, owner_user_id)
+    owner_state = command_owner_state(channel, owner_user_id, sole_allowed_id?)
 
     "#{channel}=#{owner_state}, enabled=#{enabled}, allowlist=#{length(allowlist)}"
   end
 
-  defp command_owner_state(channel, owner_user_id) do
+  defp command_owner_state(channel, owner_user_id, sole_allowed_id?) do
     cond do
       CoreConfig.channel_ingress_authority(channel) == :paired_device ->
         "paired-device authority"
+
+      sole_allowed_id? ->
+        "owner missing (sole allowed id runs as guest)"
 
       is_nil(owner_user_id) ->
         "owner missing"

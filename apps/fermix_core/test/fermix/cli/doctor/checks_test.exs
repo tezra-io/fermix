@@ -1807,6 +1807,27 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "signal=owner set"
     end
 
+    # An owner who allow-listed only their own id and set no owner_user_id is a
+    # guest to the gateway: no file access, no attachments. Doctor must say so
+    # instead of reporting the sole allow-listed id as a set owner.
+    test "warns that a sole allow-listed id without an owner chats at guest trust" do
+      for channel <- [:telegram, :discord, :slack, :signal, :mobile] do
+        Application.put_env(:fermix_channels, channel, enabled: false)
+      end
+
+      Application.put_env(:fermix_channels, :whatsapp,
+        enabled: true,
+        allowed_sender_ids: ["+15550001111"]
+      )
+
+      result = Checks.command_owner_config()
+
+      assert result.status == :warn
+      assert result.detail =~ "owner_user_id not set for enabled channels: whatsapp;"
+      assert result.detail =~ "guest trust (no file access or attachments)"
+      assert result.detail =~ "whatsapp=owner missing (sole allowed id runs as guest)"
+    end
+
     test "treats paired-device mobile ingress as its own command authority" do
       for channel <- [:telegram, :whatsapp, :discord, :slack, :signal] do
         Application.put_env(:fermix_channels, channel, enabled: false)
@@ -1818,7 +1839,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "mobile=paired-device authority"
-      refute result.detail =~ "missing command owner for enabled channels: mobile"
+      refute result.detail =~ "owner_user_id not set for enabled channels: mobile"
     end
   end
 

@@ -4,6 +4,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
@@ -11,6 +12,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Tools.SendAttachment
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -370,6 +372,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     def execute(_args, context, test_pid) do
       send(test_pid, {:tool_context, context})
       {:ok, %{success: true, output: "recorded"}}
+    end
+  end
+
+  # Asks for the file at `:path` through `send_attachment` by name, then hands
+  # the tool result back to the test and finishes — so a driven turn shows
+  # whether the call reached the tool or was refused at dispatch.
+  defmodule SendAttachmentAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      arguments = Jason.encode!(%{"path" => Keyword.fetch!(opts, :path)})
+      reply("", [%{id: "c1", call_id: "c1", name: "send_attachment", arguments: arguments}])
+    end
+
+    @impl true
+    def continue(_provider_state, tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_results, tool_results})
+      reply("done", [])
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp reply(content, tool_calls) do
+      {:ok,
+       %{
+         content: content,
+         tool_calls: tool_calls,
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock-model"
+       }}
     end
   end
 
@@ -832,6 +876,23 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert Map.has_key?(context, :session_env)
       assert context.session_env == nil
       assert context.redact_values == []
+    end
+
+    # A guest turn replies into the guest's own chat, while `send_attachment`
+    # resolves its path against the OWNER's sandbox roots. So a guest naming the
+    # tool must reach no tool at all, and no file may leave through the reply.
+    test "a guest turn cannot dispatch send_attachment by name" do
+      [result] = run_send_attachment_turn(:guest)
+
+      assert result.output == "Error: Tool 'send_attachment' not found"
+      refute_received {:delivered, {:media, _part}}
+    end
+
+    test "an operator turn still sends the file into its own chat" do
+      [result] = run_send_attachment_turn(:operator)
+
+      assert result.output =~ "Sent attachment: owner-notes.txt"
+      assert_received {:delivered, {:media, %{filename: "owner-notes.txt"}}}
     end
 
     test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
@@ -2135,6 +2196,67 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
     assert_receive {:tool_context, context}
     %{context: context}
+  end
+
+  # Drives a real turn at `trust` whose model asks for a file by name. The
+  # sandbox is rooted at a private directory holding that file — the owner's
+  # workspace in miniature — and both profiles are built by the real builder
+  # over the shipped `send_attachment` declaration. Returns the tool results the
+  # model received; every reply part lands in the mailbox as `{:delivered, _}`.
+  defp run_send_attachment_turn(trust) do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("tr-send-attachment")
+    path = Path.join(root, "owner-notes.txt")
+    File.write!(path, "the owner's notes")
+    use_strict_sandbox(root)
+
+    registry = :"tr_attach_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+    :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(SendAttachment))
+
+    test_pid = self()
+
+    msg = %{
+      channel: "telegram",
+      chat_id: "attach_#{trust}",
+      sender: "user123",
+      content: "send me owner-notes.txt",
+      source_trust: trust
+    }
+
+    turn_state =
+      turn_state(
+        adapter: SendAttachmentAdapter,
+        adapter_opts: [model: "mock-model", test_pid: test_pid, path: path],
+        capability_registry: registry,
+        conversation_store: start_voice_store(),
+        runtime_context: boundary_runtime_context(registry)
+      )
+
+    deliver = fn part ->
+      send(test_pid, {:delivered, part})
+      :ok
+    end
+
+    assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, deliver)
+    assert_receive {:tool_results, tool_results}, 5_000
+    tool_results
+  end
+
+  # A chat turn carries no `:sandbox_config`, so its tools read the global
+  # sandbox: point it at `root` for this test, and restore it (and remove
+  # `root`) on exit.
+  defp use_strict_sandbox(root) do
+    previous = Application.get_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :sandbox, %{mode: :strict, workspace_root: root})
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:fermix_core, :sandbox)
+        value -> Application.put_env(:fermix_core, :sandbox, value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(root)
+    end)
   end
 
   # A runtime context whose operator and guest profiles both advertise (and
