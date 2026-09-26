@@ -2,8 +2,8 @@ defmodule FermixCore.Companion.TimelineTest do
   use ExUnit.Case, async: true
 
   alias Exqlite.Sqlite3
-  alias FermixCore.Memory.Repo
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Memory.Repo
 
   @now ~U[2026-08-12 12:00:00Z]
   @day_seconds 86_400
