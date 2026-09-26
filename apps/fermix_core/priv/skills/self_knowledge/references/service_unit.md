@@ -60,6 +60,42 @@ edits it; a missing file is fine. A unit written before the line existed
 gets it when setup rewrites the drifted unit. What reaches commands from there:
 `skill_view(name: "self-knowledge", file: "sandbox_env")`.
 
+## The system-scope unit (Linux)
+
+`fermix service install --system` (and `setup --system`) writes
+`/etc/systemd/system/fermix.service`, which starts at boot. When
+`sudo fermix service install --system` installs a new unit for a Fermix home
+that belongs, with its database, settings, secrets and logs, to the account
+that ran `sudo`, the unit names that account in `User=`, so the daemon, its
+shell and every tool keep that account's permissions instead of root's.
+Otherwise it runs as root, as system units always have: typically `sudo` reset
+`HOME` to root's, so the home is root's; a root daemon that served the home
+left root-owned files in it, which a daemon running as the account could not
+write or read; and a `setup --system` run under `sudo` configures the home as
+root, so its daemon must be root to read those secrets. From the account itself,
+`sudo FERMIX_HOME="$HOME/.fermix" fermix service install --system` names its
+own home. The account is chosen once: an installed unit keeps the one it names
+when setup rewrites it. Moving a root unit to an account means handing the home
+back first (`sudo chown -R "$USER" "$HOME/.fermix"` from the account), then
+`sudo fermix service uninstall --system` and the install again; without the
+first step the new unit stays root. A unit that names an account keeps the
+home it names too. A rewrite for another home is refused, typically a later
+`sudo fermix setup --system` whose `sudo` reset `HOME` to root's. The refusal
+names both ways out: `sudo FERMIX_HOME="<that home>" fermix service install
+--system` keeps serving it, and uninstalling first moves the service.
+
+The system unit also refuses connections to the cloud instance-metadata
+address (`169.254.169.254`, and AWS's `fd00:ec2::254`) from the daemon and the
+processes it starts, so content that steers the agent cannot simply ask for the
+machine's cloud credentials. It is defense in depth, not a guarantee: a process
+started outside the unit is not covered, such as one launched through
+`systemd-run`, or a tab of the person's own browser (`profile: "selected_tab"`).
+An operator whose agent should use the instance's own credentials clears the
+list with a drop-in (`sudo systemctl edit fermix`, then `IPAddressDeny=` under
+`[Service]`); setup's rewrites leave drop-ins alone. A user unit, including the
+package's, cannot carry this refusal: a per-user service manager does not
+enforce IP access lists.
+
 ## Linux distribution packages
 
 A Fermix installed from a `.deb` or `.rpm` is a different configuration from the

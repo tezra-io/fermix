@@ -82,10 +82,14 @@ defmodule Fermix.CLI.ServiceCommand do
     end
   end
 
+  # This verb configures nothing, so a new system unit may run as the account
+  # that ran `sudo`; `Service` gives it that account only when the home it
+  # serves is provably theirs.
   defp apply_action(:install, options, deps) do
     service = Keyword.get(deps, :service, Service)
+    opts = Keyword.put(service_opts(options, deps), :account, :sudo_invoker)
 
-    case service.install(options.scope, service_opts(options, deps)) do
+    case service.install(options.scope, opts) do
       :ok -> report_action(options, "installed")
       {:ok, status} -> report_status(options, status)
       {:error, reason} -> report_failure(options, reason, deps)
@@ -358,6 +362,26 @@ defmodule Fermix.CLI.ServiceCommand do
   def format_reason({:launchctl_failed, code, out}), do: "launchctl failed (#{code}): #{out}"
   def format_reason({:systemctl_failed, code, out}), do: "systemctl failed (#{code}): #{out}"
   def format_reason({:unsupported_os, os}), do: "unsupported OS: #{inspect(os)}"
+
+  # A system unit that runs as an account serves only the home it names
+  # (`Fermix.CLI.Service`); these name the command for each way out.
+  def format_reason({:account_home_mismatch, account, nil, home}) do
+    "the system unit runs Fermix as #{account} but names no Fermix home, so it is not " <>
+      "rewritten for #{home}. Remove it with sudo fermix service uninstall --system, then " <>
+      "install it again."
+  end
+
+  def format_reason({:account_home_mismatch, account, installed, home}) do
+    "the system unit runs Fermix as #{account} for #{installed}, so it is not rewritten for " <>
+      "#{home}, which that account may not be able to open. To keep serving #{installed}, run " <>
+      ~s(sudo FERMIX_HOME="#{installed}" fermix service install --system; to move the ) <>
+      "service, run sudo fermix service uninstall --system first."
+  end
+
+  def format_reason({:invalid_account, path, account}) do
+    "the system unit at #{path} runs Fermix as #{inspect(account)}, which a unit file cannot " <>
+      "name. Correct its User= line, or remove it with sudo fermix service uninstall --system."
+  end
 
   def format_reason(reason) when is_atom(reason) or is_tuple(reason) do
     case published(reason, []) do

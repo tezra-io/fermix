@@ -84,6 +84,33 @@ defmodule Fermix.CLI.ServiceCommandTest do
     test "unsupported_os tags the offending OS atom" do
       assert ServiceCommand.format_reason({:unsupported_os, {:win32, :nt}}) =~ "unsupported OS"
     end
+
+    # A system unit that runs as an account serves only the home it names; the
+    # refusal names the command for each way out, not the internal reason.
+    test "an account whose unit names another home names both ways out" do
+      sentence =
+        ServiceCommand.format_reason(
+          {:account_home_mismatch, "ada", "/home/ada/.fermix", "/root/.fermix"}
+        )
+
+      assert sentence =~ ~s(sudo FERMIX_HOME="/home/ada/.fermix" fermix service install --system)
+      assert sentence =~ "sudo fermix service uninstall --system"
+      refute sentence =~ "account_home_mismatch"
+    end
+
+    test "an account whose unit names no home, or no usable account, names uninstall" do
+      reasons = [
+        {:account_home_mismatch, "ada", nil, "/root/.fermix"},
+        {:invalid_account, "/etc/systemd/system/fermix.service", "a b"}
+      ]
+
+      for reason <- reasons do
+        sentence = ServiceCommand.format_reason(reason)
+
+        assert sentence =~ "sudo fermix service uninstall --system"
+        refute sentence =~ "{:"
+      end
+    end
   end
 
   describe "run_action/4" do
@@ -167,6 +194,28 @@ defmodule Fermix.CLI.ServiceCommandTest do
       assert_received {:install_opts, opts}
       assert opts[:home] == "/home/o/.fermix"
       assert opts[:port] == 4040
+    end
+
+    # This verb configures nothing, so the home it installs a unit for is still
+    # the one its owner set up: a new system unit may run as the account that
+    # ran `sudo`, and `Service` decides whether the home is provably theirs.
+    test "install offers a new system unit to the account that ran sudo" do
+      test = self()
+
+      deps =
+        deps(
+          install: fn scope, opts ->
+            send(test, {:install, scope, opts})
+            :ok
+          end
+        )
+
+      ExUnit.CaptureIO.capture_io(fn ->
+        assert ServiceCommand.run(["install", "--system"], deps) == 0
+      end)
+
+      assert_received {:install, :system, opts}
+      assert opts[:account] == :sudo_invoker
     end
 
     test "a refusal renders one code and one sentence, and exits 1" do

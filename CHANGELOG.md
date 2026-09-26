@@ -129,6 +129,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   detached process with no terminal, now runs as an unattended turn: no desktop
   control, no reminder or event changes and no recent activity. Prompts you type
   in a terminal or an app, phones, messaging and voice are unaffected.
+- **The Linux system service runs as you and blocks cloud metadata.** Installing
+  it with `sudo fermix service install --system` now runs the daemon as your
+  own account when the Fermix home already belongs to you, and the system unit
+  blocks connections to the cloud instance-metadata addresses. On a cloud VM, a
+  cloud CLI the agent runs under a system daemon then needs the documented
+  drop-in to use the instance's role credentials.
 
 ## [0.11.0] - 2026-09-23
 

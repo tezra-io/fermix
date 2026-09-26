@@ -118,6 +118,120 @@ defmodule Fermix.CLI.Service.TemplatesTest do
 
       assert environment_files(unit) == ["EnvironmentFile=-/etc/fermix/env"]
     end
+
+    test "a system unit with an account runs the daemon as that account" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :system,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_HOME" => "/home/ada/.fermix"},
+          run_as: "ada"
+        })
+
+      assert unit_lines(unit, "User=") == ["User=ada"]
+      # The machine-wide env file stays: the system manager reads it before it
+      # drops to the account, and `%h` would still be `/root` there.
+      assert environment_files(unit) == ["EnvironmentFile=-/etc/fermix/env"]
+    end
+
+    # No `User=` is systemd's root, which is what every system unit written
+    # before accounts existed says; rendering that shape unchanged is what keeps
+    # those units from being rewritten as another account.
+    test "a system unit with no account names none" do
+      base = %{
+        scope: :system,
+        fermix_path: "/usr/local/bin/fermix",
+        service_env: %{"FERMIX_HOME" => "/root/.fermix"}
+      }
+
+      for spec <- [base, Map.put(base, :run_as, nil)] do
+        assert unit_lines(Templates.render_linux_unit(spec), "User=") == []
+      end
+    end
+
+    # `Fermix.CLI.Service` checks the name before it renders; this is the
+    # backstop that keeps a name it let through from injecting unit lines.
+    test "refuses an account name a unit file cannot carry" do
+      for name <- ["ada\nExecStartPre=/bin/sh", "a da", "ada%i", ""] do
+        assert_raise ArgumentError, ~r/User=/, fn ->
+          Templates.render_linux_unit(%{
+            scope: :system,
+            fermix_path: "/usr/local/bin/fermix",
+            service_env: %{"FERMIX_HOME" => "/home/ada/.fermix"},
+            run_as: name
+          })
+        end
+      end
+    end
+
+    test "the system unit refuses the cloud instance-metadata endpoints" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :system,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_HOME" => "/root/.fermix"}
+        })
+
+      assert unit_lines(unit, "IPAddressDeny=") == [
+               "IPAddressDeny=169.254.169.254/32 fd00:ec2::254/128"
+             ]
+    end
+
+    # A per-user service manager does not enforce an IP access list: it logs
+    # that it is not running as root and starts the unit without one.
+    test "a user unit carries no IP access list it could not enforce" do
+      unit =
+        Templates.render_linux_unit(%{
+          scope: :user,
+          fermix_path: "/usr/local/bin/fermix",
+          service_env: %{"FERMIX_HOME" => "/home/dev/.fermix"}
+        })
+
+      refute unit =~ "IPAddress"
+      refute Templates.render_vendor_unit() =~ "IPAddress"
+    end
+  end
+
+  describe "unit_run_as/1" do
+    test "the account an installed unit's User= names" do
+      assert Templates.unit_run_as("[Service]\nType=simple\nUser=ada\nExecStart=x run\n") == "ada"
+    end
+
+    test "no User=, or an empty one, is no account" do
+      assert Templates.unit_run_as("[Service]\nType=simple\n") == nil
+      assert Templates.unit_run_as("[Service]\nUser=\n") == nil
+    end
+
+    # systemd reads the last assignment of a single-valued setting, and an
+    # empty one resets it to the default.
+    test "the last assignment wins" do
+      assert Templates.unit_run_as("[Service]\nUser=ada\nUser=bob \n") == "bob"
+      assert Templates.unit_run_as("[Service]\nUser=ada\nUser=\n") == nil
+    end
+
+    # systemd trims the whitespace around `=`, and reads `User=` only in the
+    # [Service] section; anywhere else it is an unknown key it ignores.
+    test "reads the assignment where and how systemd does" do
+      assert Templates.unit_run_as("[Service]\nUser = ada\n") == "ada"
+      assert Templates.unit_run_as("[Unit]\nUser=ada\n\n[Service]\nType=simple\n") == nil
+      assert Templates.unit_run_as("[Service]\nUser=ada\n\n[Install]\nUser=bob\n") == "ada"
+    end
+  end
+
+  describe "unit_account?/1" do
+    test "an account name a User= line carries as written" do
+      for name <- ["ada", "ada.lovelace", "ada_l-1", "ada@example.com"] do
+        assert Templates.unit_account?(name), name
+      end
+    end
+
+    # Whitespace would split the value, a control character would end the line,
+    # and `%` starts a specifier systemd expands into some other name.
+    test "refuses what a User= line cannot carry as written" do
+      for name <- ["", "a da", "ada\tx", "ada\nExecStartPre=/bin/sh", "ada%i"] do
+        refute Templates.unit_account?(name), inspect(name)
+      end
+    end
   end
 
   describe "render_vendor_unit/0" do
@@ -281,7 +395,9 @@ defmodule Fermix.CLI.Service.TemplatesTest do
 
   defp pos(haystack, needle), do: :binary.match(haystack, needle) |> elem(0)
 
-  defp environment_files(unit) do
-    unit |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, "EnvironmentFile="))
+  defp environment_files(unit), do: unit_lines(unit, "EnvironmentFile=")
+
+  defp unit_lines(unit, prefix) do
+    unit |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, prefix))
   end
 end
