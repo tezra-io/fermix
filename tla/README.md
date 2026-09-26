@@ -206,6 +206,7 @@ must equal the `holds` check it covers, and the runner checks this.
 | [reminder_delivery](specs/reminder_delivery/README.md) | Reminders: the single claimer, attempt cap, boot sweep, validity window and duplicate sends |
 | [computer_history](specs/computer_history/README.md) | The capture buffer against pause, `/history off` and purge: M32 invariant 12 |
 | [realtime_session](specs/realtime_session/README.md) | One voice call: how a tool result reaches the next spoken response, and keeping one upstream OpenAI socket across drops and reconnects |
+| [companion_session](specs/companion_session/README.md) | Design spec, ahead of the code: the companion chat wire for one conversation shared by the Mac and iPhone apps. Dedupe, the outbox, the seq cursor, cancel and approvals across drops |
 
 ## Learning TLA+
 
