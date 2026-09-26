@@ -5,192 +5,193 @@ defmodule Fermix.CLI.DevicesCommandTest do
 
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
 
-  test "list prints only operator-safe device fields" do
-    request = fn "mobile_devices_list", %{}, timeout ->
-      assert timeout <= 5_000
+  test "list prints the four operator columns of each phone and nothing else" do
+    client = fn "mobile.devices.list", %{}, opts ->
+      assert opts[:timeout] <= 5_000
 
-      ok(%{
-        "devices" => [
-          %{
-            "device_id" => @device_id,
-            "name" => "Sujeeth",
-            "created_at" => "2026-08-12T12:00:00Z",
-            "last_seen" => "2026-08-12T12:30:00Z",
-            "noise_pk" => "must-not-print",
-            "push_token" => "must-not-print-either"
-          }
-        ]
-      })
+      {:ok,
+       %{
+         "devices" => [
+           device(%{
+             "last_seen" => "2026-09-26T12:30:00Z",
+             "push_registered" => true,
+             "noise_pk" => "must-not-print"
+           })
+         ]
+       }}
     end
 
-    {stdout, stderr} = io()
+    {status, stdout, stderr} = run(["list"], client)
 
-    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 0
-    assert output(stdout) =~ @device_id
-    assert output(stdout) =~ "Sujeeth"
-    assert output(stdout) =~ "2026-08-12T12:00:00Z"
-    assert output(stdout) =~ "2026-08-12T12:30:00Z"
-    refute output(stdout) =~ "must-not-print"
-    assert output(stderr) == ""
+    assert status == 0
+
+    assert stdout ==
+             "DEVICE ID\tNAME\tCREATED\tLAST SEEN\n" <>
+               "#{@device_id}\tSam's phone\t2026-09-26T12:01:05Z\t2026-09-26T12:30:00Z\n"
+
+    refute stdout =~ "must-not-print"
+    refute stdout =~ "Google Pixel"
+    assert stderr == ""
+  end
+
+  test "a phone never seen since pairing says so" do
+    client = fn "mobile.devices.list", %{}, _opts -> {:ok, %{"devices" => [device()]}} end
+
+    {0, stdout, _stderr} = run(["list"], client)
+
+    assert stdout =~ "2026-09-26T12:01:05Z\tnever\n"
   end
 
   test "list strips every terminal control sequence a stored name could carry" do
-    request = fn "mobile_devices_list", %{}, _timeout ->
-      ok(%{
-        "devices" => [
-          %{
-            "device_id" => @device_id,
-            "name" => "\e[2KSujeeth\u{009B}31m",
-            "created_at" => "2026-08-12T12:00:00Z",
-            "last_seen" => nil
-          }
-        ]
-      })
+    client = fn "mobile.devices.list", %{}, _opts ->
+      {:ok, %{"devices" => [device(%{"name" => "\e[2KSam\u{009B}31m"})]}}
     end
 
-    {stdout, stderr} = io()
+    {status, stdout, stderr} = run(["list"], client)
 
-    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 0
-    printed = output(stdout)
-    assert printed =~ "Sujeeth"
-    refute printed =~ "\e"
-    refute printed =~ "\u{009B}"
-    assert output(stderr) == ""
+    assert status == 0
+    assert stdout =~ "Sam"
+    refute stdout =~ "\e"
+    refute stdout =~ "\u{009B}"
+    assert stderr == ""
   end
 
-  test "list renders an empty store clearly" do
-    request = fn "mobile_devices_list", %{}, _timeout -> ok(%{"devices" => []}) end
-    {stdout, stderr} = io()
+  test "list renders no paired phone clearly" do
+    client = fn "mobile.devices.list", %{}, _opts -> {:ok, %{"devices" => []}} end
 
-    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 0
-    assert output(stdout) == "no paired mobile devices\n"
-    assert output(stderr) == ""
+    assert run(["list"], client) == {0, "no paired phones\n", ""}
   end
 
-  test "revoke sends the exact UUID to the running daemon" do
+  test "a row the command cannot trust is refused rather than printed" do
+    client = fn "mobile.devices.list", %{}, _opts ->
+      {:ok, %{"devices" => [device(%{"device_id" => "../../devices.toml"})]}}
+    end
+
+    {status, stdout, stderr} = run(["list"], client)
+
+    assert status == 1
+    assert stdout == ""
+    assert stderr =~ "invalid device row"
+  end
+
+  test "revoke sends the exact UUID and expects the daemon to confirm it" do
     test_pid = self()
 
-    request = fn "mobile_device_revoke", %{"device_id" => @device_id}, timeout ->
-      send(test_pid, {:revoked, timeout})
-      ok(%{"device_id" => @device_id})
+    client = fn "mobile.devices.revoke", %{"device_id" => @device_id}, opts ->
+      send(test_pid, {:revoked, opts[:timeout]})
+      {:ok, %{"device_id" => @device_id, "revoked" => true}}
     end
 
-    {stdout, stderr} = io()
-
-    assert DevicesCommand.run(["revoke", @device_id],
-             request: request,
-             stdout: stdout,
-             stderr: stderr
-           ) == 0
+    assert run(["revoke", String.upcase(@device_id)], client) ==
+             {0, "revoked phone #{@device_id}\n", ""}
 
     assert_received {:revoked, timeout}
     assert timeout <= 5_000
-    assert output(stdout) == "revoked mobile device #{@device_id}\n"
-    assert output(stderr) == ""
+  end
+
+  test "a revoke the daemon does not confirm is a failure" do
+    client = fn "mobile.devices.revoke", _params, _opts ->
+      {:ok, %{"device_id" => @device_id, "revoked" => false}}
+    end
+
+    {status, stdout, stderr} = run(["revoke", @device_id], client)
+
+    assert status == 1
+    assert stdout == ""
+    assert stderr =~ "invalid daemon reply"
+  end
+
+  test "revoking an unknown phone renders the daemon's sentence, not its code" do
+    client = fn "mobile.devices.revoke", %{"device_id" => _id}, _opts ->
+      {:error,
+       {:management_error, "invalid_params", "Request parameters are invalid.",
+        %{"field" => "device_id", "sentence" => "No paired phone has that id."}}}
+    end
+
+    {status, _stdout, stderr} = run(["revoke", @device_id], client)
+
+    assert status == 1
+    assert stderr == "fermix devices revoke: No paired phone has that id.\n"
+  end
+
+  test "revoking while the phone channel is not running says where to look" do
+    client = fn "mobile.devices.revoke", _params, _opts ->
+      {:error,
+       {:management_error, "unavailable", "The requested management capability is unavailable.",
+        %{"capability" => "mobile"}}}
+    end
+
+    {status, _stdout, stderr} = run(["revoke", @device_id], client)
+
+    assert status == 1
+    assert stderr =~ "the phone channel is not running"
+    assert stderr =~ "fermix doctor"
   end
 
   test "rejects malformed ids before calling the daemon" do
-    request = fn _method, _params, _timeout -> flunk("RPC must not run") end
-    {stdout, stderr} = io()
+    client = fn _method, _params, _opts -> flunk("no call may run") end
 
-    assert DevicesCommand.run(["revoke", "../../devices.toml"],
-             request: request,
-             stdout: stdout,
-             stderr: stderr
-           ) == 2
+    {status, stdout, stderr} = run(["revoke", "../../devices.toml"], client)
 
-    assert output(stdout) == ""
-    assert output(stderr) =~ "valid device UUID"
+    assert status == 2
+    assert stdout == ""
+    assert stderr =~ "valid device UUID"
   end
 
-  test "daemon absence is an error for list; there is no offline store path" do
-    request = fn "mobile_devices_list", %{}, _timeout -> {:error, :not_running} end
-    {stdout, stderr} = io()
+  test "daemon absence is an error for both verbs; there is no offline store path" do
+    client = fn _method, _params, _opts -> {:error, :not_running} end
 
-    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 1
-    assert output(stdout) == ""
-    assert output(stderr) =~ "Fermix daemon is not running"
-  end
+    for argv <- [["list"], ["revoke", @device_id]] do
+      {status, stdout, stderr} = run(argv, client)
 
-  # Same contract as `fermix pair`: `config.toml` is the only enable path, so a
-  # disabled channel names the flag and the restart and never mentions setup.
-  test "a disabled mobile channel points at the config flag, not at setup" do
-    request = fn method, _params, _timeout when method in ~w(mobile_devices_list) ->
-      {:ok, %{"status" => "error", "reason" => "mobile_disabled"}}
+      assert status == 1
+      assert stdout == ""
+      assert stderr =~ "Fermix daemon is not running"
     end
-
-    {stdout, stderr} = io()
-
-    assert DevicesCommand.run(["list"], request: request, stdout: stdout, stderr: stderr) == 1
-
-    printed = output(stderr)
-    assert printed =~ "[fermix_channels.mobile]"
-    assert printed =~ "enabled = true"
-    assert printed =~ "config.toml"
-    assert printed =~ "fermix restart"
-    refute printed =~ "fermix setup"
-    refute printed =~ "setup page"
   end
 
-  test "revoke on a disabled mobile channel points at the config flag" do
-    request = fn "mobile_device_revoke", %{"device_id" => _id}, _timeout ->
-      {:ok, %{"status" => "error", "reason" => "mobile_disabled"}}
-    end
+  test "a daemon that does not speak the management protocol is named" do
+    client = fn "mobile.devices.list", %{}, _opts -> {:error, :invalid_management_response} end
 
-    {stdout, stderr} = io()
+    {status, _stdout, stderr} = run(["list"], client)
 
-    assert DevicesCommand.run(["revoke", @device_id],
-             request: request,
-             stdout: stdout,
-             stderr: stderr
-           ) == 1
-
-    printed = output(stderr)
-    assert printed =~ "[fermix_channels.mobile]"
-    assert printed =~ "enabled = true"
-    refute printed =~ "fermix setup"
-  end
-
-  test "revoking an unknown device renders a typed message, not a tuple dump" do
-    request = fn "mobile_device_revoke", %{"device_id" => _id}, _timeout ->
-      {:ok, %{"status" => "error", "reason" => "device_not_found"}}
-    end
-
-    {stdout, stderr} = io()
-
-    assert DevicesCommand.run(["revoke", @device_id],
-             request: request,
-             stdout: stdout,
-             stderr: stderr
-           ) == 1
-
-    printed = output(stderr)
-    assert printed =~ "no paired device with that id"
-    assert printed =~ "fermix devices list"
-    refute printed =~ "device_not_found"
+    assert status == 1
+    assert stderr =~ "fermix devices list: the daemon did not answer management protocol v1"
   end
 
   test "invalid verbs return usage status" do
-    request = fn _method, _params, _timeout -> flunk("RPC must not run") end
-    {stdout, stderr} = io()
+    client = fn _method, _params, _opts -> flunk("no call may run") end
 
-    assert DevicesCommand.run(["delete", @device_id],
-             request: request,
-             stdout: stdout,
-             stderr: stderr
-           ) == 2
+    {status, stdout, stderr} = run(["delete", @device_id], client)
 
-    assert output(stdout) == ""
-    assert output(stderr) =~ "usage: fermix devices list"
-    assert output(stderr) =~ "fermix devices revoke <device_id>"
+    assert status == 2
+    assert stdout == ""
+    assert stderr =~ "usage: fermix devices list"
+    assert stderr =~ "fermix devices revoke <device_id>"
   end
 
-  defp ok(result), do: {:ok, %{"status" => "ok", "result" => result}}
-
-  defp io do
+  defp run(argv, client) do
     {:ok, stdout} = StringIO.open("")
     {:ok, stderr} = StringIO.open("")
-    {stdout, stderr}
+    status = DevicesCommand.run(argv, client: client, stdout: stdout, stderr: stderr)
+    {status, output(stdout), output(stderr)}
+  end
+
+  defp device(fields \\ %{}) do
+    Map.merge(
+      %{
+        "device_id" => @device_id,
+        "name" => "Sam's phone",
+        "model" => "Google Pixel 9 Pro",
+        "platform" => nil,
+        "signer_role" => nil,
+        "boot_state" => nil,
+        "push_registered" => false,
+        "created_at" => "2026-09-26T12:01:05Z",
+        "last_seen" => nil
+      },
+      fields
+    )
   end
 
   defp output(device) do

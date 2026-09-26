@@ -35,7 +35,6 @@ defmodule FermixChannels.MixProject do
       {:websock_adapter, "~> 0.5"},
       {:x509, "~> 0.9"},
       {:toml_elixir, "~> 3.0"},
-      {:qr_code, "~> 3.2"},
       {:mdns_lite, "~> 0.9", runtime: false},
       {:pigeon, "~> 2.0"}
     ]

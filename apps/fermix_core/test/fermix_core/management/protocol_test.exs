@@ -101,7 +101,14 @@ defmodule FermixCore.Management.ProtocolTest do
              "capabilities.install.start",
              "meetings.signin.start",
              "computer_use.grant.start",
-             "computer_use.permissions.get"
+             "computer_use.permissions.get",
+             "mobile.status",
+             "mobile.pair.start",
+             "mobile.pair.get",
+             "mobile.pair.decide",
+             "mobile.pair.cancel",
+             "mobile.devices.list",
+             "mobile.devices.revoke"
            ]
 
     assert Protocol.error_codes() == [
@@ -120,7 +127,8 @@ defmodule FermixCore.Management.ProtocolTest do
              "secret_store_failed",
              "unknown_job",
              "external_change",
-             "config_unreadable"
+             "config_unreadable",
+             "unknown_pairing_session"
            ]
   end
 

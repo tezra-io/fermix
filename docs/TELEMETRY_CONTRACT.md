@@ -440,7 +440,10 @@ Pairing decisions and push deliveries are **point events with no agent
 session** (like plugin dist): a pairing resolves in `PairManager` and a push
 fires after the turn already closed. Both go through `FermixChannels.Telemetry`
 — `emit_pair(channel, status, duration_us)` with
-`status ∈ approved | denied | expired | rate_limited`, and
+`status ∈ approved | denied | expired | rate_limited | cancelled |
+device_disconnected` (`cancelled`: the window closed before a decision, by an
+owner's cancel, a dropped `fermix pair` connection or a failed setup;
+`device_disconnected`: the phone was gone when the owner approved), and
 `emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
 (`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). Never

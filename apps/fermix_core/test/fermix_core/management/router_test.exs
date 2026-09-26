@@ -894,6 +894,215 @@ defmodule FermixCore.Management.RouterTest do
     end
   end
 
+  # The parameter checks and the refusal mapping, not the pairing ceremony: the
+  # provider is a fake that answers whatever the case hands it through its own
+  # options, so nothing here starts the phone channel.
+  describe "mobile operations" do
+    test "every method answers through the provider it is handed" do
+      session = mobile_session(:awaiting_scan)
+      uri = "fermix://pair?v=2&secret=EXAMPLE"
+
+      assert {:ok, %{"state" => "awaiting_scan", "uri" => ^uri}} =
+               Router.route(v2("mobile.pair.start"), mobile({:ok, %{session: session, uri: uri}}))
+
+      for {method, params} <- [
+            {"mobile.pair.get", %{"session_id" => "pair:1"}},
+            {"mobile.pair.decide", %{"session_id" => "pair:1", "approved" => false}},
+            {"mobile.pair.cancel", %{"session_id" => "pair:1"}}
+          ] do
+        assert {:ok, %{"session_id" => "pair:1", "state" => "awaiting_scan"}} =
+                 Router.route(v2(method, params), mobile({:ok, session})),
+               "#{method} did not answer the session view"
+      end
+
+      assert {:ok, %{"devices" => []}} =
+               Router.route(v2("mobile.devices.list"), mobile({:ok, []}))
+
+      assert {:ok, %{"device_id" => "d1", "revoked" => true}} =
+               Router.route(
+                 v2("mobile.devices.revoke", %{"device_id" => "d1"}),
+                 mobile({:ok, %{device_id: "d1"}})
+               )
+    end
+
+    test "a status is published whole" do
+      assert {:ok, view} = Router.route(v2("mobile.status"), mobile({:ok, mobile_status()}))
+
+      assert Enum.sort(Map.keys(view)) ==
+               ~w(apns enabled identity listener mdns paired_devices pairing protocol_version
+                  refused started tailnet)
+    end
+
+    test "the no-parameter methods refuse parameters rather than ignoring them" do
+      for method <- ~w(mobile.status mobile.pair.start mobile.devices.list) do
+        assert {:error, :invalid_params, %{"method" => ^method}} =
+                 Router.route(v2(method, %{"extra" => 1}), mobile({:ok, []})),
+               "#{method} ignored an unexpected parameter"
+      end
+    end
+
+    test "a session method needs its id and nothing else" do
+      for method <- ~w(mobile.pair.get mobile.pair.cancel) do
+        assert {:error, :invalid_params, %{"field" => "session_id"}} =
+                 Router.route(v2(method, %{}), mobile({:ok, mobile_session(:expired)}))
+
+        assert {:error, :invalid_params, %{"field" => "extra"}} =
+                 Router.route(
+                   v2(method, %{"session_id" => "pair:1", "extra" => 1}),
+                   mobile({:ok, mobile_session(:expired)})
+                 )
+      end
+    end
+
+    test "a decision needs a session id and a boolean" do
+      session = mobile({:ok, mobile_session(:approved)})
+
+      assert {:error, :invalid_params, %{"field" => "session_id"}} =
+               Router.route(v2("mobile.pair.decide", %{"approved" => true}), session)
+
+      for approved <- [nil, "yes", 1] do
+        params = %{"session_id" => "pair:1", "approved" => approved}
+
+        assert {:error, :invalid_params, %{"field" => "approved"}} =
+                 Router.route(v2("mobile.pair.decide", params), session),
+               "#{inspect(approved)} was taken as a decision"
+      end
+
+      assert {:error, :invalid_params, %{"field" => "approved"}} =
+               Router.route(v2("mobile.pair.decide", %{"session_id" => "pair:1"}), session)
+
+      params = %{"session_id" => "pair:1", "approved" => true, "extra" => 1}
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mobile.pair.decide", params), session)
+    end
+
+    test "a revoke needs a device id and nothing else" do
+      reply = mobile({:ok, %{device_id: "d1"}})
+
+      assert {:error, :invalid_params, %{"field" => "device_id"}} =
+               Router.route(v2("mobile.devices.revoke", %{}), reply)
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(
+                 v2("mobile.devices.revoke", %{"device_id" => "d1", "extra" => 1}),
+                 reply
+               )
+    end
+
+    test "a second window is busy" do
+      assert {:error, :busy, %{"operation" => "mobile.pair"}} =
+               Router.route(v2("mobile.pair.start"), mobile({:error, :pairing_active}))
+    end
+
+    test "a session this daemon does not retain answers its own code" do
+      for {method, params} <- [
+            {"mobile.pair.get", %{"session_id" => "pair:gone"}},
+            {"mobile.pair.decide", %{"session_id" => "pair:gone", "approved" => true}},
+            {"mobile.pair.cancel", %{"session_id" => "pair:gone"}}
+          ] do
+        assert {:error, :unknown_pairing_session, %{"session_id" => "pair:gone"}} =
+                 Router.route(v2(method, params), mobile({:error, :unknown_pairing_session}))
+      end
+    end
+
+    test "a refusal with a sentence rides invalid_params" do
+      params = %{"session_id" => "pair:1", "approved" => true}
+
+      assert {:error, :invalid_params,
+              %{"field" => "session_id", "sentence" => "No phone is waiting for a decision."}} =
+               Router.route(v2("mobile.pair.decide", params), mobile({:error, :request_missing}))
+
+      assert {:error, :invalid_params,
+              %{"field" => "device_id", "sentence" => "No paired phone has that id."}} =
+               Router.route(
+                 v2("mobile.devices.revoke", %{"device_id" => "d9"}),
+                 mobile({:error, :device_not_found})
+               )
+    end
+
+    # Each is a view with a sentence and no session, because nothing was opened.
+    test "a start the operator can act on is a failed view, not an envelope" do
+      refusals = [
+        mobile_disabled: "unavailable",
+        mobile_surface_refused: "unavailable",
+        mobile_not_started: "unavailable",
+        identity_unavailable: "refused",
+        listener_unavailable: "internal_error",
+        device_store_unavailable: "internal_error"
+      ]
+
+      for {reason, code} <- refusals do
+        assert {:ok, view} = Router.route(v2("mobile.pair.start"), mobile({:error, reason}))
+
+        assert %{"state" => "failed", "session_id" => nil, "uri" => nil} = view
+        assert %{"code" => ^code, "sentence" => sentence} = view["failure"]
+        assert is_binary(sentence) and sentence != ""
+      end
+    end
+
+    test "a provider that is absent or exits names the capability, never the reason" do
+      exits = fn -> exit(:noproc) end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :unavailable, %{"capability" => "mobile"}} =
+                 Router.route(v2("mobile.status"), operation_opts: [mobile: [provider: nil]])
+
+        assert {:error, :unavailable, %{"capability" => "mobile"}} =
+                 Router.route(v2("mobile.devices.list"), mobile(exits))
+      end)
+    end
+
+    test "every mobile method is refused on a v1 session with the version it requires" do
+      for method <- ~w(mobile.status mobile.pair.start mobile.pair.get mobile.pair.decide
+                       mobile.pair.cancel mobile.devices.list mobile.devices.revoke) do
+        assert {:error, :method_not_found, %{"method" => ^method, "requires" => 2}} =
+                 Router.route(request(method), mobile({:ok, []}))
+      end
+    end
+  end
+
+  defmodule FakeMobileProvider do
+    @moduledoc false
+
+    def status(opts), do: answer(opts)
+    def pair_start(opts), do: answer(opts)
+    def pair_get(_session_id, opts), do: answer(opts)
+    def pair_decide(_session_id, _approved, opts), do: answer(opts)
+    def pair_cancel(_session_id, opts), do: answer(opts)
+    def devices_list(opts), do: answer(opts)
+    def devices_revoke(_device_id, opts), do: answer(opts)
+
+    defp answer(opts) do
+      case Keyword.fetch!(opts, :reply) do
+        reply when is_function(reply, 0) -> reply.()
+        reply -> reply
+      end
+    end
+  end
+
+  defp mobile(reply), do: [operation_opts: [mobile: [provider: FakeMobileProvider, reply: reply]]]
+
+  defp mobile_session(state) do
+    %{session_id: "pair:1", state: state, ttl_ms: nil, request: nil, outcome: nil, failure: nil}
+  end
+
+  defp mobile_status do
+    %{
+      enabled: false,
+      started: false,
+      refused: false,
+      listener: %{status: :down, port: 4031, bind: "0.0.0.0", candidates: []},
+      mdns: :disabled,
+      tailnet: %{detected: false, candidates: []},
+      identity: %{present: false, fingerprint: nil},
+      apns: %{enabled: false, credentials: :missing},
+      paired_devices: 0,
+      protocol_version: 1,
+      pairing: nil
+    }
+  end
+
   defp v2(method, params \\ %{}), do: %{request(method, params) | protocol_version: 2}
 
   defp request(method, params \\ %{}) do

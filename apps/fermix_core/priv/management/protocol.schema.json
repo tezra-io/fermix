@@ -110,7 +110,14 @@
     "capabilities.install.start": 2,
     "meetings.signin.start": 2,
     "computer_use.grant.start": 2,
-    "computer_use.permissions.get": 2
+    "computer_use.permissions.get": 2,
+    "mobile.status": 2,
+    "mobile.pair.start": 2,
+    "mobile.pair.get": 2,
+    "mobile.pair.decide": 2,
+    "mobile.pair.cancel": 2,
+    "mobile.devices.list": 2,
+    "mobile.devices.revoke": 2
   },
   "$defs": {
     "request": {
@@ -163,7 +170,14 @@
             "capabilities.install.start",
             "meetings.signin.start",
             "computer_use.grant.start",
-            "computer_use.permissions.get"
+            "computer_use.permissions.get",
+            "mobile.status",
+            "mobile.pair.start",
+            "mobile.pair.get",
+            "mobile.pair.decide",
+            "mobile.pair.cancel",
+            "mobile.devices.list",
+            "mobile.devices.revoke"
           ]
         },
         "params": { "type": "object" }
@@ -435,6 +449,55 @@
             "properties": { "method": { "const": "computer_use.permissions.get" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/computer_use_permissions_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.pair.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_pair_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.pair.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_pair_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.pair.decide" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_pair_decide_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.pair.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_pair_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.devices.list" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_list_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "mobile.devices.revoke" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_revoke_params" } } }
         }
       ]
     },
@@ -477,7 +540,8 @@
                 "secret_store_failed",
                 "unknown_job",
                 "external_change",
-                "config_unreadable"
+                "config_unreadable",
+                "unknown_pairing_session"
               ]
             },
             "message": { "type": "string", "minLength": 1 },
@@ -537,7 +601,14 @@
         { "$ref": "#/$defs/capabilities_install_start_result" },
         { "$ref": "#/$defs/meetings_signin_start_result" },
         { "$ref": "#/$defs/computer_use_grant_start_result" },
-        { "$ref": "#/$defs/computer_use_permissions_get_result" }
+        { "$ref": "#/$defs/computer_use_permissions_get_result" },
+        { "$ref": "#/$defs/mobile_status_result" },
+        { "$ref": "#/$defs/mobile_pair_start_result" },
+        { "$ref": "#/$defs/mobile_pair_get_result" },
+        { "$ref": "#/$defs/mobile_pair_decide_result" },
+        { "$ref": "#/$defs/mobile_pair_cancel_result" },
+        { "$ref": "#/$defs/mobile_devices_list_result" },
+        { "$ref": "#/$defs/mobile_devices_revoke_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -2074,6 +2145,278 @@
         "screen_capture": { "type": "boolean" },
         "input_control": { "type": "boolean" },
         "probed_at": { "type": ["string", "null"] }
+      }
+    },
+    "pairingAttestation": {
+      "type": "object",
+      "description": "What the daemon verified about the phone's secure hardware, in its own words. The sentence is rendered; a client never composes one from the status.",
+      "required": ["status", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "status": { "enum": ["verified", "refused", "unavailable"] },
+        "sentence": { "type": "string" }
+      }
+    },
+    "pairingRequest": {
+      "type": "object",
+      "description": "The phone waiting for a decision: the sanitized copy of what it sent, each string at most 128 bytes, plus what the daemon verified. `sas` is the six digits the operator compares with the phone before approving.",
+      "required": [
+        "device_name",
+        "model",
+        "platform",
+        "app_version",
+        "sas",
+        "build_role",
+        "boot_state",
+        "attestation"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "device_name": { "type": "string", "maxLength": 128 },
+        "model": { "type": "string", "maxLength": 128 },
+        "platform": { "type": ["string", "null"], "maxLength": 128 },
+        "app_version": { "type": "string", "maxLength": 128 },
+        "sas": { "type": "string", "pattern": "^[0-9]{6}$" },
+        "build_role": { "enum": ["release", "development", null] },
+        "boot_state": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["verified", "locked"],
+              "additionalProperties": false,
+              "properties": { "verified": { "type": "boolean" }, "locked": { "type": "boolean" } }
+            },
+            { "type": "null" }
+          ]
+        },
+        "attestation": { "$ref": "#/$defs/pairingAttestation" }
+      }
+    },
+    "pairingOutcome": {
+      "type": "object",
+      "description": "How a finished session ended: the paired device on `approved`, the reason on `denied`, `expired` (`timeout`) and `cancelled`. The field that does not apply is null.",
+      "required": ["device_id", "reason"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": ["string", "null"] },
+        "reason": { "enum": ["denied", "timeout", "cancelled", null] }
+      }
+    },
+    "pairingFailure": {
+      "type": "object",
+      "description": "Why a session failed, in the daemon's own words. The sentence is rendered; a client never composes one from the code.",
+      "required": ["code", "sentence"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "enum": ["unavailable", "refused", "internal_error"] },
+        "sentence": { "type": "string" }
+      }
+    },
+    "pairingSession": {
+      "type": "object",
+      "description": "Every field is always present, null where it does not apply. `state` is the switch; `ttl_ms` is relative and null once the session is terminal; `outcome` is set on `approved`, `denied`, `expired` and `cancelled`, `failure` on `failed`.",
+      "required": ["session_id", "state", "ttl_ms", "request", "outcome", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": ["string", "null"], "maxLength": 256 },
+        "state": { "enum": ["awaiting_scan", "awaiting_decision", "approved", "denied", "expired", "cancelled", "failed"] },
+        "ttl_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "request": { "oneOf": [{ "$ref": "#/$defs/pairingRequest" }, { "type": "null" }] },
+        "outcome": { "oneOf": [{ "$ref": "#/$defs/pairingOutcome" }, { "type": "null" }] },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/pairingFailure" }, { "type": "null" }] }
+      }
+    },
+    "mobileStatus": {
+      "type": "object",
+      "description": "The phone channel as it stands, answered with the channel off too, so a pane can always read it. `started` is false until the channel runs, which an enabled switch alone does not do before a restart; `refused` is true when the channel could not start this boot, and the daemon log says why. `pairing` is the open window, else the newest retained session, else null.",
+      "required": [
+        "enabled",
+        "started",
+        "refused",
+        "listener",
+        "mdns",
+        "tailnet",
+        "identity",
+        "apns",
+        "paired_devices",
+        "protocol_version",
+        "pairing"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "started": { "type": "boolean" },
+        "refused": { "type": "boolean" },
+        "listener": {
+          "type": "object",
+          "required": ["status", "port", "bind", "candidates"],
+          "additionalProperties": false,
+          "properties": {
+            "status": { "enum": ["ready", "down"] },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "bind": { "type": "string" },
+            "candidates": { "type": "array", "items": { "type": "string" }, "maxItems": 500 }
+          }
+        },
+        "mdns": { "enum": ["advertising", "disabled", "down"] },
+        "tailnet": {
+          "type": "object",
+          "required": ["detected", "candidates"],
+          "additionalProperties": false,
+          "properties": {
+            "detected": { "type": "boolean" },
+            "candidates": { "type": "array", "items": { "type": "string" }, "maxItems": 500 }
+          }
+        },
+        "identity": {
+          "type": "object",
+          "description": "`fingerprint` is the SHA-256 of the gateway public key a phone pins at pairing, lowercase hex in groups of four; null until the first pairing creates the identity.",
+          "required": ["present", "fingerprint"],
+          "additionalProperties": false,
+          "properties": {
+            "present": { "type": "boolean" },
+            "fingerprint": { "type": ["string", "null"] }
+          }
+        },
+        "apns": {
+          "type": "object",
+          "required": ["enabled", "credentials"],
+          "additionalProperties": false,
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "credentials": { "enum": ["ready", "missing"] }
+          }
+        },
+        "paired_devices": { "type": "integer", "minimum": 0 },
+        "protocol_version": { "type": "integer", "minimum": 1 },
+        "pairing": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["session_id", "state"],
+              "additionalProperties": false,
+              "properties": {
+                "session_id": { "type": "string", "maxLength": 256 },
+                "state": { "enum": ["awaiting_scan", "awaiting_decision", "approved", "denied", "expired", "cancelled", "failed"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "mobileDevice": {
+      "type": "object",
+      "required": [
+        "device_id",
+        "name",
+        "model",
+        "platform",
+        "signer_role",
+        "boot_state",
+        "push_registered",
+        "created_at",
+        "last_seen"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string" },
+        "name": { "type": "string" },
+        "model": { "type": "string" },
+        "platform": { "type": ["string", "null"] },
+        "signer_role": { "enum": ["release", "development", null] },
+        "boot_state": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["verified", "locked"],
+              "additionalProperties": false,
+              "properties": { "verified": { "type": "boolean" }, "locked": { "type": "boolean" } }
+            },
+            { "type": "null" }
+          ]
+        },
+        "push_registered": { "type": "boolean" },
+        "created_at": { "type": "string" },
+        "last_seen": { "type": ["string", "null"] }
+      }
+    },
+    "mobile_status_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "mobile_status_result": { "$ref": "#/$defs/mobileStatus" },
+    "mobile_pair_start_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "mobile_pair_start_result": {
+      "type": "object",
+      "description": "The session view plus the pairing link, returned once, on the call that opens the window; a later read carries the session view alone. The link carries the one-time secret, so it is never logged and never retained. A start that opened nothing answers `failed` with a null `session_id` and a null `uri`.",
+      "required": ["session_id", "state", "ttl_ms", "request", "outcome", "failure", "uri"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": ["string", "null"], "maxLength": 256 },
+        "state": { "enum": ["awaiting_scan", "awaiting_decision", "approved", "denied", "expired", "cancelled", "failed"] },
+        "ttl_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "request": { "oneOf": [{ "$ref": "#/$defs/pairingRequest" }, { "type": "null" }] },
+        "outcome": { "oneOf": [{ "$ref": "#/$defs/pairingOutcome" }, { "type": "null" }] },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/pairingFailure" }, { "type": "null" }] },
+        "uri": { "type": ["string", "null"], "maxLength": 2048 }
+      }
+    },
+    "mobile_pair_get_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "mobile_pair_get_result": { "$ref": "#/$defs/pairingSession" },
+    "mobile_pair_decide_params": {
+      "type": "object",
+      "required": ["session_id", "approved"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "approved": { "type": "boolean" }
+      }
+    },
+    "mobile_pair_decide_result": { "$ref": "#/$defs/pairingSession" },
+    "mobile_pair_cancel_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "mobile_pair_cancel_result": { "$ref": "#/$defs/pairingSession" },
+    "mobile_devices_list_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "mobile_devices_list_result": {
+      "type": "object",
+      "required": ["devices"],
+      "additionalProperties": false,
+      "properties": {
+        "devices": { "type": "array", "maxItems": 64, "items": { "$ref": "#/$defs/mobileDevice" } }
+      }
+    },
+    "mobile_devices_revoke_params": {
+      "type": "object",
+      "required": ["device_id"],
+      "additionalProperties": false,
+      "properties": { "device_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "mobile_devices_revoke_result": {
+      "type": "object",
+      "required": ["device_id", "revoked"],
+      "additionalProperties": false,
+      "properties": {
+        "device_id": { "type": "string" },
+        "revoked": { "const": true }
       }
     },
     "logEntry": {

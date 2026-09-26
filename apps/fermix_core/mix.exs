@@ -52,6 +52,8 @@ defmodule FermixCore.MixProject do
       # of which a pooled request/response client can express. Finch would only
       # pull it transitively.
       {:mint, "~> 1.7"},
+      # The terminal QR code `fermix pair` prints for the phone to scan.
+      {:qr_code, "~> 3.2"},
       {:req, "~> 0.5"},
       {:telemetry, "~> 1.0"},
       # Compile-time-embedded IANA tz database (no runtime network fetch, unlike

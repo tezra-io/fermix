@@ -83,28 +83,39 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
-  # The channel is feature-flagged with no setup surface, so the runtime
-  # self-reference must name the one enable path (the config flag) and must not
-  # point an owner at surfaces that no longer exist. The refutations name
-  # concrete withdrawn artifacts rather than a phrasing allowlist, so a true
-  # sentence that happens to mention setup (e.g. `--migrate-secrets`) stays
-  # legal while a re-added mobile step or flag fails here.
-  test "documents mobile as a config-flag-only channel, never a setup step" do
+  # The channel's surface is the management protocol: a settings section and
+  # the `mobile.*` methods the desktop apps' Phone pane is built on, with the
+  # config flag still the route on a host with no pane. The self-reference must
+  # name both, must say pairing on an app-managed Mac is the app's, and must not
+  # point an owner at surfaces that do not exist. The refutations name concrete
+  # withdrawn artifacts rather than a phrasing allowlist, so a true sentence
+  # that happens to mention setup (e.g. `--migrate-secrets`) stays legal while a
+  # re-added mobile setup step or flag, or the withdrawn "no setup surface"
+  # claim, fails here.
+  test "documents mobile's management surface and the config route, never a setup step" do
     reference = File.read!(mobile_reference_path())
     paragraph = mobile_paragraph()
 
     for text <- [reference, paragraph] do
       assert text =~ "[fermix_channels.mobile]"
       assert text =~ "enabled = true"
+      assert text =~ "channels.mobile"
+      assert text =~ "mobile.*"
+      assert text =~ "fermix pair"
+      assert text =~ "never the CLI"
       refute text =~ "Channels page"
       refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"
       refute text =~ "--mobile-push"
+      refute text =~ "no setup surface"
     end
 
     assert reference =~ "config.toml"
     assert reference =~ "restart"
-    assert reference =~ "no setup surface"
+
+    for word <- ~w(awaiting_scan awaiting_decision cancelled device_disconnected) do
+      assert reference =~ word, "the mobile reference does not describe #{word}"
+    end
   end
 
   # The companion socket has no setting, so the runtime self-reference must not

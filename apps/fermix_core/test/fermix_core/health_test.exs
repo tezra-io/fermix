@@ -14,6 +14,7 @@ defmodule FermixCore.HealthTest do
     slack = Application.get_env(:fermix_channels, :slack)
     signal = Application.get_env(:fermix_channels, :signal)
     acp = Application.get_env(:fermix_channels, :acp)
+    mobile = Application.get_env(:fermix_channels, :mobile)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -25,6 +26,7 @@ defmodule FermixCore.HealthTest do
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
       restore_env(:fermix_channels, :acp, acp)
+      restore_env(:fermix_channels, :mobile, mobile)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -175,6 +177,31 @@ defmodule FermixCore.HealthTest do
 
     assert %{name: "acp", status: :ready, enabled: true, process_alive: true} =
              channel(ready, "acp")
+  end
+
+  # The phone channel is counted like every other transport: off by default,
+  # and degraded when it is switched on with no listener process behind it.
+  test "lists the mobile transport and keys its liveness on the listener" do
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+    Application.delete_env(:fermix_channels, :mobile)
+
+    off = health_report(fn _name -> nil end)
+
+    assert %{name: "mobile", status: :disabled, enabled: false, process_alive: nil} =
+             channel(off, "mobile")
+
+    Application.put_env(:fermix_channels, :mobile, enabled: true, mode: :listener)
+
+    degraded = health_report(fn _name -> nil end)
+
+    assert %{name: "mobile", status: :degraded, enabled: true, process_alive: false} =
+             channel(degraded, "mobile")
+
+    listening =
+      health_report(fn name -> if name == FermixChannels.Mobile.Listener, do: self() end)
+
+    assert %{name: "mobile", status: :ready, mode: :listener, process_alive: true} =
+             channel(listening, "mobile")
   end
 
   defp health_report(process_resolver, opts \\ []) do

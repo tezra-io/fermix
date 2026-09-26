@@ -236,8 +236,14 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert {:error, {:mobile_surface_refused, {:devices_decode_failed, ^path, _}}} =
              Management.health(config: [enabled: true], device_store: store)
 
-    assert {:error, {:mobile_surface_refused, {:devices_decode_failed, ^path, _}}} =
-             Management.status(config: [enabled: true], device_store: store)
+    # The management verbs name the refusal; status still answers, from
+    # configuration alone, because nothing it could ask was meant to run.
+    refused = [config: [enabled: true], device_store: store, root: root]
+    assert {:error, :mobile_surface_refused} = Management.pair_start(refused)
+    assert {:ok, []} = Management.devices_list(refused)
+
+    assert {:ok, %{enabled: true, started: false, refused: true, paired_devices: 0, pairing: nil}} =
+             Management.status(refused)
   end
 
   test "a repaired trust store clears the refusal on the next boot" do

@@ -95,6 +95,10 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_enabled, boolean() | String.t()}
           | {:signal_enabled, boolean() | String.t()}
           | {:acp_enabled, boolean() | String.t()}
+          | {:mobile_enabled, boolean() | String.t()}
+          | {:mobile_port, pos_integer()}
+          | {:mobile_bind, String.t()}
+          | {:mobile_advertise_mdns, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -788,6 +792,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_enabled(answers)
       |> put_acp_config(answers)
+      |> put_mobile_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
@@ -2436,6 +2441,50 @@ defmodule FermixCore.Setup.Wizard do
         Map.put(snapshot, :fermix_channels, Keyword.put(channels, :acp, config))
     end
   end
+
+  # The phone channel's four operator settings (M51 management pairing §6). Each
+  # answer is one key merged into `[fermix_channels.mobile]`, so the keys no
+  # pane writes (`push`, `streaming`, the media bounds) survive the write, and
+  # an absent answer changes nothing. The two refusals are the sentences a pane
+  # shows under the control, so they are written for the operator.
+  defp put_mobile_config(snapshot, answers) do
+    [
+      enabled: normalize_realtime_bool(Keyword.get(answers, :mobile_enabled), :mobile_enabled),
+      port: normalize_mobile_port(Keyword.get(answers, :mobile_port)),
+      bind: normalize_mobile_bind(Keyword.get(answers, :mobile_bind)),
+      advertise_mdns:
+        normalize_realtime_bool(
+          Keyword.get(answers, :mobile_advertise_mdns),
+          :mobile_advertise_mdns
+        )
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.reduce(snapshot, fn {key, value}, acc -> put_channel_key(acc, :mobile, key, value) end)
+  end
+
+  defp normalize_mobile_port(nil), do: nil
+  defp normalize_mobile_port(port) when is_integer(port) and port in 1_024..65_535, do: port
+
+  defp normalize_mobile_port(_port),
+    do: raise(ArgumentError, "Port must be a whole number between 1024 and 65535.")
+
+  # Strict, as the settings file's own reader is: the short forms a lenient
+  # parse accepts would bind an address the operator never wrote.
+  defp normalize_mobile_bind(nil), do: nil
+
+  defp normalize_mobile_bind(bind) when is_binary(bind) do
+    trimmed = String.trim(bind)
+
+    case :inet.parse_strict_address(String.to_charlist(trimmed)) do
+      {:ok, _address} -> trimmed
+      {:error, _reason} -> refuse_mobile_bind()
+    end
+  end
+
+  defp normalize_mobile_bind(_bind), do: refuse_mobile_bind()
+
+  defp refuse_mobile_bind,
+    do: raise(ArgumentError, "Listen on must be an IP address, such as `0.0.0.0`.")
 
   # A real enable switch, and it runs AFTER the credential writers on purpose:
   # `put_channel_config/4` turns a channel on whenever a credential arrives, so

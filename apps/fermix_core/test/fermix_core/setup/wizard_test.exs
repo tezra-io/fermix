@@ -127,10 +127,11 @@ defmodule FermixCore.Setup.WizardTest do
     :ok
   end
 
-  # The mobile channel ships feature-flagged with NO setup surface: hand-editing
-  # `[fermix_channels.mobile] enabled = true` in config.toml is the only enable
-  # path. These pin the absence, in both directions — setup never asks, and a
-  # hand-written section survives a save that knows nothing about it.
+  # The mobile channel has no setup prompt: setup never asks, and a hand-written
+  # section survives a save that knows nothing about it. Since M51 the
+  # management `channels.mobile` section writes its four rows through this
+  # pipeline, so those four answers land and every other mobile answer (the
+  # push credentials above all) is still ignored.
   describe "mobile has no wizard surface" do
     test "no setup or reconfigure prompt mentions mobile, on a fresh or enabled install" do
       assert_no_mobile_prompts(Wizard.report().wizard)
@@ -148,11 +149,9 @@ defmodule FermixCore.Setup.WizardTest do
       assert_no_mobile_prompts(Wizard.report().wizard)
     end
 
-    test "injected mobile answers are ignored and never reach config.toml" do
+    test "injected push answers are ignored and never reach config.toml" do
       assert {:ok, _report} =
                Wizard.save_answers(Wizard.report().wizard,
-                 mobile_enabled: "true",
-                 mobile_port: "4040",
                  mobile_push_enabled: "true",
                  mobile_push_team_id: "ABCDE12345",
                  mobile_push_key_id: "KEY987",
@@ -172,6 +171,35 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(mobile, :enabled) == false
       assert Keyword.get(mobile, :port) == 4031
       assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
+    end
+
+    test "the four channels.mobile answers are written, merged into the block" do
+      assert {:ok, _report} =
+               Wizard.save_answers(Wizard.report().wizard,
+                 mobile_enabled: "true",
+                 mobile_port: 4040,
+                 mobile_bind: "127.0.0.1",
+                 mobile_advertise_mdns: false,
+                 mobile_push_team_id: "ABCDE12345"
+               )
+
+      contents = File.read!(ConfigStore.path())
+      refute contents =~ "ABCDE12345"
+
+      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
+      mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
+      assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :port) == 4040
+      assert Keyword.get(mobile, :bind) == "127.0.0.1"
+      assert Keyword.get(mobile, :advertise_mdns) == false
+      assert Keyword.get(mobile, :mode) == :listener
+      assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
+    end
+
+    test "a mobile port given as text is refused rather than guessed at" do
+      assert_raise ArgumentError, "Port must be a whole number between 1024 and 65535.", fn ->
+        Wizard.save_answers(Wizard.report().wizard, mobile_port: "4040")
+      end
     end
 
     # Web setup round-trips the live config to disk on every save, so a section

@@ -21,10 +21,12 @@ defmodule FermixCore.Management.SetupStateTest do
   setup do
     core = Map.new(@core_keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
     telegram = Application.get_env(:fermix_channels, :telegram)
+    mobile = Application.get_env(:fermix_channels, :mobile)
 
     on_exit(fn ->
       Enum.each(core, fn {key, value} -> restore(:fermix_core, key, value) end)
       restore(:fermix_channels, :telegram, telegram)
+      restore(:fermix_channels, :mobile, mobile)
     end)
 
     :ok
@@ -121,7 +123,7 @@ defmodule FermixCore.Management.SetupStateTest do
     report = SetupState.report(sources())
 
     assert Enum.map(report["channels"], & &1["name"]) ==
-             Enum.map(Readiness.channels(), &Atom.to_string/1)
+             Enum.map(Readiness.channels(), &Atom.to_string/1) ++ ["mobile"]
 
     telegram = Enum.find(report["channels"], &(&1["name"] == "telegram"))
     assert telegram["enabled"] == false
@@ -139,6 +141,34 @@ defmodule FermixCore.Management.SetupStateTest do
     assert telegram["configured"] == false
     assert telegram["status"] == "setup_required"
     assert telegram["mode"] == "polling"
+  end
+
+  # The phone channel has no credential to be missing, so it is always
+  # configured, and it has one transport, so its mode is not read from a file.
+  test "the phone channel row follows its own switch and is always configured" do
+    Application.delete_env(:fermix_channels, :mobile)
+
+    off = mobile_row(SetupState.report(sources()))
+
+    assert off == %{
+             "name" => "mobile",
+             "enabled" => false,
+             "configured" => true,
+             "status" => nil,
+             "mode" => nil
+           }
+
+    Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+
+    on = mobile_row(SetupState.report(sources()))
+
+    assert on == %{
+             "name" => "mobile",
+             "enabled" => true,
+             "configured" => true,
+             "status" => "ok",
+             "mode" => "listener"
+           }
   end
 
   test "personalization reports presence only, never a value" do
@@ -280,6 +310,8 @@ defmodule FermixCore.Management.SetupStateTest do
       config_state: fn -> :clear end
     ]
   end
+
+  defp mobile_row(report), do: Enum.find(report["channels"], &(&1["name"] == "mobile"))
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

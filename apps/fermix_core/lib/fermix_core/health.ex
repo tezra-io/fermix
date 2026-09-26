@@ -73,6 +73,13 @@ defmodule FermixCore.Health do
       default_enabled: true,
       child: FermixChannels.Channels.Acp.Endpoint,
       health_provider_key: nil
+    },
+    %{
+      key: :mobile,
+      name: "mobile",
+      default_enabled: false,
+      child: FermixChannels.Mobile.Listener,
+      health_provider_key: nil
     }
   ]
 

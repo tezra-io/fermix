@@ -555,7 +555,111 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # no seam at all: it reads and writes nothing, so the shape under test is
       # the live projection rather than an injected stand-in.
       {"plugins.list", %{}, []}
-    ] ++ settings_cases() ++ job_view_cases() ++ flow_cases()
+    ] ++ settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases()
+  end
+
+  # Facts in the shape the phone channel hands over. `pair_get` answers a phone
+  # waiting for a decision, the state whose request the golden illustrates.
+  defmodule FakeMobileProvider do
+    @moduledoc false
+
+    @session_id "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"
+    @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
+
+    def status(_opts) do
+      {:ok,
+       %{
+         enabled: true,
+         started: true,
+         refused: false,
+         listener: %{
+           status: :ready,
+           port: 4031,
+           bind: "0.0.0.0",
+           candidates: ["wss://192.168.1.20:4031/ws"]
+         },
+         mdns: :advertising,
+         tailnet: %{detected: true, candidates: ["100.101.102.103"]},
+         identity: %{present: true, fingerprint: "3f9a 1c2e 7b4d 05a8"},
+         apns: %{enabled: false, credentials: :missing},
+         paired_devices: 1,
+         protocol_version: 1,
+         pairing: %{session_id: @session_id, state: :awaiting_decision}
+       }}
+    end
+
+    def pair_start(_opts) do
+      {:ok, %{session: session(:awaiting_scan, 120_000, nil, nil), uri: "fermix://pair?v=2"}}
+    end
+
+    def pair_get(_session_id, _opts),
+      do: {:ok, session(:awaiting_decision, 83_400, request(), nil)}
+
+    def pair_decide(_session_id, true, _opts),
+      do: {:ok, session(:approved, nil, request(), %{device_id: @device_id})}
+
+    def pair_cancel(_session_id, _opts),
+      do: {:ok, session(:cancelled, nil, nil, %{reason: :cancelled})}
+
+    def devices_list(_opts) do
+      {:ok,
+       [
+         %{
+           device_id: @device_id,
+           name: "Sam's phone",
+           model: "Google Pixel 9 Pro",
+           platform: nil,
+           signer_role: nil,
+           boot_state: nil,
+           push_registered: false,
+           created_at: "2026-09-26T12:01:05Z",
+           last_seen: "2026-09-26T12:04:40Z"
+         }
+       ]}
+    end
+
+    def devices_revoke(device_id, _opts), do: {:ok, %{device_id: device_id}}
+
+    defp session(state, ttl_ms, request, outcome) do
+      %{
+        session_id: @session_id,
+        state: state,
+        ttl_ms: ttl_ms,
+        request: request,
+        outcome: outcome,
+        failure: nil
+      }
+    end
+
+    defp request do
+      %{
+        device_name: "Sam's phone",
+        model: "Google Pixel 9 Pro",
+        platform: nil,
+        app_version: "1.0.0",
+        sas: "481062",
+        build_role: nil,
+        boot_state: nil,
+        attestation: :unavailable
+      }
+    end
+  end
+
+  # The seven phone methods against the fake above: what is compared is the view
+  # the adapter builds from the provider's facts, which is the daemon's own.
+  defp mobile_cases do
+    opts = [operation_opts: [mobile: [provider: FakeMobileProvider]]]
+    session = %{"session_id" => "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"}
+
+    [
+      {"mobile.status", %{}, opts},
+      {"mobile.pair.start", %{}, opts},
+      {"mobile.pair.get", session, opts},
+      {"mobile.pair.decide", Map.put(session, "approved", true), opts},
+      {"mobile.pair.cancel", session, opts},
+      {"mobile.devices.list", %{}, opts},
+      {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}, opts}
+    ]
   end
 
   # The seven flow methods whose golden result is the view the starting call

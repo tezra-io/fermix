@@ -737,6 +737,198 @@
       "field": "plugin.settings[].kind",
       "kind": "engine_only",
       "why": "The same field on the row this write answers with, for the same reason: the app redraws the control from the row it is handed, so a kind present in the listing and absent here would make the field change shape on save."
+    },
+    {
+      "method": "(errors)",
+      "field": "unknown_pairing_session:session_id",
+      "kind": "engine_only",
+      "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:unknown_pairing_session",
+      "kind": "engine_only",
+      "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.devices.list",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.devices.revoke",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.cancel",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.decide",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.get",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.start",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.status",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.devices.list=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.devices.revoke=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.cancel=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.decide=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.get=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.start=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.status=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.devices.list",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.devices.revoke",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.cancel",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.decide",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.get",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.start",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.status",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "mobile.devices.revoke",
+      "field": "params:device_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.cancel",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.decide",
+      "field": "params:approved",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.decide",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.get",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_advertise_mdns",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_bind",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_enabled",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_port",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
     }
   ]
 }

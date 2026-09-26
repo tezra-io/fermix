@@ -973,7 +973,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   # Design §0: an enabled install with NO identity at all is the normal dormant
   # state — `fermix pair` is what creates the gateway key and TLS material, and
-  # the channel is only ever enabled by hand-editing config.toml. Only a
+  # enabling the channel creates none of it. Only a
   # partial, insecure, or unreadable identity is a failure, because those are
   # refused rather than regenerated and the operator has to repair them by hand.
   defp mobile_identity_files(mobile_dir) do
@@ -1028,6 +1028,23 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_daemon_result(_config, %{status: :error, error: error}, _opts) do
     fail("mobile companion", "identity files 0600; daemon status failed: #{error}")
+  end
+
+  # A surface refused this boot or a channel enabled after boot runs no
+  # listener, no announcement and no device store, so each probe below would
+  # report a symptom of the one cause named here instead.
+  defp mobile_daemon_result(_config, %{status: :reported, report: %{"refused" => true}}, _opts) do
+    fail(
+      "mobile companion",
+      "identity files 0600; mobile surface refused this boot; see the daemon log"
+    )
+  end
+
+  defp mobile_daemon_result(_config, %{status: :reported, report: %{"started" => false}}, _opts) do
+    fail(
+      "mobile companion",
+      "identity files 0600; mobile channel not started; restart the daemon"
+    )
   end
 
   defp mobile_daemon_result(config, %{status: :reported, report: report}, opts) do

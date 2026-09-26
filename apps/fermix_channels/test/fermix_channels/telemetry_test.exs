@@ -26,7 +26,7 @@ defmodule FermixChannels.TelemetryTest do
   end
 
   test "pair events expose only the bounded terminal status" do
-    for status <- [:approved, :denied, :expired, :rate_limited] do
+    for status <- [:approved, :denied, :expired, :rate_limited, :cancelled, :device_disconnected] do
       assert :ok = Telemetry.emit_pair(:mobile, status, 17)
 
       assert_receive {:mobile_channel_telemetry, @pair_event, %{count: 1, duration_us: 17},

@@ -165,6 +165,18 @@ The flows that start a job, and the reads beside them:
   the replacement client is connected and its signed contract re-checked, so a
   reported binding is a working one rather than a started process.
 
+**The daemon serves the Phone surface for the app.** The phone channel's
+settings are their own section (the enable switch, the port, the listen
+address and the mDNS announcement, each needing a restart), and a small
+`mobile.*` method family carries the rest: the channel's status, a pairing
+session the app starts, polls every second and ends with a decision or a
+cancel, and the paired-phone list with revoke. Pairing is a polled session
+rather than a job, because the pane shows the phone's six-digit code mid-run
+and the owner decides before it ends; the pairing link comes back once, on the
+call that opens the window, and is never logged. On a production Mac, pairing
+happens in the app's Phone pane, never through `fermix pair` or any other CLI
+verb.
+
 ## Integrations are one list, and every word on a row is the daemon's
 
 One read answers the whole integrations surface: every plugin the registry holds

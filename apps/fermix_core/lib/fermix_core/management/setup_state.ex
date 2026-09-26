@@ -196,7 +196,22 @@ defmodule FermixCore.Management.SetupState do
         "status" => channel_status(enabled?, configured?),
         "mode" => channel_mode(channel, enabled?)
       }
-    end)
+    end) ++ [project_mobile_channel()]
+  end
+
+  # The phone channel needs no credential, so it is always configured, and it
+  # has one transport, so its mode is fixed rather than read.
+  defp project_mobile_channel do
+    config = Application.get_env(:fermix_channels, :mobile, [])
+    enabled? = Keyword.get(config, :enabled, false) == true
+
+    %{
+      "name" => "mobile",
+      "enabled" => enabled?,
+      "configured" => true,
+      "status" => channel_status(enabled?, true),
+      "mode" => if(enabled?, do: "listener")
+    }
   end
 
   # A channel that is off has no status and no mode: reporting one would make a

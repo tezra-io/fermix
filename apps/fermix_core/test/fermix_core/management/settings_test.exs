@@ -46,7 +46,7 @@ defmodule FermixCore.Management.SettingsTest do
     :sandbox,
     :secret_writer
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp]
+  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
 
   @row_fields ~w(
     key kind label footer info value present options min max step restart read_only suggestions
@@ -899,6 +899,120 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # The phone channel is a section of its own, not an inventory channel: it has
+  # no credential, and its rows are a switch, a port and an address.
+  describe "the phone section" do
+    test "publishes four boot-bound rows with the shipped defaults" do
+      Application.delete_env(:fermix_channels, :mobile)
+
+      assert %{id: "channels.mobile", pane: "channels", title: "Phone"} in Settings.sections()
+
+      rows = rows("channels.mobile")
+
+      assert Enum.map(rows, &{&1["key"], &1["kind"], &1["value"]}) == [
+               {"mobile_enabled", "toggle", false},
+               {"mobile_port", "number", 4031},
+               {"mobile_bind", "text", "0.0.0.0"},
+               {"mobile_advertise_mdns", "toggle", true}
+             ]
+
+      assert Enum.all?(rows, & &1["restart"])
+      refute Enum.any?(rows, & &1["read_only"])
+
+      assert %{"min" => 1024, "max" => 65_535, "step" => 1, "format" => "integer", "unit" => nil} =
+               row("channels.mobile", "mobile_port")
+    end
+
+    test "each row reads its own key of the block" do
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: true,
+        port: 4040,
+        bind: "127.0.0.1",
+        advertise_mdns: false
+      )
+
+      values = Enum.map(rows("channels.mobile"), &{&1["key"], &1["value"]})
+
+      assert values == [
+               {"mobile_enabled", true},
+               {"mobile_port", 4040},
+               {"mobile_bind", "127.0.0.1"},
+               {"mobile_advertise_mdns", false}
+             ]
+    end
+
+    test "each key is written and reads back" do
+      writes = [
+        {"mobile_enabled", true, :enabled},
+        {"mobile_port", 4040, :port},
+        {"mobile_bind", "127.0.0.1", :bind},
+        {"mobile_advertise_mdns", false, :advertise_mdns}
+      ]
+
+      for {key, value, config_key} <- writes do
+        assert {:ok, result} = Settings.apply("channels.mobile", %{key => value})
+
+        assert result["applied"] == [key]
+        assert Enum.any?(result["restart"]["reasons"], &(&1["section"] == "channels"))
+        assert Application.get_env(:fermix_channels, :mobile)[config_key] == value
+        assert row("channels.mobile", key)["value"] == value
+      end
+    end
+
+    test "a port outside the range, or not a whole number, is refused in the daemon's words" do
+      for port <- [80, 70_000, 4031.5] do
+        assert {:error, {:invalid_params, "mobile_port", sentence}} =
+                 Settings.apply("channels.mobile", %{"mobile_port" => port})
+
+        assert sentence == "Port must be a whole number between 1024 and 65535."
+      end
+    end
+
+    # Strict parsing: "0.0.0" is an address only to the lenient short-form
+    # reader, and it would bind one the operator never wrote.
+    test "an address that is not an IP literal is refused in the daemon's words" do
+      for bind <- ["localhost", "0.0.0", ""] do
+        assert {:error, {:invalid_params, "mobile_bind", sentence}} =
+                 Settings.apply("channels.mobile", %{"mobile_bind" => bind})
+
+        assert sentence == "Listen on must be an IP address, such as `0.0.0.0`."
+      end
+    end
+
+    test "a refused value leaves the block as it was" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+
+      assert {:error, _refusal} =
+               Settings.apply("channels.mobile", %{
+                 "mobile_enabled" => true,
+                 "mobile_port" => 80
+               })
+
+      assert Application.get_env(:fermix_channels, :mobile) == [enabled: false, port: 4031]
+    end
+
+    # The block carries keys no pane writes. A write that replaced it instead of
+    # merging into it would silently drop the push credentials an operator set.
+    test "a write keeps the keys this section does not publish", %{home: home} do
+      push = [enabled: true, team_id: "TEAM123456", key_id: "KEY1234567", topic: "ai.fermix.app"]
+
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: false,
+        mode: :listener,
+        streaming: "block",
+        push: push
+      )
+
+      assert {:ok, _result} = Settings.apply("channels.mobile", %{"mobile_enabled" => true})
+
+      mobile = Application.get_env(:fermix_channels, :mobile)
+      assert mobile[:enabled] == true
+      assert Enum.sort(mobile[:push]) == Enum.sort(push)
+      assert mobile[:streaming] == "block"
+      assert File.read!(Path.join(home, "config.toml")) =~ "[fermix_channels.mobile.push]"
+    end
+  end
+
   # The pitfall this exists for: a section that normalizes strings into atoms
   # must render them back in the spelling the parser accepts, or the very next
   # load raises and the daemon cannot boot on the file it just wrote. Seeded
@@ -920,6 +1034,41 @@ defmodule FermixCore.Management.SettingsTest do
       assert core[:transcription][:backend] == "deepgram"
       assert Map.get(reloaded, :sandbox).mode == :strict
       assert core[:realtime][:voice] == "cedar"
+    end
+
+    # The phone block normalizes its mode to an atom and carries a push table;
+    # both have to come back from the file a phone-section write leaves behind.
+    test "a phone section write survives being written and read back" do
+      Application.put_env(:fermix_channels, :mobile,
+        enabled: false,
+        mode: :listener,
+        port: 4031,
+        bind: "127.0.0.1",
+        advertise_mdns: false,
+        streaming: "draft",
+        max_media_bytes: 20_971_520,
+        media_store_max_bytes: 2_147_483_648,
+        push: [enabled: false, team_id: "TEAM123456", topic: "ai.fermix.app"]
+      )
+
+      assert {:ok, _result} =
+               Settings.apply("channels.mobile", %{
+                 "mobile_port" => 4040,
+                 "mobile_enabled" => true
+               })
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      mobile = reloaded |> Map.get(:fermix_channels, []) |> Keyword.get(:mobile, [])
+
+      assert mobile[:enabled] == true
+      assert mobile[:port] == 4040
+      assert mobile[:mode] == :listener
+      assert mobile[:bind] == "127.0.0.1"
+      assert mobile[:advertise_mdns] == false
+      assert mobile[:streaming] == "draft"
+
+      assert Enum.sort(mobile[:push]) ==
+               Enum.sort(enabled: false, team_id: "TEAM123456", topic: "ai.fermix.app")
     end
 
     test "a second save on top of a loaded file is stable" do

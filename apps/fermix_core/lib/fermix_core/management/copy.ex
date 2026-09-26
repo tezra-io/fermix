@@ -77,7 +77,8 @@ defmodule FermixCore.Management.Copy do
     "Signal",
     "Google Meet",
     "Zoom",
-    "Personality"
+    "Personality",
+    "Tailscale"
   ]
 
   @doc """

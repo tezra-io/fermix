@@ -168,21 +168,40 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result.detail =~ "daemon not running"
   end
 
+  # A daemon that refused the surface this boot still answers its status, so
+  # the refusal is a fact in the report rather than an error reply.
   test "a mobile surface the daemon refused to start names the refusal", %{mobile_dir: mobile_dir} do
     write_identity_files(mobile_dir)
-    Application.put_env(:fermix_channels, :mobile, enabled: true)
+    Application.put_env(:fermix_channels, :mobile, enabled: true, push: [enabled: true])
 
-    refusal =
-      ~s({:mobile_surface_refused, {:devices_decode_failed, "/home/o/.fermix/mobile/devices.toml", :bad}})
-
-    client = fn "mobile_status" -> {:ok, %{"status" => "error", "reason" => refusal}} end
+    client = live_client(idle_report(%{"refused" => true}))
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: client)
 
     assert result.status == :fail
-    assert result.detail =~ "mobile_surface_refused"
-    assert result.detail =~ "devices.toml"
-    refute result.detail =~ "unexpected daemon reply"
+    assert result.detail =~ "mobile surface refused this boot; see the daemon log"
+    refute result.detail =~ "listener down"
+    refute result.detail =~ "mDNS down"
+    refute result.detail =~ "APNs"
+  end
+
+  # The switch reaches the daemon at once, but the channel starts only at boot:
+  # an enabled channel that is not running needs a restart, not a probe.
+  test "an enabled channel the daemon has not started asks for a restart", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true, advertise_mdns: true)
+
+    client = live_client(idle_report(%{"refused" => false}))
+
+    result = Checks.mobile(mobile_dir: mobile_dir, client: client)
+
+    assert result.status == :fail
+    assert result.detail =~ "mobile channel not started; restart the daemon"
+    refute result.detail =~ "listener down"
+    refute result.detail =~ "mDNS down"
+    refute result.detail =~ "no paired devices"
   end
 
   test "listener, mDNS, APNs, and empty-pairing problems are not hidden", %{
@@ -214,8 +233,26 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result.detail =~ "no paired devices"
   end
 
+  # The daemon's report for a channel that runs: the facts each case sets, plus
+  # the lifecycle every running channel publishes.
   defp live_client(report) do
+    report = Map.merge(%{"enabled" => true, "started" => true, "refused" => false}, report)
     fn "mobile_status" -> {:ok, %{"status" => "ok", "result" => report}} end
+  end
+
+  # A channel that is not running reports idle facts beside the reason.
+  defp idle_report(lifecycle) do
+    Map.merge(
+      %{
+        "started" => false,
+        "listener" => %{"status" => "down", "candidates" => []},
+        "mdns" => "down",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => true, "credentials" => "missing"},
+        "paired_devices" => 0
+      },
+      lifecycle
+    )
   end
 
   defp write_identity_files(mobile_dir) do
