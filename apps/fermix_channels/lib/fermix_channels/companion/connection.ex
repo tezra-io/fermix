@@ -20,6 +20,17 @@ defmodule FermixChannels.Companion.Connection do
   event before the handshake, a second hello) is answered with one `error` and
   the connection closes. A request that fails is answered with one `error` and
   the connection stays open.
+
+  ## Who is on the other end (SIDE-V1)
+
+  When the socket is handed over, before any line is read, the connection
+  places the process that connected (`FermixCore.SocketPeer`, the resolver the
+  daemon control socket and the ACP socket use) and hands the answer with every
+  `msg` and `command` it queues, for `Channels.Companion` to stamp on the turn as
+  `metadata.caller`. A client started by the daemon's own shell command is the
+  agent, not the Mac app, so its turns are unattended, as are a detached
+  client's. A connection that cannot be placed is refused with one `error`
+  (`unidentified_client`) and closed.
   """
 
   use GenServer, restart: :temporary
@@ -30,6 +41,7 @@ defmodule FermixChannels.Companion.Connection do
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
   alias FermixCore.Companion.Protocol
+  alias FermixCore.SocketPeer
 
   @profile "main"
   @max_pending_requests 32
@@ -38,9 +50,9 @@ defmodule FermixChannels.Companion.Connection do
   @handover_timeout_ms 5_000
 
   # The closed vocabulary of `error.reason` this socket sends, besides
-  # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's), the
-  # field and event errors that name what they refused, and `request_failed`,
-  # which every other failure becomes.
+  # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's),
+  # `unidentified_client` (the handover's), the field and event errors that name
+  # what they refused, and `request_failed`, which every other failure becomes.
   @named_reasons ~w(
     invalid_json invalid_event missing_type attachments_unsupported missing_protocol_version
     invalid_protocol_version line_too_large handshake_required unexpected_client_hello
@@ -57,7 +69,7 @@ defmodule FermixChannels.Companion.Connection do
   def error_reasons do
     Enum.map(@named_reasons, &Atom.to_string/1) ++
       ~w(missing_field invalid_field unknown_event unsupported_protocol_version
-         max_clients_reached request_failed)
+         max_clients_reached unidentified_client request_failed)
   end
 
   @doc """
@@ -88,7 +100,12 @@ defmodule FermixChannels.Companion.Connection do
       registry: Keyword.get(opts, :registry, Companion.registry()),
       turns: Keyword.get(opts, :turns, Turns),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
-      request_opts: Keyword.get(opts, :request_opts, [])
+      request_opts: Keyword.get(opts, :request_opts, []),
+      # Placed once at handover, before any line is read (moduledoc); the
+      # daemon's process and platform are seams a test stands in for.
+      daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
+      os: Keyword.get(opts, :os, :os.type()),
+      caller: nil
     }
 
     {:ok, state, @handover_timeout_ms}
@@ -96,9 +113,11 @@ defmodule FermixChannels.Companion.Connection do
 
   @impl true
   def handle_info(:socket_handover, state) do
-    case :inet.setopts(state.socket, active: :once) do
-      :ok -> {:noreply, state}
-      {:error, reason} -> {:stop, {:shutdown, {:socket_arm_failed, reason}}, state}
+    case SocketPeer.classify(state.socket, state.daemon_os_pid, state.os) do
+      {:ok, caller} -> arm(%{state | caller: caller})
+      # Nobody is left to read a refusal, as when the socket reads closed.
+      {:error, :peer_closed} -> {:stop, :normal, state}
+      {:error, reason} -> refuse_unplaced(reason, state)
     end
   end
 
@@ -140,6 +159,22 @@ defmodule FermixChannels.Companion.Connection do
   def handle_info(message, state) do
     Logger.debug("companion connection ignored #{inspect(message)}")
     {:noreply, state}
+  end
+
+  defp arm(state) do
+    case :inet.setopts(state.socket, active: :once) do
+      :ok -> {:noreply, state}
+      {:error, reason} -> {:stop, {:shutdown, {:socket_arm_failed, reason}}, state}
+    end
+  end
+
+  defp refuse_unplaced(reason, state) do
+    Logger.warning(
+      "companion connection refusing a client the daemon could not identify: #{inspect(reason)}"
+    )
+
+    _ = send_event("error", error_payload({:unidentified_client, reason}, nil), state)
+    {:stop, :normal, state}
   end
 
   defp rearm(state) do
@@ -272,7 +307,11 @@ defmodule FermixChannels.Companion.Connection do
        when length(pending) >= @max_pending_requests,
        do: answer({:error, :request_backlog_full}, state)
 
+  # The caller rides with the request, outside the client's payload, for
+  # `Channels.Companion` to stamp on the turn (moduledoc).
   defp queue_request(event, state) do
+    event = Map.put(event, :caller, state.caller)
+
     case start_next_request(%{state | pending: state.pending ++ [event]}) do
       {:noreply, state} -> {:cont, state}
       {:stop, _reason, state} -> {:stop, state}
@@ -400,6 +439,13 @@ defmodule FermixChannels.Companion.Connection do
     do: %{"reason" => Atom.to_string(field_error), "field" => field}
 
   defp error_fields({:unknown_event, type}), do: %{"reason" => "unknown_event", "event" => type}
+
+  defp error_fields({:unidentified_client, cause}),
+    do: %{
+      "reason" => "unidentified_client",
+      "message" =>
+        "the daemon could not identify the process on this connection: " <> bounded_inspect(cause)
+    }
 
   defp error_fields(reason) when reason in @named_reasons,
     do: %{"reason" => Atom.to_string(reason)}

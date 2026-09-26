@@ -21,6 +21,8 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
   alias FermixChannels.Gateway.QueueSupervisor
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
+  alias FermixCore.Agents.TurnRunner
+  alias FermixTestSupport.ParentProcess
   alias FermixTestSupport.SafeRm
 
   @cwd "/tmp/fermix-acp-session"
@@ -1079,7 +1081,95 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     end
   end
 
+  describe "who is on the other end (SIDE-V1)" do
+    test "a prompt from a client the daemon did not start stays an attended turn", ctx do
+      msg = prompted_turn(ctx)
+
+      assert msg.metadata.caller == :independent
+      assert TurnRunner.computer_use_origin(msg) == :interactive
+    end
+
+    # An agent's shell command piping frames into `fermix acp`. This VM stands in
+    # for it: the Peer is told the daemon's process is this VM's parent, so the
+    # kernel's peer pid and the real process table must place the client beneath it.
+    test "a prompt from a client the daemon started reaches the agent unattended", ctx do
+      msg = ctx |> restart_acp(daemon_os_pid: ParentProcess.os_pid()) |> prompted_turn()
+
+      assert msg.metadata.caller == :daemon_descendant
+      assert TurnRunner.computer_use_origin(msg) == :unattended
+    end
+
+    test "a connection the daemon cannot place is refused before the handshake", ctx do
+      ctx = restart_acp(ctx, os: {:win32, :nt})
+
+      {_result, log} =
+        with_log(fn ->
+          client = connect(ctx)
+
+          assert %{"fermix_bridge_ack" => %{"status" => "error", "message" => message}} =
+                   recv_frame(client)
+
+          assert message =~ "could not identify the process on this connection"
+          assert closed?(client)
+        end)
+
+      assert log =~ "ACP peer refusing a connection"
+    end
+
+    # A client gone before it could be placed is nobody to refuse: the Peer ends
+    # quietly, as it does when it finds the socket closed on arming.
+    test "a client that hung up before it was placed is not refused" do
+      path = Path.join(System.tmp_dir!(), "fermix-acp-#{System.unique_integer([:positive])}.sock")
+      on_exit(fn -> SafeRm.rm(path) end)
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ifaddr: {:local, path}])
+      {:ok, client} = :gen_tcp.connect({:local, to_charlist(path)}, 0, [:binary, active: false])
+      {:ok, accepted} = :gen_tcp.accept(listener, 1_000)
+      :ok = :gen_tcp.close(client)
+
+      {_result, log} =
+        with_log(fn ->
+          {:ok, peer} = GenServer.start(Acp.Peer, socket: accepted)
+          ref = Process.monitor(peer)
+          :ok = :gen_tcp.controlling_process(accepted, peer)
+          send(peer, :socket_handover)
+
+          assert_receive {:DOWN, ^ref, :process, ^peer, :normal}, 5_000
+        end)
+
+      :gen_tcp.close(listener)
+      refute log =~ "refusing"
+    end
+  end
+
   # --- client helpers ---
+
+  # The ACP listener again, with `peer_opts` added to the ones setup gave it.
+  defp restart_acp(ctx, peer_opts) do
+    stop_supervised!(:acp_supervisor)
+
+    start_supervised!(
+      {Acp.Supervisor,
+       socket_path: ctx.socket_path,
+       peer_opts: [agent: Queue, agent_server: ctx.queue, hello_timeout_ms: 200] ++ peer_opts},
+      id: :acp_supervisor
+    )
+
+    ctx
+  end
+
+  # One whole prompt turn on a fresh connection; hands back the message the
+  # agent was given.
+  defp prompted_turn(ctx) do
+    client = initialized(ctx)
+    session_id = new_session(client, 2)
+    prompt(client, 3, session_id, [%{"type" => "text", "text" => "take a screenshot"}])
+
+    assert_receive {:turn_started, msg, runner}, 5_000
+    finish(runner, "done")
+    assert {_frames, %{"result" => _result}} = recv_response(client, 3)
+
+    msg
+  end
 
   defp connect(ctx) do
     {:ok, socket} =

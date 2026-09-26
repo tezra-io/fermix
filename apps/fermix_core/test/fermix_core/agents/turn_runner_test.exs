@@ -445,6 +445,27 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
 
+    test "a prompt sent by a process the daemon started is unattended on any channel" do
+      # An agent's shell command running `fermix ask` or `fermix acp` must not
+      # turn a scheduled or background run into an attended one (SIDE-V1).
+      for {channel, source} <- [{"cli", :cli}, {"acp", :acp}] do
+        from_agent = %{channel: channel, metadata: %{source: source, caller: :daemon_descendant}}
+        from_person = %{channel: channel, metadata: %{source: source, caller: :independent}}
+
+        assert TurnRunner.computer_use_origin(from_agent) == :unattended
+        refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(from_agent))
+        assert TurnRunner.computer_use_origin(from_person) == :interactive
+      end
+    end
+
+    test "a prompt sent by a detached process is unattended" do
+      # Neither the daemon's descendant nor at a terminal: nobody is watching it.
+      detached = %{channel: "cli", metadata: %{source: :cli, caller: :detached}}
+
+      assert TurnRunner.computer_use_origin(detached) == :unattended
+      refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(detached))
+    end
+
     test "a Live voice delegation is :voice and passes the host gate" do
       msg = voice_msg("open my calendar")
 

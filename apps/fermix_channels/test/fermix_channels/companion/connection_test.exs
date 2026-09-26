@@ -4,12 +4,16 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # a throwaway repo. Only the Gateway and the Queue are stand-ins.
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
+  alias FermixTestSupport.ParentProcess
 
   defmodule GatewayStub do
     def ingest([message], opts) do
@@ -95,16 +99,18 @@ defmodule FermixChannels.Companion.ConnectionTest do
       settlement_owner: queue_owner
     ]
 
-    start_supervised!(
-      {Endpoint,
-       name: :"companion_conn_endpoint_#{unique}",
-       socket_path: socket_path,
-       max_clients: 2,
-       connection_supervisor: connections,
-       connection_opts: [registry: registry, turns: turns, request_opts: request_opts]}
-    )
+    endpoint_opts = [
+      name: :"companion_conn_endpoint_#{unique}",
+      socket_path: socket_path,
+      max_clients: 2,
+      connection_supervisor: connections,
+      connection_opts: [registry: registry, turns: turns, request_opts: request_opts]
+    ]
+
+    start_supervised!({Endpoint, endpoint_opts})
 
     %{
+      endpoint_opts: endpoint_opts,
       socket_path: socket_path,
       registry: registry,
       store_opts: store_opts,
@@ -496,6 +502,72 @@ defmodule FermixChannels.Companion.ConnectionTest do
              Timeline.get_client_request("main", "mac-9", ctx.store_opts)
   end
 
+  describe "who is on the other end (SIDE-V1)" do
+    test "a message from a client the daemon did not start stays an attended turn", ctx do
+      message = ingested_message(ctx.socket_path, "mac-peer-1")
+
+      assert message.metadata.caller == :independent
+      assert TurnRunner.computer_use_origin(message) == :interactive
+    end
+
+    # An agent's shell command speaking the chat socket. This VM stands in for
+    # it: the connection is told the daemon's process is this VM's parent, so the
+    # kernel's peer pid and the real process table must place the client beneath it.
+    test "a message from a client the daemon started reaches the agent unattended", ctx do
+      restart_endpoint(ctx, daemon_os_pid: ParentProcess.os_pid())
+      message = ingested_message(ctx.socket_path, "mac-peer-2")
+
+      assert message.metadata.caller == :daemon_descendant
+      assert TurnRunner.computer_use_origin(message) == :unattended
+    end
+
+    test "a connection the daemon cannot place is refused before the handshake", ctx do
+      restart_endpoint(ctx, os: {:win32, :nt})
+
+      {_result, log} =
+        with_log(fn ->
+          client = connect(ctx.socket_path)
+
+          assert %{"type" => "error", "reason" => "unidentified_client", "message" => message} =
+                   recv(client)
+
+          assert message =~ "could not identify the process on this connection"
+          assert closed?(client)
+        end)
+
+      assert log =~ "companion connection refusing a client"
+    end
+
+    # A client gone before it could be placed is nobody to refuse: the connection
+    # ends quietly, as it does when it reads the socket closed.
+    test "a client that hung up before it was placed is not refused" do
+      path =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-companion-#{System.unique_integer([:positive])}.sock"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(path) end)
+      {:ok, listener} = :gen_tcp.listen(0, [:binary, active: false, ifaddr: {:local, path}])
+      {:ok, client} = :gen_tcp.connect({:local, to_charlist(path)}, 0, [:binary, active: false])
+      {:ok, accepted} = :gen_tcp.accept(listener, 1_000)
+      :ok = :gen_tcp.close(client)
+
+      {_result, log} =
+        with_log(fn ->
+          {:ok, connection} = GenServer.start(Connection, socket: accepted)
+          ref = Process.monitor(connection)
+          :ok = :gen_tcp.controlling_process(accepted, connection)
+          send(connection, :socket_handover)
+
+          assert_receive {:DOWN, ^ref, :process, ^connection, :normal}, 5_000
+        end)
+
+      :gen_tcp.close(listener)
+      refute log =~ "refusing"
+    end
+  end
+
   test "the exported protocol documents every error reason the socket sends" do
     protocol = File.read!(Application.app_dir(:fermix_core, "priv/companion/PROTOCOL.md"))
 
@@ -517,6 +589,25 @@ defmodule FermixChannels.Companion.ConnectionTest do
     send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
     assert %{"type" => "server_hello"} = recv(client)
     client
+  end
+
+  # The endpoint again, with `connection_opts` added to the ones setup gave it.
+  defp restart_endpoint(ctx, connection_opts) do
+    stop_supervised!(Endpoint)
+
+    ctx.endpoint_opts
+    |> Keyword.update!(:connection_opts, &(&1 ++ connection_opts))
+    |> then(&start_supervised!({Endpoint, &1}))
+  end
+
+  # One `msg` on a fresh, handshaken connection; hands back the message the
+  # Gateway was given.
+  defp ingested_message(path, client_msg_id) do
+    client = hello(path)
+    send_line(client, message(client_msg_id, "take a screenshot"))
+    assert %{"type" => "accepted", "client_msg_id" => ^client_msg_id} = recv(client)
+    assert_receive {:gateway_ingest, message, _opts}, 2_000
+    message
   end
 
   defp message(client_msg_id, text) do

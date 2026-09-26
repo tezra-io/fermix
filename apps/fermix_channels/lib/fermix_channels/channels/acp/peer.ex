@@ -42,6 +42,16 @@ defmodule FermixChannels.Channels.Acp.Peer do
   id and the identity-less rebuild only — the signing key itself lives in the
   store, and is read for the turn that needs it.
 
+  ## Who is on the other end (SIDE-V1)
+
+  When the socket is handed over, before any line is read, the Peer places the
+  process that connected (`FermixCore.SocketPeer`, the same resolver the daemon
+  control socket uses) and stamps the answer on every turn it starts as
+  `metadata.caller`. A `fermix acp` that the daemon's own shell command started is
+  the agent, not a person's editor, so its turns are unattended, as are a
+  detached one's. A connection that cannot be placed is refused, in the bridge's
+  own language.
+
   ## The wire fence
 
   Every turn carries a monotonically increasing sequence (`Session`), stamped on
@@ -81,6 +91,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Nostr.Key
+  alias FermixCore.SocketPeer
   alias FermixCore.Telemetry
   alias FermixCore.Timeouts
 
@@ -140,12 +151,23 @@ defmodule FermixChannels.Channels.Acp.Peer do
        # `{:bound, id, identity_less}` or a `%Identity{id: nil}` — see the
        # moduledoc. Set once at hello; only ever narrowed, never widened.
        identity: nil,
+       # Placed once at handover, before any line is read (moduledoc); the
+       # daemon's process and platform are seams a test stands in for.
+       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
+       os: Keyword.get(opts, :os, :os.type()),
+       caller: nil,
        sessions: %{}
      }}
   end
 
   @impl true
-  def handle_info(:socket_handover, state), do: rearm(state)
+  def handle_info(:socket_handover, state) do
+    case SocketPeer.classify(state.socket, state.daemon_os_pid, state.os) do
+      {:ok, caller} -> rearm(%{state | caller: caller})
+      {:error, :peer_closed} -> hung_up(state)
+      {:error, reason} -> refuse_unplaced(state, reason)
+    end
+  end
 
   def handle_info({:tcp, socket, bytes}, %{socket: socket} = state) do
     case drain(%{state | buffer: state.buffer <> bytes}) do
@@ -189,6 +211,21 @@ defmodule FermixChannels.Channels.Acp.Peer do
   end
 
   # --- Socket plumbing ---
+
+  # Nobody is left to read a refusal, as when `rearm/1` finds the socket gone.
+  defp hung_up(state) do
+    Logger.debug("ACP peer: the client hung up before it could be placed")
+    {:stop, :normal, state}
+  end
+
+  defp refuse_unplaced(state, reason) do
+    message = "the daemon could not identify the process on this connection: #{inspect(reason)}"
+    Logger.warning("ACP peer refusing a connection: " <> message)
+
+    state
+    |> write(refusal_line(message))
+    |> then(&{:stop, :normal, &1})
+  end
 
   defp rearm(state) do
     case :inet.setopts(state.socket, [{:active, :once}]) do
@@ -529,7 +566,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
   defp start_prompt(session, request_id, content, state) do
     {session, seq} = Session.start_turn(session, request_id)
     {session_env, state} = resolve_session_env(state)
-    message = build_message(session, seq, content, session_env)
+    message = build_message(session, seq, content, session_env, state.caller)
     state = put_session(state, session)
 
     {result, duration_us} = Telemetry.timed_us(fn -> hand_off(message, state) end)
@@ -569,9 +606,9 @@ defmodule FermixChannels.Channels.Acp.Peer do
     Gateway.ingest([message], channel: Acp, agent: state.agent, agent_server: queue)
   end
 
-  defp build_message(session, seq, content, session_env) do
+  defp build_message(session, seq, content, session_env, caller) do
     metadata =
-      %{source: :acp, user_id: "acp", chat_type: "private"}
+      %{source: :acp, user_id: "acp", chat_type: "private", caller: caller}
       |> Map.put(Acp.turn_opt(), seq)
 
     Message.new!(%{

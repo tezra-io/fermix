@@ -25,6 +25,11 @@ the ones it shares (`msg`, `command`, `read_state`, `accepted`, `turn_started`,
   socket the daemon cannot bind is logged and skipped, and the daemon runs on.
 - **Trust:** the socket's owner is the daemon's user, so a client is the owner.
   A turn from this socket runs as the operator, and slash commands are served.
+  Before it reads a line, the daemon asks the kernel which process connected:
+  a turn from a client the daemon itself started (an agent's shell command) or
+  from a detached one with no terminal runs unattended, without host desktop
+  control or reminder and event changes. A connection whose process the daemon
+  cannot identify is answered with `error: unidentified_client` and closed.
 - **Framing:** newline-delimited JSON. Each frame is one JSON object followed by
   a single `\n`, with a `type` discriminator. There is no length prefix; a
   client line longer than **65,536 bytes** is refused with
@@ -253,6 +258,7 @@ outcome to every connection.
 | `missing_protocol_version`, `invalid_protocol_version` | — | closed |
 | `unsupported_protocol_version` | `direction`, `client_version`, `min_version`, `max_version` | closed |
 | `max_clients_reached` | — | closed |
+| `unidentified_client` | `message` | closed |
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |

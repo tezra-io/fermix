@@ -123,6 +123,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   own network error instead of a policy refusal, and a failed open leaves no
   empty tab behind. If you use the unpacked browser extension, reload it once
   after updating: the daemon now refuses the older bridge protocol.
+- **A prompt sent by one of Fermix's own processes runs unattended.** A prompt
+  sent through `fermix ask`, `fermix acp` or the Mac app's chat socket by a
+  process Fermix itself started, such as an agent's shell command, or by a
+  detached process with no terminal, now runs as an unattended turn: no desktop
+  control, no reminder or event changes and no recent activity. Prompts you type
+  in a terminal or an app, phones, messaging and voice are unaffected.
 
 ## [0.11.0] - 2026-09-23
 

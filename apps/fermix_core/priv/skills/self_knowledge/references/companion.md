@@ -22,7 +22,11 @@ line in the daemon log, and the rest of the daemon keeps running.
 
 Only the daemon's own user can open a `0600` socket, so a client is the owner:
 its turns run as the operator under the normal sandbox, and slash commands are
-served (`/new`, `/stop`, `/compact` and the rest). A tool that needs the owner's
+served (`/new`, `/stop`, `/compact` and the rest). The daemon also asks the
+kernel which process connected: a turn from a client Fermix itself started
+(such as an agent's shell command) or from a detached one with no terminal runs
+unattended, so it gets no desktop control, reminder or event changes, or recent
+activity, and a connection whose process cannot be identified is refused. A tool that needs the owner's
 approval shows up as an approve/deny card answered with the same `/confirm` and
 `/deny` routes as on the other chats. At most four clients connect at once; a
 fifth is refused and told why.

@@ -39,7 +39,16 @@ defmodule FermixChannels.Channels.Companion do
   @profile "main"
   @registry FermixChannels.Companion.Registry
 
-  @type event :: %{required(:type) => String.t(), required(:payload) => map()}
+  @typedoc """
+  A decoded `msg` or `command`. `:caller` is who connected, as
+  `Companion.Connection` placed the socket's peer: absent on the phone's
+  requests and on a request recovered at boot.
+  """
+  @type event :: %{
+          required(:type) => String.t(),
+          required(:payload) => map(),
+          optional(:caller) => FermixCore.SocketPeer.caller()
+        }
 
   @doc "The channel string this adapter answers to."
   @spec channel() :: String.t()
@@ -61,20 +70,20 @@ defmodule FermixChannels.Channels.Companion do
     result
   end
 
-  defp do_parse_event(%{type: "msg", payload: payload}) when is_map(payload) do
+  defp do_parse_event(%{type: "msg", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, text} <- binary(payload, "text"),
          :ok <- no_attachments(payload) do
-      {:ok, [message(client_id, profile, text, "msg")]}
+      {:ok, [message(client_id, profile, text, "msg", event)]}
     end
   end
 
-  defp do_parse_event(%{type: "command", payload: payload}) when is_map(payload) do
+  defp do_parse_event(%{type: "command", payload: payload} = event) when is_map(payload) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id"),
          {:ok, command} <- command_text(payload) do
-      {:ok, [message(client_id, profile, command, "command")]}
+      {:ok, [message(client_id, profile, command, "command", event)]}
     end
   end
 
@@ -257,7 +266,13 @@ defmodule FermixChannels.Channels.Companion do
     end)
   end
 
-  defp message(client_id, profile, text, request_type) do
+  defp message(client_id, profile, text, request_type, event) do
+    metadata = %{
+      client_msg_id: client_id,
+      companion_request_type: request_type,
+      turn_id: "turn-" <> client_id
+    }
+
     Message.new!(%{
       id: client_id,
       content: text,
@@ -265,14 +280,23 @@ defmodule FermixChannels.Channels.Companion do
       channel: @channel,
       chat_id: profile,
       reply_target: profile,
-      metadata: %{
-        client_msg_id: client_id,
-        companion_request_type: request_type,
-        turn_id: "turn-" <> client_id
-      },
+      metadata: put_caller(metadata, event),
       attachments: []
     })
   end
+
+  # Who connected, as the connection read it off the socket's peer
+  # (`FermixCore.SocketPeer`), never from the client's payload: a process the
+  # daemon started is the agent, and nobody watches a detached one, so
+  # `TurnRunner.computer_use_origin/1` labels either turn unattended (SIDE-V1).
+  defp put_caller(metadata, %{caller: caller})
+       when caller in [:daemon_descendant, :detached, :independent],
+       do: Map.put(metadata, :caller, caller)
+
+  defp put_caller(_metadata, %{caller: other}),
+    do: raise(ArgumentError, "unknown companion caller #{inspect(other)}")
+
+  defp put_caller(metadata, _event), do: metadata
 
   @doc "The send options a reply to `message` carries: its turn, request and attempt."
   @spec reply_opts(Message.t()) :: keyword()

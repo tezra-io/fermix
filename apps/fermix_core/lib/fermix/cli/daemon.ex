@@ -48,6 +48,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
   alias FermixCore.Trace
 
   require Logger
@@ -149,6 +150,11 @@ defmodule Fermix.CLI.Daemon do
            runtime_status: Keyword.get(opts, :runtime_status, McpRuntimeStatus),
            mobile_provider: Keyword.get(opts, :mobile_provider),
            management_opts: Keyword.get(opts, :management_opts, []),
+           # The process an `agent_message` sender is placed beneath, or not, and
+           # the platform it is placed on (`FermixCore.SocketPeer`); a test stands
+           # a different one in.
+           daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
+           os: Keyword.get(opts, :os, :os.type()),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
            started_at_ms: System.monotonic_time(:millisecond)
          }}
@@ -296,7 +302,7 @@ defmodule Fermix.CLI.Daemon do
   # 0600 socket file under FERMIX_HOME. v0 `agent_message` remains a deliberate
   # operator action from `fermix ask` and can trigger LLM or tool work.
   defp handle_v0_initial_request(conn, request, state) do
-    response = dispatch_request(request, state)
+    response = dispatch_initial_request(request, conn, state)
 
     case opened_pair_session(request, response) do
       {:ok, session_id} -> handle_pair_lease(conn, response, session_id, state)
@@ -373,6 +379,18 @@ defmodule Fermix.CLI.Daemon do
 
     Keyword.put(state.management_opts, :overview_opts, overview_opts)
   end
+
+  # `agent_message` is the one method whose answer depends on the connection: a
+  # prompt is attended only when a person sent it, and the kernel, not the
+  # request, says which process did (SIDE-V1).
+  defp dispatch_initial_request(%{"method" => "agent_message"} = request, conn, state) do
+    case SocketPeer.classify(conn, state.daemon_os_pid, state.os) do
+      {:ok, caller} -> agent_message_reply(request, caller)
+      {:error, reason} -> unidentified_caller_reply(request, reason)
+    end
+  end
+
+  defp dispatch_initial_request(request, _conn, state), do: dispatch_request(request, state)
 
   defp dispatch_request(%{"method" => method} = request, state),
     do: handle_method(method, request, state)
@@ -561,7 +579,6 @@ defmodule Fermix.CLI.Daemon do
 
   defp handle_method("auth_forget", request, state), do: auth_forget_reply(request, state)
 
-  defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
   defp handle_method("observability", _request, _state), do: observability_reply()
   defp handle_method("mobile_pair_begin", _request, state), do: mobile_begin_reply(state)
   defp handle_method("mobile_pair_wait", request, state), do: mobile_wait_reply(request, state)
@@ -862,7 +879,7 @@ defmodule Fermix.CLI.Daemon do
     end)
   end
 
-  defp agent_message_reply(request) do
+  defp agent_message_reply(request, caller) do
     params = Map.get(request, "params", %{})
     content = params |> Map.get("content", "") |> to_string() |> String.trim()
     session_id = normalize_session_id(Map.get(params, "session_id"))
@@ -882,13 +899,26 @@ defmodule Fermix.CLI.Daemon do
             session_id: session_id,
             timeout_ms: timeout_ms,
             media_parts: media_parts,
-            cwd: Map.get(params, "cwd")
+            cwd: Map.get(params, "cwd"),
+            caller: caller
           )
         end
 
       {:error, reason} ->
         %{status: "error", error: reason_to_string(reason), session_id: session_id}
     end
+  end
+
+  defp unidentified_caller_reply(request, reason) do
+    session_id =
+      request |> Map.get("params", %{}) |> Map.get("session_id") |> normalize_session_id()
+
+    %{
+      status: "error",
+      error:
+        "the daemon could not identify the process that sent this prompt: #{inspect(reason)}",
+      session_id: session_id
+    }
   end
 
   # Decode `fermix ask --attach` image payloads (mime + base64) into the neutral

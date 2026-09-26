@@ -13,9 +13,10 @@ defmodule FermixCore.Temporal.Access do
     * `source_trust == :operator` — the owner, not a guest;
     * `subagent_depth` absent or `0` — a top-level turn, not a delegated worker;
     * `computer_use_origin in [:interactive, :voice]` — an attended surface with
-      a live owner. `TurnRunner` assigns `:interactive` as the catch-all for
-      every non-`"background"` channel, realtime marks a live call `:voice`,
-      background marks `:unattended`, and a scheduled run omits the marker;
+      a live owner. `TurnRunner.computer_use_origin/1` is the one resolver: its
+      catch-all is `:interactive`, a live call is `:voice`, the turns nobody
+      watches that its doc names (a background run among them) are
+      `:unattended`, and a scheduled run omits the marker;
     * `harness_continuation_depth` absent or `0` — the owner typed this turn,
       rather than a synthesized coding-run notice re-entering their channel.
 

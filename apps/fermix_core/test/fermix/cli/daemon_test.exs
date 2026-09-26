@@ -9,6 +9,7 @@ defmodule Fermix.CLI.DaemonTest do
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
+  alias FermixTestSupport.ParentProcess
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -777,6 +778,49 @@ defmodule Fermix.CLI.DaemonTest do
     assert Keyword.get(opts, :timeout_ms) == 1_000
   end
 
+  test "agent_message from a process the daemon did not start reaches the bridge as independent",
+       %{socket_path: socket_path} do
+    assert {:ok, %{"status" => "ok"}} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :caller) == :independent
+  end
+
+  # SIDE-V1: an agent's shell command running `fermix ask` is the agent, not a
+  # person at a terminal. This VM stands in for that command: the daemon below is
+  # told its own process is this VM's parent, so the kernel's peer pid and the real
+  # process table must place the client beneath it.
+  test "agent_message from a process the daemon started reaches the bridge as its descendant" do
+    socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+    assert {:ok, %{"status" => "ok"}} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :caller) == :daemon_descendant
+  end
+
+  test "agent_message from a process the daemon cannot place is refused before the bridge" do
+    socket_path = start_peer_daemon(os: {:win32, :nt})
+
+    assert {:ok, reply} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] =~ "could not identify the process that sent this prompt"
+    refute_received {:bridge_call, _, _}
+  end
+
   test "agent_message decodes the request cwd param and forwards it to the bridge", %{
     socket_path: socket_path
   } do
@@ -1377,6 +1421,30 @@ defmodule Fermix.CLI.DaemonTest do
 
     File.mkdir_p!(path)
     path
+  end
+
+  # A daemon of its own on a fresh socket, for a test that changes how it places
+  # an `agent_message` sender (`FermixCore.SocketPeer`).
+  defp start_peer_daemon(peer_opts) do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "peer.sock")
+
+    {:ok, daemon} =
+      [
+        name: unique_name(:peer_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts()
+      ]
+      |> Keyword.merge(peer_opts)
+      |> Daemon.start_link()
+
+    on_exit(fn ->
+      await_process_exit(daemon)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    socket_path
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
