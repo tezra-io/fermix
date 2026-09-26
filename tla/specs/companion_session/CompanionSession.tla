@@ -1,72 +1,83 @@
 ------------------------- MODULE CompanionSession -------------------------
 (***************************************************************************)
-(* DESIGN SPEC of the companion chat wire for ONE shared conversation,     *)
-(* written before the code. The Mac app and the iPhone app each hold one   *)
-(* connection to a 0600 Unix socket (newline JSON, protocol 1, a           *)
-(* mandatory client_hello/server_hello), connect and drop at any time,     *)
-(* and share one conversation and its durable timeline.                    *)
+(* The companion chat socket for ONE shared conversation: two clients on   *)
+(* companion.sock, each with its own Companion.Connection, connecting and  *)
+(* dropping at any time; the request path they share (Companion.Requests:  *)
+(* the claim, accepted, the attempt fence, the user's row, ingest);        *)
+(* Companion.Turns, which ends every turn on the wire from the Queue's     *)
+(* outcome; the Gateway Queue; the timeline                                *)
+(* (FermixCore.Companion.Timeline, written through Memory.Repo); a job     *)
+(* reporting back through                                                  *)
+(* Channels.Companion.send_message; and one approval, answered by a        *)
+(* /confirm or /deny command.                                              *)
 (*                                                                         *)
-(* The companion modules do not exist yet. Their SOURCE pins follow the    *)
-(* first engine commit that lands them; until then this spec describes     *)
-(* the intended design, and every step below names the module that is to   *)
-(* own it:                                                                 *)
-(*  - FermixCore.Companion.Protocol: the wire events and the handshake;    *)
-(*  - FermixChannels.Companion.Endpoint: ONE process per daemon that       *)
-(*    dedupes msg on client_msg_id, writes every row the conversation      *)
-(*    produces, fans rows out to subscribed connections, hands turns to    *)
-(*    the Queue and holds the pending approval;                            *)
-(*  - its socket handler: one process per connection; the handshake, the   *)
-(*    subscription, and history_pull answered straight from the Timeline;  *)
-(*  - FermixCore.Companion.Timeline: the durable rows, one server_seq      *)
-(*    each, written through Memory.Repo (one process, so one call is       *)
-(*    atomic);                                                             *)
-(*  - FermixChannels.Gateway.Queue: the only one that exists. The pin      *)
-(*    below names the functions whose rules this spec composes with.       *)
+(* The clients follow the rules FermixCore.Companion.Protocol exports in   *)
+(* priv/companion/PROTOCOL.md ("Keeping a client's timeline", "Delivery    *)
+(* and the outbox"): an outbox resent on every connection, and a seq       *)
+(* cursor.                                                                 *)
 (*                                                                         *)
-(* The Queue is ONE abstract process here, not the turn_queue module:      *)
-(* the runner takes one .tla per spec, and turn_queue already proves the   *)
-(* rules taken as given: one turn at a time per conversation               *)
+(* The Queue is ONE abstract process here, not the turn_queue module: the  *)
+(* runner takes one .tla per spec, and turn_queue proves the rules taken   *)
+(* as given against queue.ex: one turn at a time per conversation          *)
 (* (maybe_start_next_request; SingleFlight rests on StartsWhenIdle), one   *)
 (* outcome per turn through the claim (claim_active_turn;                  *)
-(* AtMostOneOutcome), and a stop that spares a claimed turn and cancels    *)
-(* every waiting message (stop_active_turn, cancel_pending; its checks 15  *)
-(* and 16). As in queue.ex, a turn starts in the callback that enqueues    *)
-(* it or that clears the previous turn, and then takes three steps of its  *)
-(* own: an optional approval, the claim (after the commit), and the        *)
-(* invocation of {:completed}.                                             *)
+(* AtMostOneOutcome), and a named stop (stop_turn) that ends the named     *)
+(* message's turn only and spares it once it has claimed its outcome       *)
+(* (OnlyNamedTurnCancelled rests on StopTurnNamesTurn, its checks 18 and   *)
+(* 19). As in queue.ex, a turn starts in the callback that enqueues it or  *)
+(* that clears the previous turn, then claims its outcome (after the       *)
+(* commit) and invokes it.                                                 *)
 (*                                                                         *)
-(* Only the daemon-to-app side of a socket is a queue. The handler reads   *)
-(* each app event as it arrives, so an app event, the handler's handling   *)
-(* of it and the Endpoint call it makes are one step. Nothing distinct is  *)
-(* lost: an app event lost in a drop looks to the app exactly like one     *)
-(* whose answer was lost (the app acts only on answers), and the           *)
-(* Endpoint's effects of an event that did arrive are the harder case; an  *)
-(* event delivered late is one sent late, and users may cancel, answer or  *)
-(* resend at any moment here. Server events travel on a FIFO per           *)
-(* connection, and a drop loses what is on it.                             *)
+(* Only the daemon-to-client side of a socket is a queue: a Connection's   *)
+(* mailbox, then the socket, in order (every event it writes except        *)
+(* server_hello reaches it as {:companion_event, _}, connection.ex:124).   *)
+(* A client event, the Connection's handling of it, and the request        *)
+(* worker, Repo and Queue calls it makes are one step. Nothing distinct    *)
+(* is lost: a client event lost in a drop looks to the client exactly      *)
+(* like one whose answer was lost (it acts only on answers), and one       *)
+(* delivered late is one sent late (users here cancel, answer or resend    *)
+(* at any moment). The one gap inside such a step that matters is          *)
+(* modelled: a history page is read (one Repo call) and sent to the        *)
+(* Connection's own mailbox in two steps (LiveRowsOvertakePage).           *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
-(*  - text_delta, tool_event, turn_started and read_state: live-only,      *)
-(*    never in the timeline, and no rule reads them;                       *)
-(*  - history_search and scroll-back (history_pull{before_seq}): reads     *)
-(*    below the cursor that never move it;                                 *)
-(*  - turn_error's code and sentence, and turns that fail ({:failed}       *)
-(*    ends a turn through the same outcome path as {:cancelled});          *)
-(*  - the LLM and tools, the ConversationStore, auth and the socket's      *)
-(*    0600 mode (single-call rules; ExUnit covers them);                   *)
-(*  - a daemon restart, a Queue crash, and a turn task crash: turn_queue   *)
-(*    covers what they do to outcomes (QUEUE-8, QUEUE-9);                  *)
-(*  - other conversations (the Queue keys all state by conversation).      *)
+(* - text_delta, tool_event, turn_started, read_state: live-only, never    *)
+(* in the timeline; no rule reads them;                                    *)
+(* - history_search and scroll-back (history_pull{before_seq}): reads      *)
+(* below the cursor that never move it;                                    *)
+(* - the phone: mobile and companion share the timeline but run under      *)
+(* different channel identities, so live events never cross from one       *)
+(* socket to the other; this spec is two clients on companion.sock;        *)
+(* - a failed turn ({:failed} ends it through the same path as             *)
+(* {:cancelled}), a daemon restart and boot recovery, a Queue crash        *)
+(* (Turns ends its turns as interrupted, turns.ex:115-123), a crash of     *)
+(* Turns or of a request worker, and the grant resume a confirmed          *)
+(* approval re-ingests as a new turn (sandbox.ex resume_request);          *)
+(* - the LLM and tools, the ConversationStore, attachments, auth and the   *)
+(* socket's 0600 mode (single-call rules; ExUnit covers them);             *)
+(* - other conversations (the Queue keys all state by conversation).       *)
 (*                                                                         *)
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
-(* thing an app or the environment does.                                   *)
+(* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_conversation,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 8a618a01a62c
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 741b20607fe3
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,claim_and_run,acquire_and_run,run_started,ingest_span,append_user,ingest_gateway,handoff_settlement,history,accepted_event,history_event,emit @ d775f5d7484c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ b4c4926a309c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,approval,approval_resolved,persist_text,persist_output @ b2b3eee7c5f7
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,cancel,write_event,transport,request_opts,sink @ a7c7ddd008b8
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_text,message @ b3ab2c19657e
+\* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,start_client_request,append_client_output @ 80efab0d3c3a
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim @ fdf45f89fd4c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ d7cf3a18de4c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ 8ab15a5580bd
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
-    Clients,        \* the apps on the conversation, e.g. {mac, phone}
-    Senders,        \* the apps whose users type, a subset of Clients
+    Clients,        \* the clients on the conversation, e.g. {c1, c2}
+    Senders,        \* the clients whose users type, a subset of Clients
     MsgsPerSender,  \* messages each of them types
     None,
     PageLimit,      \* history_pull's limit
@@ -74,102 +85,116 @@ CONSTANTS
     MaxDrops,       \* bound: connection drops the environment may cause in all
     MaxCancels,     \* bound: cancels the users may send in all
     \* Environment switches: what may happen to the conversation.
-    ClientsCanDisconnect,   \* a connection drops (sleep, network, app killed); what is
-                            \* on its way to the app is lost
-    MessagesCanBeResent,    \* an app resends a message it has no accepted for yet, at
+    ClientsCanDisconnect,   \* a connection drops (sleep, network, the app killed); what is
+                            \* in the Connection's mailbox or on the socket is lost
+    MessagesCanBeResent,    \* a client resends a message it has no accepted for yet, at
                             \* any moment on a live connection (its ack timeout, or the
                             \* user's retry), at most once per message
-    TurnsCanBeCancelled,    \* a user sends cancel{turn_id}, for any turn of the shared
-                            \* conversation, whatever state it is in
+    TurnsCanBeCancelled,    \* a user sends cancel{client_msg_id}, for any message of the
+                            \* shared conversation, whatever state its turn is in
     DeliveriesWhileOffline, \* a scheduled job reports back into the conversation at any
-                            \* moment, including while no app is connected (one delivery)
-    \* Mechanism switches: what the design does about it. TRUE is the design;
+                            \* moment, including while no client is connected (one delivery)
+    \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off only by the checks that show a rule needs it.
-    OutboxResend,        \* the app keeps every typed message in its outbox until
-                         \* accepted, and sends the outbox again on every new connection
-    AcceptedDedupe,      \* the Endpoint keeps a durable record of accepted
-                         \* client_msg_ids and answers a known one accepted{duplicate:
-                         \* true}, with no second row and no second turn
-    SeqCursor,           \* the app keeps the last server_seq it shows, pulls
-                         \* history_pull{after_seq: cursor} after server_hello, on a gap
-                         \* and while a page says more, and drops any row at or below it
-    SubscribeBeforePull, \* the handler subscribes its connection to the fan-out at
-                         \* client_hello, before server_hello, so before any pull
-    SingleAnswer,        \* the Endpoint applies the first answer to a pending approval
-                         \* and drops every later one
+    OutboxResend,        \* the client keeps every typed message until accepted and sends
+                         \* it again on every new connection (PROTOCOL.md "Delivery and
+                         \* the outbox")
+    AcceptedDedupe,      \* a known client_msg_id is claimed as a duplicate
+                         \* (claim_request_in_tx, classify_claim) and the request
+                         \* coordinator starts no second attempt of a request running,
+                         \* completed or failed (acquire_and_run, requests.ex:193-209)
+    SeqCursor,           \* the client keeps the last server_seq it shows, pulls
+                         \* history_pull{after_seq: cursor} after server_hello, while a
+                         \* page says more and on a gap, and drops rows at or below it
+                         \* (PROTOCOL.md "Keeping a client's timeline")
+    SubscribeBeforePull, \* the Connection joins the registry before it writes
+                         \* server_hello (join, connection.ex:212-221)
+    SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
+                         \* an :ets.take (confirmations.ex:21-26, take_pending
+                         \* sandbox.ex:397-406)
     OneTurnAtATime,      \* the Queue starts a turn only when none of the conversation's
-                         \* turns is alive (queue.ex maybe_start_next_request)
-    CancelNamesTurn,     \* cancel{turn_id} stops that turn only, through a per-turn stop
-                         \* the Queue does not have yet (FALSE: Queue.stop_conversation)
-    OutcomeEndsTurn,     \* the Endpoint ends a turn on the wire only from the Queue's
-                         \* outcome; a cancel request writes nothing itself
-    SeqAssignedOnInsert  \* the Timeline assigns server_seq inside the one Repo call that
-                         \* inserts the row (FALSE: a writer reads the highest seq, then
-                         \* inserts in a second call)
+                         \* turns is alive (maybe_start_next_request, queue.ex:304-312)
+    StopTurnNamesTurn,   \* cancel stops the named message's turn only (Queue.stop_turn,
+                         \* queue.ex:172, stop_named_in :1005-1042); FALSE is the
+                         \* conversation stop (stop_conversation_runtime :990-994)
+    OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
+                         \* Companion.Turns; the Connection's cancel writes nothing
+                         \* (cancel, connection.ex:238-246; turns.ex:155-168)
+    SeqAssignedOnInsert, \* server_seq comes from the per-profile counter inside the one
+                         \* transactional Repo call that inserts the row (append_in_tx,
+                         \* mobile_sql.ex:490-496); FALSE: a writer reads the counter,
+                         \* then inserts in a second call
+    \* Timing. TRUE is the real code; FALSE forbids a live row reaching a
+    \* Connection's mailbox between its history read and the page it sends to
+    \* that mailbox (history, requests.ex:96-107, sent through sink,
+    \* connection.ex:425-428). A check that sets it FALSE proves a property only
+    \* for a Connection that writes the page in the step it reads it.
+    LiveRowsOvertakePage
 
 VARIABLES
-    \* each app (the Mac app, the iPhone app)
+    \* each client (the Protocol's client rules)
     link,       \* link[c]: "down", "hello" (client_hello sent), "up" (server_hello read)
     composed,   \* messages the users typed
     outbox,     \* outbox[c]: c's typed messages it has no accepted for yet
     sentOn,     \* sentOn[c]: messages sent on c's current connection
-    view,       \* view[c]: the server_seq of each row the app shows, in order
+    view,       \* view[c]: the server_seq of each row the client shows, in order
     pulling,    \* pulling[c]: a history_pull is outstanding
-    prompt,     \* prompt[c]: the app shows the approval
-    resent,     \* messages resent on the app's own initiative (MessagesCanBeResent)
-    \* each connection: server events on their way, and the handler's subscription
-    wire,       \* wire[c]: server events on the socket, not yet read by the app
-    sub,        \* sub[c]: "no", "joining" (the handler is about to subscribe), "yes"
-    \* the Endpoint
-    accepted,   \* durable record: client_msg_ids accepted
+    prompt,     \* prompt[c]: the client shows the approval card
+    resent,     \* messages resent on the client's own initiative
+    \* each Companion.Connection
+    wire,       \* wire[c]: its mailbox's {:companion_event, _} then the socket, in order
+    sub,        \* sub[c]: "no", "joining" (about to join the registry), "yes"
+    reading,    \* reading[c]: the history page it read and has not sent to its
+                \* mailbox yet, or None
+    \* the request path and Companion.Turns
+    accepted,   \* claimed client_msg_ids (mobile_client_requests)
     ends,       \* ends[m]: the endings written for m's turn, in order: "done"
                 \* (text_done) or "cancelled" (turn_error)
-    cancelAsked,\* messages a cancel{turn_id} reached the Endpoint for
-    epbox,      \* its mailbox: the Queue's outcomes and the job's delivery notice
-    appr,       \* the approval: "none", "pending", "resolved", "withdrawn"
-    apprTurn,   \* the turn that raised it
-    applied,    \* answers (or the timeout) applied to it
+    cancelAsked,\* messages a cancel reached the Queue for
+    turnsBox,   \* Companion.Turns' mailbox: the Queue's outcomes
+    appr,       \* the approval token: "none", "pending", "resolved", "expired"
+    applied,    \* answers applied to it
     \* the Gateway Queue and its turn tasks
     qpending,   \* FIFO of waiting turns
-    turn,       \* turn[m]: "none", "queued", "running", "asking" (waits on the
-                \* approval), "claimed" (committed, holds its outcome), "ended"
+    turn,       \* turn[m]: "none", "queued", "running", "claimed" (committed, holds
+                \* its outcome), "ended"
     handed,     \* handed[m]: turns handed to the Queue for m
-    \* the Timeline and the job reporting back
-    tl,         \* the durable rows: the server_seq of each, in insertion order
-    job,        \* "idle", "read" (read the highest seq; SeqAssignedOnInsert off), "done"
-    jobSeq,     \* the highest seq the job read
+    \* the timeline and the job reporting back
+    tl,         \* the rows: the server_seq of each, in insertion order
+    job,        \* "idle", "read" (read the counter; SeqAssignedOnInsert off),
+                \* "written" (row in, not announced), "done"
+    jobSeq,     \* the counter value the job read, or the seq it wrote
     dseq,       \* the delivery row's server_seq, 0 before it is written
     \* environment budgets
     dropsLeft,
     cancelsLeft,
     \* observers (read only by witnesses)
-    answeredBy,     \* apps whose answer to the approval reached the Endpoint
-    dupWhileRunning \* a resend reached the Endpoint while its message's turn was alive
+    answeredBy,     \* clients whose answer to the approval reached the take
+    dupWhileRunning \* a resend was claimed while its message's turn was alive
 
-app      == <<link, composed, outbox, sentOn, view, pulling, prompt, resent>>
-conn     == <<wire, sub>>
-endpoint == <<accepted, ends, cancelAsked, epbox, appr, apprTurn, applied>>
+client   == <<link, composed, outbox, sentOn, view, pulling, prompt, resent>>
+conn     == <<wire, sub, reading>>
+turns    == <<accepted, ends, cancelAsked, turnsBox, appr, applied>>
 queue    == <<qpending, turn, handed>>
 store    == <<tl, job, jobSeq, dseq>>
 env      == <<dropsLeft, cancelsLeft>>
 obs      == <<answeredBy, dupWhileRunning>>
-vars == <<app, conn, endpoint, queue, store, env, obs>>
+vars == <<client, conn, turns, queue, store, env, obs>>
 
 Msgs == Senders \X (1..MsgsPerSender)
 Owner(m) == m[1]
 
-\* Apps that play the same part are interchangeable: invariant checks may
+\* Clients that play the same part are interchangeable: invariant checks may
 \* reduce by symmetry.
 Symm == IF Senders = Clients THEN Permutations(Clients) ELSE Permutations(Clients \ Senders)
 
-Live == {"running", "asking", "claimed"}     \* a turn task is alive
-Stoppable == {"queued", "running", "asking"} \* a stop still reaches it
+Live == {"running", "claimed"}          \* a turn task is alive
+Stoppable == {"queued", "running"}      \* a stop still reaches it
 
 Page == [rows : Seq(Nat), more : BOOLEAN]
 DownEvents ==
     ({"hello_ok", "appr", "resolved"} \X {None}) \cup ({"acc"} \X Msgs)
     \cup ({"row"} \X Nat) \cup ({"page"} \X Page)
-EpEvents == ({"completed", "cancelled"} \X Msgs) \cup ({"delivered"} \X Nat)
 
 TypeOK ==
     /\ link \in [Clients -> {"down", "hello", "up"}]
@@ -182,18 +207,18 @@ TypeOK ==
     /\ resent \subseteq Msgs
     /\ \A c \in Clients : wire[c] \in Seq(DownEvents)
     /\ sub \in [Clients -> {"no", "joining", "yes"}]
+    /\ \A c \in Clients : reading[c] \in Page \cup {None}
     /\ accepted \subseteq Msgs
     /\ \A m \in Msgs : ends[m] \in Seq({"done", "cancelled"})
     /\ cancelAsked \subseteq Msgs
-    /\ epbox \in Seq(EpEvents)
-    /\ appr \in {"none", "pending", "resolved", "withdrawn"}
-    /\ apprTurn \in Msgs \cup {None}
+    /\ turnsBox \in Seq({"completed", "cancelled"} \X Msgs)
+    /\ appr \in {"none", "pending", "resolved", "expired"}
     /\ applied \in Nat
     /\ qpending \in Seq(Msgs)
-    /\ turn \in [Msgs -> {"none", "queued", "running", "asking", "claimed", "ended"}]
+    /\ turn \in [Msgs -> {"none", "queued", "running", "claimed", "ended"}]
     /\ handed \in [Msgs -> Nat]
     /\ tl \in Seq(Nat)
-    /\ job \in {"idle", "read", "done"}
+    /\ job \in {"idle", "read", "written", "done"}
     /\ jobSeq \in Nat /\ dseq \in Nat
     /\ dropsLeft \in 0..MaxDrops /\ cancelsLeft \in 0..MaxCancels
     /\ answeredBy \subseteq Clients /\ dupWhileRunning \in BOOLEAN
@@ -204,35 +229,42 @@ TypeOK ==
 Range(s) == {s[i] : i \in 1..Len(s)}
 MaxOf(S) == IF S = {} THEN 0 ELSE CHOOSE x \in S : \A y \in S : y <= x
 
-\* The app's cursor: the last server_seq it shows.
+\* The client's cursor: the last server_seq it shows.
 Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 
-\* Timeline.append with the seq assigned inside the insert: one past the highest.
+\* The per-profile counter, read and bumped inside the insert's transaction
+\* (next_server_seq, increment_server_seq, mobile_sql.ex:511-548).
 NextSeq == MaxOf(Range(tl)) + 1
 
-\* The Endpoint fans one event out to every subscribed connection: its
-\* handler writes it to the socket in the order it receives them.
+\* Channels.Companion.broadcast (channels/companion.ex:91-95, dispatch
+\* :223-227): one send to every Connection registered under the profile.
 Fanout(ev) == [c \in Clients |-> IF sub[c] = "yes" THEN Append(wire[c], ev) ELSE wire[c]]
 
-\* The handler answers history_pull{after_seq: a, limit}: one Repo read of the
-\* rows after a, oldest first, at most PageLimit of them, and whether more follow
-\* (history_page's next_after_seq).
+\* Timeline.history_page -> mobile_sql history (timeline.ex:79,
+\* mobile_sql.ex:184-198): one Repo call reads the rows after a, oldest
+\* first, at most PageLimit of them, and the head; more follow while
+\* next_after_seq is below history_head_seq.
 PageAfter(a) ==
     LET later == SelectSeq(tl, LAMBDA s : s > a)
         k == IF Len(later) < PageLimit THEN Len(later) ELSE PageLimit
     IN [rows |-> SubSeq(later, 1, k), more |-> Len(later) > PageLimit]
 
-\* The handler answers a pull on connection c (the app sent it in the same
-\* step): the page goes on the socket after `w`, what c's socket holds then.
-\* Without SubscribeBeforePull, the handler joins the fan-out only after its
-\* first page, in a call of its own (Join).
+\* history_pull on connection c (dispatch, connection.ex:192-193 ->
+\* Requests.history, requests.ex:96-107): the Repo read, in the step the
+\* client sends the pull; `w` is c's mailbox and socket as that step left
+\* them. The page then goes to the Connection's own mailbox (emit -> sink,
+\* connection.ex:425-428): in a later step (SendPage) when live rows may
+\* overtake it, in this one otherwise. Without SubscribeBeforePull the
+\* Connection joins the registry after its first page (Join).
 Pull(c, w, a) ==
-    /\ wire' = [wire EXCEPT ![c] = Append(w, <<"page", PageAfter(a)>>)]
+    /\ IF LiveRowsOvertakePage
+       THEN wire' = [wire EXCEPT ![c] = w] /\ reading' = [reading EXCEPT ![c] = PageAfter(a)]
+       ELSE wire' = [wire EXCEPT ![c] = Append(w, <<"page", PageAfter(a)>>)] /\ UNCHANGED reading
     /\ sub' = IF sub[c] = "no" THEN [sub EXCEPT ![c] = "joining"] ELSE sub
 
-\* maybe_start_next_request (queue.ex), run by every Queue callback that can
-\* free the slot or fill the queue: with the waiting turns p and the turn
-\* states t that callback left, start the head of p if no turn is alive
+\* maybe_start_next_request (queue.ex:304-312), run by every Queue callback
+\* that can free the slot or fill the queue: with the waiting turns p and the
+\* turn states t that callback left, start the head of p if no turn is alive
 \* (OneTurnAtATime), or at once without it.
 StartNext(p, t) ==
     IF p /= <<>> /\ (OneTurnAtATime => \A x \in Msgs : t[x] \notin Live)
@@ -240,29 +272,34 @@ StartNext(p, t) ==
     ELSE turn' = t /\ qpending' = p
 
 -----------------------------------------------------------------------------
-(* The Endpoint's callbacks for an app event, called by the socket handler  *)
-(* (FermixChannels.Companion.Endpoint; a GenServer.call, so the handler     *)
-(* waits)                                                                   *)
+(* The request path: a Connection's request worker (request_job,           *)
+(* connection.ex:285-297) runs Companion.Requests.request                   *)
 
-\* msg{client_msg_id}. A known id is answered accepted{duplicate: true} and
-\* nothing else (AcceptedDedupe). A new one is recorded, its user row appended
-\* (one Repo call) and fanned out, accepted written to the sender, and the turn
-\* handed to the Queue (Queue.enqueue, a cast; the Queue's handle_cast is
-\* folded in, since nothing in the model tells the two apart).
+\* msg{client_msg_id} (Requests.request -> claim_and_run -> acquire_and_run
+\* -> run_started -> ingest_span, requests.ex:74-258):
+\*  - claim_client_request claims the id durably (claim_request_in_tx,
+\*    mobile_sql.ex:722-741), and accepted{duplicate} goes to this client's
+\*    Connection (accepted_event, requests.ex:523-526) before anything runs;
+\*  - the coordinator's acquire starts an attempt, or none for a request
+\*    running, completed or failed (request_coordinator.ex:118-125);
+\*  - an attempt appends the user's row (append_client_message, keyed by
+\*    client_msg_id: an existing row is returned, not written again). The
+\*    row is not broadcast: other clients see it through history;
+\*  - Gateway.ingest hands the turn to Companion.Turns.handle_message, which
+\*    tracks it and casts it to the Queue (turns.ex:59-64, :130-144); the
+\*    Queue's handle_cast is folded in, since nothing here tells them apart.
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
        THEN /\ wire' = [wire EXCEPT ![c] = Append(@, <<"acc", m>>)]
-            /\ UNCHANGED <<endpoint, queue, tl>>
-       ELSE LET s == NextSeq
-                w == Fanout(<<"row", s>>)
-            IN /\ accepted' = accepted \cup {m}
-               /\ tl' = Append(tl, s)
-               /\ wire' = [w EXCEPT ![c] = Append(@, <<"acc", m>>)]
-               /\ handed' = [handed EXCEPT ![m] = @ + 1]
-               /\ StartNext(Append(qpending, m), [turn EXCEPT ![m] = "queued"])
-               /\ UNCHANGED <<ends, cancelAsked, epbox, appr, apprTurn, applied>>
-    /\ UNCHANGED <<sub, job, jobSeq, dseq, answeredBy>>
+            /\ UNCHANGED <<turns, queue, tl>>
+       ELSE /\ accepted' = accepted \cup {m}
+            /\ tl' = IF m \in accepted THEN tl ELSE Append(tl, NextSeq)
+            /\ wire' = [wire EXCEPT ![c] = Append(@, <<"acc", m>>)]
+            /\ handed' = [handed EXCEPT ![m] = @ + 1]
+            /\ StartNext(Append(qpending, m), [turn EXCEPT ![m] = "queued"])
+            /\ UNCHANGED <<ends, cancelAsked, turnsBox, appr, applied>>
+    /\ UNCHANGED <<sub, reading, job, jobSeq, dseq, answeredBy>>
 
 \* A set of at most one turn as a sequence. CHOOSE on a singleton is
 \* deterministic, so symmetry stays sound; no check reaches two.
@@ -270,68 +307,63 @@ One(S) ==
     IF Cardinality(S) > 1 THEN Assert(FALSE, "two running turns stopped at once")
     ELSE IF S = {} THEN <<>> ELSE <<CHOOSE x \in S : TRUE>>
 
-\* The Queue stops the turns in `hit`, inside the Endpoint's call: a running
-\* one is killed and a waiting one dropped, and each gets {:cancelled}, sent
-\* to the Endpoint (the running one first, then the waiting ones in queue
-\* order). A claimed turn is never in `hit`: the stop spares it
-\* (stop_active_turn). The approval of a killed turn is withdrawn. A
-\* per-turn stop that kills the running turn starts the next one, as the
-\* :DOWN of a finished turn does; stop_conversation leaves none waiting.
+\* The Queue stops the turns in `hit`, in one callback: a running one is
+\* killed and a waiting one dropped, and each {:cancelled} is invoked off the
+\* Queue (invoke_turn_result_async) into Turns' mailbox, the running one
+\* first. A claimed turn is never in `hit`: the stop spares it
+\* (stop_named_in, queue.ex:1005-1013; stop_active_turn :1048-1050). A named
+\* stop that kills the running turn starts the next one (:1015-1026); the
+\* conversation stop leaves none waiting (cancel_pending :1068-1074).
 StopTurns(hit) ==
     LET order == One({x \in hit : turn[x] /= "queued"})
                  \o SelectSeq(qpending, LAMBDA x : x \in hit)
     IN /\ StartNext(SelectSeq(qpending, LAMBDA x : x \notin hit),
                     [x \in Msgs |-> IF x \in hit THEN "ended" ELSE turn[x]])
-       /\ epbox' = epbox \o [i \in 1..Len(order) |-> <<"cancelled", order[i]>>]
-       /\ IF appr = "pending" /\ apprTurn \in hit
-          THEN appr' = "withdrawn" /\ wire' = Fanout(<<"resolved", None>>)
-          ELSE UNCHANGED <<appr, wire>>
+       /\ turnsBox' = turnsBox \o [i \in 1..Len(order) |-> <<"cancelled", order[i]>>]
 
-\* cancel{turn_id}.
-\*  - CancelNamesTurn: a per-turn Queue stop (the Queue has none yet): m's turn
-\*    stops if a stop still reaches it, and nothing else does.
-\*  - Otherwise Queue.stop_conversation (stop_conversation_runtime), called
-\*    while the Endpoint still takes m's turn for unfinished: it kills
-\*    whichever turn is running unclaimed, and cancels every waiting message.
-\*  - Without OutcomeEndsTurn the Endpoint also writes turn_error{cancelled}
-\*    at once, before the Queue has stopped anything.
+\* cancel{client_msg_id} (cancel, connection.ex:238-246): the Connection calls
+\* Queue.stop_turn(key, client_msg_id) and writes nothing.
+\*  - StopTurnNamesTurn: the named message's turn stops if a stop still
+\*    reaches it, and nothing else does (stop_named_in, queue.ex:1005-1042).
+\*  - Otherwise the conversation stop: whichever turn runs unclaimed is
+\*    killed, and every waiting message cancelled.
+\*  - Without OutcomeEndsTurn the Connection also writes turn_error{cancelled}
+\*    at once, for a message it has not seen end.
 OnCancel(m) ==
     LET open == m \in accepted /\ ends[m] = <<>>
-        hit == IF CancelNamesTurn
+        hit == IF StopTurnNamesTurn
                THEN IF turn[m] \in Stoppable THEN {m} ELSE {}
-               ELSE IF open THEN {x \in Msgs : turn[x] \in Stoppable} ELSE {}
+               ELSE {x \in Msgs : turn[x] \in Stoppable}
     IN /\ cancelAsked' = cancelAsked \cup {m}
        /\ ends' = IF ~OutcomeEndsTurn /\ open
                   THEN [ends EXCEPT ![m] = Append(@, "cancelled")] ELSE ends
        /\ StopTurns(hit)
-       /\ UNCHANGED <<sub, accepted, apprTurn, applied, handed, store, obs>>
+       /\ UNCHANGED <<wire, sub, reading, accepted, appr, applied, handed, store, obs>>
 
-\* The approval is resolved: its turn resumes, and every app clears it.
-Resolve ==
-    /\ appr' = "resolved"
-    /\ applied' = applied + 1
-    /\ turn' = [turn EXCEPT ![apprTurn] = "running"]
-    /\ wire' = Fanout(<<"resolved", None>>)
-
-\* The approval's answer. The first answer to a pending approval resolves
-\* it; any other is dropped (SingleAnswer) or applied as well.
+\* /confirm TOKEN or /deny TOKEN: a command request through the same path,
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:223-243).
+\* take_pending peeks, checks the expiry and origin, then takes the token
+\* (sandbox.ex:397-414, Confirmations.take, confirmations.ex:21-26). Only a
+\* take that finds the token applies the answer and broadcasts
+\* approval_resolved (notify_approval :258-266 -> requests.ex:437-445).
+\* Without SingleAnswer the token survives its first answer.
 OnAnswer(c) ==
     /\ answeredBy' = answeredBy \cup {c}
     /\ IF appr = "pending"
-       THEN Resolve
-       ELSE /\ applied' = IF SingleAnswer THEN applied ELSE applied + 1
-            /\ UNCHANGED <<appr, turn, wire>>
-    /\ UNCHANGED <<sub, accepted, ends, cancelAsked, epbox, apprTurn, qpending, handed, store,
+       THEN /\ appr' = "resolved"
+            /\ applied' = applied + 1
+            /\ wire' = Fanout(<<"resolved", None>>)
+       ELSE /\ applied' = IF appr = "resolved" /\ ~SingleAnswer THEN applied + 1 ELSE applied
+            /\ UNCHANGED <<appr, wire>>
+    /\ UNCHANGED <<sub, reading, accepted, ends, cancelAsked, turnsBox, queue, store,
                    dupWhileRunning>>
 
 -----------------------------------------------------------------------------
-(* The apps (FermixCore.Companion.Protocol's client side, in the Mac and    *)
-(* iPhone apps), each event handled by the connection's socket handler in   *)
-(* the same step                                                            *)
+(* The clients (PROTOCOL.md's client rules) and their Connections           *)
 
 \* The user types m. With the outbox it is kept until accepted and goes out
-\* now if the app is connected, or once it is (Flush). Without one, the app
-\* can only send while connected, and sends once.
+\* now if the client is connected, or once it is (Flush). Without one, the
+\* client can only send while connected, and sends once.
 Compose(m) ==
     LET c == Owner(m) IN
     /\ m \notin composed
@@ -340,11 +372,11 @@ Compose(m) ==
     /\ outbox' = [outbox EXCEPT ![c] = @ \cup {m}]
     /\ IF link[c] = "up"
        THEN sentOn' = [sentOn EXCEPT ![c] = @ \cup {m}] /\ OnMsg(c, m)
-       ELSE UNCHANGED <<sentOn, conn, endpoint, queue, store, obs>>
+       ELSE UNCHANGED <<sentOn, conn, turns, queue, store, obs>>
     /\ UNCHANGED <<link, view, pulling, prompt, resent, env>>
 
-\* OutboxResend: after server_hello the app sends every outboxed message it
-\* has not sent on this connection.
+\* OutboxResend: after server_hello the client sends every outboxed message
+\* it has not sent on this connection.
 Flush(m) ==
     LET c == Owner(m) IN
     /\ OutboxResend
@@ -353,7 +385,7 @@ Flush(m) ==
     /\ OnMsg(c, m)
     /\ UNCHANGED <<link, composed, outbox, view, pulling, prompt, resent, env>>
 
-\* The app sends again a message it sent on this connection and has no
+\* The client sends again a message it sent on this connection and has no
 \* accepted for yet: its ack timeout, or the user's retry. Once per message.
 Resend(m) ==
     LET c == Owner(m) IN
@@ -363,67 +395,72 @@ Resend(m) ==
     /\ OnMsg(c, m)
     /\ UNCHANGED <<link, composed, outbox, sentOn, view, pulling, prompt, env>>
 
-\* The app connects and sends client_hello. The handler subscribes the
-\* connection (SubscribeBeforePull), then writes server_hello, and the
-\* approval if one is pending.
+\* The client connects: the Endpoint starts its Connection and hands it the
+\* socket (accept_connection, start_connection, hand_over, endpoint.ex:218-268;
+\* @max_clients 4, two here). The client sends client_hello; the Connection
+\* joins the registry (SubscribeBeforePull), then writes server_hello straight
+\* to the socket (hello, join, connection.ex:205-221). A pending approval is
+\* not re-sent.
 Connect(c) ==
     /\ link[c] = "down"
     /\ link' = [link EXCEPT ![c] = "hello"]
     /\ sub' = IF SubscribeBeforePull THEN [sub EXCEPT ![c] = "yes"] ELSE sub
-    /\ wire' = [wire EXCEPT ![c] = <<<<"hello_ok", None>>>>
-                                   \o (IF appr = "pending" THEN <<<<"appr", None>>>> ELSE <<>>)]
-    /\ UNCHANGED <<composed, outbox, sentOn, view, pulling, prompt, resent, endpoint, queue,
-                   store, env, obs>>
+    /\ wire' = [wire EXCEPT ![c] = <<<<"hello_ok", None>>>>]
+    /\ UNCHANGED <<composed, outbox, sentOn, view, pulling, prompt, resent, reading, turns,
+                   queue, store, env, obs>>
 
-\* The connection drops, and what is on its way to the app is lost. The
-\* handler exits and the Endpoint's monitor takes it out of the fan-out.
+\* The connection drops. The Connection exits (connection.ex:117-122) with its
+\* mailbox and any page it had not sent; its registry entry goes with it. A
+\* request worker it started runs on, since it is not linked, so a claimed
+\* request still settles. The client keeps its outbox, its view, and any
+\* approval card it shows.
 Drop(c) ==
     /\ ClientsCanDisconnect /\ dropsLeft > 0 /\ link[c] /= "down"
     /\ dropsLeft' = dropsLeft - 1
     /\ link' = [link EXCEPT ![c] = "down"]
     /\ wire' = [wire EXCEPT ![c] = <<>>]
     /\ sub' = [sub EXCEPT ![c] = "no"]
+    /\ reading' = [reading EXCEPT ![c] = None]
     /\ sentOn' = [sentOn EXCEPT ![c] = {}]
     /\ pulling' = [pulling EXCEPT ![c] = FALSE]
-    /\ prompt' = [prompt EXCEPT ![c] = FALSE]
-    /\ UNCHANGED <<composed, outbox, view, resent, endpoint, queue, store, cancelsLeft, obs>>
+    /\ UNCHANGED <<composed, outbox, view, prompt, resent, turns, queue, store, cancelsLeft,
+                   obs>>
 
-\* The user answers the approval the app shows.
+\* The user answers the approval card the client shows.
 Answer(c) ==
     /\ prompt[c] /\ link[c] = "up"
     /\ prompt' = [prompt EXCEPT ![c] = FALSE]
     /\ OnAnswer(c)
     /\ UNCHANGED <<link, composed, outbox, sentOn, view, pulling, resent, env>>
 
-\* A user cancels m's turn: either app may cancel any turn of the shared
+\* A user cancels m's turn: any client may cancel any message of the shared
 \* conversation.
 Cancel(c, m) ==
     /\ TurnsCanBeCancelled /\ cancelsLeft > 0
     /\ link[c] = "up" /\ m \in composed
     /\ cancelsLeft' = cancelsLeft - 1
     /\ OnCancel(m)
-    /\ UNCHANGED <<app, dropsLeft>>
+    /\ UNCHANGED <<client, dropsLeft>>
 
-\* server_hello: the app pulls after its cursor (SeqCursor).
+\* server_hello: the client pulls after its cursor (SeqCursor).
 OnServerHello(c, rest) ==
     /\ link' = [link EXCEPT ![c] = "up"]
     /\ pulling' = [pulling EXCEPT ![c] = SeqCursor]
     /\ IF SeqCursor THEN Pull(c, rest, Cursor(c))
-       ELSE wire' = [wire EXCEPT ![c] = rest] /\ UNCHANGED sub
+       ELSE wire' = [wire EXCEPT ![c] = rest] /\ UNCHANGED <<sub, reading>>
     /\ UNCHANGED <<composed, outbox, sentOn, view, prompt, resent>>
 
-\* A live row. With the cursor: the next seq is shown, one at or below the
-\* cursor is a duplicate and dropped, and one past a gap is dropped and the
-\* gap pulled, unless a pull is already out (its page, or a later gap,
-\* covers it). Without: every row is shown as it comes.
+\* A live text_done. With the cursor: the next seq is shown, one at or below
+\* the cursor is dropped, and one past a gap is dropped and the gap pulled,
+\* unless a pull is already out. Without: every row is shown as it comes.
 OnRow(c, s, rest) ==
     /\ IF ~SeqCursor \/ s = Cursor(c) + 1
        THEN /\ view' = [view EXCEPT ![c] = Append(@, s)]
             /\ wire' = [wire EXCEPT ![c] = rest]
-            /\ UNCHANGED <<pulling, sub>>
+            /\ UNCHANGED <<pulling, sub, reading>>
        ELSE IF s <= Cursor(c) \/ pulling[c]
        THEN /\ wire' = [wire EXCEPT ![c] = rest]
-            /\ UNCHANGED <<view, pulling, sub>>
+            /\ UNCHANGED <<view, pulling, sub, reading>>
        ELSE /\ pulling' = [pulling EXCEPT ![c] = TRUE]
             /\ Pull(c, rest, Cursor(c))
             /\ UNCHANGED view
@@ -440,11 +477,11 @@ OnPage(c, pg, rest) ==
           THEN Pull(c, rest, cur) /\ UNCHANGED pulling
           ELSE /\ pulling' = [pulling EXCEPT ![c] = FALSE]
                /\ wire' = [wire EXCEPT ![c] = rest]
-               /\ UNCHANGED sub
-       /\ UNCHANGED <<link, composed, outbox, sentOn, prompt, resent>>
+               /\ UNCHANGED <<sub, reading>>
+       /\ UNCHANGED <<link, composed, outbox, prompt, resent, sentOn>>
 
-\* The app reads the next server event.
-AppRead(c) ==
+\* The client reads the next event its Connection wrote.
+ClientRead(c) ==
     /\ wire[c] /= <<>>
     /\ LET ev == Head(wire[c])
            rest == Tail(wire[c])
@@ -454,103 +491,120 @@ AppRead(c) ==
             [] ev[1] = "acc" ->
                  /\ outbox' = [outbox EXCEPT ![c] = @ \ {ev[2]}]
                  /\ wire' = [wire EXCEPT ![c] = rest]
-                 /\ UNCHANGED <<link, composed, sentOn, view, pulling, prompt, resent, sub>>
+                 /\ UNCHANGED <<link, composed, sentOn, view, pulling, prompt, resent, sub,
+                                reading>>
             [] ev[1] \in {"appr", "resolved"} ->
                  /\ prompt' = [prompt EXCEPT ![c] = (ev[1] = "appr")]
                  /\ wire' = [wire EXCEPT ![c] = rest]
-                 /\ UNCHANGED <<link, composed, outbox, sentOn, view, pulling, resent, sub>>
-    /\ UNCHANGED <<endpoint, queue, store, env, obs>>
+                 /\ UNCHANGED <<link, composed, outbox, sentOn, view, pulling, resent, sub,
+                                reading>>
+    /\ UNCHANGED <<turns, queue, store, env, obs>>
 
-\* Without SubscribeBeforePull: the handler joins the fan-out after it
-\* answered the first pull (Endpoint.subscribe, a call of its own).
+\* LiveRowsOvertakePage: the Connection sends the page it read to its own
+\* mailbox (emit, requests.ex:604 -> sink, connection.ex:425-428), behind
+\* whatever other processes sent it since the read.
+SendPage(c) ==
+    /\ reading[c] /= None
+    /\ wire' = [wire EXCEPT ![c] = Append(@, <<"page", reading[c]>>)]
+    /\ reading' = [reading EXCEPT ![c] = None]
+    /\ UNCHANGED <<client, sub, turns, queue, store, env, obs>>
+
+\* Without SubscribeBeforePull: the Connection joins the registry after it
+\* answered the first pull, in a step of its own.
 Join(c) ==
     /\ sub[c] = "joining"
     /\ sub' = [sub EXCEPT ![c] = "yes"]
-    /\ UNCHANGED <<app, wire, endpoint, queue, store, env, obs>>
+    /\ UNCHANGED <<client, wire, reading, turns, queue, store, env, obs>>
 
 -----------------------------------------------------------------------------
-(* The Endpoint's own mailbox                                               *)
+(* Companion.Turns: every turn ends on the wire here, from its outcome      *)
 
-\* The Endpoint handles its next mailbox message.
-\*  - {:completed} (turn_result_fn): the assistant row is appended (one Repo
-\*    call) and fanned out as text_done{server_seq}.
-\*  - {:cancelled}: turn_error{cancelled}, live only.
-\*  - The job's delivery notice: its row is fanned out.
-EndpointNext ==
-    /\ epbox /= <<>>
-    /\ epbox' = Tail(epbox)
-    /\ LET ev == Head(epbox) IN
-       CASE ev[1] = "completed" ->
-              /\ tl' = Append(tl, NextSeq)
-              /\ wire' = Fanout(<<"row", NextSeq>>)
-              /\ ends' = [ends EXCEPT ![ev[2]] = Append(@, "done")]
-         [] ev[1] = "cancelled" ->
-              /\ ends' = [ends EXCEPT ![ev[2]] = Append(@, "cancelled")]
-              /\ UNCHANGED <<tl, wire>>
-         [] ev[1] = "delivered" ->
-              /\ wire' = Fanout(<<"row", ev[2]>>)
-              /\ UNCHANGED <<tl, ends>>
-    /\ UNCHANGED <<app, sub, accepted, cancelAsked, appr, apprTurn, applied, queue,
+\* Turns handles its next outcome (outcome/2, handle_call, turns.ex:107-112
+\* -> finish/3, :155-168):
+\*  - {:completed}: each held reply is written as a row (Output.persist_text
+\*    -> append_client_output, one Repo call) and broadcast as
+\*    text_done{server_seq} (write_reply, turns.ex:174-191); one reply here;
+\*  - {:cancelled}: the request is settled failed and one turn_error is
+\*    broadcast (fail, turns.ex:164-168); turn_error is live-only.
+TurnsNext ==
+    /\ turnsBox /= <<>>
+    /\ turnsBox' = Tail(turnsBox)
+    /\ LET ev == Head(turnsBox) IN
+       IF ev[1] = "completed"
+       THEN /\ tl' = Append(tl, NextSeq)
+            /\ wire' = Fanout(<<"row", NextSeq>>)
+            /\ ends' = [ends EXCEPT ![ev[2]] = Append(@, "done")]
+       ELSE /\ ends' = [ends EXCEPT ![ev[2]] = Append(@, "cancelled")]
+            /\ UNCHANGED <<tl, wire>>
+    /\ UNCHANGED <<client, sub, reading, accepted, cancelAsked, appr, applied, queue,
                    job, jobSeq, dseq, env, obs>>
 
 -----------------------------------------------------------------------------
 (* The Gateway Queue and its turn tasks, abstract (see the header)          *)
 
-\* A tool call of m's turn needs the owner's approval: the turn waits, and
-\* the Endpoint records the approval and fans it out.
+\* A tool of m's turn needs the owner's approval: the gateway stores a
+\* pending token (store_pending_grant, sandbox.ex:178-190) and the channel
+\* broadcasts the card (send_approval, channels/companion.ex:160-163). The
+\* turn does not wait for it.
 Ask(m) ==
     /\ turn[m] = "running" /\ appr = "none" /\ Approvals > 0
-    /\ turn' = [turn EXCEPT ![m] = "asking"]
-    /\ appr' = "pending" /\ apprTurn' = m
+    /\ appr' = "pending"
     /\ wire' = Fanout(<<"appr", None>>)
-    /\ UNCHANGED <<app, sub, accepted, ends, cancelAsked, epbox, applied, qpending, handed,
+    /\ UNCHANGED <<client, sub, reading, accepted, ends, cancelAsked, turnsBox, applied, queue,
                    store, env, obs>>
 
-\* The approval's own timer: nobody answered in time.
-ApprovalTimeout ==
+\* The token expires: take_pending refuses it from then on (validate_pending,
+\* sandbox.ex:408-414). Time, so no fairness.
+Expire ==
     /\ appr = "pending"
-    /\ Resolve
-    /\ UNCHANGED <<app, sub, accepted, ends, cancelAsked, epbox, apprTurn, qpending, handed,
+    /\ appr' = "expired"
+    /\ UNCHANGED <<client, conn, accepted, ends, cancelAsked, turnsBox, applied, queue,
                    store, env, obs>>
 
 \* m's turn committed its reply and claimed its outcome: from here a stop
-\* spares it (claim_active_turn, stop_active_turn).
+\* spares it (claim_active_turn, queue.ex:1090-1094).
 Claim(m) ==
     /\ turn[m] = "running"
     /\ turn' = [turn EXCEPT ![m] = "claimed"]
-    /\ UNCHANGED <<app, conn, endpoint, qpending, handed, store, env, obs>>
+    /\ UNCHANGED <<client, conn, turns, qpending, handed, store, env, obs>>
 
-\* The turn invokes {:completed} and exits; the Queue's :DOWN frees the slot
-\* and starts the next waiting turn (folded in: nothing else can act on the
-\* dead turn in between).
+\* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox)
+\* and exits; the Queue's :DOWN frees the slot and starts the next waiting
+\* turn (folded in: nothing else can act on the dead turn in between).
 Finish(m) ==
     /\ turn[m] = "claimed"
-    /\ epbox' = Append(epbox, <<"completed", m>>)
+    /\ turnsBox' = Append(turnsBox, <<"completed", m>>)
     /\ StartNext(qpending, [turn EXCEPT ![m] = "ended"])
-    /\ UNCHANGED <<app, conn, accepted, ends, cancelAsked, appr, apprTurn, applied,
-                   handed, store, env, obs>>
+    /\ UNCHANGED <<client, conn, accepted, ends, cancelAsked, appr, applied, handed, store,
+                   env, obs>>
 
 -----------------------------------------------------------------------------
-(* A scheduled job reporting back: FermixCore.Companion.Timeline, then a    *)
-(* notice to the Endpoint                                                   *)
+(* A scheduled job reporting back: Channels.Companion.send_message in the   *)
+(* job's own process (channels/companion.ex:174-206)                        *)
 
-\* Without SeqAssignedOnInsert the job reads the highest seq first.
+\* Without SeqAssignedOnInsert the job reads the counter first.
 JobRead ==
     /\ DeliveriesWhileOffline /\ ~SeqAssignedOnInsert /\ job = "idle"
     /\ job' = "read" /\ jobSeq' = MaxOf(Range(tl))
-    /\ UNCHANGED <<app, conn, endpoint, queue, tl, dseq, env, obs>>
+    /\ UNCHANGED <<client, conn, turns, queue, tl, dseq, env, obs>>
 
-\* The job inserts its row (one Repo call) and tells the Endpoint.
-JobInsert ==
+\* Output.persist_text -> Timeline.append: one Repo call (append_in_tx).
+JobWrite ==
     /\ DeliveriesWhileOffline
     /\ job = IF SeqAssignedOnInsert THEN "idle" ELSE "read"
     /\ LET s == IF SeqAssignedOnInsert THEN NextSeq ELSE jobSeq + 1 IN
        /\ tl' = Append(tl, s)
        /\ dseq' = s
-       /\ epbox' = Append(epbox, <<"delivered", s>>)
+       /\ jobSeq' = s
+    /\ job' = "written"
+    /\ UNCHANGED <<client, conn, turns, queue, env, obs>>
+
+\* announce_text: the job broadcasts its row as text_done (:201-206).
+JobAnnounce ==
+    /\ job = "written"
     /\ job' = "done"
-    /\ UNCHANGED <<app, conn, accepted, ends, cancelAsked, appr, apprTurn, applied, queue,
-                   jobSeq, env, obs>>
+    /\ wire' = Fanout(<<"row", jobSeq>>)
+    /\ UNCHANGED <<client, sub, reading, turns, queue, tl, jobSeq, dseq, env, obs>>
 
 -----------------------------------------------------------------------------
 Init ==
@@ -564,11 +618,12 @@ Init ==
     /\ resent = {}
     /\ wire = [c \in Clients |-> <<>>]
     /\ sub = [c \in Clients |-> "no"]
+    /\ reading = [c \in Clients |-> None]
     /\ accepted = {}
     /\ ends = [m \in Msgs |-> <<>>]
     /\ cancelAsked = {}
-    /\ epbox = <<>>
-    /\ appr = "none" /\ apprTurn = None /\ applied = 0
+    /\ turnsBox = <<>>
+    /\ appr = "none" /\ applied = 0
     /\ qpending = <<>>
     /\ turn = [m \in Msgs |-> "none"]
     /\ handed = [m \in Msgs |-> 0]
@@ -576,115 +631,128 @@ Init ==
     /\ dropsLeft = MaxDrops /\ cancelsLeft = MaxCancels
     /\ answeredBy = {} /\ dupWhileRunning = FALSE
 
-\* The legitimate end: every app connected with nothing left to read, no
-\* pull outstanding, no handler about to join, the Endpoint's mailbox empty,
-\* no turn waiting or alive, no approval pending and no job half-way.
-\* Whether the apps show the right rows then is for the rules to say.
-\* Deadlock checking is on, so any other state where nothing can happen is
-\* reported as a wedge.
+\* The legitimate end: every client connected with nothing left to read, no
+\* pull outstanding, no page unsent, no Connection about to join, Turns'
+\* mailbox empty, no turn waiting or alive and no job half-way. Whether the
+\* clients show the right rows then is for the rules to say. Deadlock
+\* checking is on, so any other state where nothing can happen is reported
+\* as a wedge.
 Done ==
     /\ \A c \in Clients :
-          link[c] = "up" /\ wire[c] = <<>> /\ ~pulling[c] /\ sub[c] /= "joining"
-    /\ epbox = <<>> /\ qpending = <<>>
+          /\ link[c] = "up" /\ wire[c] = <<>> /\ ~pulling[c]
+          /\ reading[c] = None /\ sub[c] /= "joining"
+    /\ turnsBox = <<>> /\ qpending = <<>>
     /\ \A m \in Msgs : turn[m] \notin Live
-    /\ appr /= "pending" /\ job /= "read"
+    /\ job \notin {"read", "written"}
 
 Terminated == Done /\ UNCHANGED vars
 
 Next ==
     \/ \E m \in Msgs : Compose(m) \/ Flush(m) \/ Resend(m) \/ Ask(m) \/ Claim(m) \/ Finish(m)
     \/ \E c \in Clients :
-          \/ Connect(c) \/ Drop(c) \/ Answer(c) \/ AppRead(c) \/ Join(c)
+          \/ Connect(c) \/ Drop(c) \/ Answer(c) \/ ClientRead(c) \/ SendPage(c) \/ Join(c)
           \/ \E m \in Msgs : Cancel(c, m)
-    \/ ApprovalTimeout \/ EndpointNext \/ JobRead \/ JobInsert
+    \/ TurnsNext \/ Expire \/ JobRead \/ JobWrite \/ JobAnnounce
     \/ Terminated
 
-\* Fairness only on what Fermix drives: the apps' reconnect loop, their
-\* reading of the socket and their outbox, the handlers, the Endpoint, a
-\* running turn, and the approval's timer. None on users (typing,
-\* answering, cancelling, retrying), on drops, or on the job reporting back.
+\* Fairness only on what Fermix drives: the clients' reconnect loop, their
+\* reading of the socket and their outbox, the Connections, Turns, a running
+\* turn, and the job's announcement once its row is written. None on users
+\* (typing, answering, cancelling, retrying), on drops, on time, or on the
+\* job reporting back.
 Fairness ==
-    /\ \A c \in Clients : WF_vars(Connect(c)) /\ WF_vars(AppRead(c)) /\ WF_vars(Join(c))
+    /\ \A c \in Clients :
+          /\ WF_vars(Connect(c)) /\ WF_vars(ClientRead(c))
+          /\ WF_vars(SendPage(c)) /\ WF_vars(Join(c))
     /\ \A m \in Msgs : WF_vars(Flush(m)) /\ WF_vars(Claim(m)) /\ WF_vars(Finish(m))
-    /\ WF_vars(EndpointNext) /\ WF_vars(ApprovalTimeout)
+    /\ WF_vars(TurnsNext) /\ WF_vars(JobAnnounce)
 
 Spec == Init /\ [][Next]_vars /\ Fairness
 
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* Design claim: a msg is run at most once. Read as: no client_msg_id is ever
-\* handed to the Queue twice, however often it reaches the Endpoint.
+\* PROTOCOL.md "Delivery and the outbox": a resend "is answered accepted with
+\* duplicate: true and never runs the turn twice". Read as: no client_msg_id
+\* is ever handed to the Queue twice.
 RunAtMostOnce == \A m \in Msgs : handed[m] <= 1
 
-\* Design claim: a msg is acknowledged at least once. Read as: every message a
-\* user typed is eventually acknowledged to the app that sent it.
+\* PROTOCOL.md: msg is at-least-once from the companion, and accepted is the
+\* point after which it stops resending. Read as: every message a user typed
+\* is eventually acknowledged to the client that sent it.
 AckAtLeastOnce ==
     \A m \in Msgs : (m \in composed) ~> (m \notin outbox[Owner(m)])
 
-\* The app c has caught up: connected, subscribed, nothing on its socket, no
-\* pull outstanding, and the Endpoint has fanned out every row written.
+\* Client c has caught up and the conversation is at rest: c is connected
+\* and joined, nothing is on its way to it, no pull or page is outstanding,
+\* Turns has announced every outcome, no turn waits or runs, and no job row
+\* waits for its announcement.
 Quiet(c) ==
     /\ link[c] = "up" /\ sub[c] = "yes"
-    /\ wire[c] = <<>> /\ ~pulling[c]
-    /\ epbox = <<>>
+    /\ wire[c] = <<>> /\ ~pulling[c] /\ reading[c] = None
+    /\ turnsBox = <<>> /\ qpending = <<>>
+    /\ \A m \in Msgs : turn[m] \notin Live
+    /\ job /= "written"
 
-\* Design claim: a client that reconnects ends up with every row in order,
-\* with no gap and no duplicate. Read as: every app shows a prefix of the
-\* timeline at all times, and the whole timeline once it has caught up.
+\* PROTOCOL.md "Keeping a client's timeline": no row "can fall between a page
+\* and the live events", and a client that follows the rules shows the rows
+\* in order. Read as: every client shows a gapless, duplicate-free prefix of
+\* the timeline at all times, and all of it once it and the conversation are
+\* at rest.
 TimelineConverges ==
     \A c \in Clients :
         /\ Len(view[c]) <= Len(tl) /\ view[c] = SubSeq(tl, 1, Len(view[c]))
         /\ Quiet(c) => view[c] = tl
 
-\* Design claim: a cancel for a running turn yields turn_error, never a
-\* text_done after it for the same turn.
+\* PROTOCOL.md "Streaming a turn": a turn ends on the wire exactly once, only
+\* from its outcome. Read as: no text_done follows a turn_error{cancelled}
+\* for the same turn.
 NoDoneAfterCancel ==
     \A m \in Msgs : \A i, j \in 1..Len(ends[m]) :
         (i < j /\ ends[m][i] = "cancelled") => ends[m][j] /= "done"
 
-\* Design claim: an approval is answered exactly once, by whichever client
-\* answers first; a late second answer is ignored. Safety half: at most one
-\* answer (or its timeout) is ever applied.
+\* take/1 is "the sole consume authority" (confirmations.ex:28-31). Read as:
+\* at most one answer to an approval is ever applied, whoever sends it and
+\* however late.
 ApprovalAnsweredOnce == applied <= 1
 
-\* Design claim: a delivery appended while no client is connected is pulled
-\* by the next connect. Read as: every app eventually shows the delivery row.
+\* PROTOCOL.md "One timeline with the phone": a job's result "is written
+\* there whether or not a client is connected". Read as: every client
+\* eventually shows the delivery row.
 OfflineDeliveryArrives ==
     \A c \in Clients : (dseq /= 0) ~> (dseq \in Range(view[c]))
 
-\* Design claim: every row gets a strictly increasing server_seq.
+\* PROTOCOL.md: server_seq comes from "a per-profile counter that never goes
+\* back ... no two rows share one".
 SeqStrictlyIncreasing == \A i \in 1..Len(tl) - 1 : tl[i] < tl[i + 1]
 
-\* Design claim (the Queue's rule, as the apps see it): the shared
-\* conversation runs one turn at a time, so the wire never streams two turns.
+\* queue.ex moduledoc: "Each conversation runs at most one active turn", as
+\* the clients see it: the wire never streams two turns of the conversation.
 OneTurnOnTheWire == Cardinality({m \in Msgs : turn[m] \in Live}) <= 1
 
-\* Proposed rule: cancel{turn_id} ends only the turn it names. Read as: no
-\* turn is told cancelled unless a cancel named it.
-CancelEndsOnlyNamedTurn ==
+\* PROTOCOL.md: cancel "never stops another turn" (turn_queue's rule of the
+\* same name, on the Queue's outcomes). Read as: no turn is told cancelled
+\* unless a cancel named its message.
+OnlyNamedTurnCancelled ==
     \A m \in Msgs : "cancelled" \in Range(ends[m]) => m \in cancelAsked
 
 -----------------------------------------------------------------------------
 (* WITNESSES: each is violated when its scenario is reachable. *)
 
-\* Both apps answered the one approval: one answer resolved it, and the
-\* other raced it.
+\* Both clients' answers to the one approval reached the take.
 Witness_ApprovalRace == ~(answeredBy = Clients)
 
-\* A resend of a message reached the Endpoint while that message's own turn
-\* was alive.
+\* A resend was claimed while its message's own turn was alive.
 Witness_ResendWhileRunning == ~dupWhileRunning
 
-\* Live rows reach an app out of seq order: a row is on its socket behind a
-\* row with a higher seq (the job's row is fanned out after a row the
-\* Endpoint wrote later).
+\* Live rows reach a client out of seq order: a row is on its way behind a
+\* row with a higher seq (the job's row announced after a later reply's).
 Witness_LiveRowsOutOfOrder ==
     ~(\E c \in Clients : \E i, j \in 1..Len(wire[c]) :
         /\ i < j /\ wire[c][i][1] = "row" /\ wire[c][j][1] = "row"
         /\ wire[c][j][2] < wire[c][i][2])
 
-\* A page and a live row carry the same row to one app.
+\* A page and a live row carry the same row to one client.
 Witness_PageOverlapsLive ==
     ~(\E c \in Clients : \E i, j \in 1..Len(wire[c]) :
         /\ wire[c][i][1] = "page" /\ wire[c][j][1] = "row"
