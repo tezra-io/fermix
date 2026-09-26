@@ -92,7 +92,7 @@ defmodule FermixChannels.Mobile.EventRouter do
              client_id,
              type,
              payload,
-             store_opts(opts, authenticated_device_id: device_id)
+             store_opts(opts, transport: "mobile", authenticated_device_id: device_id)
            ) do
         {:ok, {:claimed, request}} ->
           _ =

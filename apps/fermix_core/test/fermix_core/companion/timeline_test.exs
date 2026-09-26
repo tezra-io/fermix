@@ -985,6 +985,7 @@ defmodule FermixCore.Companion.TimelineTest do
         repo: repo,
         agent_id: "agent-a",
         owner_id: "owner-a",
+        transport: "mobile",
         authenticated_device_id: "device-a"
       ],
       extra

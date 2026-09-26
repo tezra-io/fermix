@@ -46,6 +46,7 @@ defmodule FermixCore.Memory.Repo do
   @job_runs_pending_delivery_migration_version 30
   @release_wedged_jobs_migration_version 31
   @computer_history_purges_migration_version 32
+  @companion_migration_version 33
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -680,9 +681,23 @@ defmodule FermixCore.Memory.Repo do
           required(:profile_id) => String.t()
         }
 
-  @type mobile_owner_selector :: %{
+  @type mobile_transport_selector :: %{
           required(:agent_id) => String.t(),
-          required(:owner_id) => String.t()
+          required(:owner_id) => String.t(),
+          required(:transport) => String.t()
+        }
+
+  @type mobile_search_page :: %{
+          hits: [
+            %{
+              server_seq: pos_integer(),
+              role: String.t(),
+              created_at: DateTime.t(),
+              excerpt: String.t(),
+              ranges: [%{start: non_neg_integer(), length: non_neg_integer()}]
+            }
+          ],
+          next_before_seq: pos_integer() | nil
         }
 
   @type mobile_timeline_attrs :: %{
@@ -739,6 +754,7 @@ defmodule FermixCore.Memory.Repo do
           authenticated_device_id: String.t() | nil,
           runner_epoch: String.t() | nil,
           attempt: non_neg_integer(),
+          transport: String.t(),
           claimed_at: DateTime.t(),
           expires_at: DateTime.t(),
           updated_at: DateTime.t()
@@ -1180,6 +1196,28 @@ defmodule FermixCore.Memory.Repo do
     call({:get_mobile_history, selector, after_seq, limit}, opts)
   end
 
+  @spec get_mobile_history_before(mobile_profile_selector(), pos_integer(), 1..200, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def get_mobile_history_before(selector, before_seq, limit, opts \\ [])
+      when is_map(selector) and is_integer(before_seq) and before_seq > 0 and
+             is_integer(limit) and limit > 0 and limit <= 200 do
+    call({:get_mobile_history_before, selector, before_seq, limit}, opts)
+  end
+
+  @spec search_mobile_timeline(
+          mobile_profile_selector(),
+          String.t(),
+          pos_integer() | nil,
+          pos_integer(),
+          keyword()
+        ) :: {:ok, mobile_search_page()} | {:error, term()}
+  def search_mobile_timeline(selector, query, before_seq, limit, opts \\ [])
+      when is_map(selector) and is_binary(query) and
+             (is_nil(before_seq) or (is_integer(before_seq) and before_seq > 0)) and
+             is_integer(limit) and limit > 0 do
+    call({:search_mobile_timeline, selector, query, before_seq, limit}, opts)
+  end
+
   @spec mobile_history_head(mobile_profile_selector(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def mobile_history_head(selector, opts \\ []) when is_map(selector) do
@@ -1258,7 +1296,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   @spec get_recoverable_mobile_client_requests(
-          mobile_owner_selector(),
+          mobile_transport_selector(),
           String.t(),
           1..200,
           DateTime.t(),
@@ -3015,6 +3053,16 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:get_mobile_history_before, selector, before_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.history_before(&1, selector, before_seq, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:search_mobile_timeline, selector, query, before_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.search(&1, selector, query, before_seq, limit))
+    {:reply, reply, state}
+  end
+
   def handle_call({:mobile_history_head, selector}, _from, state) do
     reply = with_connection(state, &MobileSql.history_head(&1, selector))
     {:reply, reply, state}
@@ -3847,8 +3895,25 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_job_run_tool_failures_migration(conn, versions),
          :ok <- apply_job_runs_pending_delivery_migration(conn, versions),
          :ok <- apply_release_wedged_jobs_migration(conn, versions),
-         :ok <- apply_computer_history_purges_migration(conn, versions) do
+         :ok <- apply_computer_history_purges_migration(conn, versions),
+         :ok <- apply_companion_migration(conn, versions) do
       :ok
+    end
+  end
+
+  defp apply_companion_migration(conn, versions) do
+    if Enum.member?(versions, @companion_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.companion_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@companion_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

@@ -16,6 +16,7 @@ defmodule FermixCore.Companion.Timeline do
   @request_ttl_seconds 86_400
   @max_history_limit 200
   @default_history_limit 50
+  @default_search_limit 20
   @default_recovery_limit 50
   @sha256 ~r/\A[0-9a-f]{64}\z/
 
@@ -31,6 +32,13 @@ defmodule FermixCore.Companion.Timeline do
         }
 
   @type request_status :: :running | :completed | :failed
+
+  @typedoc """
+  The transport that claimed a request. A `"mobile"` claim names its
+  Noise-authenticated device in `:authenticated_device_id`; a `"companion"`
+  claim names none, because the 0600 socket is its authentication.
+  """
+  @type transport :: String.t()
 
   @spec append(String.t(), timeline_attrs(), keyword()) ::
           {:ok, Repo.mobile_timeline_row()} | {:error, term()}
@@ -61,16 +69,39 @@ defmodule FermixCore.Companion.Timeline do
     |> Repo.append_mobile_proactive(repo_opts(opts))
   end
 
+  @doc """
+  One page of a profile's timeline, oldest first. `:after_seq` (default 0)
+  pages forward and answers `next_after_seq`; `:before_seq` pages backward
+  from it and answers `next_before_seq` only when an older row exists. The two
+  cursors exclude each other.
+  """
   @spec history_page(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def history_page(profile_id, opts \\ []) when is_binary(profile_id) do
-    after_seq = Keyword.get(opts, :after_seq, 0)
     limit = Keyword.get(opts, :limit, @default_history_limit)
 
-    with :ok <- validate_after_seq(after_seq),
+    with {:ok, cursor} <- history_cursor(opts),
          :ok <- validate_history_limit(limit) do
-      Repo.get_mobile_history(
+      fetch_history(profile_selector(profile_id, opts), cursor, limit, repo_opts(opts))
+    end
+  end
+
+  @doc """
+  Full-text search of a profile's timeline, newest first, below `:before_seq`
+  when given, at most `:limit` hits (default 20). The query is user text; a
+  query with no searchable word matches nothing.
+  """
+  @spec search(String.t(), String.t(), keyword()) ::
+          {:ok, Repo.mobile_search_page()} | {:error, term()}
+  def search(profile_id, query, opts \\ []) when is_binary(profile_id) and is_binary(query) do
+    before_seq = Keyword.get(opts, :before_seq)
+    limit = Keyword.get(opts, :limit, @default_search_limit)
+
+    with :ok <- validate_before_seq(before_seq),
+         :ok <- validate_history_limit(limit) do
+      Repo.search_mobile_timeline(
         profile_selector(profile_id, opts),
-        after_seq,
+        query,
+        before_seq,
         limit,
         repo_opts(opts)
       )
@@ -130,19 +161,18 @@ defmodule FermixCore.Companion.Timeline do
       when is_binary(profile_id) and is_binary(client_msg_id) and is_binary(request_type) do
     claimed_at = now(opts)
 
-    with {:ok, device_id} <- required_option(opts, :authenticated_device_id),
+    with {:ok, claimant} <- claimant(opts),
          {:ok, payload_digest} <- CanonicalJson.digest(payload) do
       Repo.claim_mobile_client_request(
         profile_selector(profile_id, opts),
-        %{
+        Map.merge(claimant, %{
           client_msg_id: client_msg_id,
           request_type: request_type,
           payload: payload,
           payload_digest: payload_digest,
-          authenticated_device_id: device_id,
           claimed_at: claimed_at,
           expires_at: DateTime.add(claimed_at, @request_ttl_seconds, :second)
-        },
+        }),
         repo_opts(opts)
       )
     end
@@ -175,15 +205,17 @@ defmodule FermixCore.Companion.Timeline do
     end
   end
 
+  @doc "Requests the named `:transport` claimed that a boot must recover."
   @spec recoverable_client_requests(String.t(), keyword()) ::
           {:ok, [Repo.mobile_client_request_row()]} | {:error, term()}
   def recoverable_client_requests(runner_epoch, opts \\ []) when is_binary(runner_epoch) do
     limit = Keyword.get(opts, :limit, @default_recovery_limit)
 
     with :ok <- validate_nonempty(runner_epoch, :runner_epoch),
-         :ok <- validate_recovery_limit(limit) do
+         :ok <- validate_recovery_limit(limit),
+         {:ok, transport} <- transport_option(opts) do
       Repo.get_recoverable_mobile_client_requests(
-        owner_selector(opts),
+        Map.put(owner_selector(opts), :transport, transport),
         runner_epoch,
         limit,
         now(opts),
@@ -335,6 +367,59 @@ defmodule FermixCore.Companion.Timeline do
 
   defp validate_after_seq(value) when is_integer(value) and value >= 0, do: :ok
   defp validate_after_seq(value), do: {:error, {:invalid_after_seq, value}}
+
+  defp validate_before_seq(nil), do: :ok
+  defp validate_before_seq(value) when is_integer(value) and value > 0, do: :ok
+  defp validate_before_seq(value), do: {:error, {:invalid_before_seq, value}}
+
+  defp history_cursor(opts) do
+    case {Keyword.fetch(opts, :after_seq), Keyword.fetch(opts, :before_seq)} do
+      {{:ok, _after}, {:ok, _before}} ->
+        {:error, :conflicting_history_cursors}
+
+      {:error, {:ok, before}} ->
+        with :ok <- validate_before_seq(before), do: {:ok, {:before, before}}
+
+      {{:ok, after_seq}, :error} ->
+        with :ok <- validate_after_seq(after_seq), do: {:ok, {:after, after_seq}}
+
+      {:error, :error} ->
+        {:ok, {:after, 0}}
+    end
+  end
+
+  defp fetch_history(selector, {:after, after_seq}, limit, repo_opts),
+    do: Repo.get_mobile_history(selector, after_seq, limit, repo_opts)
+
+  defp fetch_history(selector, {:before, before_seq}, limit, repo_opts),
+    do: Repo.get_mobile_history_before(selector, before_seq, limit, repo_opts)
+
+  defp claimant(opts) do
+    with {:ok, transport} <- transport_option(opts) do
+      claimant(transport, opts)
+    end
+  end
+
+  defp claimant("mobile", opts) do
+    with {:ok, device_id} <- required_option(opts, :authenticated_device_id) do
+      {:ok, %{transport: "mobile", authenticated_device_id: device_id}}
+    end
+  end
+
+  defp claimant("companion", opts) do
+    case Keyword.fetch(opts, :authenticated_device_id) do
+      :error -> {:ok, %{transport: "companion"}}
+      {:ok, device_id} -> {:error, {:invalid_option, :authenticated_device_id, device_id}}
+    end
+  end
+
+  defp transport_option(opts) do
+    case Keyword.fetch(opts, :transport) do
+      {:ok, transport} when transport in ["mobile", "companion"] -> {:ok, transport}
+      {:ok, other} -> {:error, {:invalid_option, :transport, other}}
+      :error -> {:error, {:missing_option, :transport}}
+    end
+  end
 
   defp validate_history_limit(value)
        when is_integer(value) and value > 0 and value <= @max_history_limit,
