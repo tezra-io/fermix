@@ -163,6 +163,42 @@ defmodule FermixChannels.Companion.ConnectionTest do
              Timeline.get_client_request("main", "mac-1", ctx.store_opts)
   end
 
+  test "a message counts once as an inbound companion message, and its resend not again",
+       ctx do
+    test_pid = self()
+    handler = "companion-inbound-#{System.unique_integer([:positive])}"
+
+    :ok =
+      :telemetry.attach_many(
+        handler,
+        [[:fermix, :channel, :parse], [:fermix, :channel, :message]],
+        fn event, measurements, metadata, _config ->
+          if metadata.channel == :companion, do: send(test_pid, {event, measurements, metadata})
+        end,
+        nil
+      )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    client = hello(ctx.socket_path)
+    msg = message("mac-count", "count me once")
+
+    send_line(client, msg)
+    assert %{"type" => "accepted", "duplicate" => false} = recv(client)
+
+    assert_receive {[:fermix, :channel, :parse], %{duration_us: _parse_us}, %{status: :ok}},
+                   2_000
+
+    assert_receive {[:fermix, :channel, :message], %{count: 1, duration_us: us},
+                    %{direction: :inbound}}
+
+    assert is_integer(us) and us >= 0
+
+    send_line(client, msg)
+    assert %{"type" => "accepted", "duplicate" => true} = recv(client)
+    refute_receive {[:fermix, :channel, :message], _measurements, %{direction: :inbound}}, 200
+  end
+
   test "a reused id with other content is a conflict and the connection stays", ctx do
     client = hello(ctx.socket_path)
     send_line(client, message("mac-2", "first"))

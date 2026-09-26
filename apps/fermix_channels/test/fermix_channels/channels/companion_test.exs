@@ -220,6 +220,8 @@ defmodule FermixChannels.Channels.CompanionTest do
   end
 
   test "a turn's replies are written and announced only once the queue completes it" do
+    handler = attach_message_telemetry()
+    on_exit(fn -> :telemetry.detach(handler) end)
     message = track(request_message())
     reply = Companion.build_text_reply(message)
 
@@ -243,9 +245,20 @@ defmodule FermixChannels.Channels.CompanionTest do
                     %{"t" => "text_done", "text" => "the answer", "server_seq" => 42}}
 
     assert_receive {:completed, "main", "mac-1", 3}
+
+    for _row <- 1..2 do
+      assert_receive {:telemetry, %{count: 1, duration_us: us},
+                      %{channel: :companion, direction: :outbound}}
+
+      assert is_integer(us) and us >= 0
+    end
+
+    refute_received {:telemetry, _measurements, %{direction: :outbound}}
   end
 
   test "a cancelled turn ends once, as cancelled, and keeps nothing it held" do
+    handler = attach_message_telemetry()
+    on_exit(fn -> :telemetry.detach(handler) end)
     message = track(request_message())
     reply = Companion.build_text_reply(message)
     result = Companion.build_turn_result(message)
@@ -264,6 +277,7 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:client_output, _profile, _id, _attempt, _key, _attrs}, 100
     refute_received {:completed, _profile, _id, _attempt}
     refute_received {:companion_event, %{"t" => "text_done"}}
+    refute_received {:telemetry, _measurements, %{direction: :outbound}}
   end
 
   test "a failed turn ends with its failure's code" do

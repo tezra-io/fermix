@@ -40,6 +40,8 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Telemetry
 
   @max_ended 64
 
@@ -167,12 +169,17 @@ defmodule FermixChannels.Companion.Turns do
 
   # One held reply becomes its row, fenced to the turn's attempt, and is
   # announced at that row. A failed write is the operator's to read: the turn
-  # still completes, as it did in the conversation's own history.
+  # still completes, as it did in the conversation's own history. The row is the
+  # outbound message, counted as `Companion.send_message/3` counts its own.
   defp write_reply(state, turn, text) do
     attrs = %{in_reply_to: turn.client_id, attempt: turn.attempt, turn_id: turn.turn_id}
 
-    case Output.persist_text(store(state), turn.profile, text, attrs) do
+    {written, duration_us} =
+      Telemetry.timed_us(fn -> Output.persist_text(store(state), turn.profile, text, attrs) end)
+
+    case written do
       {:ok, {:created, row}} ->
+        ChannelTelemetry.emit_message(:companion, :outbound, 1, duration_us)
         Companion.broadcast(turn.profile, Output.text_done(turn.turn_id, row.server_seq, text))
 
       {:ok, {:existing, _row}} ->
