@@ -4,6 +4,15 @@ The release itself is `.github/workflows/release.yml`, fired by a `v*.*.*` tag; 
 per-target smoke gates it runs on every candidate and staged asset live in
 `scripts/release/`.
 
+**What a tag has to name.** `preflight` refuses a tag whose commit is not on `main`
+(`scripts/release/refuse_unmerged_tag.sh`), before anything is built: tag the merge
+commit of the release pull request, after it merges, and merge a hotfix to `main`
+before tagging it. `promote` runs in the `release` environment, so its required
+reviewer approves once per release, and that approval publishes the verified draft.
+`homebrew` runs only after `promote`, in the `homebrew` environment, which holds
+`HOMEBREW_TAP_TOKEN` and is limited to `v*` tags, so the tap moves without a second
+approval and the token reaches no other ref.
+
 ## Install paths to walk before announcing
 
 The release rail proves the *artifact*: it is signed, its checksum matches, it runs,

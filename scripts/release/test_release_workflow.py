@@ -94,6 +94,32 @@ class ReleaseWorkflowTest(unittest.TestCase):
         )
         self.assertNotIn("github.run_attempt", self.release)
 
+    def test_refuses_a_tag_whose_commit_is_not_on_main_before_building(self):
+        preflight = self._job("preflight")
+
+        # Ancestry needs main's history; a depth-one checkout cannot decide it.
+        self.assertRegex(
+            preflight,
+            r"uses: actions/checkout@[0-9a-f]{40} # v\S+\n\s+with:\n(?:\s+#[^\n]*\n)*\s+fetch-depth: 0\n",
+        )
+        self.assertIn("COMMIT: ${{ github.sha }}", preflight)
+        self.assertIn('scripts/release/refuse_unmerged_tag.sh "$COMMIT"', preflight)
+        for job in ("standalone", "linux-packages", "app-engine"):
+            with self.subTest(job=job):
+                self.assertIn("needs: preflight\n", self._job(job))
+
+    def test_only_publishing_waits_on_the_release_environment(self):
+        environments = re.findall(
+            r"^  ([a-z][a-z0-9-]*):\n(?:    [^\n]*\n|\s*\n)*?    environment: (\S+)\n",
+            self.release,
+            re.MULTILINE,
+        )
+        # One approval per release: only promote waits on `release`; the tap job
+        # runs after it in `homebrew`, which holds the tap credential.
+        self.assertEqual(environments, [("promote", "release"), ("homebrew", "homebrew")])
+        self.assertEqual(self.release.count("secrets.HOMEBREW_TAP_TOKEN"), 1)
+        self.assertIn("secrets.HOMEBREW_TAP_TOKEN", self._job("homebrew"))
+
     def test_verifies_the_exact_push_authorized_draft_release(self):
         self.assertIn("release_id: ${{ steps.release.outputs.id }}", self.release)
         self.assertIn(
@@ -223,6 +249,15 @@ class ReleaseWorkflowTest(unittest.TestCase):
         self.assertIn("runs-on: macos-15", self.release)
         self.assertIn("brew install tezra-io/tap/fermix", self.release)
         self.assertIn('fermix --version | grep -F "$version"', self.release)
+
+    def _job(self, name):
+        job = re.search(
+            rf"^  {re.escape(name)}:\n(.*?)(?=^  [a-z][a-z0-9-]*:\n|\Z)",
+            self.release,
+            re.DOTALL | re.MULTILINE,
+        )
+        self.assertIsNotNone(job, f"release.yml has no {name} job")
+        return job.group(1)
 
 
 if __name__ == "__main__":

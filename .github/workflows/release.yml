@@ -13,6 +13,14 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          # The full history of main, so the tag's ancestry can be decided.
+          fetch-depth: 0
+
+      - name: Refuse a tag that is not on main
+        env:
+          COMMIT: ${{ github.sha }}
+        run: scripts/release/refuse_unmerged_tag.sh "$COMMIT"
 
       - name: Refuse published release replacement
         env:
@@ -575,6 +583,10 @@ jobs:
     name: Promote verified release
     needs: [stage-release, verify-published]
     runs-on: ubuntu-24.04
+    # Publishing runs in the `release` environment, so its required reviewer
+    # decides whether a signed release reaches the latest feed; the homebrew
+    # job runs only after this one, so that one approval also releases the tap.
+    environment: release
     permissions:
       contents: write
     steps:
@@ -634,6 +646,10 @@ jobs:
     if: ${{ !contains(github.ref_name, '-') }}
     runs-on: macos-15
     timeout-minutes: 20
+    # A second `release` job would ask for a second approval. The tap token
+    # lives in `homebrew`, an environment limited to v* tags, which only the
+    # owner can create, so it reaches no other ref.
+    environment: homebrew
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
