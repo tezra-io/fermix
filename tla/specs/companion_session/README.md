@@ -4,9 +4,11 @@ Models the companion chat socket (`companion.sock`) for one conversation that
 two clients share:
 - each client's `Companion.Connection`, connecting and dropping at any time;
 - the request path both transports share (`Companion.Requests`): the durable
-  claim, `accepted`, the request coordinator's attempt fence, the user's row,
-  and the hand-off to the Gateway;
-- `Companion.Turns`, which ends every turn on the wire from the Queue's outcome;
+  claim, `accepted`, the request coordinator's attempt fence, and the user's
+  row, announced as it is written;
+- `Companion.Turns`, one process with one mailbox. It hands every turn to the
+  Queue, sends every stop of a turn it handed off, and ends every turn on the
+  wire from the Queue's outcome;
 - the Gateway Queue;
 - the timeline (`FermixCore.Companion.Timeline`, written through
   `Memory.Repo`);
@@ -15,14 +17,17 @@ two clients share:
 
 The clients follow the rules `FermixCore.Companion.Protocol` exports in
 `apps/fermix_core/priv/companion/PROTOCOL.md` ("Keeping a client's timeline",
-"Delivery and the outbox"): an outbox resent on every connection, and a seq
-cursor. `PROTOCOL.md` is pinned whole, so a change to those rules marks the spec
-STALE.
+"Delivery and the outbox"). Each keeps an outbox, resent on every connection,
+and a seq cursor that applies a live row (a `row` or a `text_done`) at
+cursor + 1. `PROTOCOL.md` is pinned whole, so a change to those rules marks the
+spec STALE.
 
-The spec was first written as a design spec, ahead of the code (a075b8c9). It
-was then re-read against the implementation and pinned. COMPANION-1 to
-COMPANION-5 are what the design spec asked of the implementation, with their
-status now. COMPANION-6 and COMPANION-7 are new, found in the re-read.
+The spec was first written as a design spec, ahead of the code (70dc7e86). It
+was then re-read against the implementation, and re-read again after its
+fixes. COMPANION-1 to COMPANION-5 are what the design spec asked of the
+implementation. COMPANION-6 and COMPANION-7 were found in the first re-read,
+and COMPANION-8 in the implementation's own review. All eight are fixed or
+hold in the code.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -33,89 +38,99 @@ them as given:
   `AtMostOneOutcome`);
 - a named stop (`stop_turn`) that ends the named message's turn only, and spares
   it once it has claimed its outcome. This is `turn_queue`'s
-  `OnlyNamedTurnCancelled`, which rests on `StopTurnNamesTurn` (its checks 18,
-  18b, 19 and 19b). This spec uses the same switch and rule names for the same
-  claim, observed on the wire.
+  `OnlyNamedTurnCancelled`, which rests on `StopTurnNamesTurn` (its checks 18
+  to 19b). This spec uses the same switch and rule names for the same claim,
+  observed on the wire.
 
 As in `queue.ex`, a turn starts in the callback that enqueues it or that clears
 the previous turn. It then claims its outcome (after the commit) and invokes it.
 
 **Only the daemon-to-client side of a socket is a queue**: the Connection's
-mailbox, then the socket, in order. Every event a Connection writes except
-`server_hello` reaches it as `{:companion_event, _}` (`connection.ex:124`). A
-client event, the Connection's handling of it, and the request worker, Repo and
-Queue calls it makes are one step. Nothing distinct is lost this way:
+mailbox, then the socket, in order. A client event, the Connection's handling
+of it, and the request worker, Repo and Queue calls it makes are one step, up
+to the worker's call into `Turns`. Nothing distinct is lost this way:
 - A client event lost in a drop looks to the client exactly like one whose
   answer was lost, because the client acts only on answers.
 - An event delivered late is the same as one sent late, and users here cancel,
   answer or resend at any moment.
 
-The one gap inside such a step that matters is modelled: a history page is read
-(one Repo call) and then sent to the Connection's own mailbox
-(`LiveRowsOvertakePage`, COMPANION-6).
+`Turns` is a separate process: hand-offs, cancels and the Queue's outcomes
+queue in its mailbox and are handled in order.
 
 **What the code does, as modelled:**
 - A `msg` is claimed under its `client_msg_id` and answered `accepted` before
-  anything runs (`claim_and_run`, `requests.ex:172-191`). The coordinator then
-  starts one attempt (`acquire_and_run`, `:193-209`). The attempt writes the
-  user's row, which is **not broadcast**: other clients see it through history.
-- `Turns` holds a turn's reply until the Queue's outcome (`turns.ex`):
+  anything runs (`claim_and_run`). The coordinator starts one attempt
+  (`acquire_and_run`). The attempt writes the user's row and announces it to
+  every connection as a `row` (`announce_user_row`). It then calls
+  `Turns.handle_message`.
+- `Turns` hands the turn off in one step of its process (`hand_off`): it reads
+  the request's cancel mark and either ends a marked request with one
+  `turn_error` or enqueues it. A `cancel` marks the request first
+  (`cancel_request`, one Repo call), then asks `Turns`, which sends
+  `Queue.stop_turn` for a turn it handed off, after that turn's enqueue.
+- `Turns` holds a turn's reply until the Queue's outcome:
   - `{:completed}` writes the reply row and broadcasts `text_done{server_seq}`;
   - `{:cancelled}` broadcasts one `turn_error`, which is live-only.
-- `cancel{client_msg_id}` makes the Connection call `Queue.stop_turn`, and it
-  writes nothing itself (`connection.ex:238-246`).
 - Every writer gets `server_seq` from the per-profile counter inside the
-  insert's transaction (`append_in_tx`, `mobile_sql.ex:490-496`).
-- A Connection joins the registry before it writes `server_hello`
-  (`connection.ex:212-221`).
-- A job's row is written and then broadcast by the job's own process
-  (`send_message`, `channels/companion.ex:174-206`).
+  insert's transaction (`append_in_tx`).
+- A Connection joins the registry before it writes `server_hello`. It writes
+  every `history_page` to the socket in the step that read it (`read_opts`).
+- A job's row is written, then announced as a `row` by the job's own process
+  (`send_message` -> `announce_written`).
 - An approval is a single-use token. The first `/confirm` or `/deny` that
-  `take`s it applies the answer and broadcasts `approval_resolved`
-  (`sandbox.ex:223-266`, `:397-414`; `confirmations.ex:21-26`). The turn does
-  not wait on it, and a pending approval is not re-sent at `server_hello`.
+  `take`s it applies the answer and broadcasts `approval_resolved`. The turn
+  does not wait on it, and a pending approval is not re-sent at
+  `server_hello`.
 
 **Environment switches** (set per check):
-- `ClientsCanDisconnect`: a connection drops. What is in the Connection's
-  mailbox or on the socket is lost, and so is a page it read and had not sent.
-  A request worker runs on, since it is not linked. The client keeps its
-  outbox, its view, and any approval card it shows. `MaxDrops` bounds the
-  drops.
+- `ClientsCanDisconnect`: a connection drops, and what is in its mailbox or on
+  the socket is lost. A request worker runs on, since it is not linked. The
+  client keeps its outbox, its view, and any approval card it shows.
+  `MaxDrops` bounds the drops.
 - `MessagesCanBeResent`: a client resends a message it has no `accepted` for
   yet, at any moment on a live connection, at most once per message.
 - `TurnsCanBeCancelled`: a user sends `cancel{client_msg_id}` for any message of
-  the shared conversation, whatever state its turn is in. `MaxCancels` bounds
-  the cancels.
+  the shared conversation, whatever state its request is in. `MaxCancels`
+  bounds the cancels.
 - `DeliveriesWhileOffline`: a scheduled job reports back once, at any moment,
   including while no client is connected.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
-- `OutboxResend`: the client keeps every typed message until accepted, and
-  sends it again on every new connection (`PROTOCOL.md`).
+- `OutboxResend`: the client's outbox, resent on every new connection
+  (`PROTOCOL.md`).
 - `AcceptedDedupe`: a known `client_msg_id` is claimed as a duplicate
-  (`claim_request_in_tx`, `classify_claim`, `mobile_sql.ex:722-741`). The
-  coordinator starts no second attempt of a request running, completed or
-  failed (`request_coordinator.ex:118-125`).
+  (`claim_request_in_tx`, `classify_claim`). The coordinator starts no second
+  attempt of a request running, completed or failed
+  (`request_coordinator.ex:118-125`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`connection.ex:212-221`).
+  `server_hello` (`join`, `connection.ex:211-220`).
+- `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
+  in the step that read it (`read_opts`, `connection.ex:446-450`). `FALSE`
+  sends it through its own mailbox, where a live row sent after the read can
+  overtake it.
+- `AnnouncesEveryRow`: every row written outside a turn's completion is
+  broadcast as a `row` as it is written: the user's row (`announce_user_row`,
+  `connection.ex:434`) and a delivery (`announce_written`,
+  `channels/companion.ex:236`). `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:304-312`).
-- `StopTurnNamesTurn`: `cancel` stops the named message's turn only
+- `StopTurnNamesTurn`: a stop ends the named message's turn only
   (`Queue.stop_turn`, `stop_named_in`, `queue.ex:172`, `:1005-1042`). `FALSE`
-  is the conversation stop (`stop_conversation_runtime`, `:990-994`).
+  is the conversation stop.
+- `CancelMarksRequest`: a cancel is recorded on its request first
+  (`cancel_request`, `mobile_sql.ex:373-401`). `Turns` reads the mark and
+  enqueues in one step (`hand_off`, `turns.ex:166-187`), and sends every stop
+  of a turn it handed off itself, after the enqueue (`turns.ex:117-129`).
+  `FALSE` is the code before 14afcfa6: the Connection called `Queue.stop_turn`
+  directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
   `Turns`; the Connection's cancel writes nothing.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
-  transaction. `FALSE`: a writer reads the counter, then inserts in a second
-  call.
-
-**Timing:** `LiveRowsOvertakePage`. `TRUE` is the real code: a live row can
-reach a Connection's mailbox between its history read and the page it sends to
-that mailbox. `FALSE` forbids that. A check that sets it `FALSE` proves a
-property only for a Connection that writes the page in the step it reads it.
+  transaction (`append_in_tx`, `mobile_sql.ex:538-544`). `FALSE`: a writer
+  reads the counter, then inserts in a second call.
 
 **Bounds** (set per check): `Clients` (always two), `Senders` (the clients
 whose users type), `MsgsPerSender`, `PageLimit` (2), `Approvals` (0 or 1),
@@ -124,21 +139,21 @@ Invariant checks in which both clients type reduce by their symmetry.
 
 ## What holds
 
-**Check 01** (timing idealised) holds with one client typing, a drop, resends,
-and a job reporting back at any moment:
+**Check 01** holds with one client typing, a drop, resends, and a job reporting
+back at any moment:
 - Every client shows a gapless, duplicate-free prefix of the timeline at all
   times, and all of it once it and the conversation are at rest
-  (`TimelineConverges`). This rests on `SeqCursor` (check 02) and
-  `SubscribeBeforePull` (check 03).
+  (`TimelineConverges`). This rests on:
+  - `SeqCursor` (check 02);
+  - `SubscribeBeforePull` (check 03);
+  - `PageWrittenInReadStep` (check 20), COMPANION-6's fix.
 - Every row's seq is higher than the one before (`SeqStrictlyIncreasing`).
   This rests on `SeqAssignedOnInsert` (check 04).
 
-With the real timing, `TimelineConverges` breaks: COMPANION-6 (check 20).
 Witnesses 18 and 19 show why the cursor rule has two halves: live rows arrive
 out of seq order, and a page and a live row can carry the same row.
 
-**Check 05** (timing idealised; its rules do not read it, and it keeps the
-check small) holds with a drop and resends, both clients typing:
+**Check 05** holds with a drop and resends, both clients typing:
 - No message is handed to the Queue twice (`RunAtMostOnce`). This rests on
   `AcceptedDedupe` (check 06).
 - The conversation never runs two turns at once (`OneTurnOnTheWire`). This
@@ -152,71 +167,90 @@ typing:
   (`NoDoneAfterCancel`). This rests on `OutcomeEndsTurn` (check 10).
 - A cancel ends only the turn it names (`OnlyNamedTurnCancelled`). This rests
   on `StopTurnNamesTurn` (check 11), as it does in `turn_queue`.
+- A message whose cancel arrived after its claim and before its hand-off never
+  runs and is never answered (`CancelledRequestNeverRuns`). This rests on
+  `CancelMarksRequest` (check 24), COMPANION-8's fix. Witness 25 reaches that
+  window.
+
+**Check 21** holds in check 09's setup: every client shows the timeline, a
+cancelled message's row included (`TimelineConverges`). This rests on
+`AnnouncesEveryRow` (check 22), COMPANION-7's fix, and still on `SeqCursor`
+(check 23).
 
 **Check 12** holds with both clients shown the approval, a drop, and a cancel:
 at most one answer to it is ever applied (`ApprovalAnsweredOnce`). This rests
-on `SingleAnswer` (check 13). Witness 14 shows both clients answering: one take
-resolves the approval, and the other client, still showing the card, answers
-too and is refused.
+on `SingleAnswer` (check 13). Witness 14 shows both clients answering: one
+take resolves the approval, and the other client, still showing the card,
+answers too and is refused.
 
-**Check 15** (liveness, timing idealised) holds with a drop that can lose any
-answer, and a job reporting back while no client is connected. Fairness is on
-the steps Fermix drives only: the clients' reconnect loop, their reading and
-their outbox, the Connections, `Turns`, a running turn, and the job's
-announcement.
+**Check 15** (liveness) holds with a drop that can lose any answer, and a job
+reporting back while no client is connected. Fairness is on the steps Fermix
+drives only: the clients' reconnect loop, their reading and their outbox, the
+Connections, `Turns`, a running turn, and the job's announcement.
 - Every typed message is acknowledged to the client that sent it
   (`AckAtLeastOnce`). This rests on `OutboxResend` (check 16).
 - Every client shows the delivery (`OfflineDeliveryArrives`). This rests on
-  `SeqCursor` (check 17). With the real timing a delivery can be lost the way
-  COMPANION-6 loses a reply.
+  `SeqCursor` (check 17).
 
 Each `needs` check breaks its rule by this path (states in TLC's
 counterexample):
 
 | Check | Switched off | Counterexample |
 |---|---|---|
-| 02 | `SeqCursor` | 5 states: the job writes row 1 while no client is connected and announces it; the client connects and never pulls it |
-| 03 | `SubscribeBeforePull` | 7 states: the client's page is read before its Connection joins the registry, and a row is broadcast in between |
+| 02 | `SeqCursor` | 5 states: the job writes and announces row 1 while no client is connected; the client connects and never pulls it |
+| 03 | `SubscribeBeforePull` | 7 states: the client's page is read before its Connection joins the registry, and a row is announced in between |
 | 04 | `SeqAssignedOnInsert` | 6 states: the job reads the counter (0), the client's message writes row 1, and the job inserts a second row 1 |
-| 06 | `AcceptedDedupe` | 5 states: a resend on the same connection, before its `accepted` is read, hands a second turn to the Queue |
-| 07 | `OneTurnAtATime` | 7 states: the second client's message starts while the first client's turn runs |
-| 10 | `OutcomeEndsTurn` | 8 states: see COMPANION-3 |
-| 11 | `StopTurnNamesTurn` | 7 states: the second client's turn runs; the first client's user cancels its own message, not yet sent; the conversation stop kills the running turn |
-| 13 | `SingleAnswer` | 12 states: one client's answer takes the token; the other client, still showing the card, answers too and is applied as well |
+| 06 | `AcceptedDedupe` | 7 states: a resend, before its `accepted` is read, is handed to the Queue a second time |
+| 07 | `OneTurnAtATime` | 9 states: the second client's message starts while the first client's turn runs |
+| 10 | `OutcomeEndsTurn` | 9 states: the turn has finished, its `{:completed}` is still in `Turns`' mailbox, and a cancel answered at once is followed by `text_done` |
+| 11 | `StopTurnNamesTurn` | 12 states: a cancelled request is ended at its hand-off; the cancel's stop, still in `Turns`' mailbox, then reaches the Queue as the conversation stop and kills the other client's turn |
+| 13 | `SingleAnswer` | 15 states: one client's answer takes the token; the other, still showing the card, answers too and is applied as well |
 | 16 | `OutboxResend` | a lasso: a drop loses the `accepted`, and the client never sends the message again |
 | 17 | `SeqCursor` | a lasso: the delivery lands while a client is offline, and it never pulls it |
+| 20 | `PageWrittenInReadStep` | 13 states: COMPANION-6's path |
+| 22 | `AnnouncesEveryRow` | 9 states: COMPANION-7's path |
+| 23 | `SeqCursor` | 9 states: a client that connects after a message's row was announced never pulls it |
+| 24 | `CancelMarksRequest` | 6 states: COMPANION-8's path |
 
-The whole spec runs in under a minute with the runner's one worker (40 to 56 s
-on a loaded laptop). The largest checks are 15 (28,363 states and its liveness
-graph, 9 to 13 s), 12 (278,978 states, 6 to 10 s), 05 (269,761 states, 6 to
-9 s), 09 (61,408 states, 3 s) and 01 (99,229 states, 3 s). Every other check
-takes about a second.
+The whole spec runs in under a minute with the runner's one worker (55 s on a
+loaded laptop). The largest checks are 15 (48,771 states and its liveness
+graph, 15 s), 05 (417,556 states, 10 s), 01 (173,999 states, 4 s) and 12
+(131,291 states, 3 s). Every other check takes about a second.
 
-Each `holds` check was also run once by hand, with four workers, with one
-more of an entity its rules are about. All still hold:
+Each `holds` check was also run once by hand, with four workers, with one more
+of an entity its rules are about. All still hold:
 
 | Check | One more | States |
 |---|---|---|
-| 01 | drop (2) | 314,402 |
-| 05 | drop (2) | 1,153,171 |
-| 09 | cancel (2) | 130,172 |
-| 12 | drop (2) | 1,136,097 |
-| 15 | drop (2) | 101,880 |
+| 01 | drop (2) | 513,817 |
+| 05 | drop (2) | 1,697,230 |
+| 09 | cancel (2) | 90,326 |
+| 12 | drop (2) | 526,633 |
+| 15 | drop (2) | 164,236 |
+| 21 | cancel (2) | 90,326 |
 
 ## Not modelled
 
 - `text_delta`, `tool_event`, `turn_started` and `read_state`: live-only, never
   in the timeline, and no rule reads them.
-- `history_search`, and scroll-back through `history_pull{before_seq}`: reads
-  below the cursor that never move it.
+- `history_search` and scroll-back through `history_pull{before_seq}`: reads
+  below the cursor that never move it. `search_results` is written in the
+  reading step like a page (ad41aa23).
 - The phone. Mobile and companion share the timeline but run under different
   channel identities, so live events never cross from one socket to the other.
-  This spec is two clients on `companion.sock`.
+  The phone's rows reach this socket as `row`s (fde9c6bb). This spec is two
+  clients on `companion.sock`.
+- A cancel that arrives before its request is claimed. There is no request to
+  mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
+  guarantee to a cancel after `accepted`, and so does
+  `CancelledRequestNeverRuns`.
 - A failed turn: `{:failed}` ends a turn through the same path as
   `{:cancelled}`.
-- A daemon restart and boot recovery, a Queue crash, and a crash of `Turns` or
-  of a request worker. On a Queue crash, `Turns` ends its turns as
-  `interrupted` (`turns.ex:115-123`).
+- A daemon restart and boot recovery. Recovery hands a request off through the
+  same `Turns` step, so it reads the mark (14afcfa6); the model has no boot
+  step to check that.
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:148-156`),
+  and a crash of `Turns` or of a request worker.
 - The grant resume a confirmed approval re-ingests as a new turn
   (`sandbox.ex` `resume_request`).
 - The LLM and tools, the ConversationStore, attachments, authentication and
@@ -225,138 +259,104 @@ more of an entity its rules are about. All still hold:
 
 ## Findings
 
-Each finding was walked through the code on `feat/companion-chat-wire`
-(a7e3b6ef). None was reproduced on a running daemon or in ExUnit. To see a
-counterexample, run `make -C tla check SPECS=companion_session` and open
-`tla/out/companion_session/<check>.txt`.
+Every finding below was walked through the code on `feat/companion-chat-wire`
+and is fixed there, or holds by construction. None was reproduced on a
+running daemon. The `needs` check named under each brings its counterexample
+back with its fix's mechanism switched off; open
+`tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-1: `cancel` could not be built on `Queue.stop_conversation`
 - **Severity:** medium. One client's cancel stopped the other client's turn.
 - **Status:** fixed (5ab65479, db056576). `Queue.stop_turn/3` stops one message
-  by its id, and `cancel` names the `client_msg_id` because a waiting message
-  has no turn id yet. `turn_queue` models the stop (checks 18 to 19b).
+  by its id, and `cancel` names the `client_msg_id`. `turn_queue` models the
+  stop (checks 18 to 19b).
 - **Checks:** 09 holds; 11 breaks `OnlyNamedTurnCancelled` with the
   conversation stop.
-- **Counterexample (check 11):** the other client's turn runs, and a client's
-  message waits behind it. The client cancels its own waiting message, and the
-  conversation stop kills the running turn too. A second route, confirmed on a
-  variant of the design model: a cancel for a turn that had finished, with its
-  outcome still unread, killed the turn that started next.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
-- **Status:** holds in the code (ed33c3af). `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:212-221`).
-- **Checks:** 01 holds; check 03 breaks `TimelineConverges` with the join after
-  the first page. A row written in between never reaches the client.
+- **Status:** holds in the code (ed33c3af): `join` registers the Connection
+  before it writes `server_hello` (`connection.ex:211-220`).
+- **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
+  first page.
 
 ### COMPANION-3: a cancel must not end the turn on the wire
 - **Status:** fixed (db056576). `Companion.Turns` ends every turn from the
-  Queue's outcome and only from it. It holds a turn's replies until
-  `{:completed}`, which writes the rows and sends `text_done`. `{:cancelled}`
-  and `{:failed, _}` send one `turn_error`, and a dead Queue ends the turn as
-  `interrupted`. The Connection's cancel writes nothing.
-- **Checks:** 09 holds; check 10 breaks `NoDoneAfterCancel` when the cancel is
-  answered with `turn_error` at once: a turn that had finished, with its
-  `{:completed}` still unread, then sends `text_done`.
+  Queue's outcome and only from it, and the Connection's cancel writes nothing.
+- **Checks:** 09 holds; 10 breaks `NoDoneAfterCancel`.
 
 ### COMPANION-4: a client must drop rows at or below its cursor, and pull on a gap
-- **Status:** documented. `PROTOCOL.md` ("Keeping a client's timeline", db056576)
-  gives clients exactly this rule, and the spec models clients that follow it.
-  The clients live outside this repository. COMPANION-6 shows the rule is not
-  enough against the server's page ordering.
-- **Checks:** 01 and 15 hold; 02 and 17 break without the cursor. Witnesses 18
-  and 19 show rows out of order and a page overlapping a live row.
+- **Status:** documented in `PROTOCOL.md`'s client rules. They now apply to
+  every live row, a `row` or a `text_done` (fde9c6bb). The clients live outside
+  this repository.
+- **Checks:** 01, 15 and 21 hold; 02, 17 and 23 break without the cursor.
 
 ### COMPANION-5: `server_seq` must be assigned in the insert
 - **Status:** holds in the code. Every writer (`append_in_tx`) reads and bumps
-  the per-profile counter inside one transactional Repo call, the bump guarded
-  by the value it read (`mobile_sql.ex:490-548`).
-- **Checks:** 01 holds; check 04 breaks `SeqStrictlyIncreasing` when a writer
-  reads the counter and inserts in a second call.
+  the per-profile counter inside one transactional Repo call.
+- **Checks:** 01 holds; 04 breaks `SeqStrictlyIncreasing`.
 
 ### COMPANION-6: a live reply that overtakes a history page is lost
-- **Severity:** medium. The window is short, but the reply a user waits for can
-  stay unshown for as long as the conversation stays quiet.
-- **Status:** open. Recommended fix below.
-- **Check:** 20 (`TimelineConverges`, real timing, 11 states).
+- **Severity:** medium. The window was short, but the reply a user waited for
+  could stay unshown for as long as the conversation stayed quiet.
+- **Status:** fixed (ad41aa23). `history_page` and `search_results` are written
+  to the socket in the step that read them (`read_opts`), so a live row for a
+  row written after the read reaches the socket after the page.
+- **Checks:** 01 holds; 20 (13 states) breaks `TimelineConverges` with the page
+  sent through the Connection's mailbox.
 - **Counterexample (check 20):**
-  1. A client connects and reads `server_hello`. Its pull after cursor 0 is
-     read from the timeline: an empty page, not yet sent to the Connection's
-     mailbox.
-  2. The user's message is claimed and its row written (not broadcast). The
-     turn runs, completes, and `Turns` writes the reply as row 2 and
-     broadcasts its `text_done`. That event lands in the Connection's mailbox
-     ahead of the page.
-  3. The client reads `text_done` 2. Its cursor is 0 and its pull is still
-     out, so by the rule it drops the row.
-  4. The page arrives, empty. The client has caught up and shows neither row.
-- **Code:**
-  - `history_pull` runs `Requests.history` inside the Connection
-    (`connection.ex:192-193`). It reads the page in one Repo call, then emits
-    it through the event sink (`requests.ex:96-107`), which for this client is
-    `send(self(), {:companion_event, page})` (`sink`, `connection.ex:425-428`).
-  - A broadcast from another process lands in the same mailbox
-    (`Channels.Companion.dispatch`, `channels/companion.ex:223-227`, from
-    `write_reply`, `turns.ex:174-191`). One sent after the read but before the
-    self-send is ahead of the page.
-  - `PROTOCOL.md` tells the client to drop a gap row while a pull is out,
-    expecting the page to cover it. A page read before the row was written
-    cannot. `PROTOCOL.md` also claims no row "can fall between a page and the
-    live events"; this one does.
-- **Impact:** the client shows the reply's streamed draft but never its
-  `text_done` row, until another row arrives or it reconnects. A job's delivery
-  can be lost the same way.
-- **Fix (recommended):** the Connection writes `history_page` to the socket in
-  the callback that read it, as it writes `server_hello` (`send_event`,
-  `connection.ex:375-379`), instead of through its own mailbox. Every live event
-  the read missed is then behind the page. With that, check 20 is check 01's
-  setup with the timing idealisation made real: set `LiveRowsOvertakePage` to
-  `FALSE` there, flip check 20 to `holds`, and drop the switch. The client-side
-  alternative (remember a dropped gap and pull again after the page) would
-  need every client to change.
+  1. A client's pull after `server_hello` is read: its page is not yet sent.
+  2. A message's turn completes, and `Turns` writes the reply as row 2 and
+     broadcasts its `text_done`. That lands in the Connection's mailbox ahead
+     of the page.
+  3. The client drops row 2 as a gap, because its pull is still out.
+  4. The page, read before row 2 existed, lacks it. The client is at rest
+     without the reply.
 
-### COMPANION-7: a message whose turn writes no reply stays off every client's timeline
-- **Severity:** low.
-- **Status:** open. Owner question below.
-- **Check:** 21 (`TimelineConverges` with a cancel, timing idealised so the path
-  is this one, 8 states).
-- **Counterexample (check 21):**
-  1. A client sends a message. It is claimed, answered `accepted` (no
-     `server_seq`: the request has no reply row), and its user row 1 is
-     written, not broadcast.
-  2. The client cancels it. The turn stops, and `Turns` broadcasts one
-     `turn_error`.
-  3. The conversation is at rest. No client, the sender included, shows row 1,
-     and none will pull it until a later row reveals the gap.
-- **Code:** `append_user` writes the row and broadcasts nothing
-  (`requests.ex:331-342`). `accepted` carries `server_seq` only once the
-  request has a reply row (`accepted_event`, `requests.ex:523-526`).
-  `turn_error` carries no seq (`fail`, `turns.ex:164-168`). The client pulls
-  only after `server_hello`, while a page says more, and on a gap
-  (`PROTOCOL.md`).
-- **Impact:** the other client never shows a cancelled or failed message until
-  the conversation moves on or it reconnects. The sender knows the message
-  only from its outbox and cannot place it by seq. `PROTOCOL.md` says a user's
-  row reaches other connections only through history, but not that a
-  connected client gets no signal to fetch it.
-- **Owner question:** broadcast the user row when it is written, so every
-  client places it by the cursor rule? The alternative is to put the user
-  row's `server_seq` on `turn_started` and `turn_error`, so a client sees the
-  gap and pulls. That misses a message cancelled while it waited, which never
-  sent `turn_started`. Recommended: broadcast the row.
+### COMPANION-7: a message whose turn writes no reply stayed off every client's timeline
+- **Severity:** low. The other client never showed a cancelled or failed
+  message until the conversation moved on or it reconnected.
+- **Status:** fixed (fde9c6bb). Every row written outside a turn's completion
+  is announced to every connection as a `row` as it is written: the sender's
+  own user row, a slash command's answer, a delivery, and a row the phone
+  writes. `accepted.server_seq` is set only on a duplicate, as the reply's seq.
+- **Checks:** 21 holds; 22 (9 states) breaks `TimelineConverges` with the user
+  row not announced.
+- **Counterexample (check 22):** a client sends a message; its row 1 is written
+  and not announced. The client cancels it before the hand-off, and `Turns`
+  ends it with one `turn_error`. The conversation is at rest, and no client
+  shows row 1.
+
+### COMPANION-8: a cancel between `accepted` and the hand-off was lost
+- **Severity:** medium. A user who cancelled right after `accepted` still got
+  the message run and answered.
+- **Status:** fixed (14afcfa6), found in the implementation's review, not by
+  this spec. The cancel is recorded on the request first (`cancelled_at`,
+  `cancel_request`). `Turns` owns the hand-off: in one step of its process it
+  reads the mark and either ends a marked request with one `turn_error` or
+  enqueues it. It sends every `Queue.stop_turn` itself, after its own
+  enqueue, so a stop never overtakes the turn it names. Boot recovery hands off
+  through the same step (not modelled).
+- **Checks:** 09 holds `CancelledRequestNeverRuns`; 24 (6 states) breaks it
+  with the old code. Witness 25 reaches the window.
+- **Counterexample (check 24):**
+  1. A client's message is claimed, answered `accepted`, and its row written.
+     The worker's hand-off waits in `Turns`' mailbox.
+  2. The client cancels it. The Connection's `Queue.stop_turn` finds no such
+     turn (`not_found`) and nothing else records the cancel.
+  3. `Turns` hands the turn off, and it runs.
 
 ### Design notes
 - **Where `text_done` comes from:** from `{:completed}` in `Turns` (db056576),
   so a stop between the reply callback and the claim (`turn_queue`'s QUEUE-2
-  and QUEUE-3) no longer leaves the timeline holding an answer the history
-  marks as stopped.
+  and QUEUE-3) never leaves the timeline holding an answer the history marks
+  as stopped.
 - **A turn whose outcome is lost:** `Turns` watches the Queue it handed each
-  turn to and ends the turn as `interrupted` on that Queue's `:DOWN`
-  (`turns.ex:115-123`). Not modelled.
-- **`turn_error` is live-only**, as `PROTOCOL.md` says. COMPANION-7 is its
-  consequence for a connected client.
-- **The claim and the user row are two writes.** A daemon restart between them
-  leaves a claim with no row; boot recovery re-runs the request under the
+  turn to and ends the turn as `interrupted` on that Queue's `:DOWN`. Not
+  modelled.
+- **`turn_error` is live-only and carries no seq.** Since fde9c6bb the user's
+  row reaches every client anyway, as a `row`.
+- **The claim and the user row are two writes.** A restart between them
+  leaves a claim with no row. Boot recovery re-runs the request under the
   attempt fence, and the row is written then. Not modelled.
 - **Approvals:** a pending approval is not re-sent at `server_hello`, so a
   client that connects after the card was broadcast never sees it. A confirmed
