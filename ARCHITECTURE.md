@@ -598,7 +598,9 @@ Current channels:
   the durable `client_msg_id` claim, the attempt fence, ingest, history, search)
   and one set of turn outputs (`Companion.Output`); each transport's
   `Mobile.RequestCoordinator` instance reruns only its own unfinished requests
-  at boot.
+  at boot. A companion-socket turn reaches the Queue through `Companion.Turns`,
+  which writes its replies and sends `text_done` only on the `{:completed}`
+  outcome, and its `cancel` stops one named turn (`Queue.stop_turn/3`).
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`).
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
@@ -699,8 +701,11 @@ turns' results, so `Acp.Peer` watches the Queue process it handed each prompt
 to and answers the prompt as a failed turn. Mobile's `RequestCoordinator`
 fences the request on the Queue it finds after the hand-off and releases it when
 that Queue dies (a restart between the hand-off and that lookup leaves the
-attempt running until its fence expires). Voice does not watch (accepted: a
-call is bounded and the operator can cancel it).
+attempt running until its fence expires). `Companion.Turns` watches the Queue
+it handed each companion-socket turn to, ends the turn as `interrupted` when
+that Queue dies, and holds the request's fence itself, so the request is failed
+once rather than released. Voice does not watch (accepted: a call is bounded
+and the operator can cancel it).
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
 dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s
