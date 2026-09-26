@@ -35,7 +35,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ b3e57e29ef6e
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 380824457212
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 99d38bb9b68a
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ a754ccf98ee0
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ b47e2ecccdff
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 1c7fd078986a
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ c861328f6405
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ d51525cb631d
@@ -178,7 +178,7 @@ SweptTo ==
 
 \* The platform puts the reminder in front of the user. The companion timeline
 \* drops a second message with the same key (output.ex:159-161, which the
-\* mobile and companion adapters write through -> mobile_sql.ex:170-180,
+\* mobile and companion adapters write through -> mobile_sql.ex:181-191,
 \* unique index :48-50); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0
 Show ==
