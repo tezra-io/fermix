@@ -38,16 +38,37 @@ defmodule FermixCore.Plugins.Dist.LockTest do
     assert File.exists?(lock), "a live lock must not be removed"
   end
 
+  # The owner's call outlasts `attempts × delay_ms` by a fixed slack, so the
+  # retries end on that clock, not after a count of tries: each try's own file
+  # calls take time a count does not see, and on a loaded machine a hundred of
+  # them outlasted the slack and exited the caller while the owner was still
+  # retrying. With no delay, every try is all overhead.
+  test "refuses a held lock on the budget's clock, however long each try takes", %{lock: lock} do
+    File.write!(lock, "someone else\n")
+
+    assert {:error, :lock_unavailable} =
+             Lock.with_lock(lock, fn -> :should_not_run end,
+               attempts: 10_000_000,
+               delay_ms: 0,
+               stale_after_ms: 600_000
+             )
+
+    assert File.exists?(lock), "a live lock must not be removed"
+  end
+
   test "breaks a stale lock (older than the threshold) and proceeds", %{lock: lock} do
     File.write!(lock, "crashed holder\n")
     # backdate the lock's mtime well past the stale threshold
     old = System.os_time(:second) - 10_000
     File.touch!(lock, old)
 
+    # The budget is wall-clock time, so it has to cover the try that breaks the
+    # lock and the one after it on a loaded machine; the second try takes the
+    # lock one delay after the first.
     assert :done =
              Lock.with_lock(lock, fn -> :done end,
-               attempts: 5,
-               delay_ms: 1,
+               attempts: 100,
+               delay_ms: 10,
                stale_after_ms: 1_000
              )
 
