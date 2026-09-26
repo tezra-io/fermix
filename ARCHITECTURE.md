@@ -581,7 +581,7 @@ Current channels:
   `FermixCore.Acp.Identity`.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
-  `FermixCore.Mobile.Store` keeps each profile's synced timeline apart from
+  `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
   conversation history.
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`).

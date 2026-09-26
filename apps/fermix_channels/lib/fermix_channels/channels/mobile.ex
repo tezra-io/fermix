@@ -22,7 +22,7 @@ defmodule FermixChannels.Channels.Mobile do
   alias FermixChannels.Mobile.Push
   alias FermixChannels.Mobile.Unfurl
   alias FermixChannels.Telemetry, as: ChannelTelemetry
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
   alias FermixCore.Telemetry
 
@@ -802,7 +802,7 @@ defmodule FermixChannels.Channels.Mobile do
     |> maybe_put("caption", value(media, :caption))
   end
 
-  defp store, do: Application.get_env(:fermix_channels, :mobile_store, Store)
+  defp store, do: Application.get_env(:fermix_channels, :mobile_store, Timeline)
 
   defp emit(profile_id, event) do
     case Application.get_env(:fermix_channels, :mobile_event_sink) do

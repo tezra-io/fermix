@@ -2,7 +2,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   @moduledoc """
   Serializes durable mobile-request ownership for one daemon boot.
 
-  The random boot epoch is persisted by `FermixCore.Mobile.Store` when work is
+  The random boot epoch is persisted by `FermixCore.Companion.Timeline` when work is
   started. On restart, accepted work and work owned by an older epoch is
   recovered from its stored authenticated request envelope. Requests already
   running in this epoch are never started twice.
@@ -20,7 +20,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   require Logger
 
   alias FermixChannels.Mobile.EventRouter
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
 
   @default_recovery_limit 200
   @default_max_recovery_batches 100
@@ -68,7 +68,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   def init(opts) do
     state = %{
       epoch: boot_epoch(opts),
-      store: Keyword.get(opts, :store, Store),
+      store: Keyword.get(opts, :store, Timeline),
       store_opts: Keyword.get(opts, :store_opts, []),
       recovery_limit: recovery_limit(opts),
       max_recovery_batches: max_recovery_batches(opts),

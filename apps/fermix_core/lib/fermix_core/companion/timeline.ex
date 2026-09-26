@@ -1,10 +1,12 @@
-defmodule FermixCore.Mobile.Store do
+defmodule FermixCore.Companion.Timeline do
   @moduledoc """
-  Durable, append-only storage for mobile companion profiles.
+  Durable, append-only timeline of a companion profile: the one conversation the
+  phone (mobile channel) and the Mac (companion socket) both show.
 
   This timeline is intentionally separate from the mutable conversation context:
   compaction and `/new` may rewrite prompt history, but they cannot rewrite rows
-  already synchronized to a phone.
+  already synchronized to a client. The rows live in the `mobile_*` tables, whose
+  names predate the companion socket.
   """
 
   alias FermixCore.Memory.Config

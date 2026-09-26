@@ -16,7 +16,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
   alias FermixCore.Telemetry
 
   @type ingress_context :: %{
@@ -591,7 +591,7 @@ defmodule FermixChannels.Mobile.EventRouter do
     end
   end
 
-  defp store(opts), do: Keyword.get(opts, :store, Store)
+  defp store(opts), do: Keyword.get(opts, :store, Timeline)
   defp gateway(opts), do: Keyword.get(opts, :gateway, Gateway)
   defp coordinator(opts), do: Keyword.get(opts, :coordinator, RequestCoordinator)
 
