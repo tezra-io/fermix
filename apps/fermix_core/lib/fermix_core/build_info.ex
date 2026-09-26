@@ -8,6 +8,7 @@ defmodule FermixCore.BuildInfo do
   consulted when reporting artifact identity.
   """
 
+  alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Realtime.Protocol, as: RealtimeProtocol
 
@@ -143,12 +144,13 @@ defmodule FermixCore.BuildInfo do
   @spec linux_package?() :: boolean()
   def linux_package?, do: @distribution_identity == "linux_package"
 
-  @doc "Returns management and Realtime ranges from their wire authorities."
+  @doc "Returns the management, Realtime and companion ranges from their wire authorities."
   @spec protocols() :: map()
   def protocols do
     %{
       management: protocol_metadata(ManagementProtocol),
-      realtime: protocol_metadata(RealtimeProtocol)
+      realtime: protocol_metadata(RealtimeProtocol),
+      companion: protocol_metadata(CompanionProtocol)
     }
   end
 

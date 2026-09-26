@@ -16,7 +16,13 @@ defmodule FermixChannels.Gateway.Channel do
           parse_mode: String.t(),
           message_thread_id: String.t() | integer(),
           thread_ts: String.t(),
-          reply_markup: map()
+          reply_markup: map(),
+          turn_id: String.t() | nil,
+          in_reply_to: String.t() | nil,
+          attempt: non_neg_integer() | nil,
+          request_type: String.t() | nil,
+          proactive_key: String.t(),
+          proactive_part_id: String.t()
         ]
 
   @type media_part :: Reply.media_part()

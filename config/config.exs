@@ -121,6 +121,7 @@ config :fermix_core, :jobs,
     "signal" => FermixChannels.Channels.Signal,
     "whatsapp" => FermixChannels.Channels.WhatsApp,
     "mobile" => FermixChannels.Channels.Mobile,
+    "companion" => FermixChannels.Channels.Companion,
     "cli" => FermixChannels.CLI
   }
 

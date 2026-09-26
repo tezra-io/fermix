@@ -1044,6 +1044,15 @@ defmodule FermixChannels.Gateway.QueueTest do
 
   defp key(chat_id), do: {"telegram", chat_id, :root}
 
+  # A message with the identity a named stop matches on, in conversation c1,
+  # whose outcome is reported tagged with its content.
+  defp named_msg(content, test_pid) do
+    content
+    |> make_msg("c1", test_pid)
+    |> Map.put(:id, content)
+    |> tagged_turn_result(test_pid)
+  end
+
   # Tags each outcome with its message, since a stop fires several at once from
   # separate processes, in no fixed order.
   defp tagged_turn_result(msg, test_pid) do
@@ -1184,6 +1193,96 @@ defmodule FermixChannels.Gateway.QueueTest do
     test "returns :not_found for a conversation with nothing active or pending", ctx do
       queue = start_queue(ctx)
       assert {:ok, :not_found} = Queue.stop_conversation(key("never_seen"), queue)
+    end
+  end
+
+  # A stop that names one message: two clients sharing one conversation must
+  # never stop each other's turn, and a stop that arrives after its turn ended
+  # must never reach the turn that started next.
+  describe "stop_turn/3" do
+    test "stops the named active turn and starts the one waiting behind it", ctx do
+      store = start_supervised!({StubStore, test_pid: ctx.test_pid}, id: :stop_turn_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, named_msg("a", ctx.test_pid))
+      Queue.enqueue(queue, named_msg("b", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      ref_a = Process.monitor(pid_a)
+
+      assert {:ok, :stopped} = Queue.stop_turn(key("c1"), "a", queue)
+
+      assert_receive {:DOWN, ^ref_a, :process, ^pid_a, _reason}, 5_000
+      assert_receive {:turn_result, "a", {:cancelled}}, 5_000
+      assert_receive {:marker_appended, marker}, 5_000
+      assert marker =~ "stopped"
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+
+      send(pid_b, {:proceed, :reply})
+      assert_receive {:turn_result, "b", {:completed}}, 5_000
+      refute_receive {:turn_result, _content, _outcome}, 300
+    end
+
+    test "drops only the named waiting message", ctx do
+      queue = start_queue(ctx)
+
+      for content <- ["a", "b", "c"], do: Queue.enqueue(queue, named_msg(content, ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      assert eventually(fn -> Queue.status(queue).pending_requests == 2 end)
+
+      assert {:ok, :dequeued} = Queue.stop_turn(key("c1"), "b", queue)
+      assert_receive {:turn_result, "b", {:cancelled}}, 5_000
+      assert Process.alive?(pid_a)
+
+      send(pid_a, {:proceed, :reply})
+      assert_receive {:turn_result, "a", {:completed}}, 5_000
+      assert_receive {:turn_started, "c", pid_c}, 5_000
+      send(pid_c, {:proceed, :reply})
+      assert_receive {:turn_result, "c", {:completed}}, 5_000
+      refute_received {:turn_started, "b", _pid}
+    end
+
+    test "a turn that claimed its outcome is past the named stop", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      msg =
+        "hello"
+        |> named_msg(test_pid)
+        |> Map.put(:turn_result_fn, fn outcome ->
+          send(test_pid, {:claimed, self()})
+
+          receive do
+            :release -> send(test_pid, {:turn_result, "hello", outcome})
+          end
+        end)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:claimed, ^turn_pid}, 5_000
+
+      assert {:ok, :claimed} = Queue.stop_turn(key("c1"), "hello", queue)
+
+      send(turn_pid, :release)
+      assert_receive {:turn_result, "hello", {:completed}}, 5_000
+      refute_receive {:turn_result, "hello", {:cancelled}}, 300
+    end
+
+    test "a stop for a turn that already ended leaves the next turn alone", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, named_msg("a", ctx.test_pid))
+      Queue.enqueue(queue, named_msg("b", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      send(pid_a, {:proceed, :reply})
+      assert_receive {:turn_result, "a", {:completed}}, 5_000
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+
+      assert {:ok, :not_found} = Queue.stop_turn(key("c1"), "a", queue)
+      assert {:ok, :not_found} = Queue.stop_turn(key("never_seen"), "a", queue)
+
+      assert Process.alive?(pid_b)
+      refute_receive {:turn_result, "b", {:cancelled}}, 300
     end
   end
 

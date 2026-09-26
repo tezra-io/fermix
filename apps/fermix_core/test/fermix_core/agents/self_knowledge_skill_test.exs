@@ -107,6 +107,39 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert reference =~ "no setup surface"
   end
 
+  # The companion socket has no setting, so the runtime self-reference must not
+  # invent one, and it must say the app half has not shipped: an owner is never
+  # walked to a chat window that is not there.
+  test "documents the companion chat socket, its boundaries and its reads" do
+    paragraph = companion_paragraph()
+    # The reference is hard-wrapped; a phrase may span a line break.
+    reference = companion_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert paragraph =~ ~s(file: "companion")
+
+    for text <- [paragraph, reference] do
+      assert text =~ "companion.sock"
+      assert text =~ "0600"
+      assert text =~ "client message id"
+      assert text =~ ~s(delivery_mode: "origin")
+      assert text =~ "No released Fermix.app" or text =~ "no released Fermix.app"
+      refute text =~ "[fermix_channels.companion]"
+    end
+
+    for required <- [
+          "still waiting behind another turn, or not yet queued",
+          "/stop",
+          "forward",
+          "backward",
+          "Full-text search",
+          "whether or not the app is connected",
+          "Attachments do not travel",
+          "companion:main"
+        ] do
+      assert reference =~ required, "companion self-knowledge does not mention #{required}"
+    end
+  end
+
   # M34 §4 changes what a whole family of CLI verbs does on an app-managed
   # engine, so the always-loaded body — not only the reference — has to name the
   # mode, the surface the app drives it over, each hand-off, and the migration
@@ -228,6 +261,18 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   defp self_knowledge_path,
     do: Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
 
+  defp companion_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "Companion chat socket"))
+    |> Enum.join("\n\n")
+  end
+
+  defp companion_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/companion.md", __DIR__)
+  end
+
   defp mobile_reference_path do
     Path.expand("../../../priv/skills/self_knowledge/references/mobile.md", __DIR__)
   end
@@ -289,7 +334,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Each externalized feature keeps a stub + loader in the main body.
-    for name <- ~w(coding_harness computer_use mobile plugins voice) do
+    for name <- ~w(coding_harness companion computer_use mobile plugins voice) do
       assert body =~ ~s(file: "#{name}"), "missing stub loader for #{name}"
     end
 

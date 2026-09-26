@@ -38,7 +38,7 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 
 `none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode.
 
-`channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session refuses it outright, so schedule to an explicit channel there.
+`channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session refuses it outright, so schedule to an explicit channel there. From the Mac app's chat it delivers into the companion timeline, written even while the app is closed and caught up when it reconnects (`companion` reference).
 
 A final response of exactly `[SILENT]` delivers nothing and stores no run summary; the run prompt tells it to answer that way when there is nothing new. Under `origin`/`channel` the run can also send files with `send_attachment` and `generate_image` (16 media sends max, always to the job's own destination — `images` reference); under `local`/`none` they refuse first.
 

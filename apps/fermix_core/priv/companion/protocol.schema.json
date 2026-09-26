@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/companion/protocol.schema.json",
+  "title": "Fermix companion chat socket protocol",
+  "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 1,
+  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-max-line-bytes": 65536,
+  "$defs": {
+    "clientEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "client_hello",
+            "msg",
+            "command",
+            "cancel",
+            "history_pull",
+            "history_search",
+            "read_state"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "client_hello" } } },
+          "then": { "$ref": "#/$defs/client_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "msg" } } },
+          "then": { "$ref": "#/$defs/msg" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "command" } } },
+          "then": { "$ref": "#/$defs/command" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "cancel" } } },
+          "then": { "$ref": "#/$defs/cancel" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "history_pull" } } },
+          "then": { "$ref": "#/$defs/history_pull" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "history_search" } } },
+          "then": { "$ref": "#/$defs/history_search" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "read_state" } } },
+          "then": { "$ref": "#/$defs/read_state" }
+        }
+      ]
+    },
+    "serverEvent": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": {
+          "enum": [
+            "server_hello",
+            "accepted",
+            "turn_started",
+            "text_delta",
+            "tool_event",
+            "text_done",
+            "turn_error",
+            "row",
+            "approval",
+            "approval_resolved",
+            "read_state",
+            "history_page",
+            "search_results",
+            "error"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "server_hello" } } },
+          "then": { "$ref": "#/$defs/server_hello" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "accepted" } } },
+          "then": { "$ref": "#/$defs/accepted" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "turn_started" } } },
+          "then": { "$ref": "#/$defs/turn_started" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "text_delta" } } },
+          "then": { "$ref": "#/$defs/text_delta" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "tool_event" } } },
+          "then": { "$ref": "#/$defs/tool_event" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "text_done" } } },
+          "then": { "$ref": "#/$defs/text_done" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "turn_error" } } },
+          "then": { "$ref": "#/$defs/turn_error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "row" } } },
+          "then": { "$ref": "#/$defs/row" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "approval" } } },
+          "then": { "$ref": "#/$defs/approval" }
+        },
+        {
+          "if": {
+            "required": ["type"],
+            "properties": { "type": { "const": "approval_resolved" } }
+          },
+          "then": { "$ref": "#/$defs/approval_resolved" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "read_state" } } },
+          "then": { "$ref": "#/$defs/read_state" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "history_page" } } },
+          "then": { "$ref": "#/$defs/history_page" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "search_results" } } },
+          "then": { "$ref": "#/$defs/search_results" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
+          "then": { "$ref": "#/$defs/error" }
+        }
+      ]
+    },
+    "client_hello": {
+      "type": "object",
+      "required": ["type", "protocol_version"],
+      "properties": {
+        "type": { "const": "client_hello" },
+        "protocol_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "msg": {
+      "type": "object",
+      "description": "The mobile wire's msg shape. text must not be blank, and attach_ids is empty on this wire in version 1.",
+      "required": ["type", "client_msg_id", "profile_id", "text", "attach_ids"],
+      "properties": {
+        "type": { "const": "msg" },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "attach_ids": { "type": "array", "maxItems": 0 }
+      }
+    },
+    "command": {
+      "type": "object",
+      "description": "A slash command, /name args. An approval's approve and deny routes are sent this way.",
+      "required": ["type", "client_msg_id", "profile_id", "name"],
+      "properties": {
+        "type": { "const": "command" },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "name": { "type": "string", "minLength": 1 },
+        "args": { "type": "string" }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "description": "Stops the turn of the named request, running or waiting, and no other. Never answered itself: the turn ends with turn_error (cancelled), or with its text_done if it had already finished.",
+      "required": ["type", "profile_id", "client_msg_id"],
+      "properties": {
+        "type": { "const": "cancel" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "client_msg_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "history_pull": {
+      "type": "object",
+      "description": "Exactly one cursor: after_seq pages forward, before_seq pages backward.",
+      "required": ["type", "profile_id", "limit"],
+      "properties": {
+        "type": { "const": "history_pull" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "after_seq": { "type": "integer", "minimum": 0 },
+        "before_seq": { "type": "integer", "minimum": 1 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
+      },
+      "oneOf": [{ "required": ["after_seq"] }, { "required": ["before_seq"] }]
+    },
+    "history_search": {
+      "type": "object",
+      "description": "Plain-text query; every word must match as a prefix. Newest hits first, below before_seq when given.",
+      "required": ["type", "profile_id", "query", "limit"],
+      "properties": {
+        "type": { "const": "history_search" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "query": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
+        "before_seq": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "read_state": {
+      "type": "object",
+      "description": "Client: advance the read frontier. Server: the frontier, sent to every connection.",
+      "required": ["type", "profile_id", "read_up_to_seq"],
+      "properties": {
+        "type": { "const": "read_state" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "read_up_to_seq": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "server_hello": {
+      "type": "object",
+      "required": ["type", "min_version", "max_version"],
+      "properties": {
+        "type": { "const": "server_hello" },
+        "min_version": { "type": "integer", "minimum": 1 },
+        "max_version": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "accepted": {
+      "type": "object",
+      "description": "Durable receipt for a msg or command; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
+      "required": ["type", "client_msg_id", "duplicate"],
+      "properties": {
+        "type": { "const": "accepted" },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "duplicate": { "type": "boolean" },
+        "server_seq": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "turn_started": {
+      "type": "object",
+      "required": ["type", "profile_id", "turn_id", "in_reply_to"],
+      "properties": {
+        "type": { "const": "turn_started" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "in_reply_to": { "type": "string", "minLength": 1 }
+      }
+    },
+    "text_delta": {
+      "type": "object",
+      "description": "Text to append to the turn's draft, exactly as sent.",
+      "required": ["type", "turn_id", "text"],
+      "properties": {
+        "type": { "const": "text_delta" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" }
+      }
+    },
+    "tool_event": {
+      "type": "object",
+      "required": ["type", "turn_id", "tool", "phase"],
+      "properties": {
+        "type": { "const": "tool_event" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "tool": { "type": "string", "minLength": 1 },
+        "phase": { "enum": ["start", "stop"] },
+        "detail": { "type": "string" }
+      }
+    },
+    "text_done": {
+      "type": "object",
+      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft.",
+      "required": ["type", "turn_id", "server_seq", "text"],
+      "properties": {
+        "type": { "const": "text_done" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "server_seq": { "type": "integer", "minimum": 1 },
+        "text": { "type": "string" }
+      }
+    },
+    "turn_error": {
+      "type": "object",
+      "description": "The turn's terminal failure: code is cancelled after a cancel, interrupted when the daemon lost the turn. Never sent for a turn that sent text_done.",
+      "required": ["type", "turn_id", "code", "message"],
+      "properties": {
+        "type": { "const": "turn_error" },
+        "turn_id": { "type": "string", "minLength": 1 },
+        "code": { "type": "string", "minLength": 1 },
+        "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "row": {
+      "type": "object",
+      "description": "A timeline row written outside a turn's completion (the sender's own message, a slash command's answer, a scheduled delivery, a row written from the phone), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
+      "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
+      "properties": {
+        "type": { "const": "row" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "server_seq": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
+        "client_msg_id": { "type": "string", "minLength": 1 }
+      }
+    },
+    "approval": {
+      "type": "object",
+      "description": "An owner-approval card. The token is submitted but never rendered; the routes are sent back as commands.",
+      "required": [
+        "type",
+        "approval_id",
+        "kind",
+        "text",
+        "token",
+        "ttl_s",
+        "approve_command",
+        "deny_command"
+      ],
+      "properties": {
+        "type": { "const": "approval" },
+        "approval_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "text": { "type": "string", "minLength": 1 },
+        "detail": { "type": "string" },
+        "token": { "type": "string", "minLength": 1 },
+        "ttl_s": { "type": "integer", "minimum": 1 },
+        "approve_command": { "type": "string", "minLength": 1, "maxLength": 1024 },
+        "deny_command": { "type": "string", "minLength": 1, "maxLength": 1024 }
+      }
+    },
+    "approval_resolved": {
+      "type": "object",
+      "required": ["type", "approval_id", "outcome"],
+      "properties": {
+        "type": { "const": "approval_resolved" },
+        "approval_id": { "type": "string", "minLength": 1 },
+        "outcome": { "enum": ["approved", "denied", "expired"] }
+      }
+    },
+    "history_page": {
+      "type": "object",
+      "description": "Messages oldest first. A forward page carries next_after_seq; a backward page carries next_before_seq only when an older row exists.",
+      "required": ["type", "profile_id", "messages", "history_head_seq"],
+      "properties": {
+        "type": { "const": "history_page" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "messages": { "type": "array", "items": { "$ref": "#/$defs/historyMessage" } },
+        "history_head_seq": { "type": "integer", "minimum": 0 },
+        "next_after_seq": { "type": "integer", "minimum": 0 },
+        "next_before_seq": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "search_results": {
+      "type": "object",
+      "description": "Hits newest first; next_before_seq is present only when an older hit exists.",
+      "required": ["type", "profile_id", "query", "hits"],
+      "properties": {
+        "type": { "const": "search_results" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "query": { "type": "string" },
+        "hits": { "type": "array", "items": { "$ref": "#/$defs/searchHit" } },
+        "next_before_seq": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "error": {
+      "type": "object",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not.",
+      "required": ["type", "reason"],
+      "properties": {
+        "type": { "const": "error" },
+        "reason": { "type": "string", "minLength": 1 },
+        "message": { "type": "string" },
+        "field": { "type": "string" },
+        "event": { "type": "string" },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "direction": { "enum": ["client_too_old", "client_too_new"] },
+        "client_version": { "type": "integer" },
+        "min_version": { "type": "integer" },
+        "max_version": { "type": "integer" }
+      }
+    },
+    "historyMessage": {
+      "type": "object",
+      "required": ["server_seq", "role", "content", "ts", "media_refs"],
+      "properties": {
+        "server_seq": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "content": { "type": "string" },
+        "kind": { "type": "string", "minLength": 1 },
+        "ts": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        },
+        "media_refs": { "type": "array", "items": { "$ref": "#/$defs/mediaRef" } },
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "in_reply_to": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object" }
+      }
+    },
+    "mediaRef": {
+      "type": "object",
+      "required": ["ref", "kind", "mime", "size_bytes"],
+      "properties": {
+        "ref": { "type": "string", "minLength": 1 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-fA-F]{64}$" },
+        "kind": { "type": "string", "minLength": 1 },
+        "mime": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0 },
+        "filename": { "type": "string", "minLength": 1 },
+        "caption": { "type": "string", "minLength": 1 }
+      }
+    },
+    "searchHit": {
+      "type": "object",
+      "required": ["server_seq", "role", "ts", "excerpt", "ranges"],
+      "properties": {
+        "server_seq": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "ts": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"
+        },
+        "excerpt": { "type": "string" },
+        "ranges": { "type": "array", "items": { "$ref": "#/$defs/matchRange" } }
+      }
+    },
+    "matchRange": {
+      "type": "object",
+      "description": "A matched span of the excerpt, in Unicode scalar values.",
+      "required": ["start", "length"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "length": { "type": "integer", "minimum": 1 }
+      }
+    }
+  },
+  "anyOf": [{ "$ref": "#/$defs/clientEvent" }, { "$ref": "#/$defs/serverEvent" }]
+}

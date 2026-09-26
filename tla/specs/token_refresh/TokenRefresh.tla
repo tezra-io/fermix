@@ -65,7 +65,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ bae696857f03
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 559c96b83e34
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ ad03752ea118
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 8e38e71db88a
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 4a517539ab3f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_token.ex @ 091e221339b5
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
@@ -75,7 +75,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ e580e287fec4
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 238a61352a4c
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 989e7163313e
-\* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ a72706b8aa1a
+\* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 2a44b8fd3cc2
 \* SOURCE: apps/fermix_core/lib/fermix_core/tools/media/backends/codex_image.ex @ ea4175294f01
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
@@ -217,7 +217,7 @@ Reset(a) ==
     /\ buf' = [buf EXCEPT ![a] = EmptyDoc]
 
 \* The locks: Plugins.Dist.Lock.with_lock (lock.ex:48-57), an O_EXCL
-\* lockfile created and removed by a linked Lock.Owner (:167-181, :151-160).
+\* lockfile created and removed by a linked Lock.Owner (:169-189, :152-161).
 \* A lock whose mechanism is switched off is never taken, so it stays None,
 \* and releasing it changes nothing.
 TakeProfile(a) ==
@@ -470,7 +470,7 @@ LogoutDelete ==
 Killed(b) == IsMgr(b) /\ Prof(b) = LogoutProfile
 Kill(f, v) == [b \in Actors |-> IF Killed(b) THEN v ELSE f[b]]
 \* Lock.Owner traps its holder's exit and removes the lockfile
-\* (lock.ex:141-148, :153-160), so a killed lane's locks go with it.
+\* (lock.ex:142-149, :154-161), so a killed lane's locks go with it.
 Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 
 \* Four cases:

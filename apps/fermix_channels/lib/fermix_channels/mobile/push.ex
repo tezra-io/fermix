@@ -17,7 +17,7 @@ defmodule FermixChannels.Mobile.Push do
   alias FermixChannels.Mobile.Push.Config
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Telemetry
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
   alias Pigeon.APNS.Notification
 
   @info "fermix-push-v1"
@@ -374,7 +374,7 @@ defmodule FermixChannels.Mobile.Push do
   end
 
   defp read_frontier(profile_id, opts) do
-    callback = Keyword.get(opts, :read_frontier, &Store.read_frontier/1)
+    callback = Keyword.get(opts, :read_frontier, &Timeline.read_frontier/1)
     call_dependency(:read_frontier, callback, [profile_id])
   end
 

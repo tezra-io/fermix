@@ -870,8 +870,10 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     # The import spends the Codex CLI's refresh token, so a Codex profile
     # another Fermix process keeps busy refuses it first, and setup says to
-    # retry rather than printing the reason's atom.
-    test "a busy Codex profile refuses the import with the try-again sentence" do
+    # retry rather than printing the reason's atom. The test shortens the lock's
+    # wait.
+    test "a busy Codex profile refuses the import with the try-again sentence", ctx do
+      FermixTestSupport.ProfileLockWait.shorten!(ctx)
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
 

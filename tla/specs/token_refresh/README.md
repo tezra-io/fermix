@@ -531,24 +531,26 @@ grace window.
 - **Lock staleness.** The model never breaks a lock. A lockfile is broken only
   once it looks older than its stale threshold, and each threshold exceeds its
   locked section (see Assumptions). That bound is in wall-clock time: the age
-  is the lockfile's mtime against `System.system_time` (`lock.ex:183-191`). A
+  is the lockfile's mtime against `System.system_time` (`lock.ex:191-199`). A
   system sleep (a closed lid) or a clock step while a holder is live, for
   example mid-refresh, can make its lockfile look stale on wake. A second
   refresher that contends right then (the Codex image backend or a CLI)
   breaks the lock and can present the
   refresh token the woken holder is still consuming. It is rare, and only a
   monotonic, holder-aware lock would rule it out. The stale break is also
-  check-then-remove (`lock.ex:183-191`), so right after a holder dies, two of
+  check-then-remove (`lock.ex:191-199`), so right after a holder dies, two of
   three or more contenders could each come to hold the lock; `SingletonLock`
   documents the same limit. A VM killed while holding a profile lock blocks
   that profile's refreshes, sign-ins, imports and logouts for up to 120 s;
   they fail loudly meanwhile (`:profile_busy`, nothing spent).
 - **A wedged filesystem exits the caller.** `Lock.with_lock` bounds its own
-  calls to the lock owner: `acquire` gets the attempt budget plus 5 s, and
-  `release` gets 5 s (`lock.ex:107-114`, `:196-201`). A filesystem slow enough
-  to outlast them exits the caller instead of returning a tuple; inside the
-  Codex manager that restarts every later child of the top-level
-  `:rest_for_one` tree. `Store` does not catch the exit (Rule 7).
+  calls to the lock owner: `acquire` gets the attempt budget plus 5 s, and the
+  owner starts no try once that budget has passed on the monotonic clock;
+  `release` gets 5 s (`lock.ex:107-114`, `:185-189`, `:204-209`). A filesystem
+  slow enough that one try or the release outlasts them exits the caller
+  instead of returning a tuple; inside the Codex manager that restarts every
+  later child of the top-level `:rest_for_one` tree. `Store` does not catch the
+  exit (Rule 7).
 - **A refresher that waited for the profile lock refreshes again.** Only
   `CodexToken` re-checks under the lock that the entry is still due
   (`codex_token.ex:120-126`). A manager (`token_manager.ex:285-290`) or a

@@ -1,10 +1,11 @@
 defmodule FermixChannels.Mobile.EventRouterTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
-  alias FermixCore.Mobile.Store
 
   defmodule StoreStub do
     def claim_client_request(_profile, "duplicate", _type, _payload, _opts) do
@@ -28,7 +29,16 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       send(self(), {:appended, profile, attrs})
 
       status = if client_id == "stranded", do: :existing, else: :created
-      {:ok, {status, attrs |> Map.put(:client_msg_id, client_id) |> Map.put(:server_seq, 12)}}
+
+      row =
+        Map.merge(attrs, %{
+          role: "user",
+          client_msg_id: client_id,
+          server_seq: 12,
+          created_at: ~U[2026-08-12 12:00:00Z]
+        })
+
+      {:ok, {status, row}}
     end
 
     def settle_client_request(profile, id, status, fields, _opts) do
@@ -262,6 +272,32 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                        "in_reply_to" => 12,
                        "url" => "https://example.com"
                      }}
+  end
+
+  # The Mac's companion connections share the phone's timeline, so the phone's
+  # user row reaches them as it is written.
+  test "a phone's user row is announced to the companion connections", ctx do
+    {:ok, _owner} =
+      Registry.register(Companion.registry(), "main", nil)
+
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "phone-row-1",
+        "profile_id" => "main",
+        "text" => "from the phone",
+        "attach_ids" => []
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "row",
+                      "server_seq" => 12,
+                      "role" => "user",
+                      "text" => "from the phone",
+                      "client_msg_id" => "phone-row-1"
+                    }}
   end
 
   # One wire object, one rule: an absent optional field is an absent key, never
@@ -504,7 +540,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     coordinator =
       start_supervised!(
         {RequestCoordinator,
-         store: Store,
+         store: Timeline,
          store_opts: store_opts,
          recover?: false,
          boot_epoch: "boot-router-kill",
@@ -512,7 +548,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       )
 
     opts = [
-      store: Store,
+      store: Timeline,
       store_opts: store_opts,
       request_coordinator: coordinator,
       gateway: ForwardingGatewayStub,
@@ -537,12 +573,12 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_receive {:media_wait, ^killed, "photo-1"}
 
     assert {:ok, %{status: "running", attempt: 1}} =
-             Store.get_client_request("main", "killed-runner", store_opts)
+             Timeline.get_client_request("main", "killed-runner", store_opts)
 
     kill_and_settle(coordinator, killed)
 
     assert {:ok, %{status: "accepted", attempt: 1, runner_epoch: nil}} =
-             Store.get_client_request("main", "killed-runner", store_opts)
+             Timeline.get_client_request("main", "killed-runner", store_opts)
 
     resend = spawn(fn -> EventRouter.route(event, context, opts) end)
     assert_receive {:media_wait, ^resend, "photo-1"}
@@ -553,7 +589,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert message.metadata.mobile_attempt == 2
 
     assert {:ok, %{status: "running", attempt: 2, runner_epoch: "boot-router-kill"}} =
-             Store.get_client_request("main", "killed-runner", store_opts)
+             Timeline.get_client_request("main", "killed-runner", store_opts)
   end
 
   test "an ingested client event counts one inbound message for the mobile channel", ctx do

@@ -148,6 +148,32 @@ defmodule FermixChannels.Gateway.Queue do
     GenServer.call(server, {:stop_conversation, conversation_key})
   end
 
+  @doc """
+  Stop ONE turn of a conversation, named by the `id` of the message that asked
+  for it; every other turn keeps running or waiting.
+
+  Built for a conversation more than one client shares (the companion chat
+  socket's `cancel`): one client's stop must never end another's turn, and a
+  stop that arrives after its turn already ended must never reach the turn
+  that started next. The rules are `stop_conversation/2`'s, applied to one
+  message:
+
+    * The named turn is active and has not claimed its outcome: it is killed,
+      gets `{:cancelled}` and the stopped-turn marker, and the next waiting
+      message starts. `{:ok, :stopped}`.
+    * The named turn is active and has claimed its outcome: it is past the
+      stop and is left to invoke it. `{:ok, :claimed}`.
+    * The named message is waiting: it alone is dropped with `{:cancelled}`.
+      `{:ok, :dequeued}`.
+    * Otherwise (it already ended, or never arrived): `{:ok, :not_found}`.
+  """
+  @spec stop_turn(ConversationKey.t(), String.t(), GenServer.server()) ::
+          {:ok, :stopped | :claimed | :dequeued | :not_found}
+  def stop_turn(conversation_key, message_id, server \\ __MODULE__)
+      when is_tuple(conversation_key) and is_binary(message_id) do
+    GenServer.call(server, {:stop_turn, conversation_key, message_id})
+  end
+
   # --- GenServer Callbacks ---
 
   @impl true
@@ -195,6 +221,11 @@ defmodule FermixChannels.Gateway.Queue do
   def handle_call({:stop_conversation, conversation_key}, _from, state) do
     {state, result} = stop_one_conversation(state, conversation_key)
     {:reply, result, state}
+  end
+
+  def handle_call({:stop_turn, conversation_key, message_id}, _from, state) do
+    {state, result} = stop_named_turn(state, conversation_key, message_id)
+    {:reply, {:ok, result}, state}
   end
 
   # The single claim point that makes `turn_result_fn` fire exactly once: the
@@ -960,6 +991,54 @@ defmodule FermixChannels.Gateway.Queue do
     {state, active_stopped} = stop_active_turn(state, key, runtime)
     pending_cleared = cancel_pending(runtime.pending)
     {state, %{active_stopped: active_stopped, pending_cleared: pending_cleared}}
+  end
+
+  # The per-message stop: the named turn only, by the same rules as a
+  # conversation stop. The id is the one the Gateway's message carried.
+  defp stop_named_turn(state, conversation_key, message_id) do
+    case Map.get(state.conversations, conversation_key) do
+      nil -> {state, :not_found}
+      runtime -> stop_named_in(state, conversation_key, runtime, message_id)
+    end
+  end
+
+  defp stop_named_in(
+         state,
+         _key,
+         %{active: %{claimed?: true, message: %{id: message_id}}},
+         message_id
+       ),
+       do: {state, :claimed}
+
+  # Killed exactly as a conversation stop kills its active turn, but the
+  # conversation stays: the next waiting message starts in this callback.
+  defp stop_named_in(state, key, %{active: %{message: %{id: message_id}}} = runtime, message_id) do
+    terminate_active(state.task_supervisor, runtime)
+    invoke_turn_result_async(active_turn_result_fn(runtime), {:cancelled})
+    mark_stopped_turn(state, key, runtime)
+
+    state =
+      %{state | task_refs: drop_monitor_ref(state.task_refs, runtime)}
+      |> put_conversation_runtime(key, %{runtime | active: nil})
+      |> maybe_start_next_request(key)
+
+    {state, :stopped}
+  end
+
+  defp stop_named_in(state, key, runtime, message_id) do
+    case Enum.split_with(
+           :queue.to_list(runtime.pending),
+           &(Map.get(&1.message, :id) == message_id)
+         ) do
+      {[], _rest} ->
+        {state, :not_found}
+
+      {named, rest} ->
+        cancel_pending(:queue.from_list(named))
+
+        {put_conversation_runtime(state, key, %{runtime | pending: :queue.from_list(rest)}),
+         :dequeued}
+    end
   end
 
   # A turn that has claimed its outcome is past the stop: it has committed its

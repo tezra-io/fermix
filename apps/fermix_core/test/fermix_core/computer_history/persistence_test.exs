@@ -10,6 +10,7 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.ComputerHistorySql
+  alias FermixCore.Memory.Repo.MobileSql
 
   setup do
     unique = System.unique_integer([:positive])
@@ -319,10 +320,11 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
   describe "migration 28" do
     # A store written by the previous release: the base and job tables plus the
     # four CH tables at migration 27, with one memory row. Proves the upgrade
-    # path, not only a fresh file. The base and job schemas are the real ones
-    # because a later migration may alter one of their tables (29 adds a
-    # `job_runs` column), and a store that claims 27 without the tables 27
-    # implies is not the previous release's store.
+    # path, not only a fresh file. The base, job and mobile schemas are the
+    # real ones because a later migration may alter one of their tables (29
+    # adds a `job_runs` column, 33 a `mobile_client_requests` one), and a store
+    # that claims 27 without the tables 27 implies is not the previous
+    # release's store.
     defp seed_v27_database!(path) do
       {:ok, conn} = Sqlite3.open(path, mode: :readwrite)
 
@@ -336,6 +338,9 @@ defmodule FermixCore.ComputerHistory.PersistenceTest do
 
       :ok = Sqlite3.execute(conn, Repo.base_schema_sql())
       :ok = Sqlite3.execute(conn, Repo.jobs_schema_sql())
+      :ok = Sqlite3.execute(conn, MobileSql.schema_sql())
+      :ok = Sqlite3.execute(conn, MobileSql.client_message_schema_sql())
+      :ok = Sqlite3.execute(conn, MobileSql.attempt_fence_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.events_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.memories_schema_sql())
       :ok = Sqlite3.execute(conn, ComputerHistorySql.state_schema_sql())

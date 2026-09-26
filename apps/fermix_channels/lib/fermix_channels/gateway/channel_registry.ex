@@ -119,6 +119,22 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       transport: :loopback,
       child: nil
     },
+    # The Mac app's chat (`companion.sock`). Like ACP, `remote?: true` keeps a
+    # browser warm across turns of a persistent conversation, and trust comes
+    # from the transport, a 0600 socket under FERMIX_HOME, so there is no inbox
+    # and no allow-list. Slash commands stay on: an approval card's approve and
+    # deny routes are commands. No `child` and no config key: the socket runs
+    # whenever the daemon does, under `Companion.Supervisor`, which
+    # `FermixChannels.Application` starts unconditionally.
+    %{
+      name: "companion",
+      config_key: nil,
+      adapter: FermixChannels.Channels.Companion,
+      remote?: true,
+      trust: :local_operator,
+      transport: :loopback,
+      child: nil
+    },
     %{
       name: "mobile",
       config_key: :mobile,

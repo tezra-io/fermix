@@ -10,7 +10,16 @@ defmodule FermixChannels.Mobile.Protocol do
 
   The canonical cross-repository export lives under `fermix_core/priv/mobile/`.
   The iOS repository vendors those files pinned by checksum.
+
+  The chat events this wire shares verbatim with the companion socket
+  (`FermixCore.Companion.Protocol.shared_client_events/0` and
+  `shared_server_events/0`) are validated by that module, the chat
+  vocabulary's one owner; this module validates the mobile transport's own
+  events (hello, pairing, attachments and media, push, ack, keepalive) and the
+  `history_pull`/`history_page` pair, whose mobile shape has no backward cursor.
   """
+
+  alias FermixCore.Companion.Protocol, as: ChatProtocol
 
   @protocol_version 1
   @min_supported_version max(1, @protocol_version - 1)
@@ -19,7 +28,6 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_plaintext_bytes 65_535 - 16
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
-  @max_approval_command_length 1_024
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command history_pull media_fetch
@@ -33,16 +41,13 @@ defmodule FermixChannels.Mobile.Protocol do
 
   @client_required %{
     "hello" => ~w(device_id app_version last_server_seq protocol_v),
-    "msg" => ~w(client_msg_id profile_id text attach_ids),
     "attach_begin" => ~w(attach_id kind mime size_bytes sha256),
     "attach_chunk" => ~w(attach_id index),
     "attach_end" => ~w(attach_id sha256),
-    "command" => ~w(client_msg_id profile_id name),
     "history_pull" => ~w(profile_id after_seq limit),
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "ack" => ~w(server_seq),
-    "read_state" => ~w(profile_id read_up_to_seq),
     "pair_request" => ~w(device_name model app_version),
     "unpair" => [],
     "ping" => []
@@ -51,21 +56,12 @@ defmodule FermixChannels.Mobile.Protocol do
   @server_required %{
     "hello_ack" =>
       ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
-    "accepted" => ~w(client_msg_id duplicate),
     "attach_status" => ~w(attach_id status),
-    "turn_started" => ~w(profile_id turn_id in_reply_to),
-    "text_delta" => ~w(turn_id text),
-    "tool_event" => ~w(turn_id tool phase),
-    "text_done" => ~w(turn_id server_seq text),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
     "media_chunk" => ~w(ref index),
     "media_end" => ~w(ref sha256),
-    "turn_error" => ~w(turn_id code message),
     "reaction" => ~w(in_reply_to emoji),
-    "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
-    "approval_resolved" => ~w(approval_id outcome),
     "link_preview" => ~w(in_reply_to url site title),
-    "read_state" => ~w(profile_id read_up_to_seq),
     "history_page" => ~w(profile_id messages),
     "notice" => ~w(kind text),
     "pair_approved" => ~w(device_id candidates profiles),
@@ -130,9 +126,7 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- validate_media_cap(max_media_bytes),
          {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, @client_events),
-         :ok <- require_fields(envelope.type, envelope.payload, @client_required),
-         :ok <- validate_envelope_payload(envelope.type, envelope.payload, envelope.version),
-         :ok <- validate_client_payload(envelope.type, envelope.payload, max_media_bytes),
+         :ok <- validate_client_event(envelope, max_media_bytes),
          :ok <- validate_binary(envelope.type, bytes, "attach_chunk") do
       {:ok, Map.put(envelope, :bytes, bytes)}
     end
@@ -159,11 +153,31 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- valid_seq(seq),
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
-         :ok <- require_fields(type, payload, @server_required),
-         :ok <- validate_server_payload(type, payload),
+         :ok <- validate_server_event(type, payload),
          :ok <- validate_binary(type, bytes, "media_chunk"),
          {:ok, frame} <- encode_frame(type, payload, seq, bytes, version) do
       {:ok, frame}
+    end
+  end
+
+  defp validate_client_event(%{type: type, payload: payload, version: version}, max_media_bytes) do
+    if type in ChatProtocol.shared_client_events() do
+      ChatProtocol.validate_client_payload(type, payload)
+    else
+      with :ok <- require_fields(type, payload, @client_required),
+           :ok <- validate_envelope_payload(type, payload, version) do
+        validate_client_payload(type, payload, max_media_bytes)
+      end
+    end
+  end
+
+  defp validate_server_event(type, payload) do
+    if type in ChatProtocol.shared_server_events() do
+      ChatProtocol.validate_server_payload(type, payload)
+    else
+      with :ok <- require_fields(type, payload, @server_required) do
+        validate_server_payload(type, payload)
+      end
     end
   end
 
@@ -262,19 +276,16 @@ defmodule FermixChannels.Mobile.Protocol do
   end
 
   defp validate_client_payload("hello", payload, _max), do: validate_hello(payload)
-  defp validate_client_payload("msg", payload, _max), do: validate_message(payload)
 
   defp validate_client_payload("attach_begin", payload, max),
     do: validate_transfer_begin(payload, max)
 
   defp validate_client_payload("attach_chunk", payload, _max), do: validate_chunk(payload)
   defp validate_client_payload("attach_end", payload, _max), do: validate_transfer_end(payload)
-  defp validate_client_payload("command", payload, _max), do: validate_command(payload)
   defp validate_client_payload("history_pull", payload, _max), do: validate_history_pull(payload)
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
-  defp validate_client_payload("read_state", payload, _max), do: validate_read_state(payload)
   defp validate_client_payload("pair_request", payload, _max), do: validate_pair_request(payload)
   defp validate_client_payload(type, _payload, _max) when type in ~w(unpair ping), do: :ok
 
@@ -284,19 +295,6 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v") do
       :ok
-    end
-  end
-
-  defp validate_message(payload) do
-    with :ok <- nonempty(payload, "client_msg_id"),
-         :ok <- nonempty(payload, "profile_id"),
-         :ok <- binary_field(payload, "text"),
-         :ok <- string_list(payload, "attach_ids") do
-      has_text = String.trim(payload["text"]) != ""
-
-      if has_text or payload["attach_ids"] != [],
-        do: :ok,
-        else: {:error, {:missing_field, "content"}}
     end
   end
 
@@ -322,14 +320,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_command(payload) do
-    with :ok <- nonempty(payload, "client_msg_id"),
-         :ok <- nonempty(payload, "profile_id"),
-         :ok <- nonempty(payload, "name") do
-      optional_binary(payload, "args")
-    end
-  end
-
   defp validate_history_pull(payload) do
     with :ok <- nonempty(payload, "profile_id"),
          :ok <- nonnegative_u64(payload, "after_seq") do
@@ -343,12 +333,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_read_state(payload) do
-    with :ok <- nonempty(payload, "profile_id") do
-      nonnegative_u64(payload, "read_up_to_seq")
-    end
-  end
-
   defp validate_pair_request(payload) do
     with :ok <- nonempty(payload, "device_name"),
          :ok <- nonempty(payload, "model") do
@@ -357,27 +341,14 @@ defmodule FermixChannels.Mobile.Protocol do
   end
 
   defp validate_server_payload("hello_ack", payload), do: validate_hello_ack(payload)
-  defp validate_server_payload("accepted", payload), do: validate_accepted(payload)
   defp validate_server_payload("attach_status", payload), do: validate_attach_status(payload)
 
-  defp validate_server_payload("turn_started", payload),
-    do: strings(payload, ~w(profile_id turn_id in_reply_to))
-
-  defp validate_server_payload("text_delta", payload), do: text_event(payload)
-  defp validate_server_payload("tool_event", payload), do: validate_tool_event(payload)
-  defp validate_server_payload("text_done", payload), do: validate_text_done(payload)
   defp validate_server_payload("media_begin", payload), do: validate_media_begin(payload)
   defp validate_server_payload("media_chunk", payload), do: validate_media_chunk(payload)
   defp validate_server_payload("media_end", payload), do: validate_media_end(payload)
 
-  defp validate_server_payload("turn_error", payload),
-    do: strings(payload, ~w(turn_id code message))
-
   defp validate_server_payload("reaction", payload), do: strings(payload, ~w(in_reply_to emoji))
-  defp validate_server_payload("approval", payload), do: validate_approval(payload)
-  defp validate_server_payload("approval_resolved", payload), do: validate_resolution(payload)
   defp validate_server_payload("link_preview", payload), do: validate_link_preview(payload)
-  defp validate_server_payload("read_state", payload), do: validate_read_state(payload)
   defp validate_server_payload("history_page", payload), do: validate_history_page(payload)
   defp validate_server_payload("notice", payload), do: strings(payload, ~w(kind text))
   defp validate_server_payload("pair_approved", payload), do: validate_pair_approved(payload)
@@ -406,34 +377,9 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp valid_version_range(_payload), do: {:error, {:invalid_field, "version_range"}}
 
-  defp validate_accepted(payload) do
-    with :ok <- nonempty(payload, "client_msg_id") do
-      boolean_field(payload, "duplicate")
-    end
-  end
-
   defp validate_attach_status(payload) do
     with :ok <- nonempty(payload, "attach_id") do
       enum(payload, "status", ~w(upload present))
-    end
-  end
-
-  defp text_event(payload) do
-    with :ok <- nonempty(payload, "turn_id") do
-      binary_field(payload, "text")
-    end
-  end
-
-  defp validate_tool_event(payload) do
-    with :ok <- nonempty(payload, "turn_id"),
-         :ok <- nonempty(payload, "tool") do
-      enum(payload, "phase", ~w(start stop))
-    end
-  end
-
-  defp validate_text_done(payload) do
-    with :ok <- text_event(payload) do
-      positive_u64(payload, "server_seq")
     end
   end
 
@@ -457,21 +403,6 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_media_end(payload) do
     with :ok <- nonempty(payload, "ref") do
       sha256(payload, "sha256")
-    end
-  end
-
-  defp validate_approval(payload) do
-    with :ok <- strings(payload, ~w(approval_id kind text token)),
-         :ok <- positive_integer(payload, "ttl_s"),
-         :ok <- bounded_nonempty(payload, "approve_command", @max_approval_command_length),
-         :ok <- bounded_nonempty(payload, "deny_command", @max_approval_command_length) do
-      optional_binary(payload, "detail")
-    end
-  end
-
-  defp validate_resolution(payload) do
-    with :ok <- nonempty(payload, "approval_id") do
-      enum(payload, "outcome", ~w(approved denied expired))
     end
   end
 
@@ -562,45 +493,9 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp bounded_nonempty(payload, field, max_length) do
-    case Map.get(payload, field) do
-      value when is_binary(value) and value != "" ->
-        if bounded_utf8?(value, max_length),
-          do: :ok,
-          else: {:error, {:invalid_field, field}}
-
-      _value ->
-        {:error, {:invalid_field, field}}
-    end
-  end
-
-  defp bounded_utf8?(value, max_length) do
-    byte_size(value) <= max_length * 4 and
-      String.valid?(value) and
-      codepoint_length(value) <= max_length
-  end
-
-  defp codepoint_length(value), do: value |> String.codepoints() |> length()
-
-  defp binary_field(payload, field) do
-    if is_binary(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
   defp optional_binary(payload, field) do
     value = Map.get(payload, field)
     if is_nil(value) or is_binary(value), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
-  defp string_list(payload, field) do
-    case Map.get(payload, field) do
-      values when is_list(values) ->
-        if Enum.all?(values, &(is_binary(&1) and &1 != "")),
-          do: :ok,
-          else: {:error, {:invalid_field, field}}
-
-      _value ->
-        {:error, {:invalid_field, field}}
-    end
   end
 
   defp list_field(payload, field) do
@@ -609,10 +504,6 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp map_field(payload, field) do
     if is_map(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
-  defp boolean_field(payload, field) do
-    if is_boolean(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
   end
 
   defp positive_integer(payload, field), do: integer_range(payload, field, 1, @max_u64)
