@@ -195,8 +195,10 @@ defmodule Fermix.CLI.AuthCommandTest do
 
     # A sign-in takes the profile lock with the refreshers' bounded wait, so one
     # that meets another Fermix process refreshing or signing in the account
-    # fails in seconds and says to retry, instead of waiting minutes.
-    test "login meeting a busy profile fails with the try-again sentence", %{dir: dir} do
+    # fails in seconds and says to retry, instead of waiting minutes. The test
+    # shortens that wait.
+    test "login meeting a busy profile fails with the try-again sentence", %{dir: dir} = ctx do
+      FermixTestSupport.ProfileLockWait.shorten!(ctx)
       path = Path.join(dir, "auth.json")
       File.write!(Store.profile_lock_path("anthropic_oauth", path), "0 a-refresh\n")
       parent = self()

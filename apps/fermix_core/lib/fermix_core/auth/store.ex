@@ -158,7 +158,7 @@ defmodule FermixCore.Auth.Store do
   def with_profile_lock(provider, path, fun)
       when (is_atom(provider) or is_binary(provider)) and is_binary(path) and
              is_function(fun, 0) do
-    lock(profile_lock_path(provider, path), @profile_lock_opts, :profile_busy, fun)
+    lock(profile_lock_path(provider, path), profile_lock_opts(), :profile_busy, fun)
   end
 
   @doc """
@@ -573,6 +573,20 @@ defmodule FermixCore.Auth.Store do
         _ = File.rm(tmp)
         Logger.warning("Auth.Store: failed to persist — #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  # Test seam: a test that proves the busy sentence sets `:auth_profile_lock_wait`
+  # to a shorter `attempts` and `delay_ms` (`FermixTestSupport.ProfileLockWait`),
+  # so it waits milliseconds, not the 10 s every taker waits. The stale
+  # threshold is never shortened. Unset outside tests.
+  defp profile_lock_opts do
+    case Application.get_env(:fermix_core, :auth_profile_lock_wait) do
+      nil ->
+        @profile_lock_opts
+
+      [attempts: attempts, delay_ms: delay_ms] ->
+        Keyword.merge(@profile_lock_opts, attempts: attempts, delay_ms: delay_ms)
     end
   end
 end

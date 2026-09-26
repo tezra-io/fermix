@@ -331,8 +331,9 @@ defmodule Fermix.CLI.PluginsCommandTest do
 
     # The logout takes the profile lock with the refreshers' bounded wait, so a
     # profile another Fermix process keeps busy fails in seconds with a
-    # sentence, and the grant stays.
+    # sentence, and the grant stays. The test shortens that wait.
     test "a busy profile fails the logout with the try-again sentence", ctx do
+      FermixTestSupport.ProfileLockWait.shorten!(ctx)
       File.write!(Store.profile_lock_path(ctx.profile, Store.path()), "0 a-refresh\n")
       parent = self()
 
