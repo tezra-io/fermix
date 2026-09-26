@@ -37,6 +37,11 @@ defmodule FermixCore.Auth.Store do
   `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s), and
   the Codex import one refresh and one write. The profile lock's threshold is
   120 s, and `store_test.exs` ("lock bounds") holds these bounds.
+
+  A file that does not parse is `{:invalid_json, byte_offset}`. The parse
+  error's own `:data` is the whole file, every profile's tokens, so it never
+  leaves this module: the reason is logged, traced and shown by doctor, and a
+  refused write's `.broken` copy is what keeps the bytes for recovery.
   """
 
   alias FermixCore.Plugins.Dist.Lock
@@ -68,7 +73,7 @@ defmodule FermixCore.Auth.Store do
          {:ok, entry} <- fetch_provider(providers, provider) do
       normalize(provider, entry)
     else
-      {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
       {:error, :enoent} -> {:error, :no_auth_file}
       {:error, _reason} = err -> err
     end
@@ -88,7 +93,7 @@ defmodule FermixCore.Auth.Store do
       {:ok, Enum.flat_map(providers, &normalize_listed/1)}
     else
       {:error, :enoent} -> {:ok, []}
-      {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
       {:error, _reason} = err -> err
     end
   end
@@ -417,8 +422,8 @@ defmodule FermixCore.Auth.Store do
       {:ok, _other} ->
         preserve_and_refuse(path, raw, :unknown_shape)
 
-      {:error, %Jason.DecodeError{} = err} ->
-        preserve_and_refuse(path, raw, {:invalid_json, err})
+      {:error, %Jason.DecodeError{position: at}} ->
+        preserve_and_refuse(path, raw, {:invalid_json, at})
     end
   end
 
@@ -451,7 +456,7 @@ defmodule FermixCore.Auth.Store do
           {:ok, %{"providers" => providers} = data} when is_map(providers) -> {:ok, data}
           {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
           {:ok, _} -> {:error, :no_providers}
-          {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+          {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
         end
 
       {:error, :enoent} ->

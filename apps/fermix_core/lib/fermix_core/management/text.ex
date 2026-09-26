@@ -22,17 +22,19 @@ defmodule FermixCore.Management.Text do
   # writes: `key=value`, JSON `"key":"value"`, Elixir inspect `"key" => "value"`,
   # and the 2-tuple `{"key", "value"}` that `inspect/1` produces for a header
   # list. A pattern that only accepts `=` misses the provider-error body that
-  # puts a refresh token in `fermix.log` today.
+  # puts a refresh token in `fermix.log` today. Each quote may also be escaped
+  # once, because `inspect/1` of a string holding JSON (a parse error's input, a
+  # response body) writes `\"key\": \"value\"`.
   @scrubbers [
     {~r{(/Users|/home)/[^/\s"']+}, "\\1/[REDACTED:user]"},
     {~r/([?&](?:t|token|access_token|refresh_token|code|api_key|key)=)[^&\s"']+/i,
      "\\1[REDACTED:token]"},
-    {~r/\b(access_token|refresh_token|id_token)(?:"?\s*(?::|=>|=)\s*"?|"\s*,\s*")[^\s"',}\]\[]{8,}/i,
+    {~r/\b(access_token|refresh_token|id_token)(?:\\?"?\s*(?::|=>|=)\s*\\?"?|\\?"\s*,\s*\\?")[^\s"',}\]\[]{8,}/i,
      "\\1=[REDACTED:token]"},
-    {~r/\b(authorization|proxy-authorization|x-api-key|x-goog-api-key)(?:"?\s*(?::|=>|=)\s*"?|"\s*,\s*")(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s"',}\]\[]{8,}/i,
+    {~r/\b(authorization|proxy-authorization|x-api-key|x-goog-api-key)(?:\\?"?\s*(?::|=>|=)\s*\\?"?|\\?"\s*,\s*\\?")(?:[A-Za-z][A-Za-z0-9-]*\s+)?[^\s"',}\]\[]{8,}/i,
      "\\1=[REDACTED:header]"},
     {~r/\bClaude Code-credentials-[A-Za-z0-9]+/, "[REDACTED:keyring]"},
-    {~r/\b(api[_-]?key|secret|password|passphrase|token)(?:"?\s*(?::|=>|=)\s*"?|"\s*,\s*")[^\s"',}\]\[]{8,}/i,
+    {~r/\b(api[_-]?key|secret|password|passphrase|token)(?:\\?"?\s*(?::|=>|=)\s*\\?"?|\\?"\s*,\s*\\?")[^\s"',}\]\[]{8,}/i,
      "\\1=[REDACTED:secret]"},
     {~r/\b[A-Z][A-Z0-9_]{5,}=[^\s"']{8,}/, "[REDACTED:env]"}
   ]

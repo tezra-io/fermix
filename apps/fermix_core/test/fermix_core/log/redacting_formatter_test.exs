@@ -12,6 +12,7 @@ defmodule FermixCore.Log.RedactingFormatterTest do
   @fake_telegram "123456789:" <> String.duplicate("Gh4", 12)
   @fake_xai "xai-" <> String.duplicate("Jk5", 10)
   @fake_google "AIza" <> String.duplicate("Mn6", 12)
+  @fake_jwt "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.c2lnbmF0dXJlMTIz"
   @fake_private_key """
   -----BEGIN PRIVATE KEY-----
   UExBTlRFRC1BUE5TLVNFQ1JFVA==
@@ -44,7 +45,8 @@ defmodule FermixCore.Log.RedactingFormatterTest do
             {@fake_bearer, "bearer"},
             {@fake_telegram, "telegram"},
             {@fake_xai, "xai"},
-            {@fake_google, "google"}
+            {@fake_google, "google"},
+            {@fake_jwt, "jwt"}
           ] do
         redacted = RedactingFormatter.redact("before #{token} after")
 

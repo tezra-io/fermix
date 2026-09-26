@@ -80,6 +80,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   chat. Attachments are now sent on your own turns only. `fermix doctor` warns
   when a channel has no `owner_user_id`: until it is set, everyone allow-listed
   there, you included, chats as a guest.
+- **A damaged `auth.json` no longer copies your sign-in tokens into logs.** The
+  error now says only where the file stopped parsing, instead of repeating what
+  it holds in `fermix.log`, traces, doctor output and error messages, and access
+  tokens shaped like JWTs are redacted from log lines too. If your `auth.json`
+  was ever damaged, sign in again to replace those tokens.
 
 ## [0.11.0] - 2026-09-23
 

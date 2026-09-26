@@ -1,6 +1,8 @@
 defmodule FermixCore.Auth.StoreTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
   alias FermixTestSupport.SafeRm
@@ -357,6 +359,73 @@ defmodule FermixCore.Auth.StoreTest do
 
       assert "openai" in names
       refute "broken" in names
+    end
+  end
+
+  # A JSON parse error carries the whole input it failed on, and auth.json holds
+  # every profile's tokens. None of them may ride the error into a log line, a
+  # trace, `fermix doctor` or the diagnostics bundle: the error says where the
+  # file broke, and the `.broken` copy a refused write keeps is the recovery path.
+  describe "a malformed auth file" do
+    @access_token "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.c2lnbmF0dXJlMTIz"
+    @refresh_token "rt_TESTSECRET123456"
+
+    # Truncated mid-document, the way an interrupted copy leaves it. The dir
+    # also holds the lockfiles and the `.broken` copy, so one removal cleans up.
+    setup do
+      dir = SafeRm.make_tmp_dir!("auth-store-malformed")
+      on_exit(fn -> SafeRm.rm_rf(dir) end)
+
+      raw =
+        ~s({"version": 2, "providers": {"openai_codex": {"auth_mode": "chatgpt", ) <>
+          ~s("tokens": {"access_token": "#{@access_token}", "refresh_token": "#{@refresh_token}"}})
+
+      path = Path.join(dir, "auth.json")
+      File.write!(path, raw)
+      %{path: path, raw: raw, size: byte_size(raw)}
+    end
+
+    defp refute_tokens(text) do
+      refute text =~ @access_token
+      refute text =~ @refresh_token
+    end
+
+    test "read/2 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} = result = Store.read(:openai_codex, ctx.path)
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "list_profiles/1 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} = result = Store.list_profiles(ctx.path)
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "delete_provider/2 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} =
+               result = Store.delete_provider(:openai_codex, ctx.path)
+
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "a refused write logs and returns none of the file; the backup keeps all of it", ctx do
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      {result, log} = with_log(fn -> Store.write(:openai, entry, ctx.path) end)
+
+      assert {:error, {:malformed_auth_file, _path, backup, {:invalid_json, position}}} = result
+      assert position == ctx.size
+      assert log =~ "refusing to overwrite"
+      refute_tokens(log)
+      refute_tokens(inspect(result))
+      assert File.read!(backup) == ctx.raw
     end
   end
 
