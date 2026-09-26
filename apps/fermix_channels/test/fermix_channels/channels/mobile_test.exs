@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.MobileTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
@@ -624,7 +625,7 @@ defmodule FermixChannels.Channels.MobileTest do
   # store deduplicated is not announced again.
   test "every row the phone channel writes reaches the companion connections" do
     {:ok, _owner} =
-      Registry.register(FermixChannels.Channels.Companion.registry(), "main", nil)
+      Registry.register(Companion.registry(), "main", nil)
 
     assert :ok = Mobile.send_message("main", "your 9am summary", [])
 

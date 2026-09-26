@@ -1,6 +1,7 @@
 defmodule FermixChannels.Mobile.EventRouterTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Companion.Timeline
@@ -277,7 +278,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   # user row reaches them as it is written.
   test "a phone's user row is announced to the companion connections", ctx do
     {:ok, _owner} =
-      Registry.register(FermixChannels.Channels.Companion.registry(), "main", nil)
+      Registry.register(Companion.registry(), "main", nil)
 
     event =
       decoded("msg", %{
