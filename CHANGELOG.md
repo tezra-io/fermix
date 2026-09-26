@@ -62,6 +62,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **A reminder is no longer sent by a sender that was already stopped.** A send
   whose sender was restarted kept running on its own, so the same reminder
   could arrive twice, or after you had changed or cancelled it.
+- **A voice call keeps one connection through a reconnect.** When a reconnect
+  had to retry, the connection it had given up on could report its close late
+  and be taken for the live one: the call dropped its healthy connection,
+  reconnected for no reason, or ended with nothing to reconnect to, and the
+  abandoned connection's audio and tool calls could still reach the call. Only
+  the call's current connection is listened to now, and a connection that fails
+  while it is being set up costs one reconnect attempt instead of two.
+- **A tool result is spoken even when you talk over it.** If you started
+  speaking just as a tool finished, the reply to your words could start before
+  the result was in, and the result then went unmentioned until you spoke
+  again. The reply to the result is now sent once the other reply ends. In the
+  rare case where that reply had already read the result, you may hear about it
+  twice.
 
 ## [0.11.0] - 2026-09-23
 

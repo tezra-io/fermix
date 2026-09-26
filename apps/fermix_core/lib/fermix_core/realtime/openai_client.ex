@@ -5,6 +5,12 @@ defmodule FermixCore.Realtime.OpenAIClient do
   The peer is verified against the OS trust store via `FermixCore.Net.Tls` — the
   account's bearer token travels in the handshake headers, so an unverified
   socket would hand it to whoever answered.
+
+  Every event and error this process sends its parent names the socket
+  (`self()`), because a session outlives its sockets and must tell the current
+  one from one it closed or replaced. A socket's death reaches the parent only as
+  its `EXIT`, through the link `start_link/1` makes: there is no disconnect
+  notice, so one death is one signal.
   """
 
   use WebSockex
@@ -434,7 +440,11 @@ defmodule FermixCore.Realtime.OpenAIClient do
         {:ok, state}
 
       {:error, reason} ->
-        send(state.parent, {:openai_realtime_error, {:decode_failed, Exception.message(reason)}})
+        send(
+          state.parent,
+          {:openai_realtime_error, self(), {:decode_failed, Exception.message(reason)}}
+        )
+
         {:ok, state}
     end
   end
@@ -446,16 +456,10 @@ defmodule FermixCore.Realtime.OpenAIClient do
 
   def handle_cast(:close, state), do: {:close, state}
 
-  @impl true
-  def handle_disconnect(status, state) do
-    send(state.parent, {:openai_realtime_disconnect, status})
-    {:ok, state}
-  end
-
   defp notify_parent(parent, event) do
     case decode_server_event(event) do
-      {:ok, decoded} -> send(parent, {:openai_realtime_event, decoded})
-      {:error, reason} -> send(parent, {:openai_realtime_error, reason})
+      {:ok, decoded} -> send(parent, {:openai_realtime_event, self(), decoded})
+      {:error, reason} -> send(parent, {:openai_realtime_error, self(), reason})
     end
   end
 end

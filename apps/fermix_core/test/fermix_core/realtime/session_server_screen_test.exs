@@ -24,6 +24,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixTestSupport.RealtimeSocket
 
   # A test may register itself under this name to be told about provider events and
   # feed state changes as they happen, instead of polling for them. Polling here
@@ -168,10 +169,14 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
       FermixTestSupport.SafeRm.rm_rf(home)
     end)
 
+    # Its own session id, so a global telemetry handler can pin this server's events.
+    scope = "session:screen-#{System.unique_integer([:positive])}"
+
     {:ok, server} =
       SessionServer.start_link(
         companion: self(),
         config: Config.normalize(enabled: true),
+        session_scope: scope,
         openai_client: FakeOpenAIClient,
         api_key: "sk-test",
         safety_identifier: "safe-id",
@@ -184,7 +189,7 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     :ok = SessionServer.call_start(server)
     :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
 
-    %{server: server, openai: SessionServer.openai_pid(server)}
+    %{server: server, openai: SessionServer.openai_pid(server), scope: scope}
   end
 
   # A `dev_local` stub makes `ComputerUse.ready?/0` true without touching host
@@ -299,10 +304,11 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
   # A frame arriving between a provider drop and a reconnect has nowhere to go: it
   # must be discarded, not queued into a conversation that no longer exists.
-  test "frames are dropped when no provider session is ready", %{server: server} do
+  test "frames are dropped when no provider session is ready", %{server: server, openai: openai} do
     start_sharing(server)
     # Reconnecting: the connection is momentarily gone and its item ids with it.
-    send(server, {:openai_realtime_disconnect, :network})
+    :ok = RealtimeSocket.finish_close(openai, {:remote, :closed})
+    assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
     refute :sys.get_state(server).provider_ready?
 
     send_frame(server, "pixels")
@@ -311,8 +317,8 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     assert Process.alive?(server)
   end
 
-  # A server-sent error is REPORTED, not fatal: only the socket's own disconnect
-  # decides liveness, so one bad event cannot disarm the reconnect path.
+  # A server-sent error is REPORTED, not fatal: only the socket's own EXIT decides
+  # liveness, so one bad event cannot disarm the reconnect path.
   test "a provider error event does not end the call", %{server: server} do
     start_sharing(server)
 
@@ -397,22 +403,44 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
   # A reconnect opens a FRESH server-side conversation, so the old frames and
   # their item ids cannot cross it — but the operator should not have to re-ask.
-  test "a reconnect suspends the feed and resumes it on the new session", %{server: server} do
+  test "a reconnect suspends the feed and resumes it on the new session" do
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        screen_feed_module: FakeFeed,
+        screen_probe: &FakeProbe.run/0,
+        # Short, so the reconnect timer's own tick is what reopens the session.
+        reconnect_backoff_ms: [10, 10, 10],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    :ok = SessionServer.call_start(server)
+    :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
+    openai = SessionServer.openai_pid(server)
     start_sharing(server)
     send_frame(server, "pixels")
     assert :sys.get_state(server).screen_frame_items != []
 
-    send(server, {:openai_realtime_disconnect, :closed})
+    observe()
+    :ok = RealtimeSocket.finish_close(openai, {:remote, :closed})
+    assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
     state = :sys.get_state(server)
 
     assert state.screen_feed == nil
     assert state.screen_frame_items == [], "item ids belong to the conversation that went away"
     assert state.screen_share_resume?
 
-    send(server, :reconnect_attempt)
+    # The tick opens the next socket and sends it session.update; OpenAI answers.
+    assert_receive {:openai_event, %{type: "session.update"}}
     :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
 
     resumed = :sys.get_state(server)
+    assert is_pid(resumed.openai_pid) and resumed.openai_pid != openai
     assert is_pid(resumed.screen_feed)
     refute resumed.screen_share_resume?
   end
@@ -634,15 +662,33 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
 
   # The pet treats an `error` frame as terminal (mic down, call over); a benign
   # provider hiccup on a live call must never reach it as one.
-  test "non-terminal provider errors never send the companion an error frame", %{server: server} do
+  test "non-terminal provider errors never send the companion an error frame", %{
+    server: server,
+    openai: openai,
+    scope: scope
+  } do
+    handler = {__MODULE__, :transport_error, scope}
+    test_pid = self()
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :realtime, :provider_error],
+      fn _event, _meas, meta, _cfg -> send(test_pid, {:provider_error, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
     :ok =
       SessionServer.handle_provider_event(
         server,
         {:error, %{"error" => %{"message" => "item truncate past audio end"}}}
       )
 
-    send(server, {:openai_realtime_error, :transient_socket_hiccup})
+    # A frame the socket itself cannot decode: it reports a transport error.
+    :ok = RealtimeSocket.deliver_frame(openai, "not json")
 
+    assert_receive {:provider_error, %{session_id: ^scope, reason: "{:decode_failed" <> _detail}}
     assert Process.alive?(server)
     refute_receive {:realtime, %{type: "error"}}, 100
   end

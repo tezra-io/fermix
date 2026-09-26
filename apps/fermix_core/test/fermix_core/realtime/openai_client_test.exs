@@ -230,6 +230,114 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
              })
   end
 
+  # The session acts only on the socket it currently uses, so every message a
+  # socket sends names it. `handle_frame/2` runs inside the socket process, where
+  # `self()` is the socket.
+  describe "messages to the session name the socket" do
+    test "a decoded event carries the socket pid" do
+      me = self()
+
+      assert {:ok, _state} =
+               OpenAIClient.handle_frame({:text, ~s({"type":"session.created"})}, %{parent: me})
+
+      assert_received {:openai_realtime_event, ^me, {:session_created, _event}}
+    end
+
+    test "a frame that is not JSON is an error that carries the socket pid" do
+      me = self()
+
+      assert {:ok, _state} = OpenAIClient.handle_frame({:text, "not json"}, %{parent: me})
+
+      assert_received {:openai_realtime_error, ^me, {:decode_failed, _message}}
+    end
+
+    test "an event with no type is an error that carries the socket pid" do
+      me = self()
+
+      assert {:ok, _state} = OpenAIClient.handle_frame({:text, ~s({"no":"type"})}, %{parent: me})
+
+      assert_received {:openai_realtime_error, ^me, {:invalid_server_event, %{"no" => "type"}}}
+    end
+
+    # The socket's EXIT is the one signal that it died. A second notice from
+    # `handle_disconnect/2` raced the EXIT of the socket that replaced it.
+    test "a disconnect sends the session nothing" do
+      status = %{reason: {:remote, :closed}, conn: nil, attempt_number: 1}
+
+      assert {:ok, _state} = OpenAIClient.handle_disconnect(status, %{parent: self()})
+
+      assert Process.info(self(), :messages) == {:messages, []}
+    end
+
+    # The session's one liveness signal, over a real WebSockex connection on
+    # loopback: the link `start_link/1` makes. An unlinked start would lose every
+    # reconnect with the session tests (whose fake sockets link by construction)
+    # still green.
+    test "a real socket's events name it, and its death reaches the caller only as its EXIT" do
+      Process.flag(:trap_exit, true)
+      {:ok, listen} = :gen_tcp.listen(0, [:binary, active: false, ip: {127, 0, 0, 1}])
+      {:ok, port} = :inet.port(listen)
+      server = Task.async(fn -> serve_one_frame_then_drop(listen) end)
+
+      assert {:ok, socket} =
+               OpenAIClient.start_link(
+                 url: "ws://127.0.0.1:#{port}/",
+                 headers: [],
+                 parent: self()
+               )
+
+      send(server.pid, :drop)
+
+      assert_receive {:openai_realtime_event, ^socket, {:session_created, _event}}
+      assert_receive {:EXIT, ^socket, {:remote, :closed}}
+      assert :ok = Task.await(server)
+      assert_receive {:EXIT, _task, :normal}
+      :ok = :gen_tcp.close(listen)
+      assert Process.info(self(), :messages) == {:messages, []}
+    end
+  end
+
+  # Accepts one WebSocket client on `listen`, completes its handshake, and on
+  # `:drop` sends it one text frame and closes the TCP connection without a close
+  # frame, as a dropped network does.
+  defp serve_one_frame_then_drop(listen) do
+    {:ok, conn} = :gen_tcp.accept(listen, 5_000)
+    [_line, key] = Regex.run(~r/sec-websocket-key:\s*(\S+)/i, read_upgrade_request(conn, ""))
+    accept = Base.encode64(:crypto.hash(:sha, key <> "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"))
+
+    :ok =
+      :gen_tcp.send(conn, [
+        "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\n",
+        "Connection: Upgrade\r\nSec-WebSocket-Accept: #{accept}\r\n\r\n"
+      ])
+
+    receive do
+      :drop -> :ok
+    after
+      5_000 -> raise "the test never asked the server to drop the socket"
+    end
+
+    payload = ~s({"type":"session.created"})
+    :ok = :gen_tcp.send(conn, <<1::1, 0::3, 1::4, 0::1, byte_size(payload)::7, payload::binary>>)
+    :gen_tcp.close(conn)
+  end
+
+  @upgrade_reads 10
+
+  defp read_upgrade_request(conn, acc, reads_left \\ @upgrade_reads)
+
+  defp read_upgrade_request(_conn, acc, 0),
+    do: raise("no complete upgrade request after #{@upgrade_reads} reads: #{inspect(acc)}")
+
+  defp read_upgrade_request(conn, acc, reads_left) do
+    if String.contains?(acc, "\r\n\r\n") do
+      acc
+    else
+      {:ok, data} = :gen_tcp.recv(conn, 0, 5_000)
+      read_upgrade_request(conn, acc <> data, reads_left - 1)
+    end
+  end
+
   describe "start_options/2" do
     test "verifies the OpenAI peer instead of taking WebSockex's insecure default" do
       config = Config.normalize(model: "gpt-realtime-2")

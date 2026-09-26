@@ -192,10 +192,12 @@ defmodule FermixCore.Realtime.SessionServer do
            screen_frame_items: [],
            tool_image_items: [],
            # `response_active?` mirrors the provider's response lifecycle
-           # (response_created → response.done); `needs_response?` records tool
-           # outputs appended while a trigger could not be sent. Together they
-           # make "exactly one response.create per answered batch" hold under
-           # EVERY interleaving of dispatches, completions, and response.done.
+           # (response_created → response.done); `needs_response?` records a
+           # trigger that is owed: tool outputs appended while a trigger could not
+           # be sent, or a trigger OpenAI rejected because of a server-VAD response
+           # the session had not heard of yet. Together they give every answered
+           # batch a response that starts after its outputs: one trigger per
+           # batch, plus one re-send per such rejection.
            response_active?: false,
            needs_response?: false,
            screen_share_resume?: false,
@@ -380,7 +382,7 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   @impl true
-  def handle_info({:openai_realtime_event, event}, state) do
+  def handle_info({:openai_realtime_event, pid, event}, %{openai_pid: pid} = state) do
     {:noreply, handle_provider_event_internal(event, state)}
   end
 
@@ -415,28 +417,23 @@ defmodule FermixCore.Realtime.SessionServer do
     {:noreply, note_screen_feed_stopped(state, reason, measurements)}
   end
 
-  def handle_info({:openai_realtime_disconnect, _reason}, %{session_update_event: nil} = state) do
-    {:noreply, state}
-  end
-
-  def handle_info({:openai_realtime_disconnect, _reason}, state) do
-    case schedule_reconnect(state) do
-      {:ok, state} ->
-        {:noreply, state}
-
-      :exhausted ->
-        end_call(state, :provider_disconnected)
-    end
-  end
-
   # NOT forwarded to the companion: the pet treats an `error` frame as terminal
   # (mic down, call over), which is the wrong response to a non-terminal provider
   # hiccup on a call that is still live — a benign truncate/delete race was killing
   # the pet's side mid-game while the daemon session played on. A genuinely
   # terminal failure reaches the pet through `end_call`/reconnect-exhausted.
-  def handle_info({:openai_realtime_error, reason}, state) do
+  def handle_info({:openai_realtime_error, pid, reason}, %{openai_pid: pid} = state) do
     Logger.warning("realtime: provider transport error: #{reason_to_string(reason)}")
     RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(reason))
+    {:noreply, state}
+  end
+
+  # A socket this session closed, replaced or abandoned. Its conversation is not the
+  # call's, so nothing it reports is acted on: only `openai_pid`'s messages match the
+  # event and error clauses above, as only its death matches the EXIT clause.
+  def handle_info({tag, pid, _message}, state)
+      when tag in [:openai_realtime_event, :openai_realtime_error] and is_pid(pid) do
+    Logger.debug("realtime: dropped #{tag} from #{inspect(pid)}, not the call's socket")
     {:noreply, state}
   end
 
@@ -617,10 +614,6 @@ defmodule FermixCore.Realtime.SessionServer do
             speech_active?: false
         }
 
-        # A socket death can produce BOTH a disconnect notice and an EXIT, so
-        # cancel any timer already armed rather than stack a second attempt on top
-        # of the first.
-        if is_reference(state.reconnect_timer), do: Process.cancel_timer(state.reconnect_timer)
         timer = Process.send_after(self(), :reconnect_attempt, delay)
 
         {:ok,
@@ -644,8 +637,9 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   # A socket that opened but could not be configured is CLOSED before the next
-  # attempt: leaving it open leaks a billed upstream connection per retry, and its
-  # later EXIT would race the attempt that replaced it.
+  # attempt: leaving it open leaks an upstream connection per retry. It never
+  # became openai_pid, so what it sends before it dies, and its EXIT once its close
+  # finishes, are dropped: they cannot pass for the socket that replaced it.
   defp resume_provider_session(state, openai_pid) do
     case send_provider_event(state.openai_client, openai_pid, state.session_update_event) do
       :ok ->
@@ -910,7 +904,7 @@ defmodule FermixCore.Realtime.SessionServer do
       handle_active_response_race(error, state)
     else
       # Reported, not fatal. If the error is genuinely terminal OpenAI closes the
-      # socket and the disconnect/EXIT clauses handle it as the one reconnect path;
+      # socket and its EXIT clause handles that as the one reconnect path;
       # tearing down here instead disarmed that path. No companion `error` frame:
       # the pet reads that as terminal and shuts its side down mid-call.
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
@@ -1262,8 +1256,10 @@ defmodule FermixCore.Realtime.SessionServer do
   # again. The trigger is therefore deferred while other calls are still in
   # flight OR while the provider's own response is still active (the calls were
   # emitted by it; a trigger sent before its response.done is the race itself);
-  # `flush_deferred_response/1` sends it on response.done. The end of the batch
-  # also ends the feed's acting pause: the model is about to look again.
+  # `flush_deferred_response/1` sends it on response.done. The deferral avoids
+  # every rejection the session can foresee; `handle_active_response_race/2`
+  # re-arms the ones it cannot. The end of the batch also ends the feed's acting
+  # pause: the model is about to look again.
   defp finish_tool_turn(%{pending_tool_calls: pending} = state) when map_size(pending) > 0 do
     %{state | needs_response?: true}
   end
@@ -1290,9 +1286,26 @@ defmodule FermixCore.Realtime.SessionServer do
     "item_ti" <> Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
   end
 
+  # OpenAI rejected our response.create because a response the session had not
+  # heard of yet was running: server VAD starts one on the operator's speech, and
+  # its response.created was still on the wire. That response may have begun
+  # before our outputs joined, and nothing the session receives says which, so the
+  # trigger is owed again: re-armed here, and sent by `flush_deferred_response/1`
+  # on that response's response.done once no call is pending. Never sent from
+  # here: until that response ends, a re-send would only be rejected again.
+  # Bounded: each re-send needs another response the server started.
+  #
+  # Relies on the error arriving before the rejecting response's response.done
+  # (not documented, but that response is still running when OpenAI reads our
+  # create). Cost: when the rejecting response began after the outputs joined, it
+  # has read them, and the re-send asks for one reply the model did not need.
   defp handle_active_response_race(error, state) do
-    Logger.debug("Ignoring OpenAI Realtime active-response race: #{inspect(error)}")
-    state
+    Logger.info(
+      "realtime: response.create rejected by an active response, trigger re-armed " <>
+        "(#{reason_to_string(error)})"
+    )
+
+    %{state | needs_response?: true}
   end
 
   defp close_openai(%{openai_pid: pid, openai_client: client}) when is_pid(pid),
@@ -1332,11 +1345,11 @@ defmodule FermixCore.Realtime.SessionServer do
   defp send_openai(_state, _event), do: {:error, :provider_not_connected}
 
   # A send that fails is REPORTED, never fatal. Connection liveness has exactly one
-  # owner — the socket's disconnect/EXIT clauses — and this used to be a second,
-  # contradictory one: a failed send tore the session down, nilling the very fields
-  # those clauses match on, so the reconnect that should have followed was
-  # swallowed. If the socket really is gone its own signal arrives and reconnects;
-  # if the payload was bad, ending the call would not have helped.
+  # owner — the socket's EXIT clause — and this used to be a second, contradictory
+  # one: a failed send tore the session down, nilling the very fields that clause
+  # matches on, so the reconnect that should have followed was swallowed. If the
+  # socket really is gone its own EXIT arrives and reconnects; if the payload was
+  # bad, ending the call would not have helped.
   defp send_openai_events(state, events) do
     case send_openai_seq(state, events) do
       :ok -> state

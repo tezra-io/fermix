@@ -13,25 +13,38 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Tools.ComputerUse
   alias FermixCore.Tools.ScheduleJob
+  alias FermixTestSupport.RealtimeSocket
 
   defmodule FakeOpenAIClient do
     def start_link(opts) do
-      Agent.start_link(fn -> %{opts: opts, events: [], closed?: false} end)
+      Agent.start_link(fn -> %{opts: opts, events: [], closed?: false, fail_sends?: false} end)
     end
 
     def send_event(pid, event) do
-      Agent.update(pid, fn state -> %{state | events: state.events ++ [event]} end)
+      Agent.get_and_update(pid, fn
+        %{fail_sends?: true} = state -> {{:error, %WebSockex.ConnError{original: :closed}}, state}
+        state -> {:ok, %{state | events: state.events ++ [event]}}
+      end)
     end
 
     def close(pid), do: Agent.update(pid, &%{&1 | closed?: true})
     def events(pid), do: Agent.get(pid, & &1.events)
+
+    # The connection is gone, but the socket process has not noticed yet: every
+    # send fails the way WebSockex reports it, and the process lives on.
+    def fail_sends(pid), do: Agent.update(pid, &%{&1 | fail_sends?: true})
   end
 
   defmodule ProgrammableOpenAIClient do
     @moduledoc """
     Test fake whose `start_link/1` consults a pre-set queue of behaviors.
     Each call dequeues one entry: `:ok` returns a fresh Agent pid;
-    `{:error, reason}` returns that error tuple.
+    `:update_fails` returns one whose `session.update` send fails, as on a
+    connection that died right after its handshake; `{:error, reason}` returns
+    that error tuple. A started socket is announced to the test as
+    `{:socket_started, pid, behavior}`, and a close as `{:socket_closed, pid}`.
+    The close leaves the process alive, like a socket still in its close
+    handshake: `RealtimeSocket.finish_close/2` ends it.
     """
 
     def configure(behaviors, test_pid) do
@@ -56,19 +69,40 @@ defmodule FermixCore.Realtime.SessionServerTest do
           {next, %{state | behaviors: rest, attempts: state.attempts + 1}}
         end)
 
-      send(Agent.get(__MODULE__, & &1.test_pid), {:start_link_called, opts})
+      test_pid = Agent.get(__MODULE__, & &1.test_pid)
+      send(test_pid, {:start_link_called, opts})
 
       case action do
-        :ok -> Agent.start_link(fn -> %{opts: opts, events: [], closed?: false} end)
+        behavior when behavior in [:ok, :update_fails] -> start_socket(opts, behavior, test_pid)
         {:error, _reason} = err -> err
       end
     end
 
-    def send_event(pid, event) do
-      Agent.update(pid, fn state -> %{state | events: state.events ++ [event]} end)
+    defp start_socket(opts, behavior, test_pid) do
+      {:ok, pid} =
+        Agent.start_link(fn ->
+          %{opts: opts, events: [], closed?: false, behavior: behavior, test_pid: test_pid}
+        end)
+
+      send(test_pid, {:socket_started, pid, behavior})
+      {:ok, pid}
     end
 
-    def close(pid), do: Agent.update(pid, &%{&1 | closed?: true})
+    def send_event(pid, event), do: Agent.get_and_update(pid, &record_or_refuse(&1, event))
+
+    defp record_or_refuse(%{behavior: :update_fails} = state, %{type: "session.update"}),
+      do: {{:error, %WebSockex.ConnError{original: :closed}}, state}
+
+    defp record_or_refuse(state, event), do: {:ok, %{state | events: state.events ++ [event]}}
+
+    def close(pid) do
+      Agent.update(pid, fn state ->
+        send(state.test_pid, {:socket_closed, pid})
+        %{state | closed?: true}
+      end)
+    end
+
+    def closed?(pid), do: Agent.get(pid, & &1.closed?)
     def events(pid), do: Agent.get(pid, & &1.events)
     def attempts, do: Agent.get(__MODULE__, & &1.attempts)
   end
@@ -760,17 +794,46 @@ defmodule FermixCore.Realtime.SessionServerTest do
   # A failed send must not disarm the one connection owner. Before the fix it ran
   # the full teardown, so the socket's own EXIT then fell through to the silent
   # catch-all and no reconnect ever happened.
-  test "a failed provider send leaves the session able to reconnect", %{server: server} do
+  test "a failed provider send leaves the session able to reconnect" do
+    scope = "session:send-fails-#{System.unique_integer([:positive])}"
+    test_pid = self()
+    handler = {__MODULE__, :provider_error, scope}
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :realtime, :provider_error],
+      fn _event, _measurements, meta, _config -> send(test_pid, {:provider_error, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        session_scope: scope,
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
     assert :ok = SessionServer.call_start(server)
     openai = SessionServer.openai_pid(server)
 
-    # A send that fails: the socket agent is gone, so send_event exits.
-    Agent.stop(openai)
+    # A send that fails while the socket process lives on.
+    :ok = FakeOpenAIClient.fail_sends(openai)
     SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
 
-    assert Process.alive?(server), "one dropped event must not end a live call"
+    assert_receive {:provider_error, %{session_id: ^scope}}
 
-    send(server, {:openai_realtime_disconnect, :network})
+    assert SessionServer.openai_pid(server) == openai,
+           "one dropped event must not end a live call"
+
+    # The socket then dies, and its EXIT is what reconnects.
+    :ok = RealtimeSocket.finish_close(openai, {:remote, :closed})
     assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
   end
 
@@ -972,23 +1035,21 @@ defmodule FermixCore.Realtime.SessionServerTest do
       )
 
     assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
 
-    # Deliver the function call via the production provider path (an async
-    # handle_info, exactly how OpenAIClient forwards events), NOT the synchronous
-    # `handle_provider_event` GenServer.call. Under the old inline design that
-    # call absorbed the whole tool execution before returning, so the verbs below
-    # would have been issued AFTER the tool was already done, against a session
-    # that had nothing left to be blocked by.
-    send(
-      server,
-      {:openai_realtime_event,
-       {:function_call,
-        %{
-          "call_id" => "call-slow",
-          "name" => "blocking",
-          "arguments" => "{}"
-        }}}
-    )
+    # Deliver the function call via the production provider path (the socket's
+    # own `OpenAIClient.handle_frame/2` sending an async handle_info), NOT the
+    # synchronous `handle_provider_event` GenServer.call. Under the old inline
+    # design that call absorbed the whole tool execution before returning, so the
+    # verbs below would have been issued AFTER the tool was already done, against
+    # a session that had nothing left to be blocked by.
+    :ok =
+      RealtimeSocket.deliver(openai, %{
+        "type" => "response.function_call_arguments.done",
+        "call_id" => "call-slow",
+        "name" => "blocking",
+        "arguments" => "{}"
+      })
 
     assert_receive {:realtime, %{type: "tool_event", status: "running", name: "blocking"}}
     assert_receive {:blocking_tool_running, tool}
@@ -1002,7 +1063,6 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert :ok = SessionServer.audio_chunk(server, "mid-tool-audio")
     assert :ok = SessionServer.interrupt(server)
 
-    openai = SessionServer.openai_pid(server)
     appended = Base.encode64("mid-tool-audio")
 
     # The cast was enqueued before the call, so a returned interrupt proves the
@@ -1131,7 +1191,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
       assert_receive {:realtime, %{type: "state", state: "listening"}}
 
       original = SessionServer.openai_pid(server)
-      send(server, {:openai_realtime_disconnect, :network})
+      :ok = RealtimeSocket.finish_close(original, {:remote, :closed})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       assert_receive {:start_link_called, _opts}
@@ -1172,7 +1232,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
       assert_receive {:realtime, %{type: "state", state: "listening"}}
       assert :ok = SessionServer.handle_provider_event(server, {:input_audio_speech_started, %{}})
 
-      send(server, {:openai_realtime_disconnect, :network})
+      :ok = RealtimeSocket.finish_close(SessionServer.openai_pid(server), {:remote, :closed})
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       assert_receive {:start_link_called, _opts}
       assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
@@ -1205,7 +1265,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       Process.unlink(server)
       ref = Process.monitor(server)
       assert :ok = SessionServer.call_start(server)
-      send(server, {:openai_realtime_disconnect, :network})
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
@@ -1236,7 +1297,8 @@ defmodule FermixCore.Realtime.SessionServerTest do
       ref = Process.monitor(server)
       assert :ok = SessionServer.call_start(server)
       assert_receive {:start_link_called, _opts}
-      send(server, {:openai_realtime_disconnect, :network})
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
 
       assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
 
@@ -1245,6 +1307,316 @@ defmodule FermixCore.Realtime.SessionServerTest do
       assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :call_stop}}
       # The pending reconnect died with the session — no attempt fires afterwards.
       refute_receive {:start_link_called, _opts}, 200
+    end
+
+    # RT-2 (tla/specs/realtime_session check 12). A socket the session closed dies
+    # only after its close handshake or WebSockex's 5 s timeout, which can be after
+    # the next attempt has connected. Its death is not the current socket's.
+    test "a closed socket's late exit leaves the socket that replaced it alone" do
+      configure_sockets([:ok, :update_fails, :ok, :ok])
+      server = start_reconnecting_server([10, 10, 10])
+      {_first, closed, current} = reconnect_past_a_failed_update(server)
+
+      :ok = RealtimeSocket.deliver(current, %{"type" => "session.updated", "session" => %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      :sys.suspend(server)
+      :ok = RealtimeSocket.finish_close(closed, {:local, :normal})
+      await_queued(server, &match?({:EXIT, ^closed, _reason}, &1))
+      :sys.resume(server)
+
+      assert SessionServer.openai_pid(server) == current
+      refute ProgrammableOpenAIClient.closed?(current)
+      refute_received {:realtime, %{type: "state", state: "reconnecting"}}
+      refute_receive {:socket_started, _pid, _behavior}, 100
+
+      # The current socket's own death still reconnects, through its EXIT alone,
+      # even when OpenAI closes it cleanly and the socket exits :normal.
+      :ok = RealtimeSocket.finish_close(current, {:remote, 1000, ""})
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
+      assert_receive {:socket_started, next, :ok}
+      assert SessionServer.openai_pid(server) == next
+      refute_received {:realtime, %{type: "state", state: "reconnecting"}}
+    end
+
+    # RT-2's freeze. The stale death armed a reconnect timer; the new socket's
+    # session.updated, still on its way, then ran start_timers -> cancel_timers and
+    # disarmed it. No socket and no timer: the next audio chunk ended the call.
+    test "a closed socket's late exit cannot leave the call with no socket and no timer" do
+      configure_sockets([:ok, :update_fails, :ok, :ok])
+      server = start_reconnecting_server([10, 10, 10])
+      Process.unlink(server)
+      ref = Process.monitor(server)
+      {_first, closed, current} = reconnect_past_a_failed_update(server)
+
+      # Staged in this order: the closed socket's exit, the new socket's
+      # session.updated, an audio chunk.
+      :sys.suspend(server)
+      :ok = RealtimeSocket.finish_close(closed, {:local, :normal})
+      await_queued(server, &match?({:EXIT, ^closed, _reason}, &1))
+      :ok = RealtimeSocket.deliver(current, %{"type" => "session.updated", "session" => %{}})
+      await_queued(server, &provider_event?(&1, :session_updated))
+      SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
+      :sys.resume(server)
+
+      refute_receive {:DOWN, ^ref, :process, ^server, _reason}, 100
+      assert SessionServer.openai_pid(server) == current
+
+      assert OpenAIClient.audio_append_event(<<0, 0, 0, 0>>) in ProgrammableOpenAIClient.events(
+               current
+             )
+
+      GenServer.stop(server)
+    end
+
+    # RT-2 (check 14): what a closed socket read before its close took effect
+    # belongs to a conversation the call no longer has.
+    test "a closed socket's late events are dropped", %{task_supervisor: task_supervisor} do
+      configure_sockets([:ok, :update_fails, :ok, :ok])
+
+      server =
+        start_reconnecting_server([10, 10, 10],
+          capabilities: [capability()],
+          task_supervisor: task_supervisor
+        )
+
+      {_first, closed, current} = reconnect_past_a_failed_update(server)
+      call = echo_call_event("call-stale")
+
+      :sys.suspend(server)
+      :ok = RealtimeSocket.deliver(closed, call)
+      await_queued(server, &provider_event?(&1, :function_call))
+      :sys.resume(server)
+
+      # Served after the staged event, so the refute below is ordered behind it.
+      assert :sys.get_state(server).pending_tool_calls == %{}
+      refute_received {:realtime, %{type: "tool_event"}}
+
+      # The same call from the current socket runs, and its output goes there.
+      :ok = RealtimeSocket.deliver(current, call)
+      assert_receive {:realtime, %{type: "tool_event", status: "running", name: "echo"}}
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      assert [_output] = outputs_for(ProgrammableOpenAIClient.events(current), "call-stale")
+      refute_received {:realtime, %{type: "tool_event"}}
+    end
+
+    # RT-2's second route (it was check 13's witness). The closed socket's death
+    # and the next attempt's tick queued together: the stale death armed a second
+    # timer, the tick's success forgot it, and it later opened a socket into the
+    # connected call.
+    test "a closed socket's exit queued ahead of the next tick arms no second timer" do
+      configure_sockets([:ok, :update_fails, :ok, :ok])
+      # The second delay only has to outlast the step from the failed attempt to
+      # the suspend below. The third is short, so a second timer armed by the
+      # stale exit would fire inside the refute window.
+      server = start_reconnecting_server([10, 1_000, 50])
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+      assert_receive {:socket_started, closed, :update_fails}
+      assert_receive {:socket_closed, ^closed}
+
+      :sys.suspend(server)
+      :ok = RealtimeSocket.finish_close(closed, {:local, :normal})
+      await_queued(server, &match?({:EXIT, ^closed, _reason}, &1))
+      mailbox = await_queued(server, &(&1 == :reconnect_attempt))
+
+      assert Enum.find_index(mailbox, &match?({:EXIT, ^closed, _reason}, &1)) <
+               Enum.find_index(mailbox, &(&1 == :reconnect_attempt)),
+             "the route is staged only when the closed socket's exit is ahead of the tick"
+
+      :sys.resume(server)
+
+      assert_receive {:socket_started, current, :ok}
+      refute_receive {:socket_started, _pid, _behavior}, 300
+      assert SessionServer.openai_pid(server) == current
+      refute ProgrammableOpenAIClient.closed?(current)
+    end
+
+    # RT-3 (check 15). The closed socket's prompt death used to run a second
+    # schedule_reconnect for the same failure: two attempts for one, and with this
+    # budget the call ended before its last attempt ran.
+    test "a failed session.update costs one reconnect attempt" do
+      configure_sockets([:ok, :update_fails, :ok])
+      server = start_reconnecting_server([10, 300])
+      Process.unlink(server)
+      ref = Process.monitor(server)
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+      assert_receive {:socket_started, closed, :update_fails}
+      assert_receive {:socket_closed, ^closed}
+
+      # The closed socket's death lands before the 300 ms timer its failure armed.
+      :sys.suspend(server)
+      :ok = RealtimeSocket.finish_close(closed, {:local, :normal})
+      mailbox = await_queued(server, &match?({:EXIT, ^closed, _reason}, &1))
+
+      assert ProgrammableOpenAIClient.attempts() == 2,
+             "the failed attempt's timer was handled before the closed socket's death"
+
+      ahead_of_exit = Enum.take_while(mailbox, &(not match?({:EXIT, ^closed, _reason}, &1)))
+
+      refute :reconnect_attempt in ahead_of_exit,
+             "the failed attempt's timer is queued ahead of the closed socket's death"
+
+      :sys.resume(server)
+
+      assert_receive {:socket_started, current, :ok}
+      assert SessionServer.openai_pid(server) == current
+      assert ProgrammableOpenAIClient.attempts() == 3
+      assert_received {:realtime, %{type: "state", state: "reconnecting"}}
+      assert_received {:realtime, %{type: "state", state: "reconnecting"}}
+      refute_received {:realtime, %{type: "state", state: "reconnecting"}}
+      refute_received {:realtime, %{type: "error"}}
+      refute_received {:DOWN, ^ref, :process, ^server, _reason}
+
+      GenServer.stop(server)
+    end
+
+    # RT-1's re-armed trigger is owed to the conversation that rejected it. A
+    # reconnect opens a fresh one that never saw those outputs.
+    test "a trigger re-armed by a rejection is not sent into the next conversation", %{
+      task_supervisor: task_supervisor
+    } do
+      server =
+        start_reconnecting_server([10, 10, 10],
+          capabilities: [capability()],
+          task_supervisor: task_supervisor
+        )
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = SessionServer.handle_provider_event(server, {:function_call, echo_call("c1")})
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:error, active_response_error()})
+
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+      assert_receive {:socket_started, current, :ok}
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+
+      assert Enum.map(ProgrammableOpenAIClient.events(current), & &1.type) == ["session.update"]
+    end
+  end
+
+  # RT-1 (tla/specs/realtime_session check 10). `response_active?` learns of a
+  # response only from its response.created, so a trigger sent while server VAD's
+  # response is already running (its response.created still on the wire) is
+  # rejected, and that response may have begun before the outputs joined.
+  describe "a response.create rejected by an active response" do
+    test "is sent again when that response ends (the immediate send)", %{server: server} do
+      assert :ok = SessionServer.call_start(server)
+      openai = SessionServer.openai_pid(server)
+
+      # No response is known to be active, so the output and its trigger go at once.
+      :ok = SessionServer.handle_provider_event(server, {:function_call, echo_call("c1")})
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      assert creates(openai) == 1
+
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:error, active_response_error()})
+      assert creates(openai) == 1, "the rejection itself sends nothing"
+
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+
+      events = FakeOpenAIClient.events(openai)
+      assert creates(openai) == 2
+      assert %{type: "response.create"} = List.last(events)
+      assert [_output] = outputs_for(events, "c1")
+    end
+
+    test "is sent again when that response ends (the deferred send)", %{server: server} do
+      assert :ok = SessionServer.call_start(server)
+      openai = SessionServer.openai_pid(server)
+
+      # The response that calls the tool is still running, so the trigger waits
+      # for its response.done.
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:function_call, echo_call("c1")})
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      assert creates(openai) == 0
+
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+      assert creates(openai) == 1
+
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:error, active_response_error()})
+      assert creates(openai) == 1, "the rejection itself sends nothing"
+
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+
+      events = FakeOpenAIClient.events(openai)
+      assert creates(openai) == 2
+      assert %{type: "response.create"} = List.last(events)
+      assert [_output] = outputs_for(events, "c1")
+    end
+
+    # The rejection can beat the rejecting response's own response.created. A
+    # re-send from the error itself would only be rejected again.
+    test "is not sent again before the rejecting response ends", %{server: server} do
+      assert :ok = SessionServer.call_start(server)
+      openai = SessionServer.openai_pid(server)
+
+      :ok = SessionServer.handle_provider_event(server, {:function_call, echo_call("c1")})
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      assert creates(openai) == 1
+
+      :ok = SessionServer.handle_provider_event(server, {:error, active_response_error()})
+      assert creates(openai) == 1, "the rejection itself sends nothing"
+
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      assert creates(openai) == 1
+
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+
+      events = FakeOpenAIClient.events(openai)
+      assert creates(openai) == 2
+      assert %{type: "response.create"} = List.last(events)
+      assert [_output] = outputs_for(events, "c1")
+    end
+
+    # The rejecting response may call a tool itself. One trigger, after the last
+    # output, covers both that call and the re-armed one.
+    test "waits for a call the rejecting response made", %{task_supervisor: task_supervisor} do
+      {:ok, server} =
+        SessionServer.start_link(
+          companion: self(),
+          config: Config.normalize(enabled: true),
+          openai_client: FakeOpenAIClient,
+          api_key: "sk-test",
+          safety_identifier: "safe-id",
+          capabilities: [capability(), blocking_capability(self())],
+          task_supervisor: task_supervisor,
+          prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+        )
+
+      assert :ok = SessionServer.call_start(server)
+      openai = SessionServer.openai_pid(server)
+
+      :ok = SessionServer.handle_provider_event(server, {:function_call, echo_call("c1")})
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "echo"}}
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:error, active_response_error()})
+
+      blocking = %{"call_id" => "c2", "name" => "blocking", "arguments" => "{}"}
+      :ok = SessionServer.handle_provider_event(server, {:function_call, blocking})
+      assert_receive {:blocking_tool_running, tool}
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+      assert creates(openai) == 1, "no trigger while a call is still in flight"
+
+      send(tool, :release)
+      assert_receive {:realtime, %{type: "tool_event", status: "completed", name: "blocking"}}
+
+      events = FakeOpenAIClient.events(openai)
+      assert creates(openai) == 2
+      assert %{type: "response.create"} = List.last(events)
+      assert [_output] = outputs_for(events, "c2")
+
+      # Nothing is owed any more: the next response ends without a trigger.
+      :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
+      :ok = SessionServer.handle_provider_event(server, {:response_done, %{}})
+      assert creates(openai) == 2
     end
   end
 
@@ -1309,6 +1681,99 @@ defmodule FermixCore.Realtime.SessionServerTest do
       executor: {HiddenTool, :execute, []},
       policy_class: :read_only
     })
+  end
+
+  defp echo_call(call_id),
+    do: %{"call_id" => call_id, "name" => "echo", "arguments" => ~s({"text":"hi"})}
+
+  # The same call as OpenAI sends it on the socket.
+  defp echo_call_event(call_id),
+    do: Map.put(echo_call(call_id), "type", "response.function_call_arguments.done")
+
+  defp active_response_error do
+    %{
+      "type" => "invalid_request_error",
+      "code" => "conversation_already_has_active_response",
+      "message" => "Conversation already has an active response in progress"
+    }
+  end
+
+  defp creates(openai),
+    do: openai |> FakeOpenAIClient.events() |> Enum.count(&(&1.type == "response.create"))
+
+  defp outputs_for(events, call_id),
+    do:
+      Enum.filter(
+        events,
+        &match?(%{item: %{type: "function_call_output", call_id: ^call_id}}, &1)
+      )
+
+  defp configure_sockets(behaviors) do
+    ProgrammableOpenAIClient.reset()
+    ProgrammableOpenAIClient.configure(behaviors, self())
+  end
+
+  defp start_reconnecting_server(backoff_ms, opts \\ []) do
+    defaults = [
+      companion: self(),
+      config: Config.normalize(enabled: true),
+      openai_client: ProgrammableOpenAIClient,
+      api_key: "sk-test",
+      safety_identifier: "safe-id",
+      capabilities: [],
+      reconnect_backoff_ms: backoff_ms,
+      prompt_loader: fn _opts ->
+        {:ok, %{messages: [%{role: "system", content: "p"}], parts: [], accounting: []}}
+      end
+    ]
+
+    {:ok, server} = SessionServer.start_link(Keyword.merge(defaults, opts))
+    server
+  end
+
+  # The first socket drops. The reconnect opens a second, whose session.update
+  # fails, so the session closes it; its close handshake is still running. The
+  # next attempt opens a third, which becomes openai_pid.
+  defp reconnect_past_a_failed_update(server) do
+    assert :ok = SessionServer.call_start(server)
+    assert_receive {:socket_started, first, :ok}
+    :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+    assert_receive {:socket_started, closed, :update_fails}
+    assert_receive {:socket_closed, ^closed}
+    assert_receive {:socket_started, current, :ok}
+    assert SessionServer.openai_pid(server) == current
+    assert_received {:realtime, %{type: "state", state: "reconnecting"}}
+    assert_received {:realtime, %{type: "state", state: "reconnecting"}}
+    {first, closed, current}
+  end
+
+  # A socket event of `kind` waiting in a mailbox, whichever socket sent it.
+  defp provider_event?(message, kind)
+       when is_tuple(message) and elem(message, 0) == :openai_realtime_event,
+       do: match?({^kind, _event}, elem(message, tuple_size(message) - 1))
+
+  defp provider_event?(_message, _kind), do: false
+
+  # Polls `server`'s mailbox until it holds a message `queued?` accepts, and returns
+  # the mailbox. For staging an interleaving while `server` is suspended: messages
+  # from different processes (sockets, timers, this test) are ordered only per
+  # sender, so a staged order is waited for, never assumed.
+  @mailbox_polls 200
+
+  defp await_queued(server, queued?, polls \\ @mailbox_polls)
+
+  defp await_queued(server, _queued?, 0),
+    do: flunk("the staged message never reached #{inspect(server)}'s mailbox")
+
+  defp await_queued(server, queued?, polls) do
+    {:messages, mailbox} = Process.info(server, :messages)
+
+    if Enum.any?(mailbox, queued?) do
+      mailbox
+    else
+      Process.sleep(10)
+      await_queued(server, queued?, polls - 1)
+    end
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)
