@@ -53,6 +53,10 @@ defmodule FermixCore.Browser.TabCapTest do
       {:ok, %{"targetId" => id}}
     end
 
+    # `open` attaches to the tab it creates before it navigates it.
+    defp run(_pid, "Target.attachToTarget", %{targetId: tid}),
+      do: {:ok, %{"sessionId" => "S-#{tid}"}}
+
     defp run(pid, "Target.closeTarget", %{targetId: tid}) do
       Agent.update(pid, fn s -> %{s | open: List.delete(s.open, tid)} end)
       {:ok, %{}}
@@ -95,11 +99,13 @@ defmodule FermixCore.Browser.TabCapTest do
     )
   end
 
+  # `observe: false`: these tests count tabs, and this connection has no page
+  # to look at.
   defp open(pid),
     do:
       ProfileServer.request(pid, %{
         action: "open",
-        args: %{"url" => "https://example.com/"},
+        args: %{"url" => "https://example.com/", "observe" => false},
         context: %{agent_name: "t"}
       })
 

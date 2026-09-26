@@ -137,7 +137,7 @@ defmodule FermixCore.Tools.BrowserTest do
       tags = Enum.map(Browser.failure_modes(), & &1.tag)
 
       for tag <- ~w(outcome_unknown webmcp_unavailable webmcp_unknown_tool webmcp_tool_threw
-                    webmcp_timeout) do
+                    webmcp_timeout navigation_failed) do
         assert tag in tags, "`#{tag}` is returnable but undocumented"
       end
     end

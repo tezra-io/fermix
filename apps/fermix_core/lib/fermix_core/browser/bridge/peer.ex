@@ -30,8 +30,9 @@ defmodule FermixCore.Browser.Bridge.Peer do
   alias FermixCore.Browser.Error
 
   # The one protocol number this daemon speaks. A bump is a paired change with
-  # the extension, which is why it is refused rather than negotiated.
-  @protocol 1
+  # the extension, which is why it is refused rather than negotiated. 2 sends
+  # `Network.enable`, which an extension on 1 refuses.
+  @protocol 2
   # Six live profiles each block on one command, so this is an order of
   # magnitude of headroom over the reachable maximum.
   @max_inflight 64

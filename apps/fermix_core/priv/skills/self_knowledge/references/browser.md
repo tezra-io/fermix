@@ -11,6 +11,23 @@ default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
 else is using it. On a desktop it is a real window the person can see.
 
+## Where a name points
+
+Both profiles judge where a page actually comes from, not only how its host is
+spelled. A hostname is looked up once per browser session, before a navigation
+and before a page is read, and one that resolves to a link-local or
+cloud-metadata address (169.254.0.0/16, fe80::/10, fd00:ec2::254) or the
+unspecified address is refused: `navigation_blocked` before the browser goes
+there, `read_blocked` for a page already there, such as a tab a page opened by
+itself or a handed-over tab's page. A lookup that fails is left to the browser,
+and a page that then does not load answers `navigation_failed`, naming the
+browser's network error, never a refusal. For a page Fermix watched load, the address the browser reports it loaded the
+page from is judged the same way, so a name that pointed somewhere public when
+it was checked and at the metadata endpoint when the browser fetched it still
+returns nothing (`read_blocked`). LAN (RFC 1918), ULA and tailnet (100.64/10)
+addresses stay reachable by name, and the recovery for a refused host is still
+its `allowed_hosts` entry.
+
 ## `selected_tab`: the tab the person handed over
 
 `profile: "selected_tab"` is **one tab of the person's own browser**, signed in
@@ -49,9 +66,11 @@ tab too — a page chooses what it logs — so it faces the same gate, in every
 profile.
 
 Commands are limited at the transport boundary to the `Page`, `Runtime`, `DOM`,
-`Input` and `Accessibility` CDP domains, and anything else is refused before it
-is transmitted — so a browser-wide command cannot leak through this path by
-accident.
+`Input` and `Accessibility` CDP domains, plus `Network.enable` so the read gate
+learns which address served the page, and anything else is refused before it is
+transmitted — so a browser-wide command, a cookie read among them, cannot leak
+through this path by accident. Of the `Network` domain the extension relays only
+a document's frame, url and serving address: no headers, no cookies.
 
 ### When there is no tab
 
@@ -98,7 +117,9 @@ manifest in that browser's `NativeMessagingHosts` directory, and prints both
 paths. `status` says what is installed, whether the launcher it names still
 exists, and whether an extension is connected. The extension itself is
 unpublished: it loads unpacked from `apps/fermix_core/priv/browser_extension/`,
-whose README has the steps.
+whose README has the steps. The daemon refuses an extension that speaks an older
+bridge protocol, so after updating Fermix the unpacked extension is reloaded from
+that directory.
 
 `fermix browser-bridge` is the pump the browser starts through that launcher. It
 is not run by hand.

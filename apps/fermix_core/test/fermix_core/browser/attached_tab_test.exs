@@ -19,7 +19,9 @@ defmodule FermixCore.Browser.AttachedTabTest do
   # The extension, as far as the daemon can tell: it answers `cdp` frames for
   # the one tab it granted and reports the `release` it is told to perform.
   # `href` is what the page's live-URL read returns, which is the one input the
-  # read gate takes.
+  # read gate takes. A page given a `served` address is one that moves when it
+  # is navigated and reports where each document came from, the way the
+  # extension relays it.
   defmodule FakeExtension do
     def start_link(page, reporter) do
       {:ok, spawn_link(fn -> loop(page, reporter) end)}
@@ -29,6 +31,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
       receive do
         {:bridge_command, from, id, _tab_id, method, params, _session} ->
           send(reporter, {:cdp, method, params})
+          page = navigated(page, method, params, from)
           send(from, {:bridge_reply, id, run(page, method, params)})
           loop(page, reporter)
 
@@ -37,6 +40,20 @@ defmodule FermixCore.Browser.AttachedTabTest do
           loop(page, reporter)
       end
     end
+
+    # Reported before the reply to the navigation that caused it, as Chrome does.
+    defp navigated({_href, title, served}, "Page.navigate", %{url: url}, from)
+         when is_binary(served) do
+      response = %{"url" => url, "remoteIPAddress" => served}
+      params = %{"type" => "Document", "frameId" => "F1", "response" => response}
+      send(from, {:bridge_event, "Network.responseReceived", params})
+      {url, title, served}
+    end
+
+    defp navigated(page, _method, _params, _from), do: page
+
+    defp run(_page, "Page.getFrameTree", _params),
+      do: {:ok, %{"frameTree" => %{"frame" => %{"id" => "F1"}}}}
 
     defp run(_page, "Accessibility.getFullAXTree", _params), do: {:ok, %{"nodes" => ax_nodes()}}
 
@@ -52,7 +69,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
     defp run(_page, "Page.printToPDF", _params),
       do: {:ok, %{"data" => Base.encode64("%PDF-1.4")}}
 
-    defp run({href, title}, "Runtime.evaluate", %{expression: expression}) do
+    defp run({href, title, _served}, "Runtime.evaluate", %{expression: expression}) do
       if String.contains?(expression, "document.location.href") do
         {:ok,
          %{"result" => %{"value" => %{"url" => href, "title" => title, "ready" => "complete"}}}}
@@ -114,7 +131,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   defp grant!(grants, href, opts \\ []) do
     tab_id = Keyword.get(opts, :tab_id, @tab_id)
     title = Keyword.get(opts, :title, "Page")
-    {:ok, peer} = FakeExtension.start_link({href, title}, self())
+    {:ok, peer} = FakeExtension.start_link({href, title, Keyword.get(opts, :served)}, self())
     :ok = Grants.grant(grants, peer, tab_id, %{"url" => href, "title" => title})
     peer
   end
@@ -122,13 +139,15 @@ defmodule FermixCore.Browser.AttachedTabTest do
   defp start_server(ctx, id, opts \\ []) do
     start_supervised!(
       {ProfileServer,
-       owner_key: Keyword.get(opts, :owner, @owner),
-       profile_name: "selected_tab",
-       profile: %{mode: :attached_tab, headless: false, cdp_port: :auto},
-       config: public_config(),
-       launcher: NoLauncher,
-       grants: ctx.grants,
-       connection: ExtensionTransport},
+       [
+         owner_key: Keyword.get(opts, :owner, @owner),
+         profile_name: "selected_tab",
+         profile: %{mode: :attached_tab, headless: false, cdp_port: :auto},
+         config: public_config(),
+         launcher: NoLauncher,
+         grants: ctx.grants,
+         connection: ExtensionTransport
+       ] ++ Keyword.take(opts, [:resolver])},
       id: id
     )
   end
@@ -477,6 +496,37 @@ defmodule FermixCore.Browser.AttachedTabTest do
     assert result["snapshot"] =~ ~s(@textbox_1 [textbox] "Where to?")
   end
 
+  # The person's tab resolves names with the person's browser, so where a name
+  # pointed when it was checked is not where the tab went. The address the
+  # browser reports it loaded the document from is: a page served from the
+  # metadata endpoint returns nothing, whatever its name looked like.
+  test "a granted tab navigated onto a page served from the metadata endpoint reads nothing",
+       ctx do
+    grant!(ctx.grants, "https://example.com/dash", served: "169.254.169.254")
+    pid = start_server(ctx, :attached_served_from)
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:ok, result} = req(pid, "navigate", %{"url" => "http://rebind.example/latest/"})
+    assert result["page"] == "read_blocked"
+    refute Map.has_key?(result, "snapshot")
+
+    assert {:error, %Error{code: "read_blocked"}} = req(pid, "snapshot")
+  end
+
+  # The page was loaded before the grant, so nothing watched it arrive and the
+  # browser never says where it came from. Its name is still looked up before
+  # it is read.
+  test "a granted tab already on a name that points at the metadata endpoint reads nothing",
+       ctx do
+    grant!(ctx.grants, "http://meta.example/latest/meta-data/")
+    resolver = fn "meta.example" -> {:ok, [{169, 254, 169, 254}]} end
+    pid = start_server(ctx, :attached_pre_grant, resolver: resolver)
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:error, %Error{code: "read_blocked"} = error} = req(pid, "snapshot")
+    assert error.details["reason"] == "link_local_address"
+  end
+
   test "the gate does not over-block: an allowed page still reads", ctx do
     grant!(ctx.grants, "https://example.com/results")
     pid = start_server(ctx, :attached_allowed)
@@ -489,14 +539,17 @@ defmodule FermixCore.Browser.AttachedTabTest do
 
   # ── no browser-wide CDP command ever leaves the daemon ─────────────────────
 
-  test "attaching a granted tab sends no Target or Browser command", ctx do
+  # `Network.enable` is the one exception, and it is tab-scoped: it turns on the
+  # report of which address served the tab's document. Every other `Network`
+  # method — the cookie reads — stays out.
+  test "attaching a granted tab sends no Target, Browser or cookie command", ctx do
     grant!(ctx.grants, "https://example.com/results")
     pid = start_server(ctx, :attached_no_target)
 
     assert {:ok, _} = req(pid, "start")
     assert {:ok, _} = req(pid, "snapshot")
 
-    for {method, _params} <- collected_cdp() do
+    for {method, _params} <- collected_cdp(), method != "Network.enable" do
       refute String.starts_with?(method, ["Target.", "Browser.", "Network."]),
              "`#{method}` reached the extension from a granted tab"
     end

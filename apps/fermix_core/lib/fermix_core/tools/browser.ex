@@ -264,6 +264,13 @@ defmodule FermixCore.Tools.Browser do
       },
       %{tag: "navigation_blocked", description: "browser URL policy blocked the navigation"},
       %{
+        tag: "navigation_failed",
+        description:
+          "the page did not load (the name does not resolve, the connection was refused, the " <>
+            "server is down) and the browser's network error is named; not a policy refusal, " <>
+            "so check the address or the server. A failed `open` leaves no tab behind"
+      },
+      %{
         tag: "read_blocked",
         description:
           "the page's live host is blocked by browser policy; navigate somewhere allowed. As " <>

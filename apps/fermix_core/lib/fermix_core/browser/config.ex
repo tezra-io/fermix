@@ -90,6 +90,11 @@ defmodule FermixCore.Browser.Config do
 
   `act_limits/0`, not struct fields either: the post-action settle budget and
   the `fill_form` field count are tuning, not posture.
+
+  ## Address-check bounds
+
+  `address_limits/0`, likewise: the DNS budget of the address checks and the
+  sizes of what they remember.
   """
 
   alias FermixCore.Browser.Error
@@ -239,9 +244,9 @@ defmodule FermixCore.Browser.Config do
   # its own timeout and the caller adds `cdp_response_grace_ms`, so the ceiling
   # is this budget plus one poll plus one grace (see `ProfileServer.settle/5`).
   # `navigation_budget_ms` is that same wait after an `open` or a `navigate`,
-  # and it is longer because there it is the ONLY load wait: `Target.createTarget`
-  # answers on creation and `Page.navigate` on commit, so nothing else waits for
-  # the page at all. Four seconds is still well under the model turn it
+  # and it is longer because there it is the ONLY load wait: `Page.navigate`
+  # answers on commit, so nothing else waits for the page at all. Four seconds
+  # is still well under the model turn it
   # replaces, and the same `handle_call` already blocks up to
   # `navigation_timeout_ms` inside `Page.navigate` and `wait_max_ms` inside `act
   # wait`, so it is not a new class of stall. `form_fields` is how many fields
@@ -252,6 +257,23 @@ defmodule FermixCore.Browser.Config do
     navigation_budget_ms: 4_000,
     form_fields: 12,
     ref_chars: 128
+  }
+
+  # Bounds on the address checks, constants for the same reason again.
+  # `lookup_timeout_ms` bounds each of the two DNS queries the address checks
+  # make for a name; a lookup that runs out is a lookup that failed, which the
+  # policy allows. `resolved_hosts` is how many names one runtime remembers the
+  # answers for, and `served_documents` how many documents per tab it remembers
+  # the serving address of — comfortably above the handful a back/forward cache
+  # can restore without a new response. `pending_documents` bounds how many
+  # document responses one read verdict takes out of the mailbox; past it the
+  # read is refused as not yet checkable rather than judged on a partial view.
+  # All three bounded maps are cleared when full, not grown.
+  @address_limits %{
+    lookup_timeout_ms: 2_000,
+    resolved_hosts: 64,
+    served_documents: 16,
+    pending_documents: 64
   }
 
   @doc """
@@ -288,6 +310,19 @@ defmodule FermixCore.Browser.Config do
           ref_chars: pos_integer()
         }
   def act_limits, do: @act_limits
+
+  @doc """
+  Bounds on the address checks: the budget for each DNS query they make, how
+  many names and per-tab documents are remembered, and how many document
+  responses one read verdict takes in.
+  """
+  @spec address_limits() :: %{
+          lookup_timeout_ms: pos_integer(),
+          resolved_hosts: pos_integer(),
+          served_documents: pos_integer(),
+          pending_documents: pos_integer()
+        }
+  def address_limits, do: @address_limits
 
   @doc """
   `[fermix_core.browser]` as a keyword list, keeping only the settable keys.

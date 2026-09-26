@@ -29,6 +29,7 @@ defmodule FermixCore.Browser.ProfileServer do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
   alias FermixCore.Browser.Snapshot
+  alias FermixCore.Net.Guard
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Telemetry
@@ -49,6 +50,9 @@ defmodule FermixCore.Browser.ProfileServer do
                    "through its own webmcp tools."
   @advanced_actions ~w(focus close screenshot pdf console dialog cookies storage upload download act
                        webmcp)
+  # The document every tab `open` creates starts on, and is navigated from
+  # (`create_tab/3`).
+  @initial_document "about:blank"
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -90,6 +94,7 @@ defmodule FermixCore.Browser.ProfileServer do
       launcher: Keyword.get(opts, :launcher, ChromeLauncher),
       grants: Keyword.get(opts, :grants, Grants),
       conn_mod: Keyword.get(opts, :connection, transport_for(profile)),
+      resolver: Keyword.get_lazy(opts, :resolver, &default_resolver/0),
       # Why the granted tab went away, so the next request says what happened
       # rather than asking for a click that was already made.
       detached: nil,
@@ -107,6 +112,12 @@ defmodule FermixCore.Browser.ProfileServer do
       # leaves it alone (§3.1) and `open`/`navigate` bring a mark of their own
       # (§3.6).
       observations: %{},
+      # Per host, what the address checks' lookup answered, for the life of the
+      # runtime (`lookup/2`).
+      resolved: %{},
+      # Per watched tab, its main frame and the address each of its documents
+      # was served from (`watch_network/3`).
+      served_from: %{},
       console: [],
       dialogs: [],
       downloads: %{},
@@ -121,6 +132,14 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp transport_for(%{mode: :attached_tab}), do: ExtensionTransport
   defp transport_for(_profile), do: Connection
+
+  # `Net.Guard`'s resolver, bounded by the browser's own lookup budget.
+  # config/test.exs pins `:browser_resolver` so no suite reaches a real
+  # nameserver; a test that needs answers passes `:resolver` itself.
+  defp default_resolver do
+    timeout = Config.address_limits().lookup_timeout_ms
+    Application.get_env(:fermix_core, :browser_resolver, &Guard.resolve(&1, timeout))
+  end
 
   @impl true
   def handle_call(:status, _from, state), do: {:reply, status_map(state), state}
@@ -195,10 +214,11 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp run_request(%{action: "open", args: args, context: context}, state) do
-    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+    with {:ok, uri, state} <- navigation_verdict(args["url"], state),
          {:ok, mark} <- fresh_mark(args, leaving_document(uri), state) do
       with_running(state, context, fn s -> finish(create_tab(uri, mark, s), s) end)
     else
+      {:error, error, state} -> {{:error, error}, state}
       {:error, error} -> {{:error, error}, state}
     end
   end
@@ -206,10 +226,11 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_request(%{action: "navigate", args: args, context: context}, state) do
     # Nothing to leave: `Page.navigate` answers on the commit, so the document
     # the look polls is already the one the request landed on.
-    with {:ok, uri} <- Policy.validate_url(args["url"], state.config),
+    with {:ok, uri, state} <- navigation_verdict(args["url"], state),
          {:ok, mark} <- fresh_mark(args, nil, state) do
       with_running(state, context, fn s -> finish(navigate_chain(uri, args, mark, s), s) end)
     else
+      {:error, error, state} -> {{:error, error}, state}
       {:error, error} -> {{:error, error}, state}
     end
   end
@@ -560,13 +581,70 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # A new tab is created on the empty document and navigated from there, never
+  # created ON the url: Chrome starts loading a target the moment it exists,
+  # before anything can attach to it, so the served-from watch
+  # (`watch_network/3`) would miss the very document the model asked for.
+  # Navigating it is `navigate`'s own path, committed-URL check included.
   defp create_tab(uri, mark, state) do
-    params = %{url: URI.to_string(uri)}
+    params = %{url: @initial_document}
 
-    with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params),
-         {:ok, state} <- refresh_targets(%{state | active_target: tab_id(target_id)}),
-         {:ok, tab, state} <- resolve_tab(tab_id(target_id), state),
-         {:ok, state} <- enforce_tab_cap(state) do
+    with {:ok, %{"targetId" => target_id}} <- command(state, "Target.createTarget", params) do
+      tab = new_tab(target_id)
+
+      case load_new_tab(tab, uri, mark, %{state | active_target: tab.id}) do
+        {:ok, result, state} -> capped(result, state)
+        failed -> abandon_new_tab(tab, state, failed)
+      end
+    end
+  end
+
+  # The look has run by now, so its state is kept even when the trim fails.
+  defp capped(result, state) do
+    case enforce_tab_cap(state) do
+      {:ok, state} -> {:ok, result, state}
+      {:error, %Error{} = error} -> {:error, error, state}
+    end
+  end
+
+  # A tab this `open` made and could not load is closed again rather than left
+  # behind blank, where no listing shows it (`selectable_targets/1`). The answer
+  # is the load's own error, over the state from before the tab existed.
+  defp abandon_new_tab(tab, state, failed) do
+    case command(state, "Target.closeTarget", %{targetId: tab.target_id}) do
+      {:ok, _result} ->
+        :ok
+
+      {:error, error} ->
+        Logger.warning(
+          "browser: could not close #{tab.id} after its open failed: #{inspect(error)}"
+        )
+    end
+
+    {:error, load_error(failed)}
+  end
+
+  defp load_error({:error, %Error{} = error}), do: error
+  defp load_error({:error, %Error{} = error, _state}), do: error
+
+  # The tab `Target.createTarget` just made, before a refresh lists it: while
+  # another page is open, a blank tab is exactly what `selectable_targets/1`
+  # leaves out.
+  defp new_tab(target_id) do
+    {_id, tab} = target_entry(%{"targetId" => target_id, "url" => @initial_document})
+    tab
+  end
+
+  defp load_new_tab(tab, uri, mark, state) do
+    if URI.to_string(uri) == @initial_document,
+      do: open_blank(tab, mark, state),
+      else: navigate_tab(tab, uri, mark, state)
+  end
+
+  # Nothing to navigate: the new tab is already on the page that was asked for.
+  defp open_blank(tab, mark, state) do
+    with {:ok, state} <- refresh_targets(state),
+         {:ok, tab, state} <- resolve_tab(tab.id, state) do
       observe_navigation(tab_result(tab), tab, state, mark)
     end
   end
@@ -632,7 +710,7 @@ defmodule FermixCore.Browser.ProfileServer do
 
     with {:ok, tab, state} <- attach(tab, state),
          {:ok, _} <- command(state, "Page.enable", %{}, tab.session_id),
-         {:ok, _} <-
+         {:ok, navigated} <-
            command(
              state,
              "Page.navigate",
@@ -640,17 +718,38 @@ defmodule FermixCore.Browser.ProfileServer do
              tab.session_id,
              state.config.navigation_timeout_ms
            ),
+         :ok <- loaded(navigated, state),
          {:ok, final_url} <- committed_url(tab, requested, state),
-         :ok <- final_url_allowed(final_url, state.config),
+         {:ok, _committed, state} <- navigation_verdict(final_url, state),
          {:ok, state} <- refresh_targets(state),
          {:ok, live, state} <- resolve_tab(tab.id, state) do
-      # The refreshed entry carries the tab's new title; the session the look
-      # reads through is on the attached one, because `refresh_targets/1`
-      # rebuilds the tab set from the browser and keeps no sessions.
-      settled = %{live | url: final_url, session_id: tab.session_id}
-      observe_navigation(tab_result(settled), settled, state, mark)
+      # The refreshed entry carries the tab's new title, and the session this
+      # navigation attached goes back on it: `refresh_targets/1` rebuilds the tab
+      # set from the browser and keeps no sessions, and a session dropped here is
+      # leaked and re-opened by the next call — `open` navigates every tab it
+      # makes through here.
+      live = %{live | session_id: tab.session_id}
+      settled = %{live | url: final_url}
+      observe_navigation(tab_result(settled), settled, put_in(state.targets[live.id], live), mark)
     end
   end
+
+  # A request that reached no document — a name that does not resolve, a
+  # refused connection, a server that is down — is answered with the network
+  # error, and Chrome commits its own error page, whose `chrome-error:` address
+  # the committed-URL check would refuse as a scheme: a site that is merely
+  # down would read as a policy refusal. The answer is the load's instead, over
+  # the state holding the session and watch this call opened, since the tab
+  # lives on. A download and a 204 answer `net::ERR_ABORTED` and commit
+  # nothing, so they go on to the committed-URL read as any other navigation.
+  defp loaded(%{"errorText" => error}, state)
+       when is_binary(error) and error not in ["", "net::ERR_ABORTED"] do
+    {:error,
+     Error.new("navigation_failed", "Could not load the page: #{error}", %{"net_error" => error}),
+     state}
+  end
+
+  defp loaded(_navigated, _state), do: :ok
 
   # The post-navigation final-URL check (redirect SSRF guard) must read the
   # COMMITTED document URL, not Target.getTargets — Page.navigate returns once
@@ -693,22 +792,68 @@ defmodule FermixCore.Browser.ProfileServer do
   defp read_page(args, state, read_fun) when is_map(args) and is_function(read_fun, 2) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
-         {:ok, tab} <- live_page(tab, state) do
-      read_fun.(tab, state)
+         {:ok, tab, state} <- live_page(tab, state) do
+      keep_state(read_fun.(tab, state), state)
     end
   end
 
+  # The gate may have taken document responses out of the mailbox
+  # (`absorb_documents/1`), so the state holding them must outlive a read that
+  # fails after it: dropped, the next read would find those documents never
+  # served at all.
+  defp keep_state({:error, %Error{} = error}, state), do: {:error, error, state}
+  defp keep_state(reply, _state), do: reply
+
   # The read gate asks ONE question — may this document be returned — and
-  # `Policy.read_verdict/2` is where that question lives: an explicit scheme
-  # allow-list (http/https, `about:blank`, and a `blob:` whose inner origin is
-  # allowed) and then the host rules on the host it already holds. Reusing
-  # `Policy.validate_url/2` whole is a NAVIGATION policy and would refuse a page
-  # that legitimately committed to a `blob:` URL, naming a navigation the model
-  # never made.
+  # `document_verdict/3` is where that question lives.
   defp live_page(tab, state) do
     with {:ok, tab} <- live_meta(tab, state),
-         :ok <- Policy.read_verdict(tab.url, state.config) do
-      {:ok, tab}
+         {:ok, state} <- document_verdict(tab, tab.url, state) do
+      {:ok, tab, state}
+    end
+  end
+
+  # The document question, on the live address the read already holds. First
+  # `Policy.read_verdict/2`: an explicit scheme allow-list (http/https,
+  # `about:blank`, and a `blob:` whose inner origin is allowed) and then the host
+  # rules on the host it holds. Reusing `Policy.validate_url/2` whole is a
+  # NAVIGATION policy and would refuse a page that legitimately committed to a
+  # `blob:` URL, naming a navigation the model never made. Then where the
+  # document's name actually points, which no spelling of it decides.
+  defp document_verdict(tab, url, state) do
+    with :ok <- Policy.read_verdict(url, state.config),
+         {:ok, state} <- absorb_documents(state) do
+      {answers, state} = document_answers(tab, url, state)
+      read_answers_verdict(url, answers, state)
+    else
+      {:error, %Error{} = error} -> {:error, error, state}
+      {:error, %Error{}, _state} = unsettled -> unsettled
+    end
+  end
+
+  # Every answer there is to where the document's name points: the address
+  # Chrome reports it served the document from, when the watch saw it arrive,
+  # and the name's lookup, the cached one navigations ask too (`lookup/2`). The
+  # lookup is all a document nobody watched arrive has: a tab the page opened
+  # itself loads before anything can attach to it, and a handed-over tab's page
+  # loaded before the grant.
+  defp document_answers(tab, url, state) do
+    served = List.wrap(get_in(state.served_from, [tab.id, :documents, document_key(url)]))
+    {looked_up, state} = name_answers(URI.parse(url), state)
+    {served ++ looked_up, state}
+  end
+
+  defp name_answers(uri, state) do
+    case Policy.resolution_host(uri, state.config) do
+      {:ok, host} -> lookup(host, state)
+      :none -> {[], state}
+    end
+  end
+
+  defp read_answers_verdict(url, answers, state) do
+    case Policy.read_answers_verdict(url, answers, state.config) do
+      :ok -> {:ok, state}
+      {:error, %Error{} = error} -> {:error, error, state}
     end
   end
 
@@ -1405,13 +1550,11 @@ defmodule FermixCore.Browser.ProfileServer do
 
   # ── what the action changed ────────────────────────────────────────────────
 
-  # The document a new tab answers from until its request commits. `open`
-  # creates the target and returns before that, and the empty document is
-  # complete and its url stable, so a settle that did not know what it was
-  # leaving would hand back the blank page the open exists to replace. Nothing
-  # to leave when the blank page IS the request.
-  @initial_document "about:blank"
-
+  # The document a new tab answers from until its request commits. The empty
+  # document is complete and its url stable, so a settle that did not know what
+  # it was leaving would hand back the blank page the open exists to replace —
+  # and a navigation that commits nothing (a download, a 204) leaves the tab on
+  # it. Nothing to leave when the blank page IS the request.
   defp leaving_document(uri) do
     if URI.to_string(uri) == @initial_document, do: nil, else: @initial_document
   end
@@ -1495,10 +1638,10 @@ defmodule FermixCore.Browser.ProfileServer do
   # every branch below keeps the receipt and only says what could be seen. Same
   # rule as the receipts above — logged, never swallowed, never fatal.
   defp observe_attached(result, mark, tab, state, deadline) do
-    with {:ok, tab, deadline} <- rendered_view(settle(tab, state, mark, deadline, nil), deadline),
-         {:ok, rendered} <- render_within(mark, tab, state, deadline) do
-      observed(result, mark, rendered, tab, state)
-    else
+    case rendered_view(settle(tab, state, mark, deadline, nil), deadline) do
+      {:ok, tab, deadline} ->
+        observe_document(result, mark, tab, state, deadline)
+
       {:blocked, %Error{} = error} ->
         {page_refused(result, error), state}
 
@@ -1507,6 +1650,30 @@ defmodule FermixCore.Browser.ProfileServer do
       # itself standing, so the only honest report is `unobserved` and a log.
       other ->
         {unobserved(result, other), state}
+    end
+  end
+
+  # The settle asked the host rules on every poll; the document about to be
+  # rendered is asked the whole question once, where it was served from
+  # included. The verdict's state is kept on every path below, because it may
+  # have taken document responses out of the mailbox.
+  defp observe_document(result, mark, tab, state, deadline) do
+    case document_verdict(tab, tab.url, state) do
+      {:ok, state} ->
+        observe_render(result, mark, tab, state, deadline)
+
+      {:error, %Error{code: "read_url_unavailable"} = error, state} ->
+        {unobserved(result, error), state}
+
+      {:error, %Error{} = error, state} ->
+        {page_refused(result, error), state}
+    end
+  end
+
+  defp observe_render(result, mark, tab, state, deadline) do
+    case render_within(mark, tab, state, deadline) do
+      {:ok, rendered} -> observed(result, mark, rendered, tab, state)
+      other -> {unobserved(result, other), state}
     end
   end
 
@@ -2155,9 +2322,11 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The timeout keeps the state the polls built: each one went through the read
+  # gate, which may have taken document responses out of the mailbox.
   defp continue_wait(wait_until, args, state, deadline) do
     if System.monotonic_time(:millisecond) >= deadline do
-      {:error, Error.new("timeout", "wait timed out")}
+      {:error, Error.new("timeout", "wait timed out"), state}
     else
       Process.sleep(state.config.wait_poll_interval_ms)
       do_wait_for(wait_until, args, state, deadline)
@@ -2221,11 +2390,13 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
+  # The timeout keeps the state this loop built: every event it took out of the
+  # mailbox — a document response among them — is recorded there and nowhere else.
   defp receive_download_event(state, deadline) do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     if remaining == 0 do
-      {:error, Error.new("timeout", "download timed out")}
+      {:error, Error.new("timeout", "download timed out"), state}
     else
       receive do
         {:cdp_event, method, event} ->
@@ -2371,11 +2542,12 @@ defmodule FermixCore.Browser.ProfileServer do
       # A gone tab's refs can never be clicked again; keeping its map only grows
       # state for the life of the profile (closes, evictions, crashes all funnel
       # through this refresh, so pruning here covers every removal path). The
-      # observation record is the same fact about the same tab, so it is pruned
-      # on the same line — one lifecycle, not two.
+      # observation record and the served-from watch are facts about the same
+      # tab, so they are pruned on the same line — one lifecycle, not three.
       live = Map.keys(targets)
       ref_maps = Map.take(state.ref_maps, live)
       observations = Map.take(state.observations, live)
+      served_from = Map.take(state.served_from, live)
 
       {:ok,
        %{
@@ -2384,7 +2556,8 @@ defmodule FermixCore.Browser.ProfileServer do
            active_target: active,
            tab_order: order,
            ref_maps: ref_maps,
-           observations: observations
+           observations: observations,
+           served_from: served_from
        }}
     end
   end
@@ -2450,7 +2623,8 @@ defmodule FermixCore.Browser.ProfileServer do
       tab = Map.put(tab, :session_id, session_id)
       state = put_in(state.targets[tab.id], tab)
       enable_page(tab, state)
-      {:ok, tab, state}
+      # A page target's main frame carries the target's own id.
+      watch_network(tab, tab.target_id, state)
     end
   end
 
@@ -2461,7 +2635,52 @@ defmodule FermixCore.Browser.ProfileServer do
     tab = Map.put(tab, :attached, true)
     state = put_in(state.targets[tab.id], tab)
     enable_page(tab, state)
-    {:ok, tab, state}
+
+    with {:ok, frame_id} <- main_frame(tab, state) do
+      watch_network(tab, frame_id, state)
+    end
+  end
+
+  # The served-from watch: `Network` turned on for ONE session per tab, so the
+  # browser reports the address each document of that tab's main frame was
+  # served from (`record_event/3`). One per tab, not per session: sessions are
+  # re-opened after every target refresh and never closed, and a watch on each
+  # would repeat every network event once per session the tab ever had. Pruned
+  # with the tab in `refresh_targets/1`. Chrome keeps no response body for it —
+  # only a response's address is read, and the default buffers would hold every
+  # body the tab loads, in the person's own browser for a granted tab. A watch
+  # that cannot be turned on fails the attach, so a tab the served-from half
+  # cannot judge is never read; its session is re-opened by the next call, as
+  # after any refresh.
+  defp watch_network(%{id: id} = tab, _frame_id, %{served_from: served} = state)
+       when is_map_key(served, id),
+       do: {:ok, tab, state}
+
+  defp watch_network(tab, frame_id, state) do
+    params = %{maxTotalBufferSize: 0, maxResourceBufferSize: 0}
+
+    with {:ok, _} <- command(state, "Network.enable", params, tab.session_id) do
+      {:ok, tab, put_in(state.served_from[tab.id], %{frame: frame_id, documents: %{}})}
+    end
+  end
+
+  # A granted tab's main frame. Its target id is the browser's to know, not the
+  # grant's, so the frame tree is asked, once, when the tab is attached.
+  defp main_frame(tab, state) do
+    case command(state, "Page.getFrameTree", %{}, tab.session_id) do
+      {:ok, %{"frameTree" => %{"frame" => %{"id" => id}}}} when is_binary(id) ->
+        {:ok, id}
+
+      {:ok, other} ->
+        {:error,
+         Error.new(
+           "cdp_error",
+           "The tab's frame tree named no main frame: #{bounded_inspect(other)}"
+         )}
+
+      {:error, %Error{} = error} ->
+        {:error, error}
+    end
   end
 
   defp enable_page(tab, state) do
@@ -2502,11 +2721,57 @@ defmodule FermixCore.Browser.ProfileServer do
     end
   end
 
-  defp final_url_allowed(url, config) do
-    case Policy.validate_url(url, config) do
-      {:ok, _uri} -> :ok
-      {:error, error} -> {:error, error}
+  # THE navigation question, asked of every URL Chrome is about to be sent to or
+  # has just committed to — `open`, `navigate`, the committed-URL recheck, a
+  # download's source: the host rules, then, for a name, where its lookup says
+  # it points. Chrome resolves the name again on its own, so this half is the
+  # cheap early refusal, not the guarantee; the served-from half of
+  # `document_verdict/3` is.
+  defp navigation_verdict(url, state) do
+    case Policy.validate_url(url, state.config) do
+      {:ok, uri} -> resolved_verdict(uri, state)
+      {:error, %Error{} = error} -> {:error, error, state}
     end
+  end
+
+  defp resolved_verdict(uri, state) do
+    case Policy.resolution_host(uri, state.config) do
+      {:ok, host} -> answers_verdict(uri, host, lookup(host, state))
+      :none -> {:ok, uri, state}
+    end
+  end
+
+  defp answers_verdict(uri, host, {answers, state}) do
+    case Policy.answers_verdict(host, answers, state.config) do
+      :ok -> {:ok, uri, state}
+      {:error, %Error{} = error} -> {:error, error, state}
+    end
+  end
+
+  # Once per host for the life of the runtime, a failed lookup included: a name
+  # that does not resolve here is left to Chrome, which resolves it or fails on
+  # its own, and a DNS-less host must not pay the lookup budget on every hop of
+  # a flow. Full means cleared, not grown.
+  defp lookup(host, %{resolved: resolved} = state) when is_map_key(resolved, host) do
+    {Map.fetch!(resolved, host), state}
+  end
+
+  defp lookup(host, state) do
+    answers = lookup_answers(host, state.resolver.(host))
+
+    kept =
+      if map_size(state.resolved) >= Config.address_limits().resolved_hosts,
+        do: %{},
+        else: state.resolved
+
+    {answers, %{state | resolved: Map.put(kept, host, answers)}}
+  end
+
+  defp lookup_answers(_host, {:ok, answers}) when is_list(answers), do: answers
+
+  defp lookup_answers(host, {:error, reason}) do
+    Logger.debug("browser: #{host} did not resolve for the address check: #{inspect(reason)}")
+    []
   end
 
   defp track_target?(%{"type" => type, "url" => url}) when type in @page_types do
@@ -2541,7 +2806,8 @@ defmodule FermixCore.Browser.ProfileServer do
   defp granted_tab_row(state) do
     with {:ok, tab, state} <- resolve_tab(nil, state),
          {:ok, tab, state} <- attach(tab, state) do
-      {:ok, %{"ok" => true, "tabs" => [live_row(tab, state)]}, state}
+      {row, state} = live_row(tab, state)
+      {:ok, %{"ok" => true, "tabs" => [row]}, state}
     end
   end
 
@@ -2549,10 +2815,13 @@ defmodule FermixCore.Browser.ProfileServer do
   # the read policy said, and nothing of the page beside it when it said no.
   defp live_row(tab, state) do
     case live_page(tab, state) do
-      {:ok, live} -> tab_result(live)
-      {:error, %Error{code: code}} -> %{"id" => tab.id, "target" => tab.id, "page" => code}
+      {:ok, live, state} -> {tab_result(live), state}
+      {:error, %Error{code: code}, state} -> {refused_row(tab, code), state}
+      {:error, %Error{code: code}} -> {refused_row(tab, code), state}
     end
   end
+
+  defp refused_row(tab, code), do: %{"id" => tab.id, "target" => tab.id, "page" => code}
 
   defp tab_values(state) do
     state.targets
@@ -2850,7 +3119,8 @@ defmodule FermixCore.Browser.ProfileServer do
     # The observation marks go with the ref maps, here as in `refresh_targets/1`:
     # they are the same fact about the same tabs, and a mark that outlived the
     # browser would have a restarted profile compare a fresh page against a
-    # snapshot nobody in this session was ever shown.
+    # snapshot nobody in this session was ever shown. The served-from watches
+    # and the lookups are the runtime's too: a restarted browser has neither.
     %{
       state
       | runtime: nil,
@@ -2858,7 +3128,9 @@ defmodule FermixCore.Browser.ProfileServer do
         active_target: nil,
         tab_order: [],
         ref_maps: %{},
-        observations: %{}
+        observations: %{},
+        served_from: %{},
+        resolved: %{}
     }
   end
 
@@ -2903,8 +3175,26 @@ defmodule FermixCore.Browser.ProfileServer do
       "state" => "in_progress"
     }
 
-    download = vet_download_source(download, state)
+    {download, state} = vet_download_source(download, state)
     %{state | downloads: Map.put(state.downloads, guid, download)}
+  end
+
+  # A main-frame document of a watched tab: the address it was served from, kept
+  # under its url without the fragment (the one part of `location.href` a
+  # response never carries). A response that names no address — a cache or
+  # service-worker answer, an empty string — leaves what an earlier one recorded
+  # for that url, and the read gate still has the name's lookup.
+  defp record_event(
+         "Network.responseReceived",
+         %{"params" => %{"type" => "Document", "frameId" => frame_id} = params},
+         state
+       ) do
+    with {:ok, tab_id} <- watched_tab(frame_id, state),
+         {:ok, key, address} <- served_document(params["response"]) do
+      update_in(state.served_from[tab_id].documents, &remember_served(&1, key, address))
+    else
+      :none -> state
+    end
   end
 
   defp record_event("Browser.downloadProgress", event, state) do
@@ -2926,6 +3216,89 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp record_event(_method, _event, state), do: state
+
+  defp watched_tab(frame_id, state) do
+    Enum.find_value(state.served_from, :none, fn
+      {tab_id, %{frame: ^frame_id}} -> {:ok, tab_id}
+      _other -> nil
+    end)
+  end
+
+  defp served_document(%{"url" => url, "remoteIPAddress" => address})
+       when is_binary(url) and is_binary(address) and address != "" do
+    case remote_address(address) do
+      {:ok, ip} ->
+        {:ok, document_key(url), ip}
+
+      {:error, _unparsable} ->
+        Logger.warning(
+          "browser: a document from #{URI.parse(url).host} named a serving address " <>
+            "that does not parse: #{bounded_inspect(address)}"
+        )
+
+        :none
+    end
+  end
+
+  defp served_document(_response), do: :none
+
+  # CDP writes an IPv6 remote address in brackets.
+  defp remote_address(address) do
+    address
+    |> String.trim_leading("[")
+    |> String.trim_trailing("]")
+    |> String.to_charlist()
+    |> :inet.parse_address()
+  end
+
+  defp document_key(url), do: url |> String.split("#", parts: 2) |> hd()
+
+  defp remember_served(documents, key, address) do
+    kept =
+      if map_size(documents) >= Config.address_limits().served_documents,
+        do: %{},
+        else: documents
+
+    Map.put(kept, key, address)
+  end
+
+  # The read verdicts run inside a request, while the events Chrome sent during
+  # it wait in the mailbox — and a navigation's document response is always
+  # among them, because Chrome reports it before it answers anything asked of
+  # the new page. So before a verdict the main-frame document responses already
+  # delivered are taken out and recorded; every other event keeps its place for
+  # `handle_info/2`. Bounded: past the cap the page is committing documents
+  # faster than they are read, and the read is refused as not yet checkable
+  # rather than judged on what arrived first.
+  defp absorb_documents(state) do
+    frames = Map.new(state.served_from, fn {tab_id, %{frame: frame}} -> {frame, tab_id} end)
+    absorb_documents(state, frames, Config.address_limits().pending_documents)
+  end
+
+  defp absorb_documents(state, _frames, 0), do: {:error, documents_pending(), state}
+
+  defp absorb_documents(state, frames, budget) do
+    receive do
+      {:cdp_event, "Network.responseReceived" = method,
+       %{"params" => %{"type" => "Document", "frameId" => frame}} = event}
+      when is_map_key(frames, frame) ->
+        absorb_documents(record_event(method, event, state), frames, budget - 1)
+    after
+      0 -> {:ok, state}
+    end
+  end
+
+  # `read_url_unavailable` on purpose: the same cause — the page is still
+  # moving — and the same fix, so the model retries rather than concluding the
+  # host is forbidden.
+  defp documents_pending do
+    Error.new(
+      "read_url_unavailable",
+      "The page is still loading new documents faster than the browser read policy can " <>
+        "check where they came from, so the read was refused. Take the action again.",
+      %{"reason" => "documents_pending"}
+    )
+  end
 
   defp merge_download_progress(download, params) do
     download
@@ -2985,29 +3358,32 @@ defmodule FermixCore.Browser.ProfileServer do
   # data:, filesystem:) stay allowed: their bytes come from a document the
   # navigation gate already admitted, not from a new network fetch.
   defp vet_download_source(download, state) do
-    case download_source_verdict(Map.get(download, "url"), state.config) do
-      :ok -> download
-      {:error, %Error{} = policy_error} -> block_refused_download(download, policy_error, state)
+    case download_source_verdict(Map.get(download, "url"), state) do
+      {:ok, state} ->
+        {download, state}
+
+      {:error, %Error{} = policy_error, state} ->
+        {block_refused_download(download, policy_error, state), state}
     end
   end
 
-  defp download_source_verdict(url, config) when is_binary(url) do
+  defp download_source_verdict(url, state) when is_binary(url) do
     case URI.parse(url).scheme do
-      scheme when scheme in ["blob", "data", "filesystem"] -> :ok
-      _network -> network_download_verdict(url, config)
+      scheme when scheme in ["blob", "data", "filesystem"] -> {:ok, state}
+      _network -> network_download_verdict(url, state)
     end
   end
 
   # CDP always names the source; a download without one cannot be vetted, and
   # unvettable means refused, not waved through.
-  defp download_source_verdict(_missing, _config) do
-    {:error, Error.new("navigation_blocked", "Download announced no source URL to vet")}
+  defp download_source_verdict(_missing, state) do
+    {:error, Error.new("navigation_blocked", "Download announced no source URL to vet"), state}
   end
 
-  defp network_download_verdict(url, config) do
-    case Policy.validate_url(url, config) do
-      {:ok, _uri} -> :ok
-      {:error, %Error{} = error} -> {:error, error}
+  defp network_download_verdict(url, state) do
+    case navigation_verdict(url, state) do
+      {:ok, _uri, state} -> {:ok, state}
+      {:error, %Error{} = error, state} -> {:error, error, state}
     end
   end
 

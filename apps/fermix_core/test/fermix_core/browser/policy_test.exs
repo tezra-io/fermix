@@ -401,4 +401,107 @@ defmodule FermixCore.Browser.PolicyTest do
       assert Policy.read_verdict(url, narrowed) == :ok, "#{url} must stay readable"
     end
   end
+
+  # ── where a name points ────────────────────────────────────────────────────
+
+  # A public-looking name is only half the answer: `169.254.169.254.nip.io`, an
+  # attacker's A record, or a rebinding name reaches the metadata endpoint while
+  # spelling nothing the host rules above can see. The policy says which name
+  # must be looked up and judges the answers; the lookup itself is the caller's.
+  test "resolution_host/2 names the one host a navigation must look up", %{config: config} do
+    assert {:ok, "meta.example"} = resolution_host("http://meta.example/latest/", config)
+    assert {:ok, "meta.example"} = resolution_host("http://Meta.Example./x", config)
+
+    # An address literal was already judged as an address; there is no name.
+    assert :none = resolution_host("http://93.184.216.34/", config)
+    assert :none = resolution_host("http://[2606:4700::1]/", config)
+    # Loopback is a deliberate allow, and about:blank has no host.
+    assert :none = resolution_host("http://localhost:4000/", config)
+    assert :none = resolution_host("about:blank", config)
+  end
+
+  test "an allowed_hosts entry, or an allowed private network, is never looked up" do
+    {:ok, listed} = Config.current(allowed_hosts: ["meta.example"])
+    {:ok, open} = Config.current(allow_private_network: true)
+
+    assert :none = resolution_host("http://meta.example/", listed)
+    assert :none = resolution_host("http://meta.example/", open)
+  end
+
+  test "an answer in link-local or metadata space refuses the navigation", %{config: config} do
+    for {answers, why} <- [
+          {[{169, 254, 169, 254}], "the metadata endpoint"},
+          {[{93, 184, 216, 34}, {169, 254, 169, 254}], "a mixed set — the next lookup rebinds"},
+          {[{0xFD00, 0x0EC2, 0, 0, 0, 0, 0, 0x0254}], "the AWS IPv6 metadata endpoint"},
+          {[{0, 0, 0, 0, 0, 0xFFFF, 0xA9FE, 0xA9FE}], "IPv4-mapped metadata"},
+          {[{0x64, 0xFF9B, 0, 0, 0, 0, 0xA9FE, 0xA9FE}], "NAT64 metadata folds like a literal"},
+          {[{0, 0, 0, 0}], "the unspecified address"},
+          {[{0xFE80, 0, 0, 0, 0, 0, 0, 1}], "IPv6 link-local"}
+        ] do
+      assert {:error, error} = Policy.answers_verdict("meta.example", answers, config),
+             "#{why} was let through"
+
+      assert error.code == "navigation_blocked"
+      assert error.details["value"] == "meta.example"
+      assert error.details["reason"] == "link_local_address"
+      # The refusal names its recovery inline, like every other host refusal.
+      assert error.message =~ "allowed_hosts"
+      assert error.message =~ "[fermix_core.browser]"
+    end
+  end
+
+  # Phase 1 refuses only what no web page is ever served from. The operator's
+  # own network is where intranet, homelab and tailnet names resolve, and a
+  # failed lookup is Chrome's to fail, not the policy's.
+  test "the operator's own network and a failed lookup stay reachable", %{config: config} do
+    for {answers, why} <- [
+          {[{192, 168, 1, 1}], "a home router behind a public-looking name"},
+          {[{10, 0, 0, 5}], "an intranet host"},
+          {[{100, 100, 1, 2}], "a tailnet peer"},
+          {[{0xFD12, 0x3456, 0, 0, 0, 0, 0, 1}], "a ULA homelab host"},
+          {[{127, 0, 0, 1}], "a name for this machine's own dev server"},
+          {[{93, 184, 216, 34}], "a public host"},
+          {[], "no answers — the lookup failed"}
+        ] do
+      assert :ok = Policy.answers_verdict("lan.example", answers, config), "#{why} was refused"
+    end
+  end
+
+  test "an allowed_hosts entry is the recovery for a link-local answer too" do
+    {:ok, listed} = Config.current(allowed_hosts: ["meta.example"])
+
+    assert :ok = Policy.answers_verdict("meta.example", [{169, 254, 169, 254}], listed)
+    assert :ok = Policy.answers_verdict("Meta.Example.", [{169, 254, 169, 254}], listed)
+  end
+
+  # The read-side half, on the answers the caller holds for the document's name:
+  # the address the browser reported it loaded the document from — the one a
+  # rebinding name cannot choose, because Chrome's own lookup produced it — and
+  # the lookup's.
+  test "a page served from, or named for, a metadata address is refused on read",
+       %{config: config} do
+    url = "http://meta.example/latest/meta-data/"
+
+    assert {:error, error} = Policy.read_answers_verdict(url, [{169, 254, 169, 254}], config)
+    assert error.code == "read_blocked"
+    assert error.details["reason"] == "link_local_address"
+    assert error.message =~ "meta.example"
+    assert error.message =~ "169.254.169.254"
+    assert error.message =~ "Navigate somewhere allowed"
+
+    # A proxy or an intranet server is what a private remote address usually is,
+    # and no answer at all is a lookup that failed.
+    assert :ok = Policy.read_answers_verdict(url, [{10, 0, 0, 5}], config)
+    assert :ok = Policy.read_answers_verdict(url, [], config)
+    # The spelling half never resolves: the name alone still reads.
+    assert :ok = Policy.read_verdict(url, config)
+  end
+
+  test "an allowed_hosts entry reads a page it served from link-local space" do
+    {:ok, listed} = Config.current(allowed_hosts: ["camera.example"])
+
+    assert :ok = Policy.read_answers_verdict("http://camera.example/", [{169, 254, 7, 9}], listed)
+  end
+
+  defp resolution_host(url, config), do: Policy.resolution_host(URI.parse(url), config)
 end

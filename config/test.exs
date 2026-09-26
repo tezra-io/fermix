@@ -108,6 +108,12 @@ config :fermix_core, :skill_curation, enabled: false
 # Manager's `:continuation_dispatcher` seam.
 config :fermix_core, :harness_continuation_dispatcher, nil
 
+# Hermetic default: the browser's address checks resolve names, and a suite
+# that reached a real nameserver would be host-dependent and stall on a DNS-less
+# runner. Every lookup answers nothing — a failed lookup, which the policy
+# allows. A test that needs answers passes the ProfileServer its own `:resolver`.
+config :fermix_core, :browser_resolver, fn _host -> {:error, :nxdomain} end
+
 # Hermetic default: `mix test` must never spawn a vendor `--version` probe or read
 # the operator's `~/.codex`/`~/.claude`. The setup harness card (`:fermix_web`) and
 # the doctor harness check (`:fermix_core`) both resolve their detector from config,

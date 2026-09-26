@@ -115,6 +115,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   that repo asks you to confirm the change once, unless you revert or commit it
   first. A scheduled job waits and tells you how to clear it. Claude Code runs
   can no longer edit Codex's config or the `.agents` folder.
+- **The browser refuses link-local and cloud-metadata addresses.** A site whose
+  name points at one is refused, and nothing is returned from a page the
+  browser loaded from one, whatever its name looked like. Home network,
+  intranet and tailnet addresses stay reachable, and `allowed_hosts` still
+  allows a host by name. A page that fails to load now reports the browser's
+  own network error instead of a policy refusal, and a failed open leaves no
+  empty tab behind. If you use the unpacked browser extension, reload it once
+  after updating: the daemon now refuses the older bridge protocol.
 
 ## [0.11.0] - 2026-09-23
 
