@@ -238,7 +238,10 @@ defmodule FermixCore.Companion.TimelineSearchTest do
     assert {:ok, %{hits: [%{server_seq: 1}]}} = Timeline.search("main", "index", opts(repo))
 
     assert {:ok, [%{client_msg_id: "old-1", transport: "mobile"}]} =
-             Timeline.recoverable_client_requests("boot-a", opts(repo, transport: "mobile"))
+             Timeline.recoverable_client_requests(
+               "boot-a",
+               opts(repo, now: @now, transport: "mobile")
+             )
   end
 
   defp rewind_to_before_companion(conn) do
