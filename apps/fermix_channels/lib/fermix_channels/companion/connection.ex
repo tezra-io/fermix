@@ -190,10 +190,10 @@ defmodule FermixChannels.Companion.Connection do
   defp dispatch(%{type: "cancel", payload: payload}, state), do: cancel(payload, state)
 
   defp dispatch(%{type: "history_pull", payload: payload}, state),
-    do: answer(Requests.history(payload, transport(self()), request_opts(state)), state)
+    do: answer(Requests.history(payload, transport(self()), read_opts(state)), state)
 
   defp dispatch(%{type: "history_search", payload: payload}, state),
-    do: answer(Requests.search(payload, transport(self()), request_opts(state)), state)
+    do: answer(Requests.search(payload, transport(self()), read_opts(state)), state)
 
   defp dispatch(%{type: "read_state", payload: payload}, state),
     do: answer(Requests.read_state(payload, request_opts(state)), state)
@@ -420,6 +420,16 @@ defmodule FermixChannels.Companion.Connection do
   defp request_opts(state) do
     registry = state.registry
     Keyword.put(state.request_opts, :event_sink, &sink(registry, &1, &2))
+  end
+
+  # A page or a search answer is written to the socket in the step that read
+  # it, the way `server_hello` is, never through this process's mailbox: a live
+  # event for a row written after the read can then only reach the socket after
+  # the page, so every row is in the page or announced after it.
+  defp read_opts(state) do
+    Keyword.put(state.request_opts, :event_sink, fn _reply_to, %{"t" => type} = event ->
+      send_event(type, Map.delete(event, "t"), state)
+    end)
   end
 
   defp sink(_registry, pid, event) when is_pid(pid) do

@@ -165,12 +165,15 @@ row to hide how its announcement arrived.
 ## Keeping a client's timeline
 
 A connection is watching the profile from its `server_hello` on, before it can
-ask for history, so no row written after the handshake can fall between a
-page and the live events. Live announcements still arrive out of `server_seq`
-order at times (a job's row can be announced after a later reply's), a page
-and a live `text_done` can carry the same row, and a user's row reaches the
-other connections only through history. So a client keeps a cursor, the last
-`server_seq` it shows, and:
+ask for history, and the daemon writes each `history_page` to the socket in the
+same step that read it. So no row can fall between a page and the live events:
+a row written after the read is announced after the page reaches the socket,
+and a live event that arrives ahead of a page is for a row already committed
+when the page was read (in that page, or a later one of the same pull). Live
+announcements still arrive out of `server_seq` order at times (a job's row can
+be announced after a later reply's), a page and a live `text_done` can carry
+the same row, and a user's row reaches the other connections only through
+history. So a client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `server_hello`, and again
   while a page's `next_after_seq` is below its `history_head_seq`;

@@ -34,6 +34,18 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
+  # Reads a page, then announces a later row the way a turn's end does, inside
+  # the window between the read and the page reaching the socket.
+  defmodule AnnouncingStore do
+    def history_page(profile, opts) do
+      {registry, opts} = Keyword.pop!(opts, :announce_registry)
+      page = Timeline.history_page(profile, opts)
+      late = %{"t" => "text_done", "turn_id" => "turn-late", "server_seq" => 99, "text" => "late"}
+      :ok = Companion.broadcast(profile, late, registry)
+      page
+    end
+  end
+
   setup do
     test_pid = self()
     unique = System.unique_integer([:positive])
@@ -263,6 +275,46 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert [%{"server_seq" => 2, "content" => "row 2"}] = page["messages"]
     assert page["next_before_seq"] == 2
     refute Map.has_key?(page, "next_after_seq")
+  end
+
+  test "a row announced while its page is read reaches the socket after the page", ctx do
+    unique = System.unique_integer([:positive])
+    socket_path = Path.join(System.tmp_dir!(), "fermix-companion-page-#{unique}.sock")
+    connections = :"companion_page_sup_#{unique}"
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(socket_path) end)
+
+    start_supervised!(
+      Supervisor.child_spec({DynamicSupervisor, name: connections, strategy: :one_for_one},
+        id: connections
+      )
+    )
+
+    request_opts = [
+      store: AnnouncingStore,
+      store_opts: [announce_registry: ctx.registry] ++ ctx.store_opts
+    ]
+
+    start_supervised!(
+      {Endpoint,
+       name: :"companion_page_endpoint_#{unique}",
+       socket_path: socket_path,
+       max_clients: 1,
+       connection_supervisor: connections,
+       connection_opts: [registry: ctx.registry, request_opts: request_opts]},
+      id: :page_endpoint
+    )
+
+    client = hello(socket_path)
+
+    send_line(client, %{
+      "type" => "history_pull",
+      "profile_id" => "main",
+      "after_seq" => 0,
+      "limit" => 5
+    })
+
+    assert %{"type" => "history_page", "messages" => []} = recv(client)
+    assert %{"type" => "text_done", "server_seq" => 99} = recv(client)
   end
 
   test "search answers hits with plain excerpts and their matched ranges", ctx do
