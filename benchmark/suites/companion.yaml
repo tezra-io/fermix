@@ -171,15 +171,16 @@ scenarios:
     cases:
       - id: days_left_posted_here
         drive: companion
-        # The one labelled sanity case for the route: the job is created with
-        # origin delivery. The row written while offline is the proof either way.
+        # The one labelled sanity case for the route: the job is created by
+        # schedule_job. Origin delivery is proved by the row written while
+        # offline (the eval home's default delivers elsewhere), not by the
+        # tool input, which the job tools do not record on their spans.
         query: "Two minutes from now, work out how many days are left until the end of this year and post the answer here in this chat, starting with the tag fern-__EVAL_RUN_ID__-__EVAL_TRIAL__. Just once."
         companion: {offline_wait_s: 300}
         expect:
           status: ok
           no_tool_errors: true
           tools_any: [schedule_job]
-          tool_inputs_match_all: ['"delivery_mode"\s*:\s*"origin"']
           wire:
             events_all: [accepted, turn_started, text_done]
             offline_row_matches: "(?i)fern-__EVAL_RUN_ID__-__EVAL_TRIAL__"
