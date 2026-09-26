@@ -104,6 +104,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   volume matches them, Unicode look-alikes included. If `SOUL.md` is changed
   outside `/soul`, Fermix records it as an unreviewed edit and sends you one
   private message naming the `/soul revert` that undoes it.
+- **Desktop control stays with attended turns.** A coding run's follow-up turn
+  on the ACP surface can no longer start or drive desktop control, and no
+  unattended run can take over a desktop-control session an attended turn left
+  open.
 
 ## [0.11.0] - 2026-09-23
 

@@ -95,10 +95,14 @@ defmodule FermixCore.Agents.TurnRunner do
 
   A detached `/background` run (`BackgroundRun.run/1`, channel `"background"`) has
   no live owner surface to observe or abort a host action, so it is `:unattended`
-  and fails closed. A Live voice delegation (M41 §5.1) is `:voice` — an attended
-  surface whose owner is speaking and can interrupt. Every other turn reaching
-  `run/3` is a foreground interaction — a human in a chat or `fermix ask` — and is
-  `:interactive`. Scheduled jobs bypass `run/3` and default to `:unattended`.
+  and fails closed. So is a coding-run notice re-ingested into an ACP conversation
+  (MILESTONE_29 §17.6(c)): the turn is detached from any client session, so no
+  client can watch or cancel it. A continuation that re-enters an owner's chat
+  stays `:interactive`, because `/stop` still reaches it there. A Live voice
+  delegation (M41 §5.1) is `:voice` — an attended surface whose owner is speaking
+  and can interrupt. Every other turn reaching `run/3` is a foreground
+  interaction — a human in a chat or `fermix ask` — and is `:interactive`.
+  Scheduled jobs bypass `run/3` and default to `:unattended`.
 
   Derived here rather than read off the message, so the three readers in this
   module (the taint stamp, the frozen Computer History gate, and the loop
@@ -106,6 +110,11 @@ defmodule FermixCore.Agents.TurnRunner do
   """
   @spec computer_use_origin(map()) :: :interactive | :unattended | :voice
   def computer_use_origin(%{channel: "background"}), do: :unattended
+
+  # The sentinel `FermixChannels.Channels.Acp.detached_turn/0` stamps on that
+  # notice, read as a plain metadata value because core cannot compile-depend on
+  # the channel that sets it. The dispatcher's test pins the pair.
+  def computer_use_origin(%{metadata: %{acp_turn: :detached}}), do: :unattended
 
   def computer_use_origin(msg) when is_map(msg), do: chat_origin(VoiceCall.from_message(msg))
 

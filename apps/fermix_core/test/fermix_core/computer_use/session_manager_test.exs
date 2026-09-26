@@ -123,6 +123,25 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
     assert :error = SessionManager.lookup(ctx)
   end
 
+  # A session outlives the turn that opened it, so a later unattended turn in the
+  # same conversation (a coding-run notice re-entering an ACP session that has
+  # ended) must meet the same gate rather than inherit the live session.
+  test "an unattended origin cannot drive a session an attended turn left open", %{
+    config: config
+  } do
+    {:ok, pid} =
+      SessionManager.ensure(config, context(%{computer_use_origin: :interactive}),
+        driver: stub_driver()
+      )
+
+    assert {:error, {:host_start_refused, :unattended}} =
+             SessionManager.ensure(config, context(%{computer_use_origin: :unattended}),
+               driver: stub_driver()
+             )
+
+    assert {:ok, ^pid} = SessionManager.lookup(context())
+  end
+
   test "host mode starts a session from an attended origin" do
     config = Config.normalize(enabled: true)
     ctx = context(%{computer_use_origin: :voice})

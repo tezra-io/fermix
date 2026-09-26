@@ -652,7 +652,7 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp unavailable_message({:host_start_refused, origin}) do
     "computer-use host control needs an attended session (interactive chat or voice); " <>
-      "this origin (#{origin}) cannot start one"
+      "this origin (#{origin}) cannot start or drive one"
   end
 
   defp unavailable_message({:sidecar_unavailable, _reason}) do

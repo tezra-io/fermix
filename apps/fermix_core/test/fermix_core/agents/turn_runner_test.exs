@@ -459,6 +459,36 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert TurnRunner.computer_use_origin(forged) == :interactive
     end
+
+    test "a coding-run notice re-entering an ended ACP session is unattended" do
+      # The dispatcher re-ingests the notice after the client session that
+      # launched the run is gone, so nobody can watch or cancel the turn.
+      msg = %{
+        channel: "acp",
+        metadata: %{
+          acp_turn: :detached,
+          harness_continuation: true,
+          harness_continuation_depth: 1
+        }
+      }
+
+      assert TurnRunner.computer_use_origin(msg) == :unattended
+      refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(msg))
+    end
+
+    test "a live ACP turn and an owner-chat coding continuation stay interactive" do
+      live_acp = %{channel: "acp", metadata: %{acp_turn: 3}}
+
+      chat_continuation = %{
+        channel: "telegram",
+        metadata: %{harness_continuation: true, harness_continuation_depth: 1}
+      }
+
+      for msg <- [live_acp, chat_continuation] do
+        assert TurnRunner.computer_use_origin(msg) == :interactive
+        assert Safety.host_start_allowed?(TurnRunner.computer_use_origin(msg))
+      end
+    end
   end
 
   describe "commit/4" do

@@ -233,6 +233,21 @@ defmodule FermixCore.ComputerUse.OperatorStopTest do
       assert :error = SessionManager.lookup(context(@turn))
     end
 
+    # Only the person speaking again lifts a hold. A later turn nobody attends (a
+    # coding-run notice re-entering an ended ACP session) is refused before it
+    # reaches the record, so the stopped turn stays held.
+    test "an unattended turn is refused without lifting the hold", %{config: config} do
+      OperatorStop.record(@conversation, @turn)
+      unattended = %{context("main-turn-2") | computer_use_origin: :unattended}
+
+      assert {:error, {:host_start_refused, :unattended}} =
+               SessionManager.ensure(config, unattended,
+                 driver: {BlockingDriver, [test_pid: self()]}
+               )
+
+      assert {:error, :operator_stopped} = OperatorStop.check(@conversation, @turn)
+    end
+
     test "opens one again for the next turn", %{config: config} do
       OperatorStop.record(@conversation, @turn)
 
