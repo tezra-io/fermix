@@ -3,11 +3,27 @@ defmodule FermixCore.Sandbox.PathPolicy do
   Path resolution and containment checks for sandbox-owned operations.
   """
 
+  alias FermixCore.Harness.Identity
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Mode
 
-  @protected_home_dirs ~w(.ssh .aws .gnupg .docker .kube .codex .anthropic)
+  # `.config/fermix` holds a Linux service's env file, where its secrets live.
+  @protected_home_dirs ~w(.ssh .aws .gnupg .docker .kube .codex .anthropic .config/fermix)
   @os_roots ~w(/etc /usr /bin /sbin /System /Library)
+
+  # The daemon's own state under FERMIX_HOME, which no agent task reads or
+  # writes through file tools: configuration and credentials (the Linux file
+  # secret store, setup tokens, the session-signing key, ACP and mobile
+  # identities, plugin token projections, browser profiles), the persona files
+  # `/soul` curates, memory, grants, logs, traces and sockets. A new file of that
+  # kind joins this list in the same change. Each entry also covers the files
+  # named after it (see `protected?/2`).
+  @protected_fermix_entries ~w(
+    config.toml auth.json grants logs traces memory.db daemon.sock
+    secrets secret_key_base setup-token setup-launch-token.json acp_identities
+    mobile plugins/run browser/profiles bootstrap acp.sock realtime.sock
+    browser_bridge.sock companion.sock
+  )
 
   @spec resolve_working_dir(String.t() | nil, Config.t(), map()) ::
           {:ok, String.t()} | {:error, term()}
@@ -176,7 +192,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
     expanded = canonical_path(path)
 
     cond do
-      inside_any?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
+      protected?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
       blocked_path?(expanded, config.blocked_roots) -> {:error, {:blocked_root, expanded}}
       under_effective_root?(expanded, config) -> :ok
       true -> {:error, {:outside_root, expanded}}
@@ -200,7 +216,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
     expanded = canonical_path(path)
 
     cond do
-      inside_any?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
+      protected?(expanded, protected_roots) -> {:error, {:protected_path, expanded}}
       blocked_path?(expanded, config.blocked_roots) -> {:error, {:blocked_root, expanded}}
       inside_any?(expanded, effective_roots) -> :ok
       true -> {:error, {:outside_root, expanded}}
@@ -217,17 +233,27 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
     (@os_roots ++
        Enum.map(@protected_home_dirs, &Path.join(os_home, &1)) ++
-       [
-         Path.join(fermix_home, "config.toml"),
-         Path.join(fermix_home, "config.toml.pre-m5"),
-         Path.join(fermix_home, "auth.json"),
-         Path.join(fermix_home, "grants"),
-         Path.join(fermix_home, "logs"),
-         Path.join(fermix_home, "traces"),
-         Path.join(fermix_home, "memory.db"),
-         Path.join(fermix_home, "daemon.sock")
-       ])
+       vendor_credential_paths(os_home) ++
+       Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
     |> Enum.map(&canonical_path/1)
+  end
+
+  @doc """
+  Whether `path` falls under one of `protected_roots`: the root itself, anything
+  below it, or a sibling that extends its name with `.` or `-`, which is how the
+  files beside a protected one are named (SQLite's `memory.db-wal`, `-shm` and
+  `-journal`, `auth.json.tmp.N` and `auth.json.broken.TS`, `config.toml.pre-m5`,
+  `.claude.json.backup`).
+
+  Compared on the full Unicode case fold, the equivalence a case-insensitive
+  APFS or HFS+ volume uses to open a name, so `.ssh` or `config.toml` spelled
+  with a long s (U+017F), a sharp s (U+00DF) or an fi ligature (U+FB01) is still
+  recognised, including a directory that does not exist yet.
+  """
+  @spec protected?(String.t(), [String.t()]) :: boolean()
+  def protected?(path, protected_roots) when is_binary(path) and is_list(protected_roots) do
+    folded = fold(path)
+    Enum.any?(protected_roots, &covers?(folded, fold(&1)))
   end
 
   @spec canonical_path(String.t()) :: String.t()
@@ -303,13 +329,41 @@ defmodule FermixCore.Sandbox.PathPolicy do
     if part in entries do
       part
     else
-      folded = String.downcase(part)
-      Enum.find(entries, part, &(String.downcase(&1) == folded))
+      folded = fold(part)
+      Enum.find(entries, part, &(fold(&1) == folded))
     end
   end
 
+  # Full Unicode case fold of the NFC form: the equivalence a case-insensitive
+  # APFS or HFS+ volume matches names by (long s and `s`, sharp s and `ss`, the
+  # fi ligature and `fi`), which `String.downcase/1` does not apply. ASCII, the
+  # usual case, has no other normal form and folds to its ASCII lowercase, so it
+  # skips the Unicode tables: a search checks every candidate file against every
+  # protected root. A name that is not valid UTF-8 has no fold, and no such
+  # volume can hold one, so it stays its bytes.
+  defp fold(text) do
+    if ascii?(text), do: String.downcase(text, :ascii), else: unicode_fold(text)
+  end
+
+  defp unicode_fold(text) do
+    case :unicode.characters_to_nfc_binary(text) do
+      normalized when is_binary(normalized) -> :string.casefold(normalized)
+      _not_utf8 -> text
+    end
+  end
+
+  defp ascii?(<<byte, rest::binary>>) when byte < 128, do: ascii?(rest)
+  defp ascii?(rest), do: rest == <<>>
+
+  defp covers?(path, root) do
+    path == root or Enum.any?(["/", ".", "-"], &String.starts_with?(path, root <> &1))
+  end
+
+  # Operator-named directories: folded like the protected check, but without its
+  # sibling rule, since a blocked root names exactly one directory.
   defp blocked_path?(path, blocked_roots) do
-    inside_any?(path, blocked_roots)
+    folded = fold(path)
+    Enum.any?(blocked_roots, &inside_or_equal?(folded, fold(&1)))
   end
 
   defp inside_any?(path, roots) do
@@ -323,6 +377,27 @@ defmodule FermixCore.Sandbox.PathPolicy do
   end
 
   defp inside_or_equal?(path, root), do: path == root or String.starts_with?(path, root <> "/")
+
+  # Claude Code keeps its OAuth token in `<config dir>/.credentials.json` and its
+  # global state (project trust flags, user MCP servers) in `~/.claude.json`, or
+  # in `<config dir>/.claude.json` once `CLAUDE_CONFIG_DIR` relocates the store.
+  # Only those files: the rest of `~/.claude` is skills, commands and settings an
+  # owner asks the agent to edit. A relocated `CODEX_HOME` is protected whole,
+  # like `~/.codex`. Both resolve through `Harness.Identity`, the same resolver a
+  # coding run uses, so the floor guards the store a run actually reads.
+  defp vendor_credential_paths(os_home) do
+    claude_dirs = [
+      Path.join(os_home, ".claude") | List.wrap(Identity.vendor_config_dir("claude"))
+    ]
+
+    claude_files =
+      for dir <- claude_dirs, file <- [".credentials.json", ".claude.json"] do
+        Path.join(dir, file)
+      end
+
+    [Path.join(os_home, ".claude.json") | claude_files] ++
+      List.wrap(Identity.vendor_config_dir("codex"))
+  end
 
   # Mirrors ConfigStore.fermix_home/0: a blank "" is truthy, so a bare
   # `|| default` would leave home as "" and make the protected paths cwd-relative.

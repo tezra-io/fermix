@@ -12,7 +12,7 @@ defmodule FermixCore.Resource.Registry do
 
   @resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md checkpoint)
   @file_resource_types ~w(identity_md fermix_md soul_md realtime_md live_md user_md memory_md)
-  @mutation_sources ~w(seed imported manual_edit extraction_rebuild scheduler_rebuild compaction rollback soul_curation template_adopt)
+  @mutation_sources ~w(seed imported manual_edit unreviewed_edit extraction_rebuild scheduler_rebuild compaction rollback soul_curation template_adopt)
   @max_commit_attempts 4
 
   @type resource_row :: Repo.resource_row()

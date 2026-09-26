@@ -55,7 +55,8 @@ a user-scope unit and for the distribution package's unit, `/etc/fermix/env` for
 a system-scope unit. It is how a server with no keyring gives allowed sandbox
 variables to the daemon: one `NAME=value` per line, allow the name, then restart
 Fermix, because the file is read only when the service starts. Fermix never
-writes it, and a missing file is fine. A unit written before the line existed
+writes it and its file tools cannot open it (a protected path), so the owner
+edits it; a missing file is fine. A unit written before the line existed
 gets it when setup rewrites the drifted unit. What reaches commands from there:
 `skill_view(name: "self-knowledge", file: "sandbox_env")`.
 

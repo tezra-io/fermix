@@ -7,12 +7,22 @@ defmodule FermixCore.Prompt.BootstrapLoader do
   to disk). Missing or empty `SOUL.md` is omitted because that layer is
   optional. Setup-time seeding (`Prompt.SetupSeeder`) is the only path
   that writes these files.
+
+  Every load records the file in `Resource.Registry`. A file whose bytes the
+  registry does not already hold changed outside every reviewed writer, so its
+  revision is recorded as `unreviewed_edit` rather than attributed to anyone.
+  For `SOUL.md`, the one file with an owner review path (`/soul`), the
+  `:unreviewed_edit_notifier` opt (default
+  `SoulCuration.UnreviewedEditNotice.notify/1`) is called once with the new
+  revision.
   """
 
   alias FermixCore.Prompt.BootstrapFile
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
   alias FermixCore.Resource.Registry
+  alias FermixCore.Resource.Revision
+  alias FermixCore.SoulCuration.UnreviewedEditNotice
 
   require Logger
 
@@ -155,7 +165,7 @@ defmodule FermixCore.Prompt.BootstrapLoader do
       |> Keyword.merge(registry_opts(opts))
 
     with {:ok, source} <- bootstrap_mutation_source(agent_id, resource_type, opts),
-         {:ok, _revision_or_unchanged} <-
+         {:ok, revision_or_unchanged} <-
            Registry.commit(
              agent_id,
              resource_type,
@@ -166,7 +176,7 @@ defmodule FermixCore.Prompt.BootstrapLoader do
                provenance: bootstrap_provenance(source)
              )
            ) do
-      :ok
+      notify_unreviewed_soul(resource_type, revision_or_unchanged, file, opts)
     else
       {:error, :disabled} ->
         :ok
@@ -180,9 +190,28 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     end
   end
 
+  # Only a new unreviewed SOUL.md revision tells the owner: `/soul revert` is the
+  # undo it can point at. The registry dedupes identical bytes, so one edit is
+  # one notice however many prompt builds see it.
+  defp notify_unreviewed_soul(
+         :soul_md,
+         %Revision{mutation_source: "unreviewed_edit"} = revision,
+         file,
+         opts
+       ) do
+    notifier = Keyword.get(opts, :unreviewed_edit_notifier, &UnreviewedEditNotice.notify/1)
+    :ok = notifier.(%{path: file.path, revision: revision.revision})
+  end
+
+  defp notify_unreviewed_soul(_resource_type, _revision_or_unchanged, _file, _opts), do: :ok
+
+  # A registry that already tracks the file but not these bytes means the file
+  # changed outside every writer that records its change (setup, template
+  # adoption, `/soul`). Who changed it is unknown, so it is not called an
+  # operator edit.
   defp bootstrap_mutation_source(agent_id, resource_type, opts) do
     case Registry.current_hash(agent_id, resource_type, "global", registry_opts(opts)) do
-      {:ok, _hash} -> {:ok, :manual_edit}
+      {:ok, _hash} -> {:ok, :unreviewed_edit}
       {:error, :not_found} -> {:ok, :imported}
       {:error, reason} -> {:error, reason}
     end
@@ -192,8 +221,11 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     %{trigger: "imported", description: "Pre-existing bootstrap file imported on load"}
   end
 
-  defp bootstrap_provenance(:manual_edit) do
-    %{trigger: "manual_edit", description: "Operator edited bootstrap file directly"}
+  defp bootstrap_provenance(:unreviewed_edit) do
+    %{
+      trigger: "unreviewed_edit",
+      description: "Bootstrap file changed on disk outside setup, template adoption and /soul"
+    }
   end
 
   defp registry_opts(opts) do

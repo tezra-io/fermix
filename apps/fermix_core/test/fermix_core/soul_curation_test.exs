@@ -86,7 +86,7 @@ defmodule FermixCore.SoulCurationTest do
     assert File.read!(ctx.soul_path) == "soul v2\n"
 
     # Disk and registry agree after apply, so a later BootstrapLoader pass
-    # no-ops instead of capturing a spurious :manual_edit revision.
+    # no-ops instead of capturing a spurious :unreviewed_edit revision.
     assert {:ok, Registry.content_hash("soul v2\n")} ==
              Registry.current_hash("main", "soul_md", "global", repo: ctx.repo)
 

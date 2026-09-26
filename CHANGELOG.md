@@ -97,6 +97,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   it holds in `fermix.log`, traces, doctor output and error messages, and access
   tokens shaped like JWTs are redacted from log lines too. If your `auth.json`
   was ever damaged, sign in again to replace those tokens.
+- **Fermix's file tools stay out of its own secrets in every sandbox mode.** Its
+  keys, tokens, pairing state, browser profiles, persona files and sockets, and
+  Claude Code's credential files, can no longer be read or written through file
+  tools, `open` mode included, and protected names are matched the way a Mac
+  volume matches them, Unicode look-alikes included. If `SOUL.md` is changed
+  outside `/soul`, Fermix records it as an unreviewed edit and sends you one
+  private message naming the `/soul revert` that undoes it.
 
 ## [0.11.0] - 2026-09-23
 
