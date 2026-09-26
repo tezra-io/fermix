@@ -229,6 +229,32 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
         self.assertIn("deleted the stored api key for discord", result.stdout)
 
+    # ── the tree-less auth logout stage ───────────────────────────────────
+
+    def test_rejects_a_logout_that_does_not_report_the_removed_entry(self):
+        self._write_artifact(create_disclaim=True, auth_logout="silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("auth logout did not report the removed entry", result.stderr)
+
+    def test_rejects_a_logout_that_leaves_the_entry(self):
+        self._write_artifact(create_disclaim=True, auth_logout="keeps_entry")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("left the openai_codex entry in auth.json", result.stderr)
+
+    def test_rejects_a_logout_that_leaves_a_lockfile(self):
+        self._write_artifact(create_disclaim=True, auth_logout="leaves_lock")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("auth logout left a lockfile behind", result.stderr)
+
     # ── the browser-bridge pump stage ─────────────────────────────────────
 
     # The class this stage exists for: a verb whose stdout IS a wire, started by
@@ -309,6 +335,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         marker=None,
         migrate="plan",
         plugins_clear="forgets",
+        auth_logout="removes",
         browser_bridge="works",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
@@ -323,6 +350,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "plugins" ]; then\n'
             f"{self._plugins_clear_behaviour(plugins_clear)}"
+            "fi\n"
+            'if [ "${1:-}" = "auth" ]; then\n'
+            f"{self._auth_logout_behaviour(auth_logout)}"
             "fi\n"
             'if [ "${1:-}" = "browser" ]; then\n'
             f"{self._browser_behaviour(browser_bridge)}"
@@ -433,6 +463,30 @@ class VerifyStandaloneTest(unittest.TestCase):
                 "  exit 1\n"
             )
         raise ValueError(f"unknown plugins clear behaviour: {plugins_clear}")
+
+    # The real verb's shape: the seeded Codex entry leaves auth.json, the
+    # sentence names it, and no lockfile stays beside auth.json.
+    def _auth_logout_behaviour(self, auth_logout):
+        argv = '  [ "$*" = "auth logout" ] || exit 64\n'
+        removed = (
+            "  printf '{\"version\": 2, \"providers\": {}}\\n'"
+            ' > "$FERMIX_HOME/auth.json"\n'
+        )
+        reported = (
+            "  printf 'Logged out. Removed openai_codex entry from %s.\\n'"
+            ' "$FERMIX_HOME/auth.json"\n'
+        )
+        lock = '  : > "$FERMIX_HOME/auth.json.lock"\n'
+        done = "  exit 0\n"
+        if auth_logout == "removes":
+            return argv + removed + reported + done
+        if auth_logout == "silent":
+            return argv + removed + done
+        if auth_logout == "keeps_entry":
+            return argv + reported + done
+        if auth_logout == "leaves_lock":
+            return argv + removed + lock + reported + done
+        raise ValueError(f"unknown auth logout behaviour: {auth_logout}")
 
     def _unknown_keychain_argv_is_refused(self):
         return (
