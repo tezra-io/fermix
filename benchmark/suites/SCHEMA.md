@@ -210,13 +210,16 @@ the `query` shorthand; multi-turn uses `turns`.
   work it never did. The run id and trial substitute verbatim (they are
   alphanumeric, so they are equally valid in a regex gate and an exact-match
   one); the repo root is regex-escaped, since a path may carry a `+` or `(`.
-- `drive` (string, optional) — `ask` (default; drives `fermix ask`) or
-  `telegram_operator`: the runner prompts the operator to send ONE marked
-  message to the dedicated eval Telegram bot, correlates the resulting `telegram:*`
-  trace by the embedded marker, and grades it like any other case.
-  Single-turn `query` only. Such cases run only with `--operator` (skipped
-  with a notice otherwise). Only cases asserting `stream:*` spans precheck
-  Telegram `streaming = "draft" | "block"`; multimodal operator cases do not.
+- `drive` (string, optional) — `ask` (default; drives `fermix ask`),
+  `companion`, or `telegram_operator`. `telegram_operator`: the runner prompts
+  the operator to send ONE marked message to the dedicated eval Telegram bot,
+  correlates the resulting `telegram:*` trace by the embedded marker, and
+  grades it like any other case. Single-turn `query` only. Such cases run only
+  with `--operator` (skipped with a notice otherwise). Only cases asserting
+  `stream:*` spans precheck Telegram `streaming = "draft" | "block"`;
+  multimodal operator cases do not. `companion`: the runner is the Mac app's
+  chat client on the eval home's `companion.sock` and runs unattended; see
+  *`drive: companion`* below. Single-turn `query` only, no `image`.
 - `image` (string, optional) — single-turn path to a known local image relative
   to the suite file and physically contained under `suites/fixtures/`. Absolute
   paths, traversal, missing files, and symlinks escaping that fixture root are
@@ -287,6 +290,7 @@ spans have `metadata.status`).
 | `max_cost_usd` | float | reported `total_estimated_cost` ≤ N; missing is incomplete |
 | `max_duration_ms` | int | driver wall-clock duration ≤ N; missing is incomplete |
 | `max_tokens` | int | reported `usage.total_tokens` ≤ N; missing is incomplete |
+| `wire` | map | `drive: companion` only: every key holds against what the companion socket said (see below) |
 
 ### `fixture_state` — what the page recorded
 
@@ -346,13 +350,68 @@ March statement; only this one can say which button was pressed, and only
   capability case carrying `fixture_state` plus any of `score`/`checker`/`rubric`
   declares two oracles and `run_capability.py` refuses the selection.
 
+### `drive: companion` — the Mac app's chat socket
+
+```yaml
+- id: cancel_behind_story
+  drive: companion
+  query: "Also, what's the capital of Australia?"
+  companion:
+    cancel: waiting
+    blocker: "Write a 1000-word short story about a lighthouse keeper."
+  expect:
+    wire:
+      events_all: [accepted, turn_error]
+      events_none: [turn_started, text_done]
+      error_code: cancelled
+      blocker_events_all: [turn_started, text_done]
+```
+
+The runner (`bin/evallib/companion.py`) connects to
+`<FERMIX_HOME>/companion.sock`, completes the handshake, sends `/new` so the
+attempt is its own conversation, and sends the query with a unique marker
+appended, `(eval:<marker>)`. The case's `companion:` map is the choreography
+around that message:
+
+- `cancel: running` — `cancel` by the message's client id as soon as its
+  `turn_started` arrives. `cancel: waiting` — send `blocker` first, wait for its
+  `turn_started`, send the message, and cancel it once `accepted`, while it waits
+  behind the blocker's turn.
+- `reads` — any of `history_after` (pages forward from where the timeline stood
+  before the message), `history_before` (pages backward from the head), and
+  `search` (searches for the marker), issued once the turn ended.
+- `offline_wait_s` (1–900) — close the connection once the turn ended, keep no
+  client connected that long, reconnect and read every row written after the
+  turn's own: a scheduled job's delivery, for one.
+
+`expect.wire` is graded against what the socket said about the message, one
+`wire.<key>` gate per key: `events_all` / `events_none` (event types drawn from
+`accepted`, `turn_started`, `text_delta`, `tool_event`, `text_done`,
+`turn_error`), `error_code` (the `turn_error`'s code), `blocker_events_all`
+(needs `cancel: waiting`), `reads_find_marker: true` (every declared read found
+the marker; needs `reads`), and `offline_row_matches` (a regex some row written
+while offline matches; needs `offline_wait_s`). Run placeholders render inside
+it as in every gate. It is case-level only and required on every companion
+case.
+
+A message that completed is also found in Opik on the `companion:*` thread by
+its marker and graded with the ordinary gates, against the time until its turn
+ended on the wire; an `offline_wait_s` case grades its trace inside the wait,
+before anything the turn scheduled can run. A **cancelled** message is graded
+on the wire alone: it completed nothing, and one cancelled while it waited
+never ran, so a cancel case may carry no other expect key and no `rubric`. A
+socket that cannot be reached, closes, or goes silent past `timeout_ms` is
+`INCOMPLETE`, never a failed gate.
+
 Every turn also receives mandatory `trace_complete` and `telemetry_complete`
 gates. A trace must be closed, have a stable span count, and expose all spans;
 cost, duration, tokens, and iterations must be present. Missing evidence produces
 an `INCOMPLETE` case and a non-zero run, never a zero-valued green result.
-The sole exception is a `telegram_operator` turn: human response time makes an
+One exception is a `telegram_operator` turn: human response time makes an
 honest CLI duration unavailable, so it omits the latency gate rather than using
-Opik trace duration or the operator's wait as a misleading substitute.
+Opik trace duration or the operator's wait as a misleading substitute. The other
+is a cancelled `drive: companion` message, which has no completed trace and
+carries only its `wire.*` gates.
 
 Tool-name matching is exact against the span `name`. Tool spans for builtins are
 the tool name (`memory_store`, `web_search`, `shell`, `skill_view`, …). MCP

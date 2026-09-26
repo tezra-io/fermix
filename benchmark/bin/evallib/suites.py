@@ -13,6 +13,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
+from . import companion
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
 from .scoring import MATCH_METHODS, _parse_number
@@ -28,7 +29,7 @@ _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "ca
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session",
+    "cross_session", "companion",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -70,7 +71,16 @@ EXPECT_SPEC: dict[str, tuple] = {
     "max_cost_usd": (int, float),
     "max_duration_ms": (int,),
     "max_tokens": (int,),
+    # What the companion socket said about the case's message, read by the
+    # runner off the wire instead of from the trace (evallib/companion.py owns
+    # the vocabulary). A case-level `drive: companion` gate only.
+    "wire": (dict,),
 }
+
+# `ask` and `companion` run unattended; `telegram_operator` needs a human to
+# send the message, so it runs only with --operator.
+DRIVES = ("ask", "companion", "telegram_operator")
+OPERATOR_DRIVES = ("telegram_operator",)
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]*$")
 
@@ -108,7 +118,7 @@ class Case:
     rubric: str | None
     judge: bool                     # rubric graded when --judge is on
     timeout_ms: int | None          # per-turn drive timeout (None => cfg default)
-    drive: str = "ask"              # ask | telegram_operator (operator-assisted)
+    drive: str = "ask"              # ask | companion | telegram_operator (operator-assisted)
     images: list[str] = field(default_factory=list)  # ask: --attach; operator: known fixture to send
     score_spec: dict | None = None  # capability tier: ground-truth answer scoring (scoring.py)
     checker_spec: dict | None = None  # capability tier: end-state checker scoring (checker.py)
@@ -121,6 +131,12 @@ class Case:
     #   have fired without error. `requires_tools` is the any-of form; a task whose completion
     #   genuinely needs two steps (create AND register) states both here, so half the work
     #   cannot score. A span carrying error_info satisfies neither key.
+    companion: dict = field(default_factory=dict)  # drive: companion — the choreography
+    #   around the message (cancel, reads, an offline wait); evallib/companion.py.
+
+    @property
+    def needs_operator(self) -> bool:
+        return self.drive in OPERATOR_DRIVES
 
 
 @dataclass
@@ -427,6 +443,43 @@ def _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session: bool,
                     "use cross_session or a single turn")
 
 
+def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], cloc: str,
+                    problems: list[str]) -> dict:
+    """Validate a case's `companion:` map and its `expect.wire` against each other.
+
+    Both belong to `drive: companion` alone: the socket is the only place the
+    evidence exists. A cancelled message has no completed turn, and one
+    cancelled while it waits has no trace at all, so such a case asserts the
+    wire and nothing the trace would have to show."""
+    spec = cs.get("companion", {})
+    if any("wire" in turn.expect for turn in turns):
+        problems.append(f"{cloc}: `wire` belongs to the case's expect, not to a turn")
+    if drive != "companion":
+        if "companion" in cs:
+            problems.append(f"{cloc}: `companion` needs `drive: companion`")
+        if "wire" in case_expect:
+            problems.append(f"{cloc}: expect `wire` needs `drive: companion`")
+        return {}
+    problems.extend(companion.spec_problems(spec, cloc))
+    if not isinstance(spec, dict):
+        return {}
+    if "wire" not in case_expect:
+        problems.append(f"{cloc}: `drive: companion` needs an expect `wire` map")
+    else:
+        problems.extend(companion.wire_problems(case_expect["wire"], spec, f"{cloc}.expect"))
+    if spec.get("cancel") is not None:
+        traced = sorted(key for key in case_expect if key != "wire")
+        if traced:
+            problems.append(f"{cloc}: a cancelled companion message is graded on the wire "
+                            f"alone; drop {traced}")
+        if cs.get("rubric") is not None:
+            problems.append(f"{cloc}: a cancelled companion message has no reply to judge; "
+                            "drop `rubric`")
+    if cs.get("image") is not None or cs.get("images") is not None:
+        problems.append(f"{cloc}: attachments do not travel on the companion socket")
+    return spec
+
+
 def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None:
     fname = os.path.basename(path)
     try:
@@ -616,11 +669,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout
 
             drive = cs.get("drive", "ask")
-            if drive not in ("ask", "telegram_operator"):
-                problems.append(f"{cloc}: `drive` must be 'ask' or 'telegram_operator', got {drive!r}")
+            if drive not in DRIVES:
+                problems.append(f"{cloc}: `drive` must be one of {list(DRIVES)}, got {drive!r}")
                 drive = "ask"
-            if drive == "telegram_operator" and has_turns:
-                problems.append(f"{cloc}: `drive: telegram_operator` supports only single-turn `query` cases")
+            if drive in ("telegram_operator", "companion") and has_turns:
+                problems.append(f"{cloc}: `drive: {drive}` supports only single-turn `query` cases")
+            companion_spec = _companion_spec(cs, drive, case_expect, turns, cloc, problems)
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
@@ -669,7 +723,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
-                        requires_tools_all=tuple(requires_all))
+                        requires_tools_all=tuple(requires_all), companion=companion_spec)
             _refuse_misplaced_fixture_state(case, cloc, problems)
             cases.append(case)
 
