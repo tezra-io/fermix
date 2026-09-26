@@ -124,7 +124,7 @@ the checks that show a rule needs it):
   (`cancel_request`, `mobile_sql.ex:373-401`). `Turns` reads the mark and
   enqueues in one step (`hand_off`, `turns.ex:166-187`), and sends every stop
   of a turn it handed off itself, after the enqueue (`turns.ex:117-129`).
-  `FALSE` is the code before 14afcfa6: the Connection called `Queue.stop_turn`
+  `FALSE` is the code before 431d5663: the Connection called `Queue.stop_turn`
   directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
   `Turns`; the Connection's cancel writes nothing.
@@ -235,10 +235,10 @@ of an entity its rules are about. All still hold:
   in the timeline, and no rule reads them.
 - `history_search` and scroll-back through `history_pull{before_seq}`: reads
   below the cursor that never move it. `search_results` is written in the
-  reading step like a page (ad41aa23).
+  reading step like a page (453c24fc).
 - The phone. Mobile and companion share the timeline but run under different
   channel identities, so live events never cross from one socket to the other.
-  The phone's rows reach this socket as `row`s (fde9c6bb). This spec is two
+  The phone's rows reach this socket as `row`s (7f4e122d). This spec is two
   clients on `companion.sock`.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -247,7 +247,7 @@ of an entity its rules are about. All still hold:
 - A failed turn: `{:failed}` ends a turn through the same path as
   `{:cancelled}`.
 - A daemon restart and boot recovery. Recovery hands a request off through the
-  same `Turns` step, so it reads the mark (14afcfa6); the model has no boot
+  same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
 - A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:148-156`),
   and a crash of `Turns` or of a request worker.
@@ -267,26 +267,26 @@ back with its fix's mechanism switched off; open
 
 ### COMPANION-1: `cancel` could not be built on `Queue.stop_conversation`
 - **Severity:** medium. One client's cancel stopped the other client's turn.
-- **Status:** fixed (5ab65479, db056576). `Queue.stop_turn/3` stops one message
+- **Status:** fixed (286b43dd, 768ea8df). `Queue.stop_turn/3` stops one message
   by its id, and `cancel` names the `client_msg_id`. `turn_queue` models the
   stop (checks 18 to 19b).
 - **Checks:** 09 holds; 11 breaks `OnlyNamedTurnCancelled` with the
   conversation stop.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
-- **Status:** holds in the code (ed33c3af): `join` registers the Connection
+- **Status:** holds in the code (b9248004): `join` registers the Connection
   before it writes `server_hello` (`connection.ex:211-220`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 
 ### COMPANION-3: a cancel must not end the turn on the wire
-- **Status:** fixed (db056576). `Companion.Turns` ends every turn from the
+- **Status:** fixed (768ea8df). `Companion.Turns` ends every turn from the
   Queue's outcome and only from it, and the Connection's cancel writes nothing.
 - **Checks:** 09 holds; 10 breaks `NoDoneAfterCancel`.
 
 ### COMPANION-4: a client must drop rows at or below its cursor, and pull on a gap
 - **Status:** documented in `PROTOCOL.md`'s client rules. They now apply to
-  every live row, a `row` or a `text_done` (fde9c6bb). The clients live outside
+  every live row, a `row` or a `text_done` (7f4e122d). The clients live outside
   this repository.
 - **Checks:** 01, 15 and 21 hold; 02, 17 and 23 break without the cursor.
 
@@ -298,7 +298,7 @@ back with its fix's mechanism switched off; open
 ### COMPANION-6: a live reply that overtakes a history page is lost
 - **Severity:** medium. The window was short, but the reply a user waited for
   could stay unshown for as long as the conversation stayed quiet.
-- **Status:** fixed (ad41aa23). `history_page` and `search_results` are written
+- **Status:** fixed (453c24fc). `history_page` and `search_results` are written
   to the socket in the step that read them (`read_opts`), so a live row for a
   row written after the read reaches the socket after the page.
 - **Checks:** 01 holds; 20 (13 states) breaks `TimelineConverges` with the page
@@ -315,7 +315,7 @@ back with its fix's mechanism switched off; open
 ### COMPANION-7: a message whose turn writes no reply stayed off every client's timeline
 - **Severity:** low. The other client never showed a cancelled or failed
   message until the conversation moved on or it reconnected.
-- **Status:** fixed (fde9c6bb). Every row written outside a turn's completion
+- **Status:** fixed (7f4e122d). Every row written outside a turn's completion
   is announced to every connection as a `row` as it is written: the sender's
   own user row, a slash command's answer, a delivery, and a row the phone
   writes. `accepted.server_seq` is set only on a duplicate, as the reply's seq.
@@ -329,7 +329,7 @@ back with its fix's mechanism switched off; open
 ### COMPANION-8: a cancel between `accepted` and the hand-off was lost
 - **Severity:** medium. A user who cancelled right after `accepted` still got
   the message run and answered.
-- **Status:** fixed (14afcfa6), found in the implementation's review, not by
+- **Status:** fixed (431d5663), found in the implementation's review, not by
   this spec. The cancel is recorded on the request first (`cancelled_at`,
   `cancel_request`). `Turns` owns the hand-off: in one step of its process it
   reads the mark and either ends a marked request with one `turn_error` or
@@ -346,14 +346,14 @@ back with its fix's mechanism switched off; open
   3. `Turns` hands the turn off, and it runs.
 
 ### Design notes
-- **Where `text_done` comes from:** from `{:completed}` in `Turns` (db056576),
+- **Where `text_done` comes from:** from `{:completed}` in `Turns` (768ea8df),
   so a stop between the reply callback and the claim (`turn_queue`'s QUEUE-2
   and QUEUE-3) never leaves the timeline holding an answer the history marks
   as stopped.
 - **A turn whose outcome is lost:** `Turns` watches the Queue it handed each
   turn to and ends the turn as `interrupted` on that Queue's `:DOWN`. Not
   modelled.
-- **`turn_error` is live-only and carries no seq.** Since fde9c6bb the user's
+- **`turn_error` is live-only and carries no seq.** Since 7f4e122d the user's
   row reaches every client anyway, as a `row`.
 - **The claim and the user row are two writes.** A restart between them
   leaves a claim with no row. Boot recovery re-runs the request under the
