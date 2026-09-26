@@ -34,6 +34,7 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
+from evallib import companion
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -400,7 +401,7 @@ def behavioral_schema_errors(chosen) -> list[str]:
 def required_judge_cases(jobs, operator: bool) -> list[str]:
     required = []
     for suite, scenario, case, _trial in jobs:
-        runnable = case.drive == "ask" or operator
+        runnable = not case.needs_operator or operator
         label = f"{suite.name}/{scenario.id}/{case.id}"
         if runnable and case.judge and case.rubric and label not in required:
             required.append(label)
@@ -536,7 +537,7 @@ def case_jobs(chosen, repeat: int, max_cases: int = 0,
                     if max_cases and driven >= max_cases:
                         return jobs
                     jobs.append((suite, scenario, case, trial))
-                    if case.drive == "ask" or operator:
+                    if not case.needs_operator or operator:
                         driven += 1
     return jobs
 
@@ -547,10 +548,10 @@ def plan_counts(chosen, judge_on: bool, repeat: int = 1,
     scenarios = len({(suite.name, scenario.id)
                      for suite, scenario, _case, _trial in jobs})
     turns = sum(len(case.turns) for _suite, _scenario, case, _trial in jobs
-                if case.drive == "ask" or operator)
+                if not case.needs_operator or operator)
     judge_turns = sum(
         1 for _suite, _scenario, case, _trial in jobs
-        if (case.drive == "ask" or operator) and judge_on and case.judge and case.rubric
+        if (not case.needs_operator or operator) and judge_on and case.judge and case.rubric
     )
     return scenarios, len(jobs), turns, judge_turns
 
@@ -836,6 +837,103 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on,
     return {"id": case.id, "trial": trial, "outcome": outcome, "passed": outcome == "pass",
             "incomplete": outcome == "incomplete", "gate_passed": gate_ok,
             "turns": [rec], "rubric": rubric}
+
+
+def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
+    """Drive one case over the companion chat socket, as the Mac app would.
+
+    The runner is the socket's client (evallib/companion.py): it sends the
+    marked message with the case's choreography around it and records what the
+    wire said, which becomes the `wire.*` gates. A turn that completed is also
+    found in Opik on the `companion:main` thread by the marker and graded like
+    an `ask` turn, against the elapsed time until the turn ended on the wire. A
+    cancelled message is graded on the wire alone: it completed nothing, and
+    one cancelled while it waited never ran. An `offline_wait_s` case grades
+    its trace first, inside the wait, and its catch-up read last.
+    """
+    import uuid
+
+    marker = f"e2e-mark-{run_id}-{uuid.uuid4().hex[:6]}"
+    query = _render_query(case.turns[0].query, run_id, trial)
+    message = f"{query} (eval:{marker})"
+    eff = _render_expect(case.expect, run_id, trial)
+    wire = eff.pop("wire")
+    timeout_s = (case.timeout_ms or cfg.daemon.default_timeout_ms) / 1000.0
+    rec = {"index": 0, "query": message, "session": marker, "status": "error",
+           "drive_error": None, "note": None, "correlation": "n/a", "gates": [],
+           "tools": [], "reply": "", "cost_usd": 0.0, "duration_ms": 0.0, "tokens": 0,
+           "iterations": None, "subagent_spawns": 0, "trace_id": None, "trace_url": "",
+           "main_models": [], "main_providers": [], "main_efforts": []}
+
+    def incomplete(error: str | None = None, correlation: str | None = None) -> dict:
+        if error is not None:
+            rec["drive_error"] = error
+        if correlation is not None:
+            rec["correlation"] = correlation
+        return {"id": case.id, "trial": trial, "outcome": "incomplete", "passed": False,
+                "incomplete": True, "gate_passed": False, "turns": [rec], "rubric": None}
+
+    evidence = companion.drive(cfg.daemon.fermix_home, case.companion, query, marker,
+                               timeout_s)
+    rec["duration_ms"] = evidence.elapsed_ms
+    rec["reply"] = evidence.target.reply()
+    if not evidence.ok:
+        return incomplete(f"companion socket: {evidence.error}")
+    wire_gates = companion.wire_gates(evidence, wire)
+    if case.companion.get("cancel") is not None:
+        rec.update({"status": "ok", "note": "graded on the wire alone: the message was "
+                                            "cancelled", "gates": _gate_records(wire_gates)})
+        gate_ok = all(gate.passed for gate in wire_gates)
+        outcome = "pass" if gate_ok else "fail"
+        return {"id": case.id, "trial": trial, "outcome": outcome, "passed": gate_ok,
+                "incomplete": False, "gate_passed": gate_ok, "turns": [rec], "rubric": None}
+
+    budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
+              "max_duration_ms": cfg.budgets.max_duration_ms}
+    expect = dict(budget, **eff)
+    after = evidence.sent_at - timedelta(seconds=10)
+    poll_s = max(cfg.opik.poll_timeout_s, timeout_s + 60)
+    try:
+        found = client.poll_for_marker("companion:", marker, after, set(), poll_s,
+                                       cfg.opik.poll_interval_s)
+        if found is None:
+            return incomplete(f"no companion trace containing '{marker}' appeared within "
+                              f"{int(poll_s)}s", "missing")
+        trace, spans = client.await_complete(found)
+    except OpikError as exc:
+        _record_opik_error(rec, exc)
+        return incomplete()
+    wait_s = case.companion.get("offline_wait_s")
+    if wait_s is not None:
+        evidence = companion.catch_up(cfg.daemon.fermix_home, wait_s, evidence, timeout_s)
+        if not evidence.ok:
+            return incomplete(f"companion socket: {evidence.error}")
+        wire_gates = companion.wire_gates(evidence, wire)
+    gates = grade.grade(trace, spans, expect, elapsed_ms=evidence.elapsed_ms) + wire_gates
+    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms)
+    _record_graded_turn(rec, cfg, trace, gates, view, None)
+    reply = view.reply or evidence.target.reply()
+    if _provider_limit_reply(reply):
+        rec["status"] = "provider_limited"
+        rec["drive_error"] = "provider usage/rate/quota limit; turn is not gradable"
+    evidence_incomplete = _view_incomplete(view)
+    transcript = [{"role": "user", "content": message},
+                  {"role": "assistant", "content": reply}]
+    rubric = None if evidence_incomplete else _rubric_record(
+        cfg, case, scn, run_id, trial, judge_on, transcript, [_tool_evidence(view, 0)],
+        _candidate_routes_from_turns([rec]), candidate_session=marker)
+    negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
+    gate_ok = all(gate.passed for gate in gates) and not negative_failed
+    outcome = operator_outcome(gate_ok, evidence_incomplete, rubric, cfg.rubric_failures,
+                               negative_failed)
+    return {"id": case.id, "trial": trial, "outcome": outcome, "passed": outcome == "pass",
+            "incomplete": outcome == "incomplete", "gate_passed": gate_ok,
+            "turns": [rec], "rubric": rubric}
+
+
+def _gate_records(gates) -> list[dict]:
+    return [{"key": gate.key, "passed": gate.passed, "detail": gate.detail,
+             "conclusive": gate.conclusive} for gate in gates]
 
 
 # --- run one case -----------------------------------------------------------
@@ -1411,7 +1509,7 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
         chosen, judge_on, args.repeat, args.max_cases, args.operator)
     suites_planned = len({suite.name for suite, _scenario, _case, _trial in jobs})
     driven = sum(1 for _suite, _scenario, case, _trial in jobs
-                 if case.drive == "ask" or args.operator)
+                 if not case.needs_operator or args.operator)
     skipped = nc - driven
     print(f"dry-run OK — profiles={sorted(profiles)} · {suites_planned} suite(s), "
           f"{nsc} scenario(s), {driven} case trial(s) would run, "
@@ -1423,7 +1521,7 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
         print(f"  fixture server: {fixture_jobs} case trial(s) address "
               f"{FIXTURE_URL_PLACEHOLDER}; the run would start one on 127.0.0.1")
     for suite, scenario, case, trial in jobs:
-        action = "run" if case.drive == "ask" or args.operator else "skip: needs --operator"
+        action = "run" if not case.needs_operator or args.operator else "skip: needs --operator"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
               f"[{scenario.risk}; {action}]")
     return 0 if driven > 0 else 4
@@ -1478,6 +1576,9 @@ def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
         if case.drive == "telegram_operator":
             return run_operator_case(
                 cfg, client, suite, scenario, case, run_id, trial, judge_on, fixture)
+        if case.drive == "companion":
+            return run_companion_case(cfg, client, suite, scenario, case, run_id, trial,
+                                      judge_on)
         return run_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
                         fixture)
     except OpikError as exc:
@@ -1617,7 +1718,7 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
     aborted = None
     for index, (suite, scenario, case, trial) in enumerate(jobs):
         label = f"{suite.name}/{scenario.id}/{case.id}#{trial}"
-        if case.drive != "ask" and not operator:
+        if case.needs_operator and not operator:
             print(f"  · {label} — SKIPPED "
                   "(operator-assisted; rerun with --operator)", flush=True)
             skipped_required += 1
@@ -1721,7 +1822,7 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
         chosen, judge_on, args.repeat, args.max_cases, args.operator)
     jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator)
     driven = sum(1 for _suite, _scenario, case, _trial in jobs
-                 if case.drive == "ask" or args.operator)
+                 if not case.needs_operator or args.operator)
     skipped = nc - driven
     if args.max_cases:
         print(f"note: --max-cases {args.max_cases} "

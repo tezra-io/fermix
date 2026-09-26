@@ -23,7 +23,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
 
   @max_wire_bytes 65_535
   @default_max_media_bytes 20 * 1_024 * 1_024
@@ -207,7 +207,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
     |> Map.put_new(:attach_socket, &DeviceRegistry.attach/4)
     |> Map.put_new(:authorize_socket, &DeviceRegistry.authorized?/3)
     |> Map.put_new(:discover, &Discovery.discover/0)
-    |> Map.put_new(:media_descriptor, &Store.media_descriptor/2)
+    |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
     |> Map.put_new(:run_request, &Task.Supervisor.start_child(FermixCore.TaskSupervisor, &1))
   end
@@ -1126,12 +1126,12 @@ defmodule FermixChannels.Mobile.SocketHandler do
   defp history_head(profile, %{history_head: fun}) when is_function(fun, 1), do: fun.(profile)
 
   defp history_head(profile, _state),
-    do: apply(Store, :history_head, [profile])
+    do: apply(Timeline, :history_head, [profile])
 
   defp read_frontier(profile, %{read_frontier: fun}) when is_function(fun, 1), do: fun.(profile)
 
   defp read_frontier(profile, _state),
-    do: apply(Store, :read_frontier, [profile])
+    do: apply(Timeline, :read_frontier, [profile])
 
   defp current_candidates do
     case Discovery.discover() do

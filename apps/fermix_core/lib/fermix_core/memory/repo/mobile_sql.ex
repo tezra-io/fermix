@@ -5,6 +5,13 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @request_sweep_limit 200
   @sha256 ~r/\A[0-9a-f]{64}\z/
+  @transports ~w(mobile companion)
+  # Private-use code points bracket each match in a search excerpt; they are
+  # stripped before the excerpt leaves this module, leaving plain text and the
+  # ranges they marked.
+  @match_open "\u{E000}"
+  @match_close "\u{E001}"
+  @excerpt_tokens 16
 
   @schema_sql """
   CREATE TABLE IF NOT EXISTS mobile_profile_state (
@@ -90,6 +97,50 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     ON mobile_client_requests(agent_id, owner_id, status, claimed_at, profile_id, client_msg_id);
   """
 
+  # Migration 33, the companion socket. Each durable request names the transport
+  # that claimed it, so a transport's boot recovery reruns only its own requests
+  # (every row before this column is a mobile one). The timeline gets an FTS5
+  # index over `content`, written by triggers on the same insert, update and
+  # delete that change the row, and rebuilt once for the rows already there.
+  #
+  # The timeline's primary key is composite, so the index follows its implicit
+  # rowid. That rowid is stable because nothing here ever VACUUMs memory.db; a
+  # VACUUM would renumber it and must be followed by the 'rebuild' below.
+  @companion_schema_sql """
+  ALTER TABLE mobile_client_requests
+    ADD COLUMN transport TEXT NOT NULL DEFAULT 'mobile'
+    CHECK (transport IN ('mobile', 'companion'));
+
+  CREATE VIRTUAL TABLE IF NOT EXISTS mobile_timeline_fts
+  USING fts5(content, content=mobile_timeline);
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_fts_ai AFTER INSERT ON mobile_timeline BEGIN
+    INSERT INTO mobile_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_fts_ad AFTER DELETE ON mobile_timeline BEGIN
+    INSERT INTO mobile_timeline_fts(mobile_timeline_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_fts_au
+  AFTER UPDATE OF content ON mobile_timeline BEGIN
+    INSERT INTO mobile_timeline_fts(mobile_timeline_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+    INSERT INTO mobile_timeline_fts(rowid, content) VALUES (new.rowid, new.content);
+  END;
+
+  INSERT INTO mobile_timeline_fts(mobile_timeline_fts) VALUES ('rebuild');
+  """
+
+  # Migration 34, cancel before the queue. A `cancel` can reach a request that
+  # was claimed and acknowledged but not yet handed to the queue; the mark on
+  # the request is what the hand-off and boot recovery read, so the cancel is
+  # not lost in that window.
+  @cancel_schema_sql """
+  ALTER TABLE mobile_client_requests ADD COLUMN cancelled_at TEXT;
+  """
+
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
 
@@ -98,6 +149,12 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @spec attempt_fence_schema_sql() :: String.t()
   def attempt_fence_schema_sql, do: @attempt_fence_schema_sql
+
+  @spec companion_schema_sql() :: String.t()
+  def companion_schema_sql, do: @companion_schema_sql
+
+  @spec cancel_schema_sql() :: String.t()
+  def cancel_schema_sql, do: @cancel_schema_sql
 
   @spec append(term(), map()) :: {:ok, map()} | {:error, term()}
   def append(conn, attrs) do
@@ -148,6 +205,49 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          next_after_seq: next_cursor(messages, after_seq),
          history_head_seq: head
        }}
+    end
+  end
+
+  @doc """
+  The newest `limit` rows older than `before_seq`, oldest first. The page is
+  exact: `next_before_seq` is present only when an older row exists.
+  """
+  @spec history_before(term(), map(), pos_integer(), 1..200) ::
+          {:ok, map()} | {:error, term()}
+  def history_before(conn, selector, before_seq, limit) do
+    profile = normalize_profile(selector)
+
+    with {:ok, rows} <- history_rows_before(conn, profile, before_seq, limit + 1),
+         {:ok, head} <- history_head(conn, profile) do
+      {page, older?} = split_page(rows, limit)
+      messages = page |> Enum.map(&timeline_row/1) |> Enum.reverse()
+
+      {:ok,
+       %{
+         messages: messages,
+         next_before_seq: older_cursor(messages, older?),
+         history_head_seq: head
+       }}
+    end
+  end
+
+  @doc """
+  Full-text search of one profile's timeline, newest first, below `before_seq`
+  when given. `query` is user text, never FTS syntax: each whitespace-separated
+  token becomes a quoted prefix phrase and the phrases are ANDed, so operators,
+  column filters and stray quotes are literal. A query with no searchable token
+  matches nothing. Each hit carries a plain-text excerpt and the ranges in it
+  that matched, in Unicode scalar values.
+  """
+  @spec search(term(), map(), String.t(), pos_integer() | nil, pos_integer()) ::
+          {:ok, %{hits: [map()], next_before_seq: pos_integer() | nil}} | {:error, term()}
+  def search(conn, selector, query, before_seq, limit)
+      when is_binary(query) and is_integer(limit) and limit > 0 do
+    profile = normalize_profile(selector)
+
+    case match_expression(query) do
+      {:ok, match} -> search_matching(conn, profile, match, before_seq, limit)
+      :empty -> {:ok, %{hits: [], next_before_seq: nil}}
     end
   end
 
@@ -262,6 +362,43 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     end
   end
 
+  @doc """
+  Record a cancel on a request that has not settled, in one step: the mark
+  (`cancelled_at`, set once) is what the hand-off to the queue and boot
+  recovery read, so a cancel that arrives before the request is queued is
+  never lost. A settled request is left as it is.
+  """
+  @spec cancel_request(term(), map(), String.t(), DateTime.t()) ::
+          {:ok, {:marked | :settled, map()}} | {:error, term()}
+  def cancel_request(conn, selector, client_msg_id, now) do
+    profile = normalize_profile(selector)
+
+    transaction(conn, fn ->
+      with {:ok, rows} <-
+             query_all(
+               conn,
+               """
+               UPDATE mobile_client_requests
+               SET cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+               WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
+                 AND status IN ('accepted', 'running')
+               RETURNING *
+               """,
+               [timestamp(now), timestamp(now)] ++ profile_params(profile) ++ [client_msg_id]
+             ) do
+        cancelled_request(conn, profile, client_msg_id, rows)
+      end
+    end)
+  end
+
+  defp cancelled_request(_conn, _profile, _client_msg_id, [row]),
+    do: {:ok, {:marked, request_row(row)}}
+
+  defp cancelled_request(conn, profile, client_msg_id, []) do
+    with {:ok, request} <- get_request(conn, profile, client_msg_id),
+         do: {:ok, {:settled, request}}
+  end
+
   @spec start_request(term(), map(), String.t(), String.t(), DateTime.t()) ::
           {:ok, {:started | :active | :completed | :failed, map()}} | {:error, term()}
   def start_request(conn, selector, client_msg_id, runner_epoch, now) do
@@ -277,6 +414,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
           {:ok, [map()]} | {:error, term()}
   def recoverable_requests(conn, selector, runner_epoch, limit, now) do
     owner = normalize_owner(selector)
+    transport = transport!(selector)
     epoch = nonempty_string!(runner_epoch, :runner_epoch)
 
     with {:ok, rows} <-
@@ -284,12 +422,12 @@ defmodule FermixCore.Memory.Repo.MobileSql do
              conn,
              """
              SELECT * FROM mobile_client_requests
-             WHERE agent_id = ? AND owner_id = ? AND expires_at > ?
+             WHERE agent_id = ? AND owner_id = ? AND transport = ? AND expires_at > ?
                AND (status = 'accepted' OR (status = 'running' AND runner_epoch IS NOT ?))
              ORDER BY claimed_at ASC, profile_id ASC, client_msg_id ASC
              LIMIT ?
              """,
-             [owner.agent_id, owner.owner_id, timestamp(now), epoch, limit]
+             [owner.agent_id, owner.owner_id, transport, timestamp(now), epoch, limit]
            ) do
       {:ok, Enum.map(rows, &request_row/1)}
     end
@@ -514,6 +652,106 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp next_cursor([], after_seq), do: after_seq
   defp next_cursor(messages, _after_seq), do: List.last(messages).server_seq
 
+  defp history_rows_before(conn, profile, before_seq, limit) do
+    query_all(
+      conn,
+      """
+      SELECT * FROM mobile_timeline
+      WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq < ?
+      ORDER BY server_seq DESC LIMIT ?
+      """,
+      profile_params(profile) ++ [before_seq, limit]
+    )
+  end
+
+  # Rows were fetched one past the page: that extra row is the proof an older
+  # page exists, and it is never shipped.
+  defp split_page(rows, limit), do: {Enum.take(rows, limit), length(rows) > limit}
+
+  defp older_cursor([oldest | _rest], true), do: oldest.server_seq
+  defp older_cursor(_messages, _older?), do: nil
+
+  defp search_matching(conn, profile, match, before_seq, limit) do
+    with {:ok, rows} <- search_rows(conn, profile, match, before_seq, limit + 1) do
+      {page, older?} = split_page(rows, limit)
+      hits = Enum.map(page, &search_hit/1)
+      {:ok, %{hits: hits, next_before_seq: older_hit_cursor(hits, older?)}}
+    end
+  end
+
+  defp search_rows(conn, profile, match, before_seq, limit) do
+    query_all(
+      conn,
+      """
+      SELECT t.server_seq, t.role, t.created_at,
+             snippet(mobile_timeline_fts, 0, ?, ?, '…', #{@excerpt_tokens})
+      FROM mobile_timeline_fts
+      JOIN mobile_timeline AS t ON t.rowid = mobile_timeline_fts.rowid
+      WHERE mobile_timeline_fts MATCH ?
+        AND t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ?
+        AND (? IS NULL OR t.server_seq < ?)
+      ORDER BY t.server_seq DESC LIMIT ?
+      """,
+      [@match_open, @match_close, match] ++
+        profile_params(profile) ++ [before_seq, before_seq, limit]
+    )
+  end
+
+  defp older_hit_cursor(hits, true), do: List.last(hits).server_seq
+  defp older_hit_cursor(_hits, false), do: nil
+
+  defp search_hit([server_seq, role, created_at, marked]) do
+    {excerpt, ranges} = unmark_excerpt(marked)
+
+    %{
+      server_seq: server_seq,
+      role: role,
+      created_at: parse_timestamp!(created_at),
+      excerpt: excerpt,
+      ranges: ranges
+    }
+  end
+
+  # Walks the marked excerpt once, counting Unicode scalar values of the text
+  # that remains once the markers are gone. A marker left open by content that
+  # itself contains one closes at the end of the excerpt.
+  defp unmark_excerpt(marked) do
+    {text, offset, ranges, open} =
+      marked
+      |> String.codepoints()
+      |> Enum.reduce({[], 0, [], nil}, &unmark_step/2)
+
+    ranges = if open, do: [%{start: open, length: offset - open} | ranges], else: ranges
+
+    {text |> Enum.reverse() |> Enum.join(),
+     ranges |> Enum.reverse() |> Enum.filter(&(&1.length > 0))}
+  end
+
+  defp unmark_step(@match_open, {text, offset, ranges, _open}),
+    do: {text, offset, ranges, offset}
+
+  defp unmark_step(@match_close, {text, offset, ranges, open}) when is_integer(open),
+    do: {text, offset, [%{start: open, length: offset - open} | ranges], nil}
+
+  defp unmark_step(@match_close, acc), do: acc
+
+  defp unmark_step(char, {text, offset, ranges, open}),
+    do: {[char | text], offset + 1, ranges, open}
+
+  defp match_expression(query) do
+    tokens =
+      query
+      |> String.split(~r/\s+/u, trim: true)
+      |> Enum.filter(&Regex.match?(~r/[\p{L}\p{N}]/u, &1))
+
+    case tokens do
+      [] -> :empty
+      tokens -> {:ok, Enum.map_join(tokens, " AND ", &prefix_phrase/1)}
+    end
+  end
+
+  defp prefix_phrase(token), do: ~s("#{String.replace(token, ~s("), ~s(""))}"*)
+
   defp max_merge_read_frontier(conn, profile, reported_seq, stamp) do
     execute(
       conn,
@@ -542,7 +780,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   defp classify_claim(request, existing) do
     if existing.request_type == request.request_type and
-         existing.payload_digest == request.payload_digest do
+         existing.payload_digest == request.payload_digest and
+         existing.transport == request.transport do
       {:ok, {:duplicate, existing}}
     else
       {:ok, {:conflict, existing}}
@@ -559,10 +798,10 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                agent_id, owner_id, profile_id, client_msg_id, request_type, status,
                payload_digest, payload_json, turn_id, result_server_seq, error_json,
                claimed_at, expires_at, updated_at, authenticated_device_id,
-               runner_epoch, attempt
-             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?)
+               runner_epoch, attempt, transport
+             ) VALUES (?, ?, ?, ?, ?, 'accepted', ?, ?, NULL, NULL, NULL, ?, ?, ?, ?, NULL, ?, ?)
              """,
-             request_insert_params(request) ++ [attempt]
+             request_insert_params(request) ++ [attempt, request.transport]
            ),
          {:ok, row} <- get_request(conn, request, request.client_msg_id) do
       {:ok, {:claimed, row}}
@@ -878,6 +1117,29 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     }
   end
 
+  defp transport!(attrs) do
+    case Map.fetch!(attrs, :transport) do
+      transport when transport in @transports ->
+        transport
+
+      value ->
+        raise ArgumentError,
+              "expected :transport in #{inspect(@transports)}, got: #{inspect(value)}"
+    end
+  end
+
+  # A mobile claim names the Noise-authenticated device that made it; the
+  # companion socket's trust is the 0600 socket itself, so it names no device.
+  defp claimant_device!(attrs, "mobile"),
+    do: nonempty_string!(Map.fetch!(attrs, :authenticated_device_id), :authenticated_device_id)
+
+  defp claimant_device!(attrs, "companion") do
+    case Map.get(attrs, :authenticated_device_id) do
+      nil -> nil
+      value -> raise ArgumentError, "a companion claim names no device, got: #{inspect(value)}"
+    end
+  end
+
   defp normalize_timeline(attrs) do
     attrs
     |> normalize_profile()
@@ -909,6 +1171,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   end
 
   defp normalize_request(selector, attrs) do
+    transport = transport!(attrs)
+
     selector
     |> normalize_profile()
     |> Map.merge(%{
@@ -916,11 +1180,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       request_type: string!(attrs, :request_type),
       payload: Map.fetch!(attrs, :payload),
       payload_digest: digest!(attrs, :payload_digest),
-      authenticated_device_id:
-        nonempty_string!(
-          Map.fetch!(attrs, :authenticated_device_id),
-          :authenticated_device_id
-        ),
+      transport: transport,
+      authenticated_device_id: claimant_device!(attrs, transport),
       claimed_at: datetime!(attrs, :claimed_at),
       expires_at: datetime!(attrs, :expires_at)
     })
@@ -1135,7 +1396,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          updated_at,
          authenticated_device_id,
          runner_epoch,
-         attempt
+         attempt,
+         transport,
+         cancelled_at
        ]) do
     %{
       agent_id: agent_id,
@@ -1152,6 +1415,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       authenticated_device_id: authenticated_device_id,
       runner_epoch: runner_epoch,
       attempt: attempt,
+      transport: transport,
+      cancelled_at: cancelled_at && parse_timestamp!(cancelled_at),
       claimed_at: parse_timestamp!(claimed_at),
       expires_at: parse_timestamp!(expires_at),
       updated_at: parse_timestamp!(updated_at)

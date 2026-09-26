@@ -152,7 +152,7 @@ defmodule FermixChannels.Mobile.Supervisor do
               {RequestCoordinator,
                name: names.request_coordinator,
                boot_epoch: boot_epoch,
-               store_opts: Keyword.get(opts, :store_opts, []),
+               store_opts: Keyword.put(Keyword.get(opts, :store_opts, []), :transport, "mobile"),
                recovery_limit: Keyword.get(opts, :recovery_limit, 200)},
               id: names.request_coordinator
             ),

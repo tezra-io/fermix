@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.MobileTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
@@ -13,7 +14,14 @@ defmodule FermixChannels.Channels.MobileTest do
   defmodule StoreStub do
     def append(profile_id, attrs, _opts) do
       send(self(), {:timeline_append, profile_id, attrs})
-      row = Map.merge(attrs, %{profile_id: profile_id, server_seq: 73})
+
+      row =
+        Map.merge(attrs, %{
+          profile_id: profile_id,
+          server_seq: 73,
+          created_at: ~U[2026-09-26 09:00:00Z]
+        })
+
       Process.put({__MODULE__, :last_row}, row)
       {:ok, row}
     end
@@ -610,6 +618,31 @@ defmodule FermixChannels.Channels.MobileTest do
 
     assert :ok = Mobile.send_message("main", "daily", proactive)
     refute_receive {:telemetry, [:fermix, :channel, :message], _measurements, _metadata}, 100
+  end
+
+  # The phone and the Mac share one timeline: a row this channel writes is
+  # announced to the Mac's companion connections as it is written, and a row the
+  # store deduplicated is not announced again.
+  test "every row the phone channel writes reaches the companion connections" do
+    {:ok, _owner} =
+      Registry.register(Companion.registry(), "main", nil)
+
+    assert :ok = Mobile.send_message("main", "your 9am summary", [])
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "row",
+                      "profile_id" => "main",
+                      "server_seq" => 73,
+                      "role" => "assistant",
+                      "text" => "your 9am summary"
+                    }}
+
+    proactive = [proactive_key: "job:companion-row-1"]
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+    assert_receive {:companion_event, %{"t" => "row", "text" => "daily"}}
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+    refute_receive {:companion_event, %{"t" => "row"}}, 100
   end
 
   test "health delegates to the fail-closed mobile management facade" do

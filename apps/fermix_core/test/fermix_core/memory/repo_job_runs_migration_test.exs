@@ -7,6 +7,7 @@ defmodule FermixCore.Memory.RepoJobRunsMigrationTest do
   alias Exqlite.Sqlite3
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Repo.ComputerHistorySql
+  alias FermixCore.Memory.Repo.MobileSql
 
   @tool_failures_version 29
   @at ~U[2026-09-16 11:15:01Z]
@@ -106,6 +107,10 @@ defmodule FermixCore.Memory.RepoJobRunsMigrationTest do
 
     :ok = Sqlite3.execute(conn, Repo.base_schema_sql())
     :ok = Sqlite3.execute(conn, Repo.jobs_schema_sql())
+    # The mobile tables a v28 store holds: a later migration (33) alters one.
+    :ok = Sqlite3.execute(conn, MobileSql.schema_sql())
+    :ok = Sqlite3.execute(conn, MobileSql.client_message_schema_sql())
+    :ok = Sqlite3.execute(conn, MobileSql.attempt_fence_schema_sql())
     # The computer-history tables a v28 store holds: a later migration (32) reads
     # one of them, and a store that claims 28 without them is not a real one.
     :ok = Sqlite3.execute(conn, ComputerHistorySql.events_schema_sql())

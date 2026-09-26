@@ -1,0 +1,196 @@
+# Companion chat socket — the Mac app's chat, driven as the app drives it.
+#
+# `drive: companion` makes the runner the socket's client
+# (bin/evallib/companion.py): it connects to `$FERMIX_HOME/companion.sock`,
+# completes the handshake, sends `/new` so each attempt is its own conversation,
+# then sends the case's marked message with the case's choreography around it.
+# What the socket said becomes `wire.*` gates; a turn that completed is also
+# found in Opik on the `companion:main` thread by its marker and graded like an
+# `ask` turn. A cancelled message is graded on the wire alone (no reply exists,
+# and a message cancelled while it waited never ran), so those cases carry no
+# trace gates.
+#
+# Every case writes the eval home's companion timeline, and the scheduled cases
+# leave a finished one-off job behind, so the suite is `isolated_mutation`:
+# `make behavioral-isolated`, or `bin/tier.sh` against the disposable eval
+# daemon. The eval home's jobs default delivers to a Telegram target it holds no
+# credentials for, so a job reaches the companion timeline only if the model
+# chose `delivery_mode: "origin"` from this chat — which is the behaviour under
+# test.
+suite: companion
+risk: isolated_mutation
+title: "Companion chat socket — streaming, cancel, history, search, origin delivery"
+description: >
+  Drives the Mac app's chat socket end to end: a turn streams deltas and ends
+  with text_done, a cancel by client message id stops the named request whether
+  it runs or waits (and never the turn ahead of it), history pages forward and
+  backward and full-text search finds the message, and a job scheduled from
+  this chat with origin delivery lands in the companion timeline while no
+  client is connected.
+defaults:
+  timeout_ms: 180000
+  judge: false
+
+scenarios:
+  - id: chat_turn_streams
+    title: "A turn streams deltas and ends with text_done"
+    severity: critical
+    tags: [companion, streaming, core]
+    cases:
+      - id: short_answer_streams
+        drive: companion
+        query: "In two sentences, what makes sourdough bread rise?"
+        expect:
+          status: ok
+          no_tool_errors: true
+          reply_matches: "(?i)yeast|bacteria|ferment|starter|gas|carbon dioxide"
+          wire:
+            events_all: [accepted, row, turn_started, text_delta, text_done]
+            events_none: [turn_error]
+      - id: tool_turn_streams
+        drive: companion
+        # Tool activity reaches the socket as tool_event start/stop between
+        # the deltas; the reply is the tool's output.
+        query: "Print 'companion-check-ok' for me and tell me exactly what it output."
+        expect:
+          status: ok
+          no_tool_errors: true
+          reply_matches: "companion-check-ok"
+          wire:
+            events_all: [accepted, turn_started, tool_event, text_done]
+            events_none: [turn_error]
+
+  - id: cancel_running
+    title: "Cancel by client message id stops the running turn"
+    severity: critical
+    tags: [companion, cancel]
+    cases:
+      - id: cancel_long_history
+        drive: companion
+        query: "Write me a detailed 1500-word history of the lighthouse, from antiquity to automation."
+        companion: {cancel: running}
+        expect:
+          wire:
+            events_all: [accepted, row, turn_started, turn_error]
+            events_none: [text_done]
+            error_code: cancelled
+      - id: cancel_long_itinerary
+        drive: companion
+        query: "Plan a two-week trip through Japan day by day, with trains, food and lodging for every day, in full detail."
+        companion: {cancel: running}
+        expect:
+          wire:
+            events_all: [accepted, row, turn_started, turn_error]
+            events_none: [text_done]
+            error_code: cancelled
+
+  - id: cancel_waiting
+    title: "Cancel stops a request still waiting, and not the turn ahead of it"
+    # The cancelled message never runs, yet its own row is announced (`row`)
+    # as it is written, so no connected client is left without it.
+    severity: critical
+    tags: [companion, cancel, queue]
+    cases:
+      - id: cancel_behind_story
+        drive: companion
+        query: "Also, what's the capital of Australia?"
+        companion:
+          cancel: waiting
+          blocker: "Write a 1000-word short story about a lighthouse keeper who adopts a gull."
+        expect:
+          wire:
+            events_all: [accepted, row, turn_error]
+            events_none: [turn_started, text_delta, text_done]
+            error_code: cancelled
+            blocker_events_all: [turn_started, text_done]
+      - id: cancel_behind_plan
+        drive: companion
+        query: "And what is 12 times 14?"
+        companion:
+          cancel: waiting
+          blocker: "Draft a detailed 30-day beginner running plan, one line per day."
+        expect:
+          wire:
+            events_all: [accepted, row, turn_error]
+            events_none: [turn_started, text_delta, text_done]
+            error_code: cancelled
+            blocker_events_all: [turn_started, text_done]
+
+  - id: history_pages_both_ways
+    title: "History pages forward from a cursor and backward from the head"
+    severity: normal
+    tags: [companion, history]
+    cases:
+      - id: starter_name_paged
+        drive: companion
+        query: "Suggest one name for a sourdough starter."
+        companion: {reads: [history_after, history_before]}
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            reads_find_marker: true
+      - id: octopus_fact_paged
+        drive: companion
+        query: "Give me one fun fact about octopuses."
+        companion: {reads: [history_after, history_before]}
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            reads_find_marker: true
+
+  - id: history_search
+    title: "Full-text search finds the message in the timeline"
+    severity: normal
+    tags: [companion, history, search]
+    cases:
+      - id: tea_steeping_searched
+        drive: companion
+        query: "How long should I steep green tea?"
+        companion: {reads: [search]}
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            reads_find_marker: true
+      - id: bike_chain_searched
+        drive: companion
+        query: "How often should I oil a bike chain?"
+        companion: {reads: [search]}
+        expect:
+          status: ok
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            reads_find_marker: true
+
+  - id: scheduled_origin_delivery
+    title: "A job scheduled from this chat with origin delivery lands in the timeline while no client is connected"
+    severity: critical
+    tags: [companion, jobs, delivery]
+    cases:
+      - id: days_left_posted_here
+        drive: companion
+        # The one labelled sanity case for the route: the job is created by
+        # schedule_job. Origin delivery is proved by the row written while
+        # offline (the eval home's default delivers elsewhere), not by the
+        # tool input, which the job tools do not record on their spans.
+        query: "Two minutes from now, work out how many days are left until the end of this year and post the answer here in this chat, starting with the tag fern-__EVAL_RUN_ID__-__EVAL_TRIAL__. Just once."
+        companion: {offline_wait_s: 300}
+        expect:
+          status: ok
+          no_tool_errors: true
+          tools_any: [schedule_job]
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            offline_row_matches: "(?i)fern-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+      - id: autumn_poem_posted_here
+        drive: companion
+        query: "In two minutes, write a four-line poem about autumn and post it to me here in this chat, with bread-__EVAL_RUN_ID__-__EVAL_TRIAL__ as its first word. One time only."
+        companion: {offline_wait_s: 300}
+        expect:
+          status: ok
+          no_tool_errors: true
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            offline_row_matches: "(?i)bread-__EVAL_RUN_ID__-__EVAL_TRIAL__"

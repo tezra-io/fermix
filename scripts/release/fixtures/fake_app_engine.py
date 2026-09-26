@@ -143,28 +143,28 @@ def unix_listener(path):
         raise
 
 
-def remove_runtime_paths(daemon_path, realtime_path, pid_path, has_realtime):
+def remove_runtime_paths(daemon_path, socket_paths, pid_path):
     if controlled("stale-socket") and daemon_path.exists():
         daemon_path.unlink()
         daemon_path.write_text("stale", encoding="utf-8")
     else:
         daemon_path.unlink(missing_ok=True)
-    if has_realtime:
-        realtime_path.unlink(missing_ok=True)
+    for path in socket_paths:
+        path.unlink(missing_ok=True)
     pid_path.unlink(missing_ok=True)
 
 
 def run_runtime(home, port, manifest):
     daemon_path = home / "daemon.sock"
-    realtime_path = home / "realtime.sock"
     pid_path = home / "fake-engine.pid"
     daemon = unix_listener(daemon_path)
-    realtime = None
+    listeners = {}
     server = None
     stopping = threading.Event()
     try:
-        if not controlled("no-realtime"):
-            realtime = unix_listener(realtime_path)
+        for name in ("realtime", "companion"):
+            if not controlled(f"no-{name}"):
+                listeners[home / f"{name}.sock"] = unix_listener(home / f"{name}.sock")
         Health.product_version = manifest["identity"]["product_version"]
         server = http.server.ThreadingHTTPServer(("127.0.0.1", port), Health)
         signal.signal(signal.SIGTERM, lambda *_args: stopping.set())
@@ -182,11 +182,9 @@ def run_runtime(home, port, manifest):
             server.shutdown()
             server.server_close()
         daemon.close()
-        if realtime is not None:
-            realtime.close()
-        remove_runtime_paths(
-            daemon_path, realtime_path, pid_path, realtime is not None
-        )
+        for listener in listeners.values():
+            listener.close()
+        remove_runtime_paths(daemon_path, listeners.keys(), pid_path)
 
 
 def start():

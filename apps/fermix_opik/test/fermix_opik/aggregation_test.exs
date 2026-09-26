@@ -345,6 +345,32 @@ defmodule FermixOpik.AggregationTest do
     assert stream.metadata.channel == :mobile
   end
 
+  # The companion socket streams raw deltas, so its turn has no draft-stream
+  # span; it is the operator's own turn with no sender id, threaded like any
+  # other chat by channel and profile.
+  test "a companion turn is a main run threaded as companion:<profile>" do
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 180},
+         %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-27"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 9},
+         %{
+           channel: :companion,
+           chat_id: "main",
+           sender: nil,
+           session_id: "main-27",
+           agent: "main"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "companion:main"
+    assert trace.metadata.channel == "companion"
+    assert [_llm] = spans_of_type(spans, "llm")
+    refute Enum.any?(spans, &String.starts_with?(&1.name, "stream:"))
+  end
+
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
   # failed turn — carried no input, no status and nothing filterable, so a reader
   # could only find it by eyeballing output text.

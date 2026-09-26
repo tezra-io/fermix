@@ -12,6 +12,8 @@ defmodule FermixChannels.Channels.Mobile do
 
   require Logger
 
+  alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
@@ -22,14 +24,12 @@ defmodule FermixChannels.Channels.Mobile do
   alias FermixChannels.Mobile.Push
   alias FermixChannels.Mobile.Unfurl
   alias FermixChannels.Telemetry, as: ChannelTelemetry
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
   alias FermixCore.Telemetry
 
   @channel "mobile"
   @profile "main"
-  @sandbox_ttl_s 60
-  @soul_ttl_s 300
   @media_chunk_bytes 60 * 1_024
   @max_media_bytes 20 * 1_024 * 1_024
 
@@ -38,14 +38,6 @@ defmodule FermixChannels.Channels.Mobile do
 
   @spec channel() :: String.t()
   def channel, do: @channel
-
-  @doc "Stable opaque identifier shared by approval and resolution events."
-  @spec approval_id(:sandbox | :soul, String.t()) :: String.t()
-  def approval_id(kind, token)
-      when kind in [:sandbox, :soul] and is_binary(token) and token != "" do
-    digest = :crypto.hash(:sha256, "#{kind}:#{token}")
-    "#{kind}-" <> Base.url_encode64(digest, padding: false)
-  end
 
   @spec parse_event(event()) :: {:ok, [Message.t()]} | {:error, term()}
   def parse_event(event) do
@@ -145,8 +137,9 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def seal_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
-    with {:ok, {_status, row}} <- persist_final_text(message, text) do
-      _ = emit_after_commit(message.chat_id, text_done(turn_id, row.server_seq, text))
+    with {:ok, {status, row}} <- persist_final_text(message, text) do
+      _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row.server_seq, text))
+      _ = announce_to_companion(status, message.chat_id, row)
       _ = schedule_unfurl(message.chat_id, row.server_seq, text)
       {:ok, nil}
     end
@@ -163,7 +156,7 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def build_activity_callback(%Message{} = message) do
     turn_id = turn_id(message)
-    fn event -> emit(message.chat_id, tool_event(turn_id, event)) end
+    fn event -> emit(message.chat_id, Output.tool_event(turn_id, event)) end
   end
 
   @impl true
@@ -200,20 +193,7 @@ defmodule FermixChannels.Channels.Mobile do
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
-    {approve, deny, ttl} = approval_routes(kind, token)
-    clean_text = text |> scrub_command(approve) |> scrub_command(deny) |> String.trim()
-
-    emit(message.chat_id, %{
-      "t" => "approval",
-      "approval_id" => Map.get(spec, :approval_id, approval_id(kind, token)),
-      "kind" => Atom.to_string(kind),
-      "text" => clean_text,
-      "detail" => Map.get(spec, :detail),
-      "token" => token,
-      "ttl_s" => Map.get(spec, :ttl_s, ttl),
-      "approve_command" => approve,
-      "deny_command" => deny
-    })
+    emit(message.chat_id, Output.approval(spec))
   end
 
   @impl true
@@ -244,7 +224,7 @@ defmodule FermixChannels.Channels.Mobile do
     {result, duration_us} =
       Telemetry.timed_us(fn ->
         with :ok <- validate_profile(profile_id),
-             {:ok, {status, row}} <- persist_text(profile_id, text, Map.new(opts)),
+             {:ok, {status, row}} <- Output.persist_text(store(), profile_id, text, Map.new(opts)),
              :ok <- deliver_persisted_text(status, profile_id, text, row, opts) do
           {:ok, status}
         end
@@ -380,12 +360,6 @@ defmodule FermixChannels.Channels.Mobile do
   defp client_message_id(%Message{} = message),
     do: value(message.metadata, :client_msg_id) || message.id
 
-  defp persist_text(profile_id, text, attrs) do
-    timeline_attrs = text_timeline_attrs(text, attrs)
-
-    persist_output(profile_id, timeline_attrs, attrs, text_output_key(text))
-  end
-
   defp persist_final_text(message, text) do
     attrs = %{
       turn_id: turn_id(message),
@@ -393,26 +367,7 @@ defmodule FermixChannels.Channels.Mobile do
       attempt: request_attempt(message)
     }
 
-    store().append_client_response(
-      message.chat_id,
-      client_message_id(message),
-      request_attempt(message),
-      attrs |> text_timeline_attrs(text) |> Map.delete(:role),
-      []
-    )
-  end
-
-  defp text_timeline_attrs(attrs, text) when is_map(attrs) and is_binary(text),
-    do: text_timeline_attrs(text, attrs)
-
-  defp text_timeline_attrs(text, attrs) do
-    %{
-      role: "assistant",
-      content: text,
-      kind: "text",
-      in_reply_to: value(attrs, :in_reply_to),
-      metadata: %{"turn_id" => value(attrs, :turn_id)}
-    }
+    Output.persist_final_text(store(), message.chat_id, attrs, text)
   end
 
   defp persist_media(profile_id, media, ref, attrs) do
@@ -426,57 +381,25 @@ defmodule FermixChannels.Channels.Mobile do
       media_refs: [timeline_ref]
     }
 
-    persist_output(profile_id, timeline_attrs, attrs, media_output_key(timeline_ref))
+    Output.persist_output(
+      store(),
+      profile_id,
+      timeline_attrs,
+      attrs,
+      media_output_key(timeline_ref)
+    )
   end
 
-  defp persist_output(profile_id, timeline_attrs, attrs, output_key) do
-    cond do
-      client_output?(attrs) ->
-        store().append_client_output(
-          profile_id,
-          value(attrs, :in_reply_to),
-          value(attrs, :attempt),
-          output_key,
-          Map.delete(timeline_attrs, :role),
-          []
-        )
-
-      proactive_key = value(attrs, :proactive_key) ->
-        proactive_key = proactive_output_key(proactive_key, attrs)
-        store().append_proactive(profile_id, proactive_key, timeline_attrs, [])
-
-      true ->
-        case store().append(profile_id, timeline_attrs, []) do
-          {:ok, row} -> {:ok, {:created, row}}
-          {:error, reason} -> {:error, reason}
-        end
-    end
-  end
-
-  defp client_output?(attrs) do
-    is_binary(value(attrs, :in_reply_to)) and value(attrs, :in_reply_to) != "" and
-      is_integer(value(attrs, :attempt)) and value(attrs, :attempt) > 0
-  end
-
-  defp proactive_output_key(key, attrs) do
-    case value(attrs, :proactive_part_id) do
-      nil -> key
-      part_id -> "#{key}:#{part_id}"
-    end
-  end
-
-  defp text_output_key(text), do: "text:" <> content_digest(text)
   defp media_output_key(ref), do: "media:" <> value(ref, :ref)
-
-  defp content_digest(content) do
-    :crypto.hash(:sha256, content)
-    |> Base.url_encode64(padding: false)
-  end
 
   defp deliver_persisted_text(:existing, _profile, _text, _row, _opts), do: :ok
 
   defp deliver_persisted_text(:created, profile, text, row, opts) do
-    _ = emit_after_commit(profile, text_done(turn_id_from_opts(opts), row.server_seq, text))
+    _ =
+      emit_after_commit(profile, Output.text_done(turn_id_from_opts(opts), row.server_seq, text))
+
+    _ = announce_to_companion(:created, profile, row)
+
     _ = maybe_schedule_proactive_push(profile, row.server_seq, opts)
     _ = schedule_unfurl(profile, row.server_seq, text)
     :ok
@@ -486,6 +409,7 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp deliver_persisted_media(:created, profile, media, ref, row, opts) do
     _ = emit_media_after_commit(profile, row.server_seq, media, ref)
+    _ = announce_to_companion(:created, profile, row)
     _ = maybe_schedule_proactive_push(profile, row.server_seq, opts)
     _ = schedule_unfurl(profile, row.server_seq, value(media, :caption) || "")
     :ok
@@ -515,6 +439,13 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp turn_id_from_opts(opts), do: Keyword.get(opts, :turn_id, new_turn_id())
+
+  # Every row this channel writes reaches the Mac's companion connections as it
+  # is written; a row the store deduplicated was announced when it was created.
+  defp announce_to_companion(:created, profile_id, row),
+    do: Companion.announce_row(profile_id, row)
+
+  defp announce_to_companion(:existing, _profile_id, _row), do: :ok
 
   defp emit_after_commit(profile_id, event) do
     case emit(profile_id, event) do
@@ -802,7 +733,7 @@ defmodule FermixChannels.Channels.Mobile do
     |> maybe_put("caption", value(media, :caption))
   end
 
-  defp store, do: Application.get_env(:fermix_channels, :mobile_store, Store)
+  defp store, do: Application.get_env(:fermix_channels, :mobile_store, Timeline)
 
   defp emit(profile_id, event) do
     case Application.get_env(:fermix_channels, :mobile_event_sink) do
@@ -820,61 +751,15 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp emit_open(message, turn_id, text) do
-    with :ok <- emit(message.chat_id, turn_started(message, turn_id)) do
+    started = Output.turn_started(message.chat_id, turn_id, client_message_id(message))
+
+    with :ok <- emit(message.chat_id, started) do
       emit_delta(message.chat_id, turn_id, text)
     end
   end
 
-  defp turn_started(message, turn_id) do
-    %{
-      "t" => "turn_started",
-      "profile_id" => message.chat_id,
-      "turn_id" => turn_id,
-      "in_reply_to" => client_message_id(message)
-    }
-  end
-
   defp emit_delta(_profile, _turn_id, ""), do: :ok
-
-  defp emit_delta(profile, turn_id, text),
-    do: emit(profile, %{"t" => "text_delta", "turn_id" => turn_id, "text" => text})
-
-  defp text_done(turn_id, seq, text),
-    do: %{"t" => "text_done", "turn_id" => turn_id, "server_seq" => seq, "text" => text}
-
-  defp tool_event(turn_id, {:tool_start, tool}),
-    do: %{"t" => "tool_event", "turn_id" => turn_id, "tool" => tool, "phase" => "start"}
-
-  defp tool_event(turn_id, {:tool_finish, tool, detail}),
-    do: %{
-      "t" => "tool_event",
-      "turn_id" => turn_id,
-      "tool" => tool,
-      "phase" => "stop",
-      "detail" => inspect(detail)
-    }
-
-  defp tool_event(turn_id, event),
-    do: %{
-      "t" => "tool_event",
-      "turn_id" => turn_id,
-      "tool" => "unknown",
-      "phase" => "stop",
-      "detail" => inspect(event)
-    }
-
-  defp turn_error(turn_id, reason),
-    do: %{
-      "t" => "turn_error",
-      "turn_id" => turn_id,
-      "code" => error_code(reason),
-      "message" => error_message(reason)
-    }
-
-  defp error_code(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp error_code(_reason), do: "turn_failed"
-  defp error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp error_message(reason), do: inspect(reason)
+  defp emit_delta(profile, turn_id, text), do: emit(profile, Output.text_delta(turn_id, text))
 
   defp media_begin(seq, media, ref) do
     %{
@@ -958,36 +843,24 @@ defmodule FermixChannels.Channels.Mobile do
   defp validate_materialized_path(_path), do: {:error, :attachment_unavailable}
 
   defp complete_request(message) do
-    case store().complete_client_request(
-           message.chat_id,
-           client_message_id(message),
-           request_attempt(message),
-           %{},
-           []
-         ) do
-      {:ok, request} -> {:ok, request}
-      {:error, :not_found} -> :ok
-      {:error, error} -> {:error, error}
-    end
-  end
-
-  defp fail_request(message, reason) do
-    case store().fail_client_request(
-           message.chat_id,
-           client_message_id(message),
-           request_attempt(message),
-           %{error: inspect(reason)},
-           []
-         ) do
-      {:ok, _request} -> :ok
-      {:error, :not_found} -> :ok
-      {:error, error} -> {:error, error}
-    end
+    Output.complete_request(
+      store(),
+      message.chat_id,
+      client_message_id(message),
+      request_attempt(message)
+    )
   end
 
   defp fail_and_emit(message, turn_id, reason) do
-    with :ok <- fail_request(message, reason) do
-      emit(message.chat_id, turn_error(turn_id, reason))
+    with :ok <-
+           Output.fail_request(
+             store(),
+             message.chat_id,
+             client_message_id(message),
+             request_attempt(message),
+             reason
+           ) do
+      emit(message.chat_id, Output.turn_error(turn_id, reason))
     end
   end
 
@@ -1014,14 +887,6 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp request_attempt(message), do: value(message.metadata, :mobile_attempt)
-
-  defp approval_routes(:sandbox, token),
-    do: {"/confirm #{token}", "/deny #{token}", @sandbox_ttl_s}
-
-  defp approval_routes(:soul, token),
-    do: {"/soul apply #{token}", "/soul deny #{token}", @soul_ttl_s}
-
-  defp scrub_command(text, command), do: String.replace(text, command, "", global: true)
 
   defp stop_draft_state(state) do
     if Process.alive?(state), do: Agent.stop(state, :normal)

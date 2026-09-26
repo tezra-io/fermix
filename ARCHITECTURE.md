@@ -269,7 +269,7 @@ Memory has two layers:
 
 The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, mobile timelines, and computer-history rows.
+skill usage and curation, the companion timeline, and computer-history rows.
 
 `Memory.Reviewer` writes durable memory. It is a time-gated background review
 (daily by default) of the owner's recent messages that applies add, replace,
@@ -493,7 +493,7 @@ them only after `/soul apply <token>`.
 Architecture Invariant: neither curator changes a skill or `SOUL.md` without an
 explicit owner action.
 
-### Companion Protocols: `Management` and `Realtime`
+### Companion Protocols: `Management`, `Realtime`, and `Companion`
 
 The native companion apps (`tezra-io/fermix-macos`, `tezra-io/fermix-linux`)
 never read config, secrets, or state themselves. `Fermix.CLI.Daemon` serves
@@ -513,6 +513,14 @@ fixtures).
 `ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
 Live, which executes no tools and delegates every task to an agent turn through
 the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`.
+
+`Companion.Protocol` owns the chat vocabulary, served to the Mac app on
+`FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
+handshake, exported in `priv/companion/`) by `FermixChannels.Companion`; the
+mobile wire validates the chat events it shares through the same module.
+`Companion.Timeline` is the durable timeline the phone and the Mac share
+(profile `main`), paged in both directions and searched through an FTS5 index
+its own writes maintain.
 
 Architecture Invariant: each wire is defined once, in its protocol module, and
 exported; `protocol_contract_test.exs` fails when the management export drifts,
@@ -579,10 +587,27 @@ Current channels:
   `FERMIX_HOME/acp.sock` (`Acp.Endpoint`, one `Acp.Peer` per connection);
   `fermix acp` pipes stdio to that socket. Client identities are kept by
   `FermixCore.Acp.Identity`.
+- `Companion` serves the Mac app's chat on `FERMIX_HOME/companion.sock`
+  whenever the daemon runs (`Companion.Endpoint`, one `Companion.Connection` per
+  client). Its trust is the 0600 socket, so it runs as the local operator.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
-  `FermixCore.Mobile.Store` keeps each profile's synced timeline apart from
+  `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
   conversation history.
+- The two companion transports share one request path (`Companion.Requests`:
+  the durable `client_msg_id` claim, the attempt fence, ingest, history, search)
+  and one set of turn outputs (`Companion.Output`); each transport's
+  `Mobile.RequestCoordinator` instance reruns only its own unfinished requests
+  at boot. A companion-socket turn reaches the Queue through `Companion.Turns`,
+  which writes its replies and sends `text_done` only on the `{:completed}`
+  outcome, and its `cancel` stops one named turn: the cancel is recorded on
+  the request (`cancelled_at`), and `Companion.Turns`, which owns the hand-off
+  to the queue, reads that mark as it enqueues and sends any
+  `Queue.stop_turn/3` itself, so a cancel is never lost between claim and
+  queue, and boot recovery never reruns a cancelled request. Every
+  other timeline row, whichever transport or job writes it, is announced to
+  the socket's connections as a `row` the moment it is written
+  (`Channels.Companion.announce_row/3`).
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`).
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
@@ -617,7 +642,8 @@ under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
 the duplicate record. `HealthController` reports from `FermixCore.Health`.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
-(`daemon.sock`, `realtime.sock`, `acp.sock`) live in core and channels.
+(`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and
+channels.
 
 Architecture Invariant: Phoenix does not contain agent business logic. It is an
 HTTP and UI boundary over core APIs.
@@ -658,7 +684,7 @@ Milestone design documents live in `docs/design/`. Most are machine-local
 Tracked contracts and runbooks include `docs/TELEMETRY_CONTRACT.md`,
 `docs/RELEASING.md`, and `docs/DEVELOPMENT.md`. `docs/lessons.md` holds the
 incident write-ups behind the one-line rules in `AGENTS.md`; the wire contracts are exported
-under `apps/fermix_core/priv/{management,realtime}/`. When a milestone is
+under `apps/fermix_core/priv/{management,realtime,companion,mobile}/`. When a milestone is
 implemented, update this map only for durable boundaries and invariants, not for
 every implementation detail.
 
@@ -682,8 +708,11 @@ turns' results, so `Acp.Peer` watches the Queue process it handed each prompt
 to and answers the prompt as a failed turn. Mobile's `RequestCoordinator`
 fences the request on the Queue it finds after the hand-off and releases it when
 that Queue dies (a restart between the hand-off and that lookup leaves the
-attempt running until its fence expires). Voice does not watch (accepted: a
-call is bounded and the operator can cancel it).
+attempt running until its fence expires). `Companion.Turns` watches the Queue
+it handed each companion-socket turn to, ends the turn as `interrupted` when
+that Queue dies, and holds the request's fence itself, so the request is failed
+once rather than released. Voice does not watch (accepted: a call is bounded
+and the operator can cancel it).
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
 dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s
