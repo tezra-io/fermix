@@ -55,7 +55,7 @@ defmodule FermixCore.Companion.Protocol do
   @client_required %{
     "msg" => ~w(client_msg_id profile_id text attach_ids),
     "command" => ~w(client_msg_id profile_id name),
-    "cancel" => ~w(profile_id),
+    "cancel" => ~w(profile_id client_msg_id),
     "history_pull" => ~w(profile_id limit),
     "history_search" => ~w(profile_id query limit),
     "read_state" => ~w(profile_id read_up_to_seq)
@@ -226,7 +226,7 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  defp validate_client("cancel", payload), do: nonempty(payload, "profile_id")
+  defp validate_client("cancel", payload), do: strings(payload, ~w(profile_id client_msg_id))
 
   defp validate_client("history_pull", payload) do
     with :ok <- nonempty(payload, "profile_id"),

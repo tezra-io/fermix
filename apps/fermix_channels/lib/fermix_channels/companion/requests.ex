@@ -20,6 +20,11 @@ defmodule FermixChannels.Companion.Requests do
   `:event_sink`, a 2-arity function of a target and an event: the transport's
   own `reply_to` for this client, or `{:profile, profile_id}` for everyone
   watching the profile.
+
+  Once ingest has returned, the request coordinator's liveness fence moves to
+  the process that settles the request from then on: `:settlement_owner` when
+  the caller names one (the companion socket's `Companion.Turns`), otherwise
+  the queue itself (`:agent_server`).
   """
 
   require Logger
@@ -254,11 +259,12 @@ defmodule FermixChannels.Companion.Requests do
 
   # Ingest has returned, so the turn now runs inside the queue and this process
   # may disconnect at any moment. Move the coordinator's liveness fence onto the
-  # queue so its death — not this client's disconnect — releases the attempt.
+  # settlement owner so its death — not this client's disconnect — releases the
+  # attempt.
   defp handoff_settlement(run, opts) do
-    agent_server = Keyword.get(opts, :agent_server, Queue)
+    owner_name = Keyword.get(opts, :settlement_owner, Keyword.get(opts, :agent_server, Queue))
 
-    case GenServer.whereis(agent_server) do
+    case GenServer.whereis(owner_name) do
       owner when is_pid(owner) ->
         coordinator(opts).handoff(
           coordinator_server(opts),
@@ -269,7 +275,7 @@ defmodule FermixChannels.Companion.Requests do
         )
 
       nil ->
-        {:error, {:settlement_owner_unavailable, agent_server}}
+        {:error, {:settlement_owner_unavailable, owner_name}}
     end
   end
 

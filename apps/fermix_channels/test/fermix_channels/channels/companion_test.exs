@@ -4,6 +4,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.ChannelRegistry
@@ -19,29 +20,46 @@ defmodule FermixChannels.Channels.CompanionTest do
     end
   end
 
+  # The queue a tracked turn is handed to: it takes the message and reports it.
+  defmodule QueueSink do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_cast({:enqueue, message}, test_pid) do
+      send(test_pid, {:enqueued, message.id})
+      {:noreply, test_pid}
+    end
+  end
+
+  # Reports to the test by name: `Companion.Turns` writes from its own process.
   defmodule StoreStub do
     def append(profile, attrs, _opts) do
-      send(self(), {:append, profile, attrs})
+      send(:companion_adapter_test, {:append, profile, attrs})
       {:ok, Map.merge(attrs, %{profile_id: profile, server_seq: 41})}
     end
 
     def append_client_output(profile, client_id, attempt, key, attrs, _opts) do
-      send(self(), {:client_output, profile, client_id, attempt, key, attrs})
+      send(:companion_adapter_test, {:client_output, profile, client_id, attempt, key, attrs})
       {:ok, {:created, Map.merge(attrs, %{profile_id: profile, server_seq: 42})}}
     end
 
     def append_proactive(profile, key, attrs, _opts) do
-      send(self(), {:proactive, profile, key, attrs})
+      send(:companion_adapter_test, {:proactive, profile, key, attrs})
       {:ok, {:existing, Map.merge(attrs, %{profile_id: profile, server_seq: 43})}}
     end
 
     def complete_client_request(profile, client_id, attempt, _fields, _opts) do
-      send(self(), {:completed, profile, client_id, attempt})
+      send(:companion_adapter_test, {:completed, profile, client_id, attempt})
       {:ok, %{status: "completed"}}
     end
 
     def fail_client_request(profile, client_id, attempt, fields, _opts) do
-      send(self(), {:failed, profile, client_id, attempt, fields})
+      send(:companion_adapter_test, {:failed, profile, client_id, attempt, fields})
       {:ok, %{status: "failed"}}
     end
   end
@@ -49,7 +67,9 @@ defmodule FermixChannels.Channels.CompanionTest do
   setup do
     previous = Application.fetch_env(:fermix_channels, :companion_store)
     Application.put_env(:fermix_channels, :companion_store, StoreStub)
+    Process.register(self(), :companion_adapter_test)
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
+    start_supervised!(Turns)
 
     on_exit(fn ->
       case previous do
@@ -199,16 +219,81 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:companion_stream, _turn, {:snapshot, "thinking"}}
   end
 
-  test "a request's reply is its attempt's output and is announced at its row" do
-    reply = Companion.build_text_reply(request_message())
-    assert :ok = reply.("the answer")
+  test "a turn's replies are written and announced only once the queue completes it" do
+    message = track(request_message())
+    reply = Companion.build_text_reply(message)
 
-    assert_receive {:client_output, "main", "mac-1", 3, "text:" <> _digest, attrs}
-    assert attrs.content == "the answer"
+    assert :ok = reply.("first part")
+    assert :ok = reply.("the answer")
+    refute_receive {:client_output, _profile, _id, _attempt, _key, _attrs}, 100
+    refute_received {:companion_event, %{"t" => "text_done"}}
+
+    assert :ok = Companion.build_turn_result(message).({:completed})
+
+    assert_receive {:client_output, "main", "mac-1", 3, "text:" <> _digest,
+                    %{content: "first part"}}
+
+    assert_receive {:client_output, "main", "mac-1", 3, _key, %{content: "the answer"} = attrs}
     assert attrs.in_reply_to == "mac-1"
 
     assert_receive {:companion_event,
-                    %{"t" => "text_done", "turn_id" => "turn-mac-1", "server_seq" => 42}}
+                    %{"t" => "text_done", "turn_id" => "turn-mac-1", "text" => "first part"}}
+
+    assert_receive {:companion_event,
+                    %{"t" => "text_done", "text" => "the answer", "server_seq" => 42}}
+
+    assert_receive {:completed, "main", "mac-1", 3}
+  end
+
+  test "a cancelled turn ends once, as cancelled, and keeps nothing it held" do
+    message = track(request_message())
+    reply = Companion.build_text_reply(message)
+    result = Companion.build_turn_result(message)
+
+    assert :ok = reply.("partial")
+    assert :ok = result.({:cancelled})
+
+    assert_receive {:failed, "main", "mac-1", 3, _fields}
+
+    assert_receive {:companion_event,
+                    %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "cancelled"}}
+
+    # A reply or an outcome that arrives after the turn ended is dropped.
+    assert :ok = reply.("late")
+    assert :ok = result.({:completed})
+    refute_receive {:client_output, _profile, _id, _attempt, _key, _attrs}, 100
+    refute_received {:completed, _profile, _id, _attempt}
+    refute_received {:companion_event, %{"t" => "text_done"}}
+  end
+
+  test "a failed turn ends with its failure's code" do
+    message = track(request_message())
+    assert :ok = Companion.build_turn_result(message).({:failed, {:provider_error, 500}})
+    assert_receive {:companion_event, %{"t" => "turn_error", "code" => "turn_failed"}}
+  end
+
+  test "a turn whose queue dies ends once, as interrupted" do
+    queue = start_supervised!({QueueSink, self()}, id: :dying_queue)
+    message = track(request_message(), queue)
+
+    Process.exit(queue, :kill)
+
+    assert_receive {:companion_event,
+                    %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "interrupted"}}
+
+    assert_receive {:failed, "main", "mac-1", 3, _fields}
+    assert :ok = Companion.build_turn_result(message).({:completed})
+    refute_receive {:completed, _profile, _id, _attempt}, 100
+  end
+
+  test "a reply that is no queue turn, a slash command's answer, is written at once" do
+    reply = Companion.build_text_reply(request_message())
+    assert :ok = reply.("Approved.")
+
+    assert_receive {:client_output, "main", "mac-1", 3, "text:" <> _digest,
+                    %{content: "Approved."}}
+
+    assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => 42}}
   end
 
   test "a scheduled job's delivery is a plain row, announced whether or not anyone listens" do
@@ -227,23 +312,6 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:companion_event, %{"t" => "text_done", "server_seq" => 43}}
 
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
-  end
-
-  test "the turn result settles the request and a failure is announced" do
-    message = request_message()
-    result = Companion.build_turn_result(message)
-
-    assert :ok = result.({:completed})
-    assert_receive {:completed, "main", "mac-1", 3}
-
-    assert :ok = result.({:cancelled})
-    assert_receive {:failed, "main", "mac-1", 3, _fields}
-
-    assert_receive {:companion_event,
-                    %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "cancelled"}}
-
-    assert :ok = result.({:failed, {:provider_error, 500}})
-    assert_receive {:companion_event, %{"t" => "turn_error", "code" => "turn_failed"}}
   end
 
   test "tool activity and approvals reach the profile, with no null fields" do
@@ -266,6 +334,15 @@ defmodule FermixChannels.Channels.CompanionTest do
   test "media does not travel on this socket" do
     assert {:error, :unsupported_media} =
              Companion.send_media("main", %{kind: :image, path: "/tmp/x.png"}, [])
+  end
+
+  # Hand the message to a queue through Turns, as the gateway does for every
+  # companion message that becomes a turn.
+  defp track(message, queue \\ nil) do
+    queue = queue || start_supervised!({QueueSink, self()}, id: :queue_sink)
+    assert :ok = Turns.handle_message(Map.from_struct(message), queue)
+    assert_receive {:enqueued, "mac-1"}
+    message
   end
 
   defp request_message do

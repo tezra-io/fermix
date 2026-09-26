@@ -88,9 +88,14 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert {:error, {:invalid_field, "before_seq"}} = decode(Map.put(base, "before_seq", 0))
   end
 
-  test "cancel and read_state name their profile" do
-    assert {:ok, _event} = decode(%{"type" => "cancel", "profile_id" => "main"})
+  test "cancel names the request whose turn it stops, and read_state its profile" do
+    assert {:ok, _event} =
+             decode(%{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-1"})
+
     assert {:error, {:missing_field, "profile_id"}} = decode(%{"type" => "cancel"})
+
+    assert {:error, {:missing_field, "client_msg_id"}} =
+             decode(%{"type" => "cancel", "profile_id" => "main"})
 
     assert {:ok, _event} =
              decode(%{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 4})

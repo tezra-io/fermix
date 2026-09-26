@@ -4,6 +4,7 @@ defmodule FermixChannels.Companion.SupervisorTest do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Companion.Supervisor, as: CompanionSupervisor
+  alias FermixChannels.Companion.Turns
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
 
@@ -46,6 +47,7 @@ defmodule FermixChannels.Companion.SupervisorTest do
 
     assert ids == [
              :"companion_sup_registry_#{unique}",
+             Turns,
              :"companion_sup_coordinator_#{unique}",
              :"companion_sup_connections_#{unique}",
              Endpoint

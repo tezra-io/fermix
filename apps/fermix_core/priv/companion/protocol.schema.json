@@ -168,11 +168,12 @@
     },
     "cancel": {
       "type": "object",
-      "description": "Stops the profile's running turn and the turns waiting behind it.",
-      "required": ["type", "profile_id"],
+      "description": "Stops the turn of the named request, running or waiting, and no other. Never answered itself: the turn ends with turn_error (cancelled), or with its text_done if it had already finished.",
+      "required": ["type", "profile_id", "client_msg_id"],
       "properties": {
         "type": { "const": "cancel" },
-        "profile_id": { "type": "string", "minLength": 1 }
+        "profile_id": { "type": "string", "minLength": 1 },
+        "client_msg_id": { "type": "string", "minLength": 1 }
       }
     },
     "history_pull": {
@@ -263,7 +264,7 @@
     },
     "text_done": {
       "type": "object",
-      "description": "A reply's canonical text at its timeline row; it replaces the turn's draft.",
+      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft.",
       "required": ["type", "turn_id", "server_seq", "text"],
       "properties": {
         "type": { "const": "text_done" },
@@ -274,7 +275,7 @@
     },
     "turn_error": {
       "type": "object",
-      "description": "The turn's terminal failure; code is cancelled after a cancel.",
+      "description": "The turn's terminal failure: code is cancelled after a cancel, interrupted when the daemon lost the turn. Never sent for a turn that sent text_done.",
       "required": ["type", "turn_id", "code", "message"],
       "properties": {
         "type": { "const": "turn_error" },

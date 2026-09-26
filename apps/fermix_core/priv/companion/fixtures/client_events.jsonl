@@ -1,7 +1,7 @@
 {"type":"client_hello","protocol_version":1}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
-{"type":"cancel","profile_id":"main"}
+{"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
 {"type":"history_pull","profile_id":"main","after_seq":0,"limit":50}
 {"type":"history_pull","profile_id":"main","before_seq":120,"limit":50}
 {"type":"history_search","profile_id":"main","query":"dentist","limit":20}

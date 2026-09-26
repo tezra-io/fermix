@@ -8,10 +8,12 @@ defmodule FermixChannels.Companion.Supervisor do
   When the boot serves (a daemon run, never a test tree), the socket follows,
   in dependency order:
 
-  1. the request coordinator for this transport, on the boot's shared epoch, so
+  1. `Companion.Turns`, which every companion turn passes through to reach the
+     queue and which ends each one on the wire from the queue's outcome,
+  2. the request coordinator for this transport, on the boot's shared epoch, so
      a companion request that a crash left unfinished is rerun at boot,
-  2. a `DynamicSupervisor` for the connections, one `temporary` child each,
-  3. the `Endpoint`, which binds `companion.sock` and accepts.
+  3. a `DynamicSupervisor` for the connections, one `temporary` child each,
+  4. the `Endpoint`, which binds `companion.sock` and accepts.
 
   `:rest_for_one`: a registry restart would leave every connection unregistered
   and deaf, so it takes the later children down with it and clients reconnect.
@@ -22,6 +24,7 @@ defmodule FermixChannels.Companion.Supervisor do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Mobile.RequestCoordinator
 
   @connection_supervisor FermixChannels.Companion.ConnectionSupervisor
@@ -51,9 +54,16 @@ defmodule FermixChannels.Companion.Supervisor do
     coordinator = Keyword.get(opts, :request_coordinator, @request_coordinator)
     connection_supervisor = Keyword.get(opts, :connection_supervisor, @connection_supervisor)
     store_opts = Keyword.get(opts, :store_opts, [])
-    request_opts = [request_coordinator: coordinator, store_opts: store_opts]
+
+    request_opts = [
+      request_coordinator: coordinator,
+      store_opts: store_opts,
+      agent: Turns,
+      settlement_owner: Turns
+    ]
 
     [
+      Turns,
       Supervisor.child_spec(
         {RequestCoordinator,
          name: coordinator,

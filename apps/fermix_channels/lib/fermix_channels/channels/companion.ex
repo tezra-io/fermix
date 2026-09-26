@@ -8,10 +8,12 @@ defmodule FermixChannels.Channels.Companion do
   ordinary agent loop as the owner, with history keyed on the `companion`
   channel. Its durable timeline is the companion timeline the phone shares.
 
-  The adapter owns no socket. It writes each reply to the timeline through
+  The adapter owns no socket. It writes to the timeline through
   `Companion.Output` (the same writes and events the mobile adapter makes) and
   broadcasts the logical events to every connection watching the profile,
-  through the `registry/0` those connections join after their handshake.
+  through the `registry/0` those connections join after their handshake. A
+  turn's replies and its ending go through `Companion.Turns`, which writes and
+  announces them only once the queue fires the turn's outcome.
 
   The stream tier is `:raw`: the gateway hands the turn `build_raw_stream_callback/1`
   verbatim. The loop's stream events are cumulative snapshots, so the callback
@@ -25,6 +27,7 @@ defmodule FermixChannels.Channels.Companion do
   require Logger
 
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -124,9 +127,8 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @impl true
-  def build_text_reply(%Message{reply_target: profile_id} = message) do
-    opts = reply_opts(message)
-    fn text -> send_message(profile_id, text, opts) end
+  def build_text_reply(%Message{} = message) do
+    fn text -> Turns.reply(message, text) end
   end
 
   @impl true
@@ -143,13 +145,7 @@ defmodule FermixChannels.Channels.Companion do
 
   @impl true
   def build_turn_result(%Message{} = message) do
-    turn_id = turn_id(message)
-
-    fn
-      {:completed} -> complete_request(message)
-      {:cancelled} -> fail_and_emit(message, turn_id, :cancelled)
-      {:failed, reason} -> fail_and_emit(message, turn_id, reason)
-    end
+    fn outcome -> Turns.outcome(message, outcome) end
   end
 
   @impl true
@@ -230,32 +226,6 @@ defmodule FermixChannels.Channels.Companion do
     end)
   end
 
-  defp complete_request(message) do
-    case Output.complete_request(
-           store(),
-           message.chat_id,
-           client_message_id(message),
-           request_attempt(message)
-         ) do
-      {:ok, _request} -> :ok
-      :ok -> :ok
-      {:error, reason} -> {:error, reason}
-    end
-  end
-
-  defp fail_and_emit(message, turn_id, reason) do
-    with :ok <-
-           Output.fail_request(
-             store(),
-             message.chat_id,
-             client_message_id(message),
-             request_attempt(message),
-             reason
-           ) do
-      broadcast(message.chat_id, Output.turn_error(turn_id, reason))
-    end
-  end
-
   defp message(client_id, profile, text, request_type) do
     Message.new!(%{
       id: client_id,
@@ -273,7 +243,9 @@ defmodule FermixChannels.Channels.Companion do
     })
   end
 
-  defp reply_opts(message),
+  @doc "The send options a reply to `message` carries: its turn, request and attempt."
+  @spec reply_opts(Message.t()) :: keyword()
+  def reply_opts(%Message{} = message),
     do: [
       turn_id: turn_id(message),
       in_reply_to: client_message_id(message),
@@ -327,7 +299,9 @@ defmodule FermixChannels.Channels.Companion do
     end
   end
 
-  defp store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
+  @doc "The timeline this channel writes through (a test injects another)."
+  @spec store() :: module()
+  def store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
 
   defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
 end

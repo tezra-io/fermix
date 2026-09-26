@@ -107,7 +107,7 @@ in a fixed order:
 | `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
-| `cancel` | `profile_id` | Stops the profile's running turn and the turns waiting behind it. Each answers with its own `turn_error` (code `cancelled`). No other reply. |
+| `cancel` | `profile_id`, `client_msg_id` | Stops the turn of that request, running or waiting, and no other. Never answered itself; see *Streaming a turn*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). |
 | `history_search` | `profile_id`, `query` (1–256 characters), `limit` (1–50); `before_seq?` | Full-text search of the timeline, newest first, below `before_seq` when given. |
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier. |
@@ -124,8 +124,8 @@ in a fixed order:
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. |
-| `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row; replaces the draft. A turn may send more than one. |
-| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure; `code` is `cancelled` after a `cancel`. |
+| `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
+| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved`, `denied`, or `expired`. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection. |
@@ -157,6 +157,28 @@ socket; a turn started from the phone reaches this socket's clients through
 channel is written there whether or not a client is connected, and announced
 as a `text_done` to any that are.
 
+`server_seq` is assigned inside the write that stores the row, from a
+per-profile counter that never goes back, whoever writes (a turn, a job, the
+phone): no two rows share one, and the daemon never renumbers or reorders a
+row to hide how its announcement arrived.
+
+## Keeping a client's timeline
+
+A connection is watching the profile from its `server_hello` on, before it can
+ask for history, so no row written after the handshake can fall between a
+page and the live events. Live announcements still arrive out of `server_seq`
+order at times (a job's row can be announced after a later reply's), a page
+and a live `text_done` can carry the same row, and a user's row reaches the
+other connections only through history. So a client keeps a cursor, the last
+`server_seq` it shows, and:
+
+- pulls `history_pull{after_seq: cursor}` after every `server_hello`, and again
+  while a page's `next_after_seq` is below its `history_head_seq`;
+- shows a `text_done`'s row only when its `server_seq` is `cursor + 1`, drops
+  one at or below the cursor, and on a gap pulls from the cursor (unless a
+  pull is already out) instead of showing it;
+- never keys the cursor on arrival order.
+
 ## Delivery and the outbox
 
 `msg` and `command` are at-least-once from the companion. The daemon durably
@@ -182,9 +204,23 @@ yet, to be appended exactly as sent, never trimmed or spaced. When the agent
 starts another model call in the same turn (after a tool), the next text starts
 a new stretch and is appended after the previous one. A connection that joins
 mid-turn receives the text so far as its first `text_delta` for that turn,
-possibly without having seen `turn_started`. `text_done` carries the canonical
-text of a reply part at its timeline row and replaces the draft; `turn_error`
-ends a turn that failed or was cancelled.
+possibly without having seen `turn_started`. Deltas are live-only.
+
+A turn ends on the wire exactly once, and only from its outcome in the
+daemon's turn queue:
+
+- it completed: each reply part is written to the timeline then, and sent as
+  a `text_done` at its row, replacing the draft;
+- it was cancelled or failed: one `turn_error` (`cancelled`, or the failure's
+  code), and nothing of its draft is kept;
+- the daemon lost the turn (its queue restarted under it): one `turn_error`
+  with code `interrupted`.
+
+`turn_error` is live-only: a client that was offline sees the user's row with
+no answer after it. `cancel` names the request whose turn to stop, whichever
+client sent it and whether it runs or still waits; it never stops another
+turn, and the daemon never answers it itself. A turn that had already
+finished when the cancel arrived ends with its `text_done`, not an error.
 
 ## Approvals
 

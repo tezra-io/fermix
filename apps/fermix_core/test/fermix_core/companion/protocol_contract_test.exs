@@ -212,7 +212,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
         "attach_ids" => []
       },
       "command" => %{"client_msg_id" => "c", "profile_id" => "main", "name" => "help"},
-      "cancel" => %{"profile_id" => "main"},
+      "cancel" => %{"profile_id" => "main", "client_msg_id" => "c"},
       "history_pull" => %{"profile_id" => "main", "limit" => 5},
       "history_search" => %{"profile_id" => "main", "query" => "q", "limit" => 5},
       "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0}

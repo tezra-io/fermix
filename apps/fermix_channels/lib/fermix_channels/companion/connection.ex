@@ -28,6 +28,7 @@ defmodule FermixChannels.Companion.Connection do
 
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Companion.Protocol
 
@@ -67,7 +68,13 @@ defmodule FermixChannels.Companion.Connection do
   @spec recover_request(map(), map(), keyword()) :: :ok | {:error, term()}
   def recover_request(row, %{transport: :companion}, opts) when is_map(row) and is_list(opts) do
     sink = &sink(Companion.registry(), &1, &2)
-    Requests.recover(row, transport(nil), Keyword.put(opts, :event_sink, sink))
+
+    opts =
+      [agent: Turns, settlement_owner: Turns]
+      |> Keyword.merge(opts)
+      |> Keyword.put(:event_sink, sink)
+
+    Requests.recover(row, transport(nil), opts)
   end
 
   @impl true
@@ -228,10 +235,13 @@ defmodule FermixChannels.Companion.Connection do
     {:stop, state}
   end
 
-  # Stops the running turn and the ones waiting behind it; each answers with its
-  # own `turn_error` (code `cancelled`) through the channel's turn result.
-  defp cancel(%{"profile_id" => @profile}, state) do
-    _result = Queue.stop_conversation(Companion.conversation_key(@profile), state.queue)
+  # Stops the one turn the request named, running or waiting, and writes
+  # nothing itself: the turn ends on the wire from the queue's outcome, a
+  # `turn_error` (code `cancelled`), or its `text_done` when it had already
+  # finished. Other clients' turns in the conversation are untouched.
+  defp cancel(%{"profile_id" => @profile, "client_msg_id" => client_msg_id}, state) do
+    key = Companion.conversation_key(@profile)
+    {:ok, _stopped} = Queue.stop_turn(key, client_msg_id, state.queue)
     {:cont, state}
   end
 

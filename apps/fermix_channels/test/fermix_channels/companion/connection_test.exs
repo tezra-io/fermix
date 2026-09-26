@@ -18,7 +18,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Answers `Queue.stop_conversation/2` and reports it.
+  # Answers `Queue.stop_turn/3` and reports it.
   defmodule QueueStub do
     use GenServer
 
@@ -28,8 +28,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
     def init(test_pid), do: {:ok, test_pid}
 
     @impl true
-    def handle_call({:stop_conversation, key}, _from, test_pid) do
-      send(test_pid, {:stop_conversation, key})
+    def handle_call({:stop_turn, key, message_id}, _from, test_pid) do
+      send(test_pid, {:stop_turn, key, message_id})
       {:reply, {:ok, :not_found}, test_pid}
     end
   end
@@ -79,7 +79,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
       store_opts: store_opts,
       request_coordinator: coordinator,
       gateway: GatewayStub,
-      agent_server: queue_owner
+      agent_server: queue_owner,
+      settlement_owner: queue_owner
     ]
 
     start_supervised!(
@@ -289,12 +290,13 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert %{"type" => "text_done", "server_seq" => 9} = recv(client)
   end
 
-  test "cancel stops the companion conversation in the queue", ctx do
+  test "cancel stops only the named request's turn and answers nothing itself", ctx do
     client = hello(ctx.socket_path)
-    send_line(client, %{"type" => "cancel", "profile_id" => "main"})
-    assert_receive {:stop_conversation, {"companion", "main", :root}}, 2_000
+    send_line(client, %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-7"})
+    assert_receive {:stop_turn, {"companion", "main", :root}, "mac-7"}, 2_000
+    assert {:error, :timeout} = :gen_tcp.recv(client, 0, 200)
 
-    send_line(client, %{"type" => "cancel", "profile_id" => "work"})
+    send_line(client, %{"type" => "cancel", "profile_id" => "work", "client_msg_id" => "mac-7"})
     assert %{"type" => "error", "reason" => "unsupported_profile"} = recv(client)
   end
 
@@ -348,7 +350,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       Connection.recover_request(
         row,
         context,
-        opts ++ [gateway: GatewayStub, agent_server: queue_owner]
+        opts ++ [gateway: GatewayStub, agent_server: queue_owner, settlement_owner: queue_owner]
       )
     end
 
