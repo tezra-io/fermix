@@ -386,8 +386,8 @@ around that message:
 
 `expect.wire` is graded against what the socket said about the message, one
 `wire.<key>` gate per key: `events_all` / `events_none` (event types drawn from
-`accepted`, `turn_started`, `text_delta`, `tool_event`, `text_done`,
-`turn_error`), `error_code` (the `turn_error`'s code), `blocker_events_all`
+`accepted`, `row` (the message's own row, announced as it is written),
+`turn_started`, `text_delta`, `tool_event`, `text_done`, `turn_error`), `error_code` (the `turn_error`'s code), `blocker_events_all`
 (needs `cancel: waiting`), `reads_find_marker: true` (every declared read found
 the marker; needs `reads`), and `offline_row_matches` (a regex some row written
 while offline matches; needs `offline_wait_s`). Run placeholders render inside

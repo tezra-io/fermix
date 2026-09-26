@@ -412,10 +412,15 @@ defmodule FermixChannels.Companion.Connection do
       ingress_context: %{transport: :companion},
       reply_to: reply_to,
       attempt_key: :companion_attempt,
-      after_user_append: nil,
+      after_user_append: &announce_user_row/4,
       after_command: nil
     }
   end
+
+  # A user's row is announced to every connection watching the profile as it
+  # is written, the sender's own included, carrying its `client_msg_id`.
+  defp announce_user_row(profile, row, _text, opts),
+    do: Keyword.fetch!(opts, :event_sink).({:profile, profile}, Companion.row_event(profile, row))
 
   defp request_opts(state) do
     registry = state.registry

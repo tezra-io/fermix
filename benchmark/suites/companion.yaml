@@ -45,7 +45,7 @@ scenarios:
           no_tool_errors: true
           reply_matches: "(?i)yeast|bacteria|ferment|starter|gas|carbon dioxide"
           wire:
-            events_all: [accepted, turn_started, text_delta, text_done]
+            events_all: [accepted, row, turn_started, text_delta, text_done]
             events_none: [turn_error]
       - id: tool_turn_streams
         drive: companion
@@ -71,7 +71,7 @@ scenarios:
         companion: {cancel: running}
         expect:
           wire:
-            events_all: [accepted, turn_started, turn_error]
+            events_all: [accepted, row, turn_started, turn_error]
             events_none: [text_done]
             error_code: cancelled
       - id: cancel_long_itinerary
@@ -80,12 +80,14 @@ scenarios:
         companion: {cancel: running}
         expect:
           wire:
-            events_all: [accepted, turn_started, turn_error]
+            events_all: [accepted, row, turn_started, turn_error]
             events_none: [text_done]
             error_code: cancelled
 
   - id: cancel_waiting
     title: "Cancel stops a request still waiting, and not the turn ahead of it"
+    # The cancelled message never runs, yet its own row is announced (`row`)
+    # as it is written, so no connected client is left without it.
     severity: critical
     tags: [companion, cancel, queue]
     cases:
@@ -97,7 +99,7 @@ scenarios:
           blocker: "Write a 1000-word short story about a lighthouse keeper who adopts a gull."
         expect:
           wire:
-            events_all: [accepted, turn_error]
+            events_all: [accepted, row, turn_error]
             events_none: [turn_started, text_delta, text_done]
             error_code: cancelled
             blocker_events_all: [turn_started, text_done]
@@ -109,7 +111,7 @@ scenarios:
           blocker: "Draft a detailed 30-day beginner running plan, one line per day."
         expect:
           wire:
-            events_all: [accepted, turn_error]
+            events_all: [accepted, row, turn_error]
             events_none: [turn_started, text_delta, text_done]
             error_code: cancelled
             blocker_events_all: [turn_started, text_done]

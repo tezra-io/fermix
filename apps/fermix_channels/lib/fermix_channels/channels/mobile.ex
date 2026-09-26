@@ -12,6 +12,7 @@ defmodule FermixChannels.Channels.Mobile do
 
   require Logger
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Output
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
@@ -136,8 +137,9 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def seal_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
-    with {:ok, {_status, row}} <- persist_final_text(message, text) do
+    with {:ok, {status, row}} <- persist_final_text(message, text) do
       _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row.server_seq, text))
+      _ = announce_to_companion(status, message.chat_id, row)
       _ = schedule_unfurl(message.chat_id, row.server_seq, text)
       {:ok, nil}
     end
@@ -396,6 +398,8 @@ defmodule FermixChannels.Channels.Mobile do
     _ =
       emit_after_commit(profile, Output.text_done(turn_id_from_opts(opts), row.server_seq, text))
 
+    _ = announce_to_companion(:created, profile, row)
+
     _ = maybe_schedule_proactive_push(profile, row.server_seq, opts)
     _ = schedule_unfurl(profile, row.server_seq, text)
     :ok
@@ -405,6 +409,7 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp deliver_persisted_media(:created, profile, media, ref, row, opts) do
     _ = emit_media_after_commit(profile, row.server_seq, media, ref)
+    _ = announce_to_companion(:created, profile, row)
     _ = maybe_schedule_proactive_push(profile, row.server_seq, opts)
     _ = schedule_unfurl(profile, row.server_seq, value(media, :caption) || "")
     :ok
@@ -434,6 +439,13 @@ defmodule FermixChannels.Channels.Mobile do
   end
 
   defp turn_id_from_opts(opts), do: Keyword.get(opts, :turn_id, new_turn_id())
+
+  # Every row this channel writes reaches the Mac's companion connections as it
+  # is written; a row the store deduplicated was announced when it was created.
+  defp announce_to_companion(:created, profile_id, row),
+    do: Companion.announce_row(profile_id, row)
+
+  defp announce_to_companion(:existing, _profile_id, _row), do: :ok
 
   defp emit_after_commit(profile_id, event) do
     case emit(profile_id, event) do

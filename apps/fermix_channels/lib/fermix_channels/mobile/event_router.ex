@@ -11,6 +11,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   and a push once a command settles.
   """
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Mobile.DeviceRegistry
@@ -66,9 +67,16 @@ defmodule FermixChannels.Mobile.EventRouter do
       ingress_context: context,
       reply_to: {:device, device_id},
       attempt_key: :mobile_attempt,
-      after_user_append: &schedule_user_unfurl/4,
+      after_user_append: &after_user_append/4,
       after_command: &schedule_command_push/3
     }
+  end
+
+  # The phone's row reaches the Mac's companion connections as it is written;
+  # the phone's own wire hears of it as before.
+  defp after_user_append(profile, row, text, opts) do
+    :ok = Companion.announce_row(profile, row)
+    schedule_user_unfurl(profile, row, text, opts)
   end
 
   defp schedule_user_unfurl(profile, row, text, opts) do

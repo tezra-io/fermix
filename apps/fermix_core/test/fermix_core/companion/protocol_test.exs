@@ -13,7 +13,7 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                approval approval_resolved read_state history_page search_results error)
+                row approval approval_resolved read_state history_page search_results error)
   end
 
   test "the shared chat events are a subset of both catalogs" do
@@ -21,6 +21,7 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert Protocol.shared_server_events() -- Protocol.server_events() == []
     refute "history_pull" in Protocol.shared_client_events()
     refute "history_page" in Protocol.shared_server_events()
+    refute "row" in Protocol.shared_server_events()
   end
 
   test "negotiates directionally" do
@@ -169,6 +170,32 @@ defmodule FermixCore.Companion.ProtocolTest do
                "hits" => [],
                "next_before_seq" => 0
              })
+  end
+
+  test "a row announces one timeline row, with the sender's id only on a user's" do
+    row = %{
+      "profile_id" => "main",
+      "server_seq" => 12,
+      "role" => "user",
+      "text" => "What is on my calendar today?",
+      "ts" => "2026-09-25T09:00:00Z"
+    }
+
+    assert {:ok, _line} = Protocol.encode_server_event("row", row)
+
+    assert {:ok, _line} =
+             Protocol.encode_server_event("row", Map.put(row, "client_msg_id", "mac-1"))
+
+    assert {:ok, _line} = Protocol.encode_server_event("row", %{row | "text" => ""})
+
+    assert {:error, {:invalid_field, "client_msg_id"}} =
+             Protocol.encode_server_event("row", Map.put(row, "client_msg_id", ""))
+
+    assert {:error, {:invalid_field, "server_seq"}} =
+             Protocol.encode_server_event("row", %{row | "server_seq" => 0})
+
+    assert {:error, {:missing_field, "ts"}} =
+             Protocol.encode_server_event("row", Map.delete(row, "ts"))
   end
 
   test "payload validation is available to another envelope without the type key" do

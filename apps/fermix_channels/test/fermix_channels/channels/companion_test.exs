@@ -40,18 +40,26 @@ defmodule FermixChannels.Channels.CompanionTest do
   defmodule StoreStub do
     def append(profile, attrs, _opts) do
       send(:companion_adapter_test, {:append, profile, attrs})
-      {:ok, Map.merge(attrs, %{profile_id: profile, server_seq: 41})}
+      {:ok, row(profile, attrs, 41)}
     end
 
     def append_client_output(profile, client_id, attempt, key, attrs, _opts) do
       send(:companion_adapter_test, {:client_output, profile, client_id, attempt, key, attrs})
-      {:ok, {:created, Map.merge(attrs, %{profile_id: profile, server_seq: 42})}}
+      {:ok, {:created, row(profile, Map.put(attrs, :role, "assistant"), 42)}}
     end
 
     def append_proactive(profile, key, attrs, _opts) do
       send(:companion_adapter_test, {:proactive, profile, key, attrs})
-      {:ok, {:existing, Map.merge(attrs, %{profile_id: profile, server_seq: 43})}}
+      {:ok, {:existing, row(profile, attrs, 43)}}
     end
+
+    defp row(profile, attrs, seq),
+      do:
+        Map.merge(attrs, %{
+          profile_id: profile,
+          server_seq: seq,
+          created_at: ~U[2026-09-26 09:00:00Z]
+        })
 
     def complete_client_request(profile, client_id, attempt, _fields, _opts) do
       send(:companion_adapter_test, {:completed, profile, client_id, attempt})
@@ -300,14 +308,24 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:completed, _profile, _id, _attempt}, 100
   end
 
-  test "a reply that is no queue turn, a slash command's answer, is written at once" do
+  test "a reply that is no queue turn, a slash command's answer, is written at once as a row" do
     reply = Companion.build_text_reply(request_message())
     assert :ok = reply.("Approved.")
 
     assert_receive {:client_output, "main", "mac-1", 3, "text:" <> _digest,
                     %{content: "Approved."}}
 
-    assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => 42}}
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "row",
+                      "server_seq" => 42,
+                      "role" => "assistant",
+                      "text" => "Approved.",
+                      "ts" => "2026-09-26T09:00:00Z"
+                    } = row}
+
+    refute Map.has_key?(row, "client_msg_id")
+    refute_received {:companion_event, %{"t" => "text_done"}}
   end
 
   test "a scheduled job's delivery is a plain row, announced whether or not anyone listens" do
@@ -317,13 +335,15 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert :ok = Companion.send_message("main", "your 9am summary", [])
 
     assert_receive {:append, "main", %{role: "assistant", content: "your 9am summary"}}
-    assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => 41}}
+
+    assert_receive {:companion_event,
+                    %{"t" => "row", "server_seq" => 41, "text" => "your 9am summary"}}
 
     assert_receive {:telemetry, %{count: 1}, %{channel: :companion, direction: :outbound}}
 
     assert :ok = Companion.send_message("main", "again", proactive_key: "reminder-1")
     assert_receive {:proactive, "main", "reminder-1", _attrs}
-    refute_receive {:companion_event, %{"t" => "text_done", "server_seq" => 43}}
+    refute_receive {:companion_event, %{"t" => "row", "server_seq" => 43}}
 
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
   end

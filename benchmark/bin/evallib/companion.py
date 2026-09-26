@@ -47,7 +47,7 @@ PROTOCOL_VERSION = 1
 PROFILE = "main"
 SOCKET_NAME = "companion.sock"
 
-EVENT_TYPES = ("accepted", "turn_started", "text_delta", "tool_event", "text_done",
+EVENT_TYPES = ("accepted", "row", "turn_started", "text_delta", "tool_event", "text_done",
                "turn_error")
 READS = ("history_after", "history_before", "search")
 CANCEL_MODES = ("running", "waiting")
@@ -147,7 +147,12 @@ class TurnWire:
         return {event["type"] for event in self.events}
 
     def ended(self) -> bool:
-        return bool(self.types() & {"text_done", "turn_error"})
+        return bool(self.types() & {"text_done", "turn_error"}) or self.answered()
+
+    def answered(self) -> bool:
+        """A slash command ends with its answer's `row`: it is no turn."""
+        return self.command and any(e["type"] == "row" and e.get("role") == "assistant"
+                                    for e in self.events)
 
     def error_code(self) -> str | None:
         return next((e.get("code") for e in self.events if e["type"] == "turn_error"), None)
@@ -324,16 +329,20 @@ class _Session:
                 raise CompanionError(f"{event['type']} refused: {reply!r}")
             self._route(reply)
 
-    # A turn is named on the wire by `in_reply_to` only in `turn_started`; every
-    # later event carries its `turn_id`. Two endings name a turn the client never
-    # saw start: a slash command's answer, and the `turn_error` of a message
-    # cancelled while it waited. Each is attributed to the one watched request
-    # of that kind still unnamed, and to nothing when that is ambiguous, so a
-    # stray announcement (a job's delivery) never ends a watched request.
+    # A request's `accepted` and its user's `row` carry its `client_msg_id`; a
+    # turn is named by `in_reply_to` only in `turn_started`, and every later
+    # event carries its `turn_id`. Two endings name nothing the client saw: a
+    # slash command's answer (a `row` of the assistant's), and the `turn_error`
+    # of a message cancelled while it waited. Each is attributed to the one
+    # watched request of that kind still open, and to nothing when that is
+    # ambiguous, so a stray announcement (a job's delivery) never ends a
+    # watched request.
     def _route(self, event: dict) -> None:
         kind = event.get("type")
         if kind == "accepted":
             self._append(self.turns.get(event.get("client_msg_id")), event)
+        elif kind == "row":
+            self._append(self._row_owner(event), event)
         elif kind == "turn_started":
             turn = self.turns.get(event.get("in_reply_to"))
             if turn is not None:
@@ -342,23 +351,24 @@ class _Session:
         elif kind in EVENT_TYPES:
             self._append(self._by_turn_id(event.get("turn_id"), kind), event)
 
+    def _row_owner(self, event: dict) -> TurnWire | None:
+        if "client_msg_id" in event:
+            return self.turns.get(event["client_msg_id"])
+        return self._only([t for t in self.turns.values() if t.command and not t.ended()])
+
     def _by_turn_id(self, turn_id, kind: str) -> TurnWire | None:
         named = next((t for t in self.turns.values() if t.turn_id == turn_id), None)
-        if named is not None:
+        if named is not None or kind != "turn_error":
             return named
-        if kind == "text_done":
-            unnamed = [t for t in self._unnamed() if t.command]
-        elif kind == "turn_error":
-            unnamed = [t for t in self._unnamed() if t.cancel_sent]
-        else:
-            return None
-        if len(unnamed) != 1:
-            return None
-        unnamed[0].turn_id = turn_id
-        return unnamed[0]
+        cancelled = self._only([t for t in self.turns.values()
+                                if t.turn_id is None and t.cancel_sent and not t.ended()])
+        if cancelled is not None:
+            cancelled.turn_id = turn_id
+        return cancelled
 
-    def _unnamed(self) -> list[TurnWire]:
-        return [t for t in self.turns.values() if t.turn_id is None and not t.ended()]
+    @staticmethod
+    def _only(candidates: list[TurnWire]) -> TurnWire | None:
+        return candidates[0] if len(candidates) == 1 else None
 
     @staticmethod
     def _append(turn: TurnWire | None, event: dict) -> None:

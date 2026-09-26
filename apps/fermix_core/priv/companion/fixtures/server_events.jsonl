@@ -1,5 +1,6 @@
 {"type":"server_hello","min_version":1,"max_version":1}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":false}
+{"type":"row","profile_id":"main","server_seq":12,"role":"user","text":"What is on my calendar today?","ts":"2026-09-25T09:00:00Z","client_msg_id":"mac-1"}
 {"type":"accepted","client_msg_id":"mac-1","duplicate":true,"server_seq":13}
 {"type":"turn_started","profile_id":"main","turn_id":"turn-mac-1","in_reply_to":"mac-1"}
 {"type":"text_delta","turn_id":"turn-mac-1","text":"You have "}
@@ -7,6 +8,7 @@
 {"type":"tool_event","turn_id":"turn-mac-1","tool":"web_search","phase":"stop","detail":"%{status: :ok}"}
 {"type":"text_done","turn_id":"turn-mac-1","server_seq":13,"text":"You have one meeting, at 10."}
 {"type":"turn_error","turn_id":"turn-mac-3","code":"cancelled","message":"cancelled"}
+{"type":"row","profile_id":"main","server_seq":15,"role":"assistant","text":"Your 9am summary: two meetings and a dentist reminder.","ts":"2026-09-25T09:00:30Z"}
 {"type":"approval","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","kind":"sandbox","text":"Allow reading ~/Documents?","token":"opaque-token","ttl_s":60,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
 {"type":"approval_resolved","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","outcome":"approved"}
 {"type":"read_state","profile_id":"main","read_up_to_seq":13}

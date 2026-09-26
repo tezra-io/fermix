@@ -39,13 +39,15 @@ defmodule FermixCore.Companion.Protocol do
 
   @client_events ~w(client_hello msg command cancel history_pull history_search read_state)
   @server_events ~w(
-    server_hello accepted turn_started text_delta tool_event text_done turn_error approval
+    server_hello accepted turn_started text_delta tool_event text_done turn_error row approval
     approval_resolved read_state history_page search_results error
   )
 
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
-  # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks.
+  # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks. Nor
+  # is `row`, the live announcement of every row written outside a turn's
+  # completion, which only this wire carries.
   @shared_client_events ~w(msg command read_state)
   @shared_server_events ~w(
     accepted turn_started text_delta tool_event text_done turn_error approval approval_resolved
@@ -69,6 +71,7 @@ defmodule FermixCore.Companion.Protocol do
     "tool_event" => ~w(turn_id tool phase),
     "text_done" => ~w(turn_id server_seq text),
     "turn_error" => ~w(turn_id code message),
+    "row" => ~w(profile_id server_seq role text ts),
     "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
     "approval_resolved" => ~w(approval_id outcome),
     "read_state" => ~w(profile_id read_up_to_seq),
@@ -293,6 +296,14 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_server("turn_error", payload), do: strings(payload, ~w(turn_id code message))
 
+  defp validate_server("row", payload) do
+    with :ok <- strings(payload, ~w(profile_id role ts)),
+         :ok <- positive_u64(payload, "server_seq"),
+         :ok <- binary_field(payload, "text") do
+      optional_nonempty(payload, "client_msg_id")
+    end
+  end
+
   defp validate_server("approval", payload) do
     with :ok <- strings(payload, ~w(approval_id kind text token)),
          :ok <- positive_u64(payload, "ttl_s"),
@@ -442,6 +453,10 @@ defmodule FermixCore.Companion.Protocol do
 
   defp binary_field(payload, field) do
     if is_binary(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
+  end
+
+  defp optional_nonempty(payload, field) do
+    if Map.has_key?(payload, field), do: nonempty(payload, field), else: :ok
   end
 
   defp optional_binary(payload, field) do

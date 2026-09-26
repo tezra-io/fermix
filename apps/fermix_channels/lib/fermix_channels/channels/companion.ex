@@ -94,6 +94,38 @@ defmodule FermixChannels.Channels.Companion do
     dispatch(registry, profile_id, {:companion_event, event})
   end
 
+  @doc """
+  Announce one timeline row written outside a turn's completion (a user's
+  message, a slash command's answer, a delivery, a row the phone wrote) to
+  every connection watching `profile_id`, as it is written. A turn's own reply
+  is announced by its `text_done` instead.
+  """
+  @spec announce_row(String.t(), map(), atom()) :: :ok
+  def announce_row(profile_id, row, registry \\ @registry)
+      when is_binary(profile_id) and is_map(row) and is_atom(registry) do
+    Registry.dispatch(registry, profile_id, fn entries ->
+      event = row_event(profile_id, row)
+      Enum.each(entries, fn {pid, _value} -> send(pid, {:companion_event, event}) end)
+    end)
+  end
+
+  @doc "The `row` event that announces one timeline row: what a client shows."
+  @spec row_event(String.t(), map()) :: map()
+  def row_event(
+        profile_id,
+        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = at} = row
+      ) do
+    %{
+      "t" => "row",
+      "profile_id" => profile_id,
+      "server_seq" => seq,
+      "role" => role,
+      "text" => content,
+      "ts" => DateTime.to_iso8601(at)
+    }
+    |> put_present("client_msg_id", Map.get(row, :client_msg_id))
+  end
+
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
@@ -178,7 +210,7 @@ defmodule FermixChannels.Channels.Companion do
         with :ok <- validate_profile(profile_id),
              {:ok, {status, row}} <-
                Output.persist_text(store(), profile_id, text, Map.new(opts)) do
-          announce_text(status, profile_id, text, row, opts)
+          announce_written(status, profile_id, row)
           {:ok, status}
         end
       end)
@@ -198,12 +230,11 @@ defmodule FermixChannels.Channels.Companion do
     {:error, :unsupported_media}
   end
 
-  defp announce_text(:existing, _profile, _text, _row, _opts), do: :ok
-
-  defp announce_text(:created, profile, text, row, opts) do
-    turn_id = Keyword.get(opts, :turn_id, new_turn_id())
-    broadcast(profile, Output.text_done(turn_id, row.server_seq, text))
-  end
+  # A row written here is no turn's completion (a slash command's answer, a
+  # delivery), so it is announced as a `row`, not a `text_done`; a row the
+  # store deduplicated was announced when it was created.
+  defp announce_written(:created, profile, row), do: announce_row(profile, row)
+  defp announce_written(:existing, _profile, _row), do: :ok
 
   # One durable timeline row is one delivered outbound message; a row the store
   # deduplicated was counted when it was created.
@@ -304,4 +335,7 @@ defmodule FermixChannels.Channels.Companion do
   def store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
 
   defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
+
+  defp put_present(map, _key, nil), do: map
+  defp put_present(map, key, value), do: Map.put(map, key, value)
 end

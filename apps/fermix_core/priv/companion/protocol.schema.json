@@ -67,6 +67,7 @@
             "tool_event",
             "text_done",
             "turn_error",
+            "row",
             "approval",
             "approval_resolved",
             "read_state",
@@ -104,6 +105,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "turn_error" } } },
           "then": { "$ref": "#/$defs/turn_error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "row" } } },
+          "then": { "$ref": "#/$defs/row" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "approval" } } },
@@ -222,7 +227,7 @@
     },
     "accepted": {
       "type": "object",
-      "description": "Durable receipt for a msg or command; clears the outbox item. server_seq is present once the request has a reply row.",
+      "description": "Durable receipt for a msg or command; clears the outbox item. server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
       "required": ["type", "client_msg_id", "duplicate"],
       "properties": {
         "type": { "const": "accepted" },
@@ -282,6 +287,20 @@
         "turn_id": { "type": "string", "minLength": 1 },
         "code": { "type": "string", "minLength": 1 },
         "message": { "type": "string", "minLength": 1 }
+      }
+    },
+    "row": {
+      "type": "object",
+      "description": "A timeline row written outside a turn's completion (the sender's own message, a slash command's answer, a scheduled delivery, a row written from the phone), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
+      "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
+      "properties": {
+        "type": { "const": "row" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "server_seq": { "type": "integer", "minimum": 1 },
+        "role": { "type": "string", "minLength": 1 },
+        "text": { "type": "string" },
+        "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
+        "client_msg_id": { "type": "string", "minLength": 1 }
       }
     },
     "approval": {

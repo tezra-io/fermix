@@ -59,10 +59,11 @@ so it is not run again at the next boot.
 
 ## History and search
 
-History pages both ways from a cursor: forward from the last row a client
-showed (the catch-up read after a reconnect, which is how a phone turn or a job
-delivery reaches the Mac) and backward from any row (scrolling up), up to 200
-rows a page. Full-text search covers the whole timeline, newest first, with a
+Every row is announced live to the connected clients the moment it is written,
+whoever writes it: the sender's own message, a slash command's answer, a job's
+delivery, a message or reply from the phone. History pages both ways from a
+cursor: forward from the last row a client showed (the catch-up read after a
+reconnect) and backward from any row (scrolling up), up to 200 rows a page. Full-text search covers the whole timeline, newest first, with a
 plain-text excerpt around each match and the matched ranges; every word of the
 query must match, each as a word prefix, and results page backward the same
 way.

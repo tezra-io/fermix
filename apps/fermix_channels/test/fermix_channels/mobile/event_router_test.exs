@@ -28,7 +28,16 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       send(self(), {:appended, profile, attrs})
 
       status = if client_id == "stranded", do: :existing, else: :created
-      {:ok, {status, attrs |> Map.put(:client_msg_id, client_id) |> Map.put(:server_seq, 12)}}
+
+      row =
+        Map.merge(attrs, %{
+          role: "user",
+          client_msg_id: client_id,
+          server_seq: 12,
+          created_at: ~U[2026-08-12 12:00:00Z]
+        })
+
+      {:ok, {status, row}}
     end
 
     def settle_client_request(profile, id, status, fields, _opts) do
@@ -262,6 +271,32 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                        "in_reply_to" => 12,
                        "url" => "https://example.com"
                      }}
+  end
+
+  # The Mac's companion connections share the phone's timeline, so the phone's
+  # user row reaches them as it is written.
+  test "a phone's user row is announced to the companion connections", ctx do
+    {:ok, _owner} =
+      Registry.register(FermixChannels.Channels.Companion.registry(), "main", nil)
+
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "phone-row-1",
+        "profile_id" => "main",
+        "text" => "from the phone",
+        "attach_ids" => []
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "row",
+                      "server_seq" => 12,
+                      "role" => "user",
+                      "text" => "from the phone",
+                      "client_msg_id" => "phone-row-1"
+                    }}
   end
 
   # One wire object, one rule: an absent optional field is an absent key, never

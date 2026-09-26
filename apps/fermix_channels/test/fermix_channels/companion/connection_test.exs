@@ -151,12 +151,27 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a message is claimed once, acknowledged, and a resend never runs twice", ctx do
     client = hello(ctx.socket_path)
+    watcher = hello(ctx.socket_path)
     msg = message("mac-1", "hello from the Mac")
 
     send_line(client, msg)
 
     assert %{"type" => "accepted", "client_msg_id" => "mac-1", "duplicate" => false} =
              recv(client)
+
+    # The user's row is announced as it is written, to the sender and to every
+    # other connection, whatever becomes of its turn.
+    for socket <- [client, watcher] do
+      assert %{
+               "type" => "row",
+               "profile_id" => "main",
+               "server_seq" => 1,
+               "role" => "user",
+               "text" => "hello from the Mac",
+               "client_msg_id" => "mac-1",
+               "ts" => "20" <> _rest
+             } = recv(socket)
+    end
 
     assert_receive {:gateway_ingest, message, gateway_opts}, 2_000
 
@@ -170,6 +185,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     send_line(client, msg)
     assert %{"type" => "accepted", "client_msg_id" => "mac-1", "duplicate" => true} = recv(client)
     refute_receive {:gateway_ingest, _message, _opts}, 200
+    assert {:error, :timeout} = :gen_tcp.recv(watcher, 0, 200)
 
     assert {:ok, %{status: "running", transport: "companion", authenticated_device_id: nil}} =
              Timeline.get_client_request("main", "mac-1", ctx.store_opts)
@@ -197,6 +213,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     send_line(client, msg)
     assert %{"type" => "accepted", "duplicate" => false} = recv(client)
+    assert %{"type" => "row", "client_msg_id" => "mac-count"} = recv(client)
 
     assert_receive {[:fermix, :channel, :parse], %{duration_us: _parse_us}, %{status: :ok}},
                    2_000
@@ -215,6 +232,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     client = hello(ctx.socket_path)
     send_line(client, message("mac-2", "first"))
     assert %{"type" => "accepted"} = recv(client)
+    assert %{"type" => "row", "client_msg_id" => "mac-2"} = recv(client)
     assert_receive {:gateway_ingest, _message, _opts}, 2_000
 
     send_line(client, message("mac-2", "different"))

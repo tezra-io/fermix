@@ -14,8 +14,8 @@ pinned by checksum** rather than hand-copying the shapes.
 the ones it shares (`msg`, `command`, `read_state`, `accepted`, `turn_started`,
 `text_delta`, `tool_event`, `text_done`, `turn_error`, `approval`,
 `approval_resolved`) through the same module. This wire adds `cancel`,
-`history_search`, `search_results`, and a backward cursor on `history_pull`
-and `history_page`.
+`history_search`, `search_results`, `row`, and a backward cursor on
+`history_pull` and `history_page`.
 
 ## Transport
 
@@ -120,12 +120,13 @@ in a fixed order:
 | `type` | Fields | Notes |
 |---|---|---|
 | `server_hello` | `min_version`, `max_version` | Handshake reply. |
-| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present once the request has a reply row. |
+| `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. |
 | `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row written outside a turn's completion, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a row written from the phone. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved`, `denied`, or `expired`. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection. |
@@ -150,12 +151,14 @@ word.
 ## One timeline with the phone
 
 The profile's timeline is the one the phone's mobile channel reads and writes:
-its rows, `server_seq` numbering and read frontier are shared. A turn started
-from this socket is written there and seen live by every connection on this
-socket; a turn started from the phone reaches this socket's clients through
-`history_pull`. A scheduled job whose result is delivered to the companion
-channel is written there whether or not a client is connected, and announced
-as a `text_done` to any that are.
+its rows, `server_seq` numbering and read frontier are shared. **Every row is
+announced live** to every connection watching the profile at the moment it is
+written, whoever writes it: the reply of a turn started on this socket as
+that turn's `text_done`, and every other row as a `row` (the user's message,
+including to the connection that sent it; a slash command's answer; a
+scheduled job's delivery, written whether or not a client is connected; a
+message or reply written from the phone). The phone's own wire is unchanged;
+it does not carry `row`.
 
 `server_seq` is assigned inside the write that stores the row, from a
 per-profile counter that never goes back, whoever writes (a turn, a job, the
@@ -170,16 +173,15 @@ same step that read it. So no row can fall between a page and the live events:
 a row written after the read is announced after the page reaches the socket,
 and a live event that arrives ahead of a page is for a row already committed
 when the page was read (in that page, or a later one of the same pull). Live
-announcements still arrive out of `server_seq` order at times (a job's row can
-be announced after a later reply's), a page and a live `text_done` can carry
-the same row, and a user's row reaches the other connections only through
-history. So a client keeps a cursor, the last `server_seq` it shows, and:
+announcements can still arrive out of `server_seq` order (a job's row can be
+announced after a later reply's), and a page and a live event can carry the
+same row. So a client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `server_hello`, and again
   while a page's `next_after_seq` is below its `history_head_seq`;
-- shows a `text_done`'s row only when its `server_seq` is `cursor + 1`, drops
-  one at or below the cursor, and on a gap pulls from the cursor (unless a
-  pull is already out) instead of showing it;
+- applies a live row (a `row`, or a `text_done` at its `server_seq`) when its
+  seq is `cursor + 1`, drops one at or below the cursor, and on a gap pulls
+  from the cursor (unless a pull is already out) instead of showing it;
 - never keys the cursor on arrival order.
 
 ## Delivery and the outbox
@@ -219,8 +221,9 @@ daemon's turn queue:
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
   with code `interrupted`.
 
-`turn_error` is live-only: a client that was offline sees the user's row with
-no answer after it. `cancel` names the request whose turn to stop, whichever
+`turn_error` is live-only and carries no seq: a cancelled or failed message
+leaves its user's row (announced as a `row` when it was written) with no
+answer after it. `cancel` names the request whose turn to stop, whichever
 client sent it and whether it runs or still waits; it never stops another
 turn, and the daemon never answers it itself. A turn that had already
 finished when the cancel arrived ends with its `text_done`, not an error.
@@ -259,6 +262,7 @@ companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 2
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }
 daemon -> companion:  accepted { client_msg_id: "mac-1", duplicate: false }
+daemon -> companion:  row { server_seq: 13, role: "user", text, ts, client_msg_id: "mac-1" }
 daemon -> companion:  turn_started { turn_id: "turn-mac-1", in_reply_to: "mac-1" }
 daemon -> companion:  tool_event { turn_id, tool, phase: "start" } / { phase: "stop" }
 daemon -> companion:  text_delta { turn_id, text } …

@@ -34,12 +34,13 @@ from evallib import companion, suites  # noqa: E402
 class FakeDaemon:
     """Speaks the companion wire from a script, one connection at a time.
 
+    Every row written is announced: a user's as a `row` with its client id, a
+    command's answer and a delivery as a `row`, a turn's reply as `text_done`.
     A message whose text contains LONG runs until it is cancelled; one containing
     BLOCK runs until the message queued behind it is cancelled, then completes;
     any other completes at once, or waits in the queue while a turn runs. With
-    `stray`, a job's announcement (a `text_done` for a turn no client started)
-    goes out while a message waits. With `offline_row`, that row is written once
-    the first connection closes."""
+    `stray`, a job's delivery row goes out while a message waits. With
+    `offline_row`, that row is written once the first connection closes."""
 
     def __init__(self, stray: bool = False, offline_row: str | None = None):
         self.home = tempfile.mkdtemp(prefix="cmp")
@@ -93,6 +94,14 @@ class FakeDaemon:
         self.rows.append(row)
         return row
 
+    @staticmethod
+    def _row(row, client_msg_id=None):
+        event = {"type": "row", "profile_id": "main", "server_seq": row["server_seq"],
+                 "role": row["role"], "text": row["content"], "ts": row["ts"]}
+        if client_msg_id is not None:
+            event["client_msg_id"] = client_msg_id
+        return event
+
     def _on(self, event, send):
         kind = event["type"]
         if kind == "client_hello":
@@ -100,9 +109,8 @@ class FakeDaemon:
         elif kind == "command":
             send({"type": "accepted", "client_msg_id": event["client_msg_id"],
                   "duplicate": False})
-            row = self._append("assistant", "Started a fresh session.")
-            send({"type": "text_done", "turn_id": "turn-cmd",
-                  "server_seq": row["server_seq"], "text": row["content"]})
+            send(self._row(self._append("user", "/" + event["name"]), event["client_msg_id"]))
+            send(self._row(self._append("assistant", "Started a fresh session.")))
         elif kind == "history_pull":
             send(self._page(event))
         elif kind == "history_search":
@@ -112,9 +120,9 @@ class FakeDaemon:
             send({"type": "search_results", "profile_id": "main", "query": event["query"],
                   "hits": hits[:event["limit"]]})
         elif kind == "msg":
-            self._append("user", event["text"])
             send({"type": "accepted", "client_msg_id": event["client_msg_id"],
                   "duplicate": False})
+            send(self._row(self._append("user", event["text"]), event["client_msg_id"]))
             self._msg(event, send)
         elif kind == "cancel":
             self._cancel(event["client_msg_id"], send)
@@ -136,9 +144,7 @@ class FakeDaemon:
         if self.running is not None:
             self.waiting.append(cid)
             if self.stray:
-                row = self._append("assistant", "your 9am summary")
-                send({"type": "text_done", "turn_id": "turn-job",
-                      "server_seq": row["server_seq"], "text": row["content"]})
+                send(self._row(self._append("assistant", "your 9am summary")))
             return
         send({"type": "turn_started", "profile_id": "main", "turn_id": f"turn-{cid}",
               "in_reply_to": cid})
@@ -193,20 +199,20 @@ def test_a_completed_turn_is_recorded_event_by_event_with_its_reads(daemon):
     evidence = _drive(fake, {"reads": ["history_after", "history_before", "search"]})
 
     assert evidence.ok, evidence.error
-    assert evidence.target.types() == {"accepted", "turn_started", "text_delta",
+    assert evidence.target.types() == {"accepted", "row", "turn_started", "text_delta",
                                        "tool_event", "text_done"}
     assert evidence.target.reply() == "answer to e2e-mark-run1-abc123-msg"
     assert evidence.reads == {"history_after": True, "history_before": True, "search": True}
     # `/new` went first, so the attempt is its own conversation.
-    assert fake.rows[0]["content"] == "Started a fresh session."
-    assert fake.rows[1]["content"] == "hello (eval:e2e-mark-run1-abc123)"
+    assert [row["content"] for row in fake.rows[:3]] == [
+        "/new", "Started a fresh session.", "hello (eval:e2e-mark-run1-abc123)"]
 
 
 def test_a_running_turn_is_cancelled_by_its_client_message_id(daemon):
     evidence = _drive(daemon(), {"cancel": "running"}, text="LONG essay")
 
     assert evidence.ok, evidence.error
-    assert evidence.target.types() == {"accepted", "turn_started", "text_delta",
+    assert evidence.target.types() == {"accepted", "row", "turn_started", "text_delta",
                                        "turn_error"}
     assert evidence.target.error_code() == "cancelled"
 
@@ -216,7 +222,8 @@ def test_a_waiting_cancel_names_the_turn_it_never_saw_start(daemon):
     evidence = _drive(daemon(), spec, text="quick question")
 
     assert evidence.ok, evidence.error
-    assert evidence.target.types() == {"accepted", "turn_error"}
+    # The cancelled message's own row was announced although it never ran.
+    assert evidence.target.types() == {"accepted", "row", "turn_error"}
     assert evidence.target.error_code() == "cancelled"
     assert {"turn_started", "text_done"} <= evidence.blocker.types()
 
