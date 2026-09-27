@@ -242,7 +242,7 @@ defmodule FermixCore.Browser.Config do
   # short: a page holding a JS dialog answers nothing at all, and this is what
   # bounds that wait. It bounds the WORK, not the wall clock — a command waits
   # its own timeout and the caller adds `cdp_response_grace_ms`, so the ceiling
-  # is this budget plus one poll plus one grace (see `ProfileServer.settle/5`).
+  # is this budget plus one poll plus one grace (see `CDP.Backend.settle/5`).
   # `navigation_budget_ms` is that same wait after an `open` or a `navigate`,
   # and it is longer because there it is the ONLY load wait: `Page.navigate`
   # answers on commit, so nothing else waits for the page at all. Four seconds

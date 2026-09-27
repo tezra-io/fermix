@@ -1,10 +1,10 @@
 defmodule FermixCore.Browser.CDP.Transport do
   @moduledoc """
-  The contract `ProfileServer` drives a browser through.
+  The contract `CDP.Backend` drives a browser through.
 
-  `ProfileServer` reaches a browser through exactly one injection point
+  `CDP.Backend` reaches a browser through exactly one injection point
   (`:connection`) and exactly these three functions, so a second way of speaking
-  CDP is a module, not a second ProfileServer. `CDP.Connection` is the WebSocket
+  CDP is a module, not a second backend. `CDP.Connection` is the WebSocket
   to a Chrome the daemon launched or was pointed at; `CDP.ExtensionTransport` is
   a tab the person granted through the browser extension. The test suites'
   inline fakes implement the same three functions, which is what made this an
@@ -15,7 +15,8 @@ defmodule FermixCore.Browser.CDP.Transport do
   event}` to the `:owner` given to `start_link/2`, where `event` is the decoded
   CDP event object — `%{"method" => method, "params" => params}`. A transport
   that loses the browser under it sends nothing more and lets its process exit;
-  `ProfileServer` is linked to it and tears the runtime down on the `:EXIT`.
+  the `ProfileServer` process is linked to it, and `CDP.Backend` tears the
+  runtime down on the `:EXIT`.
   """
 
   alias FermixCore.Browser.Error

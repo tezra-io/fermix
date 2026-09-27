@@ -2,8 +2,9 @@ defmodule FermixCore.Browser.Capabilities do
   @moduledoc """
   What a profile mode can do, in one map consulted at the decision points.
 
-  `ProfileServer` is one implementation of the whole browser surface, and the
-  modes differ in what the browser underneath will answer. A managed Chrome is
+  The modes differ in what the browser underneath will answer, and
+  `ProfileServer` refuses a verb the mode withholds before any backend is asked
+  to do it; the backend consults the rest. A managed Chrome is
   the daemon's: it redirects downloads, enumerates targets, opens and closes
   tabs. A granted tab is the person's: the extension's debugger exposes no
   `Browser` domain at all, the targets are the one tab, and a tab of somebody's

@@ -456,9 +456,12 @@ flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
 without compux. `Browser.Supervisor` holds a `ProfileManager`, which caps live
-Chrome instances, and one `ProfileServer` per owner and profile, which launches
-Chrome lazily and shuts it down on every exit path. On macOS, Chrome launches
-only through the `disclaim` shim from `fermix_nif`.
+Chrome instances, and one `ProfileServer` per owner and profile. The server is
+the backend-neutral half (lazy lifetime, idle reaping, one request at a time,
+the mode's capability refusals); everything that talks to a browser sits behind
+the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)
+launches Chrome lazily and shuts it down on every exit path. On macOS, Chrome
+launches only through the `disclaim` shim from `fermix_nif`.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
 holds, as a GUI-control capability that guests never get. Computer history
