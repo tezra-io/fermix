@@ -41,8 +41,9 @@ title: "macOS app-managed mode — service ownership, CLI hand-offs, and the Hom
 description: >
   Ordinary owner questions about a Fermix.app-managed macOS install: why the
   service verbs refuse, why `fermix upgrade` opens a window instead of swapping
-  a binary, why two `fermix doctor` rows read not-applicable, and how a Homebrew
-  formula install moves to the app. Each case gates on a phrasing-independent
+  a binary, why two `fermix doctor` rows read not-applicable, how a Homebrew
+  formula install moves to the app, and how the app's Browser pane sets how
+  browser tasks run and downloads Chromium when the Mac has no browser. Each case gates on a phrasing-independent
   floor plus the wrong-mode refusals; the rubric owns the wording. One labelled
   sanity case pins that the answer comes from the self-knowledge skill rather
   than from the model's own guess about how a macOS daemon is usually managed.
@@ -189,3 +190,96 @@ scenarios:
           not tell the user to delete, move or re-download the app, and does not
           present dragging the app or uninstalling the formula by hand as an
           equivalent route.
+
+  # The Browser pane (`settings.sections` publishes `browser`). Neither answer is
+  # in general macOS knowledge: how tasks run is the pane's "Run tasks" choice
+  # (`[fermix_core.browser] default_profile`), and a Mac with no Chrome or
+  # Chromium gets its browser from the pane's download, which runs the meeting
+  # notetaker's own install step. Both are advice, so both are host_readonly:
+  # nothing here downloads a browser or writes a setting. The wrong-mode gates
+  # name the answers that do not work on an app-managed engine: an environment
+  # variable the launchd service never sees, and a hand-run Playwright install
+  # the daemon does for itself.
+  - id: browser_task_visibility
+    title: "Whether browser tasks open a window is the Browser pane's choice"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, browser, settings, self-knowledge]
+    cases:
+      - id: watch_browser_tasks
+        query: >
+          I use the Fermix Mac app. When it does web tasks for me I'd like to
+          actually watch the browser window while it works, and every time,
+          not just when I remember to ask. Where do I set that?
+        expect:
+          reply_matches: '(?i)\bbrowser\b'
+          reply_not_matches: '(?i)(FERMIX_BROWSER_HEADLESS|\blaunchctl\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Points at the app's Browser settings, where "Run tasks" chooses how
+          browser tasks run, and says "In a window" is the choice that shows
+          each step (the `fermix_visible` profile, stored as
+          `[fermix_core.browser] default_profile`). Mentioning that one task can
+          still be run visibly on request is correct and must never be
+          penalized. Does not tell the user to set an environment variable or
+          to edit a launchd service.
+      - id: hide_browser_windows
+        query: >
+          Every time the Fermix app on my Mac researches something, a Chrome
+          window pops up and steals focus. Can its browser work stay in the
+          background instead?
+        expect:
+          reply_matches: '(?i)\bbackground\b'
+          reply_not_matches: '(?i)(FERMIX_BROWSER_HEADLESS|\blaunchctl\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes, and that the app's Browser settings are where: choosing "In
+          the background" for how tasks run (the `fermix_headless` profile, the
+          `default_profile` setting) stops the window from opening, with no
+          restart. Noting that each choice keeps its own browser logins, so a
+          site signed in under one mode is signed out under the other, is
+          correct and must never be penalized. Does not tell the user to set an
+          environment variable or to edit a launchd service.
+
+  - id: browser_download_when_missing
+    title: "A Mac with no Chrome or Chromium gets its task browser from the Browser pane"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, browser, install, self-knowledge]
+    cases:
+      - id: no_chrome_installed
+        query: >
+          My browser tasks in the Fermix Mac app fail and the Browser settings
+          say "No Chrome or Chromium is installed." I'd rather not install
+          Chrome. Is there another way?
+        expect:
+          reply_matches: '(?i)chromium|chrome for testing'
+          reply_not_matches: '(?i)(npx\s+playwright|playwright\s+install)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says yes: the app's Browser pane offers a download for exactly this
+          case, which fetches the same Chromium build (Google Chrome for
+          Testing) the meeting notetaker uses, about 150 MB, after which
+          browser tasks use it without Chrome being installed. Does not tell
+          the user to run a Playwright install by hand or to download Chromium
+          from a website themselves.
+      - id: doctor_says_no_browser
+        query: >
+          `fermix doctor` on my Mac says "No Chrome or Chromium is installed"
+          on the browser row. I have the meeting notetaker set up already.
+          Does that mean browser tasks can't work?
+        expect:
+          reply_matches: '(?i)chromium|chrome for testing'
+          reply_not_matches: '(?i)(npx\s+playwright|playwright\s+install)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that the browser row names the browser tasks would run in,
+          and that with no Chrome, Chromium or Canary installed tasks fall back
+          to the Chromium the meeting notetaker downloads (Google Chrome for
+          Testing); if that row still says none, the Browser pane's download
+          (or re-running the notetaker's install) puts it in place. Does not
+          tell the user to run a Playwright install by hand.
