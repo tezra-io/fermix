@@ -2,7 +2,12 @@
 
 How a reply physically lands on a chat surface: per-channel rendering, the
 boundary-ladder splitter, message hygiene, streaming modes, and the ephemeral
-thought stream.
+thought stream. First, what the gateway does with inbound media and empty
+messages.
+
+## Inbound media and empty messages
+
+Inbound images on media-capable channels are downloaded at the gateway (sibling to audio transcription, which has its own reference) and passed to the model as image content — the agent sees the picture, not a placeholder. An image whose resolved model can't accept vision fails loud rather than dropping the image silently. Multi-image messages are coalesced into one turn so the agent sees every image together — Telegram albums (separate updates sharing a `media_group_id`) and WhatsApp's separate per-image webhook messages are both buffered by a short debounce and merged; Discord/Slack/Signal already deliver all attachments in one message. An inbound message with no text AND no media (a sticker, poll, or blank — a captionless image still counts as actionable) is answered at the gateway with a brief "looks empty" note and never schedules a turn, so the queue stays free and no model is called; an unauthorized sender is dropped one step earlier and gets no reply at all. If a model ever returns an empty completion, the turn replies an honest "try again" instead of a blank message, and that empty reply is never committed — so it can't poison later turns. The conversation store independently refuses to persist or replay any content-less turn of any role.
 
 ## Outbound presentation
 
@@ -14,8 +19,8 @@ When `request_directory_access` asks the owner for a directory, Telegram and
 Discord render one-tap **Approve** and **Deny** buttons whose payloads hold the
 token privately: a Telegram inline-button callback, a Discord message component.
 Tapping one funnels through the same operator-only, single-use `/confirm` (or
-`/deny`) path. The Discord app must be configured to receive component
-interactions over the gateway.
+`/deny`) path. On Discord the taps arrive over the gateway, so the app's
+Interactions Endpoint URL must stay empty: with a URL set, every tap fails.
 
 Because the button delivers the token, in a shared or group chat the raw
 `/confirm TOKEN` line is dropped from the group-visible text — it would otherwise
