@@ -34,6 +34,9 @@ defmodule FermixCore.Browser.Config do
     * `launch_timeout_ms` — total budget for spawn → CDP endpoint ready.
     * `cdp_ready_poll_interval_ms` — poll cadence while waiting for CDP.
     * `cdp_version_probe_timeout_ms` — per `/json/version` HTTP probe timeout.
+    * `host_launch_timeout_ms` — one deadline for opening the Fermix app and
+      hearing its browser host attach and report, before a new `fermix` task
+      is decided (`HostLauncher`).
 
   ## Teardown
 
@@ -99,20 +102,25 @@ defmodule FermixCore.Browser.Config do
 
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
+  alias FermixCore.BuildInfo
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
 
-  # The only key of this struct an operator sets from `config.toml`. Everything
+  # The two keys of this struct an operator sets from `config.toml`. Everything
   # else here is a timeout, a cap, a buffer size or a profile shape — tuning,
   # which is an internal constant rather than a config surface. `allowed_hosts`
   # is different in kind: it is the documented recovery for every host the policy
   # refuses (`browser_guidance` SKILL.md tells the operator to list the host
   # there), so a refusal without it is a refusal with no way out.
   #
+  # `launch_app` is the other, and a posture too: whether the engine may open the
+  # Fermix app to run a new `fermix` task in the app's browser pane. Unset, it
+  # is derived from the build (`launch_app_default/1`).
+  #
   # The config store rejects any other key in the section BY NAME, so an operator
   # reaching for `action_timeout_ms` is told it is not settable instead of
   # editing a line that silently does nothing.
-  @config_keys [:allowed_hosts]
+  @config_keys [:allowed_hosts, :launch_app]
   # `selected_tab` is the tab the person grants with the browser extension
   # (M42 slice 7). It is built in rather than configured because there is
   # nothing to configure: the grant names the tab, and the person makes it.
@@ -136,6 +144,7 @@ defmodule FermixCore.Browser.Config do
           default_profile: String.t(),
           allow_private_network: boolean(),
           allowed_hosts: [String.t()],
+          launch_app: boolean(),
           max_live_profiles: pos_integer(),
           max_tabs: pos_integer(),
           idle_profile_ttl_ms: pos_integer(),
@@ -147,6 +156,7 @@ defmodule FermixCore.Browser.Config do
           launch_timeout_ms: pos_integer(),
           cdp_ready_poll_interval_ms: pos_integer(),
           cdp_version_probe_timeout_ms: pos_integer(),
+          host_launch_timeout_ms: pos_integer(),
           stop_grace_ms: pos_integer(),
           kill_grace_ms: pos_integer(),
           start_failure_threshold: pos_integer(),
@@ -174,6 +184,8 @@ defmodule FermixCore.Browser.Config do
   defstruct default_profile: "fermix",
             allow_private_network: false,
             allowed_hosts: @default_allowed_hosts,
+            # Resolved by `current/2`; `nil` only until then.
+            launch_app: nil,
             max_live_profiles: 6,
             max_tabs: 10,
             idle_profile_ttl_ms: 900_000,
@@ -185,6 +197,7 @@ defmodule FermixCore.Browser.Config do
             launch_timeout_ms: 15_000,
             cdp_ready_poll_interval_ms: 100,
             cdp_version_probe_timeout_ms: 500,
+            host_launch_timeout_ms: 3_000,
             stop_grace_ms: 2_000,
             kill_grace_ms: 2_000,
             start_failure_threshold: 3,
@@ -211,7 +224,8 @@ defmodule FermixCore.Browser.Config do
   @positive_fields ~w(
     max_live_profiles max_tabs idle_profile_ttl_ms idle_sweep_interval_ms action_timeout_ms
     navigation_timeout_ms cdp_keepalive_ms cdp_response_grace_ms launch_timeout_ms
-    cdp_ready_poll_interval_ms cdp_version_probe_timeout_ms stop_grace_ms kill_grace_ms
+    cdp_ready_poll_interval_ms cdp_version_probe_timeout_ms host_launch_timeout_ms
+    stop_grace_ms kill_grace_ms
     start_failure_threshold start_cooldown_ms start_cooldown_max_ms start_retries
     shutdown_slack_ms wait_default_ms
     wait_max_ms wait_poll_interval_ms download_default_ms download_max_ms download_max_bytes
@@ -223,7 +237,7 @@ defmodule FermixCore.Browser.Config do
   # one of them bounds page-controlled text (a tool's name, description, schema
   # and result) or the one argument the model supplies, so there is no posture
   # an operator would want to take on them — `[fermix_core.browser]` still
-  # accepts `allowed_hosts` alone. The call budget defaults to
+  # accepts `allowed_hosts` and `launch_app` alone. The call budget defaults to
   # `action_timeout_ms` and is clamped to `call_max_ms`, which covers a page's
   # own long waits without letting one hold the profile indefinitely.
   @webmcp_limits %{
@@ -237,7 +251,7 @@ defmodule FermixCore.Browser.Config do
 
   # Bounds on the `act` action itself. Constants rather than struct fields, for
   # the same reason as `@webmcp_limits`: neither is a posture an operator would
-  # want to take — `[fermix_core.browser]` still accepts `allowed_hosts` alone.
+  # want to take — `[fermix_core.browser]` still accepts its two keys alone.
   # `settle_budget_ms` is the cost of looking at the page after an action, and
   # the poll runs inside the profile's `handle_call`, so it is deliberately
   # short: a page holding a JS dialog answers nothing at all, and this is what
@@ -365,14 +379,35 @@ defmodule FermixCore.Browser.Config do
     |> current()
   end
 
-  @spec current(keyword() | map()) :: {:ok, t()} | {:error, Error.t()}
-  def current(raw) when is_list(raw) or is_map(raw) do
+  @doc """
+  The configuration from `raw` (the `:browser` app env), every omitted key at
+  its default. `opts` may carry `:app_engine?`, the build fact `launch_app`
+  defaults from; it is this build's (`BuildInfo.app_engine?/0`) unless given.
+  """
+  @spec current(keyword() | map(), keyword()) :: {:ok, t()} | {:error, Error.t()}
+  def current(raw, opts \\ []) when (is_list(raw) or is_map(raw)) and is_list(opts) do
     raw_map = to_map(raw)
+    app_engine? = Keyword.get_lazy(opts, :app_engine?, &BuildInfo.app_engine?/0)
 
     %__MODULE__{}
     |> merge(raw_map)
+    |> resolve_launch_app(app_engine?)
     |> validate()
   end
+
+  @doc """
+  Whether the engine may open the Fermix app when `launch_app` is unset: on
+  macOS, when this engine is the one inside the app's bundle, and not
+  otherwise. An app engine is known from its compiled-in build identity, and
+  only macOS builds carry that identity, so the one fact decides both.
+  """
+  @spec launch_app_default(boolean()) :: boolean()
+  def launch_app_default(app_engine?) when is_boolean(app_engine?), do: app_engine?
+
+  defp resolve_launch_app(%__MODULE__{launch_app: nil} = config, app_engine?),
+    do: %{config | launch_app: launch_app_default(app_engine?)}
+
+  defp resolve_launch_app(config, _app_engine?), do: config
 
   @spec profile(t(), String.t() | nil) :: {:ok, profile(), String.t()} | {:error, Error.t()}
   def profile(%__MODULE__{} = config, name) do
@@ -427,6 +462,7 @@ defmodule FermixCore.Browser.Config do
   defp validate(%__MODULE__{} = config) do
     with :ok <- validate_positive_fields(config),
          :ok <- validate_depth_bounds(config),
+         :ok <- boolean(:launch_app, config.launch_app),
          :ok <- validate_allowed_hosts(config.allowed_hosts),
          :ok <- validate_profiles(config.profiles) do
       {:ok, config}

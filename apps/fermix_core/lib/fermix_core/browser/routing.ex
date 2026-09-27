@@ -6,7 +6,9 @@ defmodule FermixCore.Browser.Routing do
   The named profile `fermix` is the one profile routed. It runs in the Fermix
   app's browser pane (`:fermix_app`) when the app's browser host is attached
   and its last report says the pane is available (`HostAvailability`), and in
-  the managed Chrome (`:managed`) exactly as before otherwise. Every other
+  the managed Chrome (`:managed`) exactly as before otherwise. When no host is
+  attached and `launch_app` allows it, the app is opened first and the
+  decision waits for it under one deadline (`HostLauncher`). Every other
   profile is what its configuration says.
 
   The decision is made when no profile is live for the conversation and never
@@ -20,7 +22,7 @@ defmodule FermixCore.Browser.Routing do
 
   alias FermixCore.Browser.Backend
   alias FermixCore.Browser.Config
-  alias FermixCore.Browser.HostAvailability
+  alias FermixCore.Browser.HostLauncher
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Trace
 
@@ -29,9 +31,9 @@ defmodule FermixCore.Browser.Routing do
   @doc """
   The profile a request runs on, and the backend that implies.
 
-  `opts` may carry `:registry` (the profile registry to read) and
-  `:host_availability` (the availability process to ask); both default to the
-  browser tree's own.
+  `opts` may carry `:registry` (the profile registry to read), and
+  `:host_availability`, `:launcher`, `:now` and `:sleep` for `HostLauncher`;
+  each defaults to the real one.
   """
   @spec for_request(String.t(), String.t(), Config.profile(), Config.t(), map(), keyword()) ::
           {Config.profile(), Backend.label()}
@@ -48,15 +50,17 @@ defmodule FermixCore.Browser.Routing do
   def pin(profile, :fermix_app), do: %{profile | mode: :fermix_app}
   def pin(profile, :cdp), do: profile
 
-  defp decide(owner, @routed_profile, %{mode: :managed} = profile, _config, context, opts) do
-    host = opts |> Keyword.get(:host_availability, HostAvailability) |> HostAvailability.current()
+  defp decide(owner, @routed_profile, %{mode: :managed} = profile, config, context, opts) do
+    launcher_opts = Keyword.take(opts, [:host_availability, :launcher, :now, :sleep])
 
-    if HostAvailability.usable?(host) do
-      trace(context, owner, :fermix_app, nil)
-      {pin(profile, :fermix_app), :fermix_app}
-    else
-      trace(context, owner, :cdp, HostAvailability.unavailable_reason(host))
-      {profile, :cdp}
+    case HostLauncher.decide(config, launcher_opts) do
+      :fermix_app ->
+        trace(context, owner, :fermix_app, nil)
+        {pin(profile, :fermix_app), :fermix_app}
+
+      {:managed, reason} ->
+        trace(context, owner, :cdp, reason)
+        {profile, :cdp}
     end
   end
 

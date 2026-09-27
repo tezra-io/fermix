@@ -147,6 +147,34 @@ defmodule FermixCore.Browser.ConfigTest do
     assert config.wait_max_ms == 9999
   end
 
+  # The default follows the build, never runtime detection: on for the engine
+  # inside the app's bundle (only macOS builds are that), off for every other.
+  test "launch_app defaults to on for the app's own engine and off otherwise" do
+    assert {:ok, %{launch_app: true}} = Config.current(%{}, app_engine?: true)
+    assert {:ok, %{launch_app: false}} = Config.current(%{}, app_engine?: false)
+  end
+
+  test "an explicit launch_app wins over the build's default" do
+    assert {:ok, %{launch_app: false}} = Config.current(%{launch_app: false}, app_engine?: true)
+    assert {:ok, %{launch_app: true}} = Config.current(%{launch_app: true}, app_engine?: false)
+  end
+
+  test "launch_app must be true or false" do
+    assert {:error, error} = Config.current(%{launch_app: "yes"})
+    assert error.code == "invalid_config"
+    assert error.message =~ "launch_app"
+  end
+
+  test "launch_app is settable from config.toml, and the launch deadline is not" do
+    assert :launch_app in Config.config_keys()
+    refute :host_launch_timeout_ms in Config.config_keys()
+
+    assert Config.normalize(%{"launch_app" => false, "host_launch_timeout_ms" => 9}) ==
+             [launch_app: false]
+
+    assert {:ok, %{host_launch_timeout_ms: 3_000}} = Config.current(%{})
+  end
+
   defp restore(nil), do: Application.delete_env(:fermix_core, :browser)
   defp restore(value), do: Application.put_env(:fermix_core, :browser, value)
 end

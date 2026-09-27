@@ -18,8 +18,12 @@ same browser surface: the managed Chrome above, driven over CDP, or the Fermix
 app's own browser pane, which the app hosts and the engine drives over a local
 wire. Which one is decided once, when a conversation starts using the browser:
 the pane when the app's browser host is connected and its last report says the
-pane is ready, the managed Chrome otherwise. The choice holds for as long as
-that browser use lives. A Chrome task stays in Chrome when the pane appears,
+pane is ready, the managed Chrome otherwise. When the app is not connected and
+`[fermix_core.browser] launch_app` allows it (on by default for the engine
+inside the app), the engine opens the app in the background once and waits a
+few seconds for its browser to connect and report before deciding. The
+choice holds for as long as that browser use lives. A Chrome task stays in
+Chrome when the pane appears,
 and a pane task that loses its pane (the app quit, the pane closed) answers
 `host_lost` with the app's reason and ends there; tell the person, and do not
 redo the task in another browser on your own. The next browser use after

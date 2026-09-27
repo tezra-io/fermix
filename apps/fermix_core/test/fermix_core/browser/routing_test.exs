@@ -15,7 +15,8 @@ defmodule FermixCore.Browser.RoutingTest do
   @context %{agent_name: "t"}
 
   setup do
-    {:ok, config} = Config.current(%{})
+    # A short deadline: a host that attached and has not reported is waited for.
+    {:ok, config} = Config.current(%{host_launch_timeout_ms: 50, wait_poll_interval_ms: 10})
     registry = Module.concat(__MODULE__, "Registry#{System.unique_integer([:positive])}")
     start_supervised!({Registry, keys: :unique, name: registry}, id: registry)
     %{config: config, registry: registry}
@@ -61,6 +62,28 @@ defmodule FermixCore.Browser.RoutingTest do
              route(ctx, "owner-new", "fermix", @managed, host(:usable))
 
     assert Map.take(profile, [:headless, :cdp_port]) == %{headless: :auto, cdp_port: :auto}
+  end
+
+  test "a new browser use opens the app when launching is on, then runs on its pane", ctx do
+    {:ok, config} = Config.current(%{launch_app: true, host_launch_timeout_ms: 50})
+    pane = host(:empty)
+    :ok = HostAvailability.listening(pane, endpoint())
+    test = self()
+
+    launcher = fn _timeout_ms ->
+      send(test, :opened)
+      :ok = HostAvailability.attached(pane)
+      HostAvailability.report(pane, true, nil)
+    end
+
+    assert {%{mode: :fermix_app}, :fermix_app} =
+             Routing.for_request("owner-open", "fermix", @managed, config, @context,
+               registry: ctx.registry,
+               host_availability: pane,
+               launcher: launcher
+             )
+
+    assert_received :opened
   end
 
   test "with no usable host, fermix is the managed Chrome exactly as before", ctx do

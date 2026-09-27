@@ -2183,10 +2183,12 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # `[fermix_core.browser]`. Only `allowed_hosts` is settable — it is the
-  # documented recovery for a host the browser policy refuses, so the refusals
-  # need it reachable. Every other field of `Browser.Config` is a timeout, a cap
-  # or a buffer size: tuning, which stays an internal constant.
+  # `[fermix_core.browser]`. Only `allowed_hosts` and `launch_app` are settable:
+  # the first is the documented recovery for a host the browser policy refuses,
+  # so the refusals need it reachable, and the second is whether the engine may
+  # open the Fermix app for its browser pane. Every other field of
+  # `Browser.Config` is a timeout, a cap or a buffer size: tuning, which stays an
+  # internal constant.
   #
   # Unknown keys are rejected here at the parse boundary rather than dropped. The
   # keys an operator most plausibly writes (`action_timeout_ms`, `max_tabs`) are
