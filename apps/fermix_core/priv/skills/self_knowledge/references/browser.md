@@ -11,6 +11,23 @@ default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
 else is using it. On a desktop it is a real window the person can see.
 
+## Two backends for `fermix`, decided once
+
+The default profile `fermix` can run on either of two implementations of the
+same browser surface: the managed Chrome above, driven over CDP, or the Fermix
+app's own browser pane, which the app hosts and the engine drives over a local
+wire. Which one is decided once, when a conversation starts using the browser:
+the pane when the app's browser host is connected and its last report says the
+pane is ready, the managed Chrome otherwise. The choice holds for as long as
+that browser use lives. A Chrome task stays in Chrome when the pane appears,
+and a pane task that loses its pane (the app quit, the pane closed) answers
+`host_lost` with the app's reason and ends there; tell the person, and do not
+redo the task in another browser on your own. The next browser use after
+that is decided afresh. `fermix_visible`, `fermix_headless` and
+`selected_tab` are never routed to the pane. This engine cannot drive the
+pane yet, so a pane profile answers `host_unavailable`, and until it can,
+nothing attaches and `fermix` is the managed Chrome.
+
 ## Where a name points
 
 Both profiles judge where a page actually comes from, not only how its host is

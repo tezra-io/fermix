@@ -5,6 +5,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileManager
+  alias FermixCore.Browser.Routing
   alias FermixCore.Browser.Scope
   alias FermixCore.Temporal.Access
 
@@ -110,6 +111,8 @@ defmodule FermixCore.Browser do
       context: context,
       mutating: mutating?(action, args)
     }
+
+    {profile, _backend} = Routing.for_request(owner, profile_name, profile, config, context)
 
     case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
       {:ok, result} -> {:ok, encode(result)}

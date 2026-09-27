@@ -35,6 +35,9 @@ defmodule FermixCore.Browser.Backend do
   @typedoc "A backend's own state, threaded by `ProfileServer`."
   @type state :: term()
 
+  @typedoc "Which backend a profile runs on, as its registry entry records it."
+  @type label :: :cdp | :fermix_app
+
   @typedoc "One action's tool arguments, string-keyed as the model sent them."
   @type args :: %{optional(String.t()) => term()}
 
@@ -123,4 +126,9 @@ defmodule FermixCore.Browser.Backend do
   @spec for_mode(atom()) :: module()
   def for_mode(:fermix_app), do: HostServer
   def for_mode(mode) when is_atom(mode), do: CDP.Backend
+
+  @doc "The label of the backend that implements a profile mode."
+  @spec label(atom()) :: label()
+  def label(:fermix_app), do: :fermix_app
+  def label(mode) when is_atom(mode), do: :cdp
 end

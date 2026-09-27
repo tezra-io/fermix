@@ -16,7 +16,7 @@ defmodule FermixCore.Tools.BrowserTest do
       key = Keyword.fetch!(opts, :key)
       now = System.monotonic_time(:millisecond)
       registry = FermixCore.Browser.Registry
-      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, now}})
+      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, {now, :cdp}}})
     end
 
     @impl true

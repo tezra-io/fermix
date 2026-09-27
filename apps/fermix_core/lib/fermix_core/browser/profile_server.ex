@@ -239,14 +239,18 @@ defmodule FermixCore.Browser.ProfileServer do
   defp touch_registry(%{key: nil} = state), do: state
 
   defp touch_registry(%{registry: registry, key: key, now_fn: now} = state) do
-    Registry.update_value(registry, key, fn _old -> now.() end)
+    Registry.update_value(registry, key, fn {_last_used, backend} -> {now.(), backend} end)
     state
   end
 
+  # The registry entry is `{last_used, backend}`: the idle sweep and the LRU
+  # eviction read the first, and the routing reads the second, so a live
+  # profile answers which backend it was started on without being asked.
   defp via(opts) do
     case {Keyword.get(opts, :registry), Keyword.get(opts, :key)} do
       {registry, key} when not is_nil(registry) and not is_nil(key) ->
-        {:via, Registry, {registry, key, System.monotonic_time(:millisecond)}}
+        backend = opts |> Keyword.fetch!(:profile) |> Map.get(:mode) |> Backend.label()
+        {:via, Registry, {registry, key, {System.monotonic_time(:millisecond), backend}}}
 
       _other ->
         nil
