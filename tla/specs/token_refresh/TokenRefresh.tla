@@ -65,7 +65,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ bae696857f03
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 559c96b83e34
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 8e38e71db88a
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 06bef603aebb
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 4a517539ab3f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_token.ex @ 091e221339b5
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
@@ -80,7 +80,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/tools/media/backends/codex_image.ex @ ea4175294f01
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 0fdfc82bfdcd
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ a3d42529ca98
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 797255eecc3e
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
 
@@ -103,12 +103,12 @@ CONSTANTS
     \* each is switched off by at least one check to show a property needs it.
     ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:492-496)
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
-    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:380-386, :470-495)
+    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:385-391, :475-500)
     LogoutReachesManager,   \* logout stops or forgets the live manager (plugins/auth.ex:72, management/auth.ex:138)
-    StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:116-121, :132-139)
-    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:158-162)
+    StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:121-126, :137-144)
+    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:163-167)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:323-324, :372-380)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:267-283, plugins_command.ex:504-529, cli/daemon.ex:787-817)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:267-283, plugins_command.ex:504-529, cli/daemon.ex:804-834)
 
 ASSUME /\ CodexProfiles \subseteq Profiles
        /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
@@ -250,7 +250,7 @@ MgrMayStart(a) ==
 SignedOut(a) == RefusesMissingEntry /\ ReadsDiskBeforeRefresh /\ disk[Prof(a)] = None
 
 \* do_refresh takes the profile lock (Store.with_profile_lock, :285-290;
-\* store.ex:158-162); refresh_stored (token_manager.ex:314-319) reads the
+\* store.ex:163-167); refresh_stored (token_manager.ex:314-319) reads the
 \* entry under it through latest_entry (:492-496) and refreshes the stored
 \* token. Without
 \* RefusesMissingEntry, a read that finds no entry falls back to the
@@ -363,10 +363,10 @@ SendRejected(a) ==
     /\ UNCHANGED <<disk, issued, mem, rounds, lpc, lbuf, best, slock>>
 
 -----------------------------------------------------------------------------
-(* Persisting: Store.write (store.ex:116-121), two steps each, under the    *)
-(* store lock (lock/4 and hold/4, :540-555).                                *)
+(* Persisting: Store.write (store.ex:121-126), two steps each, under the    *)
+(* store lock (lock/4 and hold/4, :545-560).                                *)
 
-\* read_for_write (store.ex:380-381, :396-407) reads the whole file. Without
+\* read_for_write (store.ex:385-386, :401-412) reads the whole file. Without
 \* MergesOnWrite the writer would start from an empty document instead.
 ReadForWrite(a) == IF MergesOnWrite THEN disk ELSE EmptyDoc
 
@@ -378,9 +378,9 @@ WriteRead(a) ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, tok, got, tries, rounds, lpc, lbuf, best,
                    plock>>
 
-\* put_provider + atomic_write (store.ex:382-383, :470-495, :562-577): the map
+\* put_provider + atomic_write (store.ex:387-388, :475-500, :567-582): the map
 \* read above, with this profile's entry replaced (or created: put_provider
-\* merges into Map.get(providers, key, %{}), :473), renamed over auth.json.
+\* merges into Map.get(providers, key, %{}), :478), renamed over auth.json.
 \* Both locks are then released: the store lock as Store.write returns, the
 \* profile lock as the refresh's locked section returns. A manager then
 \* applies the entry in memory (apply_entry, token_manager.ex:292-293,
@@ -408,7 +408,7 @@ RejectRead(a) ==
 \* ...and rename half: %{entry | status: "reauthorization_required"}, whose
 \* tokens are the ones this refresh presented, over whatever another
 \* refresher renamed since. That status is not a quarantine the store reads
-\* back (store.ex:233); the damage is the consumed token on disk. Both locks
+\* back (store.ex:238); the damage is the consumed token on disk. Both locks
 \* are released.
 RejectRename(a) ==
     /\ pc[a] = "reject_rename"
@@ -430,8 +430,8 @@ RefreshStep(a) ==
 (* 66-88): Store.delete_provider, then TokenSupervisor.stop_profile. The   *)
 (* provider sign-out (management/auth.ex:135-142) deletes, then forgets.   *)
 
-\* delete_provider (store.ex:132-139) takes the profile lock, then the store
-\* lock, then read_existing (:388-389, :447-463). With no entry, the in-daemon
+\* delete_provider (store.ex:137-144) takes the profile lock, then the store
+\* lock, then read_existing (:393-394, :452-468). With no entry, the in-daemon
 \* plugin logout fails and stops there (plugins/auth.ex:69-71), while the
 \* provider sign-out treats :provider_missing as done and goes on to forget
 \* (management/auth.ex:351-360), and both CLI logouts go on to their notice
@@ -453,9 +453,9 @@ LogoutRead ==
     /\ lpc' = "read"
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, pc, tok, got, tries, buf, rounds, best>>
 
-\* remove_provider + atomic_write (store.ex:390-391, :497-507, :562-577),
+\* remove_provider + atomic_write (store.ex:395-396, :502-512, :567-582),
 \* then both locks are released. An entry that was already gone is not
-\* rewritten (remove_provider refuses, :503).
+\* rewritten (remove_provider refuses, :508).
 LogoutDelete ==
     /\ lpc = "read"
     /\ disk' = IF lbuf[LogoutProfile] = None THEN disk
@@ -480,7 +480,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*    the profile (plugins_command.ex:262, :504-529; auth_command.ex:223-241,
 \*    :267-283, :295-298): an `auth_forget` request on the control socket
 \*    (cli/daemon/client.ex:61-74), answered by forget_signed_out
-\*    (cli/daemon.ex:562, :787-817; token_supervisor.ex:151-170). That is
+\*    (cli/daemon.ex:580, :804-834; token_supervisor.ex:151-170). That is
 \*    forget, as below, then stop_profile for a child of TokenSupervisor,
 \*    which by then is idle and refusing; the Codex manager, a top-level
 \*    child, is only forgotten. One step: after the forget nothing can run

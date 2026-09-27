@@ -7,26 +7,26 @@ profile: the top-level `TokenManager` for Codex (`application.ex:173`,
 (`token_supervisor.ex:237-265`). A tree-less CLI VM refreshes a profile directly,
 with no manager (`token_supervisor.ex:221-224`, `:312-330`;
 `codex_token.ex:15-23`). Every refresher persists through `Store.write`, which
-reads the whole file and then renames a new one over it (`store.ex:116-121`,
-`:380-386`, `:562-577`). The model therefore keeps the file as one map: a write
+reads the whole file and then renames a new one over it (`store.ex:121-126`,
+`:385-391`, `:567-582`). The model therefore keeps the file as one map: a write
 is never torn, and the last rename wins. After a 4xx, a profile other than Codex
 writes back the entry it read when its refresh began
 (`mark_reauthorization_required`). Logout deletes the entry, then stops the
 profile's manager (plugin logout, `plugins/auth.ex:66-88`) or forgets its tokens
 (provider sign-out, `management/auth.ex:135-142`). A logout from a tree-less CLI
 VM deletes the entry the same way, then has a running daemon let go of the
-profile over the control socket (`auth_forget`, `cli/daemon.ex:787-817` →
+profile over the control socket (`auth_forget`, `cli/daemon.ex:804-834` →
 `TokenSupervisor.forget_signed_out`, `token_supervisor.ex:132-170`).
 
 Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
 (`store.ex:9-39`):
 - the store lock, `auth.json.lock`, around every `Store.write` and
-  `Store.delete_provider` (`store.ex:116-121`, `:132-139`);
+  `Store.delete_provider` (`store.ex:121-126`, `:137-144`);
 - one profile lock per profile, `auth.json.<base64 profile>.lock`, around one
   refresh from its read of the entry to its write (`token_manager.ex:285-290`,
   `token_supervisor.ex:321-330`, `codex_token.ex:112-126`), around a delete
-  (`store.ex:132-139`), and around a sign-in or import from before it spends
-  anything to its write (`store.ex:141-162`; `codex_login.ex:40-51`,
+  (`store.ex:137-144`), and around a sign-in or import from before it spends
+  anything to its write (`store.ex:146-167`; `codex_login.ex:40-51`,
   `xai_login.ex:50-58`, `plugins/auth.ex:195-206`, `codex_import.ex:38-56`,
   `anthropic_login.ex:104-121`). Every taker waits the same 10 s, and a lock
   still busy after it is `{:error, :profile_busy}` with nothing spent.
@@ -94,18 +94,18 @@ least one check):
   subsumes this mechanism, so it is load-bearing only in check 16, which has
   the profile lock off.
 - `MergesOnWrite`: `Store.write` re-reads the file and replaces only its own
-  entry (`store.ex:380-386`, `:470-495`).
+  entry (`store.ex:385-391`, `:475-500`).
 - `LogoutReachesManager`: logout stops the profile's live manager
   (`plugins/auth.ex:72` → `token_supervisor.ex:181-196`) or forgets its tokens
   (`management/auth.ex:138` → `token_manager.ex:205-208`).
 - `StoreLock`: `Store.write` and `Store.delete_provider` hold `auth.json.lock`
-  from their read to their rename (`store.ex:116-121`, `:132-139`,
-  `:540-560`).
+  from their read to their rename (`store.ex:121-126`, `:137-144`,
+  `:545-565`).
 - `ProfileLock`: a refresh holds its profile's lock from its read of the entry
   to its write, in the manager (`token_manager.ex:285-290`), the tree-less
   direct refresh (`token_supervisor.ex:321-330`) and `CodexToken`
   (`codex_token.ex:112-126`); `Store.delete_provider` takes it before its store
-  lock (`store.ex:132-139`). A sign-in holds it from before its code exchange
+  lock (`store.ex:137-144`). A sign-in holds it from before its code exchange
   to its write; that is folded (see the spec header).
 - `RefusesMissingEntry`: a manager whose read finds no entry (no auth file, or
   no entry for the profile) drops its tokens, as `forget` does, and sends and
@@ -117,12 +117,12 @@ least one check):
   `cli/daemon/client.ex:61-74`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops a
   `TokenSupervisor` child; the top-level Codex manager is only forgotten
-  (`cli/daemon.ex:562`, `:787-817`; `token_supervisor.ex:132-170`). Off, the
+  (`cli/daemon.ex:580`, `:804-834`; `token_supervisor.ex:132-170`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
 
-The atomic rename (`store.ex:569`) is not a switch. The model writes the whole
+The atomic rename (`store.ex:574`) is not a switch. The model writes the whole
 map by construction, and no property here is about a torn file.
 
 ## What holds
@@ -250,11 +250,11 @@ failed before the fix. To see a counterexample, run
     (`token_manager.ex:418-420`), so the lost update became a reuse. A daemon
     restart does the same, because `init` loads the disk entry.
 - **Fix:** `Store.write` and `Store.delete_provider` run their read, merge and
-  rename under `auth.json.lock` (`store.ex:116-121`, `:132-139`, `:540-560`):
+  rename under `auth.json.lock` (`store.ex:121-126`, `:137-144`, `:545-565`):
   80 attempts 100 ms apart, broken as stale after 5 s. The wait outlasts the
   stale threshold, so a dead VM's lockfile never fails a live writer. Reads
   take no lock. A lock that is not taken (busy past the wait, or a lockfile
-  that cannot be created) is a tuple, not a raise (`store.ex:534-560`),
+  that cannot be created) is a tuple, not a raise (`store.ex:539-565`),
   because a raise inside the Codex manager would restart the rest of the
   top-level `:rest_for_one` tree. Only a wedged filesystem, which makes the
   lock owner's own calls time out, still exits the caller (see "Outside this
@@ -296,7 +296,7 @@ failed before the fix. To see a counterexample, run
     idle period, for example from parallel subagents, both send the expired
     entry's token.
 - **Fix:** one refresher per profile at a time, across processes and VMs.
-  `Store.with_profile_lock/3` (`store.ex:158-162`) wraps
+  `Store.with_profile_lock/3` (`store.ex:163-167`) wraps
   `Plugins.Dist.Lock.with_lock` on `auth.json.<base64 profile>.lock` (the name
   is encoded, so no `/` or `..` in an operator-set profile name leaves the auth
   file's directory): 100 attempts 100 ms apart, broken as stale after 120 s.
@@ -368,7 +368,7 @@ failed before the fix. To see a counterexample, run
     (`token_manager.ex:80`), so it waits behind any refresh callback already
     running, and that refresh's write always landed first.
 - **Fix:** `Store.delete_provider` takes the profile lock before its store lock
-  (`store.ex:132-139`), so a delete waits for the profile's refresh in flight
+  (`store.ex:137-144`), so a delete waits for the profile's refresh in flight
   and deletes after it. A refresh that starts after the delete refuses
   (TOKEN-5's fix). A profile lock still busy after 10 s fails the logout loudly
   with nothing deleted (`{:error, :profile_busy}`). Every sign-in and import
@@ -457,7 +457,7 @@ failed before the fix. To see a counterexample, run
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:562`, `:787-817`;
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:580`, `:804-834`;
     `token_supervisor.ex:132-170`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile` for a
@@ -526,7 +526,7 @@ grace window.
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:315-325`), and
+  turns that into `internal_error` (`cli/daemon.ex:321-331`), and
   `revert_route` (`management/auth.ex:139`) never runs.
 - **Lock staleness.** The model never breaks a lock. A lockfile is broken only
   once it looks older than its stale threshold, and each threshold exceeds its
