@@ -22,6 +22,7 @@ description: >
     benchmark/bin/browser_host_fixture.py                                  # pane_task
     benchmark/bin/browser_host_fixture.py --fail-after 2 \
       --fail-reason host_unavailable --fail-message "the Mac is locked"    # lock_mid_task, cancel_releases_tabs
+    benchmark/bin/browser_host_fixture.py --cancel-after 1                 # host_cancel_mid_task
 
   `no_host_falls_back_to_chrome` runs with NO fixture attached and
   `[fermix_core.browser] launch_app` off (the default outside the app), so it
@@ -41,6 +42,13 @@ description: >
   `tools_any: [browser]`; everything else is judged on the substance of the
   reply. `make dry` validates this suite's shape without starting anything;
   a live run needs the fixture and a model both, per case as noted above.
+
+  `host_cancel_mid_task` is the wire counterpart: the fixture itself sends
+  `task.cancel` (as the app does when the person clicks "Cancel task" on the
+  task's own tab), never a word the person types. The model's own next
+  browser call is the one that meets it — the daemon answers `cancelled` with
+  its own sentence before anything reaches the wire again — so the case
+  proves the model reports that sentence and never re-routes to Chrome.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -105,6 +113,39 @@ scenarios:
         rubric: >
           Reports that the capture failed because the browser stopped working
           — never a claim that a screenshot was taken and here it is.
+
+  - id: host_cancel_mid_task
+    title: "The app's own task.cancel ends the turn with the daemon's sentence, never Chrome"
+    severity: critical
+    tags: [browser, browser_host, cancel]
+    cases:
+      - id: cancelled_after_open
+        # The fixture (`--cancel-after 1`) answers the first request, then
+        # sends the wire event itself — task.cancel {task_id, reason} — the
+        # way the app does when the person clicks "Cancel task" on that tab.
+        # The model never sees this in the conversation; its own next browser
+        # call is the one that meets the cancellation, exactly as BROWSER-4/5
+        # meet a lock or a lost host.
+        query: "Open https://example.com in the browser, then click the 'More information...' link, and tell me what happened."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)cancel"
+          reply_not_matches: "(?i)(clicked|navigated|went to|the linked page (shows|says))"
+        rubric: >
+          Reports that the person cancelled the browser task in the Fermix
+          app — never a claim that the click went through, that another
+          browser finished it, or that the task silently completed.
+      - id: cancelled_before_capture
+        # Same fixture invocation (`--cancel-after 1`): the second call this
+        # time is a screenshot instead of a click.
+        query: "Open https://example.com in the browser, take a screenshot of it, and tell me what happened."
+        expect:
+          tools_any: [browser]
+          reply_matches: "(?i)cancel"
+          reply_not_matches: "(?i)(here is the screenshot|the screenshot shows|captured successfully)"
+        rubric: >
+          Reports that the person cancelled the browser task in the Fermix
+          app — never a claim that a screenshot was taken and here it is.
 
   - id: cancel_releases_tabs
     title: "Cancelling a pane task before it does anything else releases it, not runs it"

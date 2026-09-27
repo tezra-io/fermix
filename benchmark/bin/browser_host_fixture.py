@@ -22,6 +22,7 @@ without starting anything.
 
     benchmark/bin/browser_host_fixture.py
     benchmark/bin/browser_host_fixture.py --fail-after 2 --fail-message "the Mac is locked"
+    benchmark/bin/browser_host_fixture.py --cancel-after 1                # the person cancels the task
     benchmark/bin/browser_host_fixture.py --no-attach   # a launch that connects but never attaches
 
 Ctrl-C stops it; the daemon reads the closed socket as `host_stopping` never
@@ -97,20 +98,26 @@ def example_page(url: str) -> dict:
 
 class FakeHost:
     """One connection's worth of state: the tabs it has opened, keyed by the
-    task that opened them (`task.release`'s bookkeeping), and the point past
-    which it starts refusing requests (the "lock mid-task" scenario)."""
+    task that opened them (`task.release`'s bookkeeping), the point past
+    which it starts refusing requests (the "lock mid-task" scenario), and the
+    point at which the person cancels a task from its own tab (the "cancel
+    mid-task" scenario)."""
 
     def __init__(
         self,
         fail_after: int | None,
         fail_reason: str,
         fail_message: str,
+        cancel_after: int | None,
+        cancel_reason: str,
         host_version: str,
         profile_id: str,
     ) -> None:
         self.fail_after = fail_after
         self.fail_reason = fail_reason
         self.fail_message = fail_message
+        self.cancel_after = cancel_after
+        self.cancel_reason = cancel_reason
         self.host_version = host_version
         self.profile_id = profile_id
         self.tabs: dict[str, str] = {}
@@ -121,6 +128,11 @@ class FakeHost:
         tab_id = f"t{self.next_tab}"
         self.next_tab += 1
         return tab_id
+
+    def task_for(self, frame: dict) -> str:
+        """The task a request belongs to: named directly (`tab.open`,
+        `tab.list`, `task.release`) or by the tab it names otherwise."""
+        return frame.get("task_id") or self.tabs[frame["tab_id"]]
 
     def handle(self, sock: socket.socket, frame: dict) -> None:
         if "id" not in frame:
@@ -147,6 +159,11 @@ class FakeHost:
 
         log(f"answering {request_type} (#{self.answered})")
         send(sock, {"id": request_id, "ok": True, "result": self.answer(request_type, frame)})
+
+        if self.cancel_after is not None and self.answered == self.cancel_after:
+            task_id = self.task_for(frame)
+            log(f"the person cancels {task_id}, right after {request_type} (#{self.answered})")
+            send(sock, {"type": "task.cancel", "task_id": task_id, "reason": self.cancel_reason})
 
     def answer(self, request_type: str, frame: dict) -> dict:
         if request_type == "tab.open":
@@ -280,7 +297,15 @@ def run(args: argparse.Namespace) -> None:
     send(sock, {"type": "availability", "available": True})
     log(f"attached as {args.profile_id}; waiting for requests")
 
-    host = FakeHost(args.fail_after, args.fail_reason, args.fail_message, args.host_version, args.profile_id)
+    host = FakeHost(
+        args.fail_after,
+        args.fail_reason,
+        args.fail_message,
+        args.cancel_after,
+        args.cancel_reason,
+        args.host_version,
+        args.profile_id,
+    )
     try:
         for frame in read_frames(sock):
             host.handle(sock, frame)
@@ -306,6 +331,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--fail-reason", default="host_unavailable")
     parser.add_argument("--fail-message", default="the Mac is locked")
+    parser.add_argument(
+        "--cancel-after",
+        type=int,
+        default=None,
+        help="right after answering the Nth request, send task.cancel for its task",
+    )
+    parser.add_argument("--cancel-reason", default="cancelled by the person")
     parser.add_argument(
         "--no-attach",
         action="store_true",
