@@ -29,9 +29,12 @@ rather than each opening the app in turn. The choice holds for as long as that
 browser use lives. A Chrome task stays in Chrome when the pane appears, and a
 pane task that loses its pane mid-task (the app quit, the Mac locked or slept)
 answers `host_lost` with the app's reason and ends there; tell the person, and
-do not redo the task in another browser on your own. Every later browser call
-in the same turn answers that same sentence too, rather than quietly starting
-a fresh task on Chrome — the turn that saw the loss stays lost. The next
+do not redo the task in another browser on your own. The person can also
+cancel a pane task directly, from its own tab in the app ("Cancel task"):
+that answers `cancelled` — the pane itself is fine, so say it was cancelled,
+not that the browser went away. Every later browser call in the same turn
+answers that same sentence too, rather than quietly starting a fresh task on
+Chrome — the turn that saw the loss or the cancel stays that way. The next
 browser use, in a fresh turn, is decided afresh. `fermix_visible`,
 `fermix_headless` and `selected_tab` are never routed to the pane.
 
