@@ -354,6 +354,12 @@ defmodule FermixCore.Tools.Browser do
           "the Fermix app's browser cannot be driven from this engine; nothing was done"
       },
       %{
+        tag: "host_lost",
+        description:
+          "the Fermix app's browser went away mid-task, and the task's browser with it; tell " <>
+            "the person what happened rather than redoing the task in another browser"
+      },
+      %{
         tag: "unsupported_in_fermix_app",
         description:
           "the Fermix app's browser does not carry this verb (a page's WebMCP tools); use " <>

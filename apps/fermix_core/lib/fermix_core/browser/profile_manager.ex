@@ -196,11 +196,12 @@ defmodule FermixCore.Browser.ProfileManager do
   # still queued — `stop_owner/2` is a cast and teardown takes seconds, so the
   # lookup keeps handing out a pid that is on its way out. Both are provably
   # "never ran", and the proof is three properties of `ProfileServer`: it traps
-  # exits (profile_server.ex `init/1`), its `handle_call/3` NEVER returns
-  # `:stop` (the only `:stop` is `handle_info(:idle_timeout, _)`), and a nested
-  # CDP call blocks in a selective receive, so a parent EXIT is processed only
-  # between callbacks. A `{:stop, ...}` added to `handle_call/3` would break
-  # that and put a half-run mutation in this branch.
+  # exits (profile_server.ex `init/1`), its `handle_call/3` returns `:stop` only
+  # WITH the reply (a backend's `:reap`), so the request it was handling is
+  # answered and only one still queued sees the exit, and a nested CDP call
+  # blocks in a selective receive, so a parent EXIT is processed only between
+  # callbacks. A `{:stop, ...}` without a reply added to `handle_call/3` would
+  # break that and put a half-run mutation in this branch.
   #
   # Everything else — `:killed` from a supervisor out of patience, a crash —
   # means the server died holding the request, and only the page knows how far

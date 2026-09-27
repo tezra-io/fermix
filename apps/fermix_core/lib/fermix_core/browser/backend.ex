@@ -41,8 +41,13 @@ defmodule FermixCore.Browser.Backend do
   @typedoc "The tool call's context (`:agent_name`, `:conversation_key`, …)."
   @type context :: map()
 
-  @typedoc "An operation's answer, with the backend's state on every path."
-  @type result :: {:ok, map(), state()} | {:error, Error.t(), state()}
+  @typedoc """
+  An operation's answer, with the backend's state on every path. `:reap` is a
+  refusal after which the profile must not take another request: the server
+  answers it and stops, and the next request starts a fresh profile.
+  """
+  @type result ::
+          {:ok, map(), state()} | {:error, Error.t(), state()} | {:reap, Error.t(), state()}
 
   @doc "The backend's state, from `ProfileServer`'s start options."
   @callback init(opts :: keyword()) :: state()
@@ -51,7 +56,8 @@ defmodule FermixCore.Browser.Backend do
   @callback status(state()) :: map()
 
   @doc "Bring the runtime up when it is not running."
-  @callback start(context(), state()) :: {:ok, state()} | {:error, Error.t(), state()}
+  @callback start(context(), state()) ::
+              {:ok, state()} | {:error, Error.t(), state()} | {:reap, Error.t(), state()}
 
   @doc "Tear the runtime down. Idempotent, and called on every exit path."
   @callback stop(state()) :: state()

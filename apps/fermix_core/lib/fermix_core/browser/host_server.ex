@@ -7,20 +7,31 @@ defmodule FermixCore.Browser.HostServer do
   `CDP.Backend` implements over Chrome. The wire is not built yet, so every
   operation answers `host_unavailable` and nothing is sent anywhere: the mode
   can be selected, started and refused cleanly, and the refusal is all it does.
+
+  Before every operation the host's last report is read (`HostAvailability`).
+  A pane that is no longer available fails the task where it stands: the
+  operation answers `host_lost` and the profile is reaped. Nothing re-runs it
+  in Chrome; the conversation's next browser use is decided afresh.
   """
 
   @behaviour FermixCore.Browser.Backend
 
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.HostAvailability
 
   @impl true
-  def init(opts) when is_list(opts), do: %{profile_name: Keyword.fetch!(opts, :profile_name)}
+  def init(opts) when is_list(opts) do
+    %{
+      profile_name: Keyword.fetch!(opts, :profile_name),
+      host_availability: Keyword.get(opts, :host_availability, HostAvailability)
+    }
+  end
 
   @impl true
   def status(_state), do: %{"running" => false, "tabs" => 0}
 
   @impl true
-  def start(_context, state), do: unwired(state)
+  def start(_context, state), do: answer(state)
 
   @impl true
   def stop(state), do: state
@@ -34,52 +45,68 @@ defmodule FermixCore.Browser.HostServer do
   def console_buffer(_state), do: []
 
   @impl true
-  def open(_args, _context, state), do: unwired(state)
+  def open(_args, _context, state), do: answer(state)
 
   @impl true
-  def navigate(_args, _context, state), do: unwired(state)
+  def navigate(_args, _context, state), do: answer(state)
 
   @impl true
-  def snapshot(_args, _context, state), do: unwired(state)
+  def snapshot(_args, _context, state), do: answer(state)
 
   @impl true
-  def tabs(_args, _context, state), do: unwired(state)
+  def tabs(_args, _context, state), do: answer(state)
 
   @impl true
-  def focus(_args, _context, state), do: unwired(state)
+  def focus(_args, _context, state), do: answer(state)
 
   @impl true
-  def close(_args, _context, state), do: unwired(state)
+  def close(_args, _context, state), do: answer(state)
 
   @impl true
-  def screenshot(_args, _context, state), do: unwired(state)
+  def screenshot(_args, _context, state), do: answer(state)
 
   @impl true
-  def pdf(_args, _context, state), do: unwired(state)
+  def pdf(_args, _context, state), do: answer(state)
 
   @impl true
-  def console(_args, _context, state), do: unwired(state)
+  def console(_args, _context, state), do: answer(state)
 
   @impl true
-  def dialog(_args, _context, state), do: unwired(state)
+  def dialog(_args, _context, state), do: answer(state)
 
   @impl true
-  def cookies(_args, _context, state), do: unwired(state)
+  def cookies(_args, _context, state), do: answer(state)
 
   @impl true
-  def storage(_args, _context, state), do: unwired(state)
+  def storage(_args, _context, state), do: answer(state)
 
   @impl true
-  def upload(_args, _context, state), do: unwired(state)
+  def upload(_args, _context, state), do: answer(state)
 
   @impl true
-  def download(_args, _context, state), do: unwired(state)
+  def download(_args, _context, state), do: answer(state)
 
   @impl true
-  def act(_args, _context, state), do: unwired(state)
+  def act(_args, _context, state), do: answer(state)
 
   @impl true
-  def webmcp(_args, _context, state), do: unwired(state)
+  def webmcp(_args, _context, state), do: answer(state)
+
+  defp answer(state) do
+    host = HostAvailability.current(state.host_availability)
+
+    if HostAvailability.usable?(host),
+      do: unwired(state),
+      else: {:reap, lost(host), state}
+  end
+
+  defp lost(host) do
+    Error.new(
+      "host_lost",
+      "The Fermix app's browser is no longer available: " <>
+        HostAvailability.unavailable_reason(host) <> "."
+    )
+  end
 
   defp unwired(state) do
     {:error,

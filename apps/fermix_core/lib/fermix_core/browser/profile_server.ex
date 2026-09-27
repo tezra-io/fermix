@@ -14,6 +14,10 @@ defmodule FermixCore.Browser.ProfileServer do
   refused here, in the order a granted tab has always answered in, before the
   backend is asked to do it.
 
+  A backend that answers `:reap` has lost the browser for good (the app's pane
+  went away mid-task): the server answers that refusal and stops, so the
+  profile is reaped rather than quietly carried on somewhere else.
+
   Callers reach this process directly (via the registry); the manager only
   starts/evicts it. Requests are serialized per scope by the GenServer.
   """
@@ -107,9 +111,14 @@ defmodule FermixCore.Browser.ProfileServer do
   @impl true
   def handle_call(:status, _from, state), do: {:reply, status_map(state), state}
 
+  # The one `:stop` a request can end in carries its reply, so the request that
+  # met it is answered and only a request still queued behind it sees the exit
+  # (`ProfileManager` reads that exit as "never ran").
   def handle_call({:request, request}, _from, state) do
-    {reply, state} = run_request(request, touch_idle(state))
-    {:reply, attach_console(reply, state), state}
+    case run_request(request, touch_idle(state)) do
+      {{:reap, error}, state} -> {:stop, :normal, attach_console({:error, error}, state), state}
+      {reply, state} -> {:reply, attach_console(reply, state), state}
+    end
   end
 
   # A failed action carries the recent console/JS-exception buffer (oldest
@@ -158,7 +167,7 @@ defmodule FermixCore.Browser.ProfileServer do
   defp run_request(%{action: "start", context: context}, state) do
     case start_backend(context, state) do
       {:ok, state} -> {{:ok, status_map(state)}, state}
-      {:error, error, state} -> {{:error, error}, state}
+      {failure, error, state} -> {{failure, error}, state}
     end
   end
 
@@ -185,15 +194,15 @@ defmodule FermixCore.Browser.ProfileServer do
       {:ok, result, backend_state} ->
         {{:ok, result}, put_backend(state, backend_state)}
 
-      {:error, %Error{} = error, backend_state} ->
-        {{:error, error}, put_backend(state, backend_state)}
+      {failure, %Error{} = error, backend_state} when failure in [:error, :reap] ->
+        {{failure, error}, put_backend(state, backend_state)}
     end
   end
 
   defp refuse_started(capability, context, state) do
     case start_backend(context, state) do
       {:ok, state} -> {Capabilities.refuse(state.mode, capability), state}
-      {:error, error, state} -> {{:error, error}, state}
+      {failure, error, state} -> {{failure, error}, state}
     end
   end
 
@@ -202,8 +211,8 @@ defmodule FermixCore.Browser.ProfileServer do
       {:ok, backend_state} ->
         {:ok, put_backend(state, backend_state)}
 
-      {:error, %Error{} = error, backend_state} ->
-        {:error, error, put_backend(state, backend_state)}
+      {failure, %Error{} = error, backend_state} when failure in [:error, :reap] ->
+        {failure, error, put_backend(state, backend_state)}
     end
   end
 
