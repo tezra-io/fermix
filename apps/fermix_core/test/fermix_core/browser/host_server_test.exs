@@ -300,6 +300,43 @@ defmodule FermixCore.Browser.HostServerTest do
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
   end
 
+  test "the person cancelling from the app fails the task with its own sentence, and reaps it" do
+    host = start_supervised!({HostAvailability, name: nil}, id: make_ref())
+    endpoint = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> Process.exit(endpoint, :kill) end)
+    :ok = HostAvailability.listening(host, endpoint)
+
+    connection =
+      spawn(fn ->
+        receive do
+          {:browser_host_request, from, ref, _task_id, "tab.open", _payload} ->
+            Link.answer(from, ref, {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+        end
+
+        receive do
+          {:browser_host_request, from, _ref, _task_id, "page.act", _payload} ->
+            Link.cancelled(from, self(), "cancelled by the person")
+        end
+
+        Process.sleep(:infinity)
+      end)
+
+    on_exit(fn -> Process.exit(connection, :kill) end)
+    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.report(host, true, nil)
+
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+
+    assert {:ok, _} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+
+    assert {:error, %Error{code: "cancelled", message: message}} =
+             req(pid, "act", %{"target" => "h1:t1", "kind" => "press", "key" => "Enter"})
+
+    assert message == "The person cancelled the browser task in the Fermix app."
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+  end
+
   test "a pane the app reports unavailable is lost with the app's own reason" do
     {host, _connection} = usable_host()
     :ok = HostAvailability.report(host, false, "the pane was closed")

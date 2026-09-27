@@ -39,6 +39,14 @@ defmodule FermixCore.Browser.HostServer do
   where it stands: the operation answers `host_lost` with the app's reason,
   the profile is reaped, and the turn is marked (`TurnMarker`) so that its
   later browser calls answer the same sentence instead of running in Chrome.
+
+  ## The person's own cancel
+
+  The pane itself is fine, but the person clicked "cancel" on this task's own
+  tab in the app. The connection tells this one task (`task.cancel`) and
+  releases its tabs the same way `task.release` does; the task ends exactly as
+  a lost pane ends it, except the sentence is its own (`cancelled`, not
+  `host_lost`), because nothing about the pane was actually lost.
   """
 
   @behaviour FermixCore.Browser.Backend
@@ -63,6 +71,8 @@ defmodule FermixCore.Browser.HostServer do
   @observing_kinds ~w(click submit click_coords)
   @download_buffer 10
   @reason_chars 200
+
+  @cancelled_sentence "The person cancelled the browser task in the Fermix app."
 
   @stale_ref "Element ref is stale or unknown. Refs belong to the snapshot they came from, and " <>
                "the page has changed since. Take a fresh `snapshot` and use a ref from it."
@@ -149,6 +159,13 @@ defmodule FermixCore.Browser.HostServer do
       ),
       do: lost_between_requests(state, "the app is quitting")
 
+  # The person cancelled this task from the app, between requests.
+  def handle_message(
+        {:browser_host_cancelled, connection, _reason},
+        %{task: %{connection: connection}} = state
+      ),
+      do: cancelled_between_requests(state)
+
   def handle_message(
         {:browser_host_event, connection, type, payload},
         %{task: %{connection: connection}} = state
@@ -161,6 +178,11 @@ defmodule FermixCore.Browser.HostServer do
 
   defp lost_between_requests(state, reason) do
     {:reap, _error, state} = lose(state, reason)
+    {:stop, stop(state)}
+  end
+
+  defp cancelled_between_requests(state) do
+    {:reap, _error, state} = lose_cancelled(state)
     {:stop, stop(state)}
   end
 
@@ -442,6 +464,14 @@ defmodule FermixCore.Browser.HostServer do
     Error.new("host_lost", "The Fermix app's browser is no longer available: #{reason}.")
   end
 
+  # The pane itself is fine; the person ended this one task on purpose, so the
+  # sentence is the daemon's own, not the app's reason.
+  defp lose_cancelled(state) do
+    error = Error.new("cancelled", @cancelled_sentence)
+    :ok = TurnMarker.mark(state.turn_marker, state.owner_key, state.task.caller, error)
+    {:reap, error, %{state | lost: error}}
+  end
+
   # ── one request ────────────────────────────────────────────────────────────
 
   # The answer, the connection's end, or the app's quit, whichever comes
@@ -456,6 +486,7 @@ defmodule FermixCore.Browser.HostServer do
       {:browser_host_answer, ^ref, {:error, error}} -> host_error(error, state)
       {:DOWN, ^connection_ref, :process, _pid, _reason} -> lose(state, "the app disconnected")
       {:browser_host_stopping, ^connection} -> lose(state, "the app is quitting")
+      {:browser_host_cancelled, ^connection, _reason} -> lose_cancelled(state)
     after
       timeout_ms -> {:error, timeout_error(type, timeout_ms), state}
     end
@@ -1011,6 +1042,9 @@ defmodule FermixCore.Browser.HostServer do
 
       {:browser_host_stopping, ^connection} ->
         lose(state, "the app is quitting")
+
+      {:browser_host_cancelled, ^connection, _reason} ->
+        lose_cancelled(state)
     after
       remaining -> {:error, Error.new("timeout", "download timed out"), state}
     end

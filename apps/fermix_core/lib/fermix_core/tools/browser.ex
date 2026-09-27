@@ -360,6 +360,12 @@ defmodule FermixCore.Tools.Browser do
             "the person what happened rather than redoing the task in another browser"
       },
       %{
+        tag: "cancelled",
+        description:
+          "the person cancelled this task's browser use from the Fermix app; tell them it was " <>
+            "cancelled rather than continuing or redoing it"
+      },
+      %{
         tag: "unsupported_in_fermix_app",
         description:
           "the Fermix app's browser does not carry this verb (a page's WebMCP tools); use " <>
