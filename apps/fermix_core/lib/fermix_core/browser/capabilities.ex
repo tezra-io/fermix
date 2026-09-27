@@ -20,6 +20,7 @@ defmodule FermixCore.Browser.Capabilities do
           :download_redirect
           | :target_discovery
           | :target_attach
+          | :tab_cap
           | :new_tab
           | :close_tab
           | :focus_tab
@@ -28,10 +29,14 @@ defmodule FermixCore.Browser.Capabilities do
 
   @type t :: %{capability() => boolean()}
 
-  @whole_browser %{
+  # `tab_cap` is whether Fermix owns this browser's tabs and so may close the
+  # oldest of them back to `max_tabs` after an `open`: the browser it launched,
+  # never one somebody else started.
+  @managed %{
     download_redirect: true,
     target_discovery: true,
     target_attach: true,
+    tab_cap: true,
     new_tab: true,
     close_tab: true,
     focus_tab: true,
@@ -39,10 +44,13 @@ defmodule FermixCore.Browser.Capabilities do
     downloads: true
   }
 
+  @attached_browser %{@managed | tab_cap: false}
+
   @attached_tab %{
     download_redirect: false,
     target_discovery: false,
     target_attach: false,
+    tab_cap: false,
     new_tab: false,
     close_tab: false,
     focus_tab: false,
@@ -54,11 +62,13 @@ defmodule FermixCore.Browser.Capabilities do
   The capabilities of a profile mode.
 
   `:managed`, `:existing_session` and `:remote_cdp` all drive a whole browser
-  over one CDP endpoint and differ only in who launched it.
+  over one CDP endpoint and differ only in who launched it, which decides
+  whose tabs they are.
   """
   @spec for_mode(atom()) :: t()
+  def for_mode(:managed), do: @managed
   def for_mode(:attached_tab), do: @attached_tab
-  def for_mode(mode) when is_atom(mode), do: @whole_browser
+  def for_mode(mode) when is_atom(mode), do: @attached_browser
 
   @doc "Whether `capability` is available in `mode`."
   @spec allows?(atom(), capability()) :: boolean()

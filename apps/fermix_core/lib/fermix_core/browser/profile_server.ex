@@ -651,13 +651,13 @@ defmodule FermixCore.Browser.ProfileServer do
 
   # Keep a managed Chrome from accumulating tabs across a session: after an
   # `open` pushes the live count past `max_tabs`, close the oldest non-active
-  # tabs back to the cap. Managed-only — a user-attached Chrome (cdp_url
-  # profile) keeps all of its own tabs.
+  # tabs back to the cap. Only a browser whose tabs are Fermix's (`tab_cap`) —
+  # a user-attached Chrome (cdp_url profile) keeps all of its own tabs.
   defp enforce_tab_cap(state) do
     cap = state.config.max_tabs
     excess = map_size(state.targets) - cap
 
-    if managed?(state) and excess > 0 do
+    if state.caps.tab_cap and excess > 0 do
       evict_oldest_tabs(state, excess)
     else
       {:ok, state}
@@ -695,8 +695,6 @@ defmodule FermixCore.Browser.ProfileServer do
         state
     end
   end
-
-  defp managed?(state), do: Map.get(state.profile, :mode) == :managed
 
   defp navigate_chain(uri, args, mark, state) do
     with {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),

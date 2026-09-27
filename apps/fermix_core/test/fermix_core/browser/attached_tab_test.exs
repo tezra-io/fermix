@@ -318,8 +318,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
   # ── the capability surface, whole ──────────────────────────────────────────
 
   # Every capability a granted tab does NOT have, and the action that asks for
-  # it. The three with no action are init steps rather than verbs, named here
-  # with the reason — so a capability added later either declares its action or
+  # it. The four with no action are init steps or housekeeping rather than
+  # verbs, named here — so a capability added later either declares its action or
   # fails this test, and cannot quietly become a browser-wide command that
   # reaches the person's browser.
   @capability_actions %{
@@ -330,7 +330,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
     downloads: {"download", %{"timeout_ms" => 50}},
     download_redirect: :not_an_action,
     target_discovery: :not_an_action,
-    target_attach: :not_an_action
+    target_attach: :not_an_action,
+    tab_cap: :not_an_action
   }
 
   test "every browser-wide capability the grant lacks refuses by name", ctx do
