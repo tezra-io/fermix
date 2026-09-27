@@ -100,18 +100,18 @@
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab?
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex
-\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ d5d1f1812173
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ 7d16cfd77d69
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ 5ea87b4f20e6
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 731c241a3438
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ 66e42b3f12d2
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ fb0379bcd574
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request @ 213c4b8946f0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
+\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 848636b97fc7
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
