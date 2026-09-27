@@ -1,0 +1,2252 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/browser_host/protocol.schema.json",
+  "title": "Fermix browser host protocol",
+  "description": "Newline-delimited JSON wire contract between the Fermix daemon and the Fermix app's browser host on browser_host.sock. The app opens it with the handshake and attached; then the daemon sends requests with an id, the app answers each (response), and sends events. Source of truth: FermixCore.BrowserHost.Protocol. See PROTOCOL.md.",
+  "x-protocol-version": 1,
+  "x-supported-version-range": {
+    "min": 1,
+    "max": 1
+  },
+  "x-max-line-bytes": 4194304,
+  "x-max-message-chars": 500,
+  "x-max-reason-chars": 200,
+  "x-max-nodes": 50000,
+  "anyOf": [
+    {
+      "$ref": "#/$defs/hostEvent"
+    },
+    {
+      "$ref": "#/$defs/response"
+    },
+    {
+      "$ref": "#/$defs/daemonFrame"
+    }
+  ],
+  "$defs": {
+    "hostEvent": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "client_hello",
+            "attached",
+            "availability",
+            "tab.closed",
+            "dialog.opened",
+            "download.began",
+            "download.progress",
+            "download.finished",
+            "host_stopping"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "client_hello"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/client_hello"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "attached"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/attached"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "availability"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/availability"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.closed"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.closed"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "dialog.opened"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/dialog.opened"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "download.began"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/download.began"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "download.progress"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/download.progress"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "download.finished"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/download.finished"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host_stopping"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host_stopping"
+          }
+        }
+      ]
+    },
+    "daemonFrame": {
+      "type": "object",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "server_hello",
+            "error",
+            "tab.open",
+            "tab.navigate",
+            "tab.list",
+            "tab.focus",
+            "tab.close",
+            "task.release",
+            "page.snapshot",
+            "page.screenshot",
+            "page.pdf",
+            "page.act",
+            "page.upload",
+            "dialog.resolve",
+            "cookies.get",
+            "cookies.clear",
+            "host.status",
+            "host.stop_ack"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "server_hello"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/server_hello"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "error"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/error"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.open"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.open"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.navigate"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.navigate"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.list"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.list"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.focus"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.focus"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "tab.close"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/tab.close"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "task.release"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/task.release"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.snapshot"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.snapshot"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.screenshot"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.screenshot"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.pdf"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.pdf"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.act"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.act"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "page.upload"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/page.upload"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "dialog.resolve"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/dialog.resolve"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "cookies.get"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/cookies.get"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "cookies.clear"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/cookies.clear"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host.status"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host.status"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "host.stop_ack"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/host.stop_ack"
+          }
+        }
+      ]
+    },
+    "tab.open": {
+      "type": "object",
+      "description": "Open a new tab for a task on url. With observe, answer once the page has settled and carry it back as `page`, read with `snapshot`'s options. Downloads from the tab and its popups go into download_dir. Refused with cap_reached past task_tab_cap tabs for the task or tab_cap task tabs in all; a popup counts against its opener's owner.",
+      "required": [
+        "id",
+        "type",
+        "task_id",
+        "url",
+        "observe",
+        "download_dir",
+        "task_tab_cap",
+        "tab_cap"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "tab.open"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "observe": {
+          "type": "boolean"
+        },
+        "download_dir": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        },
+        "task_tab_cap": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "tab_cap": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshotOptions"
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "observe": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "snapshot"
+        ]
+      }
+    },
+    "tab.navigate": {
+      "type": "object",
+      "description": "Navigate one of the task's tabs to url; observe as tab.open.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "url",
+        "observe"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "tab.navigate"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "observe": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshotOptions"
+        }
+      },
+      "additionalProperties": false,
+      "if": {
+        "properties": {
+          "observe": {
+            "const": true
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "snapshot"
+        ]
+      }
+    },
+    "tab.list": {
+      "type": "object",
+      "description": "The task's tabs, popups included.",
+      "required": [
+        "id",
+        "type",
+        "task_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "tab.list"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "tab.focus": {
+      "type": "object",
+      "description": "Bring one of the task's tabs to the front of the pane.",
+      "required": [
+        "id",
+        "type",
+        "tab_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "tab.focus"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "tab.close": {
+      "type": "object",
+      "description": "Close one of the task's tabs.",
+      "required": [
+        "id",
+        "type",
+        "tab_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "tab.close"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "task.release": {
+      "type": "object",
+      "description": "The task is over: close every tab it owns and forget their ownership. Idempotent: a second release finds nothing.",
+      "required": [
+        "id",
+        "type",
+        "task_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "task.release"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.snapshot": {
+      "type": "object",
+      "description": "The tab's page as accessibility nodes, bounded by mode, max_chars and depth.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "mode",
+        "max_chars",
+        "depth"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.snapshot"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "mode": {
+          "enum": [
+            "interactive",
+            "full"
+          ]
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.screenshot": {
+      "type": "object",
+      "description": "Capture the tab as an image written exactly at path.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "full_page",
+        "path"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.screenshot"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "full_page": {
+          "type": "boolean"
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.pdf": {
+      "type": "object",
+      "description": "Print the tab to a PDF written exactly at path.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "path"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.pdf"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false
+    },
+    "page.act": {
+      "type": "object",
+      "description": "One interaction with the tab's page. ref is the element ref a node carried as backendDOMNodeId. With observe, carry the page back as `page` once the action settled.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "kind",
+        "observe"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.act"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "click",
+            "fill",
+            "fill_form",
+            "type",
+            "submit",
+            "press",
+            "hover",
+            "get",
+            "wait",
+            "click_coords"
+          ]
+        },
+        "observe": {
+          "type": "boolean"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/snapshotOptions"
+        },
+        "ref": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "x": {
+          "type": "number"
+        },
+        "y": {
+          "type": "number"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 12,
+          "items": {
+            "$ref": "#/$defs/formField"
+          }
+        },
+        "field": {
+          "enum": [
+            "text",
+            "title",
+            "html",
+            "count",
+            "ready_state",
+            "rect"
+          ]
+        },
+        "selector": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 65536
+        },
+        "wait_until": {
+          "enum": [
+            "text",
+            "url",
+            "element",
+            "load"
+          ]
+        },
+        "timeout_ms": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        }
+      },
+      "additionalProperties": false,
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "observe": {
+                "const": true
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "snapshot"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "click",
+                  "hover",
+                  "submit"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "ref"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "enum": [
+                  "fill",
+                  "type"
+                ]
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "ref",
+              "text"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "fill_form"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "fields"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "press"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "key"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "click_coords"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "x",
+              "y"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "kind": {
+                "const": "wait"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "wait_until",
+              "timeout_ms"
+            ]
+          }
+        }
+      ]
+    },
+    "page.upload": {
+      "type": "object",
+      "description": "Put the file at path into the file input ref.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "ref",
+        "path"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "page.upload"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "ref": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        }
+      },
+      "additionalProperties": false
+    },
+    "dialog.resolve": {
+      "type": "object",
+      "description": "Answer the tab's open JavaScript dialog; text is a prompt's answer.",
+      "required": [
+        "id",
+        "type",
+        "tab_id",
+        "accept"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "dialog.resolve"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "accept": {
+          "type": "boolean"
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "additionalProperties": false
+    },
+    "cookies.get": {
+      "type": "object",
+      "description": "The cookies of the tab's site, metadata only, never a value.",
+      "required": [
+        "id",
+        "type",
+        "tab_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "cookies.get"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "cookies.clear": {
+      "type": "object",
+      "description": "Clear the cookies of the tab's site.",
+      "required": [
+        "id",
+        "type",
+        "tab_id"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "cookies.clear"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      },
+      "additionalProperties": false
+    },
+    "host.status": {
+      "type": "object",
+      "description": "The host's own account of itself.",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "host.status"
+        }
+      },
+      "additionalProperties": false
+    },
+    "host.stop_ack": {
+      "type": "object",
+      "description": "The answer to host_stopping: every task on this host has ended and its tabs are released; the app may finish quitting.",
+      "required": [
+        "id",
+        "type"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "type": {
+          "const": "host.stop_ack"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tab.open.result": {
+      "type": "object",
+      "description": "The tab, and its page when observed.",
+      "required": [
+        "tab_id",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      }
+    },
+    "tab.navigate.result": {
+      "type": "object",
+      "description": "As tab.open.",
+      "required": [
+        "tab_id",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      }
+    },
+    "tab.list.result": {
+      "type": "object",
+      "description": "Every tab the task owns.",
+      "required": [
+        "tabs"
+      ],
+      "properties": {
+        "tabs": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/listedTab"
+          }
+        }
+      }
+    },
+    "tab.focus.result": {
+      "type": "object",
+      "description": "The focused tab.",
+      "required": [
+        "tab_id",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      }
+    },
+    "tab.close.result": {
+      "type": "object",
+      "description": "The closed tab.",
+      "required": [
+        "tab_id"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "task.release.result": {
+      "type": "object",
+      "description": "The tabs this release closed, none on a second release.",
+      "required": [
+        "released"
+      ],
+      "properties": {
+        "released": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        }
+      }
+    },
+    "page.snapshot.result": {
+      "type": "object",
+      "description": "The page.",
+      "required": [
+        "url",
+        "title",
+        "ready_state",
+        "nodes"
+      ],
+      "properties": {},
+      "allOf": [
+        {
+          "$ref": "#/$defs/page"
+        }
+      ]
+    },
+    "page.screenshot.result": {
+      "type": "object",
+      "description": "The image written at the requested path.",
+      "required": [
+        "path",
+        "mime_type",
+        "bytes",
+        "url",
+        "device_pixel_ratio"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        },
+        "mime_type": {
+          "enum": [
+            "image/png",
+            "image/jpeg"
+          ]
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "device_pixel_ratio": {
+          "type": "number"
+        }
+      }
+    },
+    "page.pdf.result": {
+      "type": "object",
+      "description": "The PDF written at the requested path.",
+      "required": [
+        "path",
+        "mime_type",
+        "bytes",
+        "url"
+      ],
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        },
+        "mime_type": {
+          "const": "application/pdf"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        }
+      }
+    },
+    "page.act.result": {
+      "type": "object",
+      "description": "The page after the action: its address, its title, what a get read, and the page itself when observed.",
+      "required": [
+        "url",
+        "title"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "object"
+            }
+          ]
+        },
+        "page": {
+          "$ref": "#/$defs/page"
+        }
+      }
+    },
+    "page.upload.result": {
+      "type": "object",
+      "description": "The tab.",
+      "required": [
+        "tab_id"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "dialog.resolve.result": {
+      "type": "object",
+      "description": "The tab.",
+      "required": [
+        "tab_id"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "cookies.get.result": {
+      "type": "object",
+      "description": "The tab's committed address and its site's cookies.",
+      "required": [
+        "url",
+        "cookies"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "cookies": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/cookie"
+          }
+        }
+      }
+    },
+    "cookies.clear.result": {
+      "type": "object",
+      "description": "How many cookies were cleared.",
+      "required": [
+        "cleared"
+      ],
+      "properties": {
+        "cleared": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "host.status.result": {
+      "type": "object",
+      "description": "The host's account of itself.",
+      "required": [
+        "host_version",
+        "profile_id",
+        "available",
+        "task_tabs",
+        "person_tabs"
+      ],
+      "properties": {
+        "host_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "task_tabs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "person_tabs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "host.stop_ack.result": {
+      "type": "object",
+      "description": "Nothing.",
+      "required": [],
+      "properties": {}
+    },
+    "client_hello": {
+      "type": "object",
+      "description": "First frame. Opens the handshake.",
+      "required": [
+        "type",
+        "protocol_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "client_hello"
+        },
+        "protocol_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "attached": {
+      "type": "object",
+      "description": "Sent once, after server_hello: the app is the host, with this profile of website data.",
+      "required": [
+        "type",
+        "host_version",
+        "profile_id"
+      ],
+      "properties": {
+        "type": {
+          "const": "attached"
+        },
+        "host_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "profile_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "availability": {
+      "type": "object",
+      "description": "Whether the pane can take work, sent right after attached and on every change (screen locked or unlocked, display asleep or awake, the app terminating). An unavailable pane says why, in words that finish \"the Fermix app's browser is no longer available: ...\". Never sent after host_stopping.",
+      "required": [
+        "type",
+        "available"
+      ],
+      "properties": {
+        "type": {
+          "const": "availability"
+        },
+        "available": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
+        }
+      },
+      "if": {
+        "properties": {
+          "available": {
+            "const": false
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "reason"
+        ]
+      }
+    },
+    "tab.closed": {
+      "type": "object",
+      "description": "A tab closed: by a task's release or close (task), the person (person), its page (page), or the host itself (host).",
+      "required": [
+        "type",
+        "tab_id",
+        "by"
+      ],
+      "properties": {
+        "type": {
+          "const": "tab.closed"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "by": {
+          "enum": [
+            "task",
+            "person",
+            "page",
+            "host"
+          ]
+        }
+      }
+    },
+    "dialog.opened": {
+      "type": "object",
+      "description": "A JavaScript dialog opened on a tab.",
+      "required": [
+        "type",
+        "tab_id",
+        "kind",
+        "message"
+      ],
+      "properties": {
+        "type": {
+          "const": "dialog.opened"
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "kind": {
+          "enum": [
+            "alert",
+            "confirm",
+            "prompt",
+            "beforeunload"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "default": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      }
+    },
+    "download.began": {
+      "type": "object",
+      "description": "A download began from a tab.",
+      "required": [
+        "type",
+        "download_id",
+        "tab_id",
+        "filename"
+      ],
+      "properties": {
+        "type": {
+          "const": "download.began"
+        },
+        "download_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "filename": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 1024
+        }
+      }
+    },
+    "download.progress": {
+      "type": "object",
+      "description": "Bytes received so far.",
+      "required": [
+        "type",
+        "download_id",
+        "received_bytes"
+      ],
+      "properties": {
+        "type": {
+          "const": "download.progress"
+        },
+        "download_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "received_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "total_bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "download.finished": {
+      "type": "object",
+      "description": "A download ended; a completed one is at path, inside its tab's download_dir.",
+      "required": [
+        "type",
+        "download_id",
+        "tab_id",
+        "state"
+      ],
+      "properties": {
+        "type": {
+          "const": "download.finished"
+        },
+        "download_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "state": {
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096,
+          "pattern": "^/"
+        },
+        "bytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      }
+    },
+    "host_stopping": {
+      "type": "object",
+      "description": "The app is quitting: it has released every task's tabs and holds its quit for host.stop_ack, or its bound. Final for the connection.",
+      "required": [
+        "type"
+      ],
+      "properties": {
+        "type": {
+          "const": "host_stopping"
+        }
+      }
+    },
+    "server_hello": {
+      "type": "object",
+      "description": "Handshake reply; advertises the accepted range.",
+      "required": [
+        "type",
+        "min_version",
+        "max_version"
+      ],
+      "properties": {
+        "type": {
+          "const": "server_hello"
+        },
+        "min_version": {
+          "const": 1
+        },
+        "max_version": {
+          "const": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "error": {
+      "type": "object",
+      "description": "The daemon refused the connection or a frame; it closes the connection after it.",
+      "required": [
+        "type",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "error"
+        },
+        "reason": {
+          "enum": [
+            "invalid_json",
+            "invalid_frame",
+            "missing_type",
+            "unknown_event",
+            "missing_field",
+            "invalid_field",
+            "line_too_large",
+            "handshake_required",
+            "unexpected_client_hello",
+            "attach_required",
+            "unexpected_attached",
+            "unsupported_protocol_version",
+            "host_already_attached",
+            "untrusted_host"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        },
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "event": {
+          "type": "string",
+          "minLength": 1
+        },
+        "direction": {
+          "enum": [
+            "client_too_old",
+            "client_too_new"
+          ]
+        },
+        "client_version": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 18446744073709551615
+        },
+        "min_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "max_version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        }
+      }
+    },
+    "response": {
+      "type": "object",
+      "description": "The app's answer to the request with the same id: a result, or an error from the host's vocabulary. Which result shape is decided by the request the id names.",
+      "required": [
+        "id",
+        "ok"
+      ],
+      "properties": {
+        "id": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "ok": {
+          "type": "boolean"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/tab.open.result"
+            },
+            {
+              "$ref": "#/$defs/tab.navigate.result"
+            },
+            {
+              "$ref": "#/$defs/tab.list.result"
+            },
+            {
+              "$ref": "#/$defs/tab.focus.result"
+            },
+            {
+              "$ref": "#/$defs/tab.close.result"
+            },
+            {
+              "$ref": "#/$defs/task.release.result"
+            },
+            {
+              "$ref": "#/$defs/page.snapshot.result"
+            },
+            {
+              "$ref": "#/$defs/page.screenshot.result"
+            },
+            {
+              "$ref": "#/$defs/page.pdf.result"
+            },
+            {
+              "$ref": "#/$defs/page.act.result"
+            },
+            {
+              "$ref": "#/$defs/page.upload.result"
+            },
+            {
+              "$ref": "#/$defs/dialog.resolve.result"
+            },
+            {
+              "$ref": "#/$defs/cookies.get.result"
+            },
+            {
+              "$ref": "#/$defs/cookies.clear.result"
+            },
+            {
+              "$ref": "#/$defs/host.status.result"
+            },
+            {
+              "$ref": "#/$defs/host.stop_ack.result"
+            }
+          ]
+        },
+        "error": {
+          "$ref": "#/$defs/hostError"
+        }
+      },
+      "oneOf": [
+        {
+          "properties": {
+            "ok": {
+              "const": true
+            }
+          },
+          "required": [
+            "result"
+          ]
+        },
+        {
+          "properties": {
+            "ok": {
+              "const": false
+            }
+          },
+          "required": [
+            "error"
+          ]
+        }
+      ]
+    },
+    "hostError": {
+      "type": "object",
+      "required": [
+        "reason",
+        "message"
+      ],
+      "properties": {
+        "reason": {
+          "enum": [
+            "tab_not_found",
+            "cap_reached",
+            "not_owner",
+            "navigation_refused",
+            "act_failed",
+            "stale_ref",
+            "dialog_blocked",
+            "no_dialog",
+            "wait_timeout",
+            "write_failed",
+            "upload_failed",
+            "invalid_request",
+            "host_unavailable"
+          ]
+        },
+        "message": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500
+        }
+      },
+      "additionalProperties": false
+    },
+    "snapshotOptions": {
+      "type": "object",
+      "required": [
+        "mode",
+        "max_chars",
+        "depth"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "interactive",
+            "full"
+          ]
+        },
+        "max_chars": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 1000000
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        }
+      },
+      "additionalProperties": false
+    },
+    "formField": {
+      "type": "object",
+      "required": [
+        "ref",
+        "text"
+      ],
+      "properties": {
+        "ref": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "text": {
+          "type": "string",
+          "maxLength": 65536
+        }
+      },
+      "additionalProperties": false
+    },
+    "listedTab": {
+      "type": "object",
+      "required": [
+        "tab_id",
+        "url",
+        "title"
+      ],
+      "properties": {
+        "tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "active": {
+          "type": "boolean"
+        },
+        "opener_tab_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "cookie": {
+      "type": "object",
+      "description": "Cookie metadata. A cookie's value never crosses this wire.",
+      "required": [
+        "name",
+        "domain"
+      ],
+      "properties": {
+        "name": {
+          "type": "string"
+        },
+        "domain": {
+          "type": "string"
+        },
+        "path": {
+          "type": "string"
+        },
+        "secure": {
+          "type": "boolean"
+        },
+        "http_only": {
+          "type": "boolean"
+        },
+        "same_site": {
+          "type": "string"
+        },
+        "expires": {
+          "type": "number"
+        },
+        "session": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "page": {
+      "type": "object",
+      "description": "A page as the engine's snapshot renderer reads it. url is the web view's committed address, never a value the page supplies.",
+      "required": [
+        "url",
+        "title",
+        "ready_state",
+        "nodes"
+      ],
+      "properties": {
+        "url": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8192
+        },
+        "title": {
+          "type": "string",
+          "maxLength": 65536
+        },
+        "ready_state": {
+          "enum": [
+            "loading",
+            "interactive",
+            "complete"
+          ]
+        },
+        "nodes": {
+          "type": "array",
+          "maxItems": 50000,
+          "items": {
+            "$ref": "#/$defs/node"
+          }
+        }
+      }
+    },
+    "node": {
+      "type": "object",
+      "description": "One accessibility node: Chrome's AX node subset the renderer reads. backendDOMNodeId is the host's element ref, present on an element that can be acted on and valid until the page changes.",
+      "required": [
+        "nodeId"
+      ],
+      "properties": {
+        "nodeId": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "integer"
+            }
+          ]
+        },
+        "role": {
+          "$ref": "#/$defs/axValue"
+        },
+        "name": {
+          "$ref": "#/$defs/axValue"
+        },
+        "value": {
+          "$ref": "#/$defs/axValue"
+        },
+        "properties": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/axProperty"
+          }
+        },
+        "backendDOMNodeId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 18446744073709551615
+        },
+        "childIds": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "integer"
+              }
+            ]
+          }
+        }
+      }
+    },
+    "axValue": {
+      "type": "object",
+      "required": [
+        "value"
+      ],
+      "properties": {
+        "value": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "number"
+            },
+            {
+              "type": "boolean"
+            }
+          ]
+        }
+      }
+    },
+    "axProperty": {
+      "type": "object",
+      "required": [
+        "name"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value": {
+          "$ref": "#/$defs/axValue"
+        }
+      }
+    }
+  }
+}
