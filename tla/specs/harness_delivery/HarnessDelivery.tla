@@ -15,15 +15,21 @@
 (* Not modelled:                                                           *)
 (* - admission and its refusals (the row starts admitted, the Run started) *)
 (* - the cloud rail (submit, polling, stop_tracking)                       *)
+(* - the vendor-config tripwire (Harness.VendorConfig): its fingerprint    *)
+(*   and its gate belong to admission. Before each terminal write the      *)
+(*   Manager re-fingerprints the run's directories in the same callback    *)
+(*   (file reads, and a git status with a 5 s timeout where the config     *)
+(*   changed); the result is one more ledger field of that write, and      *)
+(*   the lease clock starts after it (manager.ex:1367-1379)                *)
 (* - the owner's cancel of a TRACKED run, and /stop: for a framework       *)
 (*   origin they only choose the "text" hand-off; for a client-owned       *)
 (*   origin a tracking-stopped or depth-capped row, or one with no         *)
-(*   dispatcher, is dead-lettered with no send at all (manager.ex:1123-1128,*)
-(*   :1134-1139, :1186-1192). The cancel of an UNTRACKED row is modelled   *)
+(*   dispatcher, is dead-lettered with no send at all (manager.ex:1187-1192,*)
+(*   :1198-1203, :1250-1256). The cancel of an UNTRACKED row is modelled   *)
 (*   (OwnerCancelUntracked), including its owner-halt dead letter.         *)
 (* - the continuation depth cap itself (a pure per-row rule; ExUnit)       *)
 (* - delivery_mode "none" and "local", which succeed without a channel     *)
-(*   send (delivery.ex:108-110)                                            *)
+(*   send (delivery.ex:111-113)                                            *)
 (* - advisory notices and telemetry                                        *)
 (* - the worker's backoff clock and max-age rule (a rescheduled row is     *)
 (*   simply due again at a later tick)                                     *)
@@ -41,18 +47,18 @@
 (* up to its next call into another process, one Memory.Repo call (all     *)
 (* SQLite goes through that one process), or one effect at a platform.     *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/manager.ex @ cd3fef98ab3d
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/manager.ex @ e172f02c909a
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery_worker.ex @ baa051c7b24d
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/continuation.ex @ 630753e79843
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/continuation.ex @ 76e0fc721679
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/continuation_dispatcher.ex @ 92d85f69b270
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery.ex @ 99276b23ba8c
-\* SOURCE: apps/fermix_core/lib/fermix_core/harness/ledger.ex @ 765a9a695ae5
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/delivery.ex @ 4d1e7fe2a364
+\* SOURCE: apps/fermix_core/lib/fermix_core/harness/ledger.ex @ 89f4b2655cc2
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/memory_writeback.ex @ d85eb40385ad
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/supervisor.ex @ f4967c985e88
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/run_supervisor.ex @ 434b12f3182b
 \* SOURCE: apps/fermix_core/lib/fermix_core/harness/run.ex @ 788c70041804
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ 025ab35639d2
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#interpret_harness_terminalize,harness_terminalize_rejection,harness_run_set_clause,harness_run_set_entry,@harness_run_timestamp_cols @ 7799fd5a935f
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,admit_harness_run,admit_harness_run_tx,admit_harness_run_in_tx,ensure_harness_capacity,insert_harness_run_row,terminalize_harness_run,terminalize_harness_run_row,update_harness_run,update_harness_run_row,pending_harness_deliveries,fetch_pending_harness_deliveries,active_harness_runs,fetch_active_harness_runs,normalize_harness_run_attrs,upsert_memory,@harness_runs_schema_sql,@harness_active_status_sql @ cd6705d40da4
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#interpret_harness_terminalize,harness_terminalize_rejection,harness_run_set_clause,harness_run_set_entry,@harness_run_timestamp_cols @ 58c7f52fc492
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 380824457212
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/harness/continuation_dispatcher.ex @ d4e6a8909e30
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
@@ -76,8 +82,8 @@ CONSTANTS
                              \* accepted: with_timeout cannot tell (channel_send.ex:219-240)
     TerminalWriteCanFail,    \* the terminal UPDATE returns an error (SQLite busy, I/O, full)
     ReconcileScanCanFail,    \* the boot scan (Ledger.active_runs) returns an error: it is
-                             \* logged and nothing is reconciled (manager.ex:1344-1349,
-                             \* :1439-1442)
+                             \* logged and nothing is reconciled (manager.ex:1436-1441,
+                             \* :1532-1535)
     LeaseCanLapse,           \* the hand-off lease ends while the Manager is still inside
                              \* its hand-off: a laptop sleep or a wall-clock jump moves the
                              \* wall clock past next_delivery_at while BEAM timers pause
@@ -85,35 +91,35 @@ CONSTANTS
                              \* no longer tracks
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* a check switches one off to show a property rests on it.
-    CleanDownDropsOnly,    \* a :normal/:shutdown DOWN only drops the monitor (manager.ex:1017)
-    IgnoresUntrackedRun,   \* every terminalization outcome ends in drop_run (manager.ex:1068,
-                           \* :1083, :1088, :1245-1261), and a report or DOWN for a run no
-                           \* longer tracked is ignored (:997-999, :1015-1016, :1023-1024)
-    GuardedTerminalUpdate, \* the terminal UPDATE only matches an active row (repo.ex:6329-6334);
-                           \* :already_terminal is dropped (manager.ex:1040, :1079-1084)
+    CleanDownDropsOnly,    \* a :normal/:shutdown DOWN only drops the monitor (manager.ex:1077)
+    IgnoresUntrackedRun,   \* every terminalization outcome ends in drop_run (manager.ex:1132,
+                           \* :1147, :1152, :1309-1325), and a report or DOWN for a run no
+                           \* longer tracked is ignored (:1056-1058, :1075-1076, :1083-1085)
+    GuardedTerminalUpdate, \* the terminal UPDATE only matches an active row (repo.ex:6492-6497);
+                           \* :already_terminal is dropped (manager.ex:1104, :1143-1148)
     RestForOne,            \* a Manager crash also restarts RunSupervisor and DeliveryWorker
                            \* (supervisor.ex:38-44), killing every live Run first
     ReconcilesAtBoot,      \* the restarted Manager finalizes active rows interrupted
-                           \* (manager.ex:235-236, :1344-1354)
+                           \* (manager.ex:245-246, :1436-1447)
     CrashDownTerminalizes, \* an abnormal Run DOWN terminalizes failed/run_crashed
-                           \* (manager.ex:1014-1027)
+                           \* (manager.ex:1074-1091)
     MarksDelivered,        \* a successful hand-off marks the row delivered
-                           \* (manager.ex:1143, :1148-1155, :1223, :1228-1238)
+                           \* (manager.ex:1207, :1212-1219, :1287, :1292-1302)
     ClientDeadLetters,     \* a failed client-owned dispatch dead-letters the row with its
-                           \* named cause (manager.ex:1162-1168, :1196-1211)
+                           \* named cause (manager.ex:1226-1232, :1260-1275)
     WorkerDrainsOutbox,    \* the worker selects terminal rows still pending
-                           \* (delivery_worker.ex:101-123, repo.ex:6452-6464)
+                           \* (delivery_worker.ex:101-123, repo.ex:6615-6627)
     DeadLetterCap,         \* the worker dead-letters at MaxAttempts (delivery_worker.ex:129-141)
     LeasesFirstAttempt,    \* the terminal write leases the row to the Manager's inline first
                            \* attempt: next_delivery_at = now + @handoff_lease_ms in the same
-                           \* guarded UPDATE (terminalize_and_notify/4, manager.ex:1035-1047,
-                           \* :83-95), and the worker selects only due rows (repo.ex:6461)
+                           \* guarded UPDATE (terminalize_and_notify/4, manager.ex:1099-1111,
+                           \* :90-102), and the worker selects only due rows (repo.ex:6624)
     SendsDieWithCaller,    \* a with_timeout sender is spawned linked to its caller
                            \* (Process.spawn [:link, :monitor], channel_send.ex:219-224), so a
                            \* caller that dies takes a sender still in flight with it
     CancelsStrandedRow     \* an owner cancel of an active local row the Manager does not
                            \* track terminalizes it cancelled (cancel_untracked/3,
-                           \* manager.ex:977-992)
+                           \* manager.ex:1035-1051)
 
 VARIABLES
     origin,      \* SQLite row: origin_kind / client_origin, frozen at admission
@@ -123,7 +129,7 @@ VARIABLES
     mbox,        \* Manager mailbox: the Run's report and DOWN messages, in order
     mpc,         \* Manager: which callback it is in (see MgrStates)
     mgrCrashes,  \* environment bound: Manager crashes so far
-    tracked,     \* Manager state: the run is in its runs / run_monitors maps (manager.ex:353-364)
+    tracked,     \* Manager state: the run is in its runs / run_monitors maps (manager.ex:411-422)
     wpc,         \* DeliveryWorker: "idle" between ticks, "sending" inside process_row
     wsnap,       \* DeliveryWorker: delivery_attempts in the row it selected
     snd,         \* snd[c]: the with_timeout sender process caller c is waiting on
@@ -185,15 +191,15 @@ TypeOK ==
 Min(a, b) == IF a < b THEN a ELSE b
 Sat(n)    == Min(n, 2)
 
-\* What the Manager's hand-off sends (hand_off_outcome/3, manager.ex:1108-1113):
+\* What the Manager's hand-off sends (hand_off_outcome/3, manager.ex:1172-1177):
 \* a chat or client-owned origin dispatches a continuation turn, the rest a
 \* text. A cancelled row is an owner halt and never continues
-\* (not_continuable_reason/1, :1134): a framework origin gets the inline text.
+\* (not_continuable_reason/1, :1198): a framework origin gets the inline text.
 MgrKind == IF origin = "text" \/ status = "cancelled" THEN "text" ELSE "turn"
 SenderKind(c) == IF c = "mgr" THEN MgrKind ELSE "text"
 
 \* A client-owned origin's owner halt has no text path: no_continuation/3
-\* dead-letters it as :owner_halt with no send (manager.ex:1186-1192).
+\* dead-letters it as :owner_halt with no send (manager.ex:1250-1256).
 OwnerHaltDeadLetters == origin = "client" /\ status = "cancelled"
 
 \* The worker's text to a client-owned origin is refused inside its sender
@@ -214,7 +220,7 @@ Notify(kind) ==
 \* handle_info({:command_host_exit, ...}) -> report_and_stop/3 (run.ex:125-131,
 \* :631-636): send {:harness_report_terminal, ...} to the :manager pid, then
 \* stop :normal, which queues a :normal DOWN behind it (Process.monitor,
-\* manager.ex:354). A report to a dead Manager's pid is dropped.
+\* manager.ex:412). A report to a dead Manager's pid is dropped.
 RunReports ==
     /\ rpc = "running"
     /\ rpc' = "gone"
@@ -224,7 +230,7 @@ RunReports ==
                    rowVars, seenVars, ghostVars>>
 
 \* The Run raises before its report: only an abnormal DOWN reaches the
-\* Manager (manager.ex:289-291). After report_and_stop it cannot crash:
+\* Manager (manager.ex:299-301). After report_and_stop it cannot crash:
 \* terminate/2 only closes an already-nil spool (run.ex:169, :707).
 RunCrashes ==
     /\ RunsCanCrash
@@ -246,26 +252,26 @@ RunCrashes ==
 \* unless that layer is switched off.
 Knows == tracked \/ ~IgnoresUntrackedRun
 
-\* terminalize_and_notify/4 (manager.ex:1035-1047): Ledger.terminalize ->
-\* Repo terminalize_harness_run_row/4 (ledger.ex:72-79, repo.ex:6322-6337),
+\* terminalize_and_notify/4 (manager.ex:1099-1111): Ledger.terminalize ->
+\* Repo terminalize_harness_run_row/4 (ledger.ex:72-79, repo.ex:6485-6500),
 \* ONE Repo call running `UPDATE ... WHERE id = ? AND status IN (active)`. It
 \* writes status, the outcome's ledger fields, completed_at and
-\* next_delivery_at = now + @handoff_lease_ms (manager.ex:1036, :1045-1047):
+\* next_delivery_at = now + @handoff_lease_ms (manager.ex:1100, :1109-1111):
 \* the row is terminal and leased to this Manager's inline attempt at once,
 \* so the worker cannot select it until the lease ends. delivery_status
-\* stays 'pending' as admission wrote it (manager.ex:395-425,
-\* repo.ex:502-505, :6770-6772).
+\* stays 'pending' as admission wrote it (manager.ex:453-483,
+\* repo.ex:505-508, :6951-6953).
 \* The call has three outcomes, one per disjunct: the Repo returns an error;
 \* the UPDATE changes the row; or the guard finds the row already terminal.
 TerminalWrite(st) ==
     \/ /\ TerminalWriteCanFail
        \* after_terminalize_error/4 for a local run: log and drop_run
-       \* (manager.ex:1049-1062, :1086-1089). The row stays active.
+       \* (manager.ex:1113-1126, :1150-1153). The row stays active.
        /\ mpc' = "idle"
        /\ tracked' = FALSE
        /\ UNCHANGED <<status, writes, leased>>
     \/ /\ status = "active" \/ ~GuardedTerminalUpdate
-       \* {:ok, row} -> post_terminal/5 (manager.ex:1039, :1064-1069).
+       \* {:ok, row} -> post_terminal/5 (manager.ex:1103, :1128-1133).
        /\ status' = st
        /\ writes' = Sat(writes + 1)
        /\ leased' = LeasesFirstAttempt
@@ -273,7 +279,7 @@ TerminalWrite(st) ==
        /\ UNCHANGED tracked
     \/ /\ status /= "active" /\ GuardedTerminalUpdate
        \* {:error, :already_terminal} -> resolve_after_race: drop, never
-       \* re-deliver or re-continue (manager.ex:1040, :1079-1084).
+       \* re-deliver or re-continue (manager.ex:1104, :1143-1148).
        /\ mpc' = "idle"
        /\ tracked' = FALSE
        /\ UNCHANGED <<status, writes, leased>>
@@ -284,17 +290,17 @@ MgrKeeps == UNCHANGED <<origin, runVars, mgrCrashes, wkrVars, sndVars, delivery,
                         attempts, lastError, seenVars, clientCause, confirmedTurn, lied>>
 
 \* handle_info({:harness_report_terminal, ...}) -> finalize_reported/4
-\* (manager.ex:285-286, :996-1004); an untracked run's report is only logged
-\* (log_unknown_report, :1006-1012).
+\* (manager.ex:295-296, :1055-1064); an untracked run's report is only logged
+\* (log_unknown_report, :1066-1072).
 MgrReport ==
     /\ mpc = "idle" /\ mbox /= <<>> /\ Head(mbox) = "report"
     /\ mbox' = Tail(mbox)
     /\ IF Knows THEN TerminalWrite("result") ELSE TerminalWriteKeeps
     /\ MgrKeeps
 
-\* handle_info({:DOWN, ...}) -> handle_down/3 (manager.ex:289-290, :1014-1020):
-\* a DOWN for an untracked run finds no monitor (:1015-1016); a :normal or
-\* :shutdown DOWN only drops the monitor (:1017).
+\* handle_info({:DOWN, ...}) -> handle_down/3 (manager.ex:299-300, :1074-1080):
+\* a DOWN for an untracked run finds no monitor (:1075-1076); a :normal or
+\* :shutdown DOWN only drops the monitor (:1077).
 MgrCleanDown ==
     /\ mpc = "idle" /\ mbox /= <<>> /\ Head(mbox) = "down_normal"
     /\ mbox' = Tail(mbox)
@@ -304,7 +310,7 @@ MgrCleanDown ==
     /\ MgrKeeps
 
 \* An abnormal DOWN -> mark_run_crashed/2 -> terminalize failed/run_crashed
-\* (manager.ex:1018, :1022-1027, :1290-1297).
+\* (manager.ex:1078, :1082-1091, :1354-1361).
 MgrCrashDown ==
     /\ mpc = "idle" /\ mbox /= <<>> /\ Head(mbox) = "down_crash"
     /\ mbox' = Tail(mbox)
@@ -314,8 +320,8 @@ MgrCrashDown ==
     /\ MgrKeeps
 
 \* handle_continue(:reconcile) -> reconcile/1 -> Ledger.active_runs, one Repo
-\* call (manager.ex:235-236, :1344-1349; repo.ex:6436-6450). A scan error is
-\* only logged (log_reconcile_scan_error/2, manager.ex:1347, :1439-1442): the
+\* call (manager.ex:245-246, :1436-1441; repo.ex:6599-6613). A scan error is
+\* only logged (log_reconcile_scan_error/2, manager.ex:1439, :1532-1535): the
 \* row stays active and this Manager tracks nothing.
 MgrReconcileScan ==
     /\ mpc = "reconcile"
@@ -325,22 +331,22 @@ MgrReconcileScan ==
                    rowVars, seenVars, ghostVars>>
 
 \* reconcile_row/2 for a local starting/running row: terminalize it
-\* interrupted, then the same post_terminal (manager.ex:1351-1354, :1299-1301).
+\* interrupted, then the same post_terminal (manager.ex:1443-1447, :1363-1365).
 MgrReconcileRow ==
     /\ mpc = "reconciling"
     /\ TerminalWrite("interrupted")
     /\ UNCHANGED mbox
     /\ MgrKeeps
 
-\* The rest of post_terminal/5 (manager.ex:1065-1067): run_complete/run_error
+\* The rest of post_terminal/5 (manager.ex:1129-1131): run_complete/run_error
 \* telemetry, then MemoryWriteback.write, which for a completed run is a
 \* second Repo call, Repo.upsert_memory (memory_writeback.ex:46-52, :159);
 \* then hand_off_outcome spawns the text send or the continuation dispatch
-\* under ChannelSend.with_timeout (delivery.ex:280-293, continuation.ex:154-166)
+\* under ChannelSend.with_timeout (delivery.ex:283-296, continuation.ex:156-168)
 \* and waits. The Manager can crash before this step (no sender exists yet).
 \* An owner halt of a client-owned row instead dead-letters it as :owner_halt
-\* with no send: dead_letter/3, one Repo call (manager.ex:1186-1192,
-\* :1196-1211); the write-back skips a row that did not complete
+\* with no send: dead_letter/3, one Repo call (manager.ex:1250-1256,
+\* :1260-1275); the write-back skips a row that did not complete
 \* (memory_writeback.ex:46-52), so that is this step's only Repo call.
 MgrWriteback ==
     /\ mpc = "writeback"
@@ -357,18 +363,18 @@ MgrWriteback ==
 
 \* The sender answered :ok. mark_continued/2 or deliver_and_mark/2 then
 \* mark_delivered/2: one Repo call, an unguarded UPDATE by id
-\* (manager.ex:1143, :1148-1155, :1223, :1228-1238; repo.ex:6363-6370).
+\* (manager.ex:1207, :1212-1219, :1287, :1292-1302; repo.ex:6526-6533).
 \* A dispatch that answered :ok is the one the code calls confirmed
-\* (manager.ex:1091-1103).
+\* (manager.ex:1155-1167).
 MgrHandOffOk ==
     /\ IF MarksDelivered THEN delivery' = "delivered" ELSE UNCHANGED delivery
     /\ confirmedTurn' = (confirmedTurn \/ MgrKind = "turn")
     /\ UNCHANGED <<lastError, clientCause>>
 
 \* The sender answered {:error, _}. A client-owned origin dead-letters with
-\* the named cause (continuation_failed/3 -> dead_letter/3, manager.ex:1162-1168,
-\* :1196-1211, one Repo call); every other origin leaves the row pending for
-\* the worker (manager.ex:1170-1179, :1224, :1240-1243).
+\* the named cause (continuation_failed/3 -> dead_letter/3, manager.ex:1226-1232,
+\* :1260-1275, one Repo call); every other origin leaves the row pending for
+\* the worker (manager.ex:1234-1243, :1288, :1304-1307).
 MgrHandOffError ==
     /\ IF origin = "client"
        THEN /\ clientCause' = TRUE
@@ -379,7 +385,7 @@ MgrHandOffError ==
     /\ UNCHANGED confirmedTurn
 
 \* with_timeout returns, the Manager records the result, then drop_run
-\* (manager.ex:1068, :1245-1261). The watchdog kills a sender that has not
+\* (manager.ex:1132, :1309-1325). The watchdog kills a sender that has not
 \* answered within 60 s (text) or 15 s (dispatch); if the platform had
 \* already accepted, the Manager still sees {:error, :delivery_timeout}.
 MgrResolve ==
@@ -395,9 +401,9 @@ MgrResolve ==
                    attempts, leased, seenVars, writes, lied>>
 
 \* handle_call({:cancel, run_id, :owner}) for a run absent from the runs map
-\* -> cancel_untracked/3 (manager.ex:254-257, :977-992): Ledger.get, then for
+\* -> cancel_untracked/3 (manager.ex:264-267, :1035-1051): Ledger.get, then for
 \* an active local row GenServer.reply(:ok) and terminalize_and_notify/4 with
-\* stranded_cancel_outcome/0 (cancelled, :1306-1308). The read and the write
+\* stranded_cancel_outcome/0 (cancelled, :1384-1386). The read and the write
 \* are two Repo calls in one callback; nothing between them can change an
 \* active row's status, since only this process writes status and the worker
 \* never selects an active row, so they are one step here. A call is served
@@ -428,13 +434,13 @@ NewOrphans(k) ==
          + (IF RestForOne /\ snd["wkr"] = "flying" /\ CanLand("wkr") /\ k = "text" THEN 1 ELSE 0)
 
 \* The Manager dies (a raise, or an exit from a Repo call past its 5 s
-\* GenServer.call timeout, repo.ex:3777-3780). Harness.Supervisor is
+\* GenServer.call timeout, repo.ex:3888-3891). Harness.Supervisor is
 \* :rest_for_one Manager -> RunSupervisor -> DeliveryWorker (supervisor.ex:38-44):
 \* it terminates the DeliveryWorker and the RunSupervisor (whose :temporary
 \* Runs die with it, run.ex:77-85, run_supervisor.ex:12, :32-34; nothing in the
 \* harness traps exits), then restarts all three. The new Manager starts with
-\* empty runs and run_monitors maps (manager.ex:1507-1508), and its init
-\* returns {:continue, :reconcile} (manager.ex:227-230), so the supervisor
+\* empty runs and run_monitors maps (manager.ex:1600-1601), and its init
+\* returns {:continue, :reconcile} (manager.ex:237-240), so the supervisor
 \* starts the new worker while reconciliation is still to run. The mailbox
 \* is lost. A with_timeout sender is linked to its caller
 \* (channel_send.ex:219-224), so a sender still in flight dies with the
@@ -457,9 +463,9 @@ MgrCrash ==
 -----------------------------------------------------------------------------
 (* The hand-off lease and the clock *)
 
-\* The wall clock passes next_delivery_at. @handoff_lease_ms (manager.ex:83-95)
+\* The wall clock passes next_delivery_at. @handoff_lease_ms (manager.ex:90-102)
 \* outlasts the longest hand-off. Its clock starts before the terminal write
-\* is served (manager.ex:1036), so the budget is the terminal write (one Repo
+\* is served (manager.ex:1100), so the budget is the terminal write (one Repo
 \* call), the write-back (at most two), the inline watchdog
 \* (Delivery.deliver_timeout_ms/0, 60 s, or Continuation.dispatch_timeout_ms/0,
 \* 15 s) and the mark (one), each Repo call bounded by GenServer.call's 5 s:
@@ -496,9 +502,9 @@ WorkerCanSelect == WorkerDrainsOutbox /\ status /= "active" /\ delivery = "pendi
 \* handle_info(:tick) -> run_tick/1 -> Ledger.pending_deliveries, one Repo
 \* call: `delivery_status = 'pending' AND status NOT IN (active) AND
 \* (next_delivery_at IS NULL OR next_delivery_at <= now)` (delivery_worker.ex:62-65,
-\* :101-108; repo.ex:6452-6464). A leased row is not due yet. Then
+\* :101-108; repo.ex:6615-6627). A leased row is not due yet. Then
 \* process_row/3 spawns Delivery.deliver under with_timeout
-\* (delivery_worker.ex:118-119, delivery.ex:280-293) and waits. Nothing claims
+\* (delivery_worker.ex:118-119, delivery.ex:283-296) and waits. Nothing claims
 \* the row between the select and the send.
 WkrTick ==
     /\ wpc = "idle"
@@ -512,7 +518,7 @@ WkrTick ==
 \* handle_failure/4 (delivery_worker.ex:129-141) from the selected row's
 \* attempts: dead_letter/3 (:153-158) at the cap, else reschedule/5 (:160-168),
 \* which writes attempts, next_delivery_at and last_delivery_error but not
-\* delivery_status. Either is one unguarded UPDATE (repo.ex:6363-6370).
+\* delivery_status. Either is one unguarded UPDATE (repo.ex:6526-6533).
 WkrFailure ==
     LET tried == wsnap + 1 IN
     IF DeadLetterCap /\ tried >= MaxAttempts
@@ -630,8 +636,8 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* PROPERTIES *)
 
 \* ARCHITECTURE.md FermixCore.Harness: "Manager is the only writer of terminal
-\* status"; manager.ex:20-23: the single terminal writer, with "the P0
-\* :already_terminal guard" as "the idempotence backstop"; manager.ex:1079-1081:
+\* status"; manager.ex:24-27: the single terminal writer, with "the P0
+\* :already_terminal guard" as "the idempotence backstop"; manager.ex:1143-1145:
 \* the loser of a terminal race is dropped, "never re-deliver and never
 \* re-continue". Each terminal write starts one hand-off, so this also counts
 \* hand-offs.
@@ -642,12 +648,12 @@ TerminalizedOnce == writes <= 1
 \* rows". Only reconciliation writes interrupted here.
 ReconcileFindsDeadRuns == status = "interrupted" => rpc = "gone"
 
-\* manager.ex:966-972 (cancel_untracked/3): an active row missing from the
+\* manager.ex:1024-1030 (cancel_untracked/3): an active row missing from the
 \* runs map "has no live Run, and the owner's cancel terminalizes it". Only
 \* that cancel writes cancelled here, so a cancelled row's Run must be gone.
 CancelFinalizesDeadRuns == status = "cancelled" => rpc = "gone"
 
-\* manager.ex:162-170 (cancel/3): an owner cancel of an active run is :ok,
+\* manager.ex:172-180 (cancel/3): an owner cancel of an active run is :ok,
 \* and :already_terminal means the run is terminal; cancel_untracked/3:
 \* "Never a false 'already finished'".
 CancelAnswersTruly == ~lied
@@ -664,7 +670,7 @@ NoOrphanedSends == \A k \in Kinds : orphans[k] = 0
 EveryRunEndsTerminal == (rpc = "gone") ~> (status /= "active")
 
 \* delivery_worker.ex:29-32: "the at-least-once / dead-letter guarantee";
-\* manager.ex:1170-1171: "the durable outbox is the at-least-once path".
+\* manager.ex:1234-1235: "the durable outbox is the at-least-once path".
 OutboxDrains == (status /= "active") ~> (delivery \in {"delivered", "dead_letter"})
 
 \* Proposed rule: the owner hears each outcome once, counting a continuation
@@ -672,7 +678,7 @@ OutboxDrains == (status /= "active") ~> (delivery \in {"delivered", "dead_letter
 \* delivery.ex:24 prefixes every message "[run <id>]" for at-least-once dedup.)
 AtMostOneNotification == texts + turns <= 1
 
-\* manager.ex:1091-1103: on a CONFIRMED dispatch (the dispatcher answered :ok)
+\* manager.ex:1155-1167: on a CONFIRMED dispatch (the dispatcher answered :ok)
 \* the row is marked delivered, "the agent's turn IS the notification - no
 \* text push, and no double-notify while the lease holds". An unconfirmed
 \* dispatch the gateway accepted is followed by the text by design (see
@@ -681,9 +687,9 @@ AtMostOneNotification == texts + turns <= 1
 \* README), so the checks that assert this rule run with LeaseCanLapse = FALSE.
 NoTextAfterConfirmedContinuation == ~(confirmedTurn /\ texts >= 1)
 
-\* manager.ex:1157-1161: leaving a client-owned row pending would let the
+\* manager.ex:1221-1225: leaving a client-owned row pending would let the
 \* worker "overwrite the real reason ... with the useless
-\* unsupported_delivery_platform word"; manager.ex:1194-1195: "the name goes on
+\* unsupported_delivery_platform word"; manager.ex:1258-1259: "the name goes on
 \* the row (last_delivery_error)".
 NamedCauseKept == (clientCause /\ delivery = "dead_letter") => lastError = "named"
 
@@ -695,13 +701,13 @@ NamedCauseKept == (clientCause /\ delivery = "dead_letter") => lastError = "name
 Witness_TextResent == texts < 2
 
 \* The designed at-least-once notification after a dispatch the Manager
-\* could not confirm (manager.ex:1091-1103, continuation.ex:148-152, design
+\* could not confirm (manager.ex:1155-1167, continuation.ex:150-154, design
 \* §23.2): the gateway accepted the continuation, but the Manager saw a
 \* watchdog expiry or died before it read the answer, so the row stayed
 \* pending and the worker's text follows the agent's turn.
 Witness_TextAfterUnconfirmedTurn == ~(turns >= 1 /\ texts >= 1)
 
-\* The documented limitation (manager.ex:40-44): the Run reported its end,
+\* The documented limitation (manager.ex:46-50): the Run reported its end,
 \* but a restart took the report with the Manager's mailbox, so boot
 \* reconciliation records the finished run as interrupted.
 Witness_ReportLostOnRestart == ~(reported /\ status = "interrupted")

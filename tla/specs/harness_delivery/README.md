@@ -31,15 +31,15 @@ crash --> reconcile --> reconciling --> [terminal write] --ok--> writeback --> .
 
 The terminal write and the write-back are separate Repo calls. The UPDATE comes
 first; `MemoryWriteback.write` then calls `Repo.upsert_memory` for a completed
-run (`manager.ex:1066`, `memory_writeback.ex:46-52`, `:159`). A crash between
+run (`manager.ex:1130`, `memory_writeback.ex:46-52`, `:159`). A crash between
 them, or during the write-back, leaves a terminal pending row and no sender.
 
 **The hand-off lease** (`leased`): the terminal UPDATE also writes
 `next_delivery_at = now + @handoff_lease_ms` (120 s; `terminalize_and_notify/4`,
-`manager.ex:1035-1047`, `:83-95`), and the worker selects only due rows
-(`repo.ex:6461`). So the row is terminal and leased in one statement, and the
+`manager.ex:1099-1111`, `:90-102`), and the worker selects only due rows
+(`repo.ex:6624`). So the row is terminal and leased in one statement, and the
 worker cannot select it until the lease ends. The lease clock starts before
-the terminal write is served (`manager.ex:1036`), so the lease must outlast that write
+the terminal write is served (`manager.ex:1100`), so the lease must outlast that write
 and the Manager's own hand-off: the terminal write, at most two write-back Repo
 calls, the inline watchdog (60 s for a text, 15 s for a dispatch), and the
 mark, each Repo call bounded by `GenServer.call`'s 5 s. That is at most 80 s.
@@ -59,7 +59,7 @@ With `SendsDieWithCaller` off, a flying sender instead becomes an orphan that
 may still land (the code before the link).
 
 **Origins** (`Origins`, the hand-off chosen by `hand_off_outcome`,
-`manager.ex:1108-1113`):
+`manager.ex:1172-1177`):
 - `chat`: a chat origin inside the chain cap. The outcome goes out as a
   continuation dispatch.
 - `text`: a scheduled origin, a depth-capped chain, an owner halt, or no
@@ -72,20 +72,26 @@ may still land (the code before the link).
   `channel_send.ex:312-321`).
 
 A row the owner cancelled is an owner halt whatever its origin
-(`not_continuable_reason/1`, `manager.ex:1134`): a framework origin gets the
+(`not_continuable_reason/1`, `manager.ex:1198`): a framework origin gets the
 inline text, and a client-owned one is dead-lettered as `:owner_halt` with no
-send (`manager.ex:1186-1192`).
+send (`manager.ex:1250-1256`).
 
 **Not modelled:**
 - admission and its refusals, and the cloud rail;
+- the vendor-config tripwire (`Harness.VendorConfig`). Its fingerprint and its
+  gate belong to admission. Before each terminal write the Manager
+  re-fingerprints the run's directories in the same callback (file reads, and a
+  `git status` with a 5 s timeout where the config changed). The result is one
+  more ledger field of that write, and the lease clock starts after it
+  (`manager.ex:1367-1379`);
 - the owner's cancel of a tracked run, and `/stop`, and the rest of the
   client-owned "no continuation" arm. A client-owned row that is
   tracking-stopped or depth-capped, or has no dispatcher, is dead-lettered
-  with no send at all (`manager.ex:1123-1128`, `:1134-1139`, `:1186-1192`).
+  with no send at all (`manager.ex:1187-1192`, `:1198-1203`, `:1250-1256`).
   The cancel of an untracked row is modelled (`OwnerCancelUntracked`);
 - the continuation depth cap itself, a pure per-row rule that ExUnit covers;
 - `delivery_mode` `none` and `local`, which succeed with no channel send
-  (`delivery.ex:108-110`);
+  (`delivery.ex:111-113`);
 - advisory notices and telemetry;
 - the worker's backoff clock and its max-age rule, and the lease's length (see
   above);
@@ -107,7 +113,7 @@ send (`manager.ex:1186-1192`).
   I/O or full).
 - `ReconcileScanCanFail`: the restarted Manager's boot scan
   (`Ledger.active_runs`) returns an error. It is only logged
-  (`manager.ex:1344-1349`, `:1439-1442`), so an active row stays active and
+  (`manager.ex:1436-1441`, `:1532-1535`), so an active row stays active and
   untracked.
 - `LeaseCanLapse`: the lease ends while the Manager is still inside its
   hand-off. A laptop sleep or a wall-clock jump mid-send moves the wall clock
@@ -118,38 +124,38 @@ send (`manager.ex:1186-1192`).
 **Mechanism switches** (`TRUE` is the real code; each is switched off by at
 least one check):
 - `CleanDownDropsOnly`: a `:normal` or `:shutdown` DOWN only drops the monitor
-  (`manager.ex:1017`).
+  (`manager.ex:1077`).
 - `IgnoresUntrackedRun`: every way a terminalization ends calls `drop_run`
-  (`manager.ex:1068`, `:1083`, `:1088`, `:1245-1261`), and a report or DOWN for
-  a run no longer tracked is ignored (`:997-999`, `:1006-1012`, `:1015-1016`,
-  `:1023-1024`). The spec's `tracked` variable is the Manager's `runs` and
+  (`manager.ex:1132`, `:1147`, `:1152`, `:1309-1325`), and a report or DOWN for
+  a run no longer tracked is ignored (`:1056-1058`, `:1066-1072`, `:1075-1076`,
+  `:1083-1085`). The spec's `tracked` variable is the Manager's `runs` and
   `run_monitors` entry. It is `TRUE` at start and `FALSE` after a crash, because
-  the restarted Manager begins with empty maps (`manager.ex:1507-1508`).
+  the restarted Manager begins with empty maps (`manager.ex:1600-1601`).
 - `GuardedTerminalUpdate`: the terminal UPDATE only matches an active row
-  (`repo.ex:6329-6334`), and `:already_terminal` is dropped (`manager.ex:1040`,
-  `:1079-1084`).
+  (`repo.ex:6492-6497`), and `:already_terminal` is dropped (`manager.ex:1104`,
+  `:1143-1148`).
 - `RestForOne`: a Manager crash also restarts the `RunSupervisor` and the
   `DeliveryWorker`, killing every live Run first (`supervisor.ex:38-44`).
 - `ReconcilesAtBoot`: the restarted Manager finalizes active local rows as
-  `interrupted` (`manager.ex:235-236`, `:1344-1354`).
+  `interrupted` (`manager.ex:245-246`, `:1436-1447`).
 - `CrashDownTerminalizes`: an abnormal DOWN terminalizes the row as
-  `failed/run_crashed` (`manager.ex:1014-1027`).
+  `failed/run_crashed` (`manager.ex:1074-1091`).
 - `MarksDelivered`: a successful hand-off marks the row `delivered`
-  (`manager.ex:1143`, `:1148-1155`, `:1223`, `:1228-1238`).
+  (`manager.ex:1207`, `:1212-1219`, `:1287`, `:1292-1302`).
 - `ClientDeadLetters`: a failed client-owned dispatch dead-letters the row with
-  its named cause (`manager.ex:1162-1168`, `:1196-1211`).
+  its named cause (`manager.ex:1226-1232`, `:1260-1275`).
 - `WorkerDrainsOutbox`: the worker selects terminal rows that are still pending
-  (`delivery_worker.ex:101-123`, `repo.ex:6452-6464`).
+  (`delivery_worker.ex:101-123`, `repo.ex:6615-6627`).
 - `DeadLetterCap`: the worker dead-letters a row at `MaxAttempts`
   (`delivery_worker.ex:129-141`).
 - `LeasesFirstAttempt`: the terminal write leases the row to the Manager's
-  inline first attempt (`manager.ex:1035-1047`, `:83-95`; see above).
+  inline first attempt (`manager.ex:1099-1111`, `:90-102`; see above).
 - `SendsDieWithCaller`: a `with_timeout` sender is linked to its caller
   (`channel_send.ex:219-224`), so a caller that dies takes a sender still in
   flight with it.
 - `CancelsStrandedRow`: an owner cancel of an active local row the Manager does
   not track terminalizes it `cancelled` (`cancel_untracked/3`,
-  `manager.ex:977-992`). Off, it is the code before the fix:
+  `manager.ex:1035-1051`). Off, it is the code before the fix:
   `terminal_cancel_reply/2` answered `:already_terminal` for any row it found.
 
 ## What holds
@@ -182,7 +188,7 @@ on, was also run once by hand with this rule added to check 01, and it holds
 (1,347 distinct states). The runner cannot carry it in check 01: no single
 switch breaks it there. The guard's `:already_terminal` branch is never taken
 with the other layers on. It is the backstop the moduledoc calls it
-(`manager.ex:22`).
+(`manager.ex:26`).
 
 Check 13 runs the real timing with the lease, run crashes and failed sends, but
 no accepted send timing out and no Manager crash (both notify twice by design,
@@ -208,7 +214,7 @@ lapsing lease it breaks, as witness 33 shows.
 failed terminal writes, failed boot scans and the owner cancelling to check
 01's environment:
 - **A cancel never answers `:already_terminal` for an active row**
-  (`manager.ex:162-170`). This rests on `CancelsStrandedRow` (check 30).
+  (`manager.ex:172-180`). This rests on `CancelsStrandedRow` (check 30).
 - **Only a row whose Run is gone is cancelled that way.** The cancel reads only
   what the Manager can see (idle, run not tracked, row active), so this is
   checked rather than assumed. It rests on `RestForOne` (check 31): without it,
@@ -232,13 +238,13 @@ All three origins are in checks 01 to 16 and 29. The run count is fixed at one
   on the code the spec was written against, and the cause of HARNESS-1. It is
   no longer true: the terminal UPDATE now writes the lease with the status.
   - `admit_attrs` writes neither `delivery_status` nor `next_delivery_at`
-    (`manager.ex:395-425`), so the insert stores `'pending'` and `NULL`
-    (`repo.ex:502-505`, `:6770-6772`).
+    (`manager.ex:453-483`), so the insert stores `'pending'` and `NULL`
+    (`repo.ex:505-508`, `:6951-6953`).
   - The terminal UPDATE writes the status, the outcome's ledger fields,
-    `completed_at` and, since the fix, `next_delivery_at` (`repo.ex:6322-6334`;
-    the fields come from `manager.ex:1036`, `:1265-1308`).
+    `completed_at` and, since the fix, `next_delivery_at` (`repo.ex:6485-6497`;
+    the fields come from `manager.ex:1100`, `:1329-1386`).
   - The worker's query takes any non-active row that is `pending` with a
-    `NULL` or past `next_delivery_at` (`repo.ex:6452-6464`).
+    `NULL` or past `next_delivery_at` (`repo.ex:6615-6627`).
 - **A tick during the inline hand-off sends the outcome twice:** confirmed,
   then fixed. See HARNESS-1 (checks 17 and 25).
 - **A tick during the hand-off sends a text on top of the continuation turn:**
@@ -246,7 +252,7 @@ All three origins are in checks 01 to 16 and 29. The run count is fixed at one
   accepted but not confirmed is still followed by the text, by design: see
   HARNESS-2.
 - **Continuation chains stop at depth 3** (plan §4.5): not modelled.
-  `continuable?/1` is a pure check on one row (`continuation.ex:99-102`), and
+  `continuable?/1` is a pure check on one row (`continuation.ex:101-104`), and
   ExUnit is the right tool for it.
 
 ## Findings
@@ -283,20 +289,20 @@ run `tla/bin/check.py harness_delivery` and open
   - The terminal UPDATE left the row due for the worker (see the first plan
     hypothesis).
   - `post_terminal/5` then runs telemetry, the memory write-back (a second Repo
-    call) and the inline hand-off (`manager.ex:1064-1069`). A text send can
-    take up to 60 s (`delivery.ex:49`, `:280-293`), and a dispatch up to 15 s
-    (`continuation.ex:54`, `:154-166`). Only then does the Manager mark the row
-    (`manager.ex:1228-1238`).
+    call) and the inline hand-off (`manager.ex:1128-1133`). A text send can
+    take up to 60 s (`delivery.ex:52`, `:283-296`), and a dispatch up to 15 s
+    (`continuation.ex:55`, `:156-168`). Only then does the Manager mark the row
+    (`manager.ex:1292-1302`).
   - Meanwhile `run_tick/1` selected the row (`delivery_worker.ex:101-108`), and
     `process_row/3` sends from that snapshot without re-reading the row
     (`:118-123`). Nothing claims the row between the select and the send.
   - Both sides mark the row with an unguarded `UPDATE ... WHERE id = ?`
-    (`repo.ex:6363-6370`). `reschedule/5` writes `last_delivery_error` without
+    (`repo.ex:6526-6533`). `reschedule/5` writes `last_delivery_error` without
     checking `delivery_status` (`delivery_worker.ex:160-168`).
 - **Fix:** `terminalize_and_notify/4` passes
   `next_delivery_at = now + @handoff_lease_ms` (120 s) to `Ledger.terminalize`,
   so the guarded UPDATE writes the status and the lease in one statement
-  (`manager.ex:1035-1047`, `:83-95`). Every terminal write goes through it:
+  (`manager.ex:1099-1111`, `:90-102`). Every terminal write goes through it:
   report, crash DOWN, launch failure, scheduled blocks, cloud terminals,
   reconciliation and the owner's cancel of a stranded row. No Repo, schema or
   worker change. A successful hand-off marks the row delivered and a failed
@@ -336,13 +342,13 @@ run `tla/bin/check.py harness_delivery` and open
     stays active and untracked the same way.
 - **Code:**
   - `after_terminalize_error/4` re-arms only a cloud run. A local run is dropped
-    (`manager.ex:1049-1062`, `:1086-1089`, "has no live poll to re-arm and is
+    (`manager.ex:1113-1126`, `:1150-1153`, "has no live poll to re-arm and is
     dropped").
-  - `reconcile/1` only logs a scan error (`manager.ex:1344-1349`,
-    `:1439-1442`), and the restarted Manager tracks nothing.
-  - The worker never selects an active row (`repo.ex:6460`).
+  - `reconcile/1` only logs a scan error (`manager.ex:1436-1441`,
+    `:1532-1535`), and the restarted Manager tracks nothing.
+  - The worker never selects an active row (`repo.ex:6623`).
   - Only the next Manager start with a working scan reconciles the row, as
-    `interrupted` (`manager.ex:1351-1354`).
+    `interrupted` (`manager.ex:1443-1447`).
 - **Impact before the fix:**
   - The owner was never told.
   - `list_coding_runs` showed the run as running, yet `cancel_coding_run` on it
@@ -350,10 +356,10 @@ run `tla/bin/check.py harness_delivery` and open
     `terminal_cancel_reply/2` treated any row it found as terminal. The owner
     could not cancel it.
   - Its workspace lock roots and capacity slot stay held, because admission
-    counts active rows (`repo.ex:6224-6252`). Later runs in that worktree are
+    counts active rows (`repo.ex:6386-6414`). Later runs in that worktree are
     refused `workspace_locked`.
 - **Fix:** an owner cancel of a run absent from the runs map now reads the row
-  (`cancel_untracked/3`, `manager.ex:977-992`). An active local row has no live
+  (`cancel_untracked/3`, `manager.ex:1035-1051`). An active local row has no live
   Run: every live local run is tracked in the callback that launches it, and a
   restart sweeps the Runs first. So the Manager replies `:ok` first (the
   terminal write runs the inline hand-off, which can outlast the caller's 5 s
@@ -379,7 +385,7 @@ showed them are now `reachable` witnesses.
 ### HARNESS-2: a continuation the Manager could not confirm is followed by a text
 - **Status:** accepted by design. Notification is at-least-once and execution
   at-most-once (design §23.2). The code's claim covers a CONFIRMED dispatch
-  only (`manager.ex:1091-1103`), and that claim holds: check 18,
+  only (`manager.ex:1155-1167`), and that claim holds: check 18,
   `NoTextAfterConfirmedContinuation`.
 - **Checks:** witnesses 20 and 21 (`Witness_TextAfterUnconfirmedTurn`).
 - **Paths:**
@@ -397,7 +403,7 @@ showed them are now `reachable` witnesses.
     in flight takes the sender with it, so the turn lands only if the gateway
     cast already happened: the crash must fall between the cast and the
     Manager's `MgrResolve`.
-- **Why by design:** `continuation.ex:148-152` says "a timeout/crash is an
+- **Why by design:** `continuation.ex:150-154` says "a timeout/crash is an
   `{:error, _}` dispatch, so the row stays `pending` and the `DeliveryWorker`
   delivers the outcome as text"; the core behaviour doc says the caller "treats
   an expiry as a failed dispatch" (`continuation_dispatcher.ex:51-52` in core).
@@ -408,7 +414,7 @@ showed them are now `reachable` witnesses.
 
 ### HARNESS-3: a Manager stop with a report still queued records the finished run as interrupted
 - **Status:** accepted and documented (owner default: accept). The Manager
-  moduledoc (`manager.ex:40-44`) says an interrupted local row may belong to a
+  moduledoc (`manager.ex:46-50`) says an interrupted local row may belong to a
   finished run whose report was lost in a restart, and that its result stays
   readable through `get_coding_run`.
 - **Check:** witness 22 (`Witness_ReportLostOnRestart`).
@@ -419,9 +425,9 @@ showed them are now `reachable` witnesses.
      terminalizes it `interrupted`.
 - **Code:**
   - The report is only a message in the Manager's mailbox (`run.ex:634`,
-    `manager.ex:285-286`), and the mailbox dies with the process.
+    `manager.ex:295-296`), and the mailbox dies with the process.
   - `reconcile_row/2` finalizes every active local row as `interrupted`
-    (`manager.ex:1351-1354`, `:1299-1301`).
+    (`manager.ex:1443-1447`, `:1363-1365`).
   - The Manager blocks for up to 60 s in each inline hand-off, so reports can
     queue behind it.
   - Triggers: an orderly shutdown (a daemon restart or upgrade: the supervisor
@@ -433,10 +439,10 @@ showed them are now `reachable` witnesses.
 - **Impact:**
   - The owner's text reads "`[run <id>] interrupted`", with the completed result
     shown as if it were the vendor's error text, and a resume hint. The text is
-    re-read from `result.txt` (`delivery.ex:359`, `:442-446`).
+    re-read from `result.txt` (`delivery.ex:362`, `:445-449`).
   - A chat continuation carries no result body. It closes with "This run ended
     without reporting a result ... check the working tree before redoing
-    anything" (`continuation.ex:88`, `:219`), so the agent finds the finished
+    anything" (`continuation.ex:90`, `:233`), so the agent finds the finished
     changes before it redoes anything.
 - **If the owner wants it closed:** make the report durable before it is sent.
   The Run writes its status and ledger fields to `<artifacts_dir>/terminal.json`
