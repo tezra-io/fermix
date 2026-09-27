@@ -90,6 +90,10 @@ processes it starts, so content that steers the agent cannot simply ask for the
 machine's cloud credentials. It is defense in depth, not a guarantee: a process
 started outside the unit is not covered, such as one launched through
 `systemd-run`, or a tab of the person's own browser (`profile: "selected_tab"`).
+A system unit written before this refusal existed gains it only when it is
+rewritten, and `fermix upgrade` never rewrites a unit: `fermix doctor`'s
+`service unit` row reports it stale, and `sudo fermix setup --system` (or
+`sudo fermix service install --system` naming the same `FERMIX_HOME`) adds it.
 An operator whose agent should use the instance's own credentials clears the
 list with a drop-in (`sudo systemctl edit fermix`, then `IPAddressDeny=` under
 `[Service]`); setup's rewrites leave drop-ins alone. A user unit, including the
