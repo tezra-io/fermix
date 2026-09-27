@@ -56,8 +56,8 @@ the checks that show a property needs it):
   kills whichever turn is running.
 - `ConsumerFencesQueue`: the consumer monitors the Queue process it handed the
   message to and answers the message as a failed turn on that Queue's `:DOWN`
-  (`Acp.Peer`: `hand_off`, `peer.ex:558-566`; `settle_queue_down`, `:181-183`,
-  `:889-894`).
+  (`Acp.Peer`: `hand_off`, `peer.ex:595-603`; `settle_queue_down`, `:203-205`,
+  `:926-931`).
 
 **Timing idealisation:** `CrashInClaimGap`. `TRUE` is the real code. A turn
 finishes in two steps (`finish_turn`, `queue.ex:574-580`):
@@ -138,11 +138,11 @@ Queue's `:DOWN`. This rests on `ConsumerFencesQueue` (check 17b). Witness 17c
 shows that a turn that claimed its result before its Queue died can still send
 it after the `:DOWN` reached the Peer, so the Peer holds two answers for one
 prompt. It writes only the first: answering closes the turn, and the wire fence
-drops every later event for it (`apply_if_open`, `peer.ex:712-718`). The
+drops every later event for it (`apply_if_open`, `peer.ex:749-755`). The
 ExUnit test "a Queue crash answers the prompt in flight as a failed turn,
 once, and accepts the next" (`acp/peer_test.exs`) pins that. The model allows
 no stop while the Queue is restarting, and check 17 does not cover that
-window: there the Peer's cancel (`stop_turn`, `peer.ex:671-675`) exits
+window: there the Peer's cancel (`stop_turn`, `peer.ex:708-712`) exits
 `:noproc`, the connection ends, and its open prompts get no answer (see
 QUEUE-8, What remains).
 
@@ -370,7 +370,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   turn. Voice stays as it is: the call is bounded and the operator can cancel
   it.
 - **Fix (ACP):**
-  - `hand_off` (`peer.ex:558-566`) resolves the Queue's name to a pid with
+  - `hand_off` (`peer.ex:595-603`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as the companion transports' `handoff_settlement`
     does (`requests.ex:264-280`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
@@ -378,14 +378,14 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
     queued" answer).
   - The turn keeps the monitor (`Session.put_queue_ref`). On the `:DOWN`,
-    `settle_queue_down` (`peer.ex:181-183`, `:889-894`) calls
+    `settle_queue_down` (`peer.ex:203-205`, `:926-931`) calls
     `apply_turn_result` with `{:failed, {:queue_down, reason}}`: the same path
     as any failed turn, so it answers an error the client may retry, or
     `end_turn` once the turn performed an effect. The error is always -32603:
     the Queue calls no provider, so its exit reason is never read as an auth
     failure (`auth_failure?`). It closes the turn, so the session accepts the
     next prompt.
-  - Every answer goes through `close_turn` (`peer.ex:907-917`), which drops
+  - Every answer goes through `close_turn` (`peer.ex:944-954`), which drops
     the monitor with `:flush`: a completed, cancelled or failed turn leaves no
     watch and no stray `:DOWN`. A result that arrives after the `:DOWN`
     answered is dropped by the wire fence (witness 17c).
@@ -416,7 +416,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   Queue, which never got the request (reported outside this spec). A cancel
   that reaches the Peer while no Queue is registered (`session/cancel`,
   `$/cancel_request` or a bridge disconnect, all through `stop_turn`,
-  `peer.ex:671-675`) exits `:noproc` in its `GenServer.call`: the Peer's
+  `peer.ex:708-712`) exits `:noproc` in its `GenServer.call`: the Peer's
   connection ends and its open prompts get no answer. The model allows no stop
   while restarting, so check 17 does not cover it (reported, not fixed).
 

@@ -29,7 +29,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/draft_stream.ex#start_link @ c185d3d497b1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 0ba02e5ff33f
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 363eb316106b
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ b3294d30e861
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref @ 46da0e632d47
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 281df102b636
@@ -72,7 +72,7 @@ CONSTANTS
                             \* conversation stop, the only stop the Queue had before
     ConsumerFencesQueue,    \* the consumer monitors the Queue process it handed the
                             \* message to and answers it as failed on that Queue's
-                            \* :DOWN (Acp.Peer: peer.ex:558-566, :181-183, :889-894)
+                            \* :DOWN (Acp.Peer: peer.ex:595-603, :203-205, :926-931)
     \* Timing idealisation. TRUE is the real code; FALSE forbids a crash in
     \* the gap between the task claiming the closure and invoking it
     \* (finish_turn, queue.ex:574-580). There invoke_turn_result catches
@@ -185,7 +185,7 @@ Fresh(m) == active = m
 \* the registered name (queue.ex:91-94), and a cast to an unregistered name
 \* is dropped silently, with no outcome (QUEUE-8's class). The Peer is not
 \* exposed: it resolves the name first and hands the prompt to that process
-\* (hand_off, peer.ex:558-566), so a prompt that finds no Queue registered
+\* (hand_off, peer.ex:595-603), so a prompt that finds no Queue registered
 \* is refused at once, and one handed to a Queue that dies gets that Queue's
 \* :DOWN. Send is disabled while restarting only to keep the model small.
 Send(m) ==
@@ -215,7 +215,7 @@ KillsActive == active /= None /\ (~claimed \/ ~StopSparesClaimedTurn)
 \* not a step. The claim is a Queue callback too, so the Queue serialises it
 \* against the stop: claimed is exact here.
 \* A stop while no Queue is registered is not modelled: every caller's
-\* GenServer.call exits :noproc. For Acp.Peer (stop_turn, peer.ex:671-675)
+\* GenServer.call exits :noproc. For Acp.Peer (stop_turn, peer.ex:708-712)
 \* that ends the connection, and its open prompts get no answer (reported,
 \* not fixed; check 17 does not cover that window).
 StopConversation ==
@@ -286,10 +286,10 @@ StopTurn ==
 \* turns, under a supervisor it is not linked to, keep running.
 \* Every consumer watching this Queue gets its :DOWN now (ConsumerFencesQueue):
 \* the Peer monitored the Queue process it handed each message to
-\* (hand_off, peer.ex:558-566), so every message the dead Queue held, active
+\* (hand_off, peer.ex:595-603), so every message the dead Queue held, active
 \* or waiting, has a :DOWN in the Peer's mailbox, except one whose result the
 \* Peer already has: that result is ahead of the :DOWN, and answering it
-\* closes the turn and flushes the :DOWN (close_turn, peer.ex:907-917).
+\* closes the turn and flushes the :DOWN (close_turn, peer.ex:944-954).
 QueueDown ==
     /\ QueueCanCrash
     /\ ~restarting
@@ -322,13 +322,13 @@ QueueRestart ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, finalSent, outcomes, shown,
                    history, dropped, watch>>
 
-\* Acp.Peer handle_info({:DOWN, ...}) -> settle_queue_down (peer.ex:181-183,
-\* :889-894): the :DOWN comes before any result for m in the mailbox, so the
+\* Acp.Peer handle_info({:DOWN, ...}) -> settle_queue_down (peer.ex:203-205,
+\* :926-931): the :DOWN comes before any result for m in the mailbox, so the
 \* Peer answers m as a failed turn through apply_turn_result and closes the
 \* turn. (Mailbox order is taken to be send order; Erlang orders only each
 \* sender's own messages, which changes who answers, not whether or how
 \* often.) A result for m sent after this is dropped by the wire fence
-\* (apply_if_open, peer.ex:712-718: the turn is closed), witness 17c.
+\* (apply_if_open, peer.ex:749-755: the turn is closed), witness 17c.
 PeerSettles(m) ==
     /\ watch[m] = "down"
     /\ watch' = [watch EXCEPT ![m] = "settled"]
