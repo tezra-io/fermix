@@ -143,6 +143,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   connection, a crashed ACP turn is no longer reported as a sign-in problem,
   and a voice cancel or hang-up waits for the stop instead of dropping the
   call after 5 seconds.
+- **A scheduled job's work stops when its job does.** When part of the daemon
+  restarted during a job, the job's work could keep running tools while the
+  same job started again. It now stops with its runner. A delivery that was
+  sent is no longer recorded as failed because its status could not be saved:
+  the run names the real cause.
 
 ## [0.11.0] - 2026-09-23
 

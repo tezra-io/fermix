@@ -110,8 +110,9 @@ defmodule FermixCore.Jobs.Scheduler do
   Claim and start an out-of-band ("run now") execution of a scheduled job.
 
   Reuses the same atomic claim, runner dispatch, and monitoring as the timed
-  path; only the trigger is `"manual"` and the schedule's `next_run_at` is left
-  untouched (the natural cadence continues). Returns the created run on success.
+  path; only the trigger is `"manual"`. A recurring job's `next_run_at` is left
+  untouched (its cadence continues); a one-off run by hand is done and does not
+  fire again at its instant. Returns the created run on success.
   """
   @spec run_now(GenServer.server(), String.t(), keyword()) ::
           {:ok, map()} | {:error, term()}
@@ -760,6 +761,7 @@ defmodule FermixCore.Jobs.Scheduler do
         source
         |> Map.merge(%{last_run_at: now, last_status: "error", updated_at: now})
         |> Repo.upsert_memory_source(server: repo)
+        |> log_source_write(job, "crash")
 
       {:error, :not_found} ->
         :ok
@@ -777,6 +779,7 @@ defmodule FermixCore.Jobs.Scheduler do
         source
         |> Map.merge(%{status: "expired", last_status: "expired", updated_at: now})
         |> Repo.upsert_memory_source(server: repo)
+        |> log_source_write(job, "expiry")
 
       {:error, :not_found} ->
         :ok
@@ -786,6 +789,16 @@ defmodule FermixCore.Jobs.Scheduler do
           "Scheduled job source #{job.memory_source_id} expiry update failed: #{inspect(reason)}"
         )
     end
+  end
+
+  # The memory-source row only mirrors the job for display, so a refused write
+  # is logged, like a failed lookup above, and the Scheduler carries on.
+  defp log_source_write({:ok, _source}, _job, _path), do: :ok
+
+  defp log_source_write({:error, reason}, job, path) do
+    Logger.error(
+      "Scheduled job source #{job.memory_source_id} #{path} status write failed: #{inspect(reason)}"
+    )
   end
 
   defp schedule_due_timer(state, outcome \\ :ok) do

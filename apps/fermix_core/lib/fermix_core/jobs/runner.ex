@@ -41,6 +41,10 @@ defmodule FermixCore.Jobs.Runner do
   @default_transient_backoff_ms 2_000
   @default_max_transient_retry_ms 60_000
 
+  # Ceiling for the logged text of a crash inside the AgentLoop process: the
+  # exception and its top frames, bounded like every other raw-payload log.
+  @crash_log_max 2_000
+
   @type state :: %{
           repo: GenServer.server(),
           capability_registry: GenServer.server(),
@@ -201,7 +205,7 @@ defmodule FermixCore.Jobs.Runner do
         completed_state = %{state | run: completed_run}
 
         persist_run_summary_memory(completed_state, result)
-        update_memory_source(job, completed_run.completed_at, state.repo)
+        update_memory_source_status(job, "ok", completed_run.completed_at, state.repo)
         finalize_delivery(completed_state, result.response)
 
       {:timeout, reason} ->
@@ -352,51 +356,41 @@ defmodule FermixCore.Jobs.Runner do
         updated_at: now
       })
 
+    # A refused write exits the runner with the outcome and its error in its
+    # reason, so the Scheduler's crash path fails the still-pending delivery with
+    # that cause at once, instead of a :normal exit leaving the row for the
+    # reconcile pass's generic "no live runner" text.
     case Repo.upsert_job_run(attrs, server: state.repo) do
       {:ok, run} ->
         run
 
       {:error, reason} ->
-        Logger.warning(
-          "Scheduled job #{state.job.id} delivery status update failed: #{inspect(reason)}"
-        )
-
-        state.run
+        exit({:delivery_status_write_failed, delivery_status, delivery_error, reason})
     end
   end
 
-  defp update_memory_source(job, now, repo) do
-    case Repo.get_memory_source(job.memory_source_id, server: repo) do
-      {:ok, source} ->
-        source
-        |> Map.merge(%{
-          last_run_at: now,
-          last_status: "ok",
-          updated_at: now
-        })
-        |> Repo.upsert_memory_source(server: repo)
-
-      {:error, :not_found} ->
-        :ok
-
-      {:error, _reason} ->
-        :ok
-    end
-  end
-
+  # The memory-source row mirrors the job's last run for display and nothing
+  # gates on it, so a failed lookup or write is logged and the run goes on.
   defp update_memory_source_status(job, status, now, repo) do
     case Repo.get_memory_source(job.memory_source_id, server: repo) do
       {:ok, source} ->
         source
         |> Map.merge(%{last_run_at: now, last_status: status, updated_at: now})
         |> Repo.upsert_memory_source(server: repo)
+        |> log_memory_source_write(job)
 
       {:error, :not_found} ->
         :ok
 
-      {:error, _reason} ->
-        :ok
+      {:error, reason} ->
+        Logger.warning("Scheduled job #{job.id} memory source lookup failed: #{inspect(reason)}")
     end
+  end
+
+  defp log_memory_source_write({:ok, _source}, _job), do: :ok
+
+  defp log_memory_source_write({:error, reason}, job) do
+    Logger.warning("Scheduled job #{job.id} memory source update failed: #{inspect(reason)}")
   end
 
   defp build_loop_input(state) do
@@ -973,10 +967,20 @@ defmodule FermixCore.Jobs.Runner do
         send(parent, {:job_loop_activity, activity_ref, event})
       end)
 
+    # Linked AND monitored in one atomic call (ChannelSend's monitored_call
+    # pattern): a runner shut down mid-run, as a :rest_for_one restart of an
+    # earlier core child does, takes its loop with it, so the restarted
+    # Scheduler's reap and next claim never run beside a live loop (JOB-8).
+    # `report_loop/2` turns every raise, throw or exit of the loop body into a
+    # value, so the loop exits :normal and the link carries only runner -> loop.
+    # The closure takes the job id alone, not the runner state it would copy.
+    job_id = state.job.id
+
     {pid, monitor_ref} =
-      spawn_monitor(fn ->
-        send(parent, {:job_loop_result, activity_ref, AgentLoop.run(loop_opts)})
-      end)
+      Process.spawn(
+        fn -> send(parent, {:job_loop_result, activity_ref, report_loop(loop_opts, job_id)}) end,
+        [:link, :monitor]
+      )
 
     watch_loop(pid, monitor_ref, activity_ref, %{
       started_at: monotonic_ms(),
@@ -988,13 +992,39 @@ defmodule FermixCore.Jobs.Runner do
     })
   end
 
+  # Runs inside the loop process. A crash is logged here, bounded because it
+  # can carry a response body, since the loop's :normal exit leaves no crash
+  # report. Residual: a process the loop links to itself can still kill it with
+  # an exit signal, and the link then takes the runner down too; the
+  # Scheduler's DOWN path settles that run as "runner crashed", with no failure
+  # text delivered and no run_error bookend (before JOB-8's fix that death was
+  # a clean {:agent_loop_exit, _} failure).
+  defp report_loop(loop_opts, job_id) do
+    AgentLoop.run(loop_opts)
+  catch
+    kind, reason ->
+      Logger.error(
+        "Scheduled job #{job_id} AgentLoop crashed: " <>
+          (kind |> Exception.format(reason, __STACKTRACE__) |> String.slice(0, @crash_log_max))
+      )
+
+      {:error, {:agent_loop_exit, reason}}
+  end
+
+  # The loop answered and is exiting :normal: drop its link and monitor. The
+  # runner does not trap exits, so the link can have queued no {:EXIT, _, _}.
+  defp release_loop(pid, monitor_ref) do
+    Process.unlink(pid)
+    Process.demonitor(monitor_ref, [:flush])
+  end
+
   # Returns `{result, tools_started?}`: the loop result plus whether any tool
   # executed this attempt, which gates the whole-loop transient retry (a retry
   # after a tool ran would replay its side effects).
   defp watch_loop(pid, monitor_ref, activity_ref, watchdog) do
     case receive_watchdog_message(next_watchdog_wait(watchdog)) do
       {:job_loop_result, ^activity_ref, result} ->
-        Process.demonitor(monitor_ref, [:flush])
+        release_loop(pid, monitor_ref)
         {result, watchdog.tools_started?}
 
       {:job_loop_activity, ^activity_ref, event} ->
@@ -1044,7 +1074,11 @@ defmodule FermixCore.Jobs.Runner do
     end
   end
 
+  # Unlink first, so the watchdog's kill cannot reach the runner through the
+  # link. A runner killed between the two leaves its loop unlinked, the same
+  # few-instruction residual as ChannelSend's kill_and_drain.
   defp kill_loop(pid, monitor_ref) do
+    Process.unlink(pid)
     Process.exit(pid, :kill)
 
     receive do
