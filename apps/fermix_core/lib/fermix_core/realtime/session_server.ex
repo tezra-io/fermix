@@ -213,8 +213,8 @@ defmodule FermixCore.Realtime.SessionServer do
 
   @impl true
   def handle_call(:call_start, _from, %{session_update_event: nil} = state) do
-    with {:ok, openai_pid, state} <- open_openai_session(state),
-         {:ok, event} <- build_session_update_event(state) do
+    with {:ok, event} <- build_session_update_event(state),
+         {:ok, openai_pid, state} <- open_openai_session(state) do
       case send_provider_event(state.openai_client, openai_pid, event) do
         :ok ->
           RealtimeTelemetry.call_start(telemetry_meta(state))
@@ -459,12 +459,12 @@ defmodule FermixCore.Realtime.SessionServer do
   def handle_info(:reconnect_attempt, state) do
     case attempt_reconnect(state) do
       {:ok, openai_pid, state} ->
+        # Not back yet: only this socket's session.updated resets reconnect_attempts.
         {:noreply,
          %{
            state
            | openai_pid: openai_pid,
              provider_ready?: false,
-             reconnect_attempts: 0,
              reconnect_timer: nil
          }}
 
@@ -825,7 +825,7 @@ defmodule FermixCore.Realtime.SessionServer do
     RealtimeTelemetry.session_updated(telemetry_meta(state))
 
     state
-    |> Map.put(:provider_ready?, true)
+    |> Map.merge(%{provider_ready?: true, reconnect_attempts: 0})
     |> start_timers()
     |> notify_listening_state()
     |> resume_screen_feed()

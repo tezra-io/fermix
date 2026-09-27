@@ -160,6 +160,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **Computer history releases its lock when it stops.** A slow final save
   could leave the recorder's lock behind, so the next start waited for it to
   expire before recording again.
+- **A voice call survives an unexpected message and gives up on a connection
+  that keeps closing.** A message from OpenAI that Fermix did not expect used
+  to drop the connection, and end a GPT-Live call. A connection that keeps
+  closing while it is being set up now ends the call after three tries instead
+  of reconnecting for the rest of the session.
 
 ## [0.11.0] - 2026-09-23
 

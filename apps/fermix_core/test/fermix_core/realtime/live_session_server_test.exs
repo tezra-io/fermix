@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
 
   @moduletag :capture_log
@@ -51,6 +52,17 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     @doc "Stop answering `session.close`, the way a socket that is already gone behaves."
     def silence_close, do: Agent.update(@name, &%{&1 | answer_close?: false})
+
+    @doc """
+    A raw text frame arrives on the socket: the REAL `OpenAILiveClient.handle_frame/2`
+    runs inside this process, where WebSockex runs it.
+    """
+    def deliver_frame(payload) when is_binary(payload) do
+      {:ok, _state} =
+        Agent.get(@name, &OpenAILiveClient.handle_frame({:text, payload}, %{parent: &1.parent}))
+
+      :ok
+    end
 
     defp answer_close(%{answer_close?: true, parent: parent}) do
       send(parent, {:openai_live_event, {:session_closed, "close_requested", 120.5}})
@@ -919,6 +931,24 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       refute_receive {:realtime, %{type: "error"}}
       assert Process.alive?(session)
+    end
+
+    # Live never reconnects, so a socket crashed by this frame used to end the call.
+    test "a JSON frame that is not an object is not terminal", %{clock: clock} do
+      scope = "voice_live:non_object_#{System.unique_integer([:positive, :monotonic])}"
+      attach_provider_error_handler(scope)
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert :ok = FakeLiveClient.deliver_frame(~s([1]))
+      sync(session)
+
+      assert_receive {:provider_error, %{session_id: ^scope, reason: reason}}
+      assert reason =~ "invalid_server_event"
+      refute_received {:realtime, %{type: "error"}}
+      assert Process.alive?(session)
+      assert LiveSessionServer.live_pid(session) == Process.whereis(FakeLiveClient.State)
     end
   end
 

@@ -432,11 +432,23 @@ defmodule FermixCore.Realtime.OpenAIClient do
     }
   end
 
+  # Valid JSON that is not an object is reported, never matched away: a
+  # CaseClauseError here killed the socket, and the call reconnected into a fresh
+  # conversation. Only a bounded description travels to the session.
   @impl true
   def handle_frame({:text, payload}, state) when is_binary(payload) do
     case Jason.decode(payload) do
       {:ok, %{} = event} ->
         notify_parent(state.parent, event)
+        {:ok, state}
+
+      {:ok, other} ->
+        send(
+          state.parent,
+          {:openai_realtime_error, self(),
+           {:invalid_server_event, inspect(other, limit: 5, printable_limit: 120)}}
+        )
+
         {:ok, state}
 
       {:error, reason} ->
