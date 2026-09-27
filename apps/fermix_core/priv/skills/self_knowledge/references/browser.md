@@ -9,7 +9,19 @@ The `browser` tool drives Chromium over CDP. Which browser it drives is the
 instances, in its own profile directory, with its own logins. This is the
 default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
-else is using it. On a desktop it is a real window the person can see.
+else is using it.
+
+Which of the three a call without `profile` uses is `[fermix_core.browser]
+default_profile`, the person's "how tasks run" choice: `fermix` (the shipped
+default) runs in a window wherever there is a display and in the background on
+a server without one, `fermix_headless` always runs in the background, and
+`fermix_visible` always opens a window they can watch. Each profile keeps its own
+logins, so a site signed in under one is signed out under the others. A call can
+still name a profile for one task, such as `fermix_visible` when the person asks
+to watch. `max_tabs` (default 10) is how many tabs a managed browser keeps open
+before closing the oldest one a task is not using; it applies from the browser's
+next start. `allowed_hosts` is the third and last key a person sets there;
+`default_profile` refuses `selected_tab` and any name no profile carries.
 
 ## Which browser the managed profiles launch
 

@@ -2183,17 +2183,18 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # `[fermix_core.browser]`. Only `allowed_hosts` is settable — it is the
-  # documented recovery for a host the browser policy refuses, so the refusals
-  # need it reachable. Every other field of `Browser.Config` is a timeout, a cap
-  # or a buffer size: tuning, which stays an internal constant.
+  # `[fermix_core.browser]`. Three keys are settable (`BrowserConfig.config_keys/0`):
+  # `allowed_hosts`, the documented recovery for a host the browser policy
+  # refuses, `default_profile`, how tasks run, and `max_tabs`. Every other field
+  # of `Browser.Config` is a timeout, a buffer size or a profile shape: tuning,
+  # which stays an internal constant.
   #
   # Unknown keys are rejected here at the parse boundary rather than dropped. The
-  # keys an operator most plausibly writes (`action_timeout_ms`, `max_tabs`) are
-  # REAL struct fields, so a silent drop would leave a config.toml line that
-  # reads as if it were in force and is not — the failure this whole section
-  # exists to end. Value validation lives in `Config.validate_allowed_hosts/1`,
-  # which runs on every read and is surfaced by `fermix doctor`.
+  # keys an operator most plausibly writes (`action_timeout_ms`) are REAL struct
+  # fields, so a silent drop would leave a config.toml line that reads as if it
+  # were in force and is not — the failure this whole section exists to end.
+  # Value validation lives in `Config.current/1`, which runs on every read, is
+  # surfaced by `fermix doctor`, and refuses a management write before it lands.
   defp normalize_browser(config) do
     validate_browser_section_keys!(config)
     BrowserConfig.normalize(config)
@@ -2217,7 +2218,7 @@ defmodule FermixCore.Setup.ConfigStore do
       config.toml [fermix_core.browser] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(BrowserConfig.config_keys(), ", ", &Atom.to_string/1)}.
-      Browser timeouts, caps and buffer sizes are internal constants, not config.
+      Browser timeouts, buffer sizes and the other caps are internal constants, not config.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
       """
     end
