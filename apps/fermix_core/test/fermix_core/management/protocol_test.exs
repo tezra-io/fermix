@@ -108,7 +108,8 @@ defmodule FermixCore.Management.ProtocolTest do
              "mobile.pair.decide",
              "mobile.pair.cancel",
              "mobile.devices.list",
-             "mobile.devices.revoke"
+             "mobile.devices.revoke",
+             "browser.install.start"
            ]
 
     assert Protocol.error_codes() == [

@@ -1620,13 +1620,13 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp shim_path(path) when is_binary(path), do: path
 
   # The browser tasks run in, in the sentence the settings row publishes, plus
-  # where it lives. `resolve_default/1` answers a refused `[fermix_core.browser]`
+  # where it lives. `resolve_default/0` answers a refused `[fermix_core.browser]`
   # section (out of range, or naming an unusable profile) with the refusal
   # itself — the exact host whose owner runs `fermix doctor` to find out why.
   # Binding it with `{:ok, _}` would kill the whole run with a MatchError and
   # print nothing.
   defp browser_chrome_result do
-    case ChromeLauncher.resolve_default(Application.get_env(:fermix_core, :browser, [])) do
+    case ChromeLauncher.resolve_default() do
       {:ok, found} = resolved ->
         ok("browser", "disclaim shim ready; #{ChromeLauncher.sentence(resolved)} (#{found.path})")
 

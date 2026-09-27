@@ -10,10 +10,12 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.AnswerMap
+  alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
@@ -44,6 +46,7 @@ defmodule FermixCore.Management.SettingsTest do
     :harness,
     :tools,
     :sandbox,
+    :browser,
     :secret_writer
   ]
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
@@ -122,7 +125,7 @@ defmodule FermixCore.Management.SettingsTest do
 
     test "every pane a section names is a pane the app routes to" do
       panes = ~w(providers personality memory channels voice meetings computer coding
-                 search images sandbox)
+                 search images sandbox browser)
 
       for section <- Settings.sections() do
         assert section.pane in panes, "#{section.id} names an unroutable pane"
@@ -1053,6 +1056,135 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # The managed task browser's pane. Its first row is the launcher's answer,
+  # injected here so the host's own Chrome never decides a verdict; the other
+  # three are the `[fermix_core.browser]` keys a person sets.
+  describe "the browser section" do
+    test "publishes the browser in force and three live settings with their defaults" do
+      Application.delete_env(:fermix_core, :browser)
+
+      assert %{id: "browser", pane: "browser", title: "Browser"} in Settings.sections()
+
+      rows = rows("browser")
+
+      assert Enum.map(rows, &{&1["key"], &1["kind"]}) == [
+               {"browser_executable", "text"},
+               {"browser_default_profile", "choice"},
+               {"browser_max_tabs", "number"},
+               {"browser_allowed_hosts", "list"}
+             ]
+
+      refute Row.restart?(:browser)
+      assert Enum.all?(rows, &(&1["restart"] == false))
+      assert row("browser", "browser_executable")["read_only"] == true
+
+      assert row("browser", "browser_default_profile")["value"] == "fermix"
+
+      assert option_values("browser", "browser_default_profile") ==
+               ~w(fermix fermix_headless fermix_visible)
+
+      assert %{"value" => 10, "min" => 1, "max" => nil, "step" => 1, "format" => "integer"} =
+               row("browser", "browser_max_tabs")
+
+      assert row("browser", "browser_allowed_hosts")["value"] == ["localhost", "127.0.0.1", "::1"]
+    end
+
+    test "the browser in force is a name, and no browser is a sentence" do
+      found = fn _block -> {:ok, %{path: "/Applications/x", label: "Google Chrome"}} end
+
+      missing = fn _block ->
+        {:error, BrowserError.new("chrome_missing", "Chrome executable was not found")}
+      end
+
+      assert %{"value" => "Google Chrome", "footer" => nil} = executable_row(found)
+
+      assert %{"value" => nil, "footer" => "No Chrome or Chromium is installed."} =
+               executable_row(missing)
+    end
+
+    # A download does not clear a configuration the launcher refuses, so the row
+    # says what the launcher would say. The default resolver reads the section's
+    # own snapshot, not the host, which is what makes this case hermetic: the
+    # refusal comes before any browser is looked for.
+    test "a browser configuration the launcher refuses is named in its own words" do
+      snapshot = %{fermix_core: [browser: [default_profile: "selected_tab"]]}
+      [executable | _rest] = Browser.rows("browser", snapshot)
+
+      assert executable["value"] == nil
+
+      assert executable["footer"] ==
+               ~s(default_profile "selected_tab" is not a browser profile tasks can run in)
+    end
+
+    test "each key is written, reads back, and asks for no restart", %{home: home} do
+      writes = [
+        {"browser_default_profile", "fermix_headless", :default_profile},
+        {"browser_max_tabs", 4, :max_tabs},
+        {"browser_allowed_hosts", ["nas.local", "192.168.1.20"], :allowed_hosts}
+      ]
+
+      for {key, value, config_key} <- writes do
+        assert {:ok, result} = Settings.apply("browser", %{key => value})
+
+        assert result["applied"] == [key]
+        refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "browser"))
+        assert Application.get_env(:fermix_core, :browser)[config_key] == value
+        assert row("browser", key)["value"] == value
+      end
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(default_profile = "fermix_headless")
+      assert contents =~ "max_tabs = 4"
+    end
+
+    test "a value the browser would refuse at launch is refused in its own words" do
+      Application.delete_env(:fermix_core, :browser)
+
+      refusals = [
+        {"browser_max_tabs", 0, "max_tabs must be a positive integer"},
+        {"browser_max_tabs", 2.5, "max_tabs must be a positive integer"},
+        {"browser_allowed_hosts", ["münchen.de"], "is not a canonical host spelling"}
+      ]
+
+      for {key, value, sentence} <- refusals do
+        assert {:error, {:invalid_params, ^key, refusal}} =
+                 Settings.apply("browser", %{key => value})
+
+        assert refusal =~ sentence
+      end
+
+      assert Application.get_env(:fermix_core, :browser) == nil
+    end
+
+    test "how tasks run takes only the managed profiles it publishes" do
+      assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
+               Settings.apply("browser", %{"browser_default_profile" => "selected_tab"})
+
+      assert sentence == "This setting takes one of its published values."
+    end
+
+    test "the browser in force is shown here and changed elsewhere" do
+      assert {:error, {:invalid_params, "browser_executable", sentence}} =
+               Settings.apply("browser", %{"browser_executable" => "Chromium"})
+
+      assert sentence == "This setting is shown here and changed elsewhere."
+    end
+
+    # The golden illustrates a write that asks for no restart, but the restart
+    # state is the daemon's whole, so a reason another section left standing is
+    # not this write's. The reason list is compared by what this write adds.
+    test "the browser apply fixture carries the shape the writer returns" do
+      assert {:ok, result} =
+               Settings.apply("browser", %{"browser_default_profile" => "fermix_headless"})
+
+      golden = named_fixture_result("settings_apply_browser")
+
+      assert golden["restart"] == %{"required" => false, "reasons" => []}
+      refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "browser"))
+      assert shape(without_reasons(result)) == shape(without_reasons(golden))
+    end
+  end
+
   # The pitfall this exists for: a section that normalizes strings into atoms
   # must render them back in the spelling the parser accepts, or the very next
   # load raises and the daemon cannot boot on the file it just wrote. Seeded
@@ -1283,6 +1415,24 @@ defmodule FermixCore.Management.SettingsTest do
       assert result["restart"]["reasons"] != []
       assert shape(result) == shape(fixture_result("settings.reload"))
     end
+  end
+
+  defp without_reasons(result), do: update_in(result, ["restart"], &Map.delete(&1, "reasons"))
+
+  defp executable_row(resolve) do
+    "browser"
+    |> Browser.rows(%{fermix_core: []}, resolve: resolve)
+    |> Enum.find(&(&1["key"] == "browser_executable"))
+  end
+
+  defp named_fixture_result(name) do
+    :fermix_core
+    |> Application.app_dir("priv/management/fixtures/success.jsonl")
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+    |> Enum.find(&(&1["name"] == name))
+    |> get_in(["response", "result"])
   end
 
   defp fixture_result(method) do

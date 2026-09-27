@@ -18,8 +18,10 @@ defmodule FermixCore.Management.Settings do
   """
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
+  alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Channels
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
@@ -35,7 +37,7 @@ defmodule FermixCore.Management.Settings do
 
   require Logger
 
-  @families [Providers, Assistant, Channels, Mobile, Voice, Tools]
+  @families [Providers, Assistant, Channels, Mobile, Voice, Tools, Browser]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
   @type write_error ::
@@ -184,8 +186,14 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
+  # The browser writer checks the merged block before it writes and answers a
+  # value it refuses in the browser's own sentence, which names the control the
+  # operator used exactly as a normalizer's raised message does.
   defp guarded_commit(writer, answers, field) do
-    commit(writer, answers)
+    case commit(writer, answers) do
+      {:error, {:invalid_value, sentence}} -> {:error, {:refused, field, sentence}}
+      result -> result
+    end
   rescue
     exception in [ArgumentError] ->
       {:error, {:refused, field, Exception.message(exception)}}
@@ -203,6 +211,7 @@ defmodule FermixCore.Management.Settings do
   end
 
   defp commit(:meetings, answers), do: MeetingsConfig.save(answers)
+  defp commit(:browser, answers), do: BrowserConfig.save(answers)
 
   defp commit(:sandbox, answers) do
     Wizard.set_sandbox_overrides(

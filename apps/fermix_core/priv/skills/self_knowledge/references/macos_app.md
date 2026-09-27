@@ -165,6 +165,20 @@ The flows that start a job, and the reads beside them:
   the replacement client is connected and its signed contract re-checked, so a
   reported binding is a working one rather than a started process.
 
+**The daemon serves the Browser pane for the app.** Its section says which
+browser the agent's tasks run in, by name (Google Chrome, Chromium, Google
+Chrome Canary, or Google Chrome for Testing when Fermix downloaded it), or "No
+Chrome or Chromium is installed." when there is none; below it are the three
+`[fermix_core.browser]` settings a person owns: how tasks run (automatically,
+in the background, or in a window they can watch; each keeps its own logins),
+the most tabs a browser keeps open, and the private hosts the browser may open.
+None needs a restart. With no browser, the pane's action is a download job: it
+runs the meeting notetaker's own install step (its helper, then the Chromium
+build it is pinned to, about 150 MB) and completes naming the browser tasks now
+use, or fails with a sentence, including when the launcher still finds none.
+This is the managed browser tasks run in, not the app's own in-window browser
+for the person's browsing, which the daemon never sees.
+
 **The daemon serves the Phone surface for the app.** The phone channel's
 settings are their own section (the enable switch, the port, the listen
 address and the mDNS announcement, each needing a restart), and a small

@@ -35,7 +35,7 @@ defmodule FermixCore.Management.Router do
     hello overview.get setup.session.create lifecycle.prepare diagnostics.build setup.state.get
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
-    mobile.devices.list
+    mobile.devices.list browser.install.start
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -177,6 +177,7 @@ defmodule FermixCore.Management.Router do
   defp route_known("mobile.pair.cancel", params, opts), do: mobile_session(:cancel, params, opts)
   defp route_known("mobile.devices.list", %{}, opts), do: mobile(&Mobile.devices_list/1, opts)
   defp route_known("mobile.devices.revoke", params, opts), do: mobile_revoke(params, opts)
+  defp route_known("browser.install.start", %{}, opts), do: browser_install(opts)
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -340,6 +341,9 @@ defmodule FermixCore.Management.Router do
   end
 
   defp meetings_signin(opts), do: operation_result(Meetings.signin_start(operation_opts(opts)))
+
+  defp browser_install(opts),
+    do: operation_result(Capabilities.browser_install_start(operation_opts(opts)))
 
   defp computer_use_grant(opts),
     do: operation_result(ComputerUse.grant_start(operation_opts(opts)))

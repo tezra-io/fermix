@@ -770,11 +770,24 @@ defmodule FermixCore.Management.RouterTest do
                )
 
       assert installing["kind"] == "capability_install"
+
+      browser = [
+        install: fn -> {:ok, "/tmp/fermix-meetbot"} end,
+        install_browser: fn -> {:ok, :already} end,
+        resolve: fn -> {:ok, %{path: "/tmp/chrome", label: "Google Chrome for Testing"}} end
+      ]
+
+      assert {:ok, downloading} =
+               Router.route(v2("browser.install.start"),
+                 operation_opts: Keyword.merge(opts, browser)
+               )
+
+      assert downloading["kind"] == "browser_install"
     end
 
     test "a no-parameter method refuses parameters rather than ignoring them" do
       for method <- ~w(job.list meetings.signin.start computer_use.grant.start
-                       computer_use.permissions.get) do
+                       computer_use.permissions.get browser.install.start) do
         assert {:error, :invalid_params, %{"method" => ^method}} =
                  Router.route(v2(method, %{"extra" => 1})),
                "#{method} ignored an unexpected parameter"

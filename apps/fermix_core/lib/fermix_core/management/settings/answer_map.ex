@@ -22,6 +22,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   # same bound the schema declares on a list value.
   @max_list_items 200
   @meetings_prefix "meetings_"
+  @browser_prefix "browser_"
 
   # The one writer that takes positional arguments rather than an answer list,
   # so its three keys are named here rather than resolved from the row key.
@@ -40,7 +41,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   # sent it, rather than landing and failing somewhere later (MGMT-1).
   @prose_keys ~w(meetings_announce_message communication_style)
 
-  @type writer :: :wizard | :sandbox | :meetings
+  @type writer :: :wizard | :sandbox | :meetings | :browser
   @type answer :: {atom(), term()}
 
   @doc """
@@ -53,6 +54,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   @spec writer(String.t()) :: writer()
   def writer("sandbox"), do: :sandbox
   def writer("meetings"), do: :meetings
+  def writer("browser"), do: :browser
   def writer(section) when is_binary(section), do: :wizard
 
   @doc """
@@ -172,6 +174,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   end
 
   defp answer_key("meetings", @meetings_prefix <> key), do: String.to_existing_atom(key)
+  defp answer_key("browser", @browser_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("sandbox", key), do: Map.fetch!(@sandbox_answers, key)
   defp answer_key(_section, key), do: String.to_existing_atom(key)
 end

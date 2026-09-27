@@ -124,6 +124,9 @@ defmodule FermixCore.Browser.ChromeLauncher do
   launcher refuses is answered with that refusal rather than with a browser it
   would never start.
   """
+  @spec resolve_default() :: {:ok, executable()} | {:error, Error.t()}
+  def resolve_default, do: :fermix_core |> Application.get_env(:browser, []) |> resolve_default()
+
   @spec resolve_default(keyword() | map()) :: {:ok, executable()} | {:error, Error.t()}
   def resolve_default(raw) when is_list(raw) or is_map(raw) do
     with {:ok, config} <- Config.current(raw),
