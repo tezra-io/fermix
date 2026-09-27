@@ -22,7 +22,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
     config.toml auth.json grants logs traces memory.db daemon.sock
     secrets secret_key_base setup-token setup-launch-token.json acp_identities
     mobile plugins/run browser/profiles bootstrap acp.sock realtime.sock
-    browser_bridge.sock companion.sock
+    browser_bridge.sock companion.sock browser_host.sock
   )
 
   @spec resolve_working_dir(String.t() | nil, Config.t(), map()) ::
