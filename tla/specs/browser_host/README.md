@@ -91,9 +91,11 @@ shared files (`host_server.ex`, `browser.ex`, `connection.ex`,
   - a tab the person opens is the person's.
 
   A `task.release` closes that task's tabs only. The person cannot close a
-  tab a task owns, but may cancel the task. The host releases every task's
-  tabs on `host_stopping` and on losing the daemon, and drops a tab's record
-  when it releases or closes it.
+  tab a task owns, but may cancel the task instead, from its own tab in the
+  app: `task.cancel { task_id, reason }` ends that one task the way a lost
+  host does, with its own sentence, and releases its tabs the same way. The
+  host releases every task's tabs on `host_stopping` and on losing the
+  daemon, and drops a tab's record when it releases or closes it.
 - **Caps.** A `tab.open`, or a popup, that would pass the task's cap or the
   global cap is refused, not queued. A popup refused at the cap is blocked
   (`window.open` returns null). The caps count task tabs only.
@@ -124,7 +126,9 @@ once per behaviour):
 - `PersonCanQuit`: the person quits the app.
 - `PersonOpensTabs`: the person opens a tab of their own.
 - `PersonCanCloseTabs`: the person tries to close a tab, any tab.
-- `PersonCanCancel`: the person cancels a task, whatever state it is in.
+- `PersonCanCancel`: the person cancels a task, whatever state it is in --
+  in chat before it has a host tab, or, once it is on the host, from its own
+  tab in the app (`task.cancel` over the wire).
 - `LaunchCanTimeOut`: a launched app may never attach. It hangs, or macOS
   refuses it. The app's attach then has no fairness.
 - `PagesOpenPopups`: a page opens a popup from any live tab.
@@ -181,8 +185,8 @@ violation it is.
 
 ## What holds
 
-**Check 01** holds with a lock and an unlock, a drop, a crash and a launch
-that may hang:
+**Check 01** holds with a lock and an unlock, a drop, a crash, a cancel and a
+launch that may hang:
 - A task is never routed to the host while the last report HostServer took
   says unavailable (`DecisionUsesCurrentAvailability`). This rests on
   `LastReportWins` (check 02).
@@ -242,7 +246,7 @@ counterexample):
 | 02 | `LastReportWins` | 7 states: the host attaches available and then reports the lock; a task is routed to it on the first report |
 | 03 | `SingleLaunch` | 3 states: two tasks start with no host attached, and each launches the app |
 | 04 | `DecideOnceAtStart` | 15 states: BROWSER-4's path |
-| 05 | `NoChromeRetry` | 11 states: a task opens its tab on the host, the lock is reported, and the task is re-run on Chrome |
+| 05 | `NoChromeRetry` | 10 states: a task's `tab.open` is out when the person cancels it; the task is re-routed to Chrome at once, and the host's late answer to the abandoned request still counts as a host step |
 | 08 | `ReleaseOnce` | 9 states: BROWSER-2's path |
 | 09 | `OwnershipRegistry` | 5 states: BROWSER-3's first path |
 | 10 | `OwnershipRegistry` | 8 states: BROWSER-3's second path |
@@ -252,9 +256,11 @@ counterexample):
 | 18 | `StoppingHandshake` | a lasso: the person quits while a task runs on the host; the app exits at once, and the task fails only at the `:DOWN` |
 | 19 | `QuitBound` | a lasso: BROWSER-7's path |
 
-The whole spec runs in about 45 s with the runner's one worker. The largest
-checks are 15 (90,651 states and its liveness graph, 13 s) and 07 (444,456
-states, 12 s). Every other check takes one to four seconds.
+The whole spec runs in about a minute with the runner's one worker. The
+largest checks are 07 (718,224 states, 18 s, up from 444,456 since a cancel
+on the host now takes two states, a Tell and the DaemonRecv that reads it)
+and 15 (90,651 states and its liveness graph, 13 s). Every other check takes
+one to six seconds.
 
 Each `holds` check was also run once by hand, with four workers, with one
 more of an entity its rules are about. All still hold:

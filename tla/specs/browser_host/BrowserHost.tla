@@ -22,9 +22,10 @@
 (*    ProfileServer (one live task per profile, not one process for the    *)
 (*    whole daemon). It binds a host task to the connection it was decided *)
 (*    on (bind, host_server.ex:387-413) and to that connection alone       *)
-(*    (check_host, :417-430); it fails the task on that connection's :DOWN *)
-(*    or the app's host_stopping (handle_message, :136-160; lose, :434-438) *)
-(*    and names its tabs by the connection (public_id, :698);              *)
+(*    (check_host, :417-430); it fails the task on that connection's :DOWN, *)
+(*    the app's host_stopping, or the person's own task.cancel for it      *)
+(*    (handle_message, :136-167; lose/lose_cancelled, :456-475) and names   *)
+(*    its tabs by the connection (public_id, :698);                        *)
 (*  - FermixCore.Browser.HostAvailability: the one process that holds the  *)
 (*    host's last report, with no probe, and which connection it is on;    *)
 (*  - FermixCore.Browser.HostLauncher: the pure decision table (step,      *)
@@ -45,7 +46,10 @@
 (*    connection process, the handshake and the line codec. A connection   *)
 (*    forwards every task's request and release in the order its own      *)
 (*    process took them off its mailbox -- BROWSER-1's fix -- and its exit *)
-(*    is HostServer's :DOWN.                                               *)
+(*    is HostServer's :DOWN. The person's own cancel of one task, from its *)
+(*    tab in the app, arrives here as task.cancel and is told to that one  *)
+(*    task and released exactly as release_task/2 releases one that ends  *)
+(*    on its own (cancel_task, connection.ex).                            *)
 (*                                                                         *)
 (* The Mac app's BrowserHostReducer (tezra-io/fermix-macos) still owns the *)
 (* tabs, the registry, the caps, the availability reports and the quit     *)
@@ -108,7 +112,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ fb0379bcd574
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request @ 213c4b8946f0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 213c4b8946f0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
 \* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ 848636b97fc7
@@ -131,7 +135,9 @@ CONSTANTS
     PersonCanQuit,      \* the person quits the app
     PersonOpensTabs,    \* the person opens a tab of their own in the app
     PersonCanCloseTabs, \* the person tries to close a tab, any tab
-    PersonCanCancel,    \* the person cancels a task (in chat, or from the app)
+    PersonCanCancel,    \* the person cancels a task: in chat before it has a host tab (its
+                        \* turn ends, the caller's :DOWN), or, once it is on the host, from
+                        \* its own tab in the app -- task.cancel over the wire
     LaunchCanTimeOut,   \* a launched app may never attach: it hangs, or macOS refuses it
     PagesOpenPopups,    \* a page opens a popup from any live tab
     \* Mechanism switches: what the design does about it. TRUE is the design;
@@ -271,7 +277,7 @@ ToHostMsgs ==
     \cup ({"release"} \X SUBSET Tasks) \cup {<<"stop_ack">>}
 ToDaemonMsgs ==
     {<<"attached">>, <<"stopping">>} \cup ({"avail"} \X {"available", "unavailable"})
-    \cup ({"ok"} \X Tasks \X (0..MaxTabs)) \cup ({"err"} \X Tasks)
+    \cup ({"ok"} \X Tasks \X (0..MaxTabs)) \cup ({"err"} \X Tasks) \cup ({"cancel"} \X Tasks)
 
 TypeOK ==
     /\ status \in [Tasks -> {"idle", "waiting", "running"} \cup Terminal]
@@ -515,6 +521,14 @@ TaskStep(t) ==
 \*    (:146-150) -- launching is no longer allowed (the person quit the app),
 \*    and the answer, host.stop_ack, is sent behind every release
 \*    (connection.ex:283, protocol.ex "host.stop_ack").
+\*  - cancel: the one task task_id names ends the way EndHostTasks ends a
+\*    host failure -- NoChromeRetry decides it the same way -- and its
+\*    task.release goes behind whatever it already had queued
+\*    (Connection.cancel_task, connection.ex; HostServer's end of it is
+\*    `lose_cancelled`/`stop`, host_server.ex:456-475,:107-129, on
+\*    `{:browser_host_cancelled, _, _}`, :164-167,:489,:1046-1047). A task_id
+\*    already ended by the time this is read (HostTasks(dgen) no longer names
+\*    it) is left alone, matching the connection's own idempotent lookup.
 DaemonRecv ==
     /\ toDaemon /= <<>>
     /\ LET m == Head(toDaemon) IN
@@ -567,6 +581,13 @@ DaemonRecv ==
                  /\ Send(ReleaseFor(S) \o <<<<"stop_ack">>>>)
                  /\ UNCHANGED <<tgen, decGen, pc, ttab, attached, dgen, launching, lastRecv,
                                 badDecision>>
+            [] m[1] = "cancel" ->
+                 LET t == m[2]
+                     S == HostTasks(dgen) \cap {t}
+                 IN /\ EndHostTasks(S)
+                    /\ Send(ReleaseFor(S))
+                    /\ UNCHANGED <<tgen, decGen, pc, ttab, attached, dgen, cache, launching,
+                                   launchOk, lastRecv, badDecision>>
     /\ UNCHANGED <<conn, gen, host, truth, hostGen, hostRan, withoutHost, chromeStep, personHit,
                    personClosed, idleHit, abandoned, lockGap, popupCounted, quitMidAct,
                    closeRefused, cancelled>>
@@ -590,20 +611,29 @@ DaemonDown ==
           /\ busy' = [t \in Tasks |-> IF t \in S THEN FALSE ELSE busy[t]]
     /\ UNCHANGED <<tgen, decGen, pc, ttab, dgen, launching, launchOk, wire, host, truth, obs>>
 
-\* The person cancels a task that has not ended: the turn (its caller) ends,
-\* which is the same :DOWN a crash would send (`handle_message` on
-\* `{:DOWN, caller_ref, ...}`, host_server.ex:137-138, `stop`, :107-129). A
-\* host task's tabs are released; a waiting task simply stops waiting.
+\* The person cancels a task that has not ended. One not yet on the host --
+\* waiting on a launch decision, or already routed to Chrome -- has no tab in
+\* the app to cancel from: the turn (its caller) ends there, the same :DOWN a
+\* crash would send (`handle_message` on `{:DOWN, caller_ref, ...}`,
+\* host_server.ex:137-138, `stop`, :107-129); a waiting task simply stops
+\* waiting. A task on the host has its own tab in the app's pane, with its
+\* own "Cancel task": the person's click is the app's task.cancel
+\* { task_id, reason } event over the wire (`Connection.cancel_task`;
+\* `Link.cancelled/3`), read later by DaemonRecv like any other event, so it
+\* can race an in-flight request exactly as the real wire does -- ending the
+\* task and releasing its tabs is DaemonRecv's `"cancel"` case, not this step.
 PersonCancel(t) ==
     /\ left["cancel"] > 0 /\ status[t] \in {"waiting", "running"}
     /\ left' = [left EXCEPT !["cancel"] = 0]
-    /\ status' = [status EXCEPT ![t] = "failed"]
-    /\ busy' = [busy EXCEPT ![t] = FALSE]
     /\ cancelled' = cancelled \cup {t}
     /\ IF route[t] = "host" /\ status[t] = "running"
-       THEN Send(<<<<"release", {t}>>>>) ELSE UNCHANGED toHost
+       THEN /\ Tell(<<<<"cancel", t>>>>)
+            /\ UNCHANGED <<status, busy>>
+       ELSE /\ status' = [status EXCEPT ![t] = "failed"]
+            /\ busy' = [busy EXCEPT ![t] = FALSE]
+            /\ UNCHANGED toDaemon
     /\ UNCHANGED <<route, tgen, decGen, pc, ttab, attached, dgen, cache, launching, launchOk,
-                   toDaemon, conn, gen, host, own, popup, closes, lastRecv, badDecision,
+                   toHost, conn, gen, host, own, popup, closes, lastRecv, badDecision,
                    hostGen, hostRan, withoutHost, chromeStep, personHit, personClosed, idleHit,
                    abandoned, lockGap, popupCounted, quitMidAct, closeRefused>>
 
