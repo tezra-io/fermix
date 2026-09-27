@@ -124,7 +124,8 @@ defmodule FermixCore.Browser.Config do
   }
 
   @type profile :: %{
-          required(:mode) => :managed | :existing_session | :remote_cdp | :attached_tab,
+          required(:mode) =>
+            :managed | :existing_session | :remote_cdp | :attached_tab | :fermix_app,
           required(:headless) => boolean() | :auto,
           required(:cdp_port) => :auto | pos_integer(),
           optional(:cdp_url) => String.t(),

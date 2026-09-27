@@ -53,7 +53,8 @@ defmodule FermixCore.Browser.ProfileServer do
     "focus" => :focus_tab,
     "close" => :close_tab,
     "cookies" => :cookies,
-    "download" => :downloads
+    "download" => :downloads,
+    "webmcp" => :webmcp
   }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -83,10 +84,11 @@ defmodule FermixCore.Browser.ProfileServer do
 
     profile = Keyword.fetch!(opts, :profile)
     mode = Map.get(profile, :mode)
-    backend = Backend.for_mode(mode)
+    backend = Keyword.get_lazy(opts, :backend, fn -> Backend.for_mode(mode) end)
 
     state = %{
       profile_name: Keyword.fetch!(opts, :profile_name),
+      mode: mode,
       # What this profile's browser can be asked to do, resolved once: the mode
       # never changes for the life of the server (§3.3).
       caps: Capabilities.for_mode(mode),
@@ -161,7 +163,7 @@ defmodule FermixCore.Browser.ProfileServer do
   end
 
   defp run_request(%{action: "open"}, %{caps: %{new_tab: false}} = state) do
-    {Capabilities.refuse(:new_tab), state}
+    {Capabilities.refuse(state.mode, :new_tab), state}
   end
 
   defp run_request(%{action: action} = request, state) when is_map_key(@gated, action) do
@@ -190,7 +192,7 @@ defmodule FermixCore.Browser.ProfileServer do
 
   defp refuse_started(capability, context, state) do
     case start_backend(context, state) do
-      {:ok, state} -> {Capabilities.refuse(capability), state}
+      {:ok, state} -> {Capabilities.refuse(state.mode, capability), state}
       {:error, error, state} -> {{:error, error}, state}
     end
   end

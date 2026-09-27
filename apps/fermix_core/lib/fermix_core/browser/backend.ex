@@ -12,7 +12,8 @@ defmodule FermixCore.Browser.Backend do
   backend's own view of a page.
 
   `CDP.Backend` drives Chrome over the DevTools protocol, whoever launched it
-  and whichever transport reaches it.
+  and whichever transport reaches it. `HostServer` is the Fermix app's own
+  browser pane (`:fermix_app`), over the app's local wire.
 
   ## The contract
 
@@ -29,6 +30,7 @@ defmodule FermixCore.Browser.Backend do
 
   alias FermixCore.Browser.CDP
   alias FermixCore.Browser.Error
+  alias FermixCore.Browser.HostServer
 
   @typedoc "A backend's own state, threaded by `ProfileServer`."
   @type state :: term()
@@ -113,5 +115,6 @@ defmodule FermixCore.Browser.Backend do
 
   @doc "The backend that implements a profile mode."
   @spec for_mode(atom()) :: module()
+  def for_mode(:fermix_app), do: HostServer
   def for_mode(mode) when is_atom(mode), do: CDP.Backend
 end

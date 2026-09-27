@@ -27,6 +27,7 @@ defmodule FermixCore.Browser.Capabilities do
           | :focus_tab
           | :cookies
           | :downloads
+          | :webmcp
 
   @type t :: %{capability() => boolean()}
 
@@ -42,7 +43,8 @@ defmodule FermixCore.Browser.Capabilities do
     close_tab: true,
     focus_tab: true,
     cookies: true,
-    downloads: true
+    downloads: true,
+    webmcp: true
   }
 
   @attached_browser %{@managed | tab_cap: false}
@@ -56,7 +58,25 @@ defmodule FermixCore.Browser.Capabilities do
     close_tab: false,
     focus_tab: false,
     cookies: false,
-    downloads: false
+    downloads: false,
+    webmcp: true
+  }
+
+  # The Fermix app's own browser pane, driven over the app's local wire: the
+  # engine's browser as the managed Chrome is, so its tabs are Fermix's and its
+  # downloads land in the workspace. The wire addresses a tab by its id, so
+  # there is no debugger session to attach, and it carries no WebMCP.
+  @fermix_app %{
+    download_redirect: true,
+    target_discovery: true,
+    target_attach: false,
+    tab_cap: true,
+    new_tab: true,
+    close_tab: true,
+    focus_tab: true,
+    cookies: true,
+    downloads: true,
+    webmcp: false
   }
 
   @doc """
@@ -69,6 +89,7 @@ defmodule FermixCore.Browser.Capabilities do
   @spec for_mode(atom()) :: t()
   def for_mode(:managed), do: @managed
   def for_mode(:attached_tab), do: @attached_tab
+  def for_mode(:fermix_app), do: @fermix_app
   def for_mode(mode) when is_atom(mode), do: @attached_browser
 
   @doc "Whether `capability` is available in `mode`."
@@ -80,13 +101,18 @@ defmodule FermixCore.Browser.Capabilities do
   @doc """
   The refusal for a capability the mode does not have.
 
-  One code, because the cause is always the same — the model asked a granted tab
-  to do something browser-wide — and one sentence per capability, because the
-  next move is not.
+  One code per mode, because the cause is always the same — the model asked a
+  granted tab to do something browser-wide, or the app's pane for something its
+  wire does not carry — and one sentence per capability, because the next move
+  is not.
   """
-  @spec refuse(capability()) :: {:error, Error.t()}
-  def refuse(capability) when is_atom(capability) do
+  @spec refuse(atom(), capability()) :: {:error, Error.t()}
+  def refuse(:attached_tab, capability) when is_atom(capability) do
     {:error, Error.new("unsupported_in_attached_tab", sentence(capability))}
+  end
+
+  def refuse(:fermix_app, capability) when is_atom(capability) do
+    {:error, Error.new("unsupported_in_fermix_app", app_sentence(capability))}
   end
 
   defp sentence(:new_tab) do
@@ -117,5 +143,14 @@ defmodule FermixCore.Browser.Capabilities do
   defp sentence(capability) do
     "#{capability} is not available in the tab you granted. Use the managed browser profile " <>
       "for that."
+  end
+
+  defp app_sentence(:webmcp) do
+    "The Fermix app's browser does not run a page's own WebMCP tools. Read the page with " <>
+      "`snapshot` and drive it with `act`."
+  end
+
+  defp app_sentence(capability) do
+    "#{capability} is not available in the Fermix app's browser."
   end
 end

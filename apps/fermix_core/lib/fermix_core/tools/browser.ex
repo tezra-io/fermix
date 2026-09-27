@@ -347,6 +347,17 @@ defmodule FermixCore.Tools.Browser do
         description:
           "the person's own tab is used only on a turn they are present for; use the " <>
             "managed profile"
+      },
+      %{
+        tag: "host_unavailable",
+        description:
+          "the Fermix app's browser cannot be driven from this engine; nothing was done"
+      },
+      %{
+        tag: "unsupported_in_fermix_app",
+        description:
+          "the Fermix app's browser does not carry this verb (a page's WebMCP tools); use " <>
+            "snapshot and act"
       }
     ]
   end
