@@ -117,14 +117,15 @@ the checks that show a rule needs it):
   `channels/companion.ex:245`). `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
-- `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:304-312`).
+- `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:317-325`).
 - `StopTurnNamesTurn`: a stop ends the named message's turn only
-  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:172`, `:1005-1042`). `FALSE`
+  (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1035-1072`). `FALSE`
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`cancel_request`, `mobile_sql.ex:373-401`). `Turns` reads the mark and
   enqueues in one step (`hand_off`, `turns.ex:166-187`), and sends every stop
-  of a turn it handed off itself, after the enqueue (`turns.ex:117-129`).
+  of a turn it handed off itself, after the enqueue (`turns.ex:123-128`,
+  `stop_in_queue`, `:192-203`).
   `FALSE` is the code before 431d5663: the Connection called `Queue.stop_turn`
   directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -251,7 +252,11 @@ of an entity its rules are about. All still hold:
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
 - A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:148-156`),
-  and a crash of `Turns` or of a request worker.
+  and a crash of `Turns` or of a request worker. A cancel whose stop finds
+  the Queue already gone (`:noproc`) is left to that `:DOWN`
+  (`stop_in_queue`, `turns.ex:192-203`). A Queue that dies during the stop
+  call exits it with its own reason instead, and that still crashes `Turns`
+  (reported, not fixed).
 - The grant resume a confirmed approval re-ingests as a new turn
   (`sandbox.ex` `resume_request`).
 - The peer check at the hand-over (`handle_info(:socket_handover)`,

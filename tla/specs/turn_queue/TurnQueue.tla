@@ -9,7 +9,7 @@
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
-(*  - the empty-completion path (queue.ex:528-531, :693-702): it delivers *)
+(*  - the empty-completion path (queue.ex:541-544, :723-732): it delivers *)
 (*    a canned retry and commits nothing, leaving the user message        *)
 (*    unanswered by design;                                                *)
 (*  - the terminal_error_owner? branch (only who sends the error text);   *)
@@ -23,14 +23,14 @@
 (* One step = one indivisible thing in the code: one Queue callback, or   *)
 (* one step of the turn task between two calls into another process.     *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex @ cdbd6e010924
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex @ 2cbe2a7d7cc2
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue_supervisor.ex @ 6bd48b7f67a7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/stopper.ex @ 3f42aedf7399
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/draft_stream.ex#start_link @ c185d3d497b1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 0ba02e5ff33f
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ b3294d30e861
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref @ 46da0e632d47
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 281df102b636
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ 2664a9cfe3fe
@@ -42,7 +42,7 @@ CONSTANTS
     \* Environment switches: what may happen to the queue.
     UsersCanStop,       \* /stop (Stopper -> Queue.stop_all, stopper.ex:44) or a voice or
                         \* ACP cancel (Queue.stop_conversation); same per-conversation effect
-    UsersCanStopTurn,   \* a stop that names one message (Queue.stop_turn, queue.ex:172): the
+    UsersCanStopTurn,   \* a stop that names one message (Queue.stop_turn, queue.ex:185): the
                         \* companion socket's cancel, which one of several clients sharing
                         \* the conversation sends at any moment, even after its turn ended
     Named,              \* the message a named stop names (one of Msgs)
@@ -53,30 +53,30 @@ CONSTANTS
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by exactly one kind of check to show a property needs it.
     OneClaimant,        \* the closure is handed to the claimant only and the Queue
-                        \* clears its copy (queue.ex:237-246, :1090-1094)
-    StartsWhenIdle,     \* a message starts only when no turn is active (queue.ex:304-312)
-    CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:877-885)
+                        \* clears its copy (queue.ex:250-259, :1120-1124)
+    StartsWhenIdle,     \* a message starts only when no turn is active (queue.ex:317-325)
+    CrashFiresOutcome,  \* a crashed turn's held closure fires {:failed, _} (queue.ex:907-915)
     TurnsShareQueueFate,    \* turn tasks run under a Task.Supervisor that QueueSupervisor
                             \* (:one_for_all) terminates before it restarts the Queue
                             \* (queue_supervisor.ex:46-51, application.ex:60)
     CrashClosesUserMessage, \* a crashed turn's DOWN writes the stopped marker before the
-                            \* next message starts (queue.ex:836, :850-856)
+                            \* next message starts (queue.ex:866, :880-886)
     StopSparesClaimedTurn,  \* a stop leaves a turn that claimed its outcome running
-                            \* (queue.ex:1048-1050)
+                            \* (queue.ex:1078-1080)
     StopCancelsPending,     \* a stop fires {:cancelled} for every message it drops
-                            \* (queue.ex:1068-1074)
+                            \* (queue.ex:1098-1104)
     StopTurnSparesClaimedTurn, \* a named stop leaves the named turn running once it has
-                               \* claimed its outcome (queue.ex:1005-1011)
+                               \* claimed its outcome (queue.ex:1035-1041)
     StopTurnNamesTurn,      \* a named stop ends the named message's turn only
-                            \* (stop_named_in, queue.ex:1005-1042); FALSE is the
+                            \* (stop_named_in, queue.ex:1035-1072); FALSE is the
                             \* conversation stop, the only stop the Queue had before
     ConsumerFencesQueue,    \* the consumer monitors the Queue process it handed the
                             \* message to and answers it as failed on that Queue's
-                            \* :DOWN (Acp.Peer: peer.ex:595-603, :203-205, :926-931)
+                            \* :DOWN (Acp.Peer: peer.ex:597-605, :205-207, :954-959)
     \* Timing idealisation. TRUE is the real code; FALSE forbids a crash in
     \* the gap between the task claiming the closure and invoking it
-    \* (finish_turn, queue.ex:574-580). There invoke_turn_result catches
-    \* whatever the closure raises, exits or throws (:896-911), so only a
+    \* (finish_turn, queue.ex:587-593). There invoke_turn_result catches
+    \* whatever the closure raises, exits or throws (:926-941), so only a
     \* linked helper's exit can land in the gap. A check that sets it FALSE
     \* proves a property only for a Queue without that gap.
     CrashInClaimGap
@@ -104,11 +104,11 @@ vars == <<unsent, pending, active, held, claimed, finalSent, restarting, pc, hol
           outcomes, shown, history, dropped, watch>>
 
 (* Turn-task states. "idle" = no task yet; "gone" = the process ended.      *)
-(* checkout_failed: MainAgent checkout failed, error sent (queue.ex:450-454) *)
+(* checkout_failed: MainAgent checkout failed, error sent (queue.ex:463-467) *)
 (* committed / errored: about to claim the closure                          *)
-(* invoking: claimed; about to run the closure in the task (queue.ex:577)   *)
+(* invoking: claimed; about to run the closure in the task (queue.ex:590)   *)
 (* done: the closure ran; the task is about to exit, but its typing loop    *)
-(*   (until with_indicator returns, queue.ex:409) and DraftStream are still *)
+(*   (until with_indicator returns, queue.ex:422) and DraftStream are still *)
 (*   linked to it                                                           *)
 TaskStates == {"idle", "start", "loop", "fresh", "shown", "delivered", "committed",
                "err_fresh", "err_shown", "errored", "checkout_failed", "invoking",
@@ -157,7 +157,7 @@ AppendMarker(h) ==
 Fire(m, outcome) == outcomes' = [outcomes EXCEPT ![m] = Append(@, outcome)]
 Show(m, what)    == shown'    = [shown    EXCEPT ![m] = @ \cup {what}]
 
-\* maybe_start_next_request/2 + start_pending_request (queue.ex:304, :329):
+\* maybe_start_next_request/2 + start_pending_request (queue.ex:317, :342):
 \* pop the FIFO head, start and monitor its task, release it. p is the
 \* pending queue after this callback's own update.
 StartNext(p, pcNow) ==
@@ -171,21 +171,23 @@ StartNext(p, pcNow) ==
             /\ pending' = Tail(p)
             /\ pc' = [pcNow EXCEPT ![Head(p)] = "start"]
 
-\* handle_call({:fresh?, ...}) (queue.ex:250): fresh iff m's task is active.
-\* After a Queue restart the task's calls go to the dead pid, exit, and are
-\* caught as "not fresh" (fresh?/1 catch, :661-665); the new Queue never
-\* holds m.
+\* handle_call({:fresh?, ...}) (queue.ex:263): fresh iff m's task is active.
+\* The task waits for the answer with no timeout, however long the Queue is
+\* busy in a bounded callback (the client API note, queue.ex:80-91), so only
+\* a dead Queue ends the wait. After a Queue restart the task's calls go to
+\* the dead pid, exit, and are logged and read as "not fresh" (fresh?/1,
+\* :678-684); the new Queue never holds m.
 Fresh(m) == active = m
 
 -----------------------------------------------------------------------------
 (* The user and the Queue process *)
 
-\* handle_cast({:enqueue, msg}) (queue.ex:196): enqueue, start if idle.
+\* handle_cast({:enqueue, msg}) (queue.ex:209): enqueue, start if idle.
 \* A message sent while the Queue is restarting is lost: enqueue/2 casts to
-\* the registered name (queue.ex:91-94), and a cast to an unregistered name
+\* the registered name (queue.ex:104-107), and a cast to an unregistered name
 \* is dropped silently, with no outcome (QUEUE-8's class). The Peer is not
 \* exposed: it resolves the name first and hands the prompt to that process
-\* (hand_off, peer.ex:595-603), so a prompt that finds no Queue registered
+\* (hand_off, peer.ex:597-605), so a prompt that finds no Queue registered
 \* is refused at once, and one handed to a Queue that dies gets that Queue's
 \* :DOWN. Send is disabled while restarting only to keep the model small.
 Send(m) ==
@@ -203,21 +205,23 @@ Send(m) ==
 KillsActive == active /= None /\ (~claimed \/ ~StopSparesClaimedTurn)
 
 \* stop_one_conversation/2 and stop_all_conversations/1 ->
-\* stop_conversation_runtime/3 (queue.ex:221, :216, :968-994), one callback:
-\* - stop_active_turn/3 (:1048-1064): a claimed turn is left running with its
-\*   slot and monitor (:1048-1050); any other active turn is killed
+\* stop_conversation_runtime/3 (queue.ex:234, :229, :998-1024), one callback:
+\* - stop_active_turn/3 (:1078-1094): a claimed turn is left running with its
+\*   slot and monitor (:1078-1080); any other active turn is killed
 \*   synchronously, fires {:cancelled} if the Queue still holds its closure,
-\*   gets the stopped marker (mark_stopped_turn, :1108-1121), and the
+\*   gets the stopped marker (mark_stopped_turn, :1138-1151), and the
 \*   conversation is dropped. A task killed while it holds a claimed closure
 \*   takes the closure with it.
-\* - cancel_pending/1 (:1068-1074): every dropped message fires {:cancelled}.
+\* - cancel_pending/1 (:1098-1104): every dropped message fires {:cancelled}.
 \* A stop that would change nothing (a claimed turn and nothing waiting) is
 \* not a step. The claim is a Queue callback too, so the Queue serialises it
 \* against the stop: claimed is exact here.
-\* A stop while no Queue is registered is not modelled: every caller's
-\* GenServer.call exits :noproc. For Acp.Peer (stop_turn, peer.ex:708-712)
-\* that ends the connection, and its open prompts get no answer (reported,
-\* not fixed; check 17 does not cover that window).
+\* A stop while no Queue is registered is not modelled: a call to the
+\* registered name exits :noproc there. Acp.Peer sends its cancel to the
+\* Queue it handed the prompt to instead (stop_turn, peer.ex:726-734); a dead
+\* one exits :noproc, a session/cancel is then answered cancelled, and
+\* closing the turn flushes that Queue's :DOWN (cancel_turn, :700-705), so
+\* the connection lives on. ExUnit covers that window, not check 17.
 StopConversation ==
     /\ pending /= <<>> \/ KillsActive
     /\ LET cancelled(x) ==
@@ -248,14 +252,14 @@ Stop ==
 KillsNamed == active = Named /\ (~claimed \/ ~StopTurnSparesClaimedTurn)
 
 \* Queue.stop_turn/3 -> handle_call({:stop_turn, ...}) -> stop_named_turn/3
-\* (queue.ex:172, :226, :998-1042), one callback, naming the message Named:
+\* (queue.ex:185, :239, :1028-1072), one callback, naming the message Named:
 \* - Named is active and has claimed its outcome: left running with its slot
-\*   (:1005-1011).
+\*   (:1035-1041).
 \* - Named is active otherwise: killed synchronously, fires {:cancelled} if
 \*   the Queue still holds its closure, gets the stopped marker, and the next
-\*   waiting message starts in the same callback (:1015-1026). A task killed
+\*   waiting message starts in the same callback (:1045-1056). A task killed
 \*   while it holds a claimed closure takes the closure with it.
-\* - Named is waiting: dropped alone, with {:cancelled} (:1028-1042).
+\* - Named is waiting: dropped alone, with {:cancelled} (:1058-1072).
 \* - Otherwise (it ended, or was never sent) nothing changes: not a step.
 \* Without StopTurnNamesTurn the named stop is the conversation stop.
 StopNamed ==
@@ -286,10 +290,10 @@ StopTurn ==
 \* turns, under a supervisor it is not linked to, keep running.
 \* Every consumer watching this Queue gets its :DOWN now (ConsumerFencesQueue):
 \* the Peer monitored the Queue process it handed each message to
-\* (hand_off, peer.ex:595-603), so every message the dead Queue held, active
+\* (hand_off, peer.ex:597-605), so every message the dead Queue held, active
 \* or waiting, has a :DOWN in the Peer's mailbox, except one whose result the
 \* Peer already has: that result is ahead of the :DOWN, and answering it
-\* closes the turn and flushes the :DOWN (close_turn, peer.ex:944-954).
+\* closes the turn and flushes the :DOWN (close_turn, peer.ex:972-982).
 QueueDown ==
     /\ QueueCanCrash
     /\ ~restarting
@@ -322,13 +326,13 @@ QueueRestart ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, finalSent, outcomes, shown,
                    history, dropped, watch>>
 
-\* Acp.Peer handle_info({:DOWN, ...}) -> settle_queue_down (peer.ex:203-205,
-\* :926-931): the :DOWN comes before any result for m in the mailbox, so the
+\* Acp.Peer handle_info({:DOWN, ...}) -> settle_queue_down (peer.ex:205-207,
+\* :954-959): the :DOWN comes before any result for m in the mailbox, so the
 \* Peer answers m as a failed turn through apply_turn_result and closes the
 \* turn. (Mailbox order is taken to be send order; Erlang orders only each
 \* sender's own messages, which changes who answers, not whether or how
 \* often.) A result for m sent after this is dropped by the wire fence
-\* (apply_if_open, peer.ex:749-755: the turn is closed), witness 17c.
+\* (apply_if_open, peer.ex:772-778: the turn is closed), witness 17c.
 PeerSettles(m) ==
     /\ watch[m] = "down"
     /\ watch' = [watch EXCEPT ![m] = "settled"]
@@ -342,7 +346,7 @@ MoveTo(m, s) == pc' = [pc EXCEPT ![m] = s]
 QueueUnchanged == UNCHANGED <<unsent, pending, active, held, claimed, finalSent,
                               restarting, dropped>>
 
-\* MainAgent.checkout_turn_state fails (checkout_and_run, queue.ex:450-454):
+\* MainAgent.checkout_turn_state fails (checkout_and_run, queue.ex:463-467):
 \* deliver_checkout_error sends the error; no user message was persisted.
 CheckoutFail(m) ==
     /\ pc[m] = "start"
@@ -357,14 +361,14 @@ PersistUser(m) ==
     /\ history' = Append(history, <<"user", m>>)
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown>>
 
-\* AgentLoop returned {:ok, ...}; deliver_response/3 asks fresh? (queue.ex:516).
-\* Not fresh -> :stopped: no delivery, no commit, no claim (finish_turn :572).
+\* AgentLoop returned {:ok, ...}; deliver_response/3 asks fresh? (queue.ex:529).
+\* Not fresh -> :stopped: no delivery, no commit, no claim (finish_turn :585).
 LoopOk(m) ==
     /\ pc[m] = "loop"
     /\ MoveTo(m, IF Fresh(m) THEN "fresh" ELSE "done")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown, history>>
 
-\* deliver_final/2 (queue.ex:534): the user now has the full reply.
+\* deliver_final/2 (queue.ex:547): the user now has the full reply.
 Deliver(m) ==
     /\ pc[m] = "fresh"
     /\ MoveTo(m, "shown")
@@ -372,7 +376,7 @@ Deliver(m) ==
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
 \* mark_final_reply_delivered/1 -> handle_call({:final_reply_delivered, ...})
-\* (queue.ex:535, :260): sets the flag only if m's task is still active.
+\* (queue.ex:548, :273): sets the flag only if m's task is still active.
 MarkDelivered(m) ==
     /\ pc[m] = "shown"
     /\ MoveTo(m, "delivered")
@@ -380,7 +384,7 @@ MarkDelivered(m) ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, restarting, dropped, holding,
                    outcomes, shown, history>>
 
-\* runner.commit/4 (queue.ex:538 -> turn_runner.ex:147): persist the reply,
+\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:147): persist the reply,
 \* then synchronous auto-compaction; the claim comes only after it returns.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
@@ -390,31 +394,31 @@ Commit(m) ==
     /\ history' = Append(history, <<"assistant", m>>)
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown>>
 
-\* AgentLoop returned {:error, ...}; deliver_turn_error/2 asks fresh? (queue.ex:555).
+\* AgentLoop returned {:error, ...}; deliver_turn_error/2 asks fresh? (queue.ex:568).
 LoopErr(m) ==
     /\ pc[m] = "loop"
     /\ MoveTo(m, IF Fresh(m) THEN "err_fresh" ELSE "done")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown, history>>
 
-\* turn.deliver.({:text, error_reply}) (queue.ex:558)
+\* turn.deliver.({:text, error_reply}) (queue.ex:571)
 DeliverError(m) ==
     /\ pc[m] = "err_fresh"
     /\ MoveTo(m, "err_shown")
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* append_marker(turn, @stopped_turn_marker) (queue.ex:561)
+\* append_marker(turn, @stopped_turn_marker) (queue.ex:574)
 MarkFailed(m) ==
     /\ pc[m] = "err_shown"
     /\ MoveTo(m, "errored")
     /\ history' = AppendMarker(history)
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, shown>>
 
-\* finish_turn/2 part 1 -> handle_call({:claim_turn_result, ...}) (queue.ex:574-577,
-\* :237-246): the active turn gets its closure, and claim_active_turn (:1090-1094)
+\* finish_turn/2 part 1 -> handle_call({:claim_turn_result, ...}) (queue.ex:587-590,
+\* :250-259): the active turn gets its closure, and claim_active_turn (:1120-1124)
 \* marks it claimed and clears the Queue's copy. A turn that is no longer
-\* active, or a dead or restarted Queue (claim_turn_result's catch,
-\* :582-586), gets nil.
+\* active, or a dead or restarted Queue (claim_turn_result's catch, which
+\* logs it, :597-603), gets nil.
 Claim(m, from, outcome) ==
     /\ pc[m] = from
     /\ MoveTo(m, "invoking")
@@ -425,7 +429,7 @@ Claim(m, from, outcome) ==
     /\ UNCHANGED <<unsent, pending, active, finalSent, restarting, dropped, outcomes, shown,
                    history>>
 
-\* finish_turn/2 part 2 -> invoke_turn_result/2 (queue.ex:577, :896-911), in the
+\* finish_turn/2 part 2 -> invoke_turn_result/2 (queue.ex:590, :926-941), in the
 \* task: run the claimed closure, if any. It catches whatever the closure
 \* raises, exits or throws, so the closure itself cannot kill the task.
 Invoke(m) ==
@@ -435,7 +439,7 @@ Invoke(m) ==
     /\ holding' = [holding EXCEPT ![m] = "none"]
     /\ QueueUnchanged /\ UNCHANGED <<shown, history>>
 
-\* The task exits :normal -> handle_info({:DOWN, ...}) (queue.ex:270) clears
+\* The task exits :normal -> handle_info({:DOWN, ...}) (queue.ex:283) clears
 \* the active slot and starts the next message. Only the Queue that
 \* monitors the task hears it.
 Exit(m) ==
@@ -446,11 +450,11 @@ Exit(m) ==
        ELSE /\ pc' = pcNow /\ UNCHANGED <<active, held, claimed, finalSent, pending>>
     /\ UNCHANGED <<unsent, restarting, holding, outcomes, shown, history, dropped>>
 
-\* The task dies -> abnormal DOWN -> clear_active_request/4 (queue.ex:821-843):
-\* maybe_close_crashed_turn writes the stopped marker (:836, :850-856);
+\* The task dies -> abnormal DOWN -> clear_active_request/4 (queue.ex:851-873):
+\* maybe_close_crashed_turn writes the stopped marker (:866, :880-886);
 \* maybe_reply_on_crash sends the generic error unless the final reply was
-\* marked delivered (:861); maybe_fail_turn_result fires {:failed, _} if
-\* the Queue still holds the closure (:877-885). A closure the task had
+\* marked delivered (:891); maybe_fail_turn_result fires {:failed, _} if
+\* the Queue still holds the closure (:907-915). A closure the task had
 \* already claimed dies with it. The next message starts in the same
 \* callback, after the marker.
 \* Where nothing in the task can raise, only a linked helper's exit kills
@@ -538,14 +542,14 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 (* PROPERTIES *)
 
 \* queue.ex moduledoc: turn_result_fn is "invoked exactly once per turn";
-\* claim handler (queue.ex:230-236). Safety half: never twice.
+\* claim handler (queue.ex:243-249). Safety half: never twice.
 AtMostOneOutcome == \A m \in Msgs : Len(outcomes[m]) <= 1
 
 \* Liveness half: every started turn eventually gets its one outcome.
 EveryTurnGetsAnOutcome ==
     \A m \in Msgs : (pc[m] = "start") ~> (Len(outcomes[m]) = 1)
 
-\* queue.ex:367: "a turn-result consumer must never be left waiting".
+\* queue.ex:380: "a turn-result consumer must never be left waiting".
 \* Read as: every message the user sent eventually gets an outcome, whether
 \* or not its turn ever started.
 EverySentMessageGetsAnOutcome ==
@@ -593,7 +597,7 @@ CancelledMeansNotAnswered ==
     \A m \in Msgs :
         (outcomes[m] /= <<>> /\ outcomes[m][1] = "cancelled") => "reply" \notin shown[m]
 
-\* queue.ex:549-553: a failed turn closes its user message with the marker
+\* queue.ex:562-566: a failed turn closes its user message with the marker
 \* so a retry "must not reach a model with no record of what the failed turn
 \* already did". Read as: when no turn task is alive, no user message is
 \* left unanswered in history. (The empty-completion path, not modelled,
@@ -601,7 +605,7 @@ CancelledMeansNotAnswered ==
 NoDanglingUserMessage ==
     (\A m \in Msgs : pc[m] \in {"idle", "gone"}) => LastKind /= "user"
 
-\* maybe_reply_on_crash (queue.ex:858-860): "If the final reply was already
+\* maybe_reply_on_crash (queue.ex:888-890): "If the final reply was already
 \* delivered, do not send a second generic error".
 NoErrorAfterReply == \A m \in Msgs : ~({"reply", "error"} \subseteq shown[m])
 

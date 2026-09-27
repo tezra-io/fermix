@@ -64,8 +64,12 @@ the checks that show a rule needs it):
   `session.update` failed (`:649`).
 - `EndsWhenExhausted`: with no reconnect left, the call ends (`end_call`,
   `:665`).
-- `ResetsAttemptsOnSuccess`: a successful reconnect resets
-  `reconnect_attempts` (`:467`).
+- `ResetsAttemptsOnSuccess`: a reconnect OpenAI confirms resets
+  `reconnect_attempts`: the new socket's first `session.updated` (`:828`).
+- `ResetsOnlyWhenConfirmed`: nothing earlier resets it (`:462`). A socket
+  that opens and takes its `session.update` but drops before
+  `session.updated` has used an attempt. Off, the reset runs as soon as the
+  socket opens, as it did at `35a6acdc` (`:467`).
 - `OwnSocketOnly`: only `openai_pid`'s events, errors and `EXIT` are acted on.
   Any other socket's are dropped: the event and error clauses match the pid in
   their heads (`:385`, `:425`), one clause drops the rest (`:434`), and the
@@ -108,9 +112,21 @@ a closed socket's exit landing at any point:
   the comment at `session_server.ex:656-664` describes. This rests on
   `EndsWhenExhausted` (check 07) and on `OwnSocketOnly` (check 17).
 
+Check 05 and its needs checks run production's three attempts. With two, the
+drop and the failed `session.update` spend the budget, so in check 17 the
+closed socket's exit ends the call instead of reaching the freeze.
+
 **Check 08** holds with two drops and failed handshakes: the call gives up
 only after running every reconnect attempt. This rests on
-`ResetsAttemptsOnSuccess` (check 09).
+`ResetsAttemptsOnSuccess` (check 09). It also holds `AttemptsBounded`:
+between two confirmations the call runs at most one attempt per delay in
+`@default_reconnect_backoff_ms`, however often a socket opens and drops
+before its `session.updated`. This rests on `ResetsOnlyWhenConfirmed` (check
+23). Before the fix (84670433) the count reset when a
+socket opened, so an upstream that kept closing before `session.updated`
+reconnected until the max-session timer, or, if the call's first socket was
+never confirmed (the timer is armed only by a `session.updated`), until the
+operator hung up; check 23 reaches three attempts against a budget of two.
 
 **Checks 12 to 15** take the setups of the old RT-2 and RT-3 checks and
 witness. Each now holds, and each rests on `OwnSocketOnly`. Check 14 (and so
@@ -133,23 +149,24 @@ With the operator's stop allowed, TLC's deadlock check cannot fire in checks
 01, 05, 08, 10 and 14: `Stop` is enabled in every live state. The only wedge
 this model has room for is the freeze (no socket, no timer, an empty mailbox),
 since tool calls and VAD never touch the socket or the timer, and check 05
-asserts it directly as `NoFreeze`. Those five checks were also run once by hand
-with the stop left out, so the deadlock check was live: all five still hold,
-with no deadlock. Checks 12, 13 and 15 leave the stop out.
+asserts it directly as `NoFreeze`. Those five checks were also run by hand
+with the stop left out, so the deadlock check was live, once and again after
+the attempt reset moved to `session.updated`: all five still hold, with no
+deadlock. Checks 12, 13 and 15 leave the stop out.
 
-The holds checks were also run once by hand with one more of each entity. All
-still hold:
+The holds checks were also run once by hand with one more of each entity, and
+again after the attempt reset moved to `session.updated`. All still hold:
 
 | Check | Calls | Sockets | Attempts | Drops | VAD responses | States |
 |---|---|---|---|---|---|---|
-| 01 | 3 | 3 | 3 | 2 | 0 | 8,523 |
-| 05 | 1 | 4 | 3 | 2 | 0 | 2,135 |
-| 08 | 1 | 4 | 3 | 3 | 0 | 350 |
-| 10 | 3 | 3 | 3 | 2 | 3 | 2,602,623 |
-| 12 | 1 | 4 | 3 | 2 | 1 | 18,504 |
-| 13 | 1 | 5 | 4 | 2 | 1 | 123,506 |
-| 14 | 2 | 5 | 3 | 2 | 2 | 2,577,199 |
-| 15 | 1 | 3 | 3 | 2 | 1 | 3,764 |
+| 01 | 3 | 3 | 3 | 2 | 0 | 10,773 |
+| 05 | 1 | 4 | 4 | 2 | 0 | 4,250 |
+| 08 | 1 | 4 | 3 | 3 | 0 | 500 |
+| 10 | 3 | 3 | 3 | 2 | 3 | 5,981,665 |
+| 12 | 1 | 4 | 3 | 2 | 1 | 20,124 |
+| 13 | 1 | 5 | 4 | 2 | 1 | 136,580 |
+| 14 | 2 | 5 | 3 | 2 | 2 | 2,811,507 |
+| 15 | 1 | 3 | 3 | 2 | 1 | 3,930 |
 
 ## Not modelled
 
@@ -160,9 +177,11 @@ still hold:
   which `RespDone` already allows at any time.
 - A tool task crash. Its `:DOWN` is answered exactly like a result
   (`session_server.ex:402-407`).
-- `call_start` and its failure path. A failed `call_start` stops the voice
-  connection and the session with it (`local_voice_socket.ex:556-559`), and the
-  socket it closed never became `openai_pid`.
+- `call_start` and its failure path. It builds the `session.update` before it
+  opens a socket, so a failed build opens none. A failed `call_start` stops
+  the voice connection and the session with it
+  (`local_voice_socket.ex:561-564`), and a socket it closed after a failed
+  send never became `openai_pid`.
 - The network between OpenAI and the socket process. An event OpenAI emits
   lands in the session's mailbox in the same step.
 - WebSockex itself (`deps/websockex`, 0.5.1 in `mix.lock`). It cannot be
@@ -258,9 +277,12 @@ the finding's rule breaking again with the fix's mechanism switched off; open
   `schedule_reconnect` any more while a timer is armed. No reconnect token was
   added: check 13 shows no stray tick is left for one to guard against, and
   checks 19 and 20 show that rests on `OwnSocketOnly`.
-- **Checks:** 12, 13 and 14 now hold. Checks 18 (10 states), 19 (8 states),
-  20 (11 states) and 21 (20 states) break them again with `OwnSocketOnly`
+- **Checks:** 12, 13 and 14 now hold. Checks 18 (12 states), 19 (8 states),
+  20 (11 states) and 21 (22 states) break them again with `OwnSocketOnly`
   off, and check 17 (12 states) breaks `NoFreeze` in check 05's setup.
+  Checks 18 and 21 took two states fewer while a socket's open reset the
+  attempt count: now the new socket's `session.updated` has to refill the
+  budget before the stale exit can schedule a reconnect.
 - **Counterexample (the old check 12):**
   1. Socket 1 drops. `schedule_reconnect` arms the first timer.
   2. The timer fires. Socket 2 opens, but `session.update` fails, so

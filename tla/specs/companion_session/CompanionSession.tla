@@ -71,7 +71,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e1dddc1df7d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,append_user,after_user_append,ingest_gateway,handoff_settlement,history,accepted_event,history_event,emit @ bd93219a8e98
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ bfab37da7b1e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 47825aba960e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,approval,approval_resolved,persist_text,persist_output @ b2b3eee7c5f7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,cancel,write_event,send_event,transport,announce_user_row,request_opts,read_opts,sink @ dbb6c34b6a55
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
@@ -79,7 +79,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output @ dc48c35b81e5
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim @ c0440ecb6aa0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ d7cf3a18de4c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 EXTENDS Naturals, Sequences, FiniteSets, TLC
@@ -129,18 +129,19 @@ CONSTANTS
                          \* an :ets.take (confirmations.ex:21-26, take_pending
                          \* sandbox.ex:445-454)
     OneTurnAtATime,      \* the Queue starts a turn only when none of the conversation's
-                         \* turns is alive (maybe_start_next_request, queue.ex:304-312)
+                         \* turns is alive (maybe_start_next_request, queue.ex:317-325)
     StopTurnNamesTurn,   \* a stop ends the named message's turn only (Queue.stop_turn,
-                         \* queue.ex:172, stop_named_in :1005-1042); FALSE is the
-                         \* conversation stop (stop_conversation_runtime :990-994)
+                         \* queue.ex:185, stop_named_in :1035-1072); FALSE is the
+                         \* conversation stop (stop_conversation_runtime :1020-1024)
     CancelMarksRequest,  \* a cancel is recorded on its request first (cancel_request,
                          \* mobile_sql.ex:373-401); Turns reads the mark and enqueues in
                          \* one step (hand_off, turns.ex:166-187) and sends every stop
-                         \* itself, after its enqueue (turns.ex:117-129). FALSE is the
-                         \* old code: the Connection calls Queue.stop_turn directly
+                         \* itself, after its enqueue (turns.ex:123-128, stop_in_queue
+                         \* :192-203). FALSE is the old code: the Connection calls
+                         \* Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the Connection's cancel writes nothing
-                         \* (cancel, connection.ex:279-293; turns.ex:220-233)
+                         \* (cancel, connection.ex:279-293; turns.ex:236-249)
     SeqAssignedOnInsert  \* server_seq comes from the per-profile counter inside the one
                          \* transactional Repo call that inserts the row (append_in_tx,
                          \* mobile_sql.ex:538-544); FALSE: a writer reads the counter,
@@ -285,7 +286,7 @@ Pull(c, w, a) ==
        ELSE wire' = [wire EXCEPT ![c] = w] /\ reading' = [reading EXCEPT ![c] = PageAfter(a)]
     /\ sub' = IF sub[c] = "no" THEN [sub EXCEPT ![c] = "joining"] ELSE sub
 
-\* maybe_start_next_request (queue.ex:304-312), run by every Queue callback
+\* maybe_start_next_request (queue.ex:317-325), run by every Queue callback
 \* that can free the slot or fill the queue: with the waiting turns p and the
 \* turn states t that callback left, start the head of p if no turn is alive
 \* (OneTurnAtATime), or at once without it.
@@ -304,11 +305,11 @@ One(S) ==
 \* running one killed, a waiting one dropped), and each {:cancelled} is
 \* invoked off the Queue (invoke_turn_result_async) into Turns' mailbox,
 \* after `box`, the running one first. A claimed turn is never in `hit`: the
-\* stop spares it (stop_named_in, queue.ex:1005-1013). A named stop that
-\* kills the running turn starts the next one (:1015-1026). Without
+\* stop spares it (stop_named_in, queue.ex:1035-1043). A named stop that
+\* kills the running turn starts the next one (:1045-1056). Without
 \* StopTurnNamesTurn it is the conversation stop: whatever runs unclaimed is
-\* killed and every waiting message cancelled (:990-994, cancel_pending
-\* :1068-1074).
+\* killed and every waiting message cancelled (:1020-1024, cancel_pending
+\* :1098-1104).
 StopTurn(m, box) ==
     LET hit == IF StopTurnNamesTurn
                THEN IF turn[m] \in Stoppable THEN {m} ELSE {}
@@ -335,7 +336,7 @@ StopTurn(m, box) ==
 \*    row it created is announced to every connection (after_user_append ->
 \*    announce_user_row, requests.ex:356, connection.ex:480);
 \*  - Gateway.ingest calls Companion.Turns.handle_message: the hand-off waits
-\*    in Turns' mailbox (turns.ex:69-71).
+\*    in Turns' mailbox (turns.ex:75-77).
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
@@ -355,7 +356,7 @@ OnMsg(c, m) ==
 \*  - CancelMarksRequest: Requests.cancel records the mark on a request that
 \*    has not settled, in one Repo call (cancel_request, mobile_sql.ex:373-401;
 \*    not_found for one never claimed), then asks Turns (Turns.cancel, a call
-\*    into its mailbox, turns.ex:79-82).
+\*    into its mailbox, turns.ex:85-88).
 \*  - Otherwise the old code: the Connection calls Queue.stop_turn itself,
 \*    which finds nothing for a request not yet handed off.
 \*  - Without OutcomeEndsTurn the Connection also writes turn_error{cancelled}
@@ -553,20 +554,22 @@ Join(c) ==
 (* Companion.Turns: one process, one mailbox                                *)
 
 \* Turns handles its next message:
-\*  - a hand-off (handle_call {:hand_off, ...}, turns.ex:108-113 -> hand_off
+\*  - a hand-off (handle_call {:hand_off, ...}, turns.ex:114-119 -> hand_off
 \*    :166-178): with CancelMarksRequest it reads the request's mark
 \*    (cancel_recorded, get_client_request, :181-187) and, in the same step,
-\*    fails a marked request with one turn_error{cancelled} (fail, :229-233),
+\*    fails a marked request with one turn_error{cancelled} (fail, :245-249),
 \*    never enqueued; otherwise it tracks the turn and enqueues it
 \*    (Queue.handle_message; the Queue's handle_cast is folded in);
-\*  - a cancel (handle_call {:cancel, ...}, :117-129): Queue.stop_turn for a
-\*    turn it handed off, sent after its own enqueue, so it cannot overtake it;
-\*    for any other, the stop finds nothing;
-\*  - {:completed} (outcome/2, :140-145 -> finish/3, :220-227): each held
+\*  - a cancel (handle_call {:cancel, ...}, :123-128 -> stop_in_queue
+\*    :192-203): Queue.stop_turn for a turn it handed off, sent after its own
+\*    enqueue, so it cannot overtake it, and answered however busy the Queue
+\*    is; for any other, the stop finds nothing (a Queue already gone is left
+\*    to its :DOWN, which ends the turn as interrupted: not modelled);
+\*  - {:completed} (outcome/2, :140-145 -> finish/3, :236-243): each held
 \*    reply is written as a row (one Repo call) and broadcast as
-\*    text_done{server_seq} (write_reply, :239-256); one reply here;
+\*    text_done{server_seq} (write_reply, :255-272); one reply here;
 \*  - {:cancelled}: the request is settled failed and one turn_error is
-\*    broadcast (fail, :229-233); turn_error is live-only.
+\*    broadcast (fail, :245-249); turn_error is live-only.
 TurnsNext ==
     /\ turnsBox /= <<>>
     /\ LET ev == Head(turnsBox)
@@ -624,7 +627,7 @@ Expire ==
                    store, env, obs>>
 
 \* m's turn committed its reply and claimed its outcome: from here a stop
-\* spares it (claim_active_turn, queue.ex:1090-1094).
+\* spares it (claim_active_turn, queue.ex:1120-1124).
 Claim(m) ==
     /\ turn[m] = "running"
     /\ turn' = [turn EXCEPT ![m] = "claimed"]

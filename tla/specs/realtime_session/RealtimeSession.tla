@@ -12,7 +12,7 @@
 (*                                                                         *)
 (* Every message a socket sends names it: its events and errors carry     *)
 (* self() (OpenAIClient.handle_frame -> notify_parent, openai_client.ex:  *)
-(* 436, :459), and its death reaches the session only as its EXIT through *)
+(* 439, :471), and its death reaches the session only as its EXIT through *)
 (* the link. "disc" below is that EXIT.                                   *)
 (* OpenAIClient overrides no handle_disconnect/2. Its SOURCE pin names    *)
 (* functions, so that absence is pinned by openai_client_test.exs         *)
@@ -59,8 +59,8 @@
 (* One step = one session callback, one tool task finishing, one timer    *)
 (* firing, or one thing OpenAI or the network does.                       *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 273bc3f99163
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ c095cbe0ed9b
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ b05065100468
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ 17f27c3f8e34
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -91,7 +91,11 @@ CONSTANTS
     ClosesUnconfigured,        \* resume_provider_session closes a socket whose
                                \* session.update failed (:649)
     EndsWhenExhausted,         \* no reconnect left ends the call (end_call, :665)
-    ResetsAttemptsOnSuccess,   \* a successful reconnect resets reconnect_attempts (:467)
+    ResetsAttemptsOnSuccess,   \* a reconnect OpenAI confirms resets reconnect_attempts: the
+                               \* new socket's first session.updated (:828)
+    ResetsOnlyWhenConfirmed,   \* ... and nothing earlier does (:462). FALSE resets it as soon
+                               \* as the socket opens and takes its session.update, as the code
+                               \* did before the reset moved (:467 at 35a6acdc)
     OwnSocketOnly              \* only openai_pid's events, errors and EXIT are acted on;
                                \* any other socket's are dropped (:385, :425, :434, :440)
 
@@ -122,7 +126,8 @@ VARIABLES
     vadLeft,      \* environment budget: VAD responses still allowed
     \* bookkeeping
     rejected,     \* OpenAI rejected a response.create: a response was already active
-    tries,        \* reconnect attempts run since the call was last connected
+    tries,        \* reconnect attempts run since OpenAI last confirmed the call's socket
+                  \* (its first session.updated)
     ended         \* why the session ended: "none", "stop", "exhausted"
 
 session  == <<alive, mbox, sock, ready, attempts, timer, stray, pending, respActive, needsResp>>
@@ -173,7 +178,7 @@ NextSock ==
     ELSE None
 
 \* Socket k puts one message in the session's mailbox: an event or error
-\* (OpenAIClient.handle_frame -> notify_parent, openai_client.ex:436, :459),
+\* (OpenAIClient.handle_frame -> notify_parent, openai_client.ex:439, :471),
 \* or its EXIT.
 Emit(k, kind, c) == mbox' = Append(mbox, <<kind, k, c>>)
 
@@ -290,14 +295,18 @@ OnSocketMsg(msg, rest) ==
                           task, sockets, book>>
       [] msg[1] = "updated" ->
            \* {:session_updated, _} (:818-832). The first one for a socket sets
-           \* provider_ready? and runs start_timers -> cancel_timers (:1543-1560),
-           \* which forgets reconnect_timer: an armed timer is cancelled, and a
-           \* fired one's tick stays queued.
+           \* provider_ready?, resets reconnect_attempts (:828), and runs
+           \* start_timers -> cancel_timers (:1543-1560), which forgets
+           \* reconnect_timer: an armed timer is cancelled, and a fired one's tick
+           \* stays queued.
            /\ ready' = TRUE
            /\ timer' = IF ready THEN timer ELSE "none"
+           /\ attempts' = IF ~ready /\ ResetsAttemptsOnSuccess /\ ResetsOnlyWhenConfirmed
+                          THEN 0 ELSE attempts
+           /\ tries' = IF ready THEN tries ELSE 0
            /\ mbox' = rest
-           /\ UNCHANGED <<alive, sock, attempts, stray, pending, respActive, needsResp,
-                          task, sockets, book>>
+           /\ UNCHANGED <<alive, sock, stray, pending, respActive, needsResp,
+                          task, sockets, ended>>
 
 \* A message from a socket that is not openai_pid: the catch-all for events and
 \* errors (session_server.ex:434) or the EXIT catch-all (:457). Nothing but the
@@ -338,14 +347,16 @@ OnTick(rest) ==
        /\ tries' = tries + 1
        /\ Reconnect(rest, [sstate EXCEPT ![k] = IF ClosesUnconfigured THEN "closing" ELSE "open"])
     \/ \* connected, with session.update on the wire (:462-469); the ref to an
-       \* armed timer is dropped
+       \* armed timer is dropped. The attempt stays counted until the socket's
+       \* session.updated: OpenAI has not confirmed it yet.
        /\ k /= None
-       /\ tries' = 0
+       /\ tries' = tries + 1
        /\ mbox' = rest
        /\ sock' = k /\ ready' = FALSE
        /\ sstate' = [sstate EXCEPT ![k] = "open"]
        /\ up' = [up EXCEPT ![k] = <<<<"update", None>>>>]
-       /\ attempts' = IF ResetsAttemptsOnSuccess THEN 0 ELSE attempts
+       /\ attempts' = IF ResetsAttemptsOnSuccess /\ ~ResetsOnlyWhenConfirmed
+                      THEN 0 ELSE attempts
        /\ timer' = "none"
        /\ stray' = stray + (IF timer = "armed" THEN 1 ELSE 0)
        /\ UNCHANGED <<alive, pending, task, respActive, needsResp, ended>>
@@ -486,7 +497,7 @@ Drop(k) ==
                    task, issuer, out, outAt, vadLeft, rejected, book>>
 
 \* A socket the session closed (OpenAIClient.close -> {:close, state},
-\* openai_client.ex:102, :457) finishes its close handshake or hits the 5 s
+\* openai_client.ex:102, :469) finishes its close handshake or hits the 5 s
 \* close timeout, then exits like any other (websockex.ex:925-931).
 CloseDone(k) ==
     /\ alive /\ sstate[k] = "closing"
@@ -596,6 +607,13 @@ NoFreeze ==
 \* attempt.
 EveryAttemptTried ==
     ended = "exhausted" => tries >= MaxAttempts
+
+\* Proposed rule (Rule 2, bounded retries): the call runs at most one reconnect
+\* attempt per delay in @default_reconnect_backoff_ms (session_server.ex:53)
+\* between two confirmations, however often a socket opens and drops before
+\* its session.updated.
+AttemptsBounded ==
+    tries <= MaxAttempts
 
 \* Proposed rule, the one the cancel that schedule_reconnect used to carry
 \* stood in for: a reconnect timer is outstanding only while openai_pid is nil,
