@@ -182,7 +182,9 @@ defmodule FermixOpik.Mapper do
             # provider name only — never a query, a place record, or a
             # coordinate. `:location_mode` is the sole record of WHICH anchor a
             # place search used (query_only / named / explicit_coordinates), so
-            # dropping it erases the privacy evidence itself.
+            # dropping it erases the privacy evidence itself. The browser tool
+            # stamps `:backend` too: which implementation served the call
+            # (`cdp` or `fermix_app`), decided when its task started.
             :backend,
             :result_count,
             :has_media_count,

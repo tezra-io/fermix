@@ -1,6 +1,7 @@
 defmodule FermixCore.Browser do
   @moduledoc false
 
+  alias FermixCore.Browser.Backend
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
@@ -63,7 +64,13 @@ defmodule FermixCore.Browser do
     end
   end
 
-  @spec execute(map(), map()) :: {:ok, String.t()} | {:error, Error.t()}
+  @doc """
+  Run one `browser` tool call, and say which backend served it: the one the
+  profile was started on, or `nil` when the call never reached a profile (a
+  refusal before dispatch, `doctor`, `status`).
+  """
+  @spec execute(map(), map()) ::
+          {{:ok, String.t()} | {:error, Error.t()}, Backend.label() | nil}
   def execute(args, context) when is_map(args) and is_map(context) do
     with {:ok, action} <- action(args),
          {:ok, config} <- Config.current(),
@@ -72,6 +79,8 @@ defmodule FermixCore.Browser do
          :ok <- allowed_turn(profile, context),
          :ok <- validate_args(action, args) do
       dispatch(action, args, context, owner_key, profile_name, profile, config)
+    else
+      {:error, %Error{} = error} -> {{:error, error}, nil}
     end
   end
 
@@ -96,11 +105,11 @@ defmodule FermixCore.Browser do
   defp allowed_turn(_profile, _context), do: :ok
 
   defp dispatch("doctor", _args, _context, _owner, _profile_name, _profile, config) do
-    {:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}
+    {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}
   end
 
   defp dispatch("status", _args, _context, owner, profile_name, _profile, _config) do
-    {:ok, encode(ProfileManager.status(owner, profile_name))}
+    {{:ok, encode(ProfileManager.status(owner, profile_name))}, nil}
   end
 
   defp dispatch(action, args, context, owner, profile_name, profile, config)
@@ -112,11 +121,11 @@ defmodule FermixCore.Browser do
       mutating: mutating?(action, args)
     }
 
-    {profile, _backend} = Routing.for_request(owner, profile_name, profile, config, context)
+    {profile, backend} = Routing.for_request(owner, profile_name, profile, config, context)
 
     case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
-      {:ok, result} -> {:ok, encode(result)}
-      {:error, %Error{} = error} -> {:error, error}
+      {:ok, result} -> {{:ok, encode(result)}, backend}
+      {:error, %Error{} = error} -> {{:error, error}, backend}
     end
   end
 

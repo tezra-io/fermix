@@ -584,7 +584,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
 
   test "the person's own tab is refused to every turn they are not present for" do
     for {label, context} <- @unattended do
-      result = Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
+      {result, nil} =
+        Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
 
       assert match?({:error, %Error{code: "attached_tab_not_allowed"}}, result),
              "#{label} reached the granted tab: #{inspect(result)}"
@@ -592,13 +593,13 @@ defmodule FermixCore.Browser.AttachedTabTest do
   end
 
   test "an attended owner turn reaches it, and the managed profile is untouched" do
-    assert {:ok, json} =
+    assert {{:ok, json}, nil} =
              Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, @attended)
 
     assert %{"profile" => "selected_tab", "running" => false} = Jason.decode!(json)
 
     guest = Map.merge(@base, %{source_trust: :guest, computer_use_origin: :interactive})
-    assert {:ok, managed} = Browser.execute(%{"action" => "status"}, guest)
+    assert {{:ok, managed}, nil} = Browser.execute(%{"action" => "status"}, guest)
     assert %{"running" => false} = Jason.decode!(managed)
   end
 end

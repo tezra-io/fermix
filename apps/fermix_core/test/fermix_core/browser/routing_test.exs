@@ -142,14 +142,14 @@ defmodule FermixCore.Browser.RoutingTest do
     {:ok, owner} = Scope.owner_key(context)
     on_exit(fn -> ProfileManager.stop_owner(owner) end)
 
-    assert {:error, %Error{code: "host_unavailable"}} =
+    assert {{:error, %Error{code: "host_unavailable"}}, :fermix_app} =
              Browser.execute(%{"action" => "tabs"}, context)
 
     assert ProfileManager.backend(owner, "fermix") == :fermix_app
 
     :ok = HostAvailability.detached(host, "the app quit")
 
-    assert {:error, %Error{code: "host_lost"} = error} =
+    assert {{:error, %Error{code: "host_lost"} = error}, :fermix_app} =
              Browser.execute(%{"action" => "tabs"}, context)
 
     assert error.message =~ "no longer available: the app quit"

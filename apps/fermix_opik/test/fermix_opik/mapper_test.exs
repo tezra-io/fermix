@@ -117,7 +117,8 @@ defmodule FermixOpik.MapperTest do
       profile: "default",
       url: "https://example.com/page",
       target_ref: "ref-7",
-      selector: "#submit"
+      selector: "#submit",
+      backend: "fermix_app"
     }
 
     span =
@@ -133,7 +134,8 @@ defmodule FermixOpik.MapperTest do
              profile: "default",
              url: "https://example.com/page",
              target_ref: "ref-7",
-             selector: "#submit"
+             selector: "#submit",
+             backend: "fermix_app"
            }
   end
 
