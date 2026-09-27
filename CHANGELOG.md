@@ -153,6 +153,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the sign-in as revoked, and ChatGPT stopped answering until a restart.
   Fermix now retries it. Signing a plugin out also deletes the access token its
   helper was given, right away.
+- **A coding run from an ACP client whose hand-off was lost is reported at
+  once.** Instead of hours of retries ending in "unsupported delivery
+  platform", the run is marked undeliverable with a cause that says the
+  hand-off was not recorded.
 
 ## [0.11.0] - 2026-09-23
 
