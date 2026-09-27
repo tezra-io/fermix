@@ -148,6 +148,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   same job started again. It now stops with its runner. A delivery that was
   sent is no longer recorded as failed because its status could not be saved:
   the run names the real cause.
+- **A rate-limited token refresh no longer signs you out.** A provider that
+  answered a refresh with "too many requests" or a timeout made Fermix treat
+  the sign-in as revoked, and ChatGPT stopped answering until a restart.
+  Fermix now retries it. Signing a plugin out also deletes the access token its
+  helper was given, right away.
 
 ## [0.11.0] - 2026-09-23
 

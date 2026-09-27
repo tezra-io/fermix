@@ -302,6 +302,46 @@ defmodule FermixCore.Auth.TokenManagerPluginRefreshTest do
     assert {:error, :reauthorization_required} = TokenManager.get_token(name)
   end
 
+  # A token endpoint that rate-limits (429) or times the request out (408) has
+  # not judged the grant, so it is no dead grant: nothing is quarantined, the
+  # manager keeps it, and the next refresh serves. The plug answers 429 to the
+  # three attempts of the first refresh, then a token pair.
+  test "a rate-limited refresh keeps the grant, and the next refresh serves", %{dir: dir} do
+    fermix_path = write_auth_file(dir, "github:primary", "github")
+    seen = :counters.new(1, [])
+
+    plug = fn conn ->
+      :counters.add(seen, 1, 1)
+
+      case :counters.get(seen, 1) do
+        attempt when attempt <= 3 ->
+          conn
+          |> Plug.Conn.put_resp_content_type("application/json")
+          |> Plug.Conn.send_resp(429, Jason.encode!(%{"error" => "rate_limited"}))
+
+        _later ->
+          refresh_plug(conn)
+      end
+    end
+
+    name =
+      start_manager(
+        auth_profile: "github:primary",
+        fermix_auth_path: fermix_path,
+        req_options: [plug: plug, retry_sleep: fn _ms -> :ok end]
+      )
+
+    capture_log(fn ->
+      assert {:error, "Refresh failed (429)" <> _detail} = TokenManager.refresh(name)
+    end)
+
+    data = fermix_path |> File.read!() |> Jason.decode!()
+    refute data["providers"]["github:primary"]["status"] == "reauthorization_required"
+    assert {:ok, "old_at"} = TokenManager.get_token(name)
+
+    assert {:ok, "new_at"} = TokenManager.refresh(name)
+  end
+
   # AGENTS.md rule 7: the quarantine status write after a dead grant can fail
   # (a malformed auth.json, a busy store lock). The failure is logged and
   # answered rather than dropped, and the manager refuses the dead grant all the
