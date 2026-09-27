@@ -31,7 +31,7 @@
 (* Only the daemon-to-client side of a socket is a queue: a Connection's   *)
 (* mailbox, then the socket, in order (what it writes outside the step     *)
 (* that produced it reaches it as {:companion_event, _},                   *)
-(* connection.ex:123). A client event, the Connection's handling of it,    *)
+(* connection.ex:142). A client event, the Connection's handling of it,    *)
 (* and the request worker, Repo and Queue calls it makes are one step,     *)
 (* up to the worker's call into Turns. Nothing distinct is lost: a client  *)
 (* event lost in a drop looks to the client exactly like one whose answer  *)
@@ -57,6 +57,11 @@
 (* Queue crash (Turns ends its turns as interrupted), a crash of Turns     *)
 (* or of a request worker, and the grant resume a confirmed approval       *)
 (* re-ingests as a new turn (sandbox.ex resume_request);                   *)
+(* - the peer check at the hand-over (handle_info(:socket_handover),       *)
+(* connection.ex:115-122): a client the daemon cannot place is sent        *)
+(* error{unidentified_client} and closed before a line is read, which it   *)
+(* sees as a drop before server_hello; the caller it places rides on each  *)
+(* turn (metadata.caller) and decides only what the turn's tools may do;   *)
 (* - the LLM and tools, the ConversationStore, attachments, auth and the   *)
 (* socket's 0600 mode (single-call rules; ExUnit covers them);             *)
 (* - other conversations (the Queue keys all state by conversation).       *)
@@ -64,18 +69,18 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 78309c4a941e
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e1dddc1df7d3
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,append_user,after_user_append,ingest_gateway,handoff_settlement,history,accepted_event,history_event,emit @ bd93219a8e98
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ bfab37da7b1e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,approval,approval_resolved,persist_text,persist_output @ b2b3eee7c5f7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,cancel,write_event,send_event,transport,announce_user_row,request_opts,read_opts,sink @ 5663000ca0a4
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,cancel,write_event,send_event,transport,announce_user_row,request_opts,read_opts,sink @ dbb6c34b6a55
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,announce_row,row_event,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message @ 626b2ec6cd07
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,announce_row,row_event,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message @ afb2f200897c
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output @ dc48c35b81e5
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim @ c0440ecb6aa0
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ d7cf3a18de4c
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ 8ab15a5580bd
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
@@ -112,17 +117,17 @@ CONSTANTS
                          \* page says more and on a gap, and applies a live row only at
                          \* cursor + 1 (PROTOCOL.md "Keeping a client's timeline")
     SubscribeBeforePull, \* the Connection joins the registry before it writes
-                         \* server_hello (join, connection.ex:211-220)
+                         \* server_hello (join, connection.ex:246-255)
     PageWrittenInReadStep, \* the Connection writes history_page to the socket in the step
-                         \* that read it (read_opts, connection.ex:446-450); FALSE sends it
+                         \* that read it (read_opts, connection.ex:492-496); FALSE sends it
                          \* through its own mailbox, behind live rows sent meanwhile
     AnnouncesEveryRow,   \* every row written outside a turn's completion is broadcast as
                          \* a row as it is written: the user's (announce_user_row,
-                         \* connection.ex:434) and a delivery's (announce_written,
-                         \* channels/companion.ex:236); FALSE announces no user row
+                         \* connection.ex:480) and a delivery's (announce_written,
+                         \* channels/companion.ex:245); FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
-                         \* sandbox.ex:397-406)
+                         \* sandbox.ex:445-454)
     OneTurnAtATime,      \* the Queue starts a turn only when none of the conversation's
                          \* turns is alive (maybe_start_next_request, queue.ex:304-312)
     StopTurnNamesTurn,   \* a stop ends the named message's turn only (Queue.stop_turn,
@@ -135,7 +140,7 @@ CONSTANTS
                          \* old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the Connection's cancel writes nothing
-                         \* (cancel, connection.ex:244-258; turns.ex:220-233)
+                         \* (cancel, connection.ex:279-293; turns.ex:220-233)
     SeqAssignedOnInsert  \* server_seq comes from the per-profile counter inside the one
                          \* transactional Repo call that inserts the row (append_in_tx,
                          \* mobile_sql.ex:538-544); FALSE: a writer reads the counter,
@@ -251,8 +256,8 @@ Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 \* (next_server_seq, increment_server_seq, mobile_sql.ex:559-596).
 NextSeq == MaxOf(Range(tl)) + 1
 
-\* Channels.Companion.broadcast or announce_row (channels/companion.ex:92-110,
-\* dispatch :254-258): one send to every Connection registered under the
+\* Channels.Companion.broadcast or announce_row (channels/companion.ex:101-119,
+\* dispatch :263-267): one send to every Connection registered under the
 \* profile. A row and a text_done are both a live row here.
 FanoutTo(w, ev) == [c \in Clients |-> IF sub[c] = "yes" THEN Append(w[c], ev) ELSE w[c]]
 Fanout(ev) == FanoutTo(wire, ev)
@@ -266,11 +271,11 @@ PageAfter(a) ==
         k == IF Len(later) < PageLimit THEN Len(later) ELSE PageLimit
     IN [rows |-> SubSeq(later, 1, k), more |-> Len(later) > PageLimit]
 
-\* history_pull on connection c (dispatch, connection.ex:191 ->
+\* history_pull on connection c (dispatch, connection.ex:226 ->
 \* Requests.history, requests.ex:97-108): the Repo read, in the step the
 \* client sends the pull; `w` is c's mailbox and socket as that step left
 \* them. With PageWrittenInReadStep the page is written to the socket in this
-\* step (read_opts -> send_event, connection.ex:446-450, :387), ahead of any
+\* step (read_opts -> send_event, connection.ex:492-496, :426), ahead of any
 \* live row sent after the read; without it, it goes through the mailbox in a
 \* later step (SendPage). Without SubscribeBeforePull the Connection joins the
 \* registry after its first page (Join).
@@ -316,7 +321,7 @@ StopTurn(m, box) ==
 
 -----------------------------------------------------------------------------
 (* The request path: a Connection's request worker (request_job,           *)
-(* connection.ex:297) runs Companion.Requests.request                       *)
+(* connection.ex:336) runs Companion.Requests.request                       *)
 
 \* msg{client_msg_id} (Requests.request -> claim_and_run -> acquire_and_run
 \* -> run_started -> ingest_span, requests.ex:75-270):
@@ -328,7 +333,7 @@ StopTurn(m, box) ==
 \*  - an attempt appends the user's row (append_client_message, keyed by
 \*    client_msg_id: an existing row is returned, not written again), and a
 \*    row it created is announced to every connection (after_user_append ->
-\*    announce_user_row, requests.ex:356, connection.ex:434);
+\*    announce_user_row, requests.ex:356, connection.ex:480);
 \*  - Gateway.ingest calls Companion.Turns.handle_message: the hand-off waits
 \*    in Turns' mailbox (turns.ex:69-71).
 OnMsg(c, m) ==
@@ -346,7 +351,7 @@ OnMsg(c, m) ==
                /\ UNCHANGED <<marked, ends, cancelAsked, appr, applied>>
     /\ UNCHANGED <<sub, reading, queue, job, jobSeq, dseq, answeredBy, cancelEarly>>
 
-\* cancel{client_msg_id} (cancel, connection.ex:244-258).
+\* cancel{client_msg_id} (cancel, connection.ex:279-293).
 \*  - CancelMarksRequest: Requests.cancel records the mark on a request that
 \*    has not settled, in one Repo call (cancel_request, mobile_sql.ex:373-401;
 \*    not_found for one never claimed), then asks Turns (Turns.cancel, a call
@@ -371,11 +376,11 @@ OnCancel(m) ==
                       dupWhileRunning>>
 
 \* /confirm TOKEN or /deny TOKEN: a command request through the same path,
-\* answered by the Gateway's command (confirm, deny, sandbox.ex:223-243).
+\* answered by the Gateway's command (confirm, deny, sandbox.ex:236-256).
 \* take_pending peeks, checks the expiry and origin, then takes the token
-\* (sandbox.ex:397-414, Confirmations.take, confirmations.ex:21-26). Only a
+\* (sandbox.ex:445-462, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and broadcasts
-\* approval_resolved (notify_approval :258-266 -> requests.ex:449-457).
+\* approval_resolved (notify_approval :293-301 -> requests.ex:449-457).
 \* Without SingleAnswer the token survives its first answer.
 OnAnswer(c) ==
     /\ answeredBy' = answeredBy \cup {c}
@@ -429,7 +434,7 @@ Resend(m) ==
 \* socket (accept_connection, start_connection, hand_over, endpoint.ex:218-268;
 \* @max_clients 4, two here). The client sends client_hello; the Connection
 \* joins the registry (SubscribeBeforePull), then writes server_hello straight
-\* to the socket (hello, join, connection.ex:204-220). A pending approval is
+\* to the socket (hello, join, connection.ex:239-255). A pending approval is
 \* not re-sent.
 Connect(c) ==
     /\ link[c] = "down"
@@ -439,7 +444,7 @@ Connect(c) ==
     /\ UNCHANGED <<composed, outbox, sentOn, view, pulling, prompt, resent, reading, turns,
                    queue, store, env, obs>>
 
-\* The connection drops. The Connection exits (connection.ex:116) with its
+\* The connection drops. The Connection exits (connection.ex:135) with its
 \* mailbox; its registry entry goes with it. A request worker it started runs
 \* on, since it is not linked, so a claimed request still settles. The client
 \* keeps its outbox, its view, and any approval card it shows.
@@ -598,10 +603,11 @@ TurnsNext ==
 -----------------------------------------------------------------------------
 (* The Gateway Queue and its turn tasks, abstract (see the header)          *)
 
-\* A tool of m's turn needs the owner's approval: the gateway stores a
-\* pending token (store_pending_grant, sandbox.ex:178-190) and the channel
-\* broadcasts the card (send_approval, channels/companion.ex:192-195). The
-\* turn does not wait for it.
+\* A tool of m's turn needs the owner's approval (a directory grant, or a
+\* coding run's vendor-config change to acknowledge; one path for both): the
+\* gateway stores a pending token (store_pending_grant, sandbox.ex:186-198)
+\* and the channel broadcasts the card (send_approval,
+\* channels/companion.ex:201-204). The turn does not wait for it.
 Ask(m) ==
     /\ turn[m] = "running" /\ appr = "none" /\ Approvals > 0
     /\ appr' = "pending"
@@ -610,7 +616,7 @@ Ask(m) ==
                    applied, queue, store, env, obs>>
 
 \* The token expires: take_pending refuses it from then on (validate_pending,
-\* sandbox.ex:408-414). Time, so no fairness.
+\* sandbox.ex:456-462). Time, so no fairness.
 Expire ==
     /\ appr = "pending"
     /\ appr' = "expired"
@@ -636,7 +642,7 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:206-237)                        *)
+(* job's own process (channels/companion.ex:215-246)                        *)
 
 \* Without SeqAssignedOnInsert the job reads the counter first.
 JobRead ==
@@ -655,7 +661,7 @@ JobWrite ==
     /\ job' = "written"
     /\ UNCHANGED <<client, conn, turns, queue, env, obs>>
 
-\* announce_written -> announce_row: the job broadcasts its row (:236).
+\* announce_written -> announce_row: the job broadcasts its row (:245).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"

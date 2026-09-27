@@ -77,10 +77,11 @@ queue in its mailbox and are handled in order.
   every `history_page` to the socket in the step that read it (`read_opts`).
 - A job's row is written, then announced as a `row` by the job's own process
   (`send_message` -> `announce_written`).
-- An approval is a single-use token. The first `/confirm` or `/deny` that
-  `take`s it applies the answer and broadcasts `approval_resolved`. The turn
-  does not wait on it, and a pending approval is not re-sent at
-  `server_hello`.
+- An approval is a single-use token, stored by `store_pending_grant` for a
+  directory grant or for a coding run's vendor-config change to acknowledge.
+  The first `/confirm` or `/deny` that `take`s it applies the answer and
+  broadcasts `approval_resolved`. The turn does not wait on it, and a pending
+  approval is not re-sent at `server_hello`.
 
 **Environment switches** (set per check):
 - `ClientsCanDisconnect`: a connection drops, and what is in its mailbox or on
@@ -105,15 +106,15 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:118-125`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:211-220`).
+  `server_hello` (`join`, `connection.ex:246-255`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:446-450`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:492-496`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   broadcast as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:434`) and a delivery (`announce_written`,
-  `channels/companion.ex:236`). `FALSE` announces no user row.
+  `connection.ex:480`) and a delivery (`announce_written`,
+  `channels/companion.ex:245`). `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `OneTurnAtATime`: `maybe_start_next_request` (`queue.ex:304-312`).
@@ -253,6 +254,11 @@ of an entity its rules are about. All still hold:
   and a crash of `Turns` or of a request worker.
 - The grant resume a confirmed approval re-ingests as a new turn
   (`sandbox.ex` `resume_request`).
+- The peer check at the hand-over (`handle_info(:socket_handover)`,
+  `connection.ex:115-122`). A client the daemon cannot place is sent
+  `error: unidentified_client` and closed before a line is read, which the
+  client sees as a drop before `server_hello`. The caller it places rides on
+  each turn (`metadata.caller`) and decides only what the turn's tools may do.
 - The LLM and tools, the ConversationStore, attachments, authentication and
   the socket's 0600 mode: single-call rules that ExUnit covers.
 - Other conversations: the Queue keys all state by conversation.
@@ -275,7 +281,7 @@ back with its fix's mechanism switched off; open
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:211-220`).
+  before it writes `server_hello` (`connection.ex:246-255`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 
