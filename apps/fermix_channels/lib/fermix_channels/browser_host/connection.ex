@@ -24,8 +24,10 @@ defmodule FermixChannels.BrowserHost.Connection do
 
   A task is known here from its first request. Its `task.release` is written
   at most once: when the task says it is over, when its process exits without
-  saying so, or when the app quits. A release travels behind the task's own
-  requests, because they leave the same process in order.
+  saying so, when the app quits, or when the person cancels it from the app's
+  pane (`task.cancel`, told and released exactly like the others). A release
+  travels behind the task's own requests, because they leave the same process
+  in order.
 
   ## The app quitting
 
@@ -204,6 +206,7 @@ defmodule FermixChannels.BrowserHost.Connection do
   defp dispatch(_frame, %{attached: false} = state), do: refuse(:attach_required, state)
   defp dispatch({:event, "availability", payload}, state), do: availability(payload, state)
   defp dispatch({:event, "host_stopping", _payload}, state), do: host_stopping(state)
+  defp dispatch({:event, "task.cancel", payload}, state), do: cancel_task(payload, state)
   defp dispatch({:event, type, payload}, state), do: forward(type, payload, state)
   defp dispatch({:response, id, outcome}, state), do: answered(id, outcome, state)
 
@@ -361,6 +364,28 @@ defmodule FermixChannels.BrowserHost.Connection do
       {_pid, tasks} ->
         state = %{state | tasks: tasks}
         write_request("task.release", %{"task_id" => task_id}, nil, state)
+    end
+  end
+
+  # The person cancelled one task from the app: it is told, then released
+  # exactly as `release_task/2` releases a task that ends on its own. A
+  # task_id this connection never bound (already gone, or never made a
+  # request) has nothing to cancel.
+  defp cancel_task(%{"task_id" => task_id, "reason" => reason}, state) do
+    case Map.fetch(state.tasks, task_id) do
+      {:ok, pid} ->
+        :ok = Link.cancelled(pid, self(), reason)
+
+        trace("browser_host_task_cancelled", %{
+          "connection" => state.connection_id,
+          "task_id" => task_id,
+          "reason" => reason
+        })
+
+        release_task(task_id, state)
+
+      :error ->
+        {:cont, state}
     end
   end
 

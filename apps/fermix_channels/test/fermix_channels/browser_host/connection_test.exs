@@ -186,6 +186,56 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     send_line(app, %{"id" => stop_id, "ok" => true, "result" => %{}})
   end
 
+  test "task.cancel tells the named task and releases its tabs, leaving other tasks alone", ctx do
+    app = attach(ctx.socket_path)
+    connection = connection_pid(ctx.connections)
+
+    ref1 = Link.request(connection, "task-1", "tab.list", %{"task_id" => "task-1"})
+    assert %{"id" => 1} = recv(app)
+    send_line(app, %{"id" => 1, "ok" => true, "result" => %{"tabs" => []}})
+    assert_receive {:browser_host_answer, ^ref1, _}
+
+    ref2 = Link.request(connection, "task-2", "tab.list", %{"task_id" => "task-2"})
+    assert %{"id" => 2} = recv(app)
+    send_line(app, %{"id" => 2, "ok" => true, "result" => %{"tabs" => []}})
+    assert_receive {:browser_host_answer, ^ref2, _}
+
+    send_line(app, %{
+      "type" => "task.cancel",
+      "task_id" => "task-1",
+      "reason" => "cancelled by the person"
+    })
+
+    assert_receive {:browser_host_cancelled, ^connection, "cancelled by the person"}
+
+    assert %{"id" => 3, "type" => "task.release", "task_id" => "task-1"} = recv(app)
+    send_line(app, %{"id" => 3, "ok" => true, "result" => %{"released" => []}})
+
+    # task-2 was never named, so it is still bound: its own release still
+    # travels, and only once.
+    :ok = Link.release(connection, "task-2")
+    assert %{"id" => 4, "type" => "task.release", "task_id" => "task-2"} = recv(app)
+    send_line(app, %{"id" => 4, "ok" => true, "result" => %{"released" => []}})
+  end
+
+  test "task.cancel for a task this connection never bound to is silently ignored", ctx do
+    app = attach(ctx.socket_path)
+    connection = connection_pid(ctx.connections)
+
+    send_line(app, %{
+      "type" => "task.cancel",
+      "task_id" => "task-x",
+      "reason" => "cancelled by the person"
+    })
+
+    assert {:error, :timeout} = :gen_tcp.recv(app, 0, 200)
+
+    ref = Link.request(connection, "task-1", "tab.list", %{"task_id" => "task-1"})
+    assert %{"id" => 1} = recv(app)
+    send_line(app, %{"id" => 1, "ok" => true, "result" => %{"tabs" => []}})
+    assert_receive {:browser_host_answer, ^ref, _}
+  end
+
   test "an app event about a tab reaches every task bound here", ctx do
     app = attach(ctx.socket_path)
     connection = connection_pid(ctx.connections)
