@@ -362,12 +362,16 @@ defmodule FermixCore.Realtime.OpenAIClient do
     {:ok, {:assistant_transcript_done, transcript}}
   end
 
-  def decode_server_event(%{
-        "type" => "conversation.item.input_audio_transcription.completed",
-        "transcript" => transcript
-      })
+  # The item id binds a spoken answer to the committed input item it transcribes
+  # (`Capabilities.AccessGate`'s spoken yes).
+  def decode_server_event(
+        %{
+          "type" => "conversation.item.input_audio_transcription.completed",
+          "transcript" => transcript
+        } = event
+      )
       when is_binary(transcript) do
-    {:ok, {:user_transcript_done, transcript}}
+    {:ok, {:user_transcript_done, Map.get(event, "item_id"), transcript}}
   end
 
   def decode_server_event(%{"type" => "input_audio_buffer.committed"} = event) do

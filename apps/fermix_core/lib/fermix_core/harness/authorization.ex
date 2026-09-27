@@ -69,10 +69,17 @@ defmodule FermixCore.Harness.Authorization do
 
   # --- Scheduled (raw job-row allowlist) ----------------------------------
 
-  # A delegated worker inherits the scheduled `conversation_key`/`job_id` but runs
-  # at `subagent_depth >= 1`; the real cron loop context carries no depth (→ 0).
-  # Gating the scheduled path on depth 0 keeps a worker out of the job allowlist.
-  defp scheduled?(context) do
+  @doc """
+  The one definition of a scheduled context, shared with
+  `Capabilities.AccessGate`: a top-level cron loop whose `conversation_key` is
+  `{:scheduled_job, _, _}`.
+
+  A delegated worker inherits the scheduled `conversation_key`/`job_id` but runs
+  at `subagent_depth >= 1`; the real cron loop context carries no depth (→ 0).
+  Gating the scheduled path on depth 0 keeps a worker out of the job allowlist.
+  """
+  @spec scheduled?(map()) :: boolean()
+  def scheduled?(context) when is_map(context) do
     Map.get(context, :subagent_depth, 0) == 0 and
       match?({:scheduled_job, _job_id, _run_id}, Map.get(context, :conversation_key))
   end

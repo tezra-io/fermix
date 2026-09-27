@@ -23,7 +23,9 @@ defmodule FermixCore.Capabilities.Builtin.Tool do
           required(:success) => boolean(),
           required(:output) => String.t(),
           required(:error) => String.t() | nil,
-          optional(:images) => [image_part()]
+          optional(:images) => [image_part()],
+          # Set only by `Capabilities.AccessGate` on a call it parked for the owner.
+          optional(:access_waiting) => true
         }
 
   @type context :: %{

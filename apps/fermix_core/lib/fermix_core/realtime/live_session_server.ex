@@ -29,6 +29,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   use GenServer
 
+  alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Realtime.Config
@@ -158,7 +160,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       max_session_timer: nil,
       usage_timer: nil,
       reply_timer: nil,
-      context_timers: %{}
+      context_timers: %{},
+      # `{intent_id, since_ms}`: the parked access-sensitive command the last
+      # settled delegation's OWN turn asked the owner about, and when the owner
+      # had last stopped speaking as that reply was delivered. Only speech after
+      # it answers (`Capabilities.AccessGate`'s spoken yes); `nil` otherwise.
+      access_window: nil,
+      # Confirmed access-sensitive runs in flight: task ref -> delegation id.
+      access_confirms: %{}
     }
   end
 
@@ -316,6 +325,24 @@ defmodule FermixCore.Realtime.LiveSessionServer do
         Logger.debug("voice_live: dropped stale event for delegation #{delegation_id}")
         {:noreply, state}
     end
+  end
+
+  # A confirmed access-sensitive command finished: its outcome answers the task
+  # that carried the owner's yes, like any delegation result.
+  def handle_info({ref, {status, outcome}}, %{access_confirms: confirms} = state)
+      when is_reference(ref) and is_map_key(confirms, ref) and status in [:ok, :error] and
+             is_binary(outcome) do
+    Process.demonitor(ref, [:flush])
+    {delegation_id, confirms} = Map.pop(confirms, ref)
+    access_result(%{state | access_confirms: confirms}, delegation_id, spoken(status, outcome))
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{access_confirms: confirms} = state)
+      when is_map_key(confirms, ref) do
+    Logger.error("voice_live: a confirmed access-sensitive command crashed: #{inspect(reason)}")
+    {delegation_id, confirms} = Map.pop(confirms, ref)
+    unknown = {:error, AccessGate.outcome_unknown_text()}
+    access_result(%{state | access_confirms: confirms}, delegation_id, unknown)
   end
 
   def handle_info(message, state) do
@@ -564,6 +591,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp submit_delegation(state, record) do
+    case access_answer(state, record) do
+      {:confirmed, intent_id} -> confirm_access(%{state | access_window: nil}, record, intent_id)
+      :declined -> submit_to_bridge(%{state | access_window: nil}, record)
+      _no_window_or_no_answer -> submit_to_bridge(state, record)
+    end
+  end
+
+  defp submit_to_bridge(state, record) do
     turn_session_id = mint_turn_session_id()
     request = delegation_request(state, record, turn_session_id)
     state = %{state | turn_sessions: Map.put(state.turn_sessions, record.id, turn_session_id)}
@@ -581,6 +616,67 @@ defmodule FermixCore.Realtime.LiveSessionServer do
         |> send_append(commentary(record.id, @submit_failed_line), :commentary, record.id)
         |> settle_delegation(record, :failed, "submit_failed")
         |> start_next()
+    end
+  end
+
+  # A task Live raises after a delegation's reply asked the owner to confirm the
+  # command that delegation's own turn parked is read against what the owner
+  # said since (`Capabilities.AccessGate`). A whole-utterance yes runs the
+  # recorded command here, with no Fermix turn that could issue it again;
+  # anything else drops the command and the task goes to Fermix as usual. A task
+  # with no owner speech behind it (raised before the question) is no answer,
+  # and the command waits.
+  defp access_answer(%{access_window: {intent_id, since}} = state, %{offset_ms: offset_ms})
+       when offset_ms > since do
+    case LiveTranscript.user_text_since(state.transcript, since) do
+      "" -> :no_answer
+      text -> AccessGate.answer_spoken(intent_id, text)
+    end
+  end
+
+  defp access_answer(_state, _record), do: :no_window
+
+  # Every settle decides the answer window afresh. Only a delegation that
+  # completed, and whose own turn parked a command still waiting, opens one: its
+  # reply is what asked the owner. A failed or cancelled one (its reply, if any,
+  # asked nothing) and a reply from a turn that parked nothing close it, so a
+  # yes the owner said to something else can never confirm the command.
+  defp settle_access_window(state, record, :completed),
+    do: %{state | access_window: parked_by(state, record)}
+
+  defp settle_access_window(state, _record, _failed_or_cancelled),
+    do: %{state | access_window: nil}
+
+  defp parked_by(state, record) do
+    with {:ok, turn_session_id} <- Map.fetch(state.turn_sessions, record.id),
+         {:ok, intent_id} <- AccessPending.pending_from(turn_session_id),
+         since when is_integer(since) <- LiveTranscript.latest_user_end_ms(state.transcript) do
+      {intent_id, since}
+    else
+      _nothing_parked -> nil
+    end
+  end
+
+  # The same bookkeeping and bookends as a submitted task. No bridge task backs
+  # it (`bridge_ref: nil`), so cancelling it makes no bridge call.
+  defp confirm_access(state, record, intent_id) do
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        AccessGate.confirm(intent_id)
+      end)
+
+    state = %{state | access_confirms: Map.put(state.access_confirms, task.ref, record.id)}
+    run_delegation(state, record, nil)
+  end
+
+  defp spoken(:ok, outcome), do: {:ok, "The owner said yes. " <> outcome}
+  defp spoken(:error, outcome), do: {:error, outcome}
+
+  # A cancelled task is already settled; its late outcome is dropped.
+  defp access_result(state, delegation_id, result) do
+    case LiveDelegation.fetch(state.delegations, delegation_id) do
+      {:ok, record} -> delegation_event({:result, result}, record, state)
+      :error -> {:noreply, state}
     end
   end
 
@@ -737,7 +833,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           state
       end
 
-    forget_delegation(state, record.id)
+    state
+    |> settle_access_window(record, status)
+    |> forget_delegation(record.id)
   end
 
   defp terminal(delegations, id, :completed, summary),

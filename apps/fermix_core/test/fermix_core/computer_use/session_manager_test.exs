@@ -2,6 +2,7 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.ComputerUse.Config
+  alias FermixCore.ComputerUse.OperatorStop
   alias FermixCore.ComputerUse.Session
   alias FermixCore.ComputerUse.SessionManager
   alias FermixCore.ComputerUse.Supervisor, as: CuSupervisor
@@ -140,6 +141,66 @@ defmodule FermixCore.ComputerUse.SessionManagerTest do
              )
 
     assert {:ok, ^pid} = SessionManager.lookup(context())
+  end
+
+  # A Buzz-wired ACP session is a channel other people can post in, so its turn is
+  # not proof the owner is present (owner decision, MOB-1). The refusal comes
+  # before the Stop hold, which a different turn's check would otherwise lift, and
+  # before the registry lookup, so it can neither start a session nor drive one an
+  # attended turn left open.
+  describe "a shared Buzz channel" do
+    @buzz_env %{"BUZZ_RELAY_URL" => "wss://relay.example.test", "PATH" => "/usr/bin"}
+
+    test "is refused before the stop hold and before an existing session is handed back", %{
+      config: config
+    } do
+      {:ok, pid} =
+        SessionManager.ensure(config, context(%{computer_use_origin: :interactive}),
+          driver: stub_driver()
+        )
+
+      OperatorStop.record(context().conversation_key, "turn-stopped")
+
+      buzz =
+        context(%{
+          computer_use_origin: :interactive,
+          session_env: @buzz_env,
+          session_id: "turn-from-buzz"
+        })
+
+      assert {:error, :shared_channel} =
+               SessionManager.ensure(config, buzz, driver: stub_driver())
+
+      # The stopped turn's hold is intact: the Buzz turn never reached the check
+      # that clears it for any other turn.
+      assert {:error, :operator_stopped} =
+               OperatorStop.check(context().conversation_key, "turn-stopped")
+
+      assert {:ok, ^pid} = SessionManager.lookup(context())
+    end
+
+    test "starts no session when none is running", %{config: config} do
+      buzz = context(%{computer_use_origin: :interactive, session_env: @buzz_env})
+
+      assert {:error, :shared_channel} =
+               SessionManager.ensure(config, buzz, driver: stub_driver())
+
+      assert :error = SessionManager.lookup(buzz)
+    end
+
+    test "an editor session without a relay starts as before", %{config: config} do
+      zed = context(%{computer_use_origin: :interactive, session_env: %{"PATH" => "/usr/bin"}})
+
+      assert {:ok, pid} = SessionManager.ensure(config, zed, driver: stub_driver())
+      assert is_pid(pid)
+    end
+
+    test "an unattended origin keeps its own reason", %{config: config} do
+      buzz = context(%{computer_use_origin: :unattended, session_env: @buzz_env})
+
+      assert {:error, {:host_start_refused, :unattended}} =
+               SessionManager.ensure(config, buzz, driver: stub_driver())
+    end
   end
 
   test "host mode starts a session from an attended origin" do

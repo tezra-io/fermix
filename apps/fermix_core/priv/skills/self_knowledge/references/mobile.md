@@ -141,7 +141,9 @@ shared across the owner's devices.
 
 The v1 surface includes text and draft streaming, tool-activity indicators,
 photos and documents in both directions, voice notes, slash commands and the
-host-supplied command palette, reactions, and approve/deny cards. Voice notes
+host-supplied command palette, reactions, and approve/deny cards (including the
+confirmation for an access-sensitive plugin command, such as a car unlock, that
+Fermix runs once it is approved). Voice notes
 use the configured Fermix transcription backend. They are not realtime voice:
 full-duplex phone calls belong to the later mobile realtime milestone.
 

@@ -93,7 +93,13 @@ is a daemon surface); use the managed profile here.
 
 Attended owner turns only. A guest, a scheduled job, a detached background run,
 a delegated subagent and a coding-run continuation are all refused with
-`attached_tab_not_allowed` and told to use the managed profile. The first
+`attached_tab_not_allowed` and told to use the managed profile. A turn from a
+Buzz-wired ACP session is refused the same way before anything reaches the
+tab, even when the owner is the one asking there: other people can post in a
+Buzz channel, so its turn is not proof the owner is present, and the refusal
+names where to ask instead (the Fermix app, their own chat, or voice). The
+managed profile still works from Buzz, and an editor client like Zed, with no
+Buzz relay, is unaffected. The first
 attended conversation to use the profile holds the grant until it releases it —
 a second conversation gets `attached_tab_not_granted` rather than sharing the
 tab.

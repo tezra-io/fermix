@@ -1,6 +1,8 @@
 defmodule FermixCore.Tools.JobsTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.GetJobRun
   alias FermixCore.Tools.ListJobRuns
@@ -9,6 +11,7 @@ defmodule FermixCore.Tools.JobsTest do
   alias FermixCore.Tools.PauseJob
   alias FermixCore.Tools.RemoveJob
   alias FermixCore.Tools.ResumeJob
+  alias FermixCore.Tools.RunJobNow
   alias FermixCore.Tools.ScheduleJob
   alias FermixCore.Tools.UpdateJob
 
@@ -1059,6 +1062,170 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.success == false
     assert result.error =~ "Not found"
   end
+
+  # A job naming an access-sensitive tool may be set up, changed or run now only
+  # from a turn that would run that tool directly (Capabilities.AccessGate), so an
+  # injected instruction cannot schedule or trigger the command instead.
+  describe "jobs naming an access-sensitive tool" do
+    setup %{context: context} do
+      registry = :"job_access_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+
+      flagged =
+        Capability.new(%{
+          name: "tesla_unlock_doors",
+          description: "Unlock the car's doors.",
+          parameters: %{"type" => "object"},
+          kind: :mcp,
+          executor: {__MODULE__, :never_run, []},
+          policy_class: :external_api,
+          metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"}
+        })
+
+      :ok = CapabilityRegistry.register(registry, flagged)
+
+      direct =
+        Map.merge(context, %{
+          capability_registry: registry,
+          computer_use_origin: :interactive,
+          outside_sources: MapSet.new()
+        })
+
+      tainted = Map.put(direct, :outside_sources, MapSet.new([{:tool, "web_fetch"}]))
+      %{direct: direct, tainted: tainted}
+    end
+
+    test "schedule_job refuses to name it from a turn that read outside content", %{
+      tainted: tainted,
+      direct: direct
+    } do
+      args = %{
+        "name" => "Valet",
+        "schedule" => "every 15 minutes",
+        "task" => "Unlock the car.",
+        "allowed_tools" => ["tesla_unlock_doors"]
+      }
+
+      assert {:ok, refused} = ScheduleJob.execute(args, tainted)
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: direct.memory_repo)
+
+      assert {:ok, created} = ScheduleJob.execute(args, direct)
+      assert created.success == true
+    end
+
+    test "schedule_job refuses to name it from a delegated worker", %{direct: direct} do
+      args = %{
+        "name" => "Valet",
+        "schedule" => "every 15 minutes",
+        "task" => "Unlock the car.",
+        "allowed_tools" => ["tesla_unlock_doors"]
+      }
+
+      assert {:ok, refused} = ScheduleJob.execute(args, Map.put(direct, :subagent_depth, 1))
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors can be set up"
+    end
+
+    # A Buzz channel is one other people can post in, so even a clean request
+    # there is not the owner's direct consent to schedule the command.
+    test "schedule_job refuses to name it from a Buzz channel", %{direct: direct} do
+      args = %{
+        "name" => "Valet",
+        "schedule" => "every 15 minutes",
+        "task" => "Unlock the car.",
+        "allowed_tools" => ["tesla_unlock_doors"]
+      }
+
+      buzz = Map.put(direct, :session_env, %{"BUZZ_RELAY_URL" => "wss://relay.example.test"})
+
+      assert {:ok, refused} = ScheduleJob.execute(args, buzz)
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors can be set up"
+      assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: direct.memory_repo)
+    end
+
+    test "update_job and run_job_now refuse such a job from a tainted turn and leave it unchanged",
+         %{direct: direct, tainted: tainted} do
+      assert {:ok, created} =
+               ScheduleJob.execute(
+                 %{
+                   "name" => "Valet",
+                   "schedule" => "every 15 minutes",
+                   "task" => "Unlock the car.",
+                   "allowed_tools" => ["tesla_unlock_doors"]
+                 },
+                 direct
+               )
+
+      job_id = Jason.decode!(created.output)["id"]
+
+      assert {:ok, refused} =
+               UpdateJob.execute(%{"job_id" => job_id, "task" => "Unlock it now."}, tainted)
+
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors"
+      assert {:ok, job} = Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+      assert job.task_prompt == "Unlock the car."
+
+      assert {:ok, refused} = RunJobNow.execute(%{"job_id" => job_id}, tainted)
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors"
+
+      assert {:ok, updated} =
+               UpdateJob.execute(%{"job_id" => job_id, "task" => "Unlock it now."}, direct)
+
+      assert updated.success == true
+    end
+
+    # Resuming a paused job that names the command re-arms it, so it is gated
+    # like run-now; pausing only stops it and stays open to any turn.
+    test "resume_job refuses such a job from a tainted turn, and pause_job does not", %{
+      direct: direct,
+      tainted: tainted
+    } do
+      assert {:ok, created} =
+               ScheduleJob.execute(
+                 %{
+                   "name" => "Valet",
+                   "schedule" => "every 15 minutes",
+                   "task" => "Unlock the car.",
+                   "allowed_tools" => ["tesla_unlock_doors"]
+                 },
+                 direct
+               )
+
+      job_id = Jason.decode!(created.output)["id"]
+      assert {:ok, %{success: true}} = PauseJob.execute(%{"job_id" => job_id}, tainted)
+
+      assert {:ok, refused} = ResumeJob.execute(%{"job_id" => job_id}, tainted)
+      assert refused.success == false
+      assert refused.error =~ "tesla_unlock_doors"
+
+      assert {:ok, %{state: "paused"}} =
+               Repo.get_scheduled_job(job_id, server: direct.memory_repo)
+
+      assert {:ok, resumed} = ResumeJob.execute(%{"job_id" => job_id}, direct)
+      assert resumed.success == true
+    end
+
+    test "jobs that do not name it behave as before from any turn", %{tainted: tainted} do
+      assert {:ok, created} =
+               ScheduleJob.execute(
+                 %{"name" => "Weather", "schedule" => "every 15 minutes", "task" => "Weather."},
+                 tainted
+               )
+
+      assert created.success == true
+      job_id = Jason.decode!(created.output)["id"]
+
+      assert {:ok, updated} = UpdateJob.execute(%{"job_id" => job_id, "task" => "Rain?"}, tainted)
+      assert updated.success == true
+    end
+  end
+
+  def never_run(_args, _context), do: raise("the access-sensitive stub must never run")
 
   defp seed_job(context, name) do
     assert {:ok, created} =

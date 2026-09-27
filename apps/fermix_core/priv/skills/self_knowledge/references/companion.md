@@ -28,7 +28,9 @@ kernel which process connected: a turn from a client Fermix itself started
 unattended, so it gets no desktop control, reminder or event changes, or recent
 activity, and a connection whose process cannot be identified is refused. A tool that needs the owner's
 approval shows up as an approve/deny card answered with the same `/confirm` and
-`/deny` routes as on the other chats. At most four clients connect at once; a
+`/deny` routes as on the other chats. That includes an access-sensitive plugin
+command (such as a car unlock) asked for after reading outside content: Fermix
+runs exactly that command once the card is approved. At most four clients connect at once; a
 fifth is refused and told why.
 
 ## Conversation and timeline

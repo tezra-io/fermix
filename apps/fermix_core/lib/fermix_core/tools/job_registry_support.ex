@@ -1,7 +1,9 @@
 defmodule FermixCore.Tools.JobRegistrySupport do
   @moduledoc false
 
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
@@ -21,6 +23,19 @@ defmodule FermixCore.Tools.JobRegistrySupport do
   end
 
   def repo(context), do: Map.get(context, :memory_repo, Repo)
+
+  @doc """
+  An existing job row's access check for `update_job`, `resume_job` and
+  `run_job_now`: a job whose allowlist names an access-sensitive tool may be
+  changed, resumed or run now only from a turn that would run that tool
+  directly (`Capabilities.AccessGate`).
+  """
+  @spec check_job_access(String.t(), map()) :: :ok | {:error, term()}
+  def check_job_access(job_id, context) when is_binary(job_id) and is_map(context) do
+    with {:ok, job} <- JobsRegistry.get_job(job_id, repo: repo(context)) do
+      AccessGate.check_job_tools(Map.get(job, :allowed_tools) || [], context)
+    end
+  end
 
   def success_json(value), do: {:ok, Tool.success(Jason.encode!(value))}
 

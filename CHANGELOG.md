@@ -16,9 +16,73 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   or address needs to be pasted. The plugin is one skill and no tools, and it
   carries the rules of play in a chat: a game is played move by move, because
   a page's wait tool holds the conversation while it waits.
+- **Plugins can mark a command access-sensitive.** A plugin manifest may set
+  `"access_sensitive": true` on a local tool that changes something. Fermix then
+  runs that command at once when you ask for it directly, and asks you first
+  when the request follows content someone else wrote. The Tesla plugin marks
+  unlock, Sentry, trunk and window vent from its 1.2.0 release.
+
+### Changed
+
+- **Unlocking your car, Sentry, the trunk and venting the windows ask you
+  first when the request follows outside content.** When you ask directly,
+  they still run at once. When the same request already read something someone
+  else could have written (a web page, an email, another plugin, a game, another
+  MCP server, the screen, or the report of a sub-agent, a skill, a coding run
+  or a scheduled job), Fermix holds the command and asks you once: a tap on
+  Telegram and Discord, `/confirm` on Slack, WhatsApp, Signal and `fermix ask`,
+  or the approval card in the Mac app and on the phone. While it waits, the
+  request that asked does nothing else, so what it read cannot answer for you.
+  Fermix then runs exactly that command and replies with the outcome; the reply
+  is not added to the conversation. Tesla's own reads never count. The rule
+  covers the whole command, so turning Sentry on or closing the trunk after
+  reading a page asks too. It needs the Tesla plugin's 1.2.0 release.
+- **On a voice call, your spoken yes confirms.** When a call has read outside
+  content, these commands wait for you to say yes: Fermix itself hears the
+  answer, and only a plain yes counts. On the Realtime engine this lasts for the
+  rest of the call, a shared screen included, and no other tool runs until you
+  answer; on GPT-Live it applies per task, and only the reply that asked you
+  can be answered.
+- **An editor or other ACP client sends the confirmation to your own chat.**
+  From an ACP session, a held command sends a one-tap confirmation to your
+  Telegram, Signal or WhatsApp direct chat, and the car acts when you tap. With
+  no such chat it is refused, and the reply names the Fermix app, your chat and
+  voice.
+- **From a Buzz channel, these commands always ask you first, and computer use
+  and your own browser tab are refused.** Other people can post in a Buzz
+  channel, so a request there is not proof you asked. Unlock, Sentry, the trunk
+  and venting send their confirmation to your own chat even when the request
+  read nothing, and the car acts when you tap, with no re-ask in Buzz. Computer
+  use and the signed-in browser tab you hand over with the Fermix extension are
+  refused there, even when you are the one asking, and the reply names the
+  Fermix app, your chat and voice. Fermix's own managed browser and everything
+  else work from Buzz as before, and editors like Zed are unaffected.
+- **Delegated workers and runs with no one present cannot run these commands.**
+  Sub-agents, `/ultra` and `skill_run` workers, `/background` runs, prompts sent
+  by Fermix's own or detached processes, coding-run and reminder follow-ups and
+  inbound MCP clients are refused.
+- **A scheduled job runs these commands only when it names them.** A job needs
+  the command in its allowed tools; a job with no allowlist that tries one gets a
+  refusal in that run. Creating, changing, resuming or running now a job that
+  names one also needs your own direct request. Jobs that already name one keep running.
+- **Held and refused commands show in traces.** Each is one failed tool call
+  with a typed marker proving it never ran, and a confirmed run is an extra tool
+  call tied to it by the same intent id. The eval grader accepts the marker as
+  proof a forbidden tool never ran.
 
 ### Fixed
 
+- **Only you can answer an approval.** `/confirm`, `/deny`, `/grant`, `/revoke`,
+  `/sandbox`, `/soul` and `/skills` sent through `fermix ask` or the app's chat
+  socket by a process Fermix itself started (the agent's own shell command, a
+  coding run) or by one running with no terminal are now refused, and the
+  approval keeps waiting for you. Before, the agent could approve its own
+  directory request with the token that request returned, or approve a persona
+  or skill change it proposed. Other commands such as `/new`, `/compact` and
+  `/tasks` still work from those processes. This raises the bar rather than
+  closing every path: a process that detaches itself into a new terminal session
+  can still look like you. Approving from your chat, the Fermix app or a
+  terminal you are at works as before.
 - **A sign-in that loses the network now says so.** When the provider's sign-in
   server timed out or could not be reached after the browser step, the daemon
   crashed while logging the error, and the app showed only "The operation failed

@@ -49,14 +49,18 @@ defmodule FermixCore.Tools.ResumeJob do
     Support.run(name(), context, fn -> do_execute(args, context) end)
   end
 
+  # Resuming re-arms the job, so a job naming an access-sensitive tool resumes
+  # only from a turn that would run that tool directly, as run-now does.
   defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id") do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         :ok <- Support.check_job_access(job_id, context) do
       case Registry.resume_job(job_id, repo: Support.repo(context)) do
         {:ok, job} -> Support.success_json(Support.job_payload(job))
         {:error, reason} -> Support.error(reason)
       end
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> Support.error(reason)
     end
   end
 end

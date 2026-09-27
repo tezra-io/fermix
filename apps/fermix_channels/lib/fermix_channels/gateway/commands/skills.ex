@@ -32,9 +32,13 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   def description,
     do: "Review, approve, or deny skill-curation proposals; unpark or restore skills."
 
+  # In the approval family: the agent must not approve its own skill proposal
+  # from a process it started (`Authorization.in_person/1`).
   @impl true
-  def authorize(message, metadata, context),
-    do: Authorization.operator_only(message, metadata, context)
+  def authorize(message, metadata, context) do
+    with :ok <- Authorization.in_person(metadata),
+         do: Authorization.operator_only(message, metadata, context)
+  end
 
   @impl true
   def execute(message, reply_fn, context) do

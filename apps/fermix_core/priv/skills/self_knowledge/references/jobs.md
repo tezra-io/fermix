@@ -22,6 +22,8 @@
 
 No other parameters exist: the iteration cap (100), isolation, the `job:<id>` memory scope, the `[SILENT]` marker and `capability_policy` are fixed.
 
+**Access-sensitive tools** (a plugin tool its manifest marks `access_sensitive`, such as a car unlock) are reached by a scheduled run only when the job's `allowed_tools` names them; an empty allowlist does not cover them, and a run that calls one anyway gets a refusal (a tool failure in that run). `schedule_job` naming one, and `update_job`, `resume_job` or `run_job_now` on a job that names one, are refused unless the request is the owner's own clean, direct ask (their chat, app or voice, having read nothing from outside this turn, not a delegated worker); jobs that already name one keep running.
+
 `task` is the run's entire brief. It cannot see the conversation that created it, so bake in every value it needs (location, account, recipient) and keep timing in `schedule`/`expires_at`. Ask for a missing detail rather than inventing one; revise with `update_job` rather than recreating.
 
 ## Schedule grammar

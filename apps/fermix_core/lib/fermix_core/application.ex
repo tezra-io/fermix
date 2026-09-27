@@ -215,6 +215,10 @@ defmodule FermixCore.Application do
         # the first command; after the command host, because a `command`
         # source spawns its helper through it.
         FermixCore.Sandbox.EnvHealth,
+        # Access-sensitive calls parked for the owner's confirmation
+        # (`Capabilities.AccessGate`). Before every process that dispatches a
+        # tool; a restart forgets them, which asks the owner again.
+        FermixCore.Capabilities.AccessGate.Pending,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,

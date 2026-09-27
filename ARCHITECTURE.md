@@ -218,6 +218,20 @@ the `Capabilities.Builtin.Tool` behaviour (name, description, parameters, usage
 guidance, `execute/2`), with optional `advertise?/1` and `dynamic_parameters/1`
 hooks that decide per turn whether and how a tool is offered.
 
+Architecture Invariant: `Capability.execute/3` is the one invoke boundary (the
+agent loop, the realtime voice bridge, inbound MCP), and it asks
+`Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
+manifest marks it `access_sensitive` runs there only on an attended owner turn,
+not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
+outside content (`:outside_sources`, folded by the agent loop from
+`UntrustedContent.outside_source/1`), or on a scheduled run whose job names it;
+otherwise the call is parked in `AccessGate.Pending` for one owner
+confirmation, or refused. While a parked call waits, the turn (or Realtime
+call) that parked it runs nothing else: the loop stamps `:access_waiting` from
+the held result itself (the rest of that step included), the Realtime session
+from `AccessGate.waiting?/1`, and the gate refuses every call under it. Every
+other capability returns on one map lookup.
+
 `Capabilities.Registry` is a GenServer over a protected ETS table. Trust decides
 what a caller sees: an operator gets every capability; a guest, or a caller with
 no trust set, gets read-only tools and never an owner-only one. Registration is
@@ -447,7 +461,9 @@ and Linux x86_64). `ready?/0` (enabled and sidecar installed) is the one gate fo
 both the `computer_use` tool and `ComputerUse.Supervisor`. `SidecarInstaller`
 fetches a sha256-pinned binary into `FERMIX_HOME/plugins/compux/`, and `Safety`
 refuses state-changing actions under strict access and host sessions outside an
-attended chat or voice turn.
+attended chat or voice turn. `SessionManager.ensure/3`, the one door a session
+opens through, also refuses a turn from a shared Buzz channel
+(`Acp.Identity.multi_principal?/1`) before the Stop hold and the registry lookup.
 
 `ComputerHistory` is an opt-in, macOS-only recorder. It captures interaction
 events through the same sidecar and summarizes them on the device into memories

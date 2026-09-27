@@ -58,6 +58,45 @@ The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
 exports them outside the content-capture gate — a blocked-before-execution claim
 must stay provable in a content-free export.
 
+A second source stamps the marker: `Capabilities.AccessGate`, the one gate in
+`Capability.execute/3` for plugin tools whose manifest marks them
+`access_sensitive`. It derives the map from `AccessGate.pre_execution_marker/1`
+(`source: "access_gate"`, `decision: "confirm"` when it held the call for the
+owner's confirmation, `"deny"` when it refused it, `phase: "pre_execution"`),
+and only on the held and refused branches, where the executor was never called.
+Because the executor never ran, the gate itself emits that model call's single
+`[:fermix, :tool, :exec]` event through `Tools.Telemetry.exec/5`, under the
+capability's name and with `success: false`.
+
+### Access-gate labels
+
+Every access-sensitive call also carries `access_gate`, a closed enum of how the
+gate settled it: `direct` (the owner's clean, attended request), `scheduled` (a
+job whose `allowed_tools` names it), `confirmed`, or one of `held_this_chat`,
+`held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
+`refused_unattended`, `refused_not_allowlisted`, `refused_no_surface`,
+`refused_full`, `refused_confirm_mismatch`. A held call also carries
+`access_intent`, the opaque id of the parked record. `refused_waiting` is the
+one label on a call to any tool, flagged or not: the turn (or Realtime call)
+that made it has a parked call still waiting on the owner, so the gate refused
+it (`:access_waiting` on the context) with the same `deny` marker. The gate stamps a
+dispatched call's label on the context it hands the executor, and `exec/5`
+copies `access_gate` and `access_intent` from the context into the executor's
+own event, so no executor knows the gate exists and the context wins over a
+caller's `:metadata`.
+
+The run the owner confirmed is not a model call. The daemon runs it later (a
+tap, `/confirm`, a spoken yes), with the parking turn's `session_id` and
+`parent_session` from the recorded snapshot, and its exec event carries
+`access_gate: "confirmed"` and the same `access_intent` as the held one: that id
+pairs "held" with "ran". Both keys are exported outside the content-capture
+gate (a closed enum and an opaque id). When the parking turn's trace has
+already shipped, `Aggregation` ships the confirmed exec as its own
+self-closing `access_gate:confirmed` trace instead of dropping it at the
+closed-session tombstone. Park, confirm, decline, expiry, a changed plugin and
+an unreachable owner inbox are one `Logger` line each (tool, intent id,
+reason; never argument values or transcript text).
+
 ### An allowed variable the sandbox could not pass
 
 The opposite claim, kept distinct on purpose. When an allow-listed environment

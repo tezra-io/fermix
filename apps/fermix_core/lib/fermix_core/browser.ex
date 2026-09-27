@@ -1,6 +1,7 @@
 defmodule FermixCore.Browser do
   @moduledoc false
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
@@ -77,18 +78,32 @@ defmodule FermixCore.Browser do
   # A granted tab is the person's own browser, signed in as them, so it is used
   # only on a turn they are present for. `Temporal.Access` already answers
   # "attended, top-level, the owner's" for every other surface with that rule;
-  # the sentence is this feature's because the next move is.
+  # the sentence is this feature's because the next move is. A turn from a shared
+  # Buzz channel is attended by every other measure, but other people can post
+  # there, so it is not proof the owner is present (owner decision, MOB-1): the
+  # same predicate and order as `ComputerUse.SessionManager`'s precheck.
   defp allowed_turn(%{mode: :attached_tab}, context) do
-    if Access.attended_operator_turn?(context) do
-      :ok
-    else
-      {:error,
-       Error.new(
-         "attached_tab_not_allowed",
-         "Your own browser tab is used only on a turn you are present for. Guest, " <>
-           "scheduled, background, delegated and coding-continuation runs use the managed " <>
-           "browser profile instead."
-       )}
+    cond do
+      not Access.attended_operator_turn?(context) ->
+        {:error,
+         Error.new(
+           "attached_tab_not_allowed",
+           "Your own browser tab is used only on a turn you are present for. Guest, " <>
+             "scheduled, background, delegated and coding-continuation runs use the managed " <>
+             "browser profile instead."
+         )}
+
+      Identity.multi_principal?(Map.get(context, :session_env)) ->
+        {:error,
+         Error.new(
+           "attached_tab_not_allowed",
+           "Your own browser tab isn't available from a Buzz channel, where other people " <>
+             "can send messages. Ask from the Fermix app, your own chat, or by voice; the " <>
+             "managed browser profile works here."
+         )}
+
+      true ->
+        :ok
     end
   end
 

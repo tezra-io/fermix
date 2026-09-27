@@ -1220,7 +1220,9 @@ defmodule FermixCore.Realtime.SessionServerTest do
         prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
       )
 
-    assert :ok = SessionServer.handle_provider_event(pid, {:user_transcript_done, "hello"})
+    assert :ok =
+             SessionServer.handle_provider_event(pid, {:user_transcript_done, "item-1", "hello"})
+
     assert :ok = SessionServer.handle_provider_event(pid, {:assistant_transcript_done, "hi"})
     assert :ok = SessionServer.handle_provider_event(pid, {:response_done, %{}})
 

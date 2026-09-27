@@ -202,9 +202,11 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
                "transcript" => "hello"
              })
 
-    assert {:ok, {:user_transcript_done, "question"}} =
+    # The item id binds a spoken answer to the committed item it transcribes.
+    assert {:ok, {:user_transcript_done, "item-7", "question"}} =
              OpenAIClient.decode_server_event(%{
                "type" => "conversation.item.input_audio_transcription.completed",
+               "item_id" => "item-7",
                "transcript" => "question"
              })
 

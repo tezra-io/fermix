@@ -65,7 +65,8 @@ defmodule FermixCore.Tools.RunJobNow do
   end
 
   defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id") do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         :ok <- Support.check_job_access(job_id, context) do
       scheduler = Map.get(context, :scheduler, Scheduler)
 
       case Scheduler.run_now(scheduler, job_id) do
@@ -73,7 +74,8 @@ defmodule FermixCore.Tools.RunJobNow do
         {:error, reason} -> Support.error(reason)
       end
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> Support.error(reason)
     end
   catch
     :exit, reason -> {:ok, Tool.error("scheduler_unavailable: #{inspect(reason)}")}

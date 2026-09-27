@@ -9,6 +9,7 @@ defmodule FermixChannels.DispatcherTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.OwnerInboxApproval
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -269,6 +270,7 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert agent_message.source_trust == :guest
     refute Map.has_key?(agent_message, :approval_fn)
+    refute Map.has_key?(agent_message, :owner_inbox_approval_fn)
   end
 
   # A channel the registry marks `commands?: false` has no `/confirm` path, so a
@@ -296,6 +298,56 @@ defmodule FermixChannels.DispatcherTest do
     assert agent_message.source_trust == :operator
     refute ChannelRegistry.commands?("acp")
     refute Map.has_key?(agent_message, :approval_fn)
+  end
+
+  # The exact complement of `approval_fn`: an operator turn on a channel without
+  # slash commands gets the owner-inbox seam, so an access-sensitive command can
+  # ask the owner in their own chat (Capabilities.AccessGate). The in-chat
+  # approval flow stays absent there (M29 §11).
+  test "an operator turn from a command-less channel carries the owner-inbox seam only" do
+    message = %Message{
+      id: "ga-4",
+      content: "unlock the car",
+      sender: "acp-client",
+      channel: "acp",
+      chat_id: "acp-session-2",
+      reply_target: "acp-session-2",
+      metadata: %{source: :acp, user_id: "acp", chat_type: "private"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.owner_inbox_approval_fn == (&OwnerInboxApproval.request/1)
+    refute Map.has_key?(agent_message, :approval_fn)
+  end
+
+  test "a chat operator turn carries approval_fn and no owner-inbox seam" do
+    message = %Message{
+      id: "ga-5",
+      content: "unlock the car",
+      sender: "alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{user_id: "test-sender"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert is_function(agent_message.approval_fn, 1)
+    refute Map.has_key?(agent_message, :owner_inbox_approval_fn)
   end
 
   test "routes normalized inbound messages into the configured agent with reply runtime" do

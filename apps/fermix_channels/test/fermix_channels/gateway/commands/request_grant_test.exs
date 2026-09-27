@@ -7,12 +7,15 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Telegram
+  alias FermixChannels.CLI
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Commands.Sandbox, as: SandboxCommand
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Capabilities.Capability
+  alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Ledger
   alias FermixCore.Memory.Repo
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -296,6 +299,307 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
     end
   end
 
+  # An access-sensitive plugin command parked by `Capabilities.AccessGate` rides
+  # the same pending-record + `/confirm` path; confirming runs the recorded call
+  # once in core and answers once, from a task (the transport is not blocked).
+  describe "access-sensitive confirmation" do
+    setup do
+      registry = :"grant_access_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      :ok = CapabilityRegistry.register(registry, flagged_capability(self()))
+      %{registry: registry}
+    end
+
+    test "/confirm runs the recorded call once and replies once", %{registry: registry} do
+      token = park_access_call(registry, chat_origin("owner-1", resume: nil), unique_key())
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:sandbox_reply, reply}, 2_000
+      assert reply =~ "Confirmed."
+      assert reply =~ "tesla_unlock_doors ran"
+      assert_receive {:unlocked, %{"vin" => "5YJ"}}
+      refute_receive {:sandbox_reply, _}, 200
+      refute_received {:unlocked, _}
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:sandbox_reply, "Confirmation failed: :unknown_token"}
+    end
+
+    # On the Mac app and the phone a `/confirm` is a client request that must
+    # stay open until its one reply lands; a reply after the request settled is
+    # refused as stale and the owner would never see the outcome.
+    test "/confirm defers its request and settles it only after the one outcome reply", %{
+      registry: registry
+    } do
+      token = park_access_call(registry, chat_origin("owner-1", resume: nil), unique_key())
+
+      assert :ok = confirm(token, "owner-1", deferring_ctx())
+      assert_received :command_deferred
+      assert_receive {:sandbox_reply, reply}, 2_000
+      assert reply =~ "Confirmed."
+      assert_receive {:command_terminal, :completed}
+      refute_received {:sandbox_reply, _}
+    end
+
+    test "a confirmed run that did not happen settles its request as failed", %{
+      registry: registry
+    } do
+      token = park_access_call(registry, chat_origin("owner-1", resume: nil), unique_key())
+      :ok = CapabilityRegistry.unregister(registry, "tesla_unlock_doors")
+
+      assert :ok = confirm(token, "owner-1", deferring_ctx())
+      assert_receive {:sandbox_reply, reply}, 2_000
+      assert reply =~ "Confirmed, but"
+      assert_receive {:command_terminal, {:failed, _reason}}
+      refute_received {:unlocked, _}
+    end
+
+    @tag :capture_log
+    test "a confirmed run that crashes still answers once, saying the outcome is unknown", %{
+      registry: registry
+    } do
+      :ok = CapabilityRegistry.register(registry, flagged_capability("tesla_actuate_trunk"))
+
+      token =
+        park_access_call(
+          registry,
+          chat_origin("owner-1", resume: nil),
+          unique_key(),
+          "tesla_actuate_trunk"
+        )
+
+      assert :ok = confirm(token, "owner-1", deferring_ctx())
+      assert_receive {:sandbox_reply, reply}, 2_000
+      assert reply =~ "unknown"
+      assert_receive {:command_terminal, {:failed, _reason}}
+      refute_receive {:sandbox_reply, _}, 200
+    end
+
+    test "a /confirm from another chat is refused and the owner can still confirm", %{
+      registry: registry
+    } do
+      token = park_access_call(registry, chat_origin("owner-1", resume: nil), unique_key())
+      elsewhere = %{telegram_message("/confirm #{token}", "owner-1") | chat_id: "chat-2"}
+
+      assert :ok = dispatch(elsewhere, agent_ctx())
+      assert_receive {:sandbox_reply, "Confirmation failed: :origin_mismatch"}
+      refute_receive {:unlocked, _}, 200
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:unlocked, _args}, 2_000
+    end
+
+    test "an expired token runs nothing", %{registry: registry} do
+      token = park_access_call(registry, chat_origin("owner-1", resume: nil), unique_key())
+      {:ok, record} = Confirmations.peek(token)
+
+      :ok =
+        Confirmations.store(token, %{
+          record
+          | expires_at: System.monotonic_time(:millisecond) - 1_000
+        })
+
+      assert :ok = confirm(token, "owner-1", agent_ctx())
+      assert_receive {:sandbox_reply, "Confirmation failed: :expired"}
+      refute_receive {:unlocked, _}, 200
+    end
+
+    test "/deny says nothing was sent and drops the parked call", %{registry: registry} do
+      origin = chat_origin("owner-1", resume: nil)
+      key = unique_key()
+      token = park_access_call(registry, origin, key)
+
+      assert :ok = dispatch(telegram_message("/deny #{token}", "owner-1"), agent_ctx())
+      assert_receive {:sandbox_reply, reply}
+      assert reply =~ "Not sent"
+      refute_receive {:unlocked, _}, 200
+
+      # The parked call is gone, so asking again prompts the owner afresh.
+      fresh = park_access_call(registry, origin, key)
+      refute fresh == token
+    end
+  end
+
+  # SIDE-V1 for approvals. A `fermix ask` from a process the daemon started (the
+  # agent's own shell command, a coding run) or from one no terminal is attached
+  # to is an operator CLI message whose `metadata.caller` the daemon read off the
+  # socket's peer. `request_directory_access` hands its token to the model, so
+  # such a process must not be able to answer the owner's prompt. These drive the
+  # real path: `CLI.dispatch_input_sync/2` -> `Gateway.ingest` -> the command.
+  describe "an approval comes from a person, not the agent (SIDE-V1)" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-grant-caller-#{unique}.db")
+      repo = :"grant_caller_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+      registry = :"grant_caller_caps_#{unique}"
+      start_supervised!({CapabilityRegistry, name: registry})
+      :ok = CapabilityRegistry.register(registry, flagged_capability(self()))
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo, registry: registry}
+    end
+
+    for caller <- [:daemon_descendant, :detached] do
+      test "a #{caller} /confirm is refused and the directory grant stays pending", %{
+        root: root
+      } do
+        {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), cli_origin())
+
+        assert {:ok, %{response: reply}} = ask("/confirm #{token}", unquote(caller))
+        assert reply =~ "in person"
+        refute PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+        assert {:ok, %{mutation: {:add_allowed_root, ^root}}} = Confirmations.peek(token)
+      end
+    end
+
+    test "a person's terminal /confirm still grants", %{root: root} do
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), cli_origin())
+
+      assert {:ok, %{response: reply}} = ask("/confirm #{token}", :independent)
+      assert reply =~ "re-run your request"
+      assert PathPolicy.canonical_path(root) in SandboxConfig.current().allowed_roots
+    end
+
+    # Only the approval family asks who sent it; every other owner command runs
+    # for the agent's own `fermix ask` exactly as it did before.
+    test "a daemon-started /new, /compact or /tasks runs as before" do
+      for {content, answer} <- [
+            {"/new", ~r/Started a fresh session/},
+            {"/compact", ~r/compact/i},
+            {"/tasks", ~r/background work/i}
+          ] do
+        assert {:ok, %{response: reply}} = ask(content, :daemon_descendant)
+        refute reply =~ "in person", "#{content} was refused: #{reply}"
+        assert reply =~ answer
+      end
+    end
+
+    test "a daemon-started /deny cannot discard the owner's pending grant", %{root: root} do
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(request(root), cli_origin())
+
+      assert {:ok, %{response: reply}} = ask("/deny #{token}", :daemon_descendant)
+      assert reply =~ "in person"
+      assert {:ok, _record} = Confirmations.peek(token)
+    end
+
+    test "a daemon-started /grant never mints a token it could confirm", %{root: root} do
+      assert {:ok, %{response: reply}} = ask("/grant path #{root}", :daemon_descendant)
+      assert reply =~ "in person"
+      refute reply =~ "/confirm"
+    end
+
+    test "a daemon-started /sandbox change is refused" do
+      before = SandboxConfig.current().commands.presets
+
+      assert {:ok, %{response: reply}} =
+               ask("/sandbox commands enable ai_tools", :daemon_descendant)
+
+      assert reply =~ "in person"
+      assert SandboxConfig.current().commands.presets == before
+    end
+
+    test "a daemon-started /confirm cannot acknowledge a coding run's vendor-config change",
+         %{repo: repo} do
+      run_id = seed_changed_run(repo)
+      {:ok, token, :new} = SandboxCommand.store_pending_grant(ack(run_id), cli_origin())
+
+      assert {:ok, %{response: reply}} = ask("/confirm #{token}", :daemon_descendant)
+      assert reply =~ "in person"
+      assert {:ok, [%{id: ^run_id}]} = Ledger.unresolved_vendor_config(server: repo)
+      assert {:ok, %{mutation: {:acknowledge_vendor_config, ^run_id}}} = Confirmations.peek(token)
+    end
+
+    test "a daemon-started /confirm cannot run a parked access-sensitive command; a person's can",
+         %{registry: registry} do
+      token = park_access_call(registry, cli_origin(), unique_key())
+
+      assert {:ok, %{response: refused}} = ask("/confirm #{token}", :daemon_descendant)
+      assert refused =~ "in person"
+      refute_receive {:unlocked, _args}, 200
+
+      assert {:ok, %{response: confirmed}} = ask("/confirm #{token}", :independent)
+      assert confirmed =~ "Confirmed."
+      assert_receive {:unlocked, %{"vin" => "5YJ"}}, 2_000
+    end
+  end
+
+  def unlock(args, _context, test_pid) do
+    send(test_pid, {:unlocked, args})
+    {:ok, %{success: true, output: ~s({"result":true}), error: nil}}
+  end
+
+  def crash(_args, _context), do: raise("the helper connection dropped mid-command")
+
+  defp flagged_capability(test_pid) when is_pid(test_pid) do
+    Capability.new(%{
+      name: "tesla_unlock_doors",
+      description: "Unlock the car's doors.",
+      parameters: %{"type" => "object"},
+      kind: :mcp,
+      executor: {__MODULE__, :unlock, [test_pid]},
+      policy_class: :external_api,
+      metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"}
+    })
+  end
+
+  # A flagged command whose helper crashes once it is finally run.
+  defp flagged_capability(name) when is_binary(name) do
+    Capability.new(%{
+      name: name,
+      description: "Open the trunk.",
+      parameters: %{"type" => "object"},
+      kind: :mcp,
+      executor: {__MODULE__, :crash, []},
+      policy_class: :external_api,
+      metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"}
+    })
+  end
+
+  # The companion and mobile routers' deferral seam, reporting to the test.
+  defp deferring_ctx do
+    test_pid = self()
+
+    defer = fn ->
+      send(test_pid, :command_deferred)
+      fn outcome -> send(test_pid, {:command_terminal, outcome}) end
+    end
+
+    Map.put(agent_ctx(), :defer_command_fn, defer)
+  end
+
+  # Parks a call the way a real tainted chat turn does: the gate calls the
+  # gateway's approval closure and posts the prompt through `reply_fn`.
+  defp park_access_call(registry, origin, conversation_key, tool \\ "tesla_unlock_doors") do
+    test_pid = self()
+
+    context = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      session_id: "grant-access-#{System.unique_integer([:positive])}",
+      conversation_key: conversation_key,
+      chat_type: "private",
+      capability_registry: registry,
+      outside_sources: MapSet.new([{:tool, "web_fetch"}]),
+      reply_fn: fn part -> send(test_pid, {:owner_prompt, part}) end,
+      approval_fn: fn request -> SandboxCommand.store_pending_grant(request, origin) end
+    }
+
+    {:ok, capability} = CapabilityRegistry.find(registry, tool)
+
+    assert {:ok, %{success: false}} =
+             Capability.execute(capability, %{"vin" => "5YJ"}, context)
+
+    assert_received {:owner_prompt, {:approval_prompt, _text, token}}
+    token
+  end
+
+  # The core parked-call store is shared, so each test parks under its own key.
+  defp unique_key, do: {"telegram", "chat-1-#{System.unique_integer([:positive])}", :root}
+
   # The inline "Approve" button synthesizes the same inbound message a typed
   # /confirm would, then funnels through the UNCHANGED confirm path. These tests
   # drive `Telegram.parse_update/1` on a real callback_query so the button and the
@@ -414,6 +718,21 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
       user_id: user_id,
       resume: Keyword.fetch!(opts, :resume)
     }
+  end
+
+  # The origin `Gateway.build_approval_fn/2` binds for a `fermix ask` turn.
+  defp cli_origin,
+    do: %{channel: "cli", chat_id: "cli", thread_ts: nil, user_id: "cli", resume: nil}
+
+  # A `fermix ask` as the daemon bridge hands it over: `caller` is what the
+  # daemon read off the control socket's peer (`FermixCore.SocketPeer`).
+  defp ask(content, caller) do
+    CLI.dispatch_input_sync(content,
+      caller: caller,
+      timeout_ms: 2_000,
+      agent: StubAgent,
+      agent_server: self()
+    )
   end
 
   defp mobile_origin(device_id, opts) do

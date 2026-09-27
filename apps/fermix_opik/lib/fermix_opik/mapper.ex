@@ -161,6 +161,12 @@ defmodule FermixOpik.Mapper do
             :target_ref,
             :selector,
             :policy_enforcement,
+            # How `Capabilities.AccessGate` settled an access-sensitive call (a
+            # closed enum) and the parked intent that pairs a held call with its
+            # confirmed run (an opaque id). No content, so both ride outside the
+            # capture_content gate like the marker above.
+            :access_gate,
+            :access_intent,
             # Allowed sandbox variables the shell tool could not pass: names
             # only, operator configuration rather than user content, so what a
             # command ran without stays visible in a content-free export.

@@ -20,6 +20,7 @@ defmodule FermixChannels.Gateway do
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.MediaIngest
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.OwnerInboxApproval
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Gateway.Transcription
@@ -497,6 +498,7 @@ defmodule FermixChannels.Gateway do
     |> Map.put(:reply_fn, closures.reply_fn)
     |> Map.put(:source_trust, authorization.trust)
     |> maybe_put_approval_fn(message, authorization, closures.approval_ingress_context)
+    |> maybe_put_owner_inbox_approval_fn(message, authorization)
     |> maybe_put_approval_button(authorization, closures.approval_button?)
     |> maybe_put_typing_fn(closures.typing_fn)
     |> maybe_put_stream_spec(closures.stream_spec)
@@ -601,6 +603,27 @@ defmodule FermixChannels.Gateway do
   end
 
   defp maybe_put_approval_fn(agent_message, _message, _authorization, _ingress_context),
+    do: agent_message
+
+  # The exact complement of `maybe_put_approval_fn`: an operator turn on a
+  # channel without slash commands (ACP) cannot answer a `/confirm` in-session,
+  # so an access-sensitive plugin command it asks for sends its confirmation to
+  # the owner's own chat instead (`Capabilities.AccessGate`,
+  # `Gateway.OwnerInboxApproval`). Nothing else reads this seam, so the in-chat
+  # approval flow stays absent there (M29 §11).
+  defp maybe_put_owner_inbox_approval_fn(
+         agent_message,
+         %Message{channel: channel},
+         %{trust: :operator}
+       ) do
+    if ChannelRegistry.commands?(channel) do
+      agent_message
+    else
+      Map.put(agent_message, :owner_inbox_approval_fn, &OwnerInboxApproval.request/1)
+    end
+  end
+
+  defp maybe_put_owner_inbox_approval_fn(agent_message, _message, _authorization),
     do: agent_message
 
   # Whether this channel renders a private one-tap approval button that carries the

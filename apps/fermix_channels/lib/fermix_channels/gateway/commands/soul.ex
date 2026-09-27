@@ -53,10 +53,14 @@ defmodule FermixChannels.Gateway.Commands.Soul do
   # `same_origin?` binds the token to their own conversation, self-approve it —
   # the same hazard /sandbox grant|revoke|confirm is gated on. `status`,
   # `history` and `diff` disclose the owner's persona and revision trail, and
-  # `review` spends a provider call, so no subcommand is guest-safe.
+  # `review` spends a provider call, so no subcommand is guest-safe. It is in
+  # the approval family too: the agent must not apply a persona change it
+  # proposed itself from a process it started (`Authorization.in_person/1`).
   @impl true
-  def authorize(message, metadata, context),
-    do: Authorization.operator_only(message, metadata, context)
+  def authorize(message, metadata, context) do
+    with :ok <- Authorization.in_person(metadata),
+         do: Authorization.operator_only(message, metadata, context)
+  end
 
   @impl true
   def execute(message, reply_fn, context) do
