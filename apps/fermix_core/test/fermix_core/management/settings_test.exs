@@ -17,6 +17,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -280,6 +281,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"value" => "claude-opus-5"} = row("providers.anthropic", "default_model")
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
+    end
+
+    # The picker's value is the model in force, so a provider nobody has chosen
+    # a model for still shows the one the daemon will call.
+    test "a model row names the catalog default until a model is chosen" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      for descriptor <- Descriptor.all() do
+        assert %{"value" => value} = row("providers.#{descriptor.id}", "default_model")
+        assert value == ModelCatalog.default_model_for(descriptor.id)
+      end
     end
 
     # The macOS app draws its model picker from these options, so a catalog

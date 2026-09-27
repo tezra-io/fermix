@@ -124,7 +124,7 @@ defmodule FermixCore.Management.Settings.Providers do
   # every other provider publishes `null` and draws no control.
   defp model_row(descriptor, block, restart) do
     Row.new("default_model", :choice, "Model",
-      value: Source.string(block, :default_model),
+      value: ModelCatalog.effective_model(descriptor.id, block),
       options: model_options(descriptor.id),
       suggestions: true,
       info: descriptor.model_info,

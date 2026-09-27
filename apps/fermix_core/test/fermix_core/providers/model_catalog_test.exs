@@ -86,6 +86,25 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  describe "effective_model/2" do
+    test "the block's default_model wins when it names one" do
+      assert ModelCatalog.effective_model(:openai, default_model: "gpt-5.4-mini") ==
+               "gpt-5.4-mini"
+    end
+
+    # A fresh sign-in has chosen nothing yet, and every surface still has to
+    # name the model the daemon will call.
+    test "an absent or blank default_model is the catalog default, for every provider" do
+      for provider <- ModelCatalog.providers() do
+        expected = ModelCatalog.default_model_for(provider)
+
+        assert ModelCatalog.effective_model(provider, []) == expected
+        assert ModelCatalog.effective_model(provider, default_model: nil) == expected
+        assert ModelCatalog.effective_model(provider, default_model: "") == expected
+      end
+    end
+  end
+
   describe "context_window_for/2" do
     test "returns cataloged context windows for known models" do
       # Direct-API entries carry the published window; the Codex column carries

@@ -72,6 +72,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A provider names its model as soon as it is signed in.** The setup row,
+  the settings Model row and Home's provider line now carry the model the
+  daemon calls the provider with: the one chosen in Settings, or the catalog
+  default until one is. A fresh install that signed in to Codex showed nothing
+  beside "Primary"; it now shows GPT-6 Astra. The OpenAI API-key route reads
+  the same resolver, so a provider with no chosen model runs on the catalog
+  default that Doctor already probed, instead of an older model the route still
+  named on its own.
 - **Only you can answer an approval.** `/confirm`, `/deny`, `/grant`, `/revoke`,
   `/sandbox`, `/soul` and `/skills` sent through `fermix ask` or the app's chat
   socket by a process Fermix itself started (the agent's own shell command, a

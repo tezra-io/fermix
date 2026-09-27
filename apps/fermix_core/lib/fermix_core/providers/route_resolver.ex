@@ -29,7 +29,6 @@ defmodule FermixCore.Providers.RouteResolver do
   @default_openai_base_url "https://api.openai.com/v1"
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
   @default_anthropic_base_url "https://api.anthropic.com/v1"
-  @default_anthropic_model "claude-sonnet-4-6"
   @default_xai_base_url "https://api.x.ai/v1"
 
   @type resolution :: {Adapter.route_key(), keyword()}
@@ -82,7 +81,7 @@ defmodule FermixCore.Providers.RouteResolver do
 
     model =
       Keyword.get(opts, :model) ||
-        Keyword.get(config, :default_model, ModelCatalog.default_model_for(descriptor.id))
+        ModelCatalog.effective_model(descriptor.id, config)
 
     base_url =
       Keyword.get(opts, :base_url) ||
@@ -156,7 +155,7 @@ defmodule FermixCore.Providers.RouteResolver do
         {:error, :not_configured} -> []
       end
 
-    model = Keyword.get(opts, :model) || Keyword.get(config, :default_model, "gpt-4o")
+    model = Keyword.get(opts, :model) || ModelCatalog.effective_model(:openai, config)
     auth_mode = Keyword.get(opts, :auth_mode) || Keyword.get(config, :auth_mode, :api_key)
 
     base_url =
@@ -179,7 +178,7 @@ defmodule FermixCore.Providers.RouteResolver do
 
     model =
       Keyword.get(opts, :model) ||
-        Keyword.get(config, :default_model, ModelCatalog.default_model_for(:openai_codex))
+        ModelCatalog.effective_model(:openai_codex, config)
 
     base_url =
       Keyword.get(opts, :base_url) || @default_codex_base_url
@@ -238,7 +237,7 @@ defmodule FermixCore.Providers.RouteResolver do
 
     model =
       Keyword.get(opts, :model) ||
-        Keyword.get(config, :default_model, @default_anthropic_model)
+        ModelCatalog.effective_model(:anthropic, config)
 
     base_url =
       Keyword.get(opts, :base_url) ||
@@ -286,7 +285,7 @@ defmodule FermixCore.Providers.RouteResolver do
 
     model =
       Keyword.get(opts, :model) ||
-        Keyword.get(config, :default_model, ModelCatalog.default_model_for(:xai))
+        ModelCatalog.effective_model(:xai, config)
 
     base_url =
       Keyword.get(opts, :base_url) || Keyword.get(config, :base_url, @default_xai_base_url)

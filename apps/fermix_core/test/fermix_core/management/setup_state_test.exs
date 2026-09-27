@@ -11,6 +11,7 @@ defmodule FermixCore.Management.SetupStateTest do
 
   alias FermixCore.Management.SetupState
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.CountingSecretWriter
@@ -91,6 +92,22 @@ defmodule FermixCore.Management.SetupStateTest do
              "reasoning_effort",
              "token_state"
            ]
+  end
+
+  # A sign-in that has just completed has chosen no model, and the row must
+  # still name the one the daemon will call: the config value where there is
+  # one, the catalog default until then. Never null.
+  test "a provider row names the model in force" do
+    Application.put_env(:fermix_core, :providers, anthropic: [default_model: "claude-opus-5"])
+    report = SetupState.report(sources())
+    rows = Map.new(report["providers"], &{&1["id"], &1})
+
+    assert rows["anthropic"]["default_model"] == "claude-opus-5"
+
+    for descriptor <- Descriptor.all(), descriptor.id != :anthropic do
+      assert rows[Atom.to_string(descriptor.id)]["default_model"] ==
+               ModelCatalog.default_model_for(descriptor.id)
+    end
   end
 
   test "a provider with no configured auth mode falls back to its descriptor default" do

@@ -347,7 +347,7 @@ defmodule FermixCore.Setup.Doctor do
     config = Application.get_env(:fermix_core, :compaction, []) |> CompactionConfig.normalize()
     provider = active_provider()
     config_for_provider = provider_config(provider)
-    model = effective_model(config_for_provider, provider)
+    model = ModelCatalog.effective_model(provider, config_for_provider)
     context_window = ModelCatalog.context_window_for(provider, model)
     threshold = CompactionConfig.threshold(config)
 
@@ -850,7 +850,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = base_url(config, :openai, @openai_default_url)
-        model = effective_model(config, :openai)
+        model = ModelCatalog.effective_model(:openai, config)
 
         body = %{
           model: model,
@@ -887,7 +887,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, token} ->
         url = base_url(config, :openai_codex, @codex_default_url)
-        model = effective_model(config, :openai_codex)
+        model = ModelCatalog.effective_model(:openai_codex, config)
 
         body = %{
           model: model,
@@ -934,7 +934,7 @@ defmodule FermixCore.Setup.Doctor do
 
   defp probe_xai_bearer(config, {:ok, bearer}, surface, opts) do
     url = "#{base_url(config, :xai, @xai_default_base_url)}/responses"
-    model = effective_model(config, :xai)
+    model = ModelCatalog.effective_model(:xai, config)
 
     body = %{
       model: model,
@@ -974,7 +974,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :openrouter, @openrouter_default_base_url)}/chat/completions"
-        model = effective_model(config, :openrouter)
+        model = ModelCatalog.effective_model(:openrouter, config)
 
         body = %{
           model: model,
@@ -1005,7 +1005,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :mistral, @mistral_default_base_url)}/chat/completions"
-        model = effective_model(config, :mistral)
+        model = ModelCatalog.effective_model(:mistral, config)
 
         body = %{
           model: model,
@@ -1038,7 +1038,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :venice, @venice_default_base_url)}/api_keys/rate_limits"
-        model = effective_model(config, :venice)
+        model = ModelCatalog.effective_model(:venice, config)
 
         headers = [
           {"authorization", "Bearer #{bearer}"},
@@ -1065,7 +1065,7 @@ defmodule FermixCore.Setup.Doctor do
           "ollama provider has no base_url configured; set [fermix_core.providers.ollama] base_url"}}
 
       base_url ->
-        model = effective_model(config, :ollama)
+        model = ModelCatalog.effective_model(:ollama, config)
         probe_ollama_chat(base_url, model, opts)
     end
   end
@@ -1233,7 +1233,7 @@ defmodule FermixCore.Setup.Doctor do
 
   defp post_anthropic_probe(config, body_extra, headers, surface, opts) do
     url = base_url(config, :anthropic, @anthropic_default_url)
-    model = effective_model(config, :anthropic)
+    model = ModelCatalog.effective_model(:anthropic, config)
 
     body =
       Map.merge(
@@ -1383,10 +1383,6 @@ defmodule FermixCore.Setup.Doctor do
 
   defp provider_config(provider) do
     Application.get_env(:fermix_core, :providers, []) |> Keyword.get(provider, [])
-  end
-
-  defp effective_model(config, provider) do
-    Keyword.get(config, :default_model) || ModelCatalog.default_model_for(provider)
   end
 
   defp catalog_windows do

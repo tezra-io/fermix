@@ -1650,14 +1650,13 @@ defmodule FermixCore.Setup.Wizard do
   defp active_provider_default_model(snapshot) do
     provider = active_provider(snapshot)
 
-    configured =
+    block =
       snapshot
       |> Map.get(:fermix_core, [])
       |> Keyword.get(:providers, [])
       |> Keyword.get(provider, [])
-      |> Keyword.get(:default_model)
 
-    configured || ModelCatalog.default_model_for(provider)
+    ModelCatalog.effective_model(provider, block)
   end
 
   defp put_routing_key(snapshot, key, value) do

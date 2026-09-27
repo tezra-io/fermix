@@ -26,6 +26,7 @@ defmodule FermixCore.Management.SetupState do
   alias FermixCore.Config
   alias FermixCore.Meetings
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
   alias FermixCore.Readiness
@@ -110,7 +111,7 @@ defmodule FermixCore.Management.SetupState do
       "configured" => Selection.configured?(descriptor.id, block),
       "primary" => descriptor.id == primary,
       "present_key" => present_key?(descriptor),
-      "default_model" => scalar(Keyword.get(block, :default_model)),
+      "default_model" => ModelCatalog.effective_model(descriptor.id, block),
       "reasoning_effort" => scalar(Keyword.get(block, :reasoning_effort)),
       "fast" => boolean_or_nil(Keyword.get(block, :fast)),
       "account_label" => account && account.label,

@@ -1514,8 +1514,7 @@ defmodule FermixWebWeb.SetupLive do
 
     %{
       provider: provider,
-      default_model:
-        Keyword.get(provider_block, :default_model) || ModelCatalog.default_model_for(provider),
+      default_model: ModelCatalog.effective_model(provider, provider_block),
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
       fast: Keyword.get(provider_block, :fast, false),
@@ -1550,7 +1549,7 @@ defmodule FermixWebWeb.SetupLive do
         provider: provider,
         configured?: Selection.configured?(provider, block),
         primary?: provider == primary,
-        model: Keyword.get(block, :default_model) || ModelCatalog.default_model_for(provider)
+        model: ModelCatalog.effective_model(provider, block)
       }
     end)
   end

@@ -326,6 +326,13 @@ Notes that the shapes alone do not carry:
   different questions, so a live fetch that fails answers `unavailable`
   {`capability`: `model_listing`} and `source` always names where the rows on
   the wire came from.
+- **`default_model` is the model in force, never the config value alone.** A
+  provider row in `setup.state.get`, the Model row of that provider's settings
+  section and `provider.model` in `overview.get` carry the model the daemon
+  calls the provider with: the one chosen in Settings, or the catalog default
+  until one is. A sign-in that has just completed therefore names its model at
+  once, and Doctor probes the same one. Engines before this published `null`,
+  or an empty value, until a model was chosen, so a client keeps accepting both.
 - **`computer_use.permissions.get` never prompts**, and `installed` comes from
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides
