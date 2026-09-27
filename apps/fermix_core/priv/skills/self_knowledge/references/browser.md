@@ -11,6 +11,21 @@ default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
 else is using it. On a desktop it is a real window the person can see.
 
+## Which browser the managed profiles launch
+
+The launcher takes the first of these that exists: the profile's own
+`executable_path`, then `CHROME_PATH`, then Chrome or Chromium on `PATH`
+(`google-chrome-stable`, `google-chrome`, `chromium`, `chromium-browser`,
+`chrome`), then Google Chrome, Chromium and Google Chrome Canary in
+`/Applications`, and last Google Chrome for Testing from Playwright's cache: the
+Chromium the meeting notetaker's `install-browser` step downloads, found as the
+newest complete `chromium-<revision>` under `PLAYWRIGHT_BROWSERS_PATH`, or else
+`~/Library/Caches/ms-playwright` on macOS and `~/.cache/ms-playwright` on Linux.
+So a machine with no browser of its own runs tasks once that download has run.
+With none of them a launch refuses `chrome_missing`. `fermix doctor`'s `browser`
+row names the browser in force and its path ("Tasks use Google Chrome."), or
+says "No Chrome or Chromium is installed."
+
 ## Where a name points
 
 Both profiles judge where a page actually comes from, not only how its host is

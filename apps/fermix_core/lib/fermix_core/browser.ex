@@ -368,8 +368,8 @@ defmodule FermixCore.Browser do
   end
 
   defp chrome_diagnostics(config) do
-    case ChromeLauncher.find_executable(config, nil) do
-      {:ok, path} -> %{"ok" => true, "path" => path}
+    case ChromeLauncher.resolve(config, nil) do
+      {:ok, %{path: path}} -> %{"ok" => true, "path" => path}
       {:error, %Error{} = error} -> %{"ok" => false, "error" => Error.to_map(error)}
     end
   end
