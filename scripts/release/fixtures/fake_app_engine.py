@@ -162,7 +162,7 @@ def run_runtime(home, port, manifest):
     server = None
     stopping = threading.Event()
     try:
-        for name in ("realtime", "companion"):
+        for name in ("realtime", "companion", "browser_host"):
             if not controlled(f"no-{name}"):
                 listeners[home / f"{name}.sock"] = unix_listener(home / f"{name}.sock")
         Health.product_version = manifest["identity"]["product_version"]

@@ -306,6 +306,34 @@ class VerifyAppEngineTest(unittest.TestCase):
                     timeouts=short,
                 )
 
+    def test_startup_timeout_reports_when_only_the_browser_host_socket_is_missing(self):
+        short = verify.Timeouts(
+            startup_attempts=50,
+            shutdown_attempts=3,
+            poll_interval_seconds=0.02,
+            health_timeout_seconds=0.02,
+            management_timeout_seconds=0.1,
+            stop_timeout_seconds=0.1,
+            cleanup_timeout_seconds=1.0,
+        )
+
+        archive = self._archive_with_control("no-browser_host")
+
+        with self._darwin_host("arm64"), self._start_after_fixture_ready():
+            with self.assertRaisesRegex(
+                verify.VerificationError,
+                r"daemon_socket=true.*realtime_socket=true.*companion_socket=true.*"
+                r"browser_host_socket=false.*health=true",
+            ):
+                verify.verify_app_engine(
+                    archive,
+                    TARGET,
+                    VERSION,
+                    "native",
+                    temp_parent=self.base,
+                    timeouts=short,
+                )
+
     def test_startup_timeout_reports_each_missing_runtime_surface(self):
         short = verify.Timeouts(
             startup_attempts=50,
@@ -322,7 +350,8 @@ class VerifyAppEngineTest(unittest.TestCase):
         with self._darwin_host("arm64"):
             with self.assertRaisesRegex(
                 verify.VerificationError,
-                r"daemon_socket=false.*realtime_socket=false.*companion_socket=false.*health=false",
+                r"daemon_socket=false.*realtime_socket=false.*companion_socket=false.*"
+                r"browser_host_socket=false.*health=false",
             ):
                 verify.verify_app_engine(
                     archive,
@@ -433,6 +462,11 @@ class VerifyAppEngineTest(unittest.TestCase):
                     "maximum_version": 1,
                 },
                 "companion": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
+                "browser_host": {
                     "current_version": 1,
                     "minimum_version": 1,
                     "maximum_version": 1,
