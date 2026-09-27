@@ -157,6 +157,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once.** Instead of hours of retries ending in "unsupported delivery
   platform", the run is marked undeliverable with a cause that says the
   hand-off was not recorded.
+- **Computer history releases its lock when it stops.** A slow final save
+  could leave the recorder's lock behind, so the next start waited for it to
+  expire before recording again.
 
 ## [0.11.0] - 2026-09-23
 

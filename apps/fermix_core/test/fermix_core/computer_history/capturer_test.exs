@@ -132,6 +132,17 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
     status == 0
   end
 
+  # A GenServer call from `caller` waits in the suspended process's mailbox.
+  defp call_parked?(server, caller) do
+    {:messages, messages} = Process.info(server, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^caller, _tag}, _request}, &1))
+  end
+
+  # The open Ports `owner` holds: the Capturer's sidecar Port while it runs.
+  defp ports_of(owner) do
+    Enum.filter(Port.list(), &(Port.info(&1, :connected) == {:connected, owner}))
+  end
+
   # --- tests -------------------------------------------------------------
 
   # Open → close on every path. A degrade is the one path that can run moments
@@ -714,6 +725,141 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       absent = :"absent_ch_capturer_#{System.unique_integer([:positive])}"
 
       assert %{mode: :not_running} = Capturer.status(absent)
+    end
+  end
+
+  # C1: the terminate-time flush makes Repo calls, each bounded by
+  # GenServer.call's 5 s, against the DynamicSupervisor's own 5 s shutdown. A
+  # kill there skips whatever terminate/2 has not reached, so the sidecar and
+  # the machine-wide lock go first and the best-effort flush last. The Repo is
+  # held suspended, and the flush's first call parked in its mailbox is the
+  # barrier: by then the sidecar's Port is closed and the lock released. The
+  # Repo is resumed at once, so no wait races the flush's own call timeout.
+  describe "teardown ahead of a slow terminate flush (C1)" do
+    test "a flush blocked on the Repo leaves the sidecar reaped and the lock released", ctx do
+      pid_file =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-ch-pid-#{ctx.tmp}-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(pid_file) end)
+      sup = start_supervised!({DynamicSupervisor, strategy: :one_for_one}, id: :capturer_sup)
+
+      # The flush timer is a minute away, so the acked event stays buffered
+      # until terminate/2 flushes it.
+      opts = [
+        name: :"ch_capturer_#{System.unique_integer([:positive])}",
+        repo: ctx.repo,
+        binary_path: @fake,
+        lock_path: ctx.lock_path,
+        apps: ["com.apple.Safari"],
+        flush_interval_ms: 60_000,
+        batch_size: 50,
+        operative_fun: fn -> true end,
+        sidecar_env: [
+          {~c"FAKE_EVENTS_FILE", String.to_charlist(events_file(ctx, [app_event(1)]))},
+          {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+        ]
+      ]
+
+      {:ok, pid} = DynamicSupervisor.start_child(sup, {Capturer, opts})
+      os_pid = eventually(fn -> read_pid_file(pid_file) end, 10_000)
+
+      eventually(
+        fn -> if :sys.get_state(pid).buffer == [], do: :retry, else: {:ok, :buffered} end,
+        10_000
+      )
+
+      assert File.exists?(ctx.lock_path)
+      assert [_sidecar_port] = ports_of(pid)
+
+      repo = Process.whereis(ctx.repo)
+      :ok = :sys.suspend(repo)
+      stopping = Task.async(fn -> DynamicSupervisor.terminate_child(sup, pid) end)
+
+      try do
+        eventually(fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end, 10_000)
+        refute File.exists?(ctx.lock_path)
+        assert ports_of(pid) == []
+      after
+        :sys.resume(repo)
+      end
+
+      assert :ok = Task.await(stopping, 10_000)
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
+
+      # The flush still ran, last.
+      assert Enum.any?(stored(ctx.repo), &(&1.source_seq == 1))
+    end
+  end
+
+  # C1's sibling: a degrade runs inside a callback, so a `:shutdown` that
+  # arrives during its flush waits in the mailbox, and the kill 5 s later skips
+  # whatever the degrade has not reached. That flush makes two Repo calls
+  # (Ingest's pause read, then the insert), each bounded by GenServer.call's
+  # 5 s, so the sidecar and the lock go first there too. A malformed line ahead
+  # of a mismatched ack buffers a self-authored gap, which gives the degrade's
+  # flush a row to write. The Repo is suspended before the Capturer starts (its
+  # start makes no Repo call), and the flush's first call parked in the Repo's
+  # mailbox is the barrier. The Repo is resumed at once after two in-memory
+  # assertions.
+  describe "teardown ahead of a slow degrade flush" do
+    test "a degrade flush blocked on the Repo leaves the sidecar reaped and the lock released",
+         ctx do
+      unique = System.unique_integer([:positive])
+      pid_file = Path.join(System.tmp_dir!(), "fermix-ch-pid-#{ctx.tmp}-#{unique}")
+      pre_ack = Path.join(System.tmp_dir!(), "fermix-ch-pre-#{ctx.tmp}-#{unique}.ndjson")
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm(pid_file)
+        FermixTestSupport.SafeRm.rm(pre_ack)
+      end)
+
+      File.write!(pre_ack, "{ not json\n")
+      repo = Process.whereis(ctx.repo)
+      :ok = :sys.suspend(repo)
+
+      {pid, os_pid} =
+        try do
+          pid =
+            start_capturer(ctx,
+              flush_interval_ms: 60_000,
+              sidecar_env: [
+                {~c"FAKE_PROTO", ~c"#{@protocol + 1}"},
+                {~c"FAKE_PRE_ACK_FILE", String.to_charlist(pre_ack)},
+                {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+              ]
+            )
+
+          os_pid = eventually(fn -> read_pid_file(pid_file) end, 10_000)
+
+          eventually(
+            fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end,
+            10_000
+          )
+
+          refute File.exists?(ctx.lock_path)
+          assert ports_of(pid) == []
+          {pid, os_pid}
+        after
+          :sys.resume(repo)
+        end
+
+      status =
+        eventually(
+          fn ->
+            status = Capturer.status(pid)
+            if status.mode == :degraded, do: {:ok, status}, else: :retry
+          end,
+          10_000
+        )
+
+      assert {:protocol_mismatch, %{required: @protocol}} = status.reason
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
+
+      # The flush still ran, last: the malformed line's gap is in the spool.
+      assert Enum.any?(stored(ctx.repo), &(&1.type == "observer.gap"))
     end
   end
 
