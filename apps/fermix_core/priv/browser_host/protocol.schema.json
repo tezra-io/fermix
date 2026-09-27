@@ -40,6 +40,7 @@
             "download.began",
             "download.progress",
             "download.finished",
+            "task.cancel",
             "host_stopping"
           ]
         }
@@ -163,6 +164,21 @@
           },
           "then": {
             "$ref": "#/$defs/download.finished"
+          }
+        },
+        {
+          "if": {
+            "required": [
+              "type"
+            ],
+            "properties": {
+              "type": {
+                "const": "task.cancel"
+              }
+            }
+          },
+          "then": {
+            "$ref": "#/$defs/task.cancel"
           }
         },
         {
@@ -1784,6 +1800,30 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 500
+        }
+      }
+    },
+    "task.cancel": {
+      "type": "object",
+      "description": "The person cancelled task_id from the app's own tab for it. The daemon tells the task, releases its tabs as task.release does, and answers its next request cancelled.",
+      "required": [
+        "type",
+        "task_id",
+        "reason"
+      ],
+      "properties": {
+        "type": {
+          "const": "task.cancel"
+        },
+        "task_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200
         }
       }
     },

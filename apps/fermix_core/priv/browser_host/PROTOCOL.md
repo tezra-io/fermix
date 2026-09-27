@@ -163,6 +163,7 @@ attach*); the rest inform whichever tasks own the tab or download named.
 | `download.began` | `download_id`, `tab_id`, `filename` | A download started on a task's tab. |
 | `download.progress` | `download_id`, `received_bytes`; `total_bytes?` | Progress of one download. |
 | `download.finished` | `download_id`, `tab_id`, `state` (`completed`, `failed`, `cancelled`); `path?`, `bytes?`, `reason?` | Terminal. `path` is set only on `completed`, and only inside the engine's downloads directory. |
+| `task.cancel` | `task_id`, `reason` | The person cancelled `task_id` from its own tab in the app. See *A cancel mid-task*. |
 | `host_stopping` | — | The app is quitting. Final for this connection: see *Quit mid-task*. |
 
 ## Errors
@@ -240,6 +241,26 @@ app -> daemon:  { id: 5, ok: false, error: { reason: "host_unavailable", message
 daemon:         HostServer reaps task-2 with host_lost("... the Mac is locked."),
                 marks its turn (TurnMarker) so the turn's later browser calls
                 answer the same sentence instead of running on Chrome
+```
+
+### A cancel mid-task
+
+The pane itself stays available; only the one named task ends, from the
+person's own act on its tab. `task.release` for it travels behind its own
+queued requests, exactly as in *Quit mid-task*, but no other task on the
+connection is touched.
+
+```
+daemon -> app:  { id: 6, type: "page.act", tab_id: "t4", kind: "fill", ref: 2, text: "…", observe: false }
+app -> daemon:  task.cancel { task_id: "task-4", reason: "cancelled by the person" }
+daemon:         tells task-4 it was cancelled (its in-flight request, if any,
+                fails with it) and writes its task.release behind that request
+daemon -> app:  { id: 7, type: "task.release", task_id: "task-4" }
+app -> daemon:  { id: 7, ok: true, result: { released: ["t4"] } }
+daemon:         HostServer reaps task-4 with cancelled("The person cancelled
+                the browser task in the Fermix app."), marks its turn
+                (TurnMarker) so the turn's later browser calls answer the
+                same sentence instead of running on Chrome
 ```
 
 ### Quit mid-task

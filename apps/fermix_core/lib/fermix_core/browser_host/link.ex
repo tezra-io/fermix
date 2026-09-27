@@ -22,6 +22,8 @@ defmodule FermixCore.BrowserHost.Link do
     (`tab.closed`, `dialog.opened`, `download.*`).
   - `{:browser_host_stopping, connection}`: the app is quitting; the connection
     has already written the task's `task.release`.
+  - `{:browser_host_cancelled, connection, reason}`: the person cancelled this
+    task from the app; the connection has already written its `task.release`.
   """
 
   @typedoc "What a request is answered with."
@@ -63,6 +65,14 @@ defmodule FermixCore.BrowserHost.Link do
   @spec stopping(pid(), pid()) :: :ok
   def stopping(task, connection) when is_pid(task) and is_pid(connection) do
     send(task, {:browser_host_stopping, connection})
+    :ok
+  end
+
+  @doc "Tell a task the person cancelled it from the app, with the app's own reason."
+  @spec cancelled(pid(), pid(), String.t()) :: :ok
+  def cancelled(task, connection, reason)
+      when is_pid(task) and is_pid(connection) and is_binary(reason) do
+    send(task, {:browser_host_cancelled, connection, reason})
     :ok
   end
 end

@@ -10,4 +10,5 @@
 {"type":"download.progress","download_id":"d1","received_bytes":65536,"total_bytes":91022}
 {"type":"download.finished","download_id":"d1","tab_id":"t2","state":"completed","path":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d/report.pdf","bytes":91022}
 {"type":"download.finished","download_id":"d2","tab_id":"t2","state":"failed","reason":"the server closed the connection"}
+{"type":"task.cancel","task_id":"task-2","reason":"cancelled by the person"}
 {"type":"host_stopping"}

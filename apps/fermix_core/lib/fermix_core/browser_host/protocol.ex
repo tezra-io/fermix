@@ -15,8 +15,9 @@ defmodule FermixCore.BrowserHost.Protocol do
   answered `server_hello`); after that the daemon is the one asking. It sends
   requests carrying an `id`, and the app answers each with `{id, ok: true,
   result}` or `{id, ok: false, error: {reason, message}}`. The app's own news
-  (`attached`, `availability`, a closed tab, a dialog, a download, its quit)
-  arrives as events, which carry a `type` and no `id`.
+  (`attached`, `availability`, a closed tab, a dialog, a download, the
+  person's own cancel of a task, its quit) arrives as events, which carry a
+  `type` and no `id`.
 
   ## Versioning
 
@@ -46,7 +47,7 @@ defmodule FermixCore.BrowserHost.Protocol do
   )
   @events ~w(
     attached availability tab.closed dialog.opened download.began download.progress
-    download.finished host_stopping
+    download.finished task.cancel host_stopping
   )
 
   # The reasons the app may answer a request with. `host_unavailable` is the one
@@ -127,6 +128,7 @@ defmodule FermixCore.BrowserHost.Protocol do
     "download.began" => ~w(download_id tab_id filename),
     "download.progress" => ~w(download_id received_bytes),
     "download.finished" => ~w(download_id tab_id state),
+    "task.cancel" => ~w(task_id reason),
     "host_stopping" => []
   }
 
@@ -172,7 +174,7 @@ defmodule FermixCore.BrowserHost.Protocol do
   @spec max_message_chars() :: pos_integer()
   def max_message_chars, do: @max_message_chars
 
-  @doc "Longest `availability.reason` the app may send, in Unicode scalar values."
+  @doc "Longest `availability.reason` or `task.cancel.reason` the app may send, in Unicode scalar values."
   @spec max_reason_chars() :: pos_integer()
   def max_reason_chars, do: @max_reason_chars
 
@@ -668,6 +670,13 @@ defmodule FermixCore.BrowserHost.Protocol do
          :ok <- optional(payload, "path", &absolute_path/2),
          :ok <- optional(payload, "bytes", &nonnegative_u64/2) do
       optional(payload, "reason", &bounded_nonempty(&1, &2, @max_message_chars))
+    end
+  end
+
+  # The person's own cancel of one task, from its owned tab in the app.
+  defp event_fields("task.cancel", payload) do
+    with :ok <- id_string(payload, "task_id") do
+      bounded_nonempty(payload, "reason", @max_reason_chars)
     end
   end
 
