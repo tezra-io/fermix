@@ -1,16 +1,16 @@
 defmodule FermixCore.Browser.HostServerTest do
   use ExUnit.Case, async: true
 
-  alias FermixCore.Browser
   alias FermixCore.Browser.Backend
   alias FermixCore.Browser.Capabilities
   alias FermixCore.Browser.CDP
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.HostAvailability
-  alias FermixCore.Browser.HostServer
-  alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.ProfileServer
+  alias FermixCore.Browser.TurnMarker
+  alias FermixCore.BrowserHost.Link
+  alias FermixTestSupport.FakeBrowserHostConnection
 
   # A backend whose runtime always comes up and whose every operation answers,
   # so what the server refuses on its own is visible: it never reaches here.
@@ -42,13 +42,6 @@ defmodule FermixCore.Browser.HostServerTest do
     end
   end
 
-  # A launcher that must never be reached: a pane profile is never Chrome.
-  defmodule NoChrome do
-    def attach(_config, _profile, _owner, _name), do: raise("a pane profile reached for Chrome")
-    def start(_config, _profile, _owner, _name), do: raise("a pane profile launched Chrome")
-    def stop(_runtime, _config), do: :ok
-  end
-
   @pane %{mode: :fermix_app, headless: :auto, cdp_port: :auto}
 
   defp start_server(opts) do
@@ -61,22 +54,45 @@ defmodule FermixCore.Browser.HostServerTest do
     start_supervised!(Supervisor.child_spec(spec, restart: :temporary))
   end
 
-  # An isolated host, attached and reporting its pane available.
-  defp usable_host do
+  # An isolated host, attached to a fake connection and reporting available.
+  defp usable_host(responses \\ %{}) do
+    {:ok, connection} = FakeBrowserHostConnection.start_link(responses)
     host = start_supervised!({HostAvailability, name: nil}, id: make_ref())
     endpoint = spawn(fn -> Process.sleep(:infinity) end)
     on_exit(fn -> Process.exit(endpoint, :kill) end)
     :ok = HostAvailability.listening(host, endpoint)
-    :ok = HostAvailability.attached(host)
+    :ok = HostAvailability.attached(host, connection, 1)
     :ok = HostAvailability.report(host, true, nil)
-    host
+    {host, connection}
   end
 
   defp req(pid, action, args \\ %{}),
     do: ProfileServer.request(pid, %{action: action, args: args, context: %{agent_name: "t"}})
 
+  defp page(url, opts \\ []) do
+    %{
+      "url" => url,
+      "title" => Keyword.get(opts, :title, "Example"),
+      "ready_state" => "complete",
+      "nodes" => [
+        %{
+          "nodeId" => "1",
+          "role" => %{"value" => "RootWebArea"},
+          "name" => %{"value" => Keyword.get(opts, :title, "Example")},
+          "childIds" => ["2"]
+        },
+        %{
+          "nodeId" => "2",
+          "backendDOMNodeId" => 7,
+          "role" => %{"value" => "button"},
+          "name" => %{"value" => "Go"}
+        }
+      ]
+    }
+  end
+
   test "the fermix_app mode is the host backend, and every other mode is CDP's" do
-    assert Backend.for_mode(:fermix_app) == HostServer
+    assert Backend.for_mode(:fermix_app) == FermixCore.Browser.HostServer
 
     for mode <- [:managed, :existing_session, :remote_cdp, :attached_tab] do
       assert Backend.for_mode(mode) == CDP.Backend
@@ -106,24 +122,6 @@ defmodule FermixCore.Browser.HostServerTest do
              Capabilities.for_mode(:managed) |> Map.keys() |> Enum.sort()
   end
 
-  # Until the wire lands the stub is the whole backend: the mode can be chosen
-  # and every verb it is asked is refused by name, with nothing sent anywhere
-  # and the profile left standing.
-  test "every action on the app's pane is refused as host_unavailable" do
-    pid = start_server(host_availability: usable_host())
-
-    for action <- Browser.actions() -- ["doctor", "status", "stop"] do
-      assert {:error, %Error{code: "host_unavailable"} = error} = req(pid, action),
-             "`#{action}` was not refused"
-
-      assert error.message =~ "Fermix app's browser"
-    end
-
-    assert {:ok, %{"running" => false, "profile" => "fermix"}} = req(pid, "status")
-    assert {:ok, %{"stopped" => true}} = req(pid, "stop")
-    assert Process.alive?(pid)
-  end
-
   test "the server refuses WebMCP on the app's pane before the backend is asked" do
     pid = start_server(backend: UpBackend, test_pid: self())
 
@@ -135,27 +133,178 @@ defmodule FermixCore.Browser.HostServerTest do
     assert_received {:backend_asked, :snapshot}
   end
 
-  # ── a pane that goes away mid-task ──────────────────────────────────────────
+  # ── a task on the host ───────────────────────────────────────────────────
 
-  test "a pane whose app went away answers host_lost with the reason and is reaped" do
-    host = usable_host()
+  test "a task opens a tab on the host, and its tab id is scoped to the connection it opened on" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => fn payload ->
+          assert payload["url"] == "about:blank"
+          assert payload["observe"] == true
+          assert String.starts_with?(payload["task_id"], "task-")
+          assert String.starts_with?(payload["download_dir"], "/")
+          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => "", "page" => page("about:blank")}}
+        end
+      })
+
+    pid = start_server(host_availability: host)
+
+    assert {:ok, result} = req(pid, "open", %{"url" => "about:blank"})
+    assert result["target"] == "h1:t1"
+    assert result["page"] == "changed"
+    assert result["snapshot"] =~ "<browser_page_content>"
+    assert [{"tab.open", _payload}] = FakeBrowserHostConnection.requests(connection)
+  end
+
+  test "an act on an identical page renders through the shared snapshot renderer and answers unchanged" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" =>
+          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => "", "page" => page("about:blank")}},
+        "page.act" => {:ok, %{"url" => "about:blank", "title" => "", "page" => page("about:blank")}}
+      })
+
+    pid = start_server(host_availability: host)
+
+    assert {:ok, opened} = req(pid, "open", %{"url" => "about:blank"})
+    assert opened["target"] == "h1:t1"
+
+    assert {:ok, acted} =
+             req(pid, "act", %{"target" => "h1:t1", "kind" => "click", "ref" => "button_1"})
+
+    assert acted["page"] == "unchanged"
+    refute Map.has_key?(acted, "snapshot")
+
+    [{"tab.open", _}, {"page.act", act_payload}] = FakeBrowserHostConnection.requests(connection)
+    assert act_payload["ref"] == 7
+    assert act_payload["kind"] == "click"
+  end
+
+  test "an unknown tab is refused locally, before anything is asked of the app" do
+    {host, connection} = usable_host()
+    pid = start_server(host_availability: host)
+
+    assert {:error, %Error{code: "tab_not_found"}} =
+             req(pid, "act", %{"target" => "h1:t1", "kind" => "click", "ref" => "button_1"})
+
+    assert FakeBrowserHostConnection.requests(connection) == []
+  end
+
+  test "a ref from no snapshot at all is refused as stale, without asking the app" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+      })
+
+    pid = start_server(host_availability: host)
+    assert {:ok, _} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+
+    assert {:error, %Error{code: "stale_ref"}} =
+             req(pid, "act", %{"target" => "h1:t1", "kind" => "click", "ref" => "button_1"})
+
+    assert [{"tab.open", _}] = FakeBrowserHostConnection.requests(connection)
+  end
+
+  test "the app's cap_reached answer becomes a sentence naming the task's own cap" do
+    {host, _connection} =
+      usable_host(%{
+        "tab.open" => {:error, %{"reason" => "cap_reached", "message" => "task owns 10 tabs"}}
+      })
+
+    pid = start_server(host_availability: host)
+
+    assert {:error, %Error{code: "cap_reached", message: message}} =
+             req(pid, "open", %{"url" => "about:blank"})
+
+    assert message =~ "already has as many tabs open"
+  end
+
+  # ── ending a task ────────────────────────────────────────────────────────
+
+  test "stopping a task with nothing open asks the app for nothing" do
+    {host, connection} = usable_host()
+    pid = start_server(host_availability: host)
+
+    assert {:ok, %{"stopped" => true}} = req(pid, "stop")
+    assert FakeBrowserHostConnection.releases(connection) == []
+  end
+
+  test "a task's tabs are released once, when it ends" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+      })
+
+    pid = start_server(host_availability: host)
+    assert {:ok, _} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+    assert {:ok, %{"stopped" => true}} = req(pid, "stop")
+
+    assert [released_id] = FakeBrowserHostConnection.releases(connection)
+    assert String.starts_with?(released_id, "task-")
+  end
+
+  # ── a pane that goes away mid-task (BROWSER-4, BROWSER-5) ───────────────
+
+  test "a pane whose connection goes down is reaped with host_lost, and marks the turn" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+      })
+
     pid = start_server(host_availability: host)
     ref = Process.monitor(pid)
 
-    assert {:error, %Error{code: "host_unavailable"}} = req(pid, "snapshot")
+    assert {:ok, _} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
 
-    :ok = HostAvailability.detached(host, "the app quit")
+    Process.exit(connection, :kill)
 
-    assert {:error, %Error{code: "host_lost", message: message}} = req(pid, "snapshot")
-    assert message == "The Fermix app's browser is no longer available: the app quit."
+    assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
+    assert %Error{code: "host_lost", message: message} = TurnMarker.lookup("owner-pane", self())
+    assert message =~ "the app disconnected"
+  end
+
+  test "the app is quitting while a request is out fails it with a sentence, and reaps the task" do
+    host = start_supervised!({HostAvailability, name: nil}, id: make_ref())
+    endpoint = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> Process.exit(endpoint, :kill) end)
+    :ok = HostAvailability.listening(host, endpoint)
+
+    connection =
+      spawn(fn ->
+        receive do
+          {:browser_host_request, from, ref, _task_id, "tab.open", _payload} ->
+            Link.answer(from, ref, {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+        end
+
+        receive do
+          {:browser_host_request, from, _ref, _task_id, "page.act", _payload} ->
+            Link.stopping(from, self())
+        end
+
+        Process.sleep(:infinity)
+      end)
+
+    on_exit(fn -> Process.exit(connection, :kill) end)
+    :ok = HostAvailability.attached(host, connection, 1)
+    :ok = HostAvailability.report(host, true, nil)
+
+    pid = start_server(host_availability: host)
+    ref = Process.monitor(pid)
+
+    assert {:ok, _} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+
+    assert {:error, %Error{code: "host_lost", message: message}} =
+             req(pid, "act", %{"target" => "h1:t1", "kind" => "press", "key" => "Enter"})
+
+    assert message =~ "the app is quitting"
     assert_receive {:DOWN, ^ref, :process, ^pid, :normal}
   end
 
   test "a pane the app reports unavailable is lost with the app's own reason" do
-    host = usable_host()
-    pid = start_server(host_availability: host)
-
+    {host, _connection} = usable_host()
     :ok = HostAvailability.report(host, false, "the pane was closed")
+
+    pid = start_server(host_availability: host)
 
     assert {:error, %Error{code: "host_lost", message: message}} = req(pid, "tabs")
     assert message =~ "no longer available: the pane was closed"
@@ -169,52 +318,4 @@ defmodule FermixCore.Browser.HostServerTest do
     assert message =~ "nothing in this engine serves it"
   end
 
-  # The reap answers the request that met it; a request queued behind it sees
-  # the server's exit, which the manager reads as "never ran" and re-sends to a
-  # fresh profile of the SAME mode — so it meets the same lost pane, never a
-  # Chrome it was not started on.
-  test "requests racing a reaped pane all answer host_lost, and none reaches Chrome" do
-    host = usable_host()
-    :ok = HostAvailability.detached(host, "the app quit")
-    {manager, registry} = pane_manager(host)
-    {:ok, config} = Config.current(%{})
-    request = %{action: "act", args: %{"kind" => "click"}, context: %{}, mutating: true}
-
-    results =
-      1..3
-      |> Enum.map(fn _ ->
-        Task.async(fn ->
-          ProfileManager.dispatch("owner-race", "fermix", @pane, config, request,
-            registry: registry,
-            server: manager
-          )
-        end)
-      end)
-      |> Task.await_many(5_000)
-
-    for result <- results do
-      assert {:error, %Error{code: "host_lost"}} = result
-    end
-  end
-
-  defp pane_manager(host) do
-    suffix = System.unique_integer([:positive])
-    registry = Module.concat(__MODULE__, "Registry#{suffix}")
-    dynamic = Module.concat(__MODULE__, "Dyn#{suffix}")
-    manager = Module.concat(__MODULE__, "Mgr#{suffix}")
-
-    start_supervised!({Registry, keys: :unique, name: registry}, id: registry)
-    start_supervised!({DynamicSupervisor, strategy: :one_for_one, name: dynamic}, id: dynamic)
-
-    start_supervised!(
-      {ProfileManager,
-       name: manager,
-       registry: registry,
-       dynamic_supervisor: dynamic,
-       child_opts: [host_availability: host, launcher: NoChrome]},
-      id: manager
-    )
-
-    {manager, registry}
-  end
 end

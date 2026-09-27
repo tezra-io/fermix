@@ -8,6 +8,7 @@ defmodule FermixCore.Browser do
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Browser.Routing
   alias FermixCore.Browser.Scope
+  alias FermixCore.Browser.TurnMarker
   alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
@@ -66,8 +67,9 @@ defmodule FermixCore.Browser do
 
   @doc """
   Run one `browser` tool call, and say which backend served it: the one the
-  profile was started on, or `nil` when the call never reached a profile (a
-  refusal before dispatch, `doctor`, `status`).
+  profile was started on, the pane for a call its turn's lost pane refuses, or
+  `nil` when the call never reached a profile (a refusal before dispatch,
+  `doctor`, `status`).
   """
   @spec execute(map(), map()) ::
           {{:ok, String.t()} | {:error, Error.t()}, Backend.label() | nil}
@@ -112,8 +114,18 @@ defmodule FermixCore.Browser do
     {{:ok, encode(ProfileManager.status(owner, profile_name))}, nil}
   end
 
+  # A turn whose pane task lost the Fermix app's browser answers every later
+  # browser call with that same sentence (`TurnMarker`), before anything is
+  # routed: the task is never redone in Chrome, and the next turn decides fresh.
   defp dispatch(action, args, context, owner, profile_name, profile, config)
        when action in @profile_actions do
+    case TurnMarker.lookup(owner, self()) do
+      %Error{} = lost -> {{:error, lost}, :fermix_app}
+      nil -> dispatch_profile(action, args, context, owner, profile_name, profile, config)
+    end
+  end
+
+  defp dispatch_profile(action, args, context, owner, profile_name, profile, config) do
     request = %{
       action: action,
       args: args,

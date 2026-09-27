@@ -14,12 +14,14 @@ defmodule FermixCore.Browser.Supervisor do
     dynamic_name = Keyword.get(opts, :dynamic_supervisor, FermixCore.Browser.DynamicSupervisor)
     manager_name = Keyword.get(opts, :profile_manager, FermixCore.Browser.ProfileManager)
     host_name = Keyword.get(opts, :host_availability, FermixCore.Browser.HostAvailability)
+    marker_name = Keyword.get(opts, :turn_marker, FermixCore.Browser.TurnMarker)
 
     children =
       [
         {Registry, keys: :unique, name: registry_name},
         {DynamicSupervisor, strategy: :one_for_one, name: dynamic_name},
         {FermixCore.Browser.HostAvailability, name: host_name},
+        {FermixCore.Browser.TurnMarker, name: marker_name},
         {FermixCore.Browser.ProfileManager,
          name: manager_name, dynamic_supervisor: dynamic_name, registry: registry_name}
       ] ++ bridge_children(opts)

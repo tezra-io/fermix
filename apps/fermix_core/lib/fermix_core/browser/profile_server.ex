@@ -16,7 +16,12 @@ defmodule FermixCore.Browser.ProfileServer do
 
   A backend that answers `:reap` has lost the browser for good (the app's pane
   went away mid-task): the server answers that refusal and stops, so the
-  profile is reaped rather than quietly carried on somewhere else.
+  profile is reaped rather than quietly carried on somewhere else. A backend
+  may end the profile between requests too (`{:stop, state}` from
+  `handle_message/2`), and a request queued behind that stop sees the exit,
+  which the manager reads as "never ran".
+
+  Every request's context carries `:caller`, the process that made the call.
 
   Callers reach this process directly (via the registry); the manager only
   starts/evicts it. Requests are serialized per scope by the GenServer.
@@ -114,8 +119,8 @@ defmodule FermixCore.Browser.ProfileServer do
   # The one `:stop` a request can end in carries its reply, so the request that
   # met it is answered and only a request still queued behind it sees the exit
   # (`ProfileManager` reads that exit as "never ran").
-  def handle_call({:request, request}, _from, state) do
-    case run_request(request, touch_idle(state)) do
+  def handle_call({:request, request}, {caller, _tag}, state) do
+    case run_request(put_caller(request, caller), touch_idle(state)) do
       {{:reap, error}, state} -> {:stop, :normal, attach_console({:error, error}, state), state}
       {reply, state} -> {:reply, attach_console(reply, state), state}
     end
@@ -127,6 +132,11 @@ defmodule FermixCore.Browser.ProfileServer do
   # failed. Gated behind content capture so regular error details stay
   # body-free. Entry COUNT is capped by `console_buffer_limit`; entry size is
   # not — capture-on is full-fidelity by design.
+  defp put_caller(%{context: context} = request, caller),
+    do: %{request | context: Map.put(context, :caller, caller)}
+
+  defp put_caller(request, _caller), do: request
+
   defp attach_console({:error, %Error{} = error}, state) do
     case state.backend.console_buffer(state.backend_state) do
       [_ | _] = console -> {:error, with_console(error, console)}
@@ -148,7 +158,10 @@ defmodule FermixCore.Browser.ProfileServer do
   # Everything else is the runtime talking — events, port output, a transport's
   # exit — and only the backend knows what it means.
   def handle_info(message, state) do
-    {:noreply, put_backend(state, state.backend.handle_message(message, state.backend_state))}
+    case state.backend.handle_message(message, state.backend_state) do
+      {:stop, backend_state} -> {:stop, :normal, put_backend(state, backend_state)}
+      backend_state -> {:noreply, put_backend(state, backend_state)}
+    end
   end
 
   @impl true

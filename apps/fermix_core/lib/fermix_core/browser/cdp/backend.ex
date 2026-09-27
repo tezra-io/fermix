@@ -30,8 +30,8 @@ defmodule FermixCore.Browser.CDP.Backend do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
   alias FermixCore.Browser.Snapshot
+  alias FermixCore.Browser.Upload
   alias FermixCore.Net.Guard
-  alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Trace
 
@@ -1145,7 +1145,7 @@ defmodule FermixCore.Browser.CDP.Backend do
   end
 
   defp upload_file(args, state) do
-    with {:ok, path} <- confined_upload_path(args["path"]),
+    with {:ok, path} <- Upload.confined_path(args["path"]),
          {:ok, tab, state} <- resolve_tab(Map.get(args, "target"), state),
          {:ok, tab, state} <- attach(tab, state),
          {:ok, ref_data} <- ref_data(tab, args["ref"], state),
@@ -2983,42 +2983,6 @@ defmodule FermixCore.Browser.CDP.Backend do
   defp get_expression("count"), do: "document.querySelectorAll('*').length"
   defp get_expression("ready_state"), do: "document.readyState"
   defp get_expression(_field), do: "document.body ? document.body.innerText : ''"
-
-  # Containment is decided on RESOLVED paths, both sides. `Path.expand/1` is
-  # purely lexical, so a symlinked final component — or any symlinked
-  # intermediate directory — used to satisfy the prefix test while pointing the
-  # upload at a file outside the workspace. `PathPolicy.canonical_path/1` walks
-  # every component and follows the links, so the string compare below is a
-  # compare of real locations.
-  #
-  # Deliberately NOT routed through `Sandbox.read_path/3`: that helper confines
-  # to `Mode.effective_roots/2` (workspace + launch cwd + request cwd + grants),
-  # which would WIDEN the upload surface past workspace-only, and it needs a tool
-  # context `run_advanced/3` does not thread.
-  defp confined_upload_path(path) when is_binary(path) do
-    canonical = PathPolicy.canonical_path(path)
-
-    workspace_root =
-      ConfigStore.workspace_paths() |> Map.fetch!(:workspace) |> PathPolicy.canonical_path()
-
-    with :ok <- under_root(canonical, workspace_root),
-         true <- File.regular?(canonical) do
-      {:ok, canonical}
-    else
-      false -> {:error, Error.new("upload_not_found", "Upload file was not found")}
-      {:error, %Error{} = error} -> {:error, error}
-    end
-  end
-
-  defp confined_upload_path(_path), do: {:error, Error.new("missing_arg", "upload requires path")}
-
-  defp under_root(path, root) do
-    if path == root or String.starts_with?(path, root <> "/") do
-      :ok
-    else
-      {:error, Error.new("upload_blocked", "Upload path is outside the Fermix workspace")}
-    end
-  end
 
   defp bounded(value, _default, max) when is_integer(value) and value > 0, do: min(value, max)
   defp bounded(_value, default, _max), do: default
