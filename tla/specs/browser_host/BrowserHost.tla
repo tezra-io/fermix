@@ -1,37 +1,57 @@
 ---------------------------- MODULE BrowserHost ----------------------------
 (***************************************************************************)
-(* DESIGN SPEC of the browser host protocol, written before the code. The *)
-(* daemon listens on one 0600 Unix socket, browser_host.sock (newline      *)
-(* JSON, a hello handshake), and the Mac app connects to it as the host:   *)
-(* its web views run a task's browser work on the person's own machine.   *)
-(* Direction is reversed from the chat wire: the daemon sends requests     *)
-(* with an id and the host answers each with ok or error; the host sends   *)
-(* unsolicited events (attached, availability, tab.closed, dialog.opened,  *)
-(* download.*, host_stopping).                                            *)
+(* The browser host protocol: the daemon listens on one 0600 Unix socket,  *)
+(* browser_host.sock (newline JSON, a hello handshake), and the Mac app    *)
+(* connects to it as the host: its web views run a task's browser work on  *)
+(* the person's own machine. Direction is reversed from the chat wire: the *)
+(* daemon sends requests with an id and the host answers each with ok or   *)
+(* error; the host sends unsolicited events (attached, availability,       *)
+(* tab.closed, dialog.opened, download.*, host_stopping).                  *)
 (*                                                                         *)
-(* The modules do not exist yet. Their SOURCE pins follow the first engine *)
-(* commit that lands them; until then every step below names the module    *)
-(* that is to own it:                                                      *)
-(*  - FermixCore.Browser.HostServer: ONE process per daemon. It keeps the  *)
-(*    host's last availability report, decides once at a task's start     *)
-(*    whether the task runs on the host or on managed Chrome, launches the *)
-(*    app hidden at most once per decision, binds each host task to the    *)
-(*    connection it was decided on, and fails those tasks with a sentence  *)
-(*    when that host goes unavailable, detaches, crashes or stops;         *)
-(*  - its backend boundary (FermixCore.Browser.execute -> the host or the  *)
-(*    managed-Chrome ProfileManager): a task's browser call, one request   *)
-(*    at a time, waiting on its answer;                                    *)
-(*  - FermixChannels.BrowserHost.Endpoint, the listener, and its           *)
-(*    connection process: the handshake and the line codec. It forwards    *)
-(*    in order, and its exit is the HostServer's :DOWN, so it is folded    *)
-(*    into the HostServer's steps here;                                    *)
-(*  - the Mac app's BrowserHostReducer (tezra-io/fermix-macos): one main-  *)
-(*    actor reducer that owns the tabs, the ownership registry, the caps,  *)
-(*    the availability reports and the quit hold. It lives in another      *)
-(*    repository, so it is an unpinned mirror: this spec states what it    *)
-(*    must do, and the app's tests hold it to that.                        *)
-(* The pin below names the functions every browser call of a task passes   *)
-(* through today, where the backend decision is to sit.                   *)
+(* Written as a DESIGN SPEC before the code (3ee506f3), and now re-read    *)
+(* and pinned by function against feat/browser-host-wire (PR #94, on       *)
+(* feat/browser-backend-boundary, PR #93), as companion_session was.       *)
+(* BROWSER-1 to BROWSER-8 are what the design asked of the implementation; *)
+(* all are fixed or hold by construction, as the findings section records  *)
+(* with the commit that proves each. The re-read also found TurnMarker, a  *)
+(* mechanism the design did not ask for (see "Not modelled").              *)
+(*                                                                         *)
+(* The daemon side, still one process group here ("daemon"), turned out to *)
+(* be several real modules, not the one process the design guessed at:     *)
+(*  - FermixCore.Browser.HostServer: the pane task, running inside its own *)
+(*    ProfileServer (one live task per profile, not one process for the    *)
+(*    whole daemon). It binds a host task to the connection it was decided *)
+(*    on (bind, host_server.ex:387-413) and to that connection alone       *)
+(*    (check_host, :417-430); it fails the task on that connection's :DOWN *)
+(*    or the app's host_stopping (handle_message, :136-160; lose, :434-438) *)
+(*    and names its tabs by the connection (public_id, :698);              *)
+(*  - FermixCore.Browser.HostAvailability: the one process that holds the  *)
+(*    host's last report, with no probe, and which connection it is on;    *)
+(*  - FermixCore.Browser.HostLauncher: the pure decision table (step,      *)
+(*    host_launcher.ex:95-105) that opens the app on demand and waits for  *)
+(*    its attach and first report under one deadline, shared by every task *)
+(*    that finds a launch pending (SingleLaunch), and bounded by a cooldown *)
+(*    after a launch that never attached -- BROWSER-6's bounded answer,    *)
+(*    since a crashed launch and a quit before attach look identical;      *)
+(*  - FermixCore.Browser.Routing: decides a task's backend once, when no   *)
+(*    profile is live for it, and pins every later request of it to the    *)
+(*    backend the live profile was started on (for_request, routing.ex:40) *)
+(*    (ProfileManager.backend, not this spec's: it is not one of the files *)
+(*    below, since it also covers profiles this design never routes);      *)
+(*  - FermixCore.Browser.execute/dispatch (browser.ex): where a call first *)
+(*    meets a lost turn's TurnMarker mark and, past that, Routing;         *)
+(*  - FermixChannels.BrowserHost.{Endpoint,Connection,Supervisor}: the     *)
+(*    listener (one host at a time, endpoint.ex:209-219) and its           *)
+(*    connection process, the handshake and the line codec. A connection   *)
+(*    forwards every task's request and release in the order its own      *)
+(*    process took them off its mailbox -- BROWSER-1's fix -- and its exit *)
+(*    is HostServer's :DOWN.                                               *)
+(*                                                                         *)
+(* The Mac app's BrowserHostReducer (tezra-io/fermix-macos) still owns the *)
+(* tabs, the registry, the caps, the availability reports and the quit     *)
+(* hold, and it still lives in another repository: an UNPINNED MIRROR, as  *)
+(* it was in the design spec. This spec states what it must do; the app's  *)
+(* own tests hold it to that.                                              *)
 (*                                                                         *)
 (* Managed Chrome is ONE abstract "elsewhere" that always completes: the   *)
 (* ProfileManager's own rules (its tab cap evicts the oldest tab; the host *)
@@ -45,22 +65,53 @@
 (*  - page.snapshot, page.screenshot, page.upload, dialog.resolve,         *)
 (*    cookies.*, host.status, tab.navigate, tab.list, tab.focus and        *)
 (*    tab.close: each is one request on a tab the task owns, answered like *)
-(*    page.act (a task step here is tab.open or page.act);                 *)
+(*    page.act (a task step here is tab.open or page.act). tab.list's      *)
+(*    opener_tab_id (protocol.ex#listed_tab?) is the wire field BROWSER-3   *)
+(*    asked for, so a popup's owner can be told to the daemon; the caps    *)
+(*    and the release that read it are still the app reducer's own,        *)
+(*    unpinned;                                                            *)
 (*  - tab.closed, dialog.opened and download.* events: informational to    *)
 (*    the daemon; a request on a closed tab is answered with an error,     *)
 (*    which is what the model uses;                                        *)
 (*  - which of lock, display sleep or app termination made the host        *)
 (*    unavailable: one reason, "locked", stands for all three;             *)
 (*  - a new connection attaching before the daemon has taken the old one's *)
-(*    :DOWN (the model attaches only after it), and the daemon itself      *)
-(*    restarting;                                                          *)
+(*    :DOWN: Endpoint refuses a second client while one is attached        *)
+(*    (accept_connection, host_already_attached, endpoint.ex:209-219), so  *)
+(*    the model attaching only after it is the code, not a shortcut taken  *)
+(*    for the model's sake; the daemon itself restarting is not modelled;  *)
 (*  - the socket's 0600 mode, the peer check and the line codec: single-   *)
-(*    call rules that ExUnit covers.                                       *)
+(*    call rules that ExUnit covers;                                       *)
+(*  - FermixCore.Browser.TurnMarker: a turn (the caller of a task, not the *)
+(*    task itself) that loses its pane marks every later browser call of   *)
+(*    THAT TURN with the same sentence (dispatch reads the mark before     *)
+(*    Routing ever runs, browser.ex:120-126), so a turn whose first task   *)
+(*    failed on the host never starts a second task Routing could send to  *)
+(*    Chrome. This spec's Tasks are already turn-sized: a Task is one      *)
+(*    script run to one Terminal state, and nothing here lets a second     *)
+(*    Task share a first one's caller once it has ended, so                *)
+(*    NoChromeAfterHostFailure cannot see the gap TurnMarker closes, and no *)
+(*    needs check can turn it off meaningfully -- switching a mechanism    *)
+(*    off must break a rule the spec can state, and this one cannot state  *)
+(*    this rule. Giving a turn more than one task in sequence would be a   *)
+(*    bigger change than a re-read, so it is recorded here rather than     *)
+(*    modelled.                                                            *)
 (*                                                                         *)
 (* One step = one callback of the HostServer, one reducer step of the      *)
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#execute,dispatch @ 9c7b5fb6245f
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab?
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex
+\* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
@@ -85,33 +136,52 @@ CONSTANTS
     PagesOpenPopups,    \* a page opens a popup from any live tab
     \* Mechanism switches: what the design does about it. TRUE is the design;
     \* each is switched off only by the checks that show a rule needs it.
-    DecideOnceAtStart,  \* HostServer decides a task's backend once, at its start, and
-                        \* binds a host task to the connection it was decided on; FALSE
+    DecideOnceAtStart,  \* the backend is decided once, when no profile is live for the
+                        \* task (Routing.for_request, routing.ex:40-46), and a host task is
+                        \* bound to the connection it was decided on and refused on any
+                        \* other (HostServer.check_host, host_server.ex:417-430); FALSE
                         \* re-decides before every step
-    LastReportWins,     \* HostServer keeps the host's last availability report and reads
-                        \* it at the decision, with no probe; FALSE keeps the first
-                        \* report after the attach
-    SingleLaunch,       \* a task that finds a launch already pending waits on it; FALSE
-                        \* launches again
+    LastReportWins,     \* HostAvailability keeps the host's last report and hands it back
+                        \* with no probe (report/3, current/1, host_availability.ex:97-100,
+                        \* :72-77); FALSE keeps the first report after the attach
+    SingleLaunch,       \* a task that finds a launch already pending waits on it
+                        \* (HostLauncher.pending?, host_launcher.ex:129); FALSE launches
+                        \* again
     LaunchDeadline,     \* the tasks waiting on a launch decide Chrome when its one
-                        \* deadline passes; FALSE waits for the attach and first report
+                        \* deadline passes (waited_deadline, launched_step,
+                        \* host_launcher.ex:154-158,:134-135); FALSE waits for the attach
+                        \* and first report
     OwnershipRegistry,  \* the host records an owner for every tab: the task that opened
                         \* it, its opener's owner for a popup, the person for their own;
-                        \* release, idle and the caps read it. FALSE ("no registry"):
+                        \* release, idle and the caps read it. Still the app reducer's own
+                        \* state, an unpinned mirror; the engine's own part is the wire
+                        \* field a popup's owner can ride on, tab.list's opener_tab_id
+                        \* (protocol.ex#listed_tab?, BROWSER-3). FALSE ("no registry"):
                         \* the host records only the person's own tabs, and every other
                         \* tab, a popup included, joins one pool that any task's release
                         \* closes; it counts itself idle with no person tab and no
                         \* request waiting
     ReleaseOnce,        \* the host drops a tab's record when it releases or closes it,
-                        \* so a second release of the same task finds nothing
+                        \* so a second release of the same task finds nothing (app-side,
+                        \* unpinned; the engine's own release is already idempotent by
+                        \* construction, see ReleaseOnce's needs check and BROWSER-2)
     PersonCannotCloseTaskTab, \* the host refuses the person's close of a tab the
-                        \* registry gives to a task
+                        \* registry gives to a task (app-side, unpinned)
     TabCaps,            \* tab.open and a popup past TaskCap or GlobalCap are refused
+                        \* (app-side, unpinned; the engine only carries the two numbers on
+                        \* tab.open, task_tab_cap and tab_cap, host_server.ex:184-186)
     StoppingHandshake,  \* on quit an attached host sends host_stopping and holds its
-                        \* quit for the daemon's answer; FALSE quits at once
+                        \* quit for the daemon's answer (app-side, unpinned); the engine's
+                        \* half is answering host.stop_ack behind every release
+                        \* (Connection.host_stopping, connection.ex:270-284, BROWSER-7).
+                        \* FALSE quits at once
     QuitBound,          \* the held quit ends when a bound elapses, answer or not
-    NoChromeRetry       \* a host task the host fails is failed with a sentence; FALSE
-                        \* re-runs it on Chrome
+                        \* (app-side, unpinned)
+    NoChromeRetry       \* a host task the host fails is failed with a sentence, never
+                        \* re-routed to Chrome (HostServer.lose, host_server.ex:434-438),
+                        \* and TurnMarker keeps the rest of its turn off Chrome too (not
+                        \* modelled here, see the header); FALSE re-runs the task on
+                        \* Chrome
 
 VARIABLES
     \* FermixCore.Browser.HostServer and the tasks' browser calls
@@ -198,7 +268,7 @@ Allowed(k) ==
 
 ToHostMsgs ==
     ({"open"} \X Tasks) \cup ({"act"} \X Tasks \X (0..MaxTabs))
-    \cup ({"release"} \X SUBSET Tasks) \cup {<<"stop_ok">>}
+    \cup ({"release"} \X SUBSET Tasks) \cup {<<"stop_ack">>}
 ToDaemonMsgs ==
     {<<"attached">>, <<"stopping">>} \cup ({"avail"} \X {"available", "unavailable"})
     \cup ({"ok"} \X Tasks \X (0..MaxTabs)) \cup ({"err"} \X Tasks)
@@ -324,16 +394,19 @@ Settle(v) ==
 (* FermixCore.Browser.HostServer and the tasks' calls through the backend  *)
 (* boundary                                                               *)
 
-\* A task's first browser call: HostServer decides its backend.
+\* A task's first browser call: decided once, when no profile is live for it
+\* (Routing.for_request, routing.ex:40-46; ProfileManager.backend is nil).
 \*  - An attached host whose report says available runs it, bound to this
-\*    connection. With LastReportWins that is the last report; without, the
-\*    first after the attach.
-\*  - No host attached and launching allowed: the app is launched hidden
-\*    (`open -g`), and the task waits for the attach and the first report
-\*    under one deadline. SingleLaunch: a launch already pending is waited
-\*    on, not repeated.
+\*    connection (HostAvailability.usable?, host_availability.ex:116-119).
+\*    With LastReportWins that is the last report; without, the first after
+\*    the attach.
+\*  - No host attached and launching allowed: HostLauncher opens the app
+\*    hidden (`launch/1`, host_launcher.ex:186-191, `open -g -j -b <bundle>`),
+\*    and the task waits for the attach and the first report under one
+\*    deadline (launch_step, :120-127). SingleLaunch: a launch already
+\*    pending is waited on, not repeated (pending?, :129).
 \*  - Anything else (attached with no report yet, unavailable, stopping, or
-\*    launching not allowed) runs it on Chrome.
+\*    launching not allowed) runs it on Chrome (step, host_launcher.ex:95-105).
 Decide(t) ==
     /\ status[t] = "idle"
     /\ IF HostUsable
@@ -358,28 +431,37 @@ Decide(t) ==
                    personHit, personClosed, idleHit, abandoned, lockGap, popupCounted,
                    quitMidAct, closeRefused, cancelled>>
 
-\* The launch's one deadline passes (HostServer's own timer): every task
-\* waiting on it runs on Chrome.
+\* The launch's one deadline passes (HostLauncher's own clock, recorded
+\* before the app is opened so a task that starts while it comes up finds
+\* the launch pending: `launching`, host_launcher.ex:163-164; `waited_deadline`,
+\* :154-158): every task waiting on it runs on Chrome.
 Deadline ==
     /\ LaunchDeadline /\ launching > 0
     /\ launching' = 0
     /\ Settle("none")
     /\ UNCHANGED <<pc, busy, ttab, attached, dgen, cache, launchOk, wire, host, truth, obs>>
 
-\* Where t's next step goes. DecideOnceAtStart: where it was decided.
-\* Without it the step re-decides from what HostServer knows now, and
-\* NoChromeRetry still refuses Chrome to a task once routed to the host.
+\* Where t's next step goes. DecideOnceAtStart: where it was decided --
+\* route[t] never changes once set, because Routing.for_request only
+\* re-decides when no profile is live (routing.ex:42-45) and a live host
+\* profile's task is refused on any other connection (check_host,
+\* host_server.ex:417-430). Without it the step re-decides from what
+\* HostServer knows now, and NoChromeRetry still refuses Chrome to a task
+\* once routed to the host.
 Resolve(t) ==
     IF DecideOnceAtStart THEN route[t]
     ELSE IF HostUsable THEN "host"
     ELSE IF NoChromeRetry /\ decGen[t] /= 0 THEN "fail"
     ELSE "chrome"
 
-\* A running task takes its next step through the backend boundary:
-\*  - on the host, its next request (tab.open, then page.act on its tab),
-\*    and it waits for the answer; with the script done it completes and
-\*    HostServer sends task.release for it;
-\*  - on Chrome, managed Chrome runs the rest of it and completes.
+\* A running task takes its next step through the backend boundary
+\* (HostServer.operate/ensure_task, host_server.ex:376-385):
+\*  - on the host, its next request (tab.open, then page.act on its tab,
+\*    `request`, :449-462), and it waits for the answer; with the script
+\*    done it completes and HostServer releases it (`Link.release`,
+\*    `stop`, :107-129, BROWSER-1/2's `task.release`);
+\*  - on Chrome, managed Chrome runs the rest of it and completes (not this
+\*    spec's, see the header).
 TaskStep(t) ==
     /\ Running(t) /\ ~busy[t]
     /\ LET r == Resolve(t) IN
@@ -410,17 +492,29 @@ TaskStep(t) ==
                    closeRefused, cancelled>>
 
 \* HostServer takes the next answer or event from the host.
-\*  - attached: the connection is live, with no report yet.
-\*  - availability: kept (LastReportWins), then the tasks waiting on a
-\*    launch decide on it, and on unavailable every task bound to this
-\*    host ends (EndHostTasks) with task.release. After host_stopping the
-\*    host is stopping for good and a report changes nothing.
+\*  - attached: the connection is live, with no report yet (Connection.attach,
+\*    connection.ex:242-252; HostAvailability.attached, host_availability.ex:
+\*    206-217, clearing any earlier connection's report, quit and launch).
+\*  - availability: kept (LastReportWins; HostAvailability.report, :163-169,
+\*    ignored once stopping -- BROWSER-5), then the tasks waiting on a launch
+\*    decide on it, and on unavailable every task bound to this host ends
+\*    (EndHostTasks) with task.release -- this folds into one step what the
+\*    real code discovers lazily, at each such task's own next check_host
+\*    (host_server.ex:417-430); both orders (one more host step slips through,
+\*    or none does) are still explored, since TaskStep and DaemonRecv race
+\*    freely. After host_stopping the host is stopping for good and a report
+\*    changes nothing (BROWSER-5).
 \*  - ok: the task's step is done; a late answer for a task that ended is
-\*    dropped. error: the task fails with a sentence and its tabs are
-\*    released.
-\*  - host_stopping: in one callback every task bound to this host ends,
-\*    task.release goes for them, launching is no longer allowed (the
-\*    person quit the app), and the answer is sent.
+\*    dropped (`request`, host_server.ex:449-462). error: the task fails
+\*    with a sentence and its tabs are released (`host_error`, :466-475).
+\*  - stopping: in one callback every task bound to this host ends and
+\*    task.release goes for it -- the app side of the handshake and its own
+\*    release loop are Connection.host_stopping (connection.ex:270-284,
+\*    BROWSER-1/7); HostServer's own end of each task is `lose`/`stop`
+\*    (host_server.ex:434-438,:107-129) on `{:browser_host_stopping, _}`
+\*    (:146-150) -- launching is no longer allowed (the person quit the app),
+\*    and the answer, host.stop_ack, is sent behind every release
+\*    (connection.ex:283, protocol.ex "host.stop_ack").
 DaemonRecv ==
     /\ toDaemon /= <<>>
     /\ LET m == Head(toDaemon) IN
@@ -470,7 +564,7 @@ DaemonRecv ==
                  LET S == IF DecideOnceAtStart THEN HostTasks(dgen) ELSE {} IN
                  /\ cache' = "stopping" /\ launchOk' = FALSE
                  /\ EndHostTasks(S)
-                 /\ Send(ReleaseFor(S) \o <<<<"stop_ok">>>>)
+                 /\ Send(ReleaseFor(S) \o <<<<"stop_ack">>>>)
                  /\ UNCHANGED <<tgen, decGen, pc, ttab, attached, dgen, launching, lastRecv,
                                 badDecision>>
     /\ UNCHANGED <<conn, gen, host, truth, hostGen, hostRan, withoutHost, chromeStep, personHit,
@@ -478,10 +572,12 @@ DaemonRecv ==
                    closeRefused, cancelled>>
 
 \* The connection's :DOWN, once everything the host wrote before it closed
-\* was read. DecideOnceAtStart: every task bound to it fails (no release:
-\* there is no socket; the host released on losing the daemon, or died).
-\* Without it, only a task with a request out fails (its call returns an
-\* error); the rest re-decide at their next step.
+\* was read (Connection owns the socket, so its exit closes the fd on every
+\* path; HostServer watches it, `handle_message` on `{:DOWN, connection_ref,
+\* ...}`, host_server.ex:140-144, `lose`, :434-438). DecideOnceAtStart: every
+\* task bound to it fails (no release: there is no socket; the host released
+\* on losing the daemon, or died). Without it, only a task with a request out
+\* fails (its call returns an error); the rest re-decide at their next step.
 DaemonDown ==
     /\ attached /\ ~conn /\ toDaemon = <<>>
     /\ attached' = FALSE /\ cache' = "none"
@@ -494,8 +590,10 @@ DaemonDown ==
           /\ busy' = [t \in Tasks |-> IF t \in S THEN FALSE ELSE busy[t]]
     /\ UNCHANGED <<tgen, decGen, pc, ttab, dgen, launching, launchOk, wire, host, truth, obs>>
 
-\* The person cancels a task that has not ended. A host task's tabs are
-\* released; a waiting task simply stops waiting.
+\* The person cancels a task that has not ended: the turn (its caller) ends,
+\* which is the same :DOWN a crash would send (`handle_message` on
+\* `{:DOWN, caller_ref, ...}`, host_server.ex:137-138, `stop`, :107-129). A
+\* host task's tabs are released; a waiting task simply stops waiting.
 PersonCancel(t) ==
     /\ left["cancel"] > 0 /\ status[t] \in {"waiting", "running"}
     /\ left' = [left EXCEPT !["cancel"] = 0]
@@ -513,8 +611,16 @@ PersonCancel(t) ==
 (* The Mac app: BrowserHostReducer (an unpinned mirror, see the header)    *)
 
 \* The app connects: the hello handshake, then `attached` and its first
-\* availability report, in one reducer step. A new connection waits for
-\* HostServer to have taken the last one's :DOWN (see the header).
+\* availability report, in one reducer step (two real frames, PROTOCOL.md's
+\* "Handshake and attach"; the daemon's side of each is Connection.attach,
+\* connection.ex:242-252, and .availability, :256-266 -- folded into one step
+\* here because nothing can act differently in the gap: HostAvailability
+\* treats "attached, no report yet" the same whichever of the two just
+\* landed). A new connection waits for HostServer to have taken the last
+\* one's :DOWN: Endpoint refuses a second client outright while one is
+\* attached (accept_connection, endpoint.ex:209-219, `host_already_attached`)
+\* rather than queuing it, so this is the code, not a simplification (see the
+\* header).
 Attach ==
     /\ app = "starting" /\ ~conn /\ ~attached /\ toDaemon = <<>>
     /\ app' = "up" /\ conn' = TRUE /\ gen' = gen + 1
@@ -548,10 +654,17 @@ HostAct(t, i) ==
     /\ hostRan' = [hostRan EXCEPT ![t] = @ \/ ~refused]
     /\ UNCHANGED <<tab, reg, views, own, popup, popupCounted>>
 
-\* The host takes the next request. tab.open and page.act are host steps of
-\* their task (recorded for NoTaskWithoutHost). task.release releases the
-\* named tasks' tabs. The answer to host_stopping ends the held quit: the
-\* app detaches and exits, its remaining tabs with it.
+\* The host takes the next request. What is on `toHost` is what the daemon's
+\* Connection wrote for it, in the order its one process took requests and
+\* releases off its own mailbox (task_request, bind_task, release_task,
+\* write_request, connection.ex:328-394 -- BROWSER-1's fix: a release can
+\* never overtake a request the same task sent before it). tab.open and
+\* page.act are host steps of their task (recorded for NoTaskWithoutHost).
+\* task.release releases the named tasks' tabs (idempotent: BROWSER-2). The
+\* answer to host_stopping (host.stop_ack, written behind every release,
+\* connection.ex:283) ends the held quit: the app detaches and exits, its
+\* remaining tabs with it. The app's own ok/error reply to host.stop_ack is
+\* not modelled: nothing reads it.
 HostRecv ==
     /\ conn /\ toHost /= <<>>
     /\ LET m == Head(toHost) IN
@@ -566,7 +679,7 @@ HostRecv ==
                  /\ ReleaseTabs(UNION {TaskRelease(t) : t \in m[2]})
                  /\ UNCHANGED <<toDaemon, conn, app, views, quit, own, popup, hostGen,
                                 hostRan, withoutHost, popupCounted, abandoned>>
-            [] m[1] = "stop_ok" ->
+            [] m[1] = "stop_ack" ->
                  /\ app' = "off" /\ conn' = FALSE /\ quit' = "done"
                  /\ tab' = [i \in TabIds |-> IF Live(i) THEN "died" ELSE tab[i]]
                  /\ reg' = [i \in TabIds |-> "nobody"] /\ views' = "cold"
@@ -684,7 +797,10 @@ PersonCloseTab(i) ==
 
 \* A page in live tab i opens a popup. The registry gives it i's owner
 \* (no registry: the pool), and the caps count it: at the cap it is blocked
-\* (window.open returns null).
+\* (window.open returns null). App-side and still unpinned (BROWSER-3); the
+\* engine's own part of this finding is the wire the app can now report it
+\* over, tab.list's opener_tab_id (protocol.ex#listed_tab?), which this step
+\* has no need to read since it already knows own[i] as ground truth.
 Popup(i) ==
     /\ left["popup"] > 0 /\ app /= "off" /\ Live(i)
     /\ left' = [left EXCEPT !["popup"] = 0]
@@ -845,7 +961,10 @@ QuitNeverAbandons == (quit /= "no") ~> QuitSettled
 IdleReleaseSparesTaskTabs == ~idleHit
 
 \* The owner's rule, "identify early, never retry with Chrome". Read as: a
-\* task that ran a step on the host never runs a step on Chrome.
+\* task that ran a step on the host never runs a step on Chrome. Proved here
+\* by NoChromeRetry alone (check 05); the code adds TurnMarker on top, which
+\* this property cannot see because it is stated per Task, not per turn --
+\* see the header's "Not modelled" for why no needs check exists for it.
 NoChromeAfterHostFailure == \A t \in Tasks : ~(hostRan[t] /\ chromeStep[t])
 
 -----------------------------------------------------------------------------
