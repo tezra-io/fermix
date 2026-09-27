@@ -29,7 +29,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionControl
+  alias FermixCore.Realtime.SessionSupervisor
 
   @moduletag :capture_log
 
@@ -281,28 +283,228 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     assert Registry.lookup(Voice.registry(), call_id) == []
   end
 
+  # The companion's connection (`LocalVoiceSocket`'s handler) drives the session
+  # through `SessionControl`, and on this rail a cancel or a hang-up reaches the
+  # Queue's conversation stop, which answers only once the Queue is free. The
+  # Queue is held suspended only until the session's stop is seen waiting in its
+  # mailbox: no test waits out a production call budget. What tells a wait with
+  # no budget from a budget not used up yet is the call itself, so each test
+  # traces the handler's call and reads the timeout it carries.
+  describe "a voice connection whose Queue is busy" do
+    setup :start_voice_socket
+
+    test "a cancel waits for the Queue's stop and the connection keeps the call", ctx do
+      %{conn: conn, session: session, handler: handler} = open_call(ctx)
+      trace_calls(call_trace(), handler)
+
+      :ok = :sys.suspend(ctx.queue)
+      send_line(conn, %{type: "task_cancel", delegation_id: "dg_1"})
+      assert eventually(fn -> queued_stop?(ctx.queue, session) end, 250)
+      :ok = :sys.resume(ctx.queue)
+
+      assert recv_frame(conn, &task_frame?(&1, "dg_1", "cancelled"))
+      assert Process.alive?(handler)
+
+      # The same connection still carries the call.
+      send_line(conn, %{type: "mute", enabled: true})
+      assert recv_frame(conn, &(&1 == %{"type" => "state", "state" => "muted"}))
+
+      assert call_timeout(handler, :cancel_task) == :infinity
+      hang_up(conn, session)
+    end
+
+    test "a hang-up waits for the Queue's stop and idle is the call's last frame", ctx do
+      %{conn: conn, session: session, handler: handler} = open_call(ctx)
+      trace_calls(call_trace(), handler)
+
+      :ok = :sys.suspend(ctx.queue)
+      send_line(conn, %{type: "call_stop"})
+      assert eventually(fn -> queued_stop?(ctx.queue, session) end, 250)
+      :ok = :sys.resume(ctx.queue)
+
+      # The session's own frames come first. The handler's idle follows them,
+      # written once `call_stop` returned and the session was gone.
+      assert recv_frame(conn, &task_frame?(&1, "dg_1", "cancelled"))
+      assert recv_frame(conn, &match?(%{"type" => "usage", "accounting" => "complete"}, &1))
+      assert recv_frame(conn, &(&1 == %{"type" => "state", "state" => "idle"}), 1)
+      refute Process.alive?(session), "the connection said idle while the call was settling"
+      assert Process.alive?(handler)
+
+      assert call_timeout(handler, :call_stop) == :infinity
+      :ok = :gen_tcp.close(conn)
+    end
+
+    # The provider drops the call, and the session's settle waits on the Queue.
+    # A cancel the companion sends meanwhile waits behind that settle, and the
+    # session stops instead of answering it.
+    test "a session that ends while a cancel waits closes the connection cleanly", ctx do
+      %{conn: conn, session: session, handler: handler} = open_call(ctx)
+      handler_ref = Process.monitor(handler)
+
+      :ok = :sys.suspend(ctx.queue)
+      send(session, {:openai_live_event, {:session_closed, "gone", @closed_seconds}})
+      assert eventually(fn -> queued_stop?(ctx.queue, session) end, 250)
+      send_line(conn, %{type: "task_cancel", delegation_id: "dg_1"})
+      assert eventually(fn -> queued_call?(session, handler, {:cancel_task, "dg_1"}) end, 250)
+      :ok = :sys.resume(ctx.queue)
+
+      # What the session said before it stopped still reaches the companion,
+      # then the connection's own error, then the close.
+      assert recv_frame(conn, &match?(%{"type" => "usage", "accounting" => "complete"}, &1))
+      assert %{"reason" => reason} = recv_frame(conn, &match?(%{"type" => "error"}, &1))
+      assert reason =~ "session_down"
+      assert {:error, :closed} = :gen_tcp.recv(conn, 0, 5_000)
+      assert_receive {:DOWN, ^handler_ref, :process, ^handler, :normal}, 5_000
+    end
+  end
+
   # --- Helpers ---
 
   defp start_session do
-    {:ok, session} =
-      LiveSessionServer.start_link(
-        companion: self(),
-        config: live_config(),
-        api_key: "sk-test",
-        device_id: "device-1",
-        session_scope: "voice_live:#{System.unique_integer([:positive, :monotonic])}",
-        live_client: FakeLiveClient,
-        voice_bridge: QueueBoundBridge,
-        prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
-        clock: fn -> 0 end,
-        unix_clock: fn -> 1_000 end,
-        usage_tick_ms: 60_000
-      )
+    {:ok, session} = LiveSessionServer.start_link([companion: self()] ++ live_session_opts())
 
     # Registered AFTER the bridge binding's cleanup, so it runs BEFORE it
     # (on_exit is LIFO): the fakes outlive the call they served.
     on_exit(fn -> await_down(session) end)
     session
+  end
+
+  defp live_session_opts do
+    [
+      config: live_config(),
+      api_key: "sk-test",
+      device_id: "device-1",
+      session_scope: "voice_live:#{System.unique_integer([:positive, :monotonic])}",
+      live_client: FakeLiveClient,
+      voice_bridge: QueueBoundBridge,
+      prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
+      clock: fn -> 0 end,
+      unix_clock: fn -> 1_000 end,
+      usage_tick_ms: 60_000
+    ]
+  end
+
+  # The production listener, starting each call's session under a
+  # `SessionSupervisor` as the default starter does, with this module's fakes.
+  defp start_voice_socket(_ctx) do
+    unique = System.unique_integer([:positive])
+    socket_path = Path.join(System.tmp_dir!(), "fermix-voice-e2e-#{unique}.sock")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm(socket_path) end)
+    test_pid = self()
+
+    starter = fn opts ->
+      {:ok, session} =
+        SessionSupervisor.start_session(
+          Keyword.fetch!(opts, :session_supervisor),
+          Keyword.put(opts, :engine_module, LiveSessionServer)
+        )
+
+      send(test_pid, {:session_started, session, Keyword.fetch!(opts, :companion)})
+      {:ok, session}
+    end
+
+    start_supervised!(
+      {LocalVoiceSocket,
+       socket_path: socket_path,
+       name: :"voice_e2e_socket_#{unique}",
+       task_supervisor: start_supervised!({Task.Supervisor, []}, id: :voice_e2e_socket_tasks),
+       session_supervisor:
+         start_supervised!({SessionSupervisor, name: :"voice_e2e_sessions_#{unique}"}),
+       session_starter: starter,
+       session_opts: live_session_opts()}
+    )
+
+    %{socket_path: socket_path}
+  end
+
+  # A companion connection with one delegation running as an agent turn.
+  defp open_call(ctx) do
+    {:ok, conn} =
+      :gen_tcp.connect(
+        {:local, String.to_charlist(ctx.socket_path)},
+        0,
+        [:binary, active: false, packet: :line],
+        1_000
+      )
+
+    send_line(conn, %{type: "client_hello", protocol_version: 2})
+    assert recv_frame(conn, &match?(%{"type" => "server_hello"}, &1))
+    send_line(conn, %{type: "call_start"})
+    assert_receive {:session_started, session, handler}, 5_000
+    # `call_start` has been handled once the session holds its provider socket.
+    assert eventually(fn -> LiveSessionServer.live_pid(session) != nil end, 250)
+
+    open_provider_session(session)
+    assert recv_frame(conn, &match?(%{"type" => "call_ready"}, &1))
+    speak(session, @spoken, 1_000, 4_000)
+    delegate(session, "dg_1", 4_200)
+    assert_receive {:turn_started, _msg, _turn_pid}, 5_000
+    assert recv_frame(conn, &task_frame?(&1, "dg_1", "running"))
+
+    %{conn: conn, session: session, handler: handler}
+  end
+
+  defp hang_up(conn, session) do
+    ref = Process.monitor(session)
+    send_line(conn, %{type: "call_stop"})
+    assert_receive {:DOWN, ^ref, :process, ^session, {:shutdown, :call_stop}}, 5_000
+    :ok = :gen_tcp.close(conn)
+  end
+
+  defp send_line(conn, event), do: :ok = :gen_tcp.send(conn, Jason.encode!(event) <> "\n")
+
+  # The next frame on `conn` that `wanted?` accepts, skipping the ones before it.
+  defp recv_frame(conn, wanted?, skips \\ 50)
+  defp recv_frame(_conn, _wanted?, 0), do: flunk("no matching frame on the voice connection")
+
+  defp recv_frame(conn, wanted?, skips) do
+    case :gen_tcp.recv(conn, 0, 5_000) do
+      {:ok, line} ->
+        frame = Jason.decode!(line)
+        if wanted?.(frame), do: frame, else: recv_frame(conn, wanted?, skips - 1)
+
+      {:error, reason} ->
+        flunk("the voice connection ended: #{inspect(reason)}")
+    end
+  end
+
+  defp task_frame?(frame, id, status),
+    do: match?(%{"type" => "task", "delegation_id" => ^id, "status" => ^status}, frame)
+
+  # The session's conversation stop is in the Queue's mailbox, waiting.
+  defp queued_stop?(queue, session) do
+    {:messages, messages} = Process.info(queue, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^session, _}, {:stop_conversation, _key}}, &1))
+  end
+
+  # `from`'s call carrying `request` is in `pid`'s mailbox, waiting.
+  defp queued_call?(pid, from, request) do
+    {:messages, messages} = Process.info(pid, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^from, _}, ^request}, &1))
+  end
+
+  # A trace session of this test's own on `GenServer.call/3`, local calls
+  # included, so `call/2`'s default timeout shows too. No other tracer sees
+  # it, and it ends with the test.
+  defp call_trace do
+    session = :trace.session_create(:voice_e2e_calls, self(), [])
+    on_exit(fn -> :trace.session_destroy(session) end)
+    1 = :trace.function(session, {GenServer, :call, 3}, true, [:local])
+    session
+  end
+
+  defp trace_calls(session, pid), do: 1 = :trace.process(session, pid, true, [:call])
+
+  # The timeout `pid`'s traced call carried, for the request `tag` or tagged
+  # `tag`.
+  defp call_timeout(pid, tag) do
+    receive do
+      {:trace, ^pid, :call, {GenServer, :call, [_server, request, timeout]}}
+      when request == tag or (is_tuple(request) and elem(request, 0) == tag) ->
+        timeout
+    after
+      5_000 -> flunk("#{inspect(pid)} made no traced #{inspect(tag)} call")
+    end
   end
 
   defp live_config do

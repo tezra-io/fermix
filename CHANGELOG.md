@@ -135,6 +135,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   blocks connections to the cloud instance-metadata addresses. On a cloud VM, a
   cloud CLI the agent runs under a system daemon then needs the documented
   drop-in to use the instance's role credentials.
+- **A busy moment no longer loses a reply.** When the conversation store was
+  slow, for example during a `/stop`, a turn that had already finished could
+  drop its reply without a word and leave the app or client waiting forever.
+  Replies now wait for the busy moment to pass. Cancelling from an ACP client
+  while its queue restarts answers the prompt instead of dropping the
+  connection, a crashed ACP turn is no longer reported as a sign-in problem,
+  and a voice cancel or hang-up waits for the stop instead of dropping the
+  call after 5 seconds.
 
 ## [0.11.0] - 2026-09-23
 

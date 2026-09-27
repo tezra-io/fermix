@@ -72,7 +72,9 @@ defmodule FermixChannels.Channels.Acp.Peer do
   failed turn, and the session accepts its next prompt. Closing a turn drops
   its monitor (flushing a `:DOWN` already queued), and the wire fence drops a
   result that arrives after the `:DOWN` answered: one answer per prompt still.
-  A prompt that finds no Queue running is refused at once.
+  A prompt that finds no Queue running is refused at once. A cancel goes to the
+  same process; one that finds it gone answers a `session/cancel` as
+  `cancelled` and closes the turn, so its `:DOWN` answers nothing more.
   """
 
   use GenServer, restart: :temporary
@@ -575,8 +577,8 @@ defmodule FermixChannels.Channels.Acp.Peer do
     handle_ingest(result, session, request_id, state)
   end
 
-  defp handle_ingest({:ok, queue_ref}, session, _request_id, state),
-    do: put_session(state, Session.put_queue_ref(session, queue_ref))
+  defp handle_ingest({:ok, queue, queue_ref}, session, _request_id, state),
+    do: put_session(state, Session.put_queue_ref(session, queue, queue_ref))
 
   # The turn will never run, so nothing else can answer this request: close it
   # here rather than leave the client waiting on its idle timer.
@@ -599,7 +601,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
     end
   end
 
-  defp watch_queue(:ok, queue), do: {:ok, Process.monitor(queue)}
+  defp watch_queue(:ok, queue), do: {:ok, queue, Process.monitor(queue)}
   defp watch_queue({:error, _reason} = error, _queue), do: error
 
   defp ingest(message, queue, state) do
@@ -687,8 +689,18 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   defp cancel_session(session_id, state) do
     case Map.get(state.sessions, session_id) do
-      %Session{turn: turn} = session when is_map(turn) -> stop_turn(session, state)
+      %Session{turn: turn} = session when is_map(turn) -> cancel_turn(session, state)
       _idle_or_unknown -> log_idle_cancel(session_id, state)
+    end
+  end
+
+  # A Queue that is gone took the turn with it, so nothing will send its
+  # result: the prompt the client cancelled is answered `cancelled` here, and
+  # closing the turn flushes that Queue's `:DOWN`, so it is answered once.
+  defp cancel_turn(session, state) do
+    case stop_turn(session) do
+      :stopped -> state
+      :queue_gone -> apply_turn_result(session, {:cancelled}, state)
     end
   end
 
@@ -697,18 +709,28 @@ defmodule FermixChannels.Channels.Acp.Peer do
     state
   end
 
-  # Stops the conversation and returns: the Queue answers with `{:cancelled}`
-  # through the turn-result callback, and THAT writes the terminal response, so
-  # there is exactly one place a prompt is answered from.
+  # Stops the conversation in the Queue the turn was handed to and returns: the
+  # Queue answers with `{:cancelled}` through the turn-result callback, and THAT
+  # writes the terminal response, so there is exactly one place a prompt is
+  # answered from.
   #
   # A cancel that races an enqueue the Queue has not processed yet finds nothing
   # to stop; the turn then completes normally and answers `end_turn`. A turn
   # that already claimed its outcome is likewise left to answer with it. That is
   # the truth of what happened, so it is left alone rather than papered over.
-  defp stop_turn(%Session{} = session, state) do
+  #
+  # The stop waits for the Queue's answer, however busy it is: the Queue's
+  # callbacks are bounded. A Queue that is already gone (`:noproc`) took the
+  # turn with it, and its `:DOWN` is in this mailbox: `:queue_gone`, and the
+  # caller decides what, if anything, answers the prompt.
+  defp stop_turn(%Session{} = session) do
     Logger.info("ACP cancelling the turn in flight for #{session.id}")
-    _ = Queue.stop_conversation(conversation_key(session.id), state.agent_server)
-    state
+    _ = Queue.stop_conversation(conversation_key(session.id), Session.queue(session))
+    :stopped
+  catch
+    :exit, {:noproc, _call} ->
+      Logger.warning("ACP cancel for #{session.id}: the Queue that held its turn is gone")
+      :queue_gone
   end
 
   # Only a `session/prompt` can be outstanding: every other request is answered
@@ -722,8 +744,9 @@ defmodule FermixChannels.Channels.Acp.Peer do
   end
 
   defp cancel_prompt_request(session, request_id, state) do
-    session
-    |> stop_turn(state)
+    _ = stop_turn(session)
+
+    state
     |> close_turn(session)
     |> write(Wire.encode_error(request_id, Wire.request_cancelled()))
   end
@@ -912,6 +935,11 @@ defmodule FermixChannels.Channels.Acp.Peer do
   # tasks). Its stack frames and exception text must not read as one.
   defp auth_failure?({:queue_down, _exit_reason}), do: false
 
+  # So is a crashed turn's: its task raised or exited. A provider's credential
+  # refusal is never raised; it comes back as a typed error the turn returns,
+  # so a crash whose reason happens to contain "401" (a line, a pid) is not one.
+  defp auth_failure?({:crashed, _exit_reason}), do: false
+
   defp auth_failure?(reason) do
     text = reason |> inspect() |> String.downcase()
     Enum.any?(@auth_markers, &String.contains?(text, &1))
@@ -1014,14 +1042,14 @@ defmodule FermixChannels.Channels.Acp.Peer do
   # client-owned session is gone, so nothing could receive their replies.
   # Registry entries deregister automatically when this process exits.
   defp teardown(state) do
-    Enum.each(state.sessions, fn {_id, session} -> stop_open_turn(session, state) end)
+    Enum.each(state.sessions, fn {_id, session} -> stop_open_turn(session) end)
     state
   end
 
-  defp stop_open_turn(%Session{turn: turn} = session, state) when is_map(turn) do
-    _ = stop_turn(session, state)
+  defp stop_open_turn(%Session{turn: turn} = session) when is_map(turn) do
+    _ = stop_turn(session)
     :ok
   end
 
-  defp stop_open_turn(%Session{}, _state), do: :ok
+  defp stop_open_turn(%Session{}), do: :ok
 end

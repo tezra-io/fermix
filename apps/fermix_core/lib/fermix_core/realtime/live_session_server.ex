@@ -204,6 +204,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {:reply, :ok, state}
   end
 
+  # `SessionControl` waits for `cancel_task` and `call_stop` with no timeout, so
+  # both must stay bounded. A cancel is one bridge cancel (the Queue's
+  # conversation stop, however long a busy Queue takes to reach it) and then the
+  # next delegation's submit. A stop is `settle/2`: at most one bridge cancel
+  # (only the active delegation reached the bridge), the bridge close (one more
+  # stop and the call store's release), and the graceful close: one send, then
+  # at most `close_deadline_ms` waiting for `session.closed`. The stop's reply
+  # goes out after `terminate/2`, so the wait covers that too: it cancels
+  # timers, finds the bridge call already closed, and casts the socket close.
   def handle_call({:cancel_task, delegation_id}, _from, state) do
     case LiveDelegation.fetch(state.delegations, delegation_id) do
       {:ok, record} -> {:reply, :ok, start_next(cancel_delegation(state, record))}

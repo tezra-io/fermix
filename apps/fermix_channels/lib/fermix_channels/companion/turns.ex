@@ -61,13 +61,19 @@ defmodule FermixChannels.Companion.Turns do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
   end
 
+  # Every call into this process waits with no timeout, because every callback
+  # here is bounded: its store calls end within their own timeouts, and a stop
+  # waits on the queue, whose callbacks are bounded (`Gateway.Queue`'s client
+  # API note). A slow stop then delays the socket that asked and the turns that
+  # reply meanwhile, instead of crashing them.
+
   @doc """
   The Gateway's agent contract (`agent.handle_message(message, agent_server)`):
   hand the turn to the queue and track it, unless its request carries a cancel.
   """
   @spec handle_message(map(), GenServer.server()) :: :ok | {:error, term()}
   def handle_message(message, queue) when is_map(message) do
-    GenServer.call(__MODULE__, {:hand_off, message, queue})
+    GenServer.call(__MODULE__, {:hand_off, message, queue}, :infinity)
   end
 
   @doc """
@@ -78,19 +84,19 @@ defmodule FermixChannels.Companion.Turns do
   @spec cancel(String.t(), String.t(), GenServer.server()) :: :ok
   def cancel(profile_id, client_msg_id, server \\ __MODULE__)
       when is_binary(profile_id) and is_binary(client_msg_id) do
-    GenServer.call(server, {:cancel, profile_id, client_msg_id})
+    GenServer.call(server, {:cancel, profile_id, client_msg_id}, :infinity)
   end
 
   @doc "Hold one reply of a tracked turn, or write it now for anything else."
   @spec reply(Message.t(), String.t()) :: :ok | {:error, term()}
   def reply(%Message{} = message, text) when is_binary(text) do
-    GenServer.call(__MODULE__, {:reply, message, text})
+    GenServer.call(__MODULE__, {:reply, message, text}, :infinity)
   end
 
   @doc "End a tracked turn on the wire from the queue's outcome."
   @spec outcome(Message.t(), term()) :: :ok | {:error, term()}
   def outcome(%Message{} = message, outcome) do
-    GenServer.call(__MODULE__, {:outcome, message, outcome})
+    GenServer.call(__MODULE__, {:outcome, message, outcome}, :infinity)
   end
 
   @impl true
@@ -116,14 +122,8 @@ defmodule FermixChannels.Companion.Turns do
   # reach the queue ahead of the turn it names.
   def handle_call({:cancel, profile, client_id}, _from, state) do
     case Map.get(state.turns, {profile, client_id}) do
-      nil ->
-        {:reply, :ok, state}
-
-      turn ->
-        {:ok, _stopped} =
-          Queue.stop_turn(Companion.conversation_key(profile), client_id, turn.queue)
-
-        {:reply, :ok, state}
+      nil -> {:reply, :ok, state}
+      turn -> {:reply, stop_in_queue(profile, client_id, turn.queue), state}
     end
   end
 
@@ -184,6 +184,22 @@ defmodule FermixChannels.Companion.Turns do
     with {:ok, request} <- store(state).get_client_request(turn.profile, turn.client_id, []) do
       {:ok, not is_nil(Map.get(request, :cancelled_at))}
     end
+  end
+
+  # The queue the turn was handed to answers the stop, however busy it is. One
+  # that is already gone (`:noproc`) took the turn with it, and its `:DOWN`,
+  # already on its way here, ends the turn as `interrupted`.
+  defp stop_in_queue(profile, client_id, queue) do
+    {:ok, _stopped} = Queue.stop_turn(Companion.conversation_key(profile), client_id, queue)
+    :ok
+  catch
+    :exit, {:noproc, _call} ->
+      Logger.warning(
+        "companion cancel of #{client_id}: the queue that held its turn is gone; " <>
+          "its :DOWN ends the turn"
+      )
+
+      :ok
   end
 
   defp new_turn(message, queue) do

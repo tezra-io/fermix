@@ -30,8 +30,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # a v1 companion (it may run the Realtime engine); this is the floor for a
   # Live CALL, and the number the refusal reports as `min_version`.
   @live_min_protocol_version 2
-  # How many queued companion frames a refused `call_start` drains before it
-  # gives up and renders the refusal itself. A refusal queues a handful.
+  # How many queued companion frames the handler writes ahead of its own last
+  # word on a call (a refusal, a session-down error, a hang-up's `idle`) before
+  # it gives up and writes that word. A session queues a handful.
   @max_flushed_frames 64
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -543,9 +544,13 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   # `call_stop` ends the CALL but keeps the CONNECTION open for a fresh one, so
   # the handler tears the session down itself and unbinds it from the listener
-  # (distinct from connection loss, which the listener's monitor handles).
+  # (distinct from connection loss, which the listener's monitor handles). The
+  # session's last frames were sent before it answered, so they are already
+  # queued here: write them first, so `idle` is the call's last frame and a
+  # fresh `call_start` never races the old call's `task` and `usage`.
   defp dispatch_event(%{type: "call_stop"}, state) do
     state = reset_session(state)
+    _error_sent? = flush_queued_frames(state, false, @max_flushed_frames)
     _ = send_event(state.conn, %{type: "state", state: "idle"})
     {:cont, state}
   end
@@ -583,8 +588,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
 
   # Bounded twice over: `after 0` takes only what the session has ALREADY
   # delivered, never waiting on one that is still producing, and the counter caps
-  # a flood. At the cap the drain stops and the caller renders the refusal as
-  # usual — the connection is closing on this path either way.
+  # a flood. At the cap the drain stops and the caller writes its own frame as
+  # usual; on a hang-up the loop writes whatever is left after it.
   defp flush_queued_frames(_state, error_sent?, 0), do: error_sent?
 
   defp flush_queued_frames(state, error_sent?, remaining) do
@@ -600,6 +605,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   defp error_frame?(%{type: "error"}), do: true
   defp error_frame?(_event), do: false
 
+  # The cancel waits with no timeout (`SessionControl`), so its call exits only
+  # when the session stopped instead of answering: a settle it was queued
+  # behind, or a crash. That is the session's death, told the way
+  # `handle_session_down/2` tells it, after what the session queued first.
   defp cancel_task(delegation_id, state) do
     case require_session(state) do
       {:ok, session, state} ->
@@ -612,6 +621,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
       {:error, reason} ->
         send_error_and_stop(reason, state)
     end
+  catch
+    :exit, {reason, {GenServer, :call, _args}} -> flush_then_stop({:session_down, reason}, state)
   end
 
   # A non-integer client_version cannot reach this: every event but
