@@ -25,6 +25,17 @@
 (* at once); memory-source rows, telemetry, the start-up stagger and the   *)
 (* network-readiness wait. An owner edit is modelled as one that touches   *)
 (* none of the modelled columns (a task or delivery edit).                 *)
+(* The access gate is not modelled either. A run's access-sensitive tool   *)
+(* call that its job row does not name is refused inside the one loop      *)
+(* step, since a scheduled run never parks a call for the owner            *)
+(* (access_gate.ex:261-270). An owner edit, resume or run now of a job     *)
+(* naming such a tool, from a turn that could not run it directly, is      *)
+(* refused by the tool before any registry write or Scheduler call         *)
+(* (job_registry_support.ex:33-38): a request the owner never made. Its    *)
+(* job-row read feeds no modelled column. The store of parked              *)
+(* confirmations (AccessGate.Pending, application.ex:221) is one more core *)
+(* child started before the RunnerSupervisor, so its crash is the daemon   *)
+(* crash below.                                                            *)
 (*                                                                         *)
 (* Late writes: a process that dies waiting on a Repo call (a 5 s          *)
 (* GenServer.call timeout, repo.ex:3888-3891) does not cancel the call;    *)
@@ -48,10 +59,10 @@
 (* Run ids are reused once a run is fully finished, so two ids model an    *)
 (* unbounded run history. A daemon crash also stands for a crash of any    *)
 (* core child started before the RunnerSupervisor (Memory.Repo, Trace,     *)
-(* Finch, MainAgent and the rest, application.ex:168-220) or of the        *)
+(* Finch, MainAgent and the rest, application.ex:168-224) or of the        *)
 (* RunnerSupervisor itself: under :rest_for_one each restarts the          *)
 (* RunnerSupervisor with its runners and the Scheduler                     *)
-(* (application.ex:259). A runner's send helper (REMIND-2,                 *)
+(* (application.ex:263). A runner's send helper (REMIND-2,                 *)
 (* channel_send.ex:219-224) and its AgentLoop (JOB-8, runner.ex:979-983)   *)
 (* are linked to it, so the restart kills them too. With                   *)
 (* LoopDiesWithRunner off (the code before JOB-8's fix, an unlinked        *)
@@ -90,7 +101,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/jobs/registry.ex @ 2bdc53628bcc
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 380824457212
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,claim_due_job,claim_job_now,claim_due_job_tx,claim_in_tx,claim_job_now_tx,transact_claim,fetch_claimable_due_job,finish_job_claim,rollback_job_claim,upsert_scheduled_job_row,upsert_job_run_row,ensure_no_active_job_run,fetch_claimable_job,settle_job_run,settle_job_run_tx,settle_job_run_in_tx,ensure_job_run_active,release_settled_job,finish_job_settle,rollback_job_settle,unsettled_job_runs,fetch_unsettled_job_runs,@unsettled_job_runs_sql,update_scheduled_job_fields,update_scheduled_job_fields_row,scheduled_job_field_assignments!,scheduled_job_field_assignment!,@owner_text_fields,due_scheduled_jobs,fetch_due_scheduled_jobs,next_scheduled_job,fetch_next_scheduled_job,upsert_job_run,upsert_scheduled_job,get_job_run,get_scheduled_job,upsert_memory @ 94ec90ea322b
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,jobs_scheduler_opts @ 06fbd1afd4cc
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,jobs_scheduler_opts @ 6d7eabb981a2
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -886,7 +897,7 @@ SchedRestart ==
 \* The Scheduler dies alone, at any point of any callback (a Repo call
 \* timeout exits it wherever it waits), and the call it waited on never
 \* lands. FermixCore.Supervisor is :rest_for_one and starts
-\* JobRunnerSupervisor before JobScheduler (application.ex:220, :227, :259),
+\* JobRunnerSupervisor before JobScheduler (application.ex:224, :231, :263),
 \* so the restart leaves every runner running.
 SchedulerCrash ==
     /\ schedCrashes < SchedulerCrashes

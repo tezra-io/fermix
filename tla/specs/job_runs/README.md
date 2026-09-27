@@ -20,8 +20,8 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:168-220`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:259`). A
+  `application.ex:168-224`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:263`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
@@ -549,6 +549,16 @@ shortest and can change between runs.
   the `RunnerSupervisor`, or of the `RunnerSupervisor` itself. The model
   kills every job process then; with `LoopDiesWithRunner` off, a runner's
   AgentLoop survives it (JOB-8).
+- The access gate is outside the model. A run's access-sensitive tool call
+  that its job row does not name is refused inside the one `Loop` step; a
+  scheduled run never parks a call for the owner (`access_gate.ex:261-270`).
+  An owner edit, resume or run now of a job naming such a tool, from a turn
+  that could not run it directly, is refused by the tool before any registry
+  write or Scheduler call (`job_registry_support.ex:33-38`): a request the owner
+  never made. That check's job-row read feeds no modelled column. The store
+  of parked confirmations (`Capabilities.AccessGate.Pending`,
+  `application.ex:221`) is one more core child started before the
+  `RunnerSupervisor`, so its crash is the daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
   result exists (`scheduler.ex:633`). The final `"none"` of `delivery_mode
   "none"` is modelled as `skipped`.
