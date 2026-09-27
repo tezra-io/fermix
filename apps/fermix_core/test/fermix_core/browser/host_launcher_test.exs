@@ -7,6 +7,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
   @at ~U[2026-09-26 10:00:00Z]
   @timeout 3_000
+  @cooldown 300_000
 
   # ── the table ──────────────────────────────────────────────────────────────
 
@@ -14,34 +15,49 @@ defmodule FermixCore.Browser.HostLauncherTest do
   @silent %HostAvailability{listening: true, attached: true}
   @ready %HostAvailability{@silent | available: true, updated_at: @at}
   @busy %HostAvailability{@silent | reason: "the pane is closed", updated_at: @at}
+  @stopping %HostAvailability{@silent | stopping: true}
+  @quit %HostAvailability{@listening | quit: true, reason: "the app quit"}
+
+  defp clock(launch_app?, remaining_ms, now_ms \\ 0) do
+    %{launch_app?: launch_app?, remaining_ms: remaining_ms, now_ms: now_ms, cooldown_ms: @cooldown}
+  end
 
   test "each row of the decision table" do
     rows = [
-      # host, launched?, launch_app?, remaining ms, step
-      {@ready, false, false, 100, :fermix_app},
-      {@ready, true, true, 0, :fermix_app},
-      {@busy, false, true, 100, {:managed, "the pane is closed"}},
-      {@silent, false, false, 100, :wait},
-      {@silent, true, true, 0,
+      # host, clock, step
+      {@ready, clock(false, 100), :fermix_app},
+      {@ready, clock(true, 0), :fermix_app},
+      {@busy, clock(true, 100), {:managed, "the pane is closed"}},
+      {@stopping, clock(true, 100), {:managed, "the app is quitting"}},
+      {@silent, clock(false, 100), :wait},
+      {@silent, clock(true, 0),
        {:managed, "the app connected but did not report its browser in time"}},
-      {%HostAvailability{}, false, true, 100, {:managed, "nothing in this engine serves it"}},
-      {@listening, false, false, 100, {:managed, "the app is not connected"}},
-      {%{@listening | reason: "the app quit"}, false, false, 100, {:managed, "the app quit"}},
-      {@listening, false, true, 100, :launch},
-      {@listening, true, true, 100, :wait},
-      {@listening, true, true, 0, {:managed, "the app was opened but did not connect in time"}}
+      {%HostAvailability{}, clock(true, 100), {:managed, "nothing in this engine serves it"}},
+      {@listening, clock(false, 100), {:managed, "the app is not connected"}},
+      {@quit, clock(true, 100),
+       {:managed, "the app was quit, and is not opened again until it is started"}},
+      {@listening, clock(true, 100), :launch},
+      {%{@listening | launch_until: 500}, clock(true, 100, 100), :wait},
+      {%{@listening | launch_until: 100}, clock(true, 0, 100),
+       {:managed, "the app was opened but did not connect in time"}},
+      {%{@listening | launch_until: 100}, clock(true, 100, 200),
+       {:managed, "the app was opened but did not connect in time"}},
+      {%{@listening | launch_until: 100}, clock(true, 100, 100 + @cooldown - 1),
+       {:managed, "the app was opened but did not connect in time"}},
+      {%{@listening | launch_until: 100}, clock(true, 100, 100 + @cooldown), :launch}
     ]
 
-    for {host, launched?, launch_app?, remaining, expected} <- rows do
-      assert HostLauncher.step(host, launched?, launch_app?, remaining) == expected,
-             "#{inspect({host, launched?, launch_app?, remaining})}"
+    for {host, clock, expected} <- rows do
+      assert HostLauncher.step(host, clock) == expected, "#{inspect({host, clock})}"
     end
   end
 
   # ── the loop, over an injected launcher and clock ──────────────────────────
 
   defp config(launch_app) do
-    {:ok, config} = Config.current(%{launch_app: launch_app, host_launch_timeout_ms: @timeout})
+    {:ok, config} =
+      Config.current(%{launch_app: launch_app, host_launch_timeout_ms: @timeout})
+
     config
   end
 
@@ -56,9 +72,16 @@ defmodule FermixCore.Browser.HostLauncherTest do
     host
   end
 
+  defp attach(host, connection_id \\ 1) do
+    connection = spawn(fn -> Process.sleep(:infinity) end)
+    on_exit(fn -> Process.exit(connection, :kill) end)
+    :ok = HostAvailability.attached(host, connection, connection_id)
+    connection
+  end
+
   # A millisecond clock that only `sleep` moves, and a sleep that can make the
   # host speak once the clock passes a mark.
-  defp clock(on_tick \\ fn _now -> :ok end) do
+  defp fake_clock(on_tick \\ fn _now -> :ok end) do
     clock = start_supervised!({Agent, fn -> 0 end}, id: make_ref())
 
     now = fn -> Agent.get(clock, & &1) end
@@ -71,7 +94,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
     %{now: now, sleep: sleep}
   end
 
-  defp decide(config, host, launcher, clock \\ clock()) do
+  defp decide(config, host, launcher, clock \\ fake_clock()) do
     HostLauncher.decide(config,
       host_availability: host,
       launcher: launcher,
@@ -91,9 +114,9 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
   test "a host that is ready is used at once, and nothing is opened" do
     ready = listening(host())
-    :ok = HostAvailability.attached(ready)
+    attach(ready)
     :ok = HostAvailability.report(ready, true, nil)
-    clock = clock()
+    clock = fake_clock()
 
     assert decide(config(true), ready, counting_launcher(), clock) == :fermix_app
     refute_received {:launched, _}
@@ -102,7 +125,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
   test "a host that says its pane is not ready is Chrome, and nothing is opened" do
     busy = listening(host())
-    :ok = HostAvailability.attached(busy)
+    attach(busy)
     :ok = HostAvailability.report(busy, false, "the pane is closed")
 
     assert decide(config(true), busy, counting_launcher()) == {:managed, "the pane is closed"}
@@ -128,7 +151,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
     launcher =
       counting_launcher(fn ->
-        :ok = HostAvailability.attached(pane)
+        attach(pane)
         :ok = HostAvailability.report(pane, true, nil)
       end)
 
@@ -140,10 +163,10 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
   test "an app that attaches and reports late is waited for under the one deadline" do
     pane = listening(host())
-    launcher = counting_launcher(fn -> HostAvailability.attached(pane) end)
+    launcher = counting_launcher(fn -> attach(pane) && :ok end)
 
     clock =
-      clock(fn now ->
+      fake_clock(fn now ->
         if now >= 500 and not HostAvailability.reported?(HostAvailability.current(pane)),
           do: HostAvailability.report(pane, true, nil)
       end)
@@ -153,7 +176,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
   end
 
   test "the app is opened once, and the decision gives up at the deadline" do
-    clock = clock()
+    clock = fake_clock()
 
     assert decide(config(true), listening(host()), counting_launcher(), clock) ==
              {:managed, "the app was opened but did not connect in time"}
@@ -165,7 +188,7 @@ defmodule FermixCore.Browser.HostLauncherTest do
 
   test "an app that cannot be opened is Chrome at once, with the reason" do
     launcher = counting_launcher(fn -> {:error, "open exited 1: no such app"} end)
-    clock = clock()
+    clock = fake_clock()
 
     assert decide(config(true), listening(host()), launcher, clock) ==
              {:managed, "the app could not be opened: open exited 1: no such app"}
@@ -179,4 +202,49 @@ defmodule FermixCore.Browser.HostLauncherTest do
     assert decide(config(true), listening(host()), counting_launcher(), stopped) ==
              {:managed, "the app was opened but did not connect in time"}
   end
+
+  # A task that finds a launch already pending waits on that SAME launch's
+  # deadline and never opens the app itself (`SingleLaunch`, BROWSER-3); the
+  # pending launch attaching ends its wait too.
+  test "a task that finds a launch pending gets the task once that launch attaches" do
+    pane = listening(host())
+    :ok = HostAvailability.launching(pane, 500)
+    refuse_launch = fn _timeout_ms -> flunk("must not launch: a launch is already pending") end
+
+    clock =
+      fake_clock(fn now ->
+        if now >= 100, do: attach(pane) && HostAvailability.report(pane, true, nil)
+      end)
+
+    assert decide(config(true), pane, refuse_launch, clock) == :fermix_app
+    assert clock.now.() >= 100 and clock.now.() < 500
+  end
+
+  # BROWSER-8: a task that finds a launch pending waits on that launch's own
+  # deadline, never past its own; only that deadline ends the wait, since a
+  # crashed launch looks identical to a slow one.
+  test "a task that finds a launch pending gives up at that launch's own, sooner, deadline" do
+    pane = listening(host())
+    :ok = HostAvailability.launching(pane, 120)
+    refuse_launch = fn _timeout_ms -> flunk("must not launch: a launch is already pending") end
+    clock = fake_clock()
+
+    assert decide(config(true), pane, refuse_launch, clock) ==
+             {:managed, "the app was opened but did not connect in time"}
+
+    assert clock.now.() >= 120 and clock.now.() < @timeout
+  end
+
+  # BROWSER-8: a launch whose app died before it attached is ended only by the
+  # deadline, and a task that starts within the cooldown afterwards runs on
+  # Chrome without a second launch.
+  test "a launch that never attached is not retried for the cooldown after its deadline" do
+    pane = listening(host())
+    :ok = HostAvailability.launching(pane, 100)
+    clock = %{now: fn -> 101 end, sleep: fn _ms -> flunk("nothing to wait on") end}
+
+    assert decide(config(true), pane, fn _ -> flunk("must not launch again in the cooldown") end, clock) ==
+             {:managed, "the app was opened but did not connect in time"}
+  end
+
 end
