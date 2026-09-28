@@ -114,10 +114,13 @@ arrival order. `task_id` and `tab_id` are opaque strings the app never
 interprets. A request whose `observe` is `true` carries a `snapshot` object
 (`mode`, `max_chars`, `depth`) naming the look the app takes at the page right
 after the request completes; `observe: false` carries no `snapshot`.
+`tab.open`'s `visible` carries the task's own intent, not a look at the page:
+`true` for a task on the visible profile, so the app shows the pane and its
+window for it; absent otherwise.
 
 | `type` | Fields | Result | Notes |
 |---|---|---|---|
-| `tab.open` | `task_id`, `url`, `observe`, `download_dir`, `task_tab_cap`, `tab_cap`; `snapshot?` | `tab_id`, `url`, `title`; `page?` | Opens a tab owned by `task_id`. Refused with `cap_reached` past either cap. |
+| `tab.open` | `task_id`, `url`, `observe`, `download_dir`, `task_tab_cap`, `tab_cap`; `snapshot?`, `visible?` | `tab_id`, `url`, `title`; `page?` | Opens a tab owned by `task_id`. Refused with `cap_reached` past either cap. `visible: true` for a task on the visible profile, so the app shows the pane and its window for it. |
 | `tab.navigate` | `tab_id`, `url`, `observe`; `snapshot?` | `tab_id`, `url`, `title`; `page?` | Navigates a tab the task already owns. |
 | `tab.list` | `task_id` | `tabs[]` | Every tab `task_id` owns, popups included. |
 | `tab.focus` | `tab_id` | `tab_id`, `url`, `title` | Refused with `not_owner` on the person's tab. |
@@ -216,7 +219,7 @@ app -> daemon:  client_hello { protocol_version: 1 }
 daemon -> app:  server_hello { min_version: 1, max_version: 1 }
 app -> daemon:  attached { host_version: "0.2.0", profile_id: "fermix-web-3c9a" }
 app -> daemon:  availability { available: true }
-daemon -> app:  { id: 1, type: "tab.open", task_id: "task-1", url, observe: true, snapshot, download_dir, task_tab_cap, tab_cap }
+daemon -> app:  { id: 1, type: "tab.open", task_id: "task-1", url, visible: true, observe: true, snapshot, download_dir, task_tab_cap, tab_cap }
 app -> daemon:  { id: 1, ok: true, result: { tab_id: "t1", url, title, page: { ... } } }
 daemon -> app:  { id: 2, type: "page.act", tab_id: "t1", kind: "click", ref: 13, observe: true, snapshot }
 app -> daemon:  { id: 2, ok: true, result: { url, title, page: "changed", snapshot, truncated } }

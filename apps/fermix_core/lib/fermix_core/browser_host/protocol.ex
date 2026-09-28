@@ -95,7 +95,7 @@ defmodule FermixCore.BrowserHost.Protocol do
   }
 
   @request_optional %{
-    "tab.open" => ~w(snapshot),
+    "tab.open" => ~w(snapshot visible),
     "tab.navigate" => ~w(snapshot),
     "page.act" => ~w(ref x y text key fields field selector wait_until timeout_ms snapshot),
     "dialog.resolve" => ~w(text)
@@ -323,7 +323,8 @@ defmodule FermixCore.BrowserHost.Protocol do
          :ok <- url_field(payload, "url"),
          :ok <- absolute_path(payload, "download_dir"),
          :ok <- positive_u64(payload, "task_tab_cap"),
-         :ok <- positive_u64(payload, "tab_cap") do
+         :ok <- positive_u64(payload, "tab_cap"),
+         :ok <- optional(payload, "visible", &boolean_field/2) do
       observed(payload)
     end
   end

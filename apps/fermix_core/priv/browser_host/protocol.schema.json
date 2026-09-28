@@ -502,7 +502,7 @@
     },
     "tab.open": {
       "type": "object",
-      "description": "Open a new tab for a task on url. With observe, answer once the page has settled and carry it back as `page`, read with `snapshot`'s options. Downloads from the tab and its popups go into download_dir. Refused with cap_reached past task_tab_cap tabs for the task or tab_cap task tabs in all; a popup counts against its opener's owner.",
+      "description": "Open a new tab for a task on url. With observe, answer once the page has settled and carry it back as `page`, read with `snapshot`'s options. Downloads from the tab and its popups go into download_dir. Refused with cap_reached past task_tab_cap tabs for the task or tab_cap task tabs in all; a popup counts against its opener's owner. With visible, the app shows the pane and its window for this task.",
       "required": [
         "id",
         "type",
@@ -531,6 +531,9 @@
           "type": "string",
           "minLength": 1,
           "maxLength": 8192
+        },
+        "visible": {
+          "type": "boolean"
         },
         "observe": {
           "type": "boolean"

@@ -72,6 +72,10 @@ defmodule FermixCore.Browser.HostServer do
   @download_buffer 10
   @reason_chars 200
 
+  # The one named profile whose task tells the app to show its pane and
+  # window; every other profile that reaches this backend runs unseen.
+  @visible_profile "fermix_visible"
+
   @cancelled_sentence "The person cancelled the browser task in the Fermix app."
 
   @stale_ref "Element ref is stale or unknown. Refs belong to the snapshot they came from, and " <>
@@ -207,6 +211,7 @@ defmodule FermixCore.Browser.HostServer do
             "tab_cap" => state.config.max_tabs * state.config.max_live_profiles
           }
           |> observe_fields(observe?, fresh_options(state))
+          |> visible_field(state.profile_name)
 
         state
         |> request("tab.open", payload, navigation_timeout(state.config))
@@ -664,6 +669,11 @@ defmodule FermixCore.Browser.HostServer do
     do: Map.merge(payload, %{"observe" => true, "snapshot" => wire_options(opts)})
 
   defp observe_fields(payload, false, _opts), do: Map.put(payload, "observe", false)
+
+  # Carries the task's own intent, not a look at the page: absent unless the
+  # task runs on the visible profile, never an explicit false.
+  defp visible_field(payload, @visible_profile), do: Map.put(payload, "visible", true)
+  defp visible_field(payload, _profile_name), do: payload
 
   # The page the app handed back after a navigation or an action, judged and
   # rendered with the options of the look it is compared against. Identical
