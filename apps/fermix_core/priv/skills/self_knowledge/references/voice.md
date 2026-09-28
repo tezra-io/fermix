@@ -22,6 +22,13 @@ The Fermix app's voice companion. The app talks to the daemon over `$FERMIX_HOME
   - No screen sharing: say plainly that this engine cannot watch the screen.
 - `fermix voice status` and `fermix doctor` name the engine in force.
 
+## Noise and echo
+
+- **Cleaned on the Mac, not by OpenAI.** GPT-Live takes no noise, echo or voice-detection settings. Realtime uses OpenAI's close-microphone noise reduction and a stricter speech threshold that ignores most clicks, but both run after the pet's own voice has already come back through the microphone. So the app turns on macOS voice processing for every call: echo cancellation, noise suppression and voice level. Other apps' sound is lowered only slightly, and only while someone speaks.
+- **Echo that gets through.** Speakers that play late, such as a display's speakers over HDMI, can defeat echo cancellation, and the reply then comes back as words. Fermix never reads words heard during a reply, or in the 2 s after it, as the owner's turn, so the pet does not take its own voice for theirs. Headphones avoid echo entirely.
+- **Typing.** On GPT-Live the pet's Thinking face follows the words Live transcribes, not loudness, so typing does not make it think. Noise costs nothing extra on Live, which bills connected time, unless it is taken for speech and answered.
+- **Other clients.** Calls come only from the Mac app today. A Linux client must cancel echo and suppress noise itself before sending audio (for example with PipeWire's echo-cancel module), because the daemon relays the microphone untouched; the wire contract is `priv/realtime/PROTOCOL.md`.
+
 ## When a call will not start
 
 - **The key.** Doctor's `realtime voice` row and `fermix voice status`'s `realtime key` line only see that a key is saved. **Run network checks** in the app (or `fermix doctor --full`) adds a `realtime voice key` row that asks OpenAI whether it accepts the key (a free model-list read, no prompt): a refused key fails with "OpenAI did not accept the API key (invalid_api_key).", any other 401 or 403 only warns (a restricted key can still hold a call), and a server, network or missing-key problem warns.
@@ -29,6 +36,7 @@ The Fermix app's voice companion. The app talks to the daemon over `$FERMIX_HOME
 - **Versions.** App and daemon exchange a versioned handshake (`client_hello`/`server_hello`); a mismatch says which side to update (the app shows "Update Fermix to match the daemon"). A Live call needs the newer wire, so an older app can still hold Realtime calls but is told to update when it starts a call on a Live-configured daemon.
 - **No key**: the app's Home shows "The voice companion needs an OpenAI key"; fill **OpenAI key** in Settings > Voice.
 - **Microphone**: "Microphone access is denied" means System Settings > Privacy & Security > Microphone > **Fermix**.
+- **Echo cancellation**: "Echo cancellation could not start on this microphone" means macOS refused voice processing for that input; pick another microphone in System Settings > Sound > Input.
 - The app always uses the Fermix home recorded in `~/Library/Application Support/Fermix/launcher.json`; it never reads `FERMIX_HOME`.
 
 ## Access-sensitive commands on a call

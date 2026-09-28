@@ -133,6 +133,28 @@ and `CompanionState.swift` (pet) together.
 | `call_stop` | — | Ends the active call and closes the session. |
 | `task_cancel` | `delegation_id` (non-empty string, required) | **v2.** Cancels one backend delegation of a Live call. Under the Realtime engine it is refused with `error: unsupported_by_engine` and the connection closes. |
 
+## Client audio
+
+`audio_chunk` carries the microphone as the provider will hear it: the daemon
+relays it untouched. A client streams 24 kHz mono PCM16 in 100 ms chunks from
+`listening` to the end of the call, silence included, and before sending it:
+
+- **cancels echo and suppresses noise.** GPT-Live's session takes no noise,
+  echo or voice-detection settings, and Realtime's server-side noise reduction
+  runs after the pet's own voice is already in the microphone. The macOS app
+  uses Apple's voice processing (`AVAudioInputNode.setVoiceProcessingEnabled`);
+  a Linux client needs the same from its audio stack, such as PipeWire's
+  echo-cancel module, with the pet's playback routed through it as the echo
+  reference.
+- **reads the processed channel.** With voice processing on, macOS delivers
+  several channels (six from a two-channel USB microphone) and the processed
+  voice is channel 0; a converter left to mix them to mono produces digital
+  silence.
+
+Echo cancellation can still fail on a route: display speakers over HDMI play
+about 90 ms later than they report. So under `openai_live` the daemon takes no
+words heard during a reply, or for 2 s after it, as the operator's turn.
+
 ## Server events (daemon → pet)
 
 | `type` | Fields | Notes |
@@ -159,7 +181,7 @@ completion event, so nothing here waits for one.
 Live publishes no turn boundaries either, so the daemon reads the turn from the
 audio and words it relays: `thinking` once Live's recognition has stopped
 sending the operator's words for a moment and no reply has started (words heard
-while the reply can still be heard do not count), and `listening` once the voice
+during a reply or just after it do not count: they are its echo), and `listening` once the voice
 of a reply has had time to play out. They drive only the pet's presentation. Live's output
 never stops: between replies `audio_delta` carries digital silence, one chunk
 every 100 ms, so a pet must read speaking from the daemon's `state` and from

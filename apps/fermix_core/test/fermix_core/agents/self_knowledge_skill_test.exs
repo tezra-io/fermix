@@ -256,6 +256,23 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # GPT-Live has no noise or echo settings, so "why does it hear my keyboard or
+  # its own voice?" is answered by the Mac's voice processing and the daemon's
+  # echo window, and a Linux client has to bring its own.
+  test "documents where a call's noise and echo are handled" do
+    reference = File.read!(reference_path("voice"))
+
+    for required <- [
+          "GPT-Live takes no noise, echo or voice-detection settings",
+          "echo cancellation, noise suppression",
+          "in the 2 s after it",
+          "Headphones avoid echo",
+          "A Linux client must cancel echo"
+        ] do
+      assert reference =~ required, "the voice reference does not say #{required}"
+    end
+  end
+
   # After the first provider, the primary moves only by an explicit action; a
   # self-reference that says saving a provider promotes it sends an owner to
   # the wrong control.
