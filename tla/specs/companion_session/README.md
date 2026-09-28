@@ -497,7 +497,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 - **Severity:** high. The Mac app sends what the user types as a `msg`, so
   `/help` or `/new` typed in the chat left its request `running`, and the next
   boot within the claim's 24 hours ran it again and wrote a second answer.
-- **Status:** fixed in the 2026-09-27 phone-channel review (its STB-4), found
+- **Status:** fixed (6d1f802f) in the 2026-09-27 phone-channel review (its STB-4), found
   there, not by this spec. Once ingest returns, the request worker casts the
   request's settlement to `Turns` behind its hand-off (`settle_after_ingest`),
   and `Turns` completes a request no turn was handed off for.
@@ -511,7 +511,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 - **Severity:** high. `/ultra <prompt>` (or any command the gateway turns into
   a turn) was completed as soon as ingest returned, so its turn's reply was
   refused as a stale attempt and the client never saw an answer.
-- **Status:** fixed in the same review (its STB-3). `Turns` settles a request
+- **Status:** fixed (6d1f802f) in the same review (its STB-3). `Turns` settles a request
   after ingest only when no turn was handed off for it, decided in its own
   mailbox after the hand-off the same worker cast
   (`settle_unless_handed_off`); a turn settles from its outcome.
@@ -528,7 +528,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 - **Severity:** high. An approval raised while the app was closed, or while it
   reconnected, reached no one, so the owner could never grant what the turn
   asked for.
-- **Status:** fixed in the same review (its FEAT-2). `Companion.Approvals`
+- **Status:** fixed (6d1f802f) in the same review (its FEAT-2). `Companion.Approvals`
   keeps each card for the transport that raised it until it resolves or its
   `ttl_s` runs out, and the Connection writes every card still waiting right
   after `server_hello`, with the time it has left as its `ttl_s`. A card's end
@@ -545,7 +545,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
   timed out or restarted while `Turns` completed a slash command left the
   request `running`. The chat got no word of the failure, and the next boot
   within the claim's 24 hours ran the command again.
-- **Status:** fixed in the same review's third round (its R3-4), found there,
+- **Status:** fixed (6d1f802f) in the same review's third round (its R3-4), found there,
   not by this spec, in the settlement COMPANION-9's fix moved into `Turns`,
   which only logged a failure. `Turns` now runs the settlement's completion
   (`run_settle`, which also contains a raise in the request path's settle
@@ -565,7 +565,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 - **Severity:** low. A reconnected client kept showing an approval that was
   answered elsewhere or had expired; tapping it answered "Confirmation
   failed".
-- **Status:** documented in `PROTOCOL.md`'s client rules (found in the same
+- **Status:** documented (6d1f802f) in `PROTOCOL.md`'s client rules (found in the same
   review's contract pass). `approval_resolved` goes only to the connections
   open when a card ends, and what follows `server_hello` is only the cards
   still waiting, so the daemon never withdraws such a card. A client drops

@@ -33,7 +33,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/stopper.ex @ 3f42aedf7399
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/typing.ex#with_indicator,stop_typing_loop @ 4e91ea3d2f7d
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/draft_stream.ex#start_link @ c185d3d497b1
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 0ba02e5ff33f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/application.ex @ 354845116fa8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca

@@ -89,7 +89,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/tools/media/backends/codex_image.ex @ ea4175294f01
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 0fdfc82bfdcd
-\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 797255eecc3e
+\* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ ae0fca04c6c7
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
 

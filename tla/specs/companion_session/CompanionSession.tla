@@ -98,17 +98,17 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ e1dddc1df7d3
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ bd93219a8e98
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 47825aba960e
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ b2b3eee7c5f7
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ dbb6c34b6a55
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 3d7da3eb0233
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ a188ccda0274
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 721f8a43246f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ 7309598811f2
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message @ afb2f200897c
-\* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ dc48c35b81e5
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ c0440ecb6aa0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message @ 96eace0c6784
+\* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ d0a1ca7c444e
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 2dadf7da73c8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
