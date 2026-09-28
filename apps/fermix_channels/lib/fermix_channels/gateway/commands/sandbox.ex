@@ -10,12 +10,17 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   alias FermixChannels.Gateway.Commands.Authorization
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Harness.Ledger
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.Mode
 
   @ttl_ms 60_000
+
+  # What the owner is told when a confirmed access-sensitive run crashed.
+  @access_outcome_unknown "Confirmed, but the command failed before it reported, so whether it " <>
+                            "reached the device is unknown. Check it before sending it again."
 
   @typedoc "Where an agent-initiated grant request came from — binds the pending record to the owner's conversation."
   @type grant_origin :: %{
@@ -32,12 +37,15 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
   @typedoc """
   What core passes to the injected approval closure: a directory grant from the
-  `request_directory_access` tool, or a coding run's vendor-config change for
-  the owner to acknowledge before the next harness launch (GAP3-1).
+  `request_directory_access` tool, a coding run's vendor-config change for the
+  owner to acknowledge before the next harness launch (GAP3-1), or an
+  access-sensitive plugin command parked by `Capabilities.AccessGate` (its
+  intent id; the call itself stays in core).
   """
   @type grant_request ::
           %{path: String.t(), reason: String.t(), diff: String.t()}
           | %{acknowledge_vendor_config: String.t()}
+          | %{access_sensitive: String.t()}
 
   @impl true
   def name, do: "sandbox"
@@ -53,15 +61,19 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   # never reach sandbox mutation: a guest's own /grant binds the pending record
   # to their origin, so `same_origin?` would otherwise let them self-approve
   # (SANDBOX_ACCESS_APPROVAL_FLOW). Read-only /sandbox status|explain and the
-  # remaining /sandbox subcommands keep the owner-or-allowlist gate.
+  # remaining /sandbox subcommands keep the owner-or-allowlist gate. Every
+  # subcommand is in the approval family, so a process Fermix started cannot
+  # answer or mint a prompt (`Authorization.in_person/1`).
   @operator_subcommands ["grant", "revoke", "confirm", "deny"]
 
   @impl true
   def authorize(message, metadata, context) do
-    if invoked_command(metadata) in @operator_subcommands do
-      Authorization.operator_only(message, metadata, context)
-    else
-      Authorization.owner_only(message, metadata, context)
+    with :ok <- Authorization.in_person(metadata) do
+      if invoked_command(metadata) in @operator_subcommands do
+        Authorization.operator_only(message, metadata, context)
+      else
+        Authorization.owner_only(message, metadata, context)
+      end
     end
   end
 
@@ -202,6 +214,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
   defp grant_mutation(%{acknowledge_vendor_config: run_id}) when is_binary(run_id),
     do: {:acknowledge_vendor_config, run_id}
 
+  defp grant_mutation(%{access_sensitive: intent_id}) when is_binary(intent_id),
+    do: {:access_sensitive, intent_id}
+
   defp find_live_pending(mutation, origin) do
     now = now_ms()
 
@@ -260,6 +275,9 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       "when the next one asks, or revert or commit it."
   end
 
+  defp denied_text(%{mutation: {:access_sensitive, _intent_id}}),
+    do: "Not sent: the command was not approved."
+
   defp denied_text(_grant), do: "Sandbox change denied — the pending grant was discarded."
 
   # A coding run's vendor-config change, acknowledged by the owner (GAP3-1): the
@@ -276,6 +294,12 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
       {:error, reason} -> reply(reply_fn, "Acknowledgment failed: #{format_error(reason)}")
     end
   end
+
+  # An access-sensitive command the owner confirmed: core runs exactly the
+  # recorded call (`AccessGate.confirm/2`) and this chat gets its outcome once.
+  # Nothing is re-ingested — the daemon runs the call, not a new model turn.
+  defp apply_confirmed(%{mutation: {:access_sensitive, intent_id}}, _token, reply_fn, context),
+    do: spawn_access_confirm(intent_id, reply_fn, context)
 
   # A confirmed grant persists exactly like an owner-typed `/confirm`; the only
   # addition is the auto-resume branch for an agent-initiated record.
@@ -389,6 +413,58 @@ defmodule FermixChannels.Gateway.Commands.Sandbox do
 
     :ok
   end
+
+  # The command's helper call can take seconds, and `confirm` runs in the
+  # transport process that called `Gateway.ingest`, so it runs on the task
+  # supervisor (the `spawn_resume/2` hop) and replies exactly once. On the Mac
+  # app and the phone the `/confirm` is a client request, deferred here (in the
+  # ingest process, as the seam requires) and settled only after that reply, or
+  # the reply would land on a request already closed and be dropped.
+  defp spawn_access_confirm(intent_id, reply_fn, context) do
+    finish = defer_command(context)
+
+    {:ok, _pid} =
+      Task.Supervisor.start_child(FermixCore.TaskSupervisor, fn ->
+        run_access_confirm(intent_id, reply_fn, finish)
+      end)
+
+    :ok
+  end
+
+  # A crashed run may or may not have reached the device, so the owner is told
+  # that before the crash goes on to the task supervisor's log.
+  defp run_access_confirm(intent_id, reply_fn, finish) do
+    case confirm_access(intent_id) do
+      {:crashed, kind, reason, stacktrace} ->
+        reply(reply_fn, @access_outcome_unknown)
+        settle_command(finish, {:error, :crashed})
+        :erlang.raise(kind, reason, stacktrace)
+
+      result ->
+        reply(reply_fn, access_outcome_text(result))
+        settle_command(finish, result)
+    end
+  end
+
+  defp confirm_access(intent_id) do
+    AccessGate.confirm(intent_id)
+  catch
+    kind, reason -> {:crashed, kind, reason, __STACKTRACE__}
+  end
+
+  defp access_outcome_text({:ok, outcome}), do: "Confirmed. #{outcome}"
+  defp access_outcome_text({:error, reason}), do: "Confirmed, but #{reason}"
+
+  defp defer_command(context) do
+    case Map.get(context, :defer_command_fn) do
+      defer when is_function(defer, 0) -> defer.()
+      nil -> nil
+    end
+  end
+
+  defp settle_command(nil, _result), do: :ok
+  defp settle_command(finish, {:ok, _outcome}), do: finish.(:completed)
+  defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
   defp synthesize_resume_message(record, resume, token) do
     Message.new!(%{

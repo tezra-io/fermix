@@ -26,7 +26,7 @@ defmodule FermixChannels.TelemetryTest do
   end
 
   test "pair events expose only the bounded terminal status" do
-    for status <- [:approved, :denied, :expired, :rate_limited, :cancelled, :device_disconnected] do
+    for status <- [:approved, :denied, :expired, :cancelled, :device_disconnected] do
       assert :ok = Telemetry.emit_pair(:mobile, status, 17)
 
       assert_receive {:mobile_channel_telemetry, @pair_event, %{count: 1, duration_us: 17},
@@ -45,6 +45,7 @@ defmodule FermixChannels.TelemetryTest do
 
   test "unsupported statuses and negative durations fail loud" do
     assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :failed, 1) end
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :rate_limited, 1) end
     assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :skipped, 1) end
     assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, -1) end
     assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :sent, -1) end

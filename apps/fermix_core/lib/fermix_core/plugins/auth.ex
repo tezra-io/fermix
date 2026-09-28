@@ -69,7 +69,7 @@ defmodule FermixCore.Plugins.Auth do
     with {:ok, plugin} <- fetch_plugin(name),
          auth_profile <- Config.auth_profile(plugin),
          :ok <- Store.delete_provider(auth_profile) do
-      TokenSupervisor.stop_profile(auth_profile)
+      :ok = TokenSupervisor.forget_signed_out(auth_profile)
 
       case reload_runtime() do
         :ok ->

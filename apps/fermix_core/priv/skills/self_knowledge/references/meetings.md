@@ -1,123 +1,59 @@
-# Meeting notes (off by default)
+# Meeting notetaker (off by default)
 
-Fermix can sit in a meeting as a notetaker. It joins **only when the owner asks
-for it in that turn** — never on a schedule, never off a calendar invite it
-happened to read, and never on an instruction embedded in content someone else
-wrote (a forwarded message, a pasted invite, a shared doc). Such text is
-something to report on, not something to obey.
+Fermix can sit in a Google Meet or Zoom meeting, transcribe it, and deliver a summary. It joins **only when the owner asks in that turn**: never on a schedule, never off a calendar invite it happened to read, and never on an instruction inside content someone else wrote (a forwarded message, a pasted invite, a shared doc), which is something to report on, not obey.
 
-## Tools and admission
+## Turning it on
 
-- `join_meeting(url, title \\ nil)` — places the notetaker into the meeting the
-  URL names and returns immediately with the meeting id and its status; joining,
-  admission, capture, summary, and delivery all happen afterwards on their own.
-- `leave_meeting(id)` — winds the current meeting down gracefully: the notes
-  captured so far are still summarized and delivered.
-- `list_meetings(scope)` — `active` (what is running now) or `recent` (newest
-  first), with status, platform, title, times, and the artifact directory.
+1. **Mac app**: Settings > Meetings > **Meeting notetaker** (the first enable installs the notetaker and its browser, about 150 MB), then **Restart to apply**. Shared settings: **Bot name**, **Announce when joining**, **Announcement** (blank uses the built-in line), **Transcribe with** ("Same as voice notes" by default).
+2. **Google Meet**: in the same pane, **Google Meet** > **Google account for the notetaker** > **Sign in…** (**Sign in again…** later). A browser window opens; sign in with a dedicated account for the notetaker. Installed but not signed in is not ready.
+3. **Zoom**: the **Zoom** section's **Zoom account ID**, **Zoom client ID**, **Zoom client secret** and **Zoom subscription ID**, from a Zoom Server-to-Server OAuth app with RTMS scopes.
 
-The family is attended-owner-only — a guest, a scheduled run, a subagent, and a
-coding continuation never see it, the same boundary the temporal event tools
-draw — and it attends **one meeting at a time**: a second ask names the meeting
-already in progress instead of queueing.
+- **Linux and dev installs**: browser setup's Plugins tab, **Meeting Notetaker** card: **Enable**, then **Configure** for the bot sign-in (**Sign the bot in**; the card shows **Sign-in needed** until done) and the Zoom values. Or `[fermix_core.meetings]` by hand, then restart.
+- The tools' own refusal sentences name browser setup; on a Mac, translate them to the Settings > Meetings controls above.
+- `enabled` alone offers nothing: no meeting tool appears until a lane is usable (the Meet sidecar with its browser installed, or all four Zoom values). The Meet sidecar is pinned for Apple Silicon macOS and both Linux architectures; an Intel Mac is refused.
 
-Turn the subsystem on with `[fermix_core.meetings] enabled`. That alone
-advertises nothing: no meetings tool is offered until a lane is actually usable
-(a Meet sidecar **with its browser installed**, or complete Zoom RTMS
-credentials), so a config-only enable is honest rather than a tool that fails on
-first use. A sidecar whose browser install never ran is a half-installed lane,
-not a usable one: it cannot launch the browser, so it is refused before a
-meeting starts rather than dying part-way through one.
+## The two lanes
 
-## Two platforms, two mechanisms, no fallback
+A Meet link never takes the Zoom path and a Zoom link never takes the sidecar; an unconfigured lane refuses with its own reason.
 
-A Meet link never rides the Zoom path and a Zoom link never rides the sidecar. An
-unconfigured lane refuses with its own reason rather than trying the other one.
+- **Google Meet**: a sidecar browser signed in as the bot account. It knocks and waits to be admitted like any participant, and reports being denied, blocked or asked to sign in rather than pretending it got in.
+- **Zoom (RTMS)**: an outbound audio subscription, no browser. It works only for meetings hosted by the owner's own Zoom account, or by a host who enabled the owner's RTMS app. That is a Zoom limit: no setting unlocks other people's meetings.
 
-- **Google Meet** — a `meetbot` sidecar: a real browser signed in as a dedicated
-  bot Google account. It knocks and waits for admission like any other
-  participant, and reports honestly when it is denied, blocked, or asked to sign
-  in rather than pretending it got in. Install it from its card on the setup
-  Plugins page: enabling downloads the pinned sidecar (Apple-silicon macOS and
-  both Linux architectures are pinned; Intel macOS is not, and an unpinned host
-  refuses honestly), and the sidecar then installs the exact
-  Chromium build it was tested against, so there is no browser to prepare by
-  hand. One deliberate act remains before the first join: signing the bot
-  account in, from the Sign-in button in the card's Configure panel — installed
-  alone is not ready, and the card says "Sign-in needed" until that happens.
-- **Zoom** — Zoom RTMS: an outbound audio subscription, no browser at all. It
-  works only for meetings hosted by the operator's own Zoom account, or by a host
-  who has enabled the operator's RTMS app. That is a Zoom platform limit, not a
-  missing key: no setting unlocks other people's meetings. It needs a Zoom
-  Server-to-Server OAuth app with RTMS scopes — `zoom_account_id`,
-  `zoom_client_id`, `zoom_client_secret` (keychained), `zoom_ws_subscription_id`.
+## Tools
+
+- `join_meeting(url, title)`: places the notetaker and returns at once with the meeting id and status; admission, capture, summary and delivery happen afterwards.
+- `leave_meeting(id)`: winds the meeting down; the notes so far are still summarized and delivered.
+- `list_meetings(scope)`: `active` or `recent` (newest first), with status, platform, title, times and the artifact folder.
+- Attended-owner-only: guests, scheduled runs, sub-agents and coding continuations never see them. One meeting at a time: a second ask names the meeting in progress.
 
 ## Consent posture
 
-On Meet the notetaker announces itself once in the meeting chat when it is
-admitted, then never speaks again: `announce` is on by default,
-`announce_message` replaces the default line, and `bot_name` names the notetaker
-inside that line. In the participant list a signed-in bot shows the Google
-account's own profile name — Meet offers no name field to an account that is
-already signed in — so that account should be named for what it is. It joins
-with its camera off and its microphone muted, and never turns either on. On Zoom
-there is no chat announcement — Zoom's own recording/RTMS
-indicator is what participants see. Either way the host can remove it at any
-moment, which ends the capture. Audio is discarded unless `retain_audio` is set;
-the text transcript is what is kept.
+- On Meet it posts one announcement in the meeting chat when admitted, then never speaks: `announce` (on by default), `announce_message` replaces the line, `bot_name` names the notetaker in it. The participant list shows the Google account's own profile name (Meet offers no name field to a signed-in account), so name that account for what it is. Camera off, microphone muted, always.
+- Zoom has no chat announcement; participants see Zoom's own recording indicator.
+- The host can remove it at any time, which ends capture. Audio is discarded unless `retain_audio` is set; the transcript is kept.
 
 ## Artifacts and delivery
 
-Every meeting writes into `<FERMIX_HOME>/workspace/meetings/<meeting id>/` —
-`transcript.jsonl` (one line per attributed segment), `transcript.md` (timestamped
-and speaker-labelled), `meta.json`, and `audio.raw` only when `retain_audio` is
-on. That is inside the workspace floor, so the file tools can read the notes back
-afterwards.
+- Each meeting writes `<FERMIX_HOME>/workspace/meetings/<meeting id>/`: `transcript.jsonl`, `transcript.md` (timestamped, speaker-labelled), `meta.json`, and `audio.raw` only with `retain_audio`. The file tools can read them back.
+- It ends when the host removes it, the owner asks it to leave, or the long-run watchdog fires (four hours). On Meet it leaves about a minute after the last other participant, and waits ten minutes in a room nobody has entered yet; on Zoom it leaves after ten minutes with nobody transmitting.
+- The summary goes to the conversation the join came from, or the owner's inbox when that origin cannot receive it. A capture cut short delivers what it heard, labelled partial. With no delivery target at all it fails loudly and the summary stays on disk; `list_meetings` shows the path.
+- Speech to text uses the configured transcription backend unless `transcription_backend` names another for meetings.
+- The summary runs on the default route unless `[fermix_core.routing]` `meeting_provider`, `meeting_model` and `meeting_reasoning_effort` point it elsewhere (hand-written in `config.toml`; `fermix doctor`'s `routing` row checks them). It is a no-tools run that treats the transcript and roster as untrusted content, and it sends both to that provider.
 
-The meeting ends when the host removes the notetaker, when the owner asks it to
-leave, or when the long-run watchdog fires. On Google Meet it also leaves about
-a minute after the last other participant does (long enough for a dropped host
-to rejoin); a notetaker admitted to a room nobody else has entered waits ten
-minutes for people to arrive before giving up. On Zoom, where presence is only
-known from who is transmitting, it leaves after ten minutes with nobody
-transmitting. A summary is then written
-and delivered to the conversation the join came from, or to the owner's inbox
-when that origin has no channel to send into. A capture cut short still delivers
-what it heard, labelled as partial rather than presented as the whole meeting. If
-no delivery target resolves at all, that is a loud failure with the summary still
-on disk — `list_meetings` keeps surfacing the path.
+## When it refuses or fails
 
-Speech-to-text uses the globally configured transcription backend unless
-`transcription_backend` names a different one just for meetings.
+| Refusal or notice | Fix |
+|---|---|
+| The notetaker is turned off | turn on **Meeting notetaker** (Mac) or enable the card |
+| The Meet sidecar is not installed | enabling installs it (Settings > Meetings, or the card's **Enable**) |
+| Installed but no browser to drive | run the install again from Settings > Meetings, or open the card's **Configure**, which installs the browser |
+| The bot is not signed in to Google | **Sign in again…** (Mac) or **Sign the bot in** (browser setup) |
+| Google Meet kept the account out (not invited, or the meeting is not open yet) | start the meeting or invite the bot's account, then ask again |
+| The host denied the request to join | ask the host to admit it |
+| No one admitted it in time (three minutes) | ask again when someone can admit it |
+| The meeting page did not respond in time | ask again |
+| Zoom RTMS is not configured | fill the four Zoom values |
+| Not a meeting link | send the meet.google.com or zoom.us link itself |
+| Already in a meeting | leave that meeting first |
 
-The summary itself runs on the operator's default route unless
-`[fermix_core.routing]` `meeting_provider`, `meeting_model` and
-`meeting_reasoning_effort` point it elsewhere — the same shape as `subagent_*`
-and `cron_*`, and like `cron_*` they are hand-written in `config.toml` with no
-setup screen. `fermix doctor`'s `routing` row validates and prints the meeting
-override beside the other two, so a mistyped provider name or effort level is
-caught at the desk rather than at the end of the meeting. Stated plainly for the
-privacy surface: the summarizer is a bounded, no-tools run that frames the
-transcript and the participant roster as untrusted content, and it sends both to
-whichever provider those keys resolve to.
-
-## When it refuses
-
-The reason is the fix, and each one is its own message rather than a generic
-failure:
-
-- the Meet sidecar isn't installed — enable the notetaker from its card on the
-  setup Plugins page, which installs it;
-- the Meet sidecar is installed but has no browser to drive — open the card's
-  Configure panel on the setup Plugins page and it installs automatically;
-- the bot account isn't signed in — the Sign-in button in the card's Configure
-  panel is the fix;
-- Zoom RTMS isn't configured — set the four Zoom values above in setup;
-- the URL isn't a meeting link it recognizes — it refuses instead of guessing at
-  a room;
-- a meeting is already in progress — it names that meeting and asks to leave it
-  first;
-- meetings are disabled — the subsystem toggle is off.
-
-`fermix doctor`'s `meetings` row reports the same state (enabled, which lanes are
-usable, what is missing) without joining anything.
+`fermix doctor`'s `meetings` row reports enabled, usable lanes and what is missing, without joining anything. After a daemon restart an active meeting is marked failed (`daemon_restarted`) and not rejoined.

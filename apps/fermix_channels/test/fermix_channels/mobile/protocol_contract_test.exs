@@ -1,8 +1,12 @@
 defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.Router
+  alias FermixChannels.Mobile.SocketHandler
+  alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -11,7 +15,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   @server_fixtures Path.join(@priv_dir, "fixtures/server_events.jsonl")
   @client_binary_fixtures Path.join(@priv_dir, "fixtures/client_binary_frames.jsonl")
   @server_binary_fixtures Path.join(@priv_dir, "fixtures/server_binary_frames.jsonl")
-  @inert_keywords ~w($schema $id $defs title description)
+  @pairing_links Path.join(@priv_dir, "fixtures/pairing_links.jsonl")
 
   setup_all do
     %{
@@ -34,7 +38,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
 
   test "every per-event def is reachable from a discriminator", %{schema: schema} do
     raw = File.read!(@schema_path)
-    structural = ~w(clientEvent serverEvent envelope)
+    # The pairing link is not a frame: the owner's QR code carries it.
+    structural = ~w(clientEvent serverEvent envelope pairingLink)
     per_event_defs = Map.keys(schema["$defs"]) -- structural
 
     for name <- per_event_defs do
@@ -69,13 +74,59 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # D1(b) and D1(e): every error message is bounded, and every list of
+  # candidates a phone is given keeps the same best-first few.
+  test "schema pins the error message and candidate bounds the daemon keeps", %{schema: schema} do
+    defs = schema["$defs"]
+    message = defs["error"]["properties"]["message"]
+    assert message["maxLength"] == 512
+    assert message["x-max-bytes"] == 512
+
+    for def <- ~w(hello_ack pair_approved) do
+      assert defs[def]["properties"]["candidates"]["maxItems"] == SocketHandler.max_candidates()
+    end
+
+    link_candidates = defs["pairingLink"]["properties"]["candidates"]["contentSchema"]
+    assert link_candidates["maxItems"] == SocketHandler.max_candidates()
+  end
+
+  test "schema pins the continuation frames and the event cap", %{schema: schema} do
+    defs = schema["$defs"]
+    cap = Protocol.max_event_bytes()
+    parts = div(cap + Protocol.max_raw_chunk_bytes() - 1, Protocol.max_raw_chunk_bytes())
+
+    assert schema["x-max-event-bytes"] == cap
+    assert schema["x-max-event-parts"] == parts
+    assert defs["event_part"]["x-raw-bytes"] == true
+    assert defs["event_part"]["properties"]["count"]["maximum"] == parts
+    assert defs["event_part"]["properties"]["index"]["maximum"] == parts - 1
+    assert "event_part" in Protocol.server_events()
+    refute "event_part" in Protocol.client_events()
+
+    for def <- ~w(text_done row historyMessage) do
+      assert defs[def]["properties"]["truncated"] == %{"const" => true}
+    end
+  end
+
+  # The phone is told why a pairing ended in the words management uses, and
+  # only in words a window that closes on a waiting phone can produce.
+  test "pair_denied names every way a waiting pairing can end", %{schema: schema} do
+    sent =
+      [:denied, :expired, :cancelled, :device_disconnected]
+      |> Enum.map(&(&1 |> PairManager.outcome_reason() |> Atom.to_string()))
+
+    assert schema["$defs"]["pair_denied"]["properties"]["reason"]["enum"] == sent
+    assert "timeout" in sent
+  end
+
   # Absent optional fields are absent keys on this wire: every producer drops a
   # nil instead of shipping an explicit null, so no exported field may declare
   # `null` as an accepted type. Derived from the schema itself, so a field added
   # later joins the rule without anyone remembering to extend a list here.
   test "no exported field accepts an explicit null", %{schema: schema, protocol: protocol} do
-    assert null_typed_paths(schema, "#") == []
+    assert WireSchema.null_typed_paths(schema, "#") == []
     assert protocol =~ "optional by omission"
+    assert protocol =~ "absent, never null"
 
     planted = %{
       "$defs" => %{
@@ -83,7 +134,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       }
     }
 
-    assert null_typed_paths(planted, "#") == ["#/$defs/mediaRef/properties/filename/type"]
+    assert WireSchema.null_typed_paths(planted, "#") == [
+             "#/$defs/mediaRef/properties/filename/type"
+           ]
+
+    for header <- client_headers() ++ server_headers() do
+      assert WireSchema.null_values(header, "#") == [], "#{header["t"]} golden carries a null"
+    end
   end
 
   test "every client golden frame decodes with the live codec" do
@@ -146,13 +203,45 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # A phone concatenates a run's tails in index order and reads the result as
+  # the event it names, with the run's `v` and its first frame's `seq`.
+  test "every event_part run in the fixtures reassembles into an event the phone accepts",
+       %{schema: schema} do
+    runs =
+      @server_binary_fixtures
+      |> jsonl()
+      |> Enum.filter(&(&1["header"]["t"] == "event_part"))
+      |> Enum.chunk_by(& &1["header"]["count"])
+
+    assert runs != []
+
+    for [first | _rest] = run <- runs do
+      assert Enum.map(run, & &1["header"]["index"]) == Enum.to_list(0..(length(run) - 1))
+      assert Enum.map(run, & &1["header"]["count"]) == List.duplicate(length(run), length(run))
+      seqs = Enum.map(run, & &1["header"]["seq"])
+      assert seqs == Enum.to_list(hd(seqs)..(hd(seqs) + length(run) - 1))
+
+      logical = run |> Enum.map(&Base.decode64!(&1["bytes_b64"])) |> IO.iodata_to_binary()
+      event = Jason.decode!(logical)
+      refute Map.has_key?(event, "v") or Map.has_key?(event, "seq")
+
+      header = Map.merge(event, %{"v" => first["header"]["v"], "seq" => hd(seqs)})
+      assert WireSchema.errors(header, WireSchema.ref("serverEvent"), schema) == []
+
+      assert {:ok, _frame} =
+               Protocol.encode_server_frame(event["t"], Map.delete(event, "t"), hd(seqs))
+    end
+  end
+
   test "every golden fixture validates against the vendored schema", %{schema: schema} do
     for header <- client_headers() do
-      assert schema_errors(header, ref("clientEvent"), schema) == [], "client #{header["t"]}"
+      assert WireSchema.errors(header, WireSchema.ref("clientEvent"), schema) == [],
+             "client #{header["t"]}"
     end
 
     for header <- server_headers() do
-      assert schema_errors(header, ref("serverEvent"), schema) == [], "server #{header["t"]}"
+      assert WireSchema.errors(header, WireSchema.ref("serverEvent"), schema) == [],
+             "server #{header["t"]}"
     end
   end
 
@@ -170,16 +259,149 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       "created_at" => "2026-08-12T12:00:00Z"
     }
 
-    drifted = server_event("history_page", %{"profile_id" => "main", "messages" => [store_row]})
-    assert ["messages: " <> _reason | _rest] = schema_errors(drifted, ref("serverEvent"), schema)
+    page = %{
+      "profile_id" => "main",
+      "messages" => [store_row],
+      "next_after_seq" => 12,
+      "history_head_seq" => 12
+    }
 
-    refute schema_errors(server_event("future_event", %{}), ref("serverEvent"), schema) == []
-    refute schema_errors(%{"v" => 1, "t" => "pong", "seq" => 0}, ref("serverEvent"), schema) == []
-    assert schema_errors(%{"v" => 1, "t" => "pong", "seq" => 1}, ref("serverEvent"), schema) == []
+    assert ["messages: " <> _reason | _rest] =
+             server_errors(server_event("history_page", page), schema)
+
+    refute server_errors(server_event("future_event", %{}), schema) == []
+    refute server_errors(%{"v" => 1, "t" => "pong", "seq" => 0}, schema) == []
+    assert server_errors(%{"v" => 1, "t" => "pong", "seq" => 1}, schema) == []
 
     bad_caps = %{"commands" => [%{"name" => "help"}], "max_media_bytes" => 1}
     hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", bad_caps))
-    refute schema_errors(hello_ack, ref("serverEvent"), schema) == []
+    refute server_errors(hello_ack, schema) == []
+  end
+
+  test "the schema refuses what the daemon's bounds rule out", %{schema: schema} do
+    candidate = %{"host" => "192.168.1.8", "interface" => "en0", "scope" => "lan"}
+    crowded = Map.put(hello_ack_payload(), "candidates", List.duplicate(candidate, 17))
+    refute server_errors(server_event("hello_ack", crowded), schema) == []
+
+    refute server_errors(server_event("pair_denied", %{"reason" => "owner_denied"}), schema) == []
+    refute server_errors(server_event("pair_denied", %{"reason" => "rate_limited"}), schema) == []
+
+    preview = %{"in_reply_to" => 12, "url" => "https://e.com", "title" => "T"}
+    long_site = Map.put(preview, "site", String.duplicate("é", 61))
+
+    assert ["site: more than 120 bytes"] =
+             server_errors(server_event("link_preview", long_site), schema)
+
+    macs_row = %{
+      "profile_id" => "main",
+      "server_seq" => 3,
+      "role" => "user",
+      "text" => "hi",
+      "ts" => "2026-09-27T09:00:00Z"
+    }
+
+    assert ["missing media_refs"] = server_errors(server_event("row", macs_row), schema)
+    refute server_errors(server_event("text_done", text_done(false)), schema) == []
+    assert server_errors(server_event("text_done", text_done(true)), schema) == []
+  end
+
+  # FEAT-5: the pairing link is the one thing a phone reads before it has a
+  # session, so its format is exported, and pinned to what the daemon builds.
+  describe "the pairing link" do
+    test "the golden link decodes to its fields, which the schema accepts", %{schema: schema} do
+      [%{"uri" => uri, "query" => query}] = jsonl(@pairing_links)
+
+      assert String.starts_with?(uri, schema["$defs"]["pairingLink"]["x-uri-prefix"])
+      assert %URI{scheme: "fermix", host: "pair", query: raw} = URI.parse(uri)
+      assert URI.decode_query(raw) == query
+      assert WireSchema.errors(query, WireSchema.ref("pairingLink"), schema) == []
+      assert byte_size(Base.decode64!(query["gateway_pk"])) == 32
+      assert byte_size(Base.decode64!(query["secret"])) == 32
+      assert byte_size(Base.decode16!(query["tls_fp"], case: :lower)) == 32
+    end
+
+    test "the daemon builds exactly the golden link from its fields", %{schema: schema} do
+      [%{"uri" => golden, "query" => query}] = jsonl(@pairing_links)
+
+      assert {:ok, %{uri: uri}} = Management.begin_pairing(pairing_opts(query))
+      assert uri == golden
+
+      live = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert WireSchema.errors(live, WireSchema.ref("pairingLink"), schema) == []
+    end
+
+    test "the schema refuses a link that drifts from the format", %{schema: schema} do
+      [%{"query" => query}] = jsonl(@pairing_links)
+
+      for {field, value} <- [
+            {"v", "2"},
+            {"candidates", "not json"},
+            {"candidates", ~s({"host":"x"})},
+            {"candidates", Jason.encode!(List.duplicate("192.168.1.8", 17))},
+            {"tls_fp", String.upcase(query["tls_fp"])},
+            {"gateway_pk", String.replace(query["gateway_pk"], "+", "-")},
+            {"secret", String.trim_trailing(query["secret"], "=")},
+            {"port", "0"}
+          ] do
+        refute WireSchema.errors(
+                 Map.put(query, field, value),
+                 WireSchema.ref("pairingLink"),
+                 schema
+               ) ==
+                 [],
+               "a pairing link with #{field}=#{value} was accepted"
+      end
+    end
+  end
+
+  test "/healthz answers the protocol version this daemon serves", %{protocol: protocol} do
+    conn = Router.call(Plug.Test.conn(:get, "/healthz"), Router.init([]))
+
+    assert Jason.decode!(conn.resp_body) == %{
+             "fermix" => "mobile",
+             "v" => Protocol.protocol_version()
+           }
+
+    assert protocol =~ ~s({"fermix":"mobile","v":)
+  end
+
+  test "documentation records every close code the daemon sends", %{protocol: protocol} do
+    for code <- ~w(1000 1002 1003 1008 1009 1011 4001 4003) do
+      assert protocol =~ "| `#{code}` |", "PROTOCOL.md has no close-code row for #{code}"
+    end
+  end
+
+  # D1(d): a phone branches on error.code, so every word the socket gives a
+  # typed refusal is published, not only the ones someone remembered.
+  test "documentation names every typed refusal code the socket sends", %{protocol: protocol} do
+    [_before, errors] = String.split(protocol, "## Errors", parts: 2)
+    [table, _after] = String.split(errors, "## Close codes", parts: 2)
+
+    for code <- SocketHandler.typed_refusals() ++ ["media_fetch_backlog_full"] do
+      assert table =~ "`#{code}`", "PROTOCOL.md's Errors table has no code #{code}"
+    end
+  end
+
+  # approval_resolved reaches only the connections open when a card ends, so
+  # a phone that was away learns of it only by the card not coming back.
+  test "documentation tells a phone to drop the cards not sent after hello_ack", %{
+    protocol: protocol
+  } do
+    [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
+    assert approvals =~ "When `hello_ack` arrives, a client drops every card it shows"
+  end
+
+  test "documentation has a table row for every catalog event", %{protocol: protocol} do
+    for type <- Protocol.client_events() ++ Protocol.server_events() do
+      assert protocol =~ "| `#{type}` |", "PROTOCOL.md has no table row for #{type}"
+    end
+
+    for heading <- ["## Continuation frames", "## Pairing link", "## Approvals", "## Errors"] do
+      assert protocol =~ heading
+    end
+
+    assert protocol =~ "fermix://pair?"
+    assert protocol =~ "1 MiB"
   end
 
   test "documentation records the locked transport contract", %{protocol: protocol} do
@@ -207,26 +429,6 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert protocol =~ "push_vectors.json"
     assert File.exists?(Path.join(@priv_dir, "push_vectors.json"))
   end
-
-  defp null_typed_paths(schema, path) when is_map(schema) do
-    Enum.flat_map(schema, fn {key, value} -> null_typed_paths(key, value, path) end)
-  end
-
-  defp null_typed_paths(schema, path) when is_list(schema) do
-    schema
-    |> Enum.with_index()
-    |> Enum.flat_map(fn {value, index} -> null_typed_paths(value, "#{path}/#{index}") end)
-  end
-
-  defp null_typed_paths(_scalar, _path), do: []
-
-  defp null_typed_paths("type", "null", path), do: ["#{path}/type"]
-
-  defp null_typed_paths("type", types, path) when is_list(types) do
-    if "null" in types, do: ["#{path}/type"], else: []
-  end
-
-  defp null_typed_paths(key, value, path), do: null_typed_paths(value, "#{path}/#{key}")
 
   defp jsonl(path) do
     path
@@ -260,109 +462,46 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     }
   end
 
-  defp ref(name), do: %{"$ref" => "#/$defs/#{name}"}
+  defp server_errors(event, schema),
+    do: WireSchema.errors(event, WireSchema.ref("serverEvent"), schema)
 
-  # A bounded validator for exactly the JSON Schema vocabulary this export uses.
-  # Anything outside it fails loudly rather than passing unchecked, so extending
-  # the schema with an unsupported keyword breaks this test instead of quietly
-  # weakening the gate. Returns a list of problems; empty means valid.
-  defp schema_errors(value, schema, root) when is_map(schema) do
-    conditional_errors(schema, value, root) ++
-      Enum.flat_map(Map.drop(schema, ["if", "then"]), &keyword_errors(&1, value, root))
+  defp text_done(truncated) do
+    %{"turn_id" => "turn-1", "server_seq" => 1, "text" => "Hi", "truncated" => truncated}
   end
 
-  defp conditional_errors(%{"if" => condition, "then" => branch}, value, root) do
-    if schema_errors(value, condition, root) == [],
-      do: schema_errors(value, branch, root),
-      else: []
+  # The inputs the daemon builds a pairing link from, recovered from a link.
+  defp pairing_opts(query) do
+    identity = %{
+      gateway_public_key: Base.decode64!(query["gateway_pk"]),
+      tls_fingerprint: Base.decode16!(query["tls_fp"], case: :lower)
+    }
+
+    window = %{
+      session_id: "session",
+      secret: Base.decode64!(query["secret"]),
+      identity: identity,
+      opened_at_ms: 0,
+      expires_at_ms: PairManager.max_ttl_ms()
+    }
+
+    candidates =
+      query["candidates"]
+      |> Jason.decode!()
+      |> Enum.map(&%{address: &1, interface: "en0", scope: :lan})
+
+    [
+      config: [enabled: true],
+      pair_manager: :pair,
+      whereis: fn FermixChannels.Mobile.Supervisor -> self() end,
+      listener: :listener,
+      open_pair: fn :pair -> {:ok, window} end,
+      listener_info: fn :listener ->
+        {:ok, {{0, 0, 0, 0}, String.to_integer(query["port"])}}
+      end,
+      discover: fn -> {:ok, candidates} end,
+      host_label: fn -> query["name"] end
+    ]
   end
-
-  defp conditional_errors(_schema, _value, _root), do: []
-
-  defp keyword_errors({"$ref", "#/$defs/" <> name}, value, root) do
-    schema_errors(value, Map.fetch!(root["$defs"], name), root)
-  end
-
-  defp keyword_errors({"allOf", schemas}, value, root) do
-    Enum.flat_map(schemas, &schema_errors(value, &1, root))
-  end
-
-  defp keyword_errors({"anyOf", schemas}, value, root) do
-    if Enum.any?(schemas, &(schema_errors(value, &1, root) == [])),
-      do: [],
-      else: ["matched no anyOf branch"]
-  end
-
-  defp keyword_errors({"type", types}, value, _root) when is_list(types) do
-    if Enum.any?(types, &type?(value, &1)), do: [], else: ["expected #{Enum.join(types, "|")}"]
-  end
-
-  defp keyword_errors({"type", type}, value, _root) do
-    if type?(value, type), do: [], else: ["expected #{type}, got #{inspect(value)}"]
-  end
-
-  defp keyword_errors({"required", keys}, value, _root) when is_map(value) do
-    Enum.reject(keys, &Map.has_key?(value, &1)) |> Enum.map(&"missing #{&1}")
-  end
-
-  defp keyword_errors({"properties", properties}, value, root) when is_map(value) do
-    Enum.flat_map(properties, fn {key, subschema} ->
-      case Map.fetch(value, key) do
-        {:ok, sub} -> Enum.map(schema_errors(sub, subschema, root), &"#{key}: #{&1}")
-        :error -> []
-      end
-    end)
-  end
-
-  defp keyword_errors({"items", subschema}, value, root) when is_list(value) do
-    Enum.flat_map(value, &schema_errors(&1, subschema, root))
-  end
-
-  defp keyword_errors({"enum", allowed}, value, _root) do
-    if value in allowed, do: [], else: ["#{inspect(value)} outside enum"]
-  end
-
-  defp keyword_errors({"const", expected}, value, _root) do
-    if value == expected, do: [], else: ["#{inspect(value)} is not #{inspect(expected)}"]
-  end
-
-  defp keyword_errors({"minLength", min}, value, _root) when is_binary(value) do
-    if String.length(value) >= min, do: [], else: ["shorter than #{min}"]
-  end
-
-  defp keyword_errors({"maxLength", max}, value, _root) when is_binary(value) do
-    if String.length(value) <= max, do: [], else: ["longer than #{max}"]
-  end
-
-  defp keyword_errors({"pattern", pattern}, value, _root) when is_binary(value) do
-    if Regex.match?(Regex.compile!(pattern), value), do: [], else: ["does not match #{pattern}"]
-  end
-
-  defp keyword_errors({"minimum", min}, value, _root) when is_number(value) do
-    if value >= min, do: [], else: ["below #{min}"]
-  end
-
-  defp keyword_errors({"maximum", max}, value, _root) when is_number(value) do
-    if value <= max, do: [], else: ["above #{max}"]
-  end
-
-  defp keyword_errors({keyword, _constraint}, _value, _root)
-       when keyword in ~w(required properties items minLength maxLength pattern minimum maximum) do
-    []
-  end
-
-  defp keyword_errors({keyword, _constraint}, _value, _root) do
-    if keyword in @inert_keywords or String.starts_with?(keyword, "x-"),
-      do: [],
-      else: ["unsupported schema keyword #{keyword}"]
-  end
-
-  defp type?(value, "object"), do: is_map(value)
-  defp type?(value, "array"), do: is_list(value)
-  defp type?(value, "string"), do: is_binary(value)
-  defp type?(value, "integer"), do: is_integer(value)
-  defp type?(value, "number"), do: is_number(value)
-  defp type?(value, "boolean"), do: is_boolean(value)
 
   defp frame(header, bytes \\ <<>>) do
     json = Jason.encode!(header)

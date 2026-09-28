@@ -243,7 +243,7 @@ defmodule FermixCore.Plugins.Dist.McpSource do
       # daemon does not keep fresh.
       env: Map.merge(Config.plugin_settings(plugin.name), daemon_env),
       pass_env: Map.get(runtime, "pass_env", []),
-      tools_overrides: %{},
+      tools_overrides: access_overrides(plugin),
       cwd: root,
       capability_metadata: %{
         plugin_owned?: true,
@@ -252,6 +252,18 @@ defmodule FermixCore.Plugins.Dist.McpSource do
         category: :plugin
       }
     }
+  end
+
+  # The manifest is the one source of the access-sensitive flag on the mcp rail
+  # (the helper's own annotations are not read). `tools_overrides` is keyed by
+  # the helper's descriptor name, which is the preview name without the prefix.
+  defp access_overrides(%Plugin{name: name, tools: tools}) do
+    prefix = name <> "_"
+
+    for %{"rail" => "mcp", "access_sensitive" => true, "name" => preview} <- tools,
+        into: %{} do
+      {String.replace_prefix(preview, prefix, ""), %{access_sensitive?: true}}
+    end
   end
 
   # vendored: true — the runtime executable ships inside the artifact under

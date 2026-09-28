@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.ScheduleJob do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.Builtin.Tool
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.DeliveryDefaults
@@ -148,6 +149,7 @@ defmodule FermixCore.Tools.ScheduleJob do
          {:ok, expires_at} <- Support.optional_datetime(args, "expires_at"),
          {:ok, {delivery_mode, delivery_target}} <- DeliveryDefaults.resolve(args, context),
          {:ok, allowed_tools} <- caller_scoped_allowed_tools(args, context),
+         :ok <- AccessGate.check_job_tools(allowed_tools, context),
          {:ok, skill_name} <- validate_skill_name(args, context),
          {:ok, created_by_trust} <- require_source_trust(context),
          {:ok, {provider, model}} <- Support.validate_route_pin(args) do

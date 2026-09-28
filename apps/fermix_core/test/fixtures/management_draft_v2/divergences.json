@@ -745,6 +745,12 @@
       "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
     },
     {
+      "method": "(errors)",
+      "field": "unavailable:capability,sentence",
+      "kind": "engine_only",
+      "why": "unavailable is illustrated twice: once with details {capability} for a capability that could not answer, and once with details {capability, sentence} for the phone channel refusing a pairing or forgetting decision from a caller that is not the owner. The sentence is what tells that refusal from a channel that is not running; without it the CLI sent the operator to doctor, which reported the channel healthy. The draft predates the phone pairing surface and drew only the {capability} case."
+    },
+    {
       "method": "(schema)",
       "field": "error_codes:unknown_pairing_session",
       "kind": "engine_only",
@@ -929,6 +935,12 @@
       "field": "rows:mobile_port",
       "kind": "engine_only",
       "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:secrets",
+      "field": "rows:secret_store",
+      "kind": "engine_only",
+      "why": "The secrets section, under a secrets pane the draft predates, chooses the store a new secret is written to: the keyring or a private file in the Fermix home, for a Linux desktop whose login keyring stays locked after a fingerprint login. Its one row is an ordinary closed choice; an app that does not know the pane decodes it as unrecognised and draws no section for it."
     }
   ]
 }

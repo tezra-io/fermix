@@ -19,6 +19,13 @@ defmodule FermixCore.Plugins.Registry do
       satisfy; an `mcp`-rail entry may not carry one at all
       (`:requires_setting_on_mcp_tool`), because the gate governs what
       `Plugins.Capabilities` advertises and mcp-rail entries never register there.
+    * `access_sensitive` — the literal `true` on a local `http` or `mcp` tool
+      with `"read_only": false`, marking a command that changes who can get into
+      something (a car unlock). `Capabilities.AccessGate` runs it at once on the
+      owner's direct request and asks the owner to confirm it otherwise. Any other
+      value is `:invalid_access_sensitive`; on a read-only tool it is
+      `:access_sensitive_read_only_tool`. A `remote_mcp` tool may not carry it
+      (its fields are a closed set). Older engines ignore the key.
 
   The `runtime` block takes the same gate, and it is how an `mcp`-rail plugin
   expresses the same consent (M8 §9.3): `runtime.requires_setting` names one of
@@ -1284,6 +1291,7 @@ defmodule FermixCore.Plugins.Registry do
          :ok <- validate_tool_namespace(name, plugin_name),
          :ok <- validate_tool_description(tool, name),
          :ok <- validate_requires_setting(plugin, tool, name),
+         :ok <- validate_access_sensitive(tool, name),
          :ok <- validate_tool_rail(plugin, tool) do
       validate_tool_scopes(plugin, tool)
     end
@@ -1384,6 +1392,21 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   defp validate_requires_setting(_plugin, _tool, _name), do: :ok
+
+  # An access-sensitive tool (a car unlock) runs at once on the owner's direct
+  # request and waits for one owner confirmation otherwise
+  # (`Capabilities.AccessGate`). One spelling, the literal `true`, and only on a
+  # tool that changes something: a flag on a read would confirm nothing.
+  defp validate_access_sensitive(%{"access_sensitive" => true} = tool, name) do
+    if Map.get(tool, "read_only") == false,
+      do: :ok,
+      else: {:error, {:access_sensitive_read_only_tool, name}}
+  end
+
+  defp validate_access_sensitive(%{"access_sensitive" => _other}, name),
+    do: {:error, {:invalid_access_sensitive, name}}
+
+  defp validate_access_sensitive(_tool, _name), do: :ok
 
   # Scope declarations are an OAuth granted-scope concept; `none`/`api_key`
   # plugins declare no scopes.

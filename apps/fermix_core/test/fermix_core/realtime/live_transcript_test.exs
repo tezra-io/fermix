@@ -94,4 +94,24 @@ defmodule FermixCore.Realtime.LiveTranscriptTest do
       assert LiveTranscript.latest_user_end_ms(LiveTranscript.new()) == nil
     end
   end
+
+  # What the operator said after a point in the call, and only that: the spoken
+  # answer to a question Fermix asked (`Capabilities.AccessGate`).
+  describe "user_text_since/2" do
+    test "concatenates the user's fragments that ended after the point, verbatim and in order" do
+      transcript =
+        LiveTranscript.new()
+        |> LiveTranscript.append(:user, "unlock the car", 0, 2_000)
+        |> LiveTranscript.append(:assistant, "Should I unlock it?", 2_500, 4_000)
+        |> LiveTranscript.append(:user, "Yes,", 5_000, 5_300)
+        |> LiveTranscript.append(:user, " go ahead.", 5_300, 5_900)
+
+      assert LiveTranscript.user_text_since(transcript, 2_000) == "Yes, go ahead."
+      assert LiveTranscript.user_text_since(transcript, 5_900) == ""
+    end
+
+    test "is empty when the user never spoke" do
+      assert LiveTranscript.user_text_since(LiveTranscript.new(), 0) == ""
+    end
+  end
 end

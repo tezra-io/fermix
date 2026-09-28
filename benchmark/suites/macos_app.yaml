@@ -42,7 +42,8 @@ description: >
   Ordinary owner questions about a Fermix.app-managed macOS install: why the
   service verbs refuse, why `fermix upgrade` opens a window instead of swapping
   a binary, why two `fermix doctor` rows read not-applicable, and how a Homebrew
-  formula install moves to the app. Each case gates on a phrasing-independent
+  formula install moves to the app, plus how an app user connects Telegram.
+  Each case gates on a phrasing-independent
   floor plus the wrong-mode refusals; the rubric owns the wording. One labelled
   sanity case pins that the answer comes from the self-knowledge skill rather
   than from the model's own guess about how a macOS daemon is usually managed.
@@ -99,10 +100,10 @@ scenarios:
           service controls as where that state lives.
 
   - id: app_managed_handoffs
-    title: "setup, upgrade, and uninstall hand off to the app; two doctor rows go not-applicable"
+    title: "setup, upgrade, and uninstall hand off to the app; two doctor rows go not-applicable; channel setup lives in the app"
     severity: normal
     risk: host_readonly
-    tags: [macos-app, upgrade, doctor, self-knowledge]
+    tags: [macos-app, upgrade, doctor, channels, self-knowledge]
     cases:
       - id: upgrade_opened_a_window
         query: >
@@ -133,6 +134,28 @@ scenarios:
           app-managed install does not use because the app updates itself, so
           they report not-applicable rather than failing. Does not tell the user
           to reinstall, re-download, or verify the binary by hand.
+      # Channel setup is one of the things `fermix setup` hands to the app, and
+      # the wrong-mode failure is the one this suite exists for: an app user
+      # handed the standalone answer. The `--telegram-*` flags have no place in
+      # a correct app reply in any polarity. "BotFather" is the floor: every
+      # correct answer names where the token comes from.
+      - id: connect_telegram_on_app
+        query: >
+          I've got the Fermix Mac app running. How do I hook it up to Telegram
+          so I can message it from my phone?
+        expect:
+          reply_matches: '(?i)botfather'
+          reply_not_matches: '(?i)--telegram-'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Names the two values: a bot token from @BotFather (`/newbot`) and the
+          user's numeric Telegram user id, taken from a bot such as @userinfobot
+          and not from `/whoami` (Fermix does not answer a sender it does not
+          know yet). Says both go in the app's Settings > Channels > Telegram
+          sheet with the Telegram switch on, that Fermix then needs a restart,
+          and that the first message is opening the bot and pressing Start. Does
+          not tell the user to run `fermix setup` or edit config.toml.
 
   - id: brew_formula_to_app_migration
     title: "Moving a Homebrew formula install to the app"

@@ -4,13 +4,13 @@ defmodule FermixChannels.Mobile.ProtocolTest do
   alias FermixChannels.Mobile.Protocol
 
   @client_events ~w(
-    hello msg attach_begin attach_chunk attach_end command history_pull media_fetch
+    hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register ack read_state pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done
-    media_begin media_chunk media_end turn_error reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong
+    media_begin media_chunk media_end turn_error row reaction approval approval_resolved
+    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
   )
 
   test "publishes the v1 N/N-1 window and approved event catalogs" do
@@ -21,12 +21,138 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert Protocol.max_header_bytes() == 4_096
     assert Protocol.max_raw_chunk_bytes() == 61_440
     assert Protocol.max_plaintext_bytes() == 65_519
+    assert Protocol.max_event_bytes() == 1_048_576
   end
 
   test "negotiates supported, old, and new clients directionally" do
     assert :ok = Protocol.negotiate(1)
     assert {:error, :client_too_old} = Protocol.negotiate(0)
     assert {:error, :client_too_new} = Protocol.negotiate(2)
+  end
+
+  test "an out-of-window envelope names the direction and the client's version" do
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 2}} =
+             Protocol.decode_client_frame(
+               encode_frame(%{"v" => 2, "t" => "ping", "seq" => 1}, "")
+             )
+
+    assert {:error, {:unsupported_protocol_version, :client_too_old, 0}} =
+             Protocol.decode_client_frame(
+               encode_frame(%{"v" => 0, "t" => "ping", "seq" => 1}, "")
+             )
+  end
+
+  test "event_part is server-only: a client-sent part is refused like any unknown event" do
+    frame = client_frame("event_part", 1, %{"index" => 0, "count" => 2}, "{}")
+    assert {:error, {:unknown_event, "event_part"}} = Protocol.decode_client_frame(frame)
+  end
+
+  test "an event within the header cap stays one frame" do
+    assert {:ok, [frame]} = Protocol.encode_server_event("pong", %{}, 3, <<>>, [])
+    assert {:ok, ^frame} = Protocol.encode_server_frame("pong", %{}, 3)
+  end
+
+  test "a header over 4 KiB travels as a contiguous event_part run that reassembles" do
+    payload = %{"turn_id" => "turn-1", "server_seq" => 9, "text" => String.duplicate("a", 5_000)}
+
+    assert {:ok, frames} = Protocol.encode_server_event("text_done", payload, 5, <<>>, version: 1)
+    assert length(frames) == 2
+
+    assert Enum.map(frames, &decode_frame!(&1).header) == [
+             %{"v" => 1, "t" => "event_part", "seq" => 5, "index" => 0, "count" => 2},
+             %{"v" => 1, "t" => "event_part", "seq" => 6, "index" => 1, "count" => 2}
+           ]
+
+    assert reassemble(frames) == Map.put(payload, "t", "text_done")
+  end
+
+  test "a 64 KiB reply splits into parts that each fit one Noise message" do
+    payload = %{"turn_id" => "turn-1", "server_seq" => 9, "text" => String.duplicate("é", 32_768)}
+
+    assert {:ok, frames} = Protocol.encode_server_event("text_done", payload, 1, <<>>, [])
+    assert length(frames) == 2
+    assert Enum.all?(frames, &(byte_size(&1) <= Protocol.max_plaintext_bytes()))
+    assert Enum.all?(frames, &(byte_size(decode_frame!(&1).bytes) <= 61_440))
+    assert reassemble(frames) == Map.put(payload, "t", "text_done")
+  end
+
+  test "a reply past the 1 MiB event cap is cut on a UTF-8 boundary and marked truncated" do
+    # Two-byte characters and escaped newlines: the cut has to respect both the
+    # codepoint boundary and the JSON escaping that lengthens the header.
+    text = String.duplicate("é\n", 400_000)
+    payload = %{"turn_id" => "turn-1", "server_seq" => 9, "text" => text}
+
+    assert {:ok, frames} = Protocol.encode_server_event("text_done", payload, 1, <<>>, [])
+    json = frames |> Enum.map(&decode_frame!(&1).bytes) |> IO.iodata_to_binary()
+    assert byte_size(json) <= Protocol.max_event_bytes()
+
+    event = Jason.decode!(json)
+    assert event["truncated"] == true
+    assert String.valid?(event["text"])
+    assert String.starts_with?(text, event["text"])
+    assert byte_size(event["text"]) > 600_000
+  end
+
+  test "a single history row past the event cap ships truncated; the page shape stays" do
+    row = %{
+      "server_seq" => 4,
+      "role" => "assistant",
+      "content" => String.duplicate("x", 1_100_000),
+      "ts" => "2026-09-27T12:00:00Z",
+      "media_refs" => []
+    }
+
+    payload = %{"profile_id" => "main", "messages" => [row], "next_after_seq" => 4}
+
+    assert {:ok, frames} = Protocol.encode_server_event("history_page", payload, 1, <<>>, [])
+    event = reassemble(frames)
+    assert byte_size(Jason.encode!(event)) <= Protocol.max_event_bytes()
+    assert [%{"truncated" => true, "content" => content, "server_seq" => 4}] = event["messages"]
+    assert String.starts_with?(row["content"], content)
+    assert event["next_after_seq"] == 4
+  end
+
+  test "a row announced past the event cap ships truncated, like the reply it carries" do
+    payload = %{
+      "profile_id" => "main",
+      "server_seq" => 11,
+      "role" => "assistant",
+      "text" => String.duplicate("x", 1_100_000),
+      "ts" => "2026-09-27T12:00:00Z"
+    }
+
+    assert {:ok, frames} = Protocol.encode_server_event("row", payload, 1, <<>>, [])
+    event = reassemble(frames)
+    assert byte_size(Jason.encode!(event)) <= Protocol.max_event_bytes()
+    assert event["truncated"] == true
+    assert event["server_seq"] == 11
+    assert String.starts_with?(payload["text"], event["text"])
+  end
+
+  test "any other event past the 1 MiB cap is refused, never truncated" do
+    payload = %{"kind" => "info", "text" => String.duplicate("x", 1_100_000)}
+
+    assert {:error, {:event_too_large, size, 1_048_576}} =
+             Protocol.encode_server_event("notice", payload, 1, <<>>, [])
+
+    assert size > 1_048_576
+  end
+
+  test "event_part is a transport frame, not a logical event" do
+    assert {:error, :nested_event_part} =
+             Protocol.encode_server_event("event_part", %{"index" => 0, "count" => 2}, 1, "x", [])
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("event_part", %{"index" => 1, "count" => 2}, 1, "x")
+
+    assert {:error, {:invalid_field, "index"}} =
+             Protocol.encode_server_frame("event_part", %{"index" => 2, "count" => 2}, 1, "x")
+
+    assert {:error, {:invalid_field, "count"}} =
+             Protocol.encode_server_frame("event_part", %{"index" => 0, "count" => 1}, 1, "x")
+
+    assert {:error, {:missing_field, "bytes"}} =
+             Protocol.encode_server_frame("event_part", %{"index" => 0, "count" => 2}, 1)
   end
 
   test "decodes a valid hello and keeps additive fields" do
@@ -268,12 +394,84 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              Protocol.encode_server_frame("media_end", %{"ref" => hash, "sha256" => hash}, 6)
   end
 
+  # The phone stops one request's turn the way the Mac does, and hears a row
+  # written elsewhere (a Mac message, a Mac turn's reply) as the Mac hears one.
+  test "carries the shared cancel and row with the companion's shapes" do
+    cancel = %{"profile_id" => "main", "client_msg_id" => "phone-1"}
+
+    assert {:ok, %{type: "cancel"}} =
+             Protocol.decode_client_frame(client_frame("cancel", 1, cancel))
+
+    assert {:error, {:missing_field, "client_msg_id"}} =
+             Protocol.decode_client_frame(client_frame("cancel", 1, %{"profile_id" => "main"}))
+
+    row = %{
+      "profile_id" => "main",
+      "server_seq" => 7,
+      "role" => "user",
+      "text" => "from the Mac",
+      "ts" => "2026-09-27T09:00:00Z"
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("row", row, 1)
+
+    assert {:error, {:missing_field, "ts"}} =
+             Protocol.encode_server_frame("row", Map.delete(row, "ts"), 1)
+  end
+
+  test "a request's error names the request it ends" do
+    error = %{"code" => "request_failed", "message" => "attachment unavailable"}
+    assert {:ok, _frame} = Protocol.encode_server_frame("error", error, 1)
+
+    assert {:ok, frame} =
+             Protocol.encode_server_frame("error", Map.put(error, "client_msg_id", "phone-1"), 1)
+
+    assert {:ok, %{header: %{"client_msg_id" => "phone-1"}}} = decode_frame(frame)
+
+    assert {:error, {:invalid_field, "client_msg_id"}} =
+             Protocol.encode_server_frame("error", Map.put(error, "client_msg_id", ""), 1)
+  end
+
   test "encoder accepts atom payload keys but rejects reserved envelope fields" do
     assert {:ok, frame} = Protocol.encode_server_frame("pong", %{}, 1)
     assert {:ok, %{header: %{"t" => "pong"}}} = decode_frame(frame)
 
     assert {:error, {:reserved_field, "v"}} =
              Protocol.encode_server_frame("pong", %{v: 99}, 1)
+  end
+
+  # FEAT-4/STB-17: an absent optional field is an absent key on this wire,
+  # never an explicit null, as the companion codec already enforces.
+  test "the encoder refuses an explicit null in any field" do
+    preview = %{
+      "in_reply_to" => 7,
+      "url" => "https://example.com",
+      "site" => "Example",
+      "title" => "Example"
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("link_preview", preview, 1)
+
+    for field <- ["description", "image_ref"] do
+      assert {:error, {:null_field, ^field}} =
+               Protocol.encode_server_frame("link_preview", Map.put(preview, field, nil), 1)
+
+      assert {:error, {:null_field, ^field}} =
+               Protocol.encode_server_event(
+                 "link_preview",
+                 Map.put(preview, field, nil),
+                 1,
+                 <<>>,
+                 []
+               )
+    end
+
+    assert {:error, {:null_field, "client_msg_id"}} =
+             Protocol.encode_server_frame(
+               "error",
+               %{"code" => "x", "message" => "y", "client_msg_id" => nil},
+               1
+             )
   end
 
   test "encoder can pin a supported session version" do
@@ -298,5 +496,21 @@ defmodule FermixChannels.Mobile.ProtocolTest do
   defp decode_frame(<<size::32, rest::binary>>) do
     <<json::binary-size(size), bytes::binary>> = rest
     {:ok, %{header: Jason.decode!(json), bytes: bytes}}
+  end
+
+  defp decode_frame!(frame) do
+    {:ok, decoded} = decode_frame(frame)
+    decoded
+  end
+
+  # The client's side of an event_part run: tails in index order, then one
+  # logical event.
+  defp reassemble(frames) do
+    frames
+    |> Enum.map(&decode_frame!/1)
+    |> Enum.sort_by(& &1.header["index"])
+    |> Enum.map(& &1.bytes)
+    |> IO.iodata_to_binary()
+    |> Jason.decode!()
   end
 end

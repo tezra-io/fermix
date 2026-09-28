@@ -170,6 +170,69 @@ defmodule FermixChannels.Gateway.CommandsTest do
       refute help_text =~ "/new"
     end
 
+    # SIDE-V1: a `fermix ask` the daemon's own process tree sent is operator by
+    # transport, but not the owner, so a command that answers an approval or
+    # changes the sandbox, the persona or the skills answers with the sentence
+    # naming where the owner can act, and the refusal says why in its telemetry.
+    test "refuses the approval family from a process the daemon started, saying why" do
+      test_pid = self()
+      handler_id = "test-command-unattended-#{System.unique_integer()}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :command, :unauthorized],
+        fn event, _measurements, metadata, _config ->
+          send(test_pid, {:telemetry, event, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      family = [
+        {"/confirm ABC", "sandbox"},
+        {"/deny ABC", "sandbox"},
+        {"/grant path /tmp", "sandbox"},
+        {"/revoke path /tmp", "sandbox"},
+        {"/sandbox status", "sandbox"},
+        {"/soul status", "soul"},
+        {"/skills proposals", "skills"}
+      ]
+
+      for {content, command} <- family do
+        msg = cli_message(content, :daemon_descendant)
+
+        assert {:error, :unauthorized} =
+                 Commands.dispatch(Commands.parse(msg), reply_fn(test_pid), cli_ctx(msg))
+
+        assert_receive {:compact_reply, reply}
+        assert reply =~ "in person", "#{content} was not refused: #{reply}"
+        assert reply =~ "the Fermix app"
+
+        assert_receive {:telemetry, [:fermix, :command, :unauthorized],
+                        %{command: ^command, channel: "cli", reason: :unattended}}
+      end
+    end
+
+    test "help from a process the daemon started lists every command but the approval family" do
+      test_pid = self()
+      msg = cli_message("/help", :daemon_descendant)
+
+      assert :ok = Commands.dispatch(Commands.parse(msg), reply_fn(test_pid), cli_ctx(msg))
+
+      assert_receive {:compact_reply, help_text}
+
+      for command <- ~w(/help /whoami /new /compact /tasks /pause /resume /stop /background
+                        /ultra /history) do
+        assert help_text =~ command, "#{command} missing from: #{help_text}"
+      end
+
+      refute help_text =~ "/sandbox"
+      refute help_text =~ "/confirm"
+      refute help_text =~ "/soul"
+      refute help_text =~ "/skills"
+    end
+
     test "shows command aliases in help output for authorized callers" do
       Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
       test_pid = self()
@@ -462,6 +525,22 @@ defmodule FermixChannels.Gateway.CommandsTest do
       metadata: Keyword.get(opts, :metadata, %{})
     })
   end
+
+  # A `fermix ask` as the daemon bridge hands it over, `caller` read off the peer.
+  defp cli_message(content, caller) do
+    Message.new!(%{
+      id: "msg-1",
+      content: content,
+      sender: "operator",
+      channel: "cli",
+      chat_id: "cli",
+      reply_target: "cli",
+      metadata: %{source: :cli, user_id: "cli", chat_type: "private", caller: caller}
+    })
+  end
+
+  defp cli_ctx(msg),
+    do: context_for(msg, %{conversation_store: self(), conversation_key: {"cli", "cli", :root}})
 
   defp reply_fn(test_pid) do
     fn

@@ -412,6 +412,21 @@ defmodule FermixCore.Providers.ModelCatalog do
     id
   end
 
+  @doc """
+  The model a provider runs with: the `default_model` its config block names,
+  or the catalog default while it names none. The one resolver behind the
+  setup row, the settings Model row, the overview, Doctor's probe and the
+  route, so a provider that has just been signed in shows the model it will
+  call, and every surface names the same one.
+  """
+  @spec effective_model(provider(), keyword()) :: String.t()
+  def effective_model(provider, block) when is_list(block) do
+    case Keyword.get(block, :default_model) do
+      model when is_binary(model) and model != "" -> model
+      _absent -> default_model_for(provider)
+    end
+  end
+
   @spec known_model?(provider(), String.t()) :: boolean()
   def known_model?(provider, id) when is_binary(id) do
     Enum.any?(models_for(provider), &(&1.id == id))

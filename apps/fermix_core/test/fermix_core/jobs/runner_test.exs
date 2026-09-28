@@ -11,6 +11,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
+  alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
 
   defmodule RecordingAdapter do
@@ -252,6 +253,31 @@ defmodule FermixCore.Jobs.RunnerTest do
          provider_state: %{rest: []}
        }}
     end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, "no continue expected"}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule RaisingAdapter do
+    @moduledoc false
+    # The model call raises: nothing between the adapter and AgentLoop.run
+    # rescues it, so the whole loop process crashes.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts), do: raise("adapter exploded")
 
     @impl true
     def continue(_provider_state, _tool_results, _opts), do: {:error, "no continue expected"}
@@ -1279,6 +1305,82 @@ defmodule FermixCore.Jobs.RunnerTest do
 
     # A dead runner has no label, which is what makes an orphaned run detectable.
     assert Runner.run_id(pid) == nil
+  end
+
+  # JOB-8: a :rest_for_one restart of any core child started before the job
+  # subtree shuts every runner down mid-run. The restarted Scheduler reaps the
+  # run and may claim the job again, so a loop left running would execute the
+  # job a second time beside the new run.
+  test "a runner shut down mid-loop takes its AgentLoop with it", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Shut Down Mid Loop", task_prompt: "Park, then go.")
+
+    supervisor = start_supervised!({RunnerSupervisor, name: :"jobs_runner_sup_#{run.id}"})
+
+    {:ok, runner} =
+      RunnerSupervisor.start_run(supervisor,
+        repo: repo,
+        job: job,
+        run: run,
+        capability_registry: capability_registry,
+        adapter: HeldAdapter,
+        adapter_opts: [test_pid: self()],
+        output_base_dir: output_base_dir,
+        network_readiness_enabled: false
+      )
+
+    # The provider call runs inside the loop process, so the held pid is the loop.
+    assert_receive {:held, loop}
+    refute loop == runner
+    loop_ref = Process.monitor(loop)
+
+    :ok = DynamicSupervisor.terminate_child(supervisor, runner)
+
+    # HeldAdapter gives up after 2 s on its own and the loop then ends :normal,
+    # so only a loop that died with its runner reports the runner's :shutdown.
+    assert_receive {:DOWN, ^loop_ref, :process, ^loop, reason}, 5_000
+    assert reason == :shutdown
+  end
+
+  # The loop is linked to its runner, so a loop that crashes must report the
+  # crash as a value: the runner then fails the run itself (error row, failure
+  # text) and exits :normal instead of dying with the loop.
+  test "an AgentLoop crash fails the run and the runner still exits normally", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Crashing Loop", task_prompt: "Explode.")
+
+    Process.flag(:trap_exit, true)
+
+    log =
+      capture_log(fn ->
+        {:ok, pid} =
+          Runner.start_link(
+            repo: repo,
+            job: job,
+            run: run,
+            notify: self(),
+            capability_registry: capability_registry,
+            adapter: RaisingAdapter,
+            output_base_dir: output_base_dir,
+            network_readiness_enabled: false
+          )
+
+        assert_receive {:EXIT, ^pid, :normal}, 5_000
+      end)
+
+    assert log =~ "Scheduled job #{job.id} AgentLoop crashed"
+    assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
+    assert failed.status == "error"
+    assert failed.error =~ "agent_loop_exit"
+    assert failed.error =~ "adapter exploded"
   end
 
   # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors

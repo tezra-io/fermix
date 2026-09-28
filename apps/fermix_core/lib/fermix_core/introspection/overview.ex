@@ -8,6 +8,7 @@ defmodule FermixCore.Introspection.Overview do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
 
@@ -205,7 +206,7 @@ defmodule FermixCore.Introspection.Overview do
 
         %{
           active: active,
-          model: Keyword.get(provider_config, :default_model),
+          model: ModelCatalog.effective_model(active, provider_config),
           auth_mode: Keyword.get(provider_config, :auth_mode),
           reasoning_effort: Keyword.get(provider_config, :reasoning_effort)
         }

@@ -546,6 +546,36 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused, courtesy: :yielded}
   end
 
+  # How the access gate settled an access-sensitive call (a closed enum) and the
+  # parked intent that pairs a held call with its confirmed run (an opaque id):
+  # no content, so both ride outside the content-capture gate.
+  test "tool_span keeps the access-gate label and intent" do
+    metadata = %{
+      tool: "tesla_unlock_doors",
+      success: false,
+      access_gate: "held_this_chat",
+      access_intent: "9f2c1a7b3e4d5f60",
+      policy_enforcement: %{source: "access_gate", decision: "confirm", phase: "pre_execution"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             access_gate: "held_this_chat",
+             access_intent: "9f2c1a7b3e4d5f60",
+             policy_enforcement: %{
+               source: "access_gate",
+               decision: "confirm",
+               phase: "pre_execution"
+             }
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 

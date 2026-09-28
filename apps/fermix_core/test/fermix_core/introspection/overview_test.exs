@@ -2,6 +2,7 @@ defmodule FermixCore.Introspection.OverviewTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Introspection.Overview
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Setup.ConfigStore
 
   setup do
@@ -89,6 +90,35 @@ defmodule FermixCore.Introspection.OverviewTest do
     assert snapshot.capabilities == capabilities.counts
     assert snapshot.paths.home == tmp_home
     assert snapshot.paths.config == ConfigStore.path()
+  end
+
+  # A fresh account has signed in and chosen no model. Home's provider line
+  # reads this snapshot, so it names the model the daemon calls rather than
+  # nothing.
+  test "names the catalog default while no model is chosen" do
+    Application.put_env(:fermix_core, :providers, openai_codex: [])
+
+    assert {:ok, snapshot} =
+             Overview.snapshot(
+               health_report: %{status: :ready, failures: [], channels: [], memory: %{}},
+               main_agent_status: %{
+                 status: :idle,
+                 active_conversations: 0,
+                 pending_conversations: 0
+               },
+               skill_workers: [],
+               capabilities_snapshot: %{
+                 counts: %{builtin: 0, skill: 0, mcp: 0, total: 0},
+                 capabilities: []
+               },
+               jobs: [],
+               running_job_runs: [],
+               failed_job_runs: [],
+               daemon: %{status: :running, pid: "123", uptime_ms: 1_000}
+             )
+
+    assert snapshot.provider.active == :openai_codex
+    assert snapshot.provider.model == ModelCatalog.default_model_for(:openai_codex)
   end
 
   test "marks job status unavailable when job reads fail" do

@@ -40,6 +40,17 @@ defmodule FermixCore.Management.Settings.Assistant do
     %{id: "memory", pane: "memory", title: "Memory"}
   ]
 
+  @doc """
+  The communication style a fresh home starts with, the balanced suggestion:
+  the first boot seeds it (`Setup.HomeSeeder`) and About you offers it, so the
+  two cannot drift apart.
+  """
+  @spec default_style() :: String.t()
+  def default_style do
+    {sentence, "Balanced"} = List.keyfind(@style_suggestions, "Balanced", 1)
+    sentence
+  end
+
   @doc "Both sections, in publication order."
   @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
   def sections, do: @sections

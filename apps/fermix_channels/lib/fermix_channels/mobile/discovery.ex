@@ -3,29 +3,82 @@ defmodule FermixChannels.Mobile.Discovery do
   Enumerates local addresses that are useful to an already-paired mobile client.
 
   Discovery is deliberately bounded and dependency-injectable. It enumerates
-  interfaces, then performs at most eight reverse-DNS lookups for tailnet IPs
-  so resolvable Tailscale MagicDNS names travel with the numeric candidates.
+  interfaces, then performs at most eight reverse-DNS lookups for tailnet IPs,
+  concurrently under one overall deadline, so resolvable Tailscale MagicDNS
+  names travel with the numeric candidates.
+
+  The mobile supervisor runs one instance as a cache: `hello_ack` and
+  `pair_approved` read `candidates/1`, which enumerates again only once the
+  last answer is older than a minute, so a burst of hellos costs one lookup.
   """
+
+  use GenServer
 
   @type scope :: :lan | :tailnet
   @type candidate :: %{address: String.t(), interface: String.t(), scope: scope()}
 
   @max_magicdns_lookups 8
   @magicdns_timeout_ms 750
+  @cache_ttl_ms 60_000
   @hostname_label ~r/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
 
-  @doc "Returns private-LAN and Tailscale IPv4 candidates for active interfaces."
+  @spec start_link(keyword()) :: GenServer.on_start()
+  def start_link(opts \\ []) when is_list(opts) do
+    GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name, __MODULE__))
+  end
+
+  @doc "The cached candidates, enumerated again once they are older than a minute."
+  @spec candidates(GenServer.server()) :: {:ok, [candidate()]} | {:error, term()}
+  def candidates(server \\ __MODULE__), do: GenServer.call(server, :candidates)
+
+  @impl true
+  def init(opts) do
+    discover = Keyword.get(opts, :discover, fn -> discover() end)
+    clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
+
+    if is_function(discover, 0) and is_function(clock, 0),
+      do: {:ok, %{discover: discover, clock: clock, cached: nil}},
+      else: {:stop, :invalid_discovery_options}
+  end
+
+  @impl true
+  def handle_call(:candidates, _from, state) do
+    now = state.clock.()
+
+    case state.cached do
+      {at, candidates} when now - at < @cache_ttl_ms -> {:reply, {:ok, candidates}, state}
+      _stale_or_empty -> refresh(now, state)
+    end
+  end
+
+  # A failed enumeration is answered, never cached: the next hello retries.
+  defp refresh(now, state) do
+    case state.discover.() do
+      {:ok, candidates} -> {:reply, {:ok, candidates}, %{state | cached: {now, candidates}}}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  @doc """
+  Returns private-LAN and Tailscale IPv4 candidates for active interfaces.
+
+  `:getifaddrs` and `:reverse_lookup` replace the OS calls, and
+  `:lookup_timeout_ms` the 750 ms deadline the reverse lookups share.
+  """
   @spec discover(keyword()) :: {:ok, [candidate()]} | {:error, term()}
   def discover(opts \\ [])
 
   def discover(opts) when is_list(opts) do
     getifaddrs = Keyword.get(opts, :getifaddrs, &:inet.getifaddrs/0)
     reverse_lookup = Keyword.get(opts, :reverse_lookup, &:inet.gethostbyaddr/2)
+    lookup_timeout_ms = Keyword.get(opts, :lookup_timeout_ms, @magicdns_timeout_ms)
     validate_getifaddrs!(getifaddrs)
     validate_reverse_lookup!(reverse_lookup)
+    validate_lookup_timeout!(lookup_timeout_ms)
+    lookup = {reverse_lookup, lookup_timeout_ms}
 
     case getifaddrs.() do
-      {:ok, interfaces} -> {:ok, collect_candidates(interfaces, reverse_lookup)}
+      {:ok, interfaces} -> {:ok, collect_candidates(interfaces, lookup)}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:invalid_getifaddrs_result, other}}
     end
@@ -51,26 +104,43 @@ defmodule FermixChannels.Mobile.Discovery do
   defp validate_reverse_lookup!(_fun),
     do: raise(ArgumentError, ":reverse_lookup must be a 2-arity function")
 
-  defp collect_candidates(interfaces, reverse_lookup)
+  defp validate_lookup_timeout!(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0,
+    do: :ok
+
+  defp validate_lookup_timeout!(_timeout_ms),
+    do: raise(ArgumentError, ":lookup_timeout_ms must be a positive integer")
+
+  defp collect_candidates(interfaces, lookup)
        when is_list(interfaces) or is_map(interfaces) do
     candidates = interfaces |> Enum.flat_map(&interface_candidates/1) |> unique_candidates()
     {tailnet, lan} = Enum.split_with(candidates, &(&1.scope == :tailnet))
-    magicdns = magicdns_candidates(tailnet, reverse_lookup)
+    magicdns = magicdns_candidates(tailnet, lookup)
 
     unique_candidates(magicdns ++ tailnet ++ lan)
   end
 
-  defp collect_candidates(_interfaces, _reverse_lookup), do: []
+  defp collect_candidates(_interfaces, _lookup), do: []
 
-  defp magicdns_candidates(tailnet, reverse_lookup) do
+  # Every lookup starts at once, so the per-task timeout is also the overall
+  # deadline: an unanswerable PTR (MagicDNS off, no upstream resolver) costs
+  # one timeout, not one per tailnet address.
+  defp magicdns_candidates(tailnet, {_reverse_lookup, timeout_ms} = lookup) do
     tailnet
     |> Enum.take(@max_magicdns_lookups)
-    |> Enum.flat_map(&magicdns_candidate(&1, reverse_lookup))
+    |> Task.async_stream(&magicdns_candidate(&1, lookup),
+      max_concurrency: @max_magicdns_lookups,
+      timeout: timeout_ms,
+      on_timeout: :kill_task
+    )
+    |> Enum.flat_map(fn
+      {:ok, candidates} -> candidates
+      {:exit, :timeout} -> []
+    end)
   end
 
-  defp magicdns_candidate(candidate, reverse_lookup) do
+  defp magicdns_candidate(candidate, {reverse_lookup, timeout_ms}) do
     with {:ok, address} <- parse_ipv4(candidate.address),
-         {:ok, hostent} <- reverse_lookup.(address, @magicdns_timeout_ms),
+         {:ok, hostent} <- reverse_lookup.(address, timeout_ms),
          {:ok, hostname} <- magicdns_hostname(hostent) do
       [%{candidate | address: hostname}]
     else

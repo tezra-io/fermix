@@ -63,7 +63,6 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     attrs = device_attrs()
     assert {:ok, original} = DeviceStore.add(attrs, root: root)
     first_seen = ~U[2026-08-12 18:30:00Z]
-    stale_seen = ~U[2026-08-12 18:29:59Z]
 
     assert {:ok, seen} =
              DeviceStore.update(original.device_id, %{last_seen: first_seen}, root: root)
@@ -71,13 +70,182 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     assert {:ok, ^seen} =
              DeviceStore.update(original.device_id, %{last_seen: first_seen}, root: root)
 
-    assert {:error, {:last_seen_regression, ^first_seen, ^stale_seen}} =
-             DeviceStore.update(original.device_id, %{last_seen: stale_seen}, root: root)
-
-    assert {:error, {:last_seen_regression, ^first_seen, nil}} =
-             DeviceStore.update(original.device_id, %{last_seen: nil}, root: root)
-
     assert {:ok, ^seen} = DeviceStore.fetch(original.device_id, root: root)
+  end
+
+  # last_seen is informational: a wall clock that steps backwards must never
+  # refuse the update, because the socket's hello would fail with it (SEC-9).
+  test "a last_seen earlier than the stored one keeps the later time and never fails",
+       %{root: root} do
+    assert {:ok, original} = DeviceStore.add(device_attrs(), root: root)
+    later = ~U[2026-08-12 18:30:00Z]
+    assert {:ok, _seen} = DeviceStore.update(original.device_id, %{last_seen: later}, root: root)
+
+    for stepped_back <- [~U[2026-08-12 18:29:59Z], ~U[2020-01-01 00:00:00Z], nil] do
+      assert {:ok, %Device{last_seen: ^later}} =
+               DeviceStore.update(original.device_id, %{last_seen: stepped_back}, root: root)
+    end
+
+    assert {:ok, %Device{name: "Renamed", last_seen: ^later}} =
+             DeviceStore.update(
+               original.device_id,
+               %{name: "Renamed", last_seen: ~U[2026-08-12 18:00:00Z]},
+               root: root
+             )
+  end
+
+  # Every hello records last_seen; rewriting the trust store for each one is a
+  # needless fsync'd write on every reconnect (STB-15).
+  test "a last_seen within five minutes of the stored one does not rewrite the store",
+       %{root: root} do
+    assert {:ok, original} = DeviceStore.add(device_attrs(), root: root)
+    first = ~U[2026-08-12 18:30:00Z]
+    assert {:ok, _seen} = DeviceStore.update(original.device_id, %{last_seen: first}, root: root)
+    path = DeviceStore.store_path(root)
+    %File.Stat{inode: inode} = File.lstat!(path)
+
+    assert {:ok, %Device{last_seen: ^first}} =
+             DeviceStore.update(original.device_id, %{last_seen: DateTime.add(first, 299)},
+               root: root
+             )
+
+    assert File.lstat!(path).inode == inode
+
+    moved_on = DateTime.add(first, 300)
+
+    assert {:ok, %Device{last_seen: ^moved_on}} =
+             DeviceStore.update(original.device_id, %{last_seen: moved_on}, root: root)
+
+    refute File.lstat!(path).inode == inode
+  end
+
+  # A power loss after an unsynced rename can leave a zero-length file, which
+  # used to load as "no paired devices" and silently unpair every phone.
+  test "a zero-length store is refused, never read as an empty one", %{root: root} do
+    assert {:ok, _device} = DeviceStore.add(device_attrs(), root: root)
+    path = DeviceStore.store_path(root)
+    File.write!(path, "")
+
+    assert {:error, {:devices_store_empty, ^path}} = DeviceStore.list(root: root)
+    assert {:error, {:devices_store_empty, ^path}} = DeviceStore.list(root: root)
+  end
+
+  test "an empty device list round-trips as an empty store, not a refusal", %{root: root} do
+    attrs = device_attrs()
+    assert {:ok, _device} = DeviceStore.add(attrs, root: root)
+    assert :ok = DeviceStore.delete(attrs.device_id, root: root)
+    assert File.read!(DeviceStore.store_path(root)) != ""
+    assert {:ok, []} = DeviceStore.list(root: root)
+  end
+
+  test "a read never creates the mobile directory", %{root: root} do
+    assert {:ok, []} = DeviceStore.list(root: root)
+
+    assert {:error, {:device_not_found, _id}} =
+             DeviceStore.delete("11111111-1111-4111-8111-111111111111", root: root)
+
+    refute File.exists?(Path.join(root, "mobile"))
+  end
+
+  describe "the supervised store caches the parsed file" do
+    setup %{root: root} do
+      name = Module.concat(__MODULE__, "Cached#{unique_id()}")
+      start_supervised!({DeviceStore, root: root, name: name})
+      %{store: name}
+    end
+
+    test "an unchanged file is not read again", %{root: root, store: store} do
+      attrs = device_attrs()
+      assert {:ok, _added} = DeviceStore.add(store, attrs)
+      assert {:ok, _device} = DeviceStore.fetch(store, attrs.device_id)
+
+      # Same size, same inode, same times: only the bytes changed. A cached
+      # store answers from memory; a store that re-read would refuse this.
+      path = DeviceStore.store_path(root)
+      stat = File.lstat!(path, time: :posix)
+      File.write!(path, String.duplicate(" ", stat.size))
+      File.touch!(path, stat.mtime)
+      File.touch!(path, stat.mtime)
+      assert %File.Stat{size: size, inode: inode} = File.lstat!(path, time: :posix)
+      assert {size, inode} == {stat.size, stat.inode}
+
+      assert {:ok, %Device{}} = DeviceStore.fetch(store, attrs.device_id)
+    end
+
+    test "its own delete is seen by the next fetch", %{store: store} do
+      attrs = device_attrs()
+      assert {:ok, _added} = DeviceStore.add(store, attrs)
+      assert {:ok, _device} = DeviceStore.fetch(store, attrs.device_id)
+      assert :ok = DeviceStore.delete(store, attrs.device_id)
+
+      assert {:error, {:device_not_found, _id}} = DeviceStore.fetch(store, attrs.device_id)
+    end
+
+    # The per-frame revocation check depends on this: an operator who edits or
+    # replaces the file by hand must be seen on the very next frame.
+    test "a file replaced outside the daemon is re-read", %{root: root, store: store} do
+      first = device_attrs()
+      second = device_attrs()
+      assert {:ok, _added} = DeviceStore.add(store, first)
+      assert {:ok, [_one]} = DeviceStore.list(store)
+
+      assert {:ok, _added} = DeviceStore.add(second, root: root)
+      assert {:ok, [_one, _two]} = DeviceStore.list(store)
+
+      assert :ok = DeviceStore.delete(first.device_id, root: root)
+      assert {:error, {:device_not_found, _id}} = DeviceStore.fetch(store, first.device_id)
+    end
+
+    test "a file whose permissions changed is validated again", %{root: root, store: store} do
+      assert {:ok, _added} = DeviceStore.add(store, device_attrs())
+      assert {:ok, [_one]} = DeviceStore.list(store)
+      path = DeviceStore.store_path(root)
+      File.chmod!(path, 0o644)
+
+      assert {:error, {:unsafe_permissions, ^path, 0o644, 0o600}} = DeviceStore.list(store)
+    end
+  end
+
+  describe "add_approved/2" do
+    # A phone whose `pair_approved` was lost never sent a hello, so its row is
+    # an orphan the duplicate-key guard would otherwise hold forever (STB-13).
+    test "replaces an earlier approval of the same phone that never said hello",
+         %{root: root} do
+      orphan = device_attrs()
+      assert {:ok, _orphan} = DeviceStore.add(orphan, root: root)
+      again = %{device_attrs() | noise_pk: orphan.noise_pk}
+
+      assert {:ok, %Device{device_id: id}} = DeviceStore.add_approved(again, root: root)
+      assert id == again.device_id
+      assert {:ok, [%Device{device_id: ^id}]} = DeviceStore.list(root: root)
+    end
+
+    test "never replaces a phone that has connected", %{root: root} do
+      paired = device_attrs()
+      assert {:ok, _paired} = DeviceStore.add(paired, root: root)
+
+      assert {:ok, _seen} =
+               DeviceStore.update(paired.device_id, %{last_seen: ~U[2026-08-12 19:00:00Z]},
+                 root: root
+               )
+
+      again = %{device_attrs() | noise_pk: paired.noise_pk}
+
+      assert {:error, {:duplicate_noise_identity, _key}} =
+               DeviceStore.add_approved(again, root: root)
+
+      assert {:ok, [%Device{device_id: id}]} = DeviceStore.list(root: root)
+      assert id == paired.device_id
+    end
+
+    test "the supervised facade admits a new phone like add/2", %{root: root} do
+      name = Module.concat(__MODULE__, "Approved#{unique_id()}")
+      start_supervised!({DeviceStore, root: root, name: name})
+      attrs = device_attrs()
+
+      assert {:ok, %Device{}} = DeviceStore.add_approved(name, attrs)
+      assert {:ok, [_one]} = DeviceStore.list(name)
+    end
   end
 
   test "delete removes only the requested record", %{root: root} do

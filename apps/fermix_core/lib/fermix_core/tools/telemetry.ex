@@ -16,6 +16,13 @@ defmodule FermixCore.Tools.Telemetry do
   # override them (defends against a tool injecting a false agent/success).
   @authoritative [:tool, :agent, :success]
 
+  # How `Capabilities.AccessGate` let an access-sensitive call through (`direct`,
+  # `scheduled`, `confirmed`) and the parked intent a confirmed run answers. The
+  # gate stamps them on the call's context, so the executor's own event carries
+  # them without any executor knowing the gate exists; the context wins over a
+  # caller's `:metadata`.
+  @access_gate_keys [:access_gate, :access_intent]
+
   # A turn may carry `:redact_values` — secret values that must not leave the
   # machine in an exported event (MILESTONE_29_ACP_AGENT_SURFACE §8.3). This is
   # the single choke point every tool's content passes through, so the scrub
@@ -67,6 +74,7 @@ defmodule FermixCore.Tools.Telemetry do
       |> Keyword.get(:metadata, %{})
       |> Map.drop(@authoritative)
       |> scrub_metadata(redact)
+      |> Map.merge(Map.take(context, @access_gate_keys))
       |> Map.merge(Telemetry.correlation(context))
       |> maybe_put_content(opts, redact)
       |> Map.merge(%{tool: tool_name, agent: agent, success: success})

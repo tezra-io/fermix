@@ -21,11 +21,22 @@ defmodule FermixTestSupport.DistFetcherStub do
     :ok
   end
 
+  # The table is owned by the test process that called `init/0` and the VM
+  # deletes it when that process exits; an `on_exit` callback runs afterwards,
+  # so the table can vanish between `whereis` and `delete`. A table that is
+  # gone by then is already cleaned up.
   def cleanup do
     case :ets.whereis(@table) do
       :undefined -> :ok
-      tid -> :ets.delete(tid)
+      tid -> delete_if_present(tid)
     end
+  end
+
+  defp delete_if_present(tid) do
+    :ets.delete(tid)
+    :ok
+  rescue
+    ArgumentError -> :ok
   end
 
   defp reset, do: cleanup()

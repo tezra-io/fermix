@@ -322,15 +322,25 @@ def _first_start(view: TurnView, name: str) -> datetime | None:
     return None
 
 
+# Which decisions each enforcing source stamps (docs/TELEMETRY_CONTRACT.md,
+# "Proving a policy denial"). The access gate holds a call for the owner's
+# confirmation or refuses it; either way its executor never ran.
+_PRE_EXECUTION_DECISIONS = {
+    "sandbox": {"deny", "hardline"},
+    "netguard": {"deny", "hardline"},
+    "access_gate": {"confirm", "deny"},
+}
+
+
 def _explicit_block(span: dict) -> bool:
     """Accept only typed evidence that policy stopped execution before it began."""
     metadata = span.get("metadata") or {}
     enforcement = metadata.get("policy_enforcement")
     if not isinstance(enforcement, dict):
         return False
+    decisions = _PRE_EXECUTION_DECISIONS.get(enforcement.get("source"), set())
     return (
-        enforcement.get("source") in {"sandbox", "netguard"}
-        and enforcement.get("decision") in {"deny", "hardline"}
+        enforcement.get("decision") in decisions
         and enforcement.get("phase") == "pre_execution"
     )
 

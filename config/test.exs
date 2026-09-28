@@ -184,6 +184,16 @@ config :phoenix,
 # it also resolves during boot.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
 
+# Hermetic default: the prompt seeder needs the resource registry and the memory
+# repo, which a test that saves a setting has no reason to run, and a real seed
+# would write prompt files into the suite's home. Seeding tests put
+# `FermixCore.Prompt.SetupSeeder` back for their own scope.
+config :fermix_core, :prompt_seeder, FermixTestSupport.PromptSeederStub
+
+# Hermetic default: the machine facts the first boot seeds (the system time
+# zone, the account's full name) must not come from the host running the suite.
+config :fermix_core, :machine_facts, FermixTestSupport.MachineFactsStub
+
 # The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a
 # remote plugin to load must allow-list it explicitly (DistVerifierStub.allow/2),
 # so a gate that stopped verifying fails here instead of passing quietly. Never

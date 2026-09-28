@@ -134,6 +134,20 @@ defmodule FermixCore.Acp.Identity do
     do: present?(env, @signing_key) and present?(env, "PATH")
 
   @doc """
+  Is a turn under this env from a channel other people can post in? True iff
+  the env carries a non-empty `BUZZ_RELAY_URL`: the Buzz harness always spawns
+  with it (it survives an identity-less hello), and an editor client like Zed
+  never does. Such a turn is not proof the owner is present (owner decision,
+  MOB-1): `ComputerUse.SessionManager` refuses computer use there, `Browser`
+  refuses the owner's own signed-in tab, and `Capabilities.AccessGate` sends an
+  access-sensitive command's confirmation to the owner's own chat. Every other
+  feature treats the turn as before.
+  """
+  @spec multi_principal?(env() | nil) :: boolean()
+  def multi_principal?(nil), do: false
+  def multi_principal?(env) when is_map(env), do: present?(env, "BUZZ_RELAY_URL")
+
+  @doc """
   Derive the identity id — the x-only public key of `BUZZ_PRIVATE_KEY`, as
   lowercase hex.
 

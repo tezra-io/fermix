@@ -23,6 +23,9 @@ defmodule FermixCore.Harness.DeliveryWorker do
   at-least-once duplicate), and it owns every subsequent attempt. A successful
   hand-off marks the row `delivered` and a failed client-owned one dead-letters
   it, so the worker takes over only a failed attempt or one whose Manager died.
+  A client-owned origin (M29 §17.6(d)) has no text path, so a client-owned row
+  it finds is a hand-off that recorded no outcome: it dead-letters that row on
+  its first due tick as `:handoff_unrecorded` and sends nothing.
   A failing tick (e.g. the query itself errors) re-arms no sooner than
   `@min_rearm_ms` so the worker never hot-loops.
 
@@ -115,7 +118,28 @@ defmodule FermixCore.Harness.DeliveryWorker do
     state
   end
 
+  # A client-owned row has no wire here: a send would only be refused, and
+  # re-dispatching its continuation would break at-most-once execution (§23.2).
+  # The Manager's hand-off continued it or dead-lettered it by name, so one still
+  # pending is a hand-off that recorded no outcome, and that is its name.
   defp process_row(row, state, now) do
+    if Delivery.client_owned?(row) do
+      dead_letter_unrecorded(row, state)
+    else
+      send_row(row, state, now)
+    end
+  end
+
+  defp dead_letter_unrecorded(row, state) do
+    Logger.warning(
+      "harness run #{Map.get(row, :id)} dead-lettered: :handoff_unrecorded; " <>
+        "its client-owned hand-off recorded no outcome"
+    )
+
+    dead_letter(row, state, :handoff_unrecorded)
+  end
+
+  defp send_row(row, state, now) do
     case Delivery.deliver(row, state.delivery_opts) do
       {:ok, _sent_or_skipped} -> mark_delivered(row, state, now)
       {:error, reason} -> handle_failure(row, state, now, reason)

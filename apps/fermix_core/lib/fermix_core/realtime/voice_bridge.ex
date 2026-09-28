@@ -12,6 +12,10 @@ defmodule FermixCore.Realtime.VoiceBridge do
   A `call_handle` is opaque to the session: it is whatever the implementation
   needs to route a turn (conversation store, owner pid, call id). One handle
   lives for one call; one `task_ref` for one delegation.
+
+  `cancel/2` and `close_call/1` return once the work is stopped. They carry no
+  deadline of their own and must stay bounded: the session runs them inside
+  calls its own callers wait on with no timeout (`SessionControl`).
   """
 
   @typedoc "One voice call, opened once per `call_start` and closed once per `call_stop`."

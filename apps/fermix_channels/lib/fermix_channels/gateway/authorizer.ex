@@ -16,6 +16,9 @@ defmodule FermixChannels.Gateway.Authorizer do
     human owner is sitting at. That check runs FIRST, so such a
     channel authorizes whether or not it carries a config key or a
     sender id.
+  - A paired device (the phone's transport proof) is the operator
+    while the mobile trust store still holds it, so work a revoked
+    device already submitted is refused when it reaches ingest.
   - Missing sender id, unknown sender, or unknown channel string:
     denied.
 
@@ -30,9 +33,12 @@ defmodule FermixChannels.Gateway.Authorizer do
   trust rules. See `docs/MESSAGE_GATEWAY_ARCHITECTURE.md` §4 and §9.2.
   """
 
+  require Logger
+
   alias FermixChannels.Gateway.Authorization
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Source
+  alias FermixChannels.Mobile.DeviceStore
   alias FermixCore.Config
 
   @spec resolve(Source.t()) ::
@@ -49,10 +55,26 @@ defmodule FermixChannels.Gateway.Authorizer do
 
   defp resolve_paired_device(%Source{transport_auth: {:mobile_device, device_id}})
        when is_binary(device_id) and device_id != "" do
-    {:ok, %Authorization{role: :operator, trust: :operator}}
+    case paired_device(device_id) do
+      {:ok, _device} ->
+        {:ok, %Authorization{role: :operator, trust: :operator}}
+
+      {:error, reason} ->
+        Logger.warning("mobile device #{device_id} is not paired: #{inspect(reason)}")
+        {:error, :unauthorized}
+    end
   end
 
   defp resolve_paired_device(%Source{}), do: {:error, :unauthorized}
+
+  # The trust store runs with the mobile subtree; without it no device can be
+  # confirmed, and none is authorized.
+  defp paired_device(device_id) do
+    case Process.whereis(DeviceStore) do
+      nil -> {:error, :device_store_not_running}
+      store -> DeviceStore.fetch(store, device_id)
+    end
+  end
 
   defp resolve_sender(%Source{channel_key: nil}), do: {:error, :unknown_channel}
 

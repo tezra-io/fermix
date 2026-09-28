@@ -42,6 +42,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Text
@@ -70,6 +71,13 @@ defmodule Fermix.CLI.Daemon do
   # An auth profile is a provider's fixed name or an operator-set plugin
   # profile; either is a short printable string.
   @max_profile_bytes 256
+  # The owner's decisions on the phone channel, in both protocol versions:
+  # opening a pairing window (its link carries the pairing secret), deciding
+  # on the phone that asked, closing the window, and forgetting a phone.
+  @owner_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
+                         mobile.devices.revoke)
+  @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
+                         mobile_device_revoke)
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -313,9 +321,44 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp handle_v1_request(conn, request, state) do
-    result = route_management_request(request, state)
+    result =
+      case owner_caller(request.method, @owner_decisions_v1, conn, state) do
+        :ok -> route_management_request(request, state)
+        {:error, _verdict} -> owner_decision_refusal()
+      end
+
     response = management_response(request.request_id, result)
     send_response(conn, response)
+  end
+
+  # M19 §6.2: pairing is the owner's interactive decision, never the agent's.
+  # The socket's trust boundary is its 0600 file, which every process of the
+  # owner's account can open, so the kernel's peer is placed (SIDE-V1): a
+  # process the daemon started is the agent or a harness, and nobody watches a
+  # detached one. Either is refused, as is a peer that cannot be placed.
+  defp owner_caller(method, decisions, conn, state) do
+    if method in decisions,
+      do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os)),
+      else: :ok
+  end
+
+  # The same code as a channel that cannot answer, with its own sentence: the
+  # channel is fine and doctor says so, so "not running" would send the
+  # operator after the wrong fault.
+  defp owner_decision_refusal do
+    {:error, :unavailable,
+     %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
+  end
+
+  defp placed_owner(_method, {:ok, :independent}), do: :ok
+
+  defp placed_owner(method, verdict) do
+    Logger.warning(
+      "Refused #{method}: only the owner may pair or forget a phone, " <>
+        "and the caller was placed as #{inspect(verdict)}"
+    )
+
+    {:error, verdict}
   end
 
   defp route_management_request(request, state) do
@@ -390,7 +433,12 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
-  defp dispatch_initial_request(request, _conn, state), do: dispatch_request(request, state)
+  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
+    case owner_caller(method, @owner_decisions_v0, conn, state) do
+      :ok -> dispatch_request(request, state)
+      {:error, _verdict} -> error_reply(:owner_decision_refused)
+    end
+  end
 
   defp dispatch_request(%{"method" => method} = request, state),
     do: handle_method(method, request, state)

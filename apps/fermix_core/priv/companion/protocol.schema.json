@@ -188,8 +188,8 @@
       "properties": {
         "type": { "const": "history_pull" },
         "profile_id": { "type": "string", "minLength": 1 },
-        "after_seq": { "type": "integer", "minimum": 0 },
-        "before_seq": { "type": "integer", "minimum": 1 },
+        "after_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "before_seq": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 200 }
       },
       "oneOf": [{ "required": ["after_seq"] }, { "required": ["before_seq"] }]
@@ -203,17 +203,17 @@
         "profile_id": { "type": "string", "minLength": 1 },
         "query": { "type": "string", "minLength": 1, "maxLength": 256 },
         "limit": { "type": "integer", "minimum": 1, "maximum": 50 },
-        "before_seq": { "type": "integer", "minimum": 1 }
+        "before_seq": { "type": "integer", "minimum": 1, "maximum": 18446744073709551615 }
       }
     },
     "read_state": {
       "type": "object",
-      "description": "Client: advance the read frontier. Server: the frontier, sent to every connection.",
+      "description": "Client: advance the read frontier. Server: the frontier, sent to every connection; it never passes the newest row.",
       "required": ["type", "profile_id", "read_up_to_seq"],
       "properties": {
         "type": { "const": "read_state" },
         "profile_id": { "type": "string", "minLength": 1 },
-        "read_up_to_seq": { "type": "integer", "minimum": 0 }
+        "read_up_to_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
       }
     },
     "server_hello": {
@@ -264,7 +264,7 @@
         "turn_id": { "type": "string", "minLength": 1 },
         "tool": { "type": "string", "minLength": 1 },
         "phase": { "enum": ["start", "stop"] },
-        "detail": { "type": "string" }
+        "detail": { "type": "string", "maxLength": 512, "x-max-bytes": 512 }
       }
     },
     "text_done": {
@@ -286,12 +286,12 @@
         "type": { "const": "turn_error" },
         "turn_id": { "type": "string", "minLength": 1 },
         "code": { "type": "string", "minLength": 1 },
-        "message": { "type": "string", "minLength": 1 }
+        "message": { "type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512 }
       }
     },
     "row": {
       "type": "object",
-      "description": "A timeline row written outside a turn's completion (the sender's own message, a slash command's answer, a scheduled delivery, a row written from the phone), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
       "properties": {
         "type": { "const": "row" },
@@ -305,7 +305,7 @@
     },
     "approval": {
       "type": "object",
-      "description": "An owner-approval card. The token is submitted but never rendered; the routes are sent back as commands.",
+      "description": "An owner-approval card raised by a turn on this socket. The token is submitted but never rendered; the routes are sent back as commands. Sent again after server_hello, with ttl_s the seconds it has left, while it waits.",
       "required": [
         "type",
         "approval_id",
@@ -330,6 +330,7 @@
     },
     "approval_resolved": {
       "type": "object",
+      "description": "approved or denied when the owner answered, expired when the card's ttl_s ran out.",
       "required": ["type", "approval_id", "outcome"],
       "properties": {
         "type": { "const": "approval_resolved" },
@@ -339,14 +340,14 @@
     },
     "history_page": {
       "type": "object",
-      "description": "Messages oldest first. A forward page carries next_after_seq; a backward page carries next_before_seq only when an older row exists.",
+      "description": "Messages oldest first, at most limit and about 60 KiB of them. A forward page carries next_after_seq, the last row sent or the cursor on an empty page; a backward page carries next_before_seq, the oldest row sent, only when an older row exists.",
       "required": ["type", "profile_id", "messages", "history_head_seq"],
       "properties": {
         "type": { "const": "history_page" },
         "profile_id": { "type": "string", "minLength": 1 },
         "messages": { "type": "array", "items": { "$ref": "#/$defs/historyMessage" } },
         "history_head_seq": { "type": "integer", "minimum": 0 },
-        "next_after_seq": { "type": "integer", "minimum": 0 },
+        "next_after_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
         "next_before_seq": { "type": "integer", "minimum": 1 }
       }
     },
@@ -394,7 +395,25 @@
         "media_refs": { "type": "array", "items": { "$ref": "#/$defs/mediaRef" } },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "in_reply_to": { "type": "string", "minLength": 1 },
-        "metadata": { "type": "object" }
+        "metadata": { "type": "object" },
+        "link_previews": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/linkPreviewCard" }
+        }
+      }
+    },
+    "linkPreviewCard": {
+      "type": "object",
+      "description": "A link preview the phone channel stored on its row, as its link_preview event carried it. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "required": ["url", "site", "title"],
+      "properties": {
+        "url": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048 },
+        "site": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 },
+        "title": { "type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300 },
+        "description": { "type": "string", "maxLength": 600, "x-max-bytes": 600 },
+        "image_ref": { "type": "string", "minLength": 1 }
       }
     },
     "mediaRef": {

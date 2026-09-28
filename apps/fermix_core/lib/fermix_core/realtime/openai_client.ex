@@ -362,12 +362,16 @@ defmodule FermixCore.Realtime.OpenAIClient do
     {:ok, {:assistant_transcript_done, transcript}}
   end
 
-  def decode_server_event(%{
-        "type" => "conversation.item.input_audio_transcription.completed",
-        "transcript" => transcript
-      })
+  # The item id binds a spoken answer to the committed input item it transcribes
+  # (`Capabilities.AccessGate`'s spoken yes).
+  def decode_server_event(
+        %{
+          "type" => "conversation.item.input_audio_transcription.completed",
+          "transcript" => transcript
+        } = event
+      )
       when is_binary(transcript) do
-    {:ok, {:user_transcript_done, transcript}}
+    {:ok, {:user_transcript_done, Map.get(event, "item_id"), transcript}}
   end
 
   def decode_server_event(%{"type" => "input_audio_buffer.committed"} = event) do
@@ -432,11 +436,23 @@ defmodule FermixCore.Realtime.OpenAIClient do
     }
   end
 
+  # Valid JSON that is not an object is reported, never matched away: a
+  # CaseClauseError here killed the socket, and the call reconnected into a fresh
+  # conversation. Only a bounded description travels to the session.
   @impl true
   def handle_frame({:text, payload}, state) when is_binary(payload) do
     case Jason.decode(payload) do
       {:ok, %{} = event} ->
         notify_parent(state.parent, event)
+        {:ok, state}
+
+      {:ok, other} ->
+        send(
+          state.parent,
+          {:openai_realtime_error, self(),
+           {:invalid_server_event, inspect(other, limit: 5, printable_limit: 120)}}
+        )
+
         {:ok, state}
 
       {:error, reason} ->

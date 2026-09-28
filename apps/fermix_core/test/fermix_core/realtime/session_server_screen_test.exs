@@ -365,6 +365,16 @@ defmodule FermixCore.Realtime.SessionServerScreenTest do
     assert :sys.get_state(server).screen_feed == feed
   end
 
+  # What is on a shared screen is outside content, so for the rest of the call an
+  # access-sensitive command waits for the owner's spoken yes
+  # (`Capabilities.AccessGate`).
+  test "a shared screen counts as outside content for the rest of the call", %{server: server} do
+    assert :sys.get_state(server).outside_sources == MapSet.new()
+
+    start_sharing(server)
+    assert :sys.get_state(server).outside_sources == MapSet.new([{:tool, "screen_share"}])
+  end
+
   test "a refused start is answered, and no feed is left behind", %{server: server} do
     FakeFeed.refuse(true)
     start_sharing(server)

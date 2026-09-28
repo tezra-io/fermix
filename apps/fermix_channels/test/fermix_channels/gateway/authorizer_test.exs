@@ -4,6 +4,7 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
   alias FermixChannels.Gateway.Authorization
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.Source
+  alias FermixChannels.Mobile.DeviceStore
 
   setup do
     previous = Application.get_env(:fermix_channels, :telegram, [])
@@ -139,11 +140,31 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
       source = %Source{
         channel: "mobile",
         channel_key: :mobile,
-        transport_auth: {:mobile_device, "device-1"}
+        transport_auth: {:mobile_device, pair_device!()}
       }
 
       assert {:ok, %Authorization{role: :operator, trust: :operator}} =
                Authorizer.resolve(source)
+    end
+
+    # Work a device submitted before its revocation reaches ingest later: the
+    # device must still be paired then, not only when it connected.
+    test "a device no longer in the trust store is refused at ingest" do
+      device_id = pair_device!()
+
+      source = %Source{
+        channel: "mobile",
+        channel_key: :mobile,
+        transport_auth: {:mobile_device, device_id}
+      }
+
+      assert {:ok, %Authorization{trust: :operator}} = Authorizer.resolve(source)
+
+      assert :ok = DeviceStore.delete(DeviceStore, device_id)
+      assert {:error, :unauthorized} = Authorizer.resolve(source)
+
+      stop_supervised!(DeviceStore)
+      assert {:error, :unauthorized} = Authorizer.resolve(source)
     end
 
     test "mobile fails closed when transport authentication is absent or malformed" do
@@ -256,5 +277,32 @@ defmodule FermixChannels.Gateway.AuthorizerTest do
       assert {:error, :unauthorized} =
                msg |> Source.from_message() |> Authorizer.resolve()
     end
+  end
+
+  # A device paired in a throwaway trust store, run under the name the
+  # authorizer asks: a paired device is authorized only while the store holds it.
+  defp pair_device! do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("paired-device")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    start_supervised!({DeviceStore, root: root, name: DeviceStore})
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    id =
+      [{a, 8}, {b, 4}, {c, 4}, {d, 4}, {e, 12}]
+      |> Enum.map_join("-", fn {part, width} ->
+        part |> Integer.to_string(16) |> String.pad_leading(width, "0") |> String.downcase()
+      end)
+
+    {:ok, _device} =
+      DeviceStore.add(DeviceStore, %{
+        device_id: id,
+        name: "iPhone",
+        model: "iPhone17,1",
+        noise_pk: :crypto.strong_rand_bytes(32),
+        created_at: ~U[2026-09-27 09:00:00Z],
+        apns_key_salt: :crypto.strong_rand_bytes(32)
+      })
+
+    id
   end
 end

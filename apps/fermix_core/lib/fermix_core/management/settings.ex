@@ -24,6 +24,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Mobile
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Management.Settings.Secrets
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -35,7 +36,7 @@ defmodule FermixCore.Management.Settings do
 
   require Logger
 
-  @families [Providers, Assistant, Channels, Mobile, Voice, Tools]
+  @families [Providers, Assistant, Channels, Mobile, Voice, Tools, Secrets]
 
   @type section :: %{id: String.t(), pane: String.t(), title: String.t()}
   @type write_error ::

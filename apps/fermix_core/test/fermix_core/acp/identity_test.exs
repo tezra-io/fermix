@@ -220,6 +220,24 @@ defmodule FermixCore.Acp.IdentityTest do
     end
   end
 
+  # The relay URL is what a Buzz harness always spawns with and an editor like
+  # Zed never does; it survives an identity-less hello, so a Buzz channel that
+  # presented no signing key is still a channel other people can post in.
+  describe "multi_principal?/1" do
+    test "true iff the env carries a non-empty relay URL" do
+      env = hello_env() |> Identity.new() |> Identity.to_env()
+      identity_less = hello_env() |> Map.delete("BUZZ_PRIVATE_KEY") |> Identity.new()
+
+      assert Identity.multi_principal?(env)
+      assert Identity.multi_principal?(Identity.to_env(identity_less))
+      refute Identity.multi_principal?(Map.delete(env, "BUZZ_RELAY_URL"))
+      refute Identity.multi_principal?(Map.put(env, "BUZZ_RELAY_URL", ""))
+      refute Identity.multi_principal?(%{"PATH" => "/usr/bin"})
+      refute Identity.multi_principal?(%{})
+      refute Identity.multi_principal?(nil)
+    end
+  end
+
   describe "id_from_env/1" do
     test "agrees with new/1 on the same env" do
       assert Identity.id_from_env(hello_env()) == {:ok, @public_hex}

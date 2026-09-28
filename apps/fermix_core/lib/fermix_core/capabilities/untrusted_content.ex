@@ -14,9 +14,25 @@ defmodule FermixCore.Capabilities.UntrustedContent do
   The gate is content ORIGIN, not effect: a bare `:external_api` tool without
   plugin ownership (e.g. `subagents`) returns fermix-internal reports and stays
   unwrapped; fermix-authored error strings are also unwrapped.
+
+  `Capabilities.AccessGate` reads the same boundary through `outside_source/1`
+  to decide whether a turn has read content someone else could have written.
   """
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Tools.GetJobRun
+  alias FermixCore.Tools.ListJobRuns
+  alias FermixCore.Tools.SkillRun
+
+  @typedoc "Where outside content came from: a plugin, or one named tool."
+  @type outside_source :: {:plugin, String.t()} | {:tool, String.t()}
+
+  # Tool categories whose result relays what a worker or a coding run read.
+  @relaying_categories [:delegation, :harness]
+
+  # Tools whose result relays what another run read, whatever their category: a
+  # skill's worker report, and a scheduled run's final response.
+  @relaying_modules [SkillRun, GetJobRun, ListJobRuns]
 
   # Durable-memory `source_type` values whose stored value derives from an
   # external/attacker-controllable surface (a coding-harness run summarizes
@@ -37,6 +53,40 @@ defmodule FermixCore.Capabilities.UntrustedContent do
     do: Map.get(metadata, :plugin_owned?, false) == true
 
   def external?(_capability), do: false
+
+  @doc """
+  The outside source a capability's result brings into a turn, or `nil` for a
+  Fermix-internal tool.
+
+  A plugin tool is labelled by its plugin on either rail, so an access-sensitive
+  command can leave its own plugin's reads out of the taint. A report that
+  relays what someone else read counts even though it is not wrapped: a
+  delegated worker's (`subagents`), a skill's (`skill_run` or a skill
+  capability, both a sub-agent worker whose report comes back verbatim), a
+  coding run's (the harness tools return the vendor CLI's text, derived from
+  the repo, issue and web content the run read) and a scheduled job's
+  (`get_job_run` and `list_job_runs` return each run's final response, which
+  relays whatever that run read). Every other `external?/1` tool is labelled by
+  name.
+  """
+  @spec outside_source(Capability.t()) :: outside_source() | nil
+  def outside_source(%Capability{metadata: %{plugin_owned?: true, plugin: plugin}})
+      when is_binary(plugin),
+      do: {:plugin, plugin}
+
+  def outside_source(%Capability{name: name, metadata: %{category: category}})
+      when category in @relaying_categories,
+      do: {:tool, name}
+
+  def outside_source(%Capability{name: name, metadata: %{tool_module: module}})
+      when module in @relaying_modules,
+      do: {:tool, name}
+
+  def outside_source(%Capability{name: name, kind: :skill}), do: {:tool, name}
+
+  def outside_source(%Capability{name: name} = capability) do
+    if external?(capability), do: {:tool, name}, else: nil
+  end
 
   @doc """
   Wrap `output` in the untrusted-content frame when `capability` is external;

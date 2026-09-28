@@ -1,6 +1,8 @@
 defmodule FermixCore.Capabilities.MCP.ServerTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
@@ -250,6 +252,39 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       assert CapabilityRegistry.list(cap_registry) == []
 
       assert [_only] = CapabilityRegistry.list(cap_registry, include_hidden?: true)
+    end
+
+    # An override that names no advertised tool changes nothing. For a plugin's
+    # access-sensitive flag that would leave a command ungated with no sign, so
+    # the mismatch is logged when the tools register.
+    test "an override naming no advertised tool is logged and applies to nothing", %{
+      cap_registry: cap_registry,
+      mcp_registry: mcp_registry
+    } do
+      StubDiscoverer.set_tools([%{name: "unlock", description: "x", input_schema: %{}}])
+
+      log =
+        capture_log(fn ->
+          {:ok, _} =
+            start_supervised(
+              {McpServer,
+               [
+                 server_name: "tesla",
+                 discoverer: StubDiscoverer,
+                 caller: StubCaller,
+                 tools_overrides: %{"unlock_doors" => %{access_sensitive?: true}},
+                 capability_registry: cap_registry,
+                 mcp_registry: mcp_registry,
+                 fail_fast?: true
+               ]},
+              id: :mcp_server_unmatched_override
+            )
+        end)
+
+      assert log =~ "unlock_doors"
+      assert log =~ "names no advertised tool"
+      assert [capability] = CapabilityRegistry.list(cap_registry)
+      refute Map.get(capability.metadata, :access_sensitive?, false)
     end
 
     test "exits with a tagged reason when discovery fails (fail_fast?: true)", %{

@@ -128,7 +128,8 @@ defmodule FermixCore.Tools.UpdateJob do
          {:ok, delivery} <- resolve_delivery(args, context),
          {:ok, clear_route_pin?} <- validate_clear_route_pin(args),
          {:ok, route_pin} <- Support.validate_route_pin(args),
-         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin, clear_route_pin?) do
+         {:ok, attrs} <- update_attrs(args, skill_name, delivery, route_pin, clear_route_pin?),
+         :ok <- Support.check_job_access(job_id, context) do
       case Registry.update_job(job_id, attrs, repo: Support.repo(context)) do
         {:ok, job} -> Support.success_json(Support.job_payload(job))
         {:error, reason} -> Support.error(reason)

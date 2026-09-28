@@ -3,8 +3,13 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Mobile.DeviceRegistry
+  alias FermixChannels.Mobile.DeviceStore
+  alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixTestSupport.SafeRm
 
   test "begin_pairing returns a canonical secret-bearing URI and terminal QR only" do
     identity = %{
@@ -15,6 +20,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     opts = [
       config: [enabled: true],
       pair_manager: :pair,
+      whereis: fn MobileSupervisor -> self() end,
       listener: :listener,
       open_pair: fn :pair ->
         {:ok,
@@ -50,6 +56,41 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert query["tls_fp"] == Base.encode16(<<2::256>>, case: :lower)
   end
 
+  # D1(e): a host with many bridges counted as LAN put every one in the QR
+  # link, which grew past what a phone scans, then past what the QR encoder
+  # takes, and pairing could not start. hello_ack keeps 16, best first.
+  test "begin_pairing puts at most 16 candidates in the link, best first" do
+    candidates =
+      for index <- 1..40,
+          do: %{address: "172.17.0.#{index}", interface: "br#{index}", scope: :lan}
+
+    opts = [
+      config: [enabled: true],
+      pair_manager: :pair,
+      whereis: fn MobileSupervisor -> self() end,
+      listener: :listener,
+      open_pair: fn :pair ->
+        {:ok,
+         %{
+           session_id: "session-id",
+           secret: <<3::256>>,
+           identity: %{gateway_public_key: <<1::256>>, tls_fingerprint: <<2::256>>},
+           opened_at_ms: 1_000,
+           expires_at_ms: 121_000
+         }}
+      end,
+      listener_info: fn :listener -> {:ok, {{0, 0, 0, 0}, 40_321}} end,
+      discover: fn -> {:ok, candidates} end,
+      host_label: fn -> "workstation" end
+    ]
+
+    assert {:ok, result} = Management.begin_pairing(opts)
+    query = result.uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+
+    assert Jason.decode!(query["candidates"]) ==
+             candidates |> Enum.take(16) |> Enum.map(& &1.address)
+  end
+
   test "begin_pairing closes its window when local QR setup fails" do
     test_pid = self()
 
@@ -57,6 +98,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
              Management.begin_pairing(
                config: [enabled: true],
                pair_manager: :pair,
+               whereis: fn MobileSupervisor -> self() end,
                listener: :listener,
                open_pair: fn :pair ->
                  {:ok,
@@ -96,12 +138,14 @@ defmodule FermixChannels.Mobile.ManagementTest do
              Management.decide_pairing("session", true,
                config: [enabled: true],
                pair_manager: :pair,
+               whereis: fn MobileSupervisor -> self() end,
                approve_pair: fn :pair, "session" -> {:ok, device} end
              )
 
     assert {:ok, %{devices: [listed]}} =
              Management.list_devices(
                config: [enabled: true],
+               whereis: fn _manager -> self() end,
                device_store: :store,
                list_devices: fn :store -> {:ok, [device]} end
              )
@@ -118,6 +162,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert {:ok, %{device_id: ^device_id}} =
              Management.revoke_device(device.device_id,
                config: [enabled: true],
+               whereis: fn _manager -> self() end,
                device_registry: :registry,
                revoke_device: fn :registry, id ->
                  send(test_pid, {:revoked, id})
@@ -135,6 +180,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert {:error, :device_not_found} =
              Management.revoke_device("22222222-2222-4222-8222-222222222222",
                config: [enabled: true],
+               whereis: fn _manager -> self() end,
                device_registry: :registry,
                revoke_device: fn :registry, id -> {:error, {:device_not_found, id}} end
              )
@@ -147,6 +193,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
              Management.cancel_pairing("session",
                config: [enabled: true],
                pair_manager: :pair,
+               whereis: fn MobileSupervisor -> self() end,
                cancel_pair: fn :pair, "session" ->
                  send(test_pid, :cancelled)
                  :ok
@@ -164,7 +211,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       mdns_advertiser: :mdns,
       device_store: :store,
       refusal: fn :store -> :none end,
-      whereis: fn :pair -> self() end,
+      whereis: fn MobileSupervisor -> self() end,
       listener_status: fn :listener -> {:listening, {{0, 0, 0, 0}, 4_031}} end,
       mdns_status: fn :mdns -> :advertising end,
       discover: fn ->
@@ -186,7 +233,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     assert status.mdns == :advertising
     assert status.tailnet.detected
     assert status.tailnet.candidates == ["100.64.1.2"]
-    assert status.apns == %{enabled: false, credentials: :missing}
+    assert status.apns == %{enabled: false, credentials: :missing, delivery: :down, reason: nil}
     assert status.paired_devices == 1
   end
 
@@ -216,21 +263,27 @@ defmodule FermixChannels.Mobile.ManagementTest do
   end
 
   # The un-stubbed world every fresh install and upgrader lives in: the flag is
-  # off, so no PairManager/DeviceStore/Listener process exists. Each entry
-  # point must refuse with :mobile_disabled BEFORE any process call — without
-  # the gate these surfaced as raw `{:dependency_exit, _, {:noproc, _}}`
+  # off, so no PairManager/DeviceStore/Listener process exists. Each pairing
+  # entry point must refuse with :mobile_disabled BEFORE any process call —
+  # without the gate these surfaced as raw `{:dependency_exit, _, {:noproc, _}}`
   # tuples, and the CLI's "mobile channel is off" copy was unreachable from a
-  # real daemon.
-  test "every entry point refuses :mobile_disabled with the flag off and no subtree" do
-    off = [config: [enabled: false]]
+  # real daemon. The paired devices are a file, and answer from it.
+  test "every pairing entry point refuses :mobile_disabled with the flag off and no subtree" do
+    root = SafeRm.make_tmp_dir!("mobile-management-off")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+    off = [config: [enabled: false], root: root, whereis: fn _manager -> nil end]
 
     assert {:error, :mobile_disabled} = Management.begin_pairing(off)
     assert {:error, :mobile_disabled} = Management.await_pairing("session", 1_000, off)
     assert {:error, :mobile_disabled} = Management.decide_pairing("session", true, off)
     assert {:error, :mobile_disabled} = Management.decide_pairing("session", false, off)
     assert {:error, :mobile_disabled} = Management.cancel_pairing("session", off)
-    assert {:error, :mobile_disabled} = Management.list_devices(off)
-    assert {:error, :mobile_disabled} = Management.revoke_device("device-id", off)
+    assert {:ok, %{devices: []}} = Management.list_devices(off)
+
+    assert {:error, :device_not_found} =
+             Management.revoke_device("11111111-1111-4111-8111-111111111111", off)
+
+    refute File.exists?(Path.join(root, "mobile"))
   end
 
   test "health surfaces missing or invalid identity and device-store failures" do
@@ -286,6 +339,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       opts = [
         config: [enabled: true],
         pair_manager: manager,
+        whereis: fn MobileSupervisor -> self() end,
         listener: :listener,
         device_store: :store,
         refusal: fn :store -> :none end,
@@ -415,12 +469,16 @@ defmodule FermixChannels.Mobile.ManagementTest do
                Management.pair_get("pair-session", ctx.opts)
     end
 
-    test "five failed handshakes fail the session as rate limited", ctx do
+    # R1-5: failures refuse the addresses that made them and never end the
+    # window, so the owner's phone can still scan it.
+    test "failed handshakes from many addresses leave the session waiting for a scan", ctx do
       assert {:ok, _started} = Management.pair_start(ctx.opts)
 
-      for _attempt <- 1..5, do: PairManager.record_failure(ctx.manager, "pair-session")
+      for host <- 1..10, _attempt <- 1..5 do
+        PairManager.record_failure(ctx.manager, "pair-session", {192, 168, 1, host})
+      end
 
-      assert {:ok, %{state: :failed, failure: %{reason: :rate_limited}, outcome: nil}} =
+      assert {:ok, %{state: :awaiting_scan, failure: nil, outcome: nil}} =
                Management.pair_get("pair-session", ctx.opts)
     end
 
@@ -434,7 +492,6 @@ defmodule FermixChannels.Mobile.ManagementTest do
       status_opts =
         ctx.opts ++
           [
-            whereis: fn manager when manager == ctx.manager -> manager end,
             listener_status: fn :listener -> {:listening, {{0, 0, 0, 0}, 40_321}} end,
             mdns_status: fn _mdns -> :advertising end,
             list_devices: fn :store -> {:ok, []} end,
@@ -456,15 +513,13 @@ defmodule FermixChannels.Mobile.ManagementTest do
   end
 
   describe "v1 refusals" do
-    test "with the channel off every verb refuses before any process call" do
+    test "with the channel off every pairing verb refuses before any process call" do
       off = [config: [enabled: false]] ++ unreachable_processes()
 
       assert {:error, :mobile_disabled} = Management.pair_start(off)
       assert {:error, :mobile_disabled} = Management.pair_get("pair-session", off)
       assert {:error, :mobile_disabled} = Management.pair_decide("pair-session", true, off)
       assert {:error, :mobile_disabled} = Management.pair_cancel("pair-session", off)
-      assert {:error, :mobile_disabled} = Management.devices_revoke("device-id", off)
-      assert {:ok, []} = Management.devices_list(off)
     end
 
     test "a surface refused this boot is named, before any process call" do
@@ -479,8 +534,6 @@ defmodule FermixChannels.Mobile.ManagementTest do
                Management.pair_decide("pair-session", false, refused)
 
       assert {:error, :mobile_surface_refused} = Management.pair_cancel("pair-session", refused)
-      assert {:error, :mobile_surface_refused} = Management.devices_revoke("device-id", refused)
-      assert {:ok, []} = Management.devices_list(refused)
     end
 
     # A settings write enables the channel at once, but the subtree starts
@@ -490,7 +543,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         [config: [enabled: true], pair_manager: :pair, device_store: :store] ++
           Keyword.merge(unreachable_processes(),
             refusal: fn :store -> :none end,
-            whereis: fn :pair -> nil end
+            whereis: fn MobileSupervisor -> nil end
           )
 
       assert {:error, :mobile_not_started} = Management.pair_start(not_started)
@@ -500,8 +553,68 @@ defmodule FermixChannels.Mobile.ManagementTest do
                Management.pair_decide("pair-session", true, not_started)
 
       assert {:error, :mobile_not_started} = Management.pair_cancel("pair-session", not_started)
-      assert {:error, :mobile_not_started} = Management.devices_revoke("device-id", not_started)
-      assert {:ok, []} = Management.devices_list(not_started)
+    end
+
+    # SEC-4: the switch reaches the app env at once but the subtree runs until
+    # the next boot. Gating on the switch refused revoke and hid every device
+    # while paired phones kept connecting; the running subtree is the gate.
+    test "a running channel whose switch was turned off keeps serving every verb" do
+      running_but_off =
+        start_opts(
+          config: [enabled: false],
+          refusal: fn :store -> flunk("a running channel refused nothing") end
+        )
+
+      assert {:ok, %{session: %{state: :awaiting_scan}}} =
+               Management.pair_start(
+                 Keyword.put(running_but_off, :pair_session, fn :pair, "pair-session" ->
+                   {:ok, record(:awaiting_scan)}
+                 end)
+               )
+
+      test_pid = self()
+
+      revoking =
+        Keyword.put(running_but_off, :revoke_device, fn :registry, id ->
+          send(test_pid, {:revoked, id})
+          :ok
+        end)
+        |> Keyword.put(:device_registry, :registry)
+
+      assert {:ok, %{device_id: "known"}} = Management.devices_revoke("known", revoking)
+      assert_received {:revoked, "known"}
+    end
+
+    test "turning the switch off does not stop a live phone from being revoked" do
+      registry =
+        start_supervised!(
+          {DeviceRegistry,
+           name: :"revoke_off_registry_#{System.unique_integer([:positive])}",
+           device_store: :store,
+           authorize_device: fn :store, id -> {:ok, %{device_id: id}} end,
+           delete_device: fn :store, _id -> :ok end}
+        )
+
+      socket = spawn_socket()
+      assert :ok = DeviceRegistry.attach(registry, "live-phone", socket)
+
+      opts = [
+        config: [enabled: false],
+        pair_manager: :pair,
+        device_registry: registry,
+        whereis: fn MobileSupervisor -> self() end
+      ]
+
+      assert {:ok, %{device_id: "live-phone"}} = Management.devices_revoke("live-phone", opts)
+      assert_receive {:socket_message, ^socket, {:mobile_revoked, "live-phone"}}
+
+      assert {:ok, status} =
+               Management.status(
+                 serving_opts(config: [enabled: false], list_devices: fn :store -> {:ok, []} end)
+               )
+
+      refute status.enabled
+      assert status.started
     end
 
     test "an identity step failure is named and its reason logged" do
@@ -630,14 +743,32 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert List.last(rows).device_id == "device-64"
     end
 
-    test "an enabled channel that has not started yet lists nothing, without a process call" do
-      opts =
-        serving_opts(
-          whereis: fn :pair -> nil end,
-          list_devices: fn _store -> flunk("the device store is not running") end
-        )
+    # D6: listing and revoking read the trust store itself while the subtree
+    # is not running, the two configurations a paired-device file can be in.
+    test "a channel that is not running lists the stored devices, without a process call" do
+      root = stored_root([device_attrs("11111111-1111-4111-8111-111111111111")])
+
+      for config <- [[enabled: false], [enabled: true]] do
+        opts =
+          serving_opts(
+            config: config,
+            root: root,
+            whereis: fn MobileSupervisor -> nil end,
+            list_devices: fn _store -> flunk("the device store is not running") end
+          )
+
+        assert {:ok, [%{device_id: "11111111-1111-4111-8111-111111111111"}]} =
+                 Management.devices_list(opts)
+      end
+    end
+
+    test "a channel that never ran lists nothing and creates nothing" do
+      root = SafeRm.make_tmp_dir!("mobile-management-never-ran")
+      on_exit(fn -> SafeRm.rm_rf!(root) end)
+      opts = serving_opts(config: [enabled: false], root: root, whereis: fn _name -> nil end)
 
       assert {:ok, []} = Management.devices_list(opts)
+      refute File.exists?(Path.join(root, "mobile"))
     end
 
     test "a failing device store is an error, not an empty list" do
@@ -663,6 +794,29 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert_received {:revoked, "known"}
       assert {:error, :device_not_found} = Management.devices_revoke("unknown", opts)
     end
+
+    test "a channel that is not running revokes from the stored devices" do
+      test_pid = self()
+      kept = "11111111-1111-4111-8111-111111111111"
+      revoked = "22222222-2222-4222-8222-222222222222"
+      root = stored_root([device_attrs(kept), device_attrs(revoked)])
+
+      opts =
+        serving_opts(
+          config: [enabled: false],
+          root: root,
+          whereis: fn MobileSupervisor -> nil end,
+          revoke_device: fn _registry, _id -> flunk("the registry is not running") end,
+          revoke_requests: fn id -> send(test_pid, {:requests_revoked, id}) && :ok end
+        )
+
+      assert {:ok, %{device_id: ^revoked}} = Management.devices_revoke(revoked, opts)
+      # The same revocation as the registry's: what the device asked for stops too.
+      assert_received {:requests_revoked, ^revoked}
+      assert {:error, :device_not_found} = Management.devices_revoke(revoked, opts)
+      refute_received {:requests_revoked, _id}
+      assert {:ok, [%{device_id: ^kept}]} = DeviceStore.list(root: root)
+    end
   end
 
   describe "status/1" do
@@ -680,11 +834,18 @@ defmodule FermixChannels.Mobile.ManagementTest do
                enabled: false,
                started: false,
                refused: false,
-               listener: %{status: :down, port: 4_040, bind: "100.64.1.2", candidates: []},
+               refusal: nil,
+               listener: %{
+                 status: :down,
+                 reason: nil,
+                 port: 4_040,
+                 bind: "100.64.1.2",
+                 candidates: []
+               },
                mdns: :disabled,
                tailnet: %{detected: false, candidates: []},
                identity: %{present: false, fingerprint: nil},
-               apns: %{enabled: false, credentials: :missing},
+               apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
                paired_devices: 0,
                protocol_version: FermixChannels.Mobile.Protocol.protocol_version(),
                pairing: nil
@@ -696,7 +857,10 @@ defmodule FermixChannels.Mobile.ManagementTest do
       base = [config: [enabled: true], device_store: :store, load_identity: identity]
 
       refused =
-        base ++ Keyword.put(unreachable_processes(), :refusal, fn :store -> {:error, :bad} end)
+        base ++
+          Keyword.put(unreachable_processes(), :refusal, fn :store ->
+            {:error, {:devices_decode_failed, "/x", :bad}}
+          end)
 
       not_started =
         base ++
@@ -705,12 +869,21 @@ defmodule FermixChannels.Mobile.ManagementTest do
             whereis: fn _manager -> nil end
           )
 
-      for {opts, refused?} <- [{refused, true}, {not_started, false}] do
+      for {opts, refused?, refusal} <- [{refused, true, :trust_store}, {not_started, false, nil}] do
         assert {:ok, status} = Management.status(opts)
         assert status.enabled
         refute status.started
         assert status.refused == refused?
-        assert status.listener == %{status: :down, port: 4_031, bind: "0.0.0.0", candidates: []}
+        assert status.refusal == refusal
+
+        assert status.listener == %{
+                 status: :down,
+                 reason: nil,
+                 port: 4_031,
+                 bind: "0.0.0.0",
+                 candidates: []
+               }
+
         assert status.mdns == :down
         assert status.paired_devices == 0
         assert status.pairing == nil
@@ -740,7 +913,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
     test "a running channel reports the listener, reachability, devices and window" do
       record = %{
         session_id: "pair-session",
-        status: :rate_limited,
+        status: :device_disconnected,
         remaining_ms: nil,
         request: nil,
         device_id: nil
@@ -769,6 +942,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
       assert status.listener == %{
                status: :ready,
+               reason: nil,
                port: 40_321,
                bind: "0.0.0.0",
                candidates: ["wss://192.168.1.8:40321/ws", "wss://100.64.1.2:40321/ws"]
@@ -779,6 +953,128 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert status.paired_devices == 2
       assert status.pairing == %{session_id: "pair-session", state: :failed}
       assert status.identity == %{present: true, fingerprint: grouped_sha256(<<7::256>>)}
+    end
+
+    # R4-5: the phone subtree runs while its supervisor does. A child it is
+    # restarting, or one still registered without it, changes nothing.
+    test "the channel is started while its supervisor's name is registered, and only then" do
+      supervisor_only = fn
+        MobileSupervisor -> self()
+        _child -> nil
+      end
+
+      children_only = fn
+        MobileSupervisor -> nil
+        _child -> self()
+      end
+
+      list = fn :store -> {:ok, []} end
+
+      assert {:ok, %{started: true}} =
+               Management.status(serving_opts(whereis: supervisor_only, list_devices: list))
+
+      assert {:ok, %{started: false}} =
+               Management.status(serving_opts(whereis: children_only, list_devices: list))
+    end
+
+    # R4-7: status and a pairing link read the running subtree's discovery
+    # cache, the list its sockets send, so a burst of status calls and the QR
+    # link cost one enumeration and name the same addresses.
+    test "status and a pairing link read the discovery cache the sockets read" do
+      test_pid = self()
+      candidates = [%{address: "100.64.1.2", interface: "utun4", scope: :tailnet}]
+
+      enumerate = fn ->
+        send(test_pid, :enumerated)
+        {:ok, candidates}
+      end
+
+      discovery = start_supervised!({Discovery, name: nil, discover: enumerate})
+
+      opts =
+        [discovery: discovery, list_devices: fn :store -> {:ok, []} end]
+        |> serving_opts()
+        |> Keyword.delete(:discover)
+
+      pairing = [
+        open_pair: fn :pair ->
+          {:ok,
+           %{
+             session_id: "session-id",
+             secret: <<3::256>>,
+             identity: %{gateway_public_key: <<1::256>>, tls_fingerprint: <<2::256>>},
+             opened_at_ms: 1_000,
+             expires_at_ms: 121_000
+           }}
+        end,
+        listener_info: fn :listener -> {:ok, {{0, 0, 0, 0}, 40_321}} end,
+        host_label: fn -> "workstation" end
+      ]
+
+      assert {:ok, %{uri: uri}} = Management.begin_pairing(opts ++ pairing)
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert Jason.decode!(query["candidates"]) == ["100.64.1.2"]
+
+      for _call <- 1..2 do
+        assert {:ok, %{tailnet: %{detected: true, candidates: ["100.64.1.2"]}}} =
+                 Management.status(opts)
+      end
+
+      assert_received :enumerated
+      refute_received :enumerated
+    end
+
+    # STB-6: a listener that cannot bind stays up, unavailable, and says why.
+    test "a listener that cannot bind is unavailable with its reason" do
+      opts =
+        serving_opts(
+          config: [enabled: true, port: 4_031, bind: "100.64.1.2"],
+          listener_status: fn :listener -> {:unavailable, :address_unavailable} end,
+          list_devices: fn :store -> {:ok, []} end
+        )
+
+      assert {:ok, status} = Management.status(opts)
+
+      assert %{status: :unavailable, reason: :address_unavailable, port: 4_031} =
+               status.listener
+
+      assert {:error, {:listener_unavailable, :address_unavailable}} =
+               Management.health(
+                 Keyword.merge(opts, load_identity: fn _opts -> {:ok, :identity} end)
+               )
+    end
+
+    # STB-5: APNs unreachable degrades push instead of stopping the subtree.
+    test "push delivery reads the dispatcher: ready, degraded with a reason, or down" do
+      key = X509.PrivateKey.new_ec(:secp256r1) |> X509.PrivateKey.to_pem()
+
+      push = [
+        enabled: true,
+        team_id: "ABCDE12345",
+        key_id: "KEY123",
+        key: key,
+        topic: "io.tezra.fermix",
+        environment: "development"
+      ]
+
+      for {reply, delivery, reason} <- [
+            {:ready, :ready, nil},
+            {{:degraded, :connecting}, :degraded, :connecting},
+            {{:degraded, :connect_failed}, :degraded, :connect_failed},
+            {{:error, :noproc}, :down, nil}
+          ] do
+        opts =
+          serving_opts(
+            config: [enabled: true, push: push],
+            push_status: fn _dispatcher ->
+              if match?({:error, _}, reply), do: exit(:noproc), else: reply
+            end,
+            list_devices: fn :store -> {:ok, []} end
+          )
+
+        assert {:ok, %{apns: apns}} = Management.status(opts)
+        assert apns == %{enabled: true, credentials: :ready, delivery: delivery, reason: reason}
+      end
     end
 
     test "the identity fingerprint is the grouped SHA-256 of the gateway key" do
@@ -835,7 +1131,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         listener: :listener,
         device_store: :store,
         refusal: fn :store -> :none end,
-        whereis: fn :pair -> self() end,
+        whereis: fn MobileSupervisor -> self() end,
         open_pair: fn :pair -> {:ok, window} end,
         listener_info: fn :listener -> {:ok, {{0, 0, 0, 0}, 40_321}} end,
         discover: fn -> {:ok, []} end,
@@ -855,7 +1151,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
         mdns_advertiser: :mdns,
         device_store: :store,
         refusal: fn :store -> :none end,
-        whereis: fn :pair -> self() end,
+        whereis: fn MobileSupervisor -> self() end,
         listener_status: fn :listener -> :dormant end,
         mdns_status: fn :mdns -> :disabled end,
         discover: fn -> {:ok, []} end,
@@ -867,13 +1163,14 @@ defmodule FermixChannels.Mobile.ManagementTest do
   end
 
   # Every process-backed seam fails the test: a verb that must answer before
-  # reaching the mobile subtree proves it by never calling one.
+  # reaching the mobile subtree proves it by never calling one. The name lookup
+  # sends no message; here it finds no subtree.
   defp unreachable_processes do
     unreachable = fn name -> fn _args -> flunk("#{name} must not be called") end end
 
     [
       refusal: unreachable.(:refusal),
-      whereis: unreachable.(:whereis),
+      whereis: fn _manager -> nil end,
       open_pair: unreachable.(:open_pair),
       pair_session: fn _manager, _id -> flunk("pair_session must not be called") end,
       approve_pair: fn _manager, _id -> flunk("approve_pair must not be called") end,
@@ -900,6 +1197,50 @@ defmodule FermixChannels.Mobile.ManagementTest do
       last_seen: nil,
       apns_key_salt: <<6::256>>
     }
+  end
+
+  defp record(status) do
+    %{
+      session_id: "pair-session",
+      status: status,
+      remaining_ms: 120_000,
+      request: nil,
+      device_id: nil
+    }
+  end
+
+  defp spawn_socket do
+    test_pid = self()
+
+    pid =
+      spawn(fn ->
+        receive do
+          message -> send(test_pid, {:socket_message, self(), message})
+        end
+      end)
+
+    on_exit(fn -> if Process.alive?(pid), do: Process.exit(pid, :kill) end)
+    pid
+  end
+
+  defp device_attrs(device_id) do
+    %{
+      device_id: device_id,
+      name: "Pixel",
+      model: "Google Pixel 9 Pro",
+      noise_pk: :crypto.strong_rand_bytes(32),
+      push_token: nil,
+      created_at: ~U[2026-09-01 12:00:00Z],
+      last_seen: nil,
+      apns_key_salt: :crypto.strong_rand_bytes(32)
+    }
+  end
+
+  defp stored_root(devices) do
+    root = SafeRm.make_tmp_dir!("mobile-management-store")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+    for attrs <- devices, do: {:ok, _device} = DeviceStore.add(attrs, root: root)
+    root
   end
 
   defp grouped_sha256(key) do

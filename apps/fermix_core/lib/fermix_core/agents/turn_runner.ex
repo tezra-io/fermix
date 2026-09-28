@@ -515,6 +515,14 @@ defmodule FermixCore.Agents.TurnRunner do
       # can bind a pending grant to the owner's conversation. Absent (nil) on
       # unattended/cron/guest turns, where the tool fails closed.
       approval_fn: Map.get(msg, :approval_fn),
+      # The owner-inbox seam for a channel without slash commands (ACP): the
+      # gateway's closure that sends an access-sensitive confirmation to the
+      # owner's own chat (`Capabilities.AccessGate`). Absent (nil) elsewhere.
+      owner_inbox_approval_fn: Map.get(msg, :owner_inbox_approval_fn),
+      # The Live call a delegation belongs to, so an access-sensitive command
+      # parks on that call and the owner's spoken yes can answer it. `nil` on
+      # every non-voice turn (a forged `voice_call` never clears `VoiceCall`).
+      voice_call_id: voice_call_id(voice_call),
       channel: msg.channel,
       # Chat context (private DM vs shared group), from the inbound message
       # metadata. `request_directory_access` reads it to keep the tap-to-copy
@@ -611,6 +619,9 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp parent_session({:ok, %{call_id: call_id}}), do: call_id
   defp parent_session(:none), do: nil
+
+  defp voice_call_id({:ok, %{call_id: call_id}}), do: call_id
+  defp voice_call_id(:none), do: nil
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil

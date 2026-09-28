@@ -180,11 +180,15 @@ defmodule FermixCore.AgentLoop do
     routes = resolve_routes(opts)
     {first_route_key, _first_opts} = hd(routes)
 
+    # `:outside_sources` is this turn's record of content someone else could have
+    # written (`record_outside_sources/3`). `put_new` so a nested run keeps what
+    # its parent already read.
     context =
       opts
       |> Keyword.get(:context, %{})
       |> stamp_effective_surface(trust, policy, allowed_tools)
       |> Map.put(:tool_result_store, store)
+      |> Map.put_new(:outside_sources, MapSet.new())
 
     {{capabilities, dispatchable}, capability_duration_us} =
       Telemetry.timed_us(fn ->
@@ -561,10 +565,14 @@ defmodule FermixCore.AgentLoop do
   defp unwrap_bridge_call(call), do: call
 
   defp run_continuation(turn, state, warning) do
-    with {:ok, tool_results, sole_terminal?, failures} <-
+    with {:ok, tool_results, sole_terminal?, failures, context} <-
            execute_tool_calls(turn.tool_calls, state),
          :ok <- ensure_tool_results_image_capable(tool_results, state) do
-      state = %{state | tool_failures: state.tool_failures + failures}
+      state = %{
+        state
+        | tool_failures: state.tool_failures + failures,
+          context: record_outside_sources(context, turn.tool_calls, state)
+      }
 
       if sole_terminal? and blank?(turn.content) do
         # The terminal side-effect (react) delivered and IS the reply; the model
@@ -577,6 +585,21 @@ defmodule FermixCore.AgentLoop do
         continue_turn(turn, tool_results, warning, state)
       end
     end
+  end
+
+  # Folded AFTER the batch ran: a call in the same batch as a web read was chosen
+  # before that content existed, so only later steps count it. The calls are
+  # already bridge-unwrapped, so a `tool_call` records the tool it ran. Read by
+  # `Capabilities.AccessGate` through the context the next dispatch receives.
+  defp record_outside_sources(context, tool_calls, state) do
+    sources =
+      tool_calls
+      |> Enum.map(&Map.get(state.capabilities_by_name, &1.name))
+      |> Enum.reject(&is_nil/1)
+      |> Enum.map(&UntrustedContent.outside_source/1)
+      |> Enum.reject(&is_nil/1)
+
+    Map.update!(context, :outside_sources, &Enum.into(sources, &1))
   end
 
   defp continue_turn(turn, tool_results, warning, state) do
@@ -1050,32 +1073,50 @@ defmodule FermixCore.AgentLoop do
   # image generations (M46 §2.4).
   #
   # Returns the results for the provider, whether the turn's one call was a
-  # terminal side-effect, and how many calls came back as an error result.
+  # terminal side-effect, how many calls came back as an error result, and the
+  # run's context after the batch.
   defp execute_tool_calls(tool_calls, state) do
-    {outcomes, _channel_used?} =
-      Enum.map_reduce(tool_calls, false, &execute_or_refuse(&1, &2, state))
+    {outcomes, {_channel_used?, context}} =
+      Enum.map_reduce(tool_calls, {false, state.context}, &execute_or_refuse(&1, &2, state))
 
     {:ok, Enum.map(outcomes, &elem(&1, 0)), sole_terminal?(outcomes),
-     Enum.count(outcomes, &(elem(&1, 2) == :error))}
+     Enum.count(outcomes, &(elem(&1, 2) == :error)), context}
   end
 
-  defp execute_or_refuse(tool_call, channel_used?, state) do
+  # A call `Capabilities.AccessGate` parked for the owner stamps `:access_waiting`
+  # on the context every later call of the run receives, the rest of this batch
+  # included, and the gate refuses each of them. The model chose the whole batch
+  # before any call ran, so a click aimed at where the owner's prompt lands (an
+  # earlier screenshot shows it) must not run once that prompt is out: the turn
+  # that read the outside content cannot answer the prompt itself.
+  defp execute_or_refuse(tool_call, {channel_used?, context}, state) do
+    state = %{state | context: context}
     channel? = channel_side_effect_call?(tool_call, state)
 
     if channel? and channel_used? do
-      {refused_channel_outcome(tool_call, state), true}
+      {refused_channel_outcome(tool_call, state), {true, context}}
     else
-      {executed_outcome(tool_call, state), channel_used? or channel?}
+      {outcome, access_waiting?} = executed_outcome(tool_call, state)
+      {outcome, {channel_used? or channel?, stamp_access_waiting(context, access_waiting?)}}
     end
   end
 
+  defp stamp_access_waiting(context, true), do: Map.put(context, :access_waiting, true)
+  defp stamp_access_waiting(context, false), do: context
+
   defp executed_outcome(tool_call, state) do
-    %{output: output, images: images, terminal: terminal, status: status, external?: external?} =
-      run_tool_call(tool_call, state)
+    %{
+      output: output,
+      images: images,
+      terminal: terminal,
+      status: status,
+      external?: external?,
+      access_waiting: access_waiting?
+    } = run_tool_call(tool_call, state)
 
     output = sanitize_tool_output(output)
     record_tool_result(state, tool_call, output, external?)
-    {build_tool_result(tool_call.call_id, output, images), terminal, status}
+    {{build_tool_result(tool_call.call_id, output, images), terminal, status}, access_waiting?}
   end
 
   # Not executed, so no `:tool_start`/`:tool_finish` activity — but it IS one
@@ -1168,9 +1209,18 @@ defmodule FermixCore.AgentLoop do
   # every text-only path — errors, missing/disallowed tools — wraps its string
   # with no images via `text_result/2`. `status` is loop metadata (never sent to
   # the provider), carried so the `:tool_finish` activity event reports the real
-  # outcome instead of a caller re-deriving it from the output text.
-  defp text_result(output, status) when is_binary(output) and status in [:ok, :error],
-    do: %{output: output, images: [], terminal: false, status: status, external?: false}
+  # outcome instead of a caller re-deriving it from the output text. So is
+  # `access_waiting`, true only for a call the access gate parked.
+  defp text_result(output, status) when is_binary(output) and status in [:ok, :error] do
+    %{
+      output: output,
+      images: [],
+      terminal: false,
+      status: status,
+      external?: false,
+      access_waiting: false
+    }
+  end
 
   defp invoke_capability(name, arguments, state) do
     if capability_allowed?(name, state.allowed_tools) do
@@ -1230,7 +1280,15 @@ defmodule FermixCore.AgentLoop do
           # other branch flows through `text_result/2` (terminal: false), so a
           # failed reaction is never terminal and the loop continues.
           terminal: terminal_capability?(capability),
-          status: :ok
+          status: :ok,
+          access_waiting: false
+        }
+
+      # Parked for the owner (`Capabilities.AccessGate`): the run waits.
+      {:ok, %{success: false, error: error, access_waiting: true}} ->
+        %{
+          text_result("Error: #{wrap_untrusted_content(error, capability)}", :error)
+          | access_waiting: true
         }
 
       {:ok, %{success: false, error: error}} ->

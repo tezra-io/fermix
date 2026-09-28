@@ -21,12 +21,27 @@ defmodule FermixCore.Realtime.SessionControl do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
 
-  # `call_start` blocks on the provider handshake and `call_stop` on the graceful
-  # close (Live keeps receiving until `session.closed`, bounded at 15 s), so both
-  # sit above the engines' own internal deadlines: an upstream stall must surface
-  # as the engine's typed error, never as a GenServer.call exit here.
+  # `call_start` blocks on the provider handshake, so it sits above the engines'
+  # own internal deadlines: an upstream stall must surface as the engine's typed
+  # error, never as a GenServer.call exit here.
+  #
+  # `cancel_task` and `call_stop` wait with no timeout. On Live no finite one
+  # covers them: both reach `Gateway.Queue`'s conversation stop through the
+  # voice bridge, and that stop waits with no timeout for a busy Queue. The
+  # Realtime `call_stop` has a finite bound (it sends a frame and releases what
+  # the call holds), but it shares this API with Live, and that is what makes
+  # it wait the same way. Each engine keeps its handler for them bounded
+  # (`LiveSessionServer` says how). A timed-out cancel crashed the connection's
+  # handler and dropped the companion mid-call; a timed-out stop told the
+  # companion the call was idle while it was still settling. The call still
+  # monitors the session, so a dead session still ends the wait.
+  #
+  # The companion, not this wait, bounds a cancel in practice. The connection's
+  # handler reads nothing while it waits, and the companion keeps streaming
+  # audio through a cancel. It drops a connection its writes cannot reach: 8 s
+  # after its audio buffer fills (about 2 s of audio), or 5 s for a control
+  # frame sent meanwhile. A Queue stop longer than that still ends the call.
   @call_start_timeout_ms 12_000
-  @call_stop_timeout_ms 20_000
   @reload_runtime_timeout_ms 10_000
 
   defguardp is_session(server) when is_pid(server) or is_atom(server) or is_tuple(server)
@@ -69,12 +84,12 @@ defmodule FermixCore.Realtime.SessionControl do
   @spec cancel_task(GenServer.server(), String.t()) :: :ok | {:error, term()}
   def cancel_task(server, delegation_id)
       when is_session(server) and is_binary(delegation_id) and delegation_id != "",
-      do: GenServer.call(server, {:cancel_task, delegation_id})
+      do: GenServer.call(server, {:cancel_task, delegation_id}, :infinity)
 
   @doc "Ends the call and settles the provider session."
   @spec call_stop(GenServer.server()) :: :ok
   def call_stop(server) when is_session(server),
-    do: GenServer.call(server, :call_stop, @call_stop_timeout_ms)
+    do: GenServer.call(server, :call_stop, :infinity)
 
   @doc "Re-reads runtime config mid-call. What that means is the engine's answer."
   @spec reload_runtime(GenServer.server()) :: {:ok, map()} | {:error, term()}

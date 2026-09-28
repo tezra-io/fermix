@@ -152,6 +152,31 @@ defmodule FermixCore.Harness.DeliveryWorkerTest do
     assert DateTime.diff(updated.next_delivery_at, @now, :second) == 300
   end
 
+  # A client-owned origin (an ACP session) has no framework wire: the Manager's
+  # inline hand-off continues such a row or dead-letters it by name. One still
+  # pending here is a hand-off that recorded no outcome (the Manager died inside
+  # it), so the worker dead-letters it on this tick under that name and never
+  # sends. The adapter would accept a send, so a send leaves the row delivered.
+  test "dead-letters a client-owned row on its first due tick without a send", %{repo: repo} do
+    row =
+      pending_row(repo, %{
+        origin_session_id: "acp:sess-1:root",
+        platform: "acp",
+        destination: "sess-1",
+        client_origin: %{"identity" => "7e7e9c42", "cwd" => "/repo"}
+      })
+
+    worker = start_worker(repo, adapter: OkAdapter)
+
+    :ok = tick(worker)
+
+    {:ok, updated} = Ledger.get(row.id, server: repo)
+    assert updated.delivery_status == "dead_letter"
+    assert updated.last_delivery_error == ":handoff_unrecorded"
+    assert updated.delivery_attempts == 0
+    assert updated.delivered_at == nil
+  end
+
   test "marks the row delivered on a successful send", %{repo: repo} do
     row = pending_row(repo)
     worker = start_worker(repo, adapter: OkAdapter)
