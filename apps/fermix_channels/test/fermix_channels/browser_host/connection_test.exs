@@ -34,7 +34,12 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
 
     start_supervised!({Endpoint, endpoint_opts})
 
-    %{endpoint_opts: endpoint_opts, socket_path: socket_path, host: host, connections: connections}
+    %{
+      endpoint_opts: endpoint_opts,
+      socket_path: socket_path,
+      host: host,
+      connections: connections
+    }
   end
 
   test "the socket is owner-only", %{socket_path: path} do
@@ -131,7 +136,12 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     assert %{"id" => 1, "type" => "tab.open"} = recv(app)
     assert %{"id" => 2, "type" => "task.release", "task_id" => "task-1"} = recv(app)
 
-    send_line(app, %{"id" => 1, "ok" => true, "result" => %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+    send_line(app, %{
+      "id" => 1,
+      "ok" => true,
+      "result" => %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}
+    })
+
     assert_receive {:browser_host_answer, ^ref, {:ok, %{"tab_id" => "t1"}}}
 
     send_line(app, %{"id" => 2, "ok" => true, "result" => %{"released" => ["t1"]}})
@@ -240,21 +250,30 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
     app = attach(ctx.socket_path)
     connection = connection_pid(ctx.connections)
 
-    ref = Link.request(connection, "task-1", "tab.open", %{
-      "task_id" => "task-1",
-      "url" => "about:blank",
-      "observe" => false,
-      "download_dir" => "/tmp",
-      "task_tab_cap" => 1,
-      "tab_cap" => 1
-    })
+    ref =
+      Link.request(connection, "task-1", "tab.open", %{
+        "task_id" => "task-1",
+        "url" => "about:blank",
+        "observe" => false,
+        "download_dir" => "/tmp",
+        "task_tab_cap" => 1,
+        "tab_cap" => 1
+      })
 
     assert %{"id" => 1} = recv(app)
-    send_line(app, %{"id" => 1, "ok" => true, "result" => %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+
+    send_line(app, %{
+      "id" => 1,
+      "ok" => true,
+      "result" => %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}
+    })
+
     assert_receive {:browser_host_answer, ^ref, _}
 
     send_line(app, %{"type" => "tab.closed", "tab_id" => "t1", "by" => "page"})
-    assert_receive {:browser_host_event, ^connection, "tab.closed", %{"tab_id" => "t1", "by" => "page"}}
+
+    assert_receive {:browser_host_event, ^connection, "tab.closed",
+                    %{"tab_id" => "t1", "by" => "page"}}
   end
 
   test "protocol violations are answered once and close the connection", ctx do
@@ -302,7 +321,12 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
 
       {_result, log} =
         with_log(fn ->
-          {:ok, connection} = GenServer.start(FermixChannels.BrowserHost.Connection, socket: accepted, connection_id: 1)
+          {:ok, connection} =
+            GenServer.start(FermixChannels.BrowserHost.Connection,
+              socket: accepted,
+              connection_id: 1
+            )
+
           ref = Process.monitor(connection)
           :ok = :gen_tcp.controlling_process(accepted, connection)
           send(connection, :socket_handover)

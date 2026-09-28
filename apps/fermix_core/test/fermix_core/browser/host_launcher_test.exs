@@ -19,7 +19,12 @@ defmodule FermixCore.Browser.HostLauncherTest do
   @quit %HostAvailability{@listening | quit: true, reason: "the app quit"}
 
   defp clock(launch_app?, remaining_ms, now_ms \\ 0) do
-    %{launch_app?: launch_app?, remaining_ms: remaining_ms, now_ms: now_ms, cooldown_ms: @cooldown}
+    %{
+      launch_app?: launch_app?,
+      remaining_ms: remaining_ms,
+      now_ms: now_ms,
+      cooldown_ms: @cooldown
+    }
   end
 
   test "each row of the decision table" do
@@ -243,8 +248,12 @@ defmodule FermixCore.Browser.HostLauncherTest do
     :ok = HostAvailability.launching(pane, 100)
     clock = %{now: fn -> 101 end, sleep: fn _ms -> flunk("nothing to wait on") end}
 
-    assert decide(config(true), pane, fn _ -> flunk("must not launch again in the cooldown") end, clock) ==
+    assert decide(
+             config(true),
+             pane,
+             fn _ -> flunk("must not launch again in the cooldown") end,
+             clock
+           ) ==
              {:managed, "the app was opened but did not connect in time"}
   end
-
 end

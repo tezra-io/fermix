@@ -201,7 +201,10 @@ defmodule FermixChannels.BrowserHost.Connection do
   defp dispatch({:hello, version}, %{version: nil} = state), do: hello(version, state)
   defp dispatch({:hello, _version}, state), do: refuse(:unexpected_client_hello, state)
   defp dispatch(_frame, %{version: nil} = state), do: refuse(:handshake_required, state)
-  defp dispatch({:event, "attached", payload}, %{attached: false} = state), do: attach(payload, state)
+
+  defp dispatch({:event, "attached", payload}, %{attached: false} = state),
+    do: attach(payload, state)
+
   defp dispatch({:event, "attached", _payload}, state), do: refuse(:unexpected_attached, state)
   defp dispatch(_frame, %{attached: false} = state), do: refuse(:attach_required, state)
   defp dispatch({:event, "availability", payload}, state), do: availability(payload, state)
@@ -257,7 +260,8 @@ defmodule FermixChannels.BrowserHost.Connection do
   # A report after `host_stopping` changes nothing: `HostAvailability` holds
   # stopping as final for this connection.
   defp availability(payload, state) do
-    :ok = HostAvailability.report(state.host_availability, payload["available"], payload["reason"])
+    :ok =
+      HostAvailability.report(state.host_availability, payload["available"], payload["reason"])
 
     trace("browser_host_availability", %{
       "connection" => state.connection_id,
@@ -409,7 +413,12 @@ defmodule FermixChannels.BrowserHost.Connection do
 
     case Protocol.encode_request(id, type, payload) do
       {:ok, line} ->
-        sent(:gen_tcp.send(state.socket, line), id, waiter || %{task: nil, ref: nil, type: type}, state)
+        sent(
+          :gen_tcp.send(state.socket, line),
+          id,
+          waiter || %{task: nil, ref: nil, type: type},
+          state
+        )
 
       {:error, reason} ->
         Logger.error("browser host connection could not encode #{type}: #{inspect(reason)}")
@@ -426,7 +435,12 @@ defmodule FermixChannels.BrowserHost.Connection do
   defp refuse_encoding(nil, _reason), do: :ok
 
   defp refuse_encoding(%{task: pid, ref: ref}, reason),
-    do: Link.answer(pid, ref, {:error, %{"reason" => "invalid_request", "message" => bounded_inspect(reason)}})
+    do:
+      Link.answer(
+        pid,
+        ref,
+        {:error, %{"reason" => "invalid_request", "message" => bounded_inspect(reason)}}
+      )
 
   defp unavailable(message), do: %{"reason" => "host_unavailable", "message" => message}
 
