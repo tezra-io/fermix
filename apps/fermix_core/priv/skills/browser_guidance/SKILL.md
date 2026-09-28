@@ -51,7 +51,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - `attached_tab_not_granted` means nothing is handed over yet. Ask the person to click the Fermix extension on the tab they mean — do NOT open the same URL in the managed profile and treat it as the same page; it is a different session.
 - `attached_tab_detached` means the tab is gone, and the message says which way: they clicked again, the tab closed, Chrome's debugging bar was dismissed, DevTools opened on it, or the extension disconnected. Report what happened and ask for a fresh click if the work is not finished.
 - A detach is always reported before any other tab is used: if a different tab was granted in the meantime, the first answer is still `attached_tab_detached` and the next call picks the new one up. `browser_bridge_unavailable` means this process has no bridge at all — use the managed profile.
-- `attached_tab_not_allowed` means this turn is not one the person is present for (a scheduled job, a background run, a guest, a delegated worker). Use the managed profile.
+- `attached_tab_not_allowed` means this turn is not one the person is present for (a scheduled job, a background run, a guest, a delegated worker, a Buzz channel). Use the managed profile.
 
 ## Tab And Ref Hygiene
 

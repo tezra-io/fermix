@@ -143,7 +143,14 @@ defmodule FermixCore.Browser.HostServerTest do
           assert String.starts_with?(payload["task_id"], "task-")
           assert String.starts_with?(payload["download_dir"], "/")
           refute Map.has_key?(payload, "visible")
-          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => "", "page" => page("about:blank")}}
+
+          {:ok,
+           %{
+             "tab_id" => "t1",
+             "url" => "about:blank",
+             "title" => "",
+             "page" => page("about:blank")
+           }}
         end
       })
 
@@ -176,8 +183,15 @@ defmodule FermixCore.Browser.HostServerTest do
     {host, connection} =
       usable_host(%{
         "tab.open" =>
-          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => "", "page" => page("about:blank")}},
-        "page.act" => {:ok, %{"url" => "about:blank", "title" => "", "page" => page("about:blank")}}
+          {:ok,
+           %{
+             "tab_id" => "t1",
+             "url" => "about:blank",
+             "title" => "",
+             "page" => page("about:blank")
+           }},
+        "page.act" =>
+          {:ok, %{"url" => "about:blank", "title" => "", "page" => page("about:blank")}}
       })
 
     pid = start_server(host_availability: host)
@@ -289,7 +303,11 @@ defmodule FermixCore.Browser.HostServerTest do
       spawn(fn ->
         receive do
           {:browser_host_request, from, ref, _task_id, "tab.open", _payload} ->
-            Link.answer(from, ref, {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+            Link.answer(
+              from,
+              ref,
+              {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+            )
         end
 
         receive do
@@ -326,7 +344,11 @@ defmodule FermixCore.Browser.HostServerTest do
       spawn(fn ->
         receive do
           {:browser_host_request, from, ref, _task_id, "tab.open", _payload} ->
-            Link.answer(from, ref, {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}})
+            Link.answer(
+              from,
+              ref,
+              {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+            )
         end
 
         receive do
@@ -370,5 +392,4 @@ defmodule FermixCore.Browser.HostServerTest do
     assert {:error, %Error{code: "host_lost", message: message}} = req(pid, "start")
     assert message =~ "nothing in this engine serves it"
   end
-
 end

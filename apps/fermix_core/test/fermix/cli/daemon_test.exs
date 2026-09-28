@@ -104,6 +104,13 @@ defmodule Fermix.CLI.DaemonTest do
     def revoke_device(device_id), do: call(:revoke_device, [device_id])
     def status, do: call(:status, [])
 
+    # The v1 provider functions the owner-decision gate stands in front of.
+    def pair_start(_opts), do: call(:pair_start, [])
+    def pair_get(session_id, _opts), do: call(:pair_get, [session_id])
+    def pair_decide(session_id, approved, _opts), do: call(:pair_decide, [session_id, approved])
+    def pair_cancel(session_id, _opts), do: call(:pair_cancel, [session_id])
+    def devices_revoke(device_id, _opts), do: call(:devices_revoke, [device_id])
+
     defp call(operation, args) do
       test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
       send(test_pid, {:mobile_provider_call, operation, args})
@@ -156,6 +163,11 @@ defmodule Fermix.CLI.DaemonTest do
            name: "Sujeeth"
          }},
       cancel_pairing: {:ok, %{cancelled: true}},
+      pair_start: {:error, :pairing_active},
+      pair_get: {:error, :unknown_pairing_session},
+      pair_decide: {:error, :unknown_pairing_session},
+      pair_cancel: {:error, :unknown_pairing_session},
+      devices_revoke: {:error, :device_not_found},
       list_devices: {:ok, %{devices: []}},
       revoke_device: {:ok, %{device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}},
       status: {:ok, %{enabled: true, listener: :ready, paired_devices: 1}}
@@ -819,6 +831,98 @@ defmodule Fermix.CLI.DaemonTest do
     assert reply["status"] == "error"
     assert reply["error"] =~ "could not identify the process that sent this prompt"
     refute_received {:bridge_call, _, _}
+  end
+
+  # SEC-5: opening a pairing window returns the link that carries the pairing
+  # secret, and approving or forgetting a phone is the owner's decision. A
+  # process the daemon started (a shell tool's command, a coding harness) is
+  # the agent, so an injected prompt could otherwise mint itself a phone.
+  describe "owner decisions on the phone channel" do
+    @owner_v1 [
+      {"mobile.pair.start", %{}, :pair_start},
+      {"mobile.pair.decide", %{"session_id" => "pair-1", "approved" => true}, :pair_decide},
+      {"mobile.pair.cancel", %{"session_id" => "pair-1"}, :pair_cancel},
+      {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"},
+       :devices_revoke}
+    ]
+    @owner_v0 [
+      {"mobile_pair_begin", %{}, :begin_pairing},
+      {"mobile_pair_decide", %{"session_id" => "pair-1", "approved" => true}, :decide_pairing},
+      {"mobile_pair_cancel", %{"session_id" => "pair-1"}, :cancel_pairing},
+      {"mobile_device_revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"},
+       :revoke_device}
+    ]
+
+    test "a process the daemon started is refused before the provider" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+      assert_owner_decisions_refused(socket_path)
+    end
+
+    test "a caller the daemon cannot place is refused before the provider" do
+      socket_path = start_peer_daemon(os: {:win32, :nt})
+      assert_owner_decisions_refused(socket_path)
+    end
+
+    # Placing the caller runs `ps` on macOS, bounded at five seconds in the
+    # daemon, so the reply gets the budget every other placed call here gets.
+    test "a process the daemon did not start reaches the provider", %{socket_path: socket_path} do
+      for {method, params, operation} <- @owner_v1 do
+        assert {:error, {:management_error, _code, _message, _details}} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+
+        assert_received {:mobile_provider_call, ^operation, _args}
+      end
+    end
+
+    test "reading a session or the status stays open to every caller" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      assert {:error, {:management_error, "unknown_pairing_session", _message, _details}} =
+               Client.request_v1("mobile.pair.get", %{"session_id" => "pair-1"},
+                 socket_path: socket_path,
+                 timeout: 1_000
+               )
+
+      assert_received {:mobile_provider_call, :pair_get, ["pair-1"]}
+    end
+
+    # R2-2: the refusal carries its own sentence, which `fermix pair` and
+    # `fermix devices` print instead of "the phone channel is not running",
+    # and it is the published golden refusal.
+    defp assert_owner_decisions_refused(socket_path) do
+      sentence = "Only the owner can pair or forget a phone; run this from your own terminal."
+      golden = golden_error_details("unavailable_owner_decision")
+      assert golden == %{"capability" => "mobile", "sentence" => sentence}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _operation} <- @owner_v1 do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+          end
+
+          for {method, params, _operation} <- @owner_v0 do
+            assert {:ok, %{"status" => "error", "reason" => "owner_decision_refused"}} =
+                     Client.request(method,
+                       params: params,
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:mobile_provider_call, _operation, _args}
+    end
+
+    defp golden_error_details(name) do
+      :fermix_core
+      |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+      |> File.stream!()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["name"] == name))
+      |> get_in(["response", "error", "details"])
+    end
   end
 
   test "agent_message decodes the request cwd param and forwards it to the bridge", %{

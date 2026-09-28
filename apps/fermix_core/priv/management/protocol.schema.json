@@ -117,7 +117,8 @@
     "mobile.pair.decide": 2,
     "mobile.pair.cancel": 2,
     "mobile.devices.list": 2,
-    "mobile.devices.revoke": 2
+    "mobile.devices.revoke": 2,
+    "browser.install.start": 2
   },
   "$defs": {
     "request": {
@@ -177,7 +178,8 @@
             "mobile.pair.decide",
             "mobile.pair.cancel",
             "mobile.devices.list",
-            "mobile.devices.revoke"
+            "mobile.devices.revoke",
+            "browser.install.start"
           ]
         },
         "params": { "type": "object" }
@@ -498,6 +500,13 @@
             "properties": { "method": { "const": "mobile.devices.revoke" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_revoke_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.install.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_install_start_params" } } }
         }
       ]
     },
@@ -608,7 +617,8 @@
         { "$ref": "#/$defs/mobile_pair_decide_result" },
         { "$ref": "#/$defs/mobile_pair_cancel_result" },
         { "$ref": "#/$defs/mobile_devices_list_result" },
-        { "$ref": "#/$defs/mobile_devices_revoke_result" }
+        { "$ref": "#/$defs/mobile_devices_revoke_result" },
+        { "$ref": "#/$defs/browser_install_start_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1185,6 +1195,7 @@
         "search",
         "images",
         "sandbox",
+        "secrets",
         "permissions"
       ]
     },
@@ -1607,7 +1618,8 @@
         "plugin_workspace_select",
         "capability_install",
         "meetings_signin",
-        "computer_use_grant"
+        "computer_use_grant",
+        "browser_install"
       ]
     },
     "jobStatus": {
@@ -2124,6 +2136,12 @@
       "additionalProperties": false
     },
     "meetings_signin_start_result": { "$ref": "#/$defs/jobView" },
+    "browser_install_start_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "browser_install_start_result": { "$ref": "#/$defs/jobView" },
     "computer_use_grant_start_params": {
       "type": "object",
       "required": [],
@@ -2228,11 +2246,12 @@
     },
     "mobileStatus": {
       "type": "object",
-      "description": "The phone channel as it stands, answered with the channel off too, so a pane can always read it. `started` is false until the channel runs, which an enabled switch alone does not do before a restart; `refused` is true when the channel could not start this boot, and the daemon log says why. `pairing` is the open window, else the newest retained session, else null.",
+      "description": "The phone channel as it stands, answered with the channel off too, so a pane can always read it. `enabled` is the switch and `started` whether the channel runs: settings are boot-bound, so each can differ from the other until a restart. `refused` is true when the channel could not start this boot, `refusal` names the class of fault, and the daemon log says why. `pairing` is the open window, else the newest retained session, else null.",
       "required": [
         "enabled",
         "started",
         "refused",
+        "refusal",
         "listener",
         "mdns",
         "tailnet",
@@ -2247,12 +2266,15 @@
         "enabled": { "type": "boolean" },
         "started": { "type": "boolean" },
         "refused": { "type": "boolean" },
+        "refusal": { "enum": ["memory_disabled", "identity", "attachment_manifest", "trust_store", null] },
         "listener": {
           "type": "object",
-          "required": ["status", "port", "bind", "candidates"],
+          "description": "`unavailable` is a running channel that cannot listen on its address; it retries on its own, and `reason` says why. `reason` is null in every other state.",
+          "required": ["status", "reason", "port", "bind", "candidates"],
           "additionalProperties": false,
           "properties": {
-            "status": { "enum": ["ready", "down"] },
+            "status": { "enum": ["ready", "down", "unavailable"] },
+            "reason": { "enum": ["address_unavailable", "address_in_use", "permission_denied", "listen_failed", null] },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
             "bind": { "type": "string" },
             "candidates": { "type": "array", "items": { "type": "string" }, "maxItems": 500 }
@@ -2280,11 +2302,14 @@
         },
         "apns": {
           "type": "object",
-          "required": ["enabled", "credentials"],
+          "description": "`delivery` is `degraded` while a connection to Apple is being made or when the last one failed or was lost, with `reason` saying which, and `down` when no push dispatcher runs. `reason` is null unless degraded.",
+          "required": ["enabled", "credentials", "delivery", "reason"],
           "additionalProperties": false,
           "properties": {
             "enabled": { "type": "boolean" },
-            "credentials": { "enum": ["ready", "missing"] }
+            "credentials": { "enum": ["ready", "missing"] },
+            "delivery": { "enum": ["ready", "degraded", "down"] },
+            "reason": { "enum": ["connecting", "connect_failed", "connection_lost", null] }
           }
         },
         "paired_devices": { "type": "integer", "minimum": 0 },

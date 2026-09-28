@@ -6,17 +6,56 @@ defmodule FermixChannels.Mobile.Listener do
   creates the gateway identity during the first pairing window and activates
   this listener with it. On later boots the existing identity is loaded and
   Bandit starts immediately.
+
+  An address it cannot listen on (a Tailscale address not up yet at login, a
+  port another daemon holds) leaves it unavailable, never stopped: a stop
+  escalates through the channels supervisor and halts the whole daemon. It
+  says why through `status/1`, retries from one second doubling to a minute,
+  and gives up after a day until the next boot. A Bandit that dies while
+  serving is retried the same way.
   """
 
   use GenServer
 
+  require Logger
+
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Router
+  alias FermixChannels.Mobile.TlsTransport
 
   @default_bind {0, 0, 0, 0}
   @default_port 4031
-  @max_frame_size 65_535
+  # Pre-authentication bounds (SEC-2): phones are few, so 64 concurrent
+  # connections in all, and an HTTP request slower than this before the
+  # upgrade is closed. The WebSocket idle timeout governs after the upgrade.
+  # `TlsTransport` ends a TLS handshake at ten seconds and the whole HTTP
+  # phase at its upgrade deadline, and `SocketHandler` ends a socket that has
+  # not said hello or sent its pair request, so a peer that stays silent, or
+  # keeps talking HTTP, gives its slot back instead of holding it.
+  @num_acceptors 4
+  @num_connections 16
+  @read_timeout_ms 10_000
+  # A phone sends one small upgrade request: anything else gets one answer and
+  # the connection closes. No phone speaks HTTP/2, whose connection idles
+  # between frames where no read bounds it.
+  @http_1_options [
+    max_requests: 1,
+    max_request_line_length: 2_048,
+    max_header_length: 4_096,
+    max_header_count: 32
+  ]
+  @first_retry_ms 1_000
+  @max_retry_ms 60_000
+  @retry_window_ms 24 * 3_600_000
+  # How deep `failure/1` looks into a nested start error for the socket errno.
+  @max_reason_depth 8
 
-  @type status :: :dormant | {:listening, {:inet.ip_address(), :inet.port_number()}}
+  @typedoc "Why the listener cannot serve, in the words `mobile.status` publishes."
+  @type failure :: :address_unavailable | :address_in_use | :permission_denied | :listen_failed
+  @type status ::
+          :dormant
+          | {:listening, {:inet.ip_address(), :inet.port_number()}}
+          | {:unavailable, failure()}
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -30,7 +69,7 @@ defmodule FermixChannels.Mobile.Listener do
     GenServer.call(server, {:activate, identity})
   end
 
-  @doc "Returns dormant state or the actual bound address, including port 0 allocation."
+  @doc "Dormant, unavailable with its reason, or the bound address (port 0 resolved)."
   @spec status(GenServer.server()) :: status()
   def status(server \\ __MODULE__), do: GenServer.call(server, :status)
 
@@ -62,9 +101,14 @@ defmodule FermixChannels.Mobile.Listener do
 
     state = %{
       bandit: nil,
+      identity: nil,
+      failure: nil,
+      retry: nil,
       listener_opts: listener_opts(opts),
       root: Keyword.get(opts, :root),
-      start_listener?: Keyword.get(opts, :start_listener?, true)
+      start_listener?: Keyword.get(opts, :start_listener?, true),
+      clock: Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end),
+      schedule_retry: Keyword.get(opts, :schedule_retry, &Process.send_after(self(), &1, &2))
     }
 
     initialize_listener(state)
@@ -73,8 +117,12 @@ defmodule FermixChannels.Mobile.Listener do
   @impl true
   def handle_call({:activate, identity}, _from, %{bandit: nil} = state) do
     case start_bandit(state.listener_opts, identity) do
-      {:ok, bandit} -> {:reply, listening_status(bandit), %{state | bandit: bandit}}
-      {:error, reason} -> {:reply, {:error, reason}, state}
+      {:ok, bandit} ->
+        state = serving(state, bandit, identity)
+        {:reply, listening_status(bandit), state}
+
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -82,7 +130,11 @@ defmodule FermixChannels.Mobile.Listener do
     {:reply, listening_status(state.bandit), state}
   end
 
-  def handle_call(:status, _from, %{bandit: nil} = state), do: {:reply, :dormant, state}
+  def handle_call(:status, _from, %{bandit: nil, failure: nil} = state),
+    do: {:reply, :dormant, state}
+
+  def handle_call(:status, _from, %{bandit: nil} = state),
+    do: {:reply, {:unavailable, state.failure}, state}
 
   def handle_call(:status, _from, state) do
     {:reply, status_from_bandit(state.bandit), state}
@@ -98,7 +150,13 @@ defmodule FermixChannels.Mobile.Listener do
 
   @impl true
   def handle_info({:EXIT, bandit, reason}, %{bandit: bandit} = state) do
-    {:stop, {:bandit_exited, reason}, %{state | bandit: nil}}
+    Logger.error("mobile listener stopped serving (#{inspect(reason)}); retrying")
+    state = %{state | bandit: nil}
+    {:noreply, begin_retries(state, {:listener_exited, reason})}
+  end
+
+  def handle_info({:retry_listen, token}, %{retry: %{token: token}} = state) do
+    {:noreply, retry_listen(state)}
   end
 
   def handle_info(_message, state), do: {:noreply, state}
@@ -122,11 +180,82 @@ defmodule FermixChannels.Mobile.Listener do
   end
 
   defp init_bandit(state, identity) do
+    state = %{state | identity: identity}
+
     case start_bandit(state.listener_opts, identity) do
       {:ok, bandit} -> {:ok, %{state | bandit: bandit}}
-      {:error, reason} -> {:stop, {:mobile_listener_unavailable, reason}}
+      {:error, reason} -> {:ok, begin_retries(state, reason)}
     end
   end
+
+  defp serving(state, bandit, identity),
+    do: %{state | bandit: bandit, identity: identity, failure: nil, retry: nil}
+
+  # The retry window is measured from the first failure of a run of them, so
+  # a listener that keeps failing gives up a day after it stopped serving.
+  defp begin_retries(state, reason) do
+    now = state.clock.()
+    Logger.error("mobile listener could not listen (#{inspect(reason)}); retrying")
+    retry = %{deadline_ms: now + @retry_window_ms, delay_ms: @first_retry_ms, token: nil}
+    arm_retry(%{state | failure: failure(reason), retry: retry})
+  end
+
+  defp arm_retry(%{retry: retry} = state) do
+    token = make_ref()
+    _timer = state.schedule_retry.({:retry_listen, token}, retry.delay_ms)
+    %{state | retry: %{retry | token: token}}
+  end
+
+  defp retry_listen(%{retry: retry} = state) do
+    if state.clock.() >= retry.deadline_ms do
+      give_up(state)
+    else
+      attempt_listen(state)
+    end
+  end
+
+  defp attempt_listen(state) do
+    case start_bandit(state.listener_opts, state.identity) do
+      {:ok, bandit} ->
+        Logger.info("mobile listener is serving again")
+        serving(state, bandit, state.identity)
+
+      {:error, reason} ->
+        Logger.warning("mobile listener retry failed (#{inspect(reason)})")
+        delay = min(state.retry.delay_ms * 2, @max_retry_ms)
+        arm_retry(%{state | failure: failure(reason), retry: %{state.retry | delay_ms: delay}})
+    end
+  end
+
+  defp give_up(state) do
+    Logger.error(
+      "mobile listener stopped retrying after a day without serving (#{state.failure}); " <>
+        "it stays unavailable until Fermix restarts"
+    )
+
+    %{state | retry: nil}
+  end
+
+  # The errno is buried in whichever supervisor or listener tuple reported it.
+  defp failure(reason) do
+    cond do
+      mentions?(reason, :eaddrnotavail, @max_reason_depth) -> :address_unavailable
+      mentions?(reason, :eaddrinuse, @max_reason_depth) -> :address_in_use
+      mentions?(reason, :eacces, @max_reason_depth) -> :permission_denied
+      true -> :listen_failed
+    end
+  end
+
+  defp mentions?(atom, atom, _depth), do: true
+  defp mentions?(_term, _atom, 0), do: false
+
+  defp mentions?(term, atom, depth) when is_tuple(term),
+    do: term |> Tuple.to_list() |> mentions?(atom, depth)
+
+  defp mentions?(term, atom, depth) when is_list(term),
+    do: Enum.any?(term, &mentions?(&1, atom, depth - 1))
+
+  defp mentions?(_term, _atom, _depth), do: false
 
   defp existing_identity(root) do
     opts = if is_nil(root), do: [], else: [root: root]
@@ -184,9 +313,20 @@ defmodule FermixChannels.Mobile.Listener do
       port: port,
       keyfile: keyfile,
       certfile: certfile,
-      plug: {FermixChannels.Mobile.Router, router_opts(opts)},
+      plug: {Router, router_opts(opts)},
       startup_log: Keyword.get(opts, :startup_log, false),
-      websocket_options: [max_frame_size: @max_frame_size, compress: false]
+      thousand_island_options: [
+        num_acceptors: @num_acceptors,
+        num_connections: @num_connections,
+        read_timeout: @read_timeout_ms,
+        transport_module: TlsTransport
+      ],
+      http_1_options: @http_1_options,
+      http_2_options: [enabled: false],
+      websocket_options: [
+        max_frame_size: Router.max_frame_size(),
+        compress: false
+      ]
     ]
   end
 

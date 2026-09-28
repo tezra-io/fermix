@@ -4,6 +4,10 @@ The release itself is `.github/workflows/release.yml`, fired by a `v*.*.*` tag; 
 per-target smoke gates it runs on every candidate and staged asset live in
 `scripts/release/`.
 
+**Who pushes it.** Only the `release-owners` team can create, move or delete a `v*`
+tag (a repository ruleset), so the owner pushes the release tag; the automation
+account has write access but no bypass.
+
 **What a tag has to name.** `preflight` refuses a tag whose commit is not on `main`
 (`scripts/release/refuse_unmerged_tag.sh`), before anything is built: tag the merge
 commit of the release pull request, after it merges, and merge a hotfix to `main`

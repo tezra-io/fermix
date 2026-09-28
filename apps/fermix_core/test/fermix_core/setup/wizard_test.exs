@@ -1956,7 +1956,7 @@ defmodule FermixCore.Setup.WizardTest do
 
     report = Wizard.report()
 
-    assert report.status == :setup_required
+    assert report.status == :ready
     assert report.wizard.step == :personalization
 
     prompts = Wizard.prompts(report.wizard)
@@ -2009,7 +2009,9 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(Path.join([bootstrap_dir, "main", "LIVE.md"]))
   end
 
-  test "save_answers skips seeding when prerequisites are still missing" do
+  # The prompt files depend on the personalization alone, and the first boot
+  # seeds them before any provider exists: a save never waits for the provider.
+  test "save_answers seeds the prompt files while a provider is still missing" do
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :personalization, [])
     start_memory_repo!()
@@ -2023,7 +2025,8 @@ defmodule FermixCore.Setup.WizardTest do
       )
 
     assert report.status == :setup_required
-    assert report.seeding_results == []
+    assert [_ | _] = report.seeding_results
+    assert Enum.all?(report.seeding_results, &(&1.outcome in [:seeded, :seeded_uncommitted]))
   end
 
   test "seed_now restores files deleted from disk when readiness is :ready" do
@@ -2052,11 +2055,12 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(soul_path)
   end
 
-  test "seed_now is a no-op when readiness is not :ready" do
+  test "seed_now seeds whatever readiness says" do
     Application.put_env(:fermix_core, :providers, [])
     start_memory_repo!()
 
-    assert {:ok, []} = Wizard.seed_now()
+    assert {:ok, [_ | _] = results} = Wizard.seed_now()
+    assert Enum.all?(results, &(&1.outcome in [:seeded, :seeded_uncommitted]))
   end
 
   test "save_answers persists whatsapp and discord setup answers" do
@@ -2842,6 +2846,9 @@ defmodule FermixCore.Setup.WizardTest do
 
     previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
     previous_memory = Application.get_env(:fermix_core, :memory, [])
+    # The suite pins a seeder stub; a test that starts a repo wants the real one.
+    previous_seeder = Application.get_env(:fermix_core, :prompt_seeder)
+    Application.put_env(:fermix_core, :prompt_seeder, FermixCore.Prompt.SetupSeeder)
 
     Application.put_env(
       :fermix_core,
@@ -2866,6 +2873,7 @@ defmodule FermixCore.Setup.WizardTest do
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
+      Application.put_env(:fermix_core, :prompt_seeder, previous_seeder)
       restart_global_memory_repo!()
       FermixTestSupport.SafeRm.rm_rf!(bootstrap_dir)
       FermixTestSupport.SafeRm.rm_rf!(memory_dir)

@@ -19,6 +19,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   @server_fixtures Path.join(@priv_dir, "fixtures/server_events.jsonl")
   @mobile_schema_path Application.app_dir(:fermix_core, "priv/mobile/protocol.schema.json")
   @inert_keywords ~w($schema $id $defs title description)
+  # The phone's `row` is this wire's `row` carrying the whole history message,
+  # whose `media_refs` it always has.
+  @phone_only_required %{"row" => ["media_refs"]}
 
   setup_all do
     %{
@@ -90,9 +93,31 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       companion_required = schema["$defs"][type]["required"] -- ["type"]
       mobile_required = mobile["$defs"][type]["required"] -- ["v", "t", "seq"]
 
-      assert Enum.sort(companion_required) == Enum.sort(mobile_required),
+      assert Enum.sort(companion_required ++ Map.get(@phone_only_required, type, [])) ==
+               Enum.sort(mobile_required),
              "#{type} requires different fields on the two wires"
     end
+
+    for type <- Protocol.shared_server_events() do
+      companion = Map.delete(schema["$defs"][type]["properties"], "type")
+      phone = Map.take(mobile["$defs"][type]["properties"], Map.keys(companion))
+
+      assert phone == companion, "#{type} bounds a shared field differently on the two wires"
+    end
+  end
+
+  test "a timeline row has one exported shape on both wires", %{schema: schema} do
+    mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
+
+    for def <- ~w(mediaRef linkPreviewCard) do
+      assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
+    end
+
+    # Only the phone's wire cuts a message past its 1 MiB event cap.
+    phone_message =
+      update_in(mobile["$defs"]["historyMessage"], ["properties"], &Map.delete(&1, "truncated"))
+
+    assert schema["$defs"]["historyMessage"] == phone_message
   end
 
   test "the golden fixtures cover every event of the catalog by direction" do
@@ -201,6 +226,15 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     for type <- Protocol.client_events() ++ Protocol.server_events() do
       assert protocol =~ "| `#{type}` |", "PROTOCOL.md has no table row for #{type}"
     end
+  end
+
+  # approval_resolved reaches only the connections open when a card ends, so
+  # a client that was away learns of it only by the card not coming back.
+  test "documentation tells a client to drop the cards not sent after server_hello", %{
+    protocol: protocol
+  } do
+    [_before, approvals] = String.split(protocol, "## Approvals", parts: 2)
+    assert approvals =~ "When `server_hello` arrives, a client drops every card it shows"
   end
 
   defp minimal_client_payloads do
@@ -313,6 +347,10 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     Enum.flat_map(value, &schema_errors(&1, subschema, root))
   end
 
+  defp keyword_errors({"minItems", min}, value, _root) when is_list(value) do
+    if length(value) >= min, do: [], else: ["fewer than #{min} items"]
+  end
+
   defp keyword_errors({"maxItems", max}, value, _root) when is_list(value) do
     if length(value) <= max, do: [], else: ["more than #{max} items"]
   end
@@ -346,8 +384,8 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   end
 
   defp keyword_errors({keyword, _constraint}, _value, _root)
-       when keyword in ~w(required properties items maxItems minLength maxLength pattern minimum
-                          maximum) do
+       when keyword in ~w(required properties items minItems maxItems minLength maxLength pattern
+                          minimum maximum) do
     []
   end
 

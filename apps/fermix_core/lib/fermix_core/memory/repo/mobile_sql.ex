@@ -4,6 +4,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   alias Exqlite.Sqlite3
 
   @request_sweep_limit 200
+  @max_link_previews 4
   @sha256 ~r/\A[0-9a-f]{64}\z/
   @transports ~w(mobile companion)
   # Private-use code points bracket each match in a search excerpt; they are
@@ -141,6 +142,165 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   ALTER TABLE mobile_client_requests ADD COLUMN cancelled_at TEXT;
   """
 
+  # A claim's high-water mark of earlier attempts. Every row that carries a
+  # `request_client_msg_id` is a request output with an `output_key`, so the
+  # `output_key IS NOT NULL` term changes no answer; it lets the partial index
+  # serve the lookup instead of a walk over the whole profile's timeline inside
+  # the claim's write transaction.
+  @prior_attempt_high_water_sql """
+  SELECT COALESCE(MAX(request_attempt), 0) FROM mobile_timeline
+  WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
+    AND request_client_msg_id = ? AND output_key IS NOT NULL
+  """
+
+  # The index rows for the refs one written row names: an attached file's
+  # position in `media_refs_json`, or a link preview's in `previews_json`. The
+  # paths index into the row's own JSON, so an entry that is not an object
+  # naming a text ref is skipped and never an error in the writer's statement.
+  @index_attachment_refs_sql """
+  INSERT INTO mobile_timeline_media (agent_id, owner_id, profile_id, server_seq, source, idx, ref)
+  SELECT new.agent_id, new.owner_id, new.profile_id, new.server_seq, 'attachment',
+         CAST(refs.key AS INTEGER), json_extract(new.media_refs_json, refs.fullkey || '.ref')
+  FROM json_each(
+    CASE WHEN json_valid(new.media_refs_json) THEN new.media_refs_json ELSE '[]' END
+  ) AS refs
+  WHERE json_type(new.media_refs_json, refs.fullkey || '.ref') = 'text';
+  """
+
+  @index_preview_images_sql """
+  INSERT INTO mobile_timeline_media (agent_id, owner_id, profile_id, server_seq, source, idx, ref)
+  SELECT new.agent_id, new.owner_id, new.profile_id, new.server_seq, 'preview',
+         CAST(previews.key AS INTEGER),
+         json_extract(new.previews_json, previews.fullkey || '.image.ref')
+  FROM json_each(new.previews_json) AS previews
+  WHERE json_type(new.previews_json, previews.fullkey || '.image.ref') = 'text';
+  """
+
+  # Migration 36, the media index and link previews. It adds tables beside the
+  # timeline and no column to it: every earlier engine decodes a timeline row
+  # by position from `SELECT *`, so one more column would crash it on a
+  # database this engine migrated. `media_fetch` authorizes a ref by the newest
+  # row that names it, so every ref a row names (an attached file, or a link
+  # preview's image) has an index row. Triggers write them in the statement
+  # that writes the refs, for every writer, so the rows an older engine writes
+  # after a rollback are indexed too; the backfill indexes the rows already
+  # written. A row's link previews are its own cards, kept in their own row
+  # beside it, never as one of its media refs.
+  @media_index_schema_sql """
+  CREATE TABLE IF NOT EXISTS mobile_timeline_media (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    server_seq INTEGER NOT NULL CHECK (server_seq > 0),
+    source TEXT NOT NULL CHECK (source IN ('attachment', 'preview')),
+    idx INTEGER NOT NULL CHECK (idx >= 0),
+    ref TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, profile_id, server_seq, source, idx)
+  ) WITHOUT ROWID;
+
+  CREATE INDEX IF NOT EXISTS idx_mobile_timeline_media_ref
+    ON mobile_timeline_media(agent_id, owner_id, profile_id, ref, server_seq DESC, source, idx);
+
+  CREATE TABLE IF NOT EXISTS mobile_timeline_link_previews (
+    agent_id TEXT NOT NULL,
+    owner_id TEXT NOT NULL,
+    profile_id TEXT NOT NULL,
+    server_seq INTEGER NOT NULL CHECK (server_seq > 0),
+    previews_json TEXT NOT NULL,
+    PRIMARY KEY (agent_id, owner_id, profile_id, server_seq)
+  ) WITHOUT ROWID;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_media_ai AFTER INSERT ON mobile_timeline BEGIN
+    #{@index_attachment_refs_sql}
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_media_au
+  AFTER UPDATE OF media_refs_json ON mobile_timeline BEGIN
+    DELETE FROM mobile_timeline_media
+    WHERE agent_id = old.agent_id AND owner_id = old.owner_id AND profile_id = old.profile_id
+      AND server_seq = old.server_seq AND source = 'attachment';
+    #{@index_attachment_refs_sql}
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_link_previews_ai
+  AFTER INSERT ON mobile_timeline_link_previews BEGIN
+    #{@index_preview_images_sql}
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS mobile_timeline_link_previews_au
+  AFTER UPDATE OF previews_json ON mobile_timeline_link_previews BEGIN
+    DELETE FROM mobile_timeline_media
+    WHERE agent_id = old.agent_id AND owner_id = old.owner_id AND profile_id = old.profile_id
+      AND server_seq = old.server_seq AND source = 'preview';
+    #{@index_preview_images_sql}
+  END;
+
+  INSERT OR IGNORE INTO mobile_timeline_media (
+    agent_id, owner_id, profile_id, server_seq, source, idx, ref
+  )
+  SELECT timeline.agent_id, timeline.owner_id, timeline.profile_id, timeline.server_seq,
+         'attachment', CAST(refs.key AS INTEGER),
+         json_extract(timeline.media_refs_json, refs.fullkey || '.ref')
+  FROM mobile_timeline AS timeline
+  JOIN json_each(
+    CASE WHEN json_valid(timeline.media_refs_json)
+      THEN timeline.media_refs_json ELSE '[]' END
+  ) AS refs
+  WHERE json_type(timeline.media_refs_json, refs.fullkey || '.ref') = 'text';
+  """
+
+  # A timeline row as this engine reads it: its columns by name, and its link
+  # previews from their own table. A column a later migration adds is never
+  # decoded by position here.
+  @timeline_row_sql """
+  SELECT t.agent_id, t.owner_id, t.profile_id, t.server_seq, t.kind, t.role, t.content,
+         t.client_msg_id, t.in_reply_to, t.media_refs_json, t.metadata_json, t.proactive_key,
+         t.created_at, t.request_client_msg_id, t.request_attempt, t.output_key,
+         COALESCE(p.previews_json, '[]')
+  FROM mobile_timeline AS t
+  LEFT JOIN mobile_timeline_link_previews AS p
+    ON p.agent_id = t.agent_id AND p.owner_id = t.owner_id
+   AND p.profile_id = t.profile_id AND p.server_seq = t.server_seq
+  """
+
+  # A request row as this engine reads and returns it, its columns by name.
+  @request_columns """
+  agent_id, owner_id, profile_id, client_msg_id, request_type, status, payload_digest,
+  payload_json, turn_id, result_server_seq, error_json, claimed_at, expires_at, updated_at,
+  authenticated_device_id, runner_epoch, attempt, transport, cancelled_at
+  """
+
+  # The newest row naming the ref wins, and within it an attachment before a
+  # preview image, first position first.
+  @media_descriptor_sql """
+  SELECT media.server_seq,
+         CASE media.source
+           WHEN 'attachment' THEN json_extract(timeline.media_refs_json, '$[' || media.idx || ']')
+           ELSE json_extract(previews.previews_json, '$[' || media.idx || '].image')
+         END
+  FROM mobile_timeline_media AS media
+  JOIN mobile_timeline AS timeline
+    ON timeline.agent_id = media.agent_id AND timeline.owner_id = media.owner_id
+   AND timeline.profile_id = media.profile_id AND timeline.server_seq = media.server_seq
+  LEFT JOIN mobile_timeline_link_previews AS previews
+    ON previews.agent_id = media.agent_id AND previews.owner_id = media.owner_id
+   AND previews.profile_id = media.profile_id AND previews.server_seq = media.server_seq
+  WHERE media.agent_id = ? AND media.owner_id = ? AND media.profile_id = ? AND media.ref = ?
+  ORDER BY media.server_seq DESC, media.source ASC, media.idx ASC
+  LIMIT 1
+  """
+
+  @search_rows_sql """
+  SELECT t.server_seq, t.role, t.created_at,
+         snippet(mobile_timeline_fts, 0, ?, ?, '…', #{@excerpt_tokens})
+  FROM mobile_timeline_fts
+  CROSS JOIN mobile_timeline AS t ON t.rowid = mobile_timeline_fts.rowid
+  WHERE mobile_timeline_fts MATCH ?
+    AND t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ?
+    AND (? IS NULL OR t.server_seq < ?)
+  ORDER BY mobile_timeline_fts.rowid DESC LIMIT ?
+  """
+
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
 
@@ -155,6 +315,21 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   @spec cancel_schema_sql() :: String.t()
   def cancel_schema_sql, do: @cancel_schema_sql
+
+  @spec media_index_schema_sql() :: String.t()
+  def media_index_schema_sql, do: @media_index_schema_sql
+
+  @doc "The claim's prior-attempt query, whose plan a test pins to its index."
+  @spec prior_attempt_high_water_sql() :: String.t()
+  def prior_attempt_high_water_sql, do: @prior_attempt_high_water_sql
+
+  @doc "The media authorization query, whose plan a test pins to its index."
+  @spec media_descriptor_sql() :: String.t()
+  def media_descriptor_sql, do: @media_descriptor_sql
+
+  @doc "The search page query, whose plan a test pins to the full-text index's order."
+  @spec search_rows_sql() :: String.t()
+  def search_rows_sql, do: @search_rows_sql
 
   @spec append(term(), map()) :: {:ok, map()} | {:error, term()}
   def append(conn, attrs) do
@@ -274,50 +449,48 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   def media_descriptor(conn, selector, ref) do
     profile = normalize_profile(selector)
 
-    with {:ok, rows} <-
-           query_all(
-             conn,
-             """
-             SELECT timeline.server_seq, refs.value
-             FROM mobile_timeline AS timeline
-             JOIN json_each(
-               CASE WHEN json_valid(timeline.media_refs_json)
-                 THEN timeline.media_refs_json ELSE '[]' END
-             ) AS refs
-             WHERE timeline.agent_id = ? AND timeline.owner_id = ?
-               AND timeline.profile_id = ? AND refs.type = 'object'
-               AND json_extract(refs.value, '$.ref') = ?
-             ORDER BY timeline.server_seq DESC, CAST(refs.key AS INTEGER) ASC
-             LIMIT 1
-             """,
-             profile_params(profile) ++ [ref]
-           ) do
+    with {:ok, rows} <- query_all(conn, @media_descriptor_sql, profile_params(profile) ++ [ref]) do
       media_descriptor_result(rows, ref)
     end
   end
 
-  @spec attach_timeline_media(term(), map(), pos_integer(), map()) ::
+  @doc """
+  Add one link preview to a row: its `url`, `site` and `title`, an optional
+  `description`, and an optional `image` media descriptor, which `media_fetch`
+  then serves through this row. A preview whose url the row already has is
+  the same preview. A request output from an older attempt is refused.
+  """
+  @spec attach_link_preview(term(), map(), pos_integer(), map()) ::
           {:ok, map()} | {:error, term()}
-  def attach_timeline_media(conn, selector, server_seq, media_ref) do
+  def attach_link_preview(conn, selector, server_seq, preview) do
     profile = normalize_profile(selector)
 
     transaction(conn, fn ->
-      with {:ok, ref} <- attached_media_ref(media_ref),
+      with :ok <- validate_link_preview(preview),
            {:ok, row} <- fetch_timeline(conn, profile, server_seq),
            :ok <- ensure_timeline_attachment_fence(conn, profile, row),
-           do: append_timeline_media_ref(conn, profile, row, ref)
+           do: append_link_preview(conn, profile, row, preview)
     end)
   end
 
+  @doc """
+  Advance the read frontier to the reported seq, clamped to the history head
+  in the same transaction: it never moves back, and never past the newest row.
+  A frontier stored past the head before this clamp comes back to it here.
+  """
   @spec advance_read_frontier(term(), map(), non_neg_integer(), DateTime.t()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def advance_read_frontier(conn, selector, reported_seq, now) do
     profile = normalize_profile(selector)
     stamp = timestamp(now)
 
-    with :ok <- ensure_profile(conn, profile, stamp, reported_seq),
-         :ok <- max_merge_read_frontier(conn, profile, reported_seq, stamp),
-         do: read_frontier(conn, profile)
+    transaction(conn, fn ->
+      with {:ok, head} <- history_head(conn, profile),
+           reported = min(reported_seq, head),
+           :ok <- ensure_profile(conn, profile, stamp, reported),
+           :ok <- max_merge_read_frontier(conn, profile, reported, head, stamp),
+           do: read_frontier(conn, profile)
+    end)
   end
 
   @spec read_frontier(term(), map()) :: {:ok, non_neg_integer()} | {:error, term()}
@@ -352,7 +525,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_client_requests
+             SELECT #{@request_columns} FROM mobile_client_requests
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
              LIMIT 1
              """,
@@ -382,13 +555,39 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                SET cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
                WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                  AND status IN ('accepted', 'running')
-               RETURNING *
+               RETURNING #{@request_columns}
                """,
                [timestamp(now), timestamp(now)] ++ profile_params(profile) ++ [client_msg_id]
              ) do
         cancelled_request(conn, profile, client_msg_id, rows)
       end
     end)
+  end
+
+  @doc """
+  Record a cancel on every unsettled request one device claimed, in one step,
+  as its revocation does: a hand-off or a boot recovery that reads the mark
+  never runs the request. Answers the requests it marked.
+  """
+  @spec cancel_device_requests(term(), map(), String.t(), DateTime.t()) ::
+          {:ok, [map()]} | {:error, term()}
+  def cancel_device_requests(conn, selector, device_id, now) do
+    owner = normalize_owner(selector)
+
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             UPDATE mobile_client_requests
+             SET cancelled_at = COALESCE(cancelled_at, ?), updated_at = ?
+             WHERE agent_id = ? AND owner_id = ? AND transport = 'mobile'
+               AND authenticated_device_id = ? AND status IN ('accepted', 'running')
+             RETURNING #{@request_columns}
+             """,
+             [timestamp(now), timestamp(now), owner.agent_id, owner.owner_id, device_id]
+           ) do
+      {:ok, Enum.map(rows, &request_row/1)}
+    end
   end
 
   defp cancelled_request(_conn, _profile, _client_msg_id, [row]),
@@ -421,7 +620,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_client_requests
+             SELECT #{@request_columns} FROM mobile_client_requests
              WHERE agent_id = ? AND owner_id = ? AND transport = ? AND expires_at > ?
                AND (status = 'accepted' OR (status = 'running' AND runner_epoch IS NOT ?))
              ORDER BY claimed_at ASC, profile_id ASC, client_msg_id ASC
@@ -465,7 +664,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
              SET status = 'accepted', runner_epoch = NULL, updated_at = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                AND status = 'running' AND attempt = ?
-             RETURNING *
+             RETURNING #{@request_columns}
              """,
              [timestamp(now)] ++ profile_params(profile) ++ [client_msg_id, attempt]
            ) do
@@ -600,8 +799,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_timeline
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq = ? LIMIT 1
+             #{@timeline_row_sql}
+             WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ? AND t.server_seq = ?
+             LIMIT 1
              """,
              profile_params(selector) ++ [server_seq]
            ) do
@@ -614,8 +814,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_timeline
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND proactive_key = ? LIMIT 1
+             #{@timeline_row_sql}
+             WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ? AND t.proactive_key = ?
+             LIMIT 1
              """,
              profile_params(timeline) ++ [timeline.proactive_key]
            ) do
@@ -628,8 +829,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_timeline
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ? LIMIT 1
+             #{@timeline_row_sql}
+             WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ? AND t.client_msg_id = ?
+             LIMIT 1
              """,
              profile_params(timeline) ++ [timeline.client_msg_id]
            ) do
@@ -641,9 +843,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     query_all(
       conn,
       """
-      SELECT * FROM mobile_timeline
-      WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq > ?
-      ORDER BY server_seq ASC LIMIT ?
+      #{@timeline_row_sql}
+      WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ? AND t.server_seq > ?
+      ORDER BY t.server_seq ASC LIMIT ?
       """,
       profile_params(profile) ++ [after_seq, limit]
     )
@@ -656,9 +858,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     query_all(
       conn,
       """
-      SELECT * FROM mobile_timeline
-      WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq < ?
-      ORDER BY server_seq DESC LIMIT ?
+      #{@timeline_row_sql}
+      WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ? AND t.server_seq < ?
+      ORDER BY t.server_seq DESC LIMIT ?
       """,
       profile_params(profile) ++ [before_seq, limit]
     )
@@ -682,16 +884,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp search_rows(conn, profile, match, before_seq, limit) do
     query_all(
       conn,
-      """
-      SELECT t.server_seq, t.role, t.created_at,
-             snippet(mobile_timeline_fts, 0, ?, ?, '…', #{@excerpt_tokens})
-      FROM mobile_timeline_fts
-      JOIN mobile_timeline AS t ON t.rowid = mobile_timeline_fts.rowid
-      WHERE mobile_timeline_fts MATCH ?
-        AND t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ?
-        AND (? IS NULL OR t.server_seq < ?)
-      ORDER BY t.server_seq DESC LIMIT ?
-      """,
+      @search_rows_sql,
       [@match_open, @match_close, match] ++
         profile_params(profile) ++ [before_seq, before_seq, limit]
     )
@@ -752,15 +945,15 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   defp prefix_phrase(token), do: ~s("#{String.replace(token, ~s("), ~s(""))}"*)
 
-  defp max_merge_read_frontier(conn, profile, reported_seq, stamp) do
+  defp max_merge_read_frontier(conn, profile, reported_seq, head, stamp) do
     execute(
       conn,
       """
       UPDATE mobile_profile_state
-      SET read_up_to_seq = MAX(read_up_to_seq, ?), updated_at = ?
+      SET read_up_to_seq = MIN(MAX(read_up_to_seq, ?), ?), updated_at = ?
       WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
       """,
-      [reported_seq, stamp] ++ profile_params(profile)
+      [reported_seq, head, stamp] ++ profile_params(profile)
     )
   end
 
@@ -816,11 +1009,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     with {:ok, [[attempt]]} <-
            query_all(
              conn,
-             """
-             SELECT COALESCE(MAX(request_attempt), 0) FROM mobile_timeline
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
-               AND request_client_msg_id = ?
-             """,
+             @prior_attempt_high_water_sql,
              profile_params(request) ++ [request.client_msg_id]
            ) do
       {:ok, attempt}
@@ -898,7 +1087,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                  turn_id = NULL, result_server_seq = NULL, error_json = NULL, updated_at = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                AND status = ? AND attempt = ? AND expires_at > ?
-             RETURNING *
+             RETURNING #{@request_columns}
              """,
              [epoch, timestamp(now)] ++
                profile_params(profile) ++
@@ -938,7 +1127,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
                  error_json = COALESCE(?, error_json), updated_at = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND client_msg_id = ?
                AND status = 'running' AND attempt = ?
-             RETURNING *
+             RETURNING #{@request_columns}
              """,
              settlement_params(settlement) ++
                profile_params(profile) ++ [client_msg_id, settlement.attempt]
@@ -975,9 +1164,9 @@ defmodule FermixCore.Memory.Repo.MobileSql do
            query_all(
              conn,
              """
-             SELECT * FROM mobile_timeline
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
-               AND request_client_msg_id = ? AND request_attempt = ? AND output_key = ?
+             #{@timeline_row_sql}
+             WHERE t.agent_id = ? AND t.owner_id = ? AND t.profile_id = ?
+               AND t.request_client_msg_id = ? AND t.request_attempt = ? AND t.output_key = ?
              LIMIT 1
              """,
              profile_params(timeline) ++
@@ -1061,22 +1250,22 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     if Map.has_key?(attrs, key), do: normalize.(Map.fetch!(attrs, key)), else: current
   end
 
+  # The caller read this user row in the same transaction; it is read back,
+  # with its previews, once rewritten.
   defp update_client_message_row(conn, profile, client_msg_id, update) do
-    with {:ok, rows} <-
-           query_all(
+    with :ok <-
+           execute(
              conn,
              """
              UPDATE mobile_timeline
              SET content = ?, media_refs_json = ?, metadata_json = ?
              WHERE agent_id = ? AND owner_id = ? AND profile_id = ?
                AND client_msg_id = ? AND role = 'user'
-             RETURNING *
              """,
              [update.content, Jason.encode!(update.media_refs), encode_json(update.metadata)] ++
                profile_params(profile) ++ [client_msg_id]
-           ) do
-      timeline_result(rows)
-    end
+           ),
+         do: fetch_by_client_message(conn, Map.put(profile, :client_msg_id, client_msg_id))
   end
 
   defp transaction(conn, operation) do
@@ -1294,20 +1483,85 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp nonnegative_integer?(value), do: is_integer(value) and value >= 0
   defp valid_digest?(value), do: is_binary(value) and Regex.match?(@sha256, value)
 
-  defp attached_media_ref(media_ref) do
-    case Map.fetch(media_ref, "ref") do
-      {:ok, ref} ->
-        case validate_media_descriptor(media_ref, ref) do
-          :ok ->
-            {:ok, media_ref}
-
-          {:error, {:malformed_media_descriptor, reason}} ->
-            {:error, {:invalid_media_descriptor, reason}}
-        end
-
-      :error ->
-        {:error, {:invalid_media_descriptor, {:missing_field, "ref"}}}
+  # What a stored preview may hold: a url, a site and a title, text when
+  # present, and an image that is a well-formed media descriptor of its own
+  # ref. An absent field is an absent key, never a null.
+  defp validate_link_preview(preview) when is_map(preview) do
+    with :ok <- known_preview_keys(preview),
+         :ok <- required_preview_text(preview, ~w(url site title)),
+         :ok <- optional_preview_text(preview, "description") do
+      preview_image(Map.fetch(preview, "image"))
     end
+  end
+
+  defp validate_link_preview(_preview), do: invalid_preview(:not_a_map)
+
+  defp known_preview_keys(preview) do
+    case Map.keys(preview) -- ~w(url site title description image) do
+      [] -> :ok
+      [key | _rest] -> invalid_preview({:unknown_field, key})
+    end
+  end
+
+  defp required_preview_text(preview, keys) do
+    case Enum.find(keys, &(not nonempty_string?(Map.get(preview, &1)))) do
+      nil -> :ok
+      key -> invalid_preview({:invalid_field, key})
+    end
+  end
+
+  defp optional_preview_text(preview, key) do
+    case Map.fetch(preview, key) do
+      :error -> :ok
+      {:ok, value} when is_binary(value) -> :ok
+      {:ok, _value} -> invalid_preview({:invalid_field, key})
+    end
+  end
+
+  defp preview_image(:error), do: :ok
+
+  defp preview_image({:ok, %{"ref" => ref} = image}) do
+    case validate_media_descriptor(image, ref) do
+      :ok -> :ok
+      {:error, {:malformed_media_descriptor, reason}} -> invalid_preview({:image, reason})
+    end
+  end
+
+  defp preview_image({:ok, _image}), do: invalid_preview({:image, {:missing_field, "ref"}})
+
+  defp invalid_preview(reason), do: {:error, {:invalid_link_preview, reason}}
+
+  # The unfurler asks for at most two previews a row; this bounds what any
+  # caller can pile onto one row.
+  defp append_link_preview(conn, profile, row, preview) do
+    cond do
+      Enum.any?(row.link_previews, &(&1["url"] == preview["url"])) ->
+        {:ok, row}
+
+      length(row.link_previews) >= @max_link_previews ->
+        {:error, {:too_many_link_previews, @max_link_previews}}
+
+      true ->
+        update_link_previews(conn, profile, row, row.link_previews ++ [preview])
+    end
+  end
+
+  # A row's previews are one row of their own, keyed like it; its triggers
+  # index their images.
+  defp update_link_previews(conn, profile, row, previews) do
+    with :ok <-
+           execute(
+             conn,
+             """
+             INSERT INTO mobile_timeline_link_previews (
+               agent_id, owner_id, profile_id, server_seq, previews_json
+             ) VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT (agent_id, owner_id, profile_id, server_seq)
+             DO UPDATE SET previews_json = excluded.previews_json
+             """,
+             profile_params(profile) ++ [row.server_seq, Jason.encode!(previews)]
+           ),
+         do: fetch_timeline(conn, profile, row.server_seq)
   end
 
   defp ensure_timeline_attachment_fence(_conn, _profile, %{request_client_msg_id: nil}), do: :ok
@@ -1315,29 +1569,6 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp ensure_timeline_attachment_fence(conn, profile, row) do
     with {:ok, request} <- get_request(conn, profile, row.request_client_msg_id) do
       matching_attempt(request, row.request_attempt)
-    end
-  end
-
-  defp append_timeline_media_ref(conn, profile, row, media_ref) do
-    if Enum.any?(row.media_refs, &(&1["ref"] == media_ref["ref"])) do
-      {:ok, row}
-    else
-      update_timeline_media_refs(conn, profile, row, row.media_refs ++ [media_ref])
-    end
-  end
-
-  defp update_timeline_media_refs(conn, profile, row, media_refs) do
-    with {:ok, rows} <-
-           query_all(
-             conn,
-             """
-             UPDATE mobile_timeline SET media_refs_json = ?
-             WHERE agent_id = ? AND owner_id = ? AND profile_id = ? AND server_seq = ?
-             RETURNING *
-             """,
-             [Jason.encode!(media_refs)] ++ profile_params(profile) ++ [row.server_seq]
-           ) do
-      timeline_result(rows)
     end
   end
 
@@ -1357,7 +1588,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
          created_at,
          request_client_msg_id,
          request_attempt,
-         output_key
+         output_key,
+         previews_json
        ]) do
     %{
       agent_id: agent_id,
@@ -1375,6 +1607,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
       request_client_msg_id: request_client_msg_id,
       request_attempt: request_attempt,
       output_key: output_key,
+      link_previews: Jason.decode!(previews_json),
       created_at: parse_timestamp!(created_at)
     }
   end

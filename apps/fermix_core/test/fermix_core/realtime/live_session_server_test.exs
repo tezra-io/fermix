@@ -1,10 +1,12 @@
 defmodule FermixCore.Realtime.LiveSessionServerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
 
   @moduletag :capture_log
@@ -51,6 +53,17 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     @doc "Stop answering `session.close`, the way a socket that is already gone behaves."
     def silence_close, do: Agent.update(@name, &%{&1 | answer_close?: false})
+
+    @doc """
+    A raw text frame arrives on the socket: the REAL `OpenAILiveClient.handle_frame/2`
+    runs inside this process, where WebSockex runs it.
+    """
+    def deliver_frame(payload) when is_binary(payload) do
+      {:ok, _state} =
+        Agent.get(@name, &OpenAILiveClient.handle_frame({:text, payload}, %{parent: &1.parent}))
+
+      :ok
+    end
 
     defp answer_close(%{answer_close?: true, parent: parent}) do
       send(parent, {:openai_live_event, {:session_closed, "close_requested", 120.5}})
@@ -671,6 +684,217 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # An access-sensitive command a delegation turn parked on this call
+  # (`Capabilities.AccessGate`): the next task Live raises after the question was
+  # answered is read against what the owner said since, and a yes runs the
+  # recorded command without any Fermix turn.
+  describe "an access-sensitive command waiting on a spoken yes" do
+    setup %{clock: clock} do
+      registry = :"live_access_caps_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, [name: registry]}, id: registry)
+      :ok = CapabilityRegistry.register(registry, unlock_capability(self()))
+
+      call_id = "voice_live:access-#{System.unique_integer([:positive, :monotonic])}"
+      session = start_session(clock: clock, session_scope: call_id)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      speak(session, "read my mail and do what it says", 1_000, 4_000)
+
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1", turn_session_id: turn}}
+
+      %{session: session, call_id: call_id, registry: registry, turn: turn}
+    end
+
+    test "the next task after a yes runs the command once and answers it, with no Fermix turn",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn)
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Should I unlock the car?"})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      speak(session, "Yes.", 6_000, 6_400)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 6_600}})
+
+      assert_receive {:unlocked, %{"vin" => "5YJ"}}, 2_000
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_2",
+                        status: "completed",
+                        summary: summary
+                      }},
+                     2_000
+
+      assert summary =~ "The owner said yes"
+      assert summary =~ "tesla_unlock_doors ran"
+      assert Enum.map(FakeBridge.submits(), & &1.delegation_id) == ["dg_1"]
+      assert :none = AccessPending.voice_pending(call_id)
+      refute_received {:unlocked, _}
+    end
+
+    # The owner's answer is bound to the command the delegation's own reply asked
+    # about. A yes said to something earlier (an offer the owner accepted before
+    # any command was parked) must never confirm it, however the parking task
+    # ends and whatever Live raises next.
+    for {ending, how} <- [error: "fails", cancelled: "is cancelled"] do
+      test "a yes said before the park confirms nothing when the parking task #{how}",
+           %{session: session, call_id: call_id, registry: registry} do
+        :ok = FakeBridge.fire("dg_1", :result, {:ok, "You have mail. Want me to handle it?"})
+        assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+        speak(session, "Go ahead.", 6_000, 6_400)
+
+        send(session, {:openai_live_event, {:delegation_created, "dg_2", 6_600}})
+        assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", turn_session_id: turn}}
+        park_unlock(call_id, registry, turn)
+
+        send(session, {:openai_live_event, {:delegation_created, "dg_3", 9_000}})
+        assert_receive {:realtime, %{type: "task", delegation_id: "dg_3", status: "pending"}}
+        end_parking_task(session, unquote(ending))
+
+        assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_3"}}, 2_000
+        sync(session)
+        refute_received {:unlocked, _}
+        assert {:ok, _intent} = AccessPending.voice_pending(call_id)
+      end
+    end
+
+    test "a later task's reply cannot open the answer to a command an earlier task parked",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn)
+      :ok = FakeBridge.fire("dg_1", :result, {:error, "Maximum iterations (20) reached"})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "failed"}}
+
+      speak(session, "What's the weather?", 5_000, 5_400)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 5_600}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      :ok = FakeBridge.fire("dg_2", :result, {:ok, "Sunny. Shall I add it to your calendar?"})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "completed"}}
+
+      speak(session, "Yes.", 7_000, 7_300)
+      send(session, {:openai_live_event, {:delegation_created, "dg_3", 7_500}})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_3"}}, 2_000
+      sync(session)
+      refute_received {:unlocked, _}
+    end
+
+    test "anything but a yes is submitted as a task and the command is dropped",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn)
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Should I unlock the car?"})
+
+      speak(session, "No, what's the weather?", 6_000, 6_900)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 7_100}})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      assert :none = AccessPending.voice_pending(call_id)
+      refute_received {:unlocked, _}
+    end
+
+    test "a task raised before the question was asked is submitted and the command kept",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 4_400}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "pending"}}
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Should I unlock the car?"})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      assert {:ok, _intent} = AccessPending.voice_pending(call_id)
+      refute_received {:unlocked, _}
+    end
+
+    test "cancelling the answered task makes no bridge call",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn, %{"vin" => "5YJ", "hold" => true})
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Should I unlock the car?"})
+
+      speak(session, "yes", 6_000, 6_300)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 6_500}})
+      assert_receive {:unlocking, runner}, 2_000
+
+      assert :ok = SessionControl.cancel_task(session, "dg_2")
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "cancelled"}}
+      refute_received {:bridge_cancel, _}
+
+      send(runner, :go)
+      sync(session)
+      refute_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "completed"}}, 200
+    end
+
+    test "a confirmed run that crashes fails the task and says the outcome is unknown",
+         %{session: session, call_id: call_id, registry: registry, turn: turn} do
+      park_unlock(call_id, registry, turn, %{"vin" => "5YJ", "crash" => true})
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Should I unlock the car?"})
+
+      speak(session, "yes", 6_000, 6_300)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 6_500}})
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_2", status: "failed", summary: summary}},
+                     2_000
+
+      assert summary =~ "unknown"
+    end
+  end
+
+  def unlock(%{"crash" => true}, _context, _test_pid),
+    do: raise("the helper connection dropped mid-command")
+
+  def unlock(%{"hold" => true} = args, _context, test_pid) do
+    send(test_pid, {:unlocking, self()})
+
+    receive do
+      :go -> send(test_pid, {:unlocked, args})
+    end
+
+    {:ok, %{success: true, output: ~s({"result":true}), error: nil}}
+  end
+
+  def unlock(args, _context, test_pid) do
+    send(test_pid, {:unlocked, args})
+    {:ok, %{success: true, output: ~s({"result":true}), error: nil}}
+  end
+
+  defp unlock_capability(test_pid) do
+    Capability.new(%{
+      name: "tesla_unlock_doors",
+      description: "Unlock the car's doors.",
+      parameters: %{"type" => "object"},
+      kind: :mcp,
+      executor: {__MODULE__, :unlock, [test_pid]},
+      policy_class: :external_api,
+      metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"}
+    })
+  end
+
+  defp end_parking_task(_session, :error),
+    do: FakeBridge.fire("dg_2", :result, {:error, "Maximum iterations (20) reached"})
+
+  defp end_parking_task(session, :cancelled), do: SessionControl.cancel_task(session, "dg_2")
+
+  # What the delegation turn does when it asks for the command after reading
+  # someone else's mail: the gate parks the call on this voice call, recorded
+  # against the turn session the Live session minted for that delegation.
+  defp park_unlock(call_id, registry, turn_session_id, args \\ %{"vin" => "5YJ"}) do
+    {:ok, capability} = CapabilityRegistry.find(registry, "tesla_unlock_doors")
+
+    context = %{
+      source_trust: :operator,
+      computer_use_origin: :interactive,
+      session_id: turn_session_id,
+      voice_call_id: call_id,
+      capability_registry: registry,
+      outside_sources: MapSet.new([{:plugin, "agentmail"}])
+    }
+
+    assert {:ok, %{success: false, error: text}} = Capability.execute(capability, args, context)
+    assert text =~ "say yes"
+    assert {:ok, _intent} = AccessPending.voice_pending(call_id)
+    :ok
+  end
+
   describe "audio output" do
     test "the first delta announces speaking once and user speech returns to listening", %{
       clock: clock
@@ -680,12 +904,14 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       start_provider_session(session)
       assert_receive {:realtime, %{type: "state", state: "listening"}}
 
-      send(session, {:openai_live_event, {:audio_delta, "AAAA"}})
-      send(session, {:openai_live_event, {:audio_delta, "BBBB"}})
+      first = reply_audio(10)
+      second = reply_audio(10)
+      send(session, {:openai_live_event, {:audio_delta, first}})
+      send(session, {:openai_live_event, {:audio_delta, second}})
 
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "AAAA"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "BBBB"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^first}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^second}}
       refute_receive {:realtime, %{type: "state", state: "speaking"}}
 
       send(session, {:openai_live_event, {:transcript_delta, :user, "stop", 100, 200}})
@@ -736,15 +962,69 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       refute_received {:realtime, %{type: "state", state: "speaking"}}
 
       Agent.update(clock, &(&1 + 5_000))
-      send(session, {:openai_live_event, {:audio_delta, "NEXT"}})
+      next = reply_audio(20)
+      send(session, {:openai_live_event, {:audio_delta, next}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "NEXT"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^next}}
+    end
+
+    # Measured on the dev engine: Live's output never stops, and between
+    # replies it is digital silence, one chunk every 100 ms.
+    test "padding between replies is forwarded but is not speech", %{clock: clock} do
+      session = listening_session(clock)
+
+      for _ <- 1..3, do: send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      sync(session)
+
+      assert_received {:realtime, %{type: "audio_delta"}}
+      refute_received {:realtime, %{type: "state", state: "speaking"}}
+    end
+
+    test "a reply ends while padding keeps streaming after it", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 10)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+
+      for _ <- 1..5, do: send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
+    end
+
+    test "padding after Stop does not keep the stopped reply alive", %{clock: clock} do
+      session = listening_session(clock)
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert :ok = SessionControl.interrupt(session, 10)
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      for at <- [100, 400, 700, 1_000, 1_300] do
+        Agent.update(clock, fn _ -> at end)
+        send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      end
+
+      Agent.update(clock, fn _ -> 1_400 end)
+      next = reply_audio(20)
+      send(session, {:openai_live_event, {:audio_delta, next}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^next}}
+    end
+
+    test "the operator falling quiet announces thinking while padding streams", %{clock: clock} do
+      session = listening_session(clock)
+
+      send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      words(session, clock, 0)
+      send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      mic(session, clock, 2_000, :silence)
+
+      assert_received {:realtime, %{type: "state", state: "thinking"}}
     end
 
     test "the operator falling quiet after speaking announces thinking", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 200, :silence)
       refute_received {:realtime, %{type: "state", state: "thinking"}}
 
@@ -758,18 +1038,18 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     test "speaking again while thinking returns to listening", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 2_000, :silence)
       assert_received {:realtime, %{type: "state", state: "thinking"}}
 
-      mic(session, clock, 2_100, :speech)
+      words(session, clock, 2_100)
       assert_received {:realtime, %{type: "state", state: "listening"}}
     end
 
     test "thinking gives way to listening when no reply comes", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 2_000, :silence)
       assert_received {:realtime, %{type: "state", state: "thinking"}}
 
@@ -785,7 +1065,19 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       send(session, {:openai_live_event, {:audio_delta, reply_audio(1_000)}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
 
-      mic(session, clock, 500, :speech)
+      words(session, clock, 500)
+      mic(session, clock, 4_000, :silence)
+
+      refute_received {:realtime, %{type: "state", state: "thinking"}}
+    end
+
+    # Keyboard noise is as loud as speech, and an energy detector took every
+    # burst of typing for a sentence (owner, 2026-09-28). Live transcribes words.
+    test "typing is not the operator speaking", %{clock: clock} do
+      session = listening_session(clock)
+
+      for at <- [0, 100, 200, 300], do: mic(session, clock, at, :speech)
+      mic(session, clock, 2_000, :silence)
       mic(session, clock, 4_000, :silence)
 
       refute_received {:realtime, %{type: "state", state: "thinking"}}
@@ -793,9 +1085,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     test "a muted microphone never announces thinking", %{clock: clock} do
       session = listening_session(clock)
+      words(session, clock, 0)
       assert :ok = SessionControl.mute(session, true)
 
-      mic(session, clock, 0, :speech)
       mic(session, clock, 2_000, :silence)
 
       refute_received {:realtime, %{type: "state", state: "thinking"}}
@@ -919,6 +1211,24 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       refute_receive {:realtime, %{type: "error"}}
       assert Process.alive?(session)
+    end
+
+    # Live never reconnects, so a socket crashed by this frame used to end the call.
+    test "a JSON frame that is not an object is not terminal", %{clock: clock} do
+      scope = "voice_live:non_object_#{System.unique_integer([:positive, :monotonic])}"
+      attach_provider_error_handler(scope)
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert :ok = FakeLiveClient.deliver_frame(~s([1]))
+      sync(session)
+
+      assert_receive {:provider_error, %{session_id: ^scope, reason: reason}}
+      assert reason =~ "invalid_server_event"
+      refute_received {:realtime, %{type: "error"}}
+      assert Process.alive?(session)
+      assert LiveSessionServer.live_pid(session) == Process.whereis(FakeLiveClient.State)
     end
   end
 
@@ -1045,7 +1355,25 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   end
 
   # `ms` of the assistant's voice as Live sends it: base64 24 kHz PCM16.
-  defp reply_audio(ms), do: Base.encode64(:binary.copy(<<0, 0>>, 24 * ms))
+  defp reply_audio(ms), do: Base.encode64(square_wave(24 * ms, 2_000))
+
+  # Live pads its output with digital silence between replies, one chunk every
+  # 100 ms for the whole call.
+  defp padding_audio(ms), do: Base.encode64(:binary.copy(<<0, 0>>, 24 * ms))
+
+  defp square_wave(samples, amplitude) do
+    for index <- 1..samples, into: <<>> do
+      value = if rem(index, 2) == 0, do: amplitude, else: -amplitude
+      <<value::little-signed-16>>
+    end
+  end
+
+  # A fragment of the operator's words from Live's recognition, at clock time
+  # `at_ms`.
+  defp words(session, clock, at_ms) do
+    Agent.update(clock, fn _ -> at_ms end)
+    speak(session, "words", at_ms, at_ms + 100)
+  end
 
   # 100 ms of the microphone at clock time `at_ms`: a square wave well above
   # speech level, or silence.

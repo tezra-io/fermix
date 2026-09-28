@@ -8,14 +8,20 @@ defmodule FermixChannels.Mobile.EventRouter do
   decoded payload and never reconstructed from client-controlled JSON, and it
   supplies what only the phone has: attribution of each claim to its device,
   replies addressed to that device, link previews after a user row is written,
-  and a push once a command settles.
+  and a push once a request settles without a turn.
   """
 
-  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Mobile
+  alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Mobile.DeviceRegistry
+  alias FermixChannels.Mobile.SocketHandler
   alias FermixCore.Companion.Timeline
+
+  # A page above the 4 KiB header travels as continuation frames; this bounds
+  # the one event they carry.
+  @max_page_bytes 256 * 1_024
 
   @type ingress_context :: %{
           required(:transport) => :mobile,
@@ -26,7 +32,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   def route(event, context, opts \\ [])
       when is_map(event) and is_map(context) and is_list(opts) do
     with {:ok, device_id} <- authenticated_device(context) do
-      dispatch(event, transport(device_id, context), with_default_sink(opts))
+      opts = with_default_sink(opts)
+      dispatch(event, transport(device_id, context, opts), opts)
     end
   end
 
@@ -35,7 +42,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   def recover_request(row, context, opts \\ [])
       when is_map(row) and is_map(context) and is_list(opts) do
     with {:ok, device_id} <- authenticated_device(context) do
-      Requests.recover(row, transport(device_id, context), with_default_sink(opts))
+      opts = with_default_sink(opts)
+      Requests.recover(row, transport(device_id, context, opts), opts)
     end
   end
 
@@ -50,6 +58,9 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp dispatch(%{type: "read_state", payload: payload}, _transport, opts),
     do: Requests.read_state(payload, opts)
 
+  defp dispatch(%{type: "cancel", payload: payload}, _transport, opts),
+    do: Requests.cancel(payload, opts)
+
   defp dispatch(%{type: "ping"}, transport, opts) do
     Keyword.fetch!(opts, :event_sink).(transport.reply_to, %{"t" => "pong"})
   end
@@ -59,23 +70,36 @@ defmodule FermixChannels.Mobile.EventRouter do
 
   defp dispatch(_event, _transport, _opts), do: {:error, :invalid_event}
 
-  defp transport(device_id, context) do
+  defp transport(device_id, context, opts) do
+    reply_to = {:device, device_id}
+    sink = Keyword.fetch!(opts, :event_sink)
+
     %{
       name: :mobile,
       channel: Mobile,
       claimant: [authenticated_device_id: device_id],
       ingress_context: context,
-      reply_to: {:device, device_id},
+      reply_to: reply_to,
+      # A request that fails after its worker returned is told to the device
+      # as the socket tells a failed worker's (`SocketHandler.request_error/2`).
+      report_failure: fn client_msg_id, cause ->
+        sink.(reply_to, SocketHandler.request_error({:request_failed, cause}, client_msg_id))
+      end,
       attempt_key: :mobile_attempt,
+      max_page_bytes: @max_page_bytes,
       after_user_append: &after_user_append/4,
-      after_command: &schedule_command_push/3
+      after_settle: &schedule_settled_push/3
     }
   end
 
-  # The phone's row reaches the Mac's companion connections as it is written;
-  # the phone's own wire hears of it as before.
+  # The phone's row reaches everyone watching the profile as it is written: the
+  # Mac's companion connections, and every phone, the sender's own included,
+  # each wire in its own shape. A voice note's transcript replaces its text
+  # only later (the gateway's enrichment), so the row a phone hears first is
+  # the one written.
   defp after_user_append(profile, row, text, opts) do
-    :ok = Companion.announce_row(profile, row)
+    :ok = Keyword.fetch!(opts, :event_sink).({:profile, profile}, Output.row(profile, row))
+
     schedule_user_unfurl(profile, row, text, opts)
   end
 
@@ -89,7 +113,7 @@ defmodule FermixChannels.Mobile.EventRouter do
     )
   end
 
-  defp schedule_command_push(profile, request, opts) do
+  defp schedule_settled_push(profile, request, opts) do
     case Map.get(request, :result_server_seq) do
       server_seq when is_integer(server_seq) and server_seq > 0 ->
         Mobile.schedule_push(profile, server_seq,
@@ -111,10 +135,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp emit_registered({:device, device_id}, event),
     do: DeviceRegistry.send_device_event(device_id, event)
 
-  defp emit_registered({:profile, profile}, event),
-    do: profile_emit_result(DeviceRegistry.send_profile_event(profile, event))
-
-  defp profile_emit_result(count) when is_integer(count) and count >= 0, do: :ok
+  defp emit_registered({:profile, profile}, event), do: Fanout.announce(profile, event)
 
   defp authenticated_device(%{
          transport: :mobile,

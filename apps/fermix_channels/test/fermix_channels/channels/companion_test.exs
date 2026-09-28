@@ -4,6 +4,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Authorizer
@@ -39,6 +40,36 @@ defmodule FermixChannels.Channels.CompanionTest do
     def handle_call({:stop_turn, key, message_id}, _from, test_pid) do
       send(test_pid, {:stop_turn, key, message_id})
       {:reply, {:ok, :dequeued}, test_pid}
+    end
+  end
+
+  # A queue busy in its stop callback (a stopped-marker write on a stalled
+  # store): the stop is answered only when the test releases it.
+  defmodule SlowQueueSink do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_cast({:enqueue, message}, test_pid) do
+      send(test_pid, {:enqueued, message.id})
+      {:noreply, test_pid}
+    end
+
+    @impl true
+    def handle_call({:stop_turn, _key, message_id}, from, test_pid) do
+      send(test_pid, {:stop_waiting, message_id, self()})
+
+      receive do
+        :release -> GenServer.reply(from, {:ok, :stopped})
+      after
+        10_000 -> :ok
+      end
+
+      {:noreply, test_pid}
     end
   end
 
@@ -89,7 +120,16 @@ defmodule FermixChannels.Channels.CompanionTest do
 
   setup do
     previous = Application.fetch_env(:fermix_channels, :companion_store)
+    previous_approvals = Application.fetch_env(:fermix_channels, :companion_approvals)
     Application.put_env(:fermix_channels, :companion_store, StoreStub)
+
+    approvals =
+      start_supervised!(
+        {Approvals, name: nil, schedule: fn _message, _delay -> make_ref() end},
+        id: :companion_test_approvals
+      )
+
+    Application.put_env(:fermix_channels, :companion_approvals, approvals)
     Process.register(self(), :companion_adapter_test)
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
     start_supervised!(Turns)
@@ -101,9 +141,14 @@ defmodule FermixChannels.Channels.CompanionTest do
         {:ok, value} -> Application.put_env(:fermix_channels, :companion_store, value)
         :error -> Application.delete_env(:fermix_channels, :companion_store)
       end
+
+      case previous_approvals do
+        {:ok, value} -> Application.put_env(:fermix_channels, :companion_approvals, value)
+        :error -> Application.delete_env(:fermix_channels, :companion_approvals)
+      end
     end)
 
-    :ok
+    {:ok, approvals: approvals}
   end
 
   describe "registry entry" do
@@ -311,15 +356,16 @@ defmodule FermixChannels.Channels.CompanionTest do
     message = request_message()
 
     assert :ok = Turns.handle_message(Map.from_struct(message), queue)
+    handed_off(queue)
 
-    refute_receive {:enqueued, "mac-1"}, 100
+    refute_received {:enqueued, "mac-1"}
     assert_received {:failed, "main", "mac-1", 3, %{error: ":cancelled"}}
 
     assert_received {:companion_event,
                      %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "cancelled"}}
 
     # Its turn has ended: a stop finds nothing to stop, and a late outcome is dropped.
-    assert :ok = Turns.cancel("main", "mac-1")
+    assert :ok = Turns.cancel(Turns, "main", "mac-1")
     refute_received {:stop_turn, _key, _id}
     assert :ok = Companion.build_turn_result(message).({:completed})
     refute_receive {:completed, _profile, _id, _attempt}, 100
@@ -333,8 +379,9 @@ defmodule FermixChannels.Channels.CompanionTest do
     recovered = %{recovered | metadata: %{recovered.metadata | companion_attempt: 4}}
 
     assert :ok = Turns.handle_message(Map.from_struct(recovered), queue)
+    handed_off(queue)
 
-    refute_receive {:enqueued, "mac-1"}, 100
+    refute_received {:enqueued, "mac-1"}
     assert_received {:failed, "main", "mac-1", 4, _fields}
     assert_received {:companion_event, %{"t" => "turn_error", "code" => "cancelled"}}
   end
@@ -343,11 +390,11 @@ defmodule FermixChannels.Channels.CompanionTest do
     queue = start_supervised!({QueueSink, self()}, id: :queue_sink)
     track(request_message(), queue)
 
-    assert :ok = Turns.cancel("main", "mac-1")
+    assert :ok = Turns.cancel(Turns, "main", "mac-1")
     assert_receive {:stop_turn, {"companion", "main", :root}, "mac-1"}
 
     # Another request's cancel never stops this turn.
-    assert :ok = Turns.cancel("main", "mac-2")
+    assert :ok = Turns.cancel(Turns, "main", "mac-2")
     refute_receive {:stop_turn, _key, "mac-2"}, 100
   end
 
@@ -369,6 +416,57 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert_receive {:failed, "main", "mac-1", 3, _fields}
     assert :ok = Companion.build_turn_result(message).({:completed})
     refute_receive {:completed, _profile, _id, _attempt}, 100
+  end
+
+  # Turns is held while a cancel and then its queue's death reach it, so it
+  # reads the cancel before the `:DOWN`: the stop goes to a queue that is gone.
+  test "a cancel that finds its turn's queue gone leaves the :DOWN to end the turn" do
+    queue = start_supervised!({QueueSink, self()}, id: :dying_queue)
+    message = track(request_message(), queue)
+    turns = GenServer.whereis(Turns)
+
+    :ok = :sys.suspend(turns)
+    cancel = Task.async(fn -> Turns.cancel(Turns, "main", "mac-1") end)
+    wait_until(fn -> mailbox_size(turns) >= 1 end)
+    queue_ref = Process.monitor(queue)
+    Process.exit(queue, :kill)
+    assert_receive {:DOWN, ^queue_ref, :process, ^queue, :killed}
+    wait_until(fn -> mailbox_size(turns) >= 2 end)
+    :ok = :sys.resume(turns)
+
+    assert :ok = Task.await(cancel)
+    assert GenServer.whereis(Turns) == turns
+
+    assert_receive {:companion_event,
+                    %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "interrupted"}}
+
+    assert_receive {:failed, "main", "mac-1", 3, _fields}
+    assert :ok = Companion.build_turn_result(message).({:cancelled})
+    refute_receive {:companion_event, %{"t" => "turn_error"}}, 100
+  end
+
+  # The stop waits for the queue's answer, and so do the socket that asked
+  # and a reply that reaches Turns meanwhile. The queue is held only until the
+  # stop is seen waiting: no test waits out a production call budget. Each of
+  # the three calls is traced instead, and carries no timeout to run out.
+  test "a cancel waits for a queue busy in its stop, and so does a reply behind it" do
+    queue = start_supervised!({SlowQueueSink, self()}, id: :slow_queue)
+    message = track(request_message(), queue)
+    turns = GenServer.whereis(Turns)
+    trace = call_trace()
+    trace_calls(trace, turns)
+
+    cancel = traced_task(trace, fn -> Turns.cancel(Turns, "main", "mac-1") end)
+    assert_receive {:stop_waiting, "mac-1", ^queue}
+    reply = traced_task(trace, fn -> Companion.build_text_reply(message).("partial") end)
+    wait_until(fn -> mailbox_size(turns) >= 1 end)
+    send(queue, :release)
+
+    assert :ok = Task.await(cancel)
+    assert :ok = Task.await(reply)
+    assert call_timeout(cancel.pid, :cancel) == :infinity
+    assert call_timeout(turns, :stop_turn) == :infinity
+    assert call_timeout(reply.pid, :reply) == :infinity
   end
 
   test "a reply that is no queue turn, a slash command's answer, is written at once as a row" do
@@ -411,7 +509,9 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
   end
 
-  test "tool activity and approvals reach the profile, with no null fields" do
+  test "tool activity and approvals reach the profile, with no null fields", %{
+    approvals: approvals
+  } do
     message = request_message()
     activity = Companion.build_activity_callback(message)
     assert :ok = activity.({:tool_start, "shell"})
@@ -426,11 +526,38 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert approval["deny_command"] == "/deny TOK"
     assert approval["text"] == "Allow this?"
     refute Map.has_key?(approval, "detail")
+
+    # FEAT-2: kept for a Mac client that connects after it went out.
+    assert [%{"approval_id" => id}] = Approvals.pending(approvals, "main", :companion)
+    assert Approvals.pending(approvals, "main", :mobile) == []
+    assert id == approval["approval_id"]
+  end
+
+  test "a provider call is not a tool event" do
+    message = request_message()
+    activity = Companion.build_activity_callback(message)
+
+    assert :ok = activity.(:provider_start)
+    assert :ok = activity.(:provider_response)
+    refute_receive {:companion_event, %{"t" => "tool_event"}}
+
+    assert :ok = activity.({:tool_start, "shell"})
+
+    assert_receive {:companion_event,
+                    %{"t" => "tool_event", "tool" => "shell", "phase" => "start"}}
   end
 
   test "media does not travel on this socket" do
     assert {:error, :unsupported_media} =
              Companion.send_media("main", %{kind: :image, path: "/tmp/x.png"}, [])
+  end
+
+  # The hand-off is sent to Turns, not awaited: once Turns and then the queue
+  # have answered, whatever the hand-off did has happened.
+  defp handed_off(queue) do
+    _turns = :sys.get_state(Turns)
+    _queue = :sys.get_state(queue)
+    :ok
   end
 
   # Hand the message to a queue through Turns, as the gateway does for every
@@ -469,5 +596,61 @@ defmodule FermixChannels.Channels.CompanionTest do
       )
 
     handler_id
+  end
+
+  defp mailbox_size(pid) do
+    {:message_queue_len, size} = Process.info(pid, :message_queue_len)
+    size
+  end
+
+  # A trace session of this test's own on `GenServer.call/3`, local calls
+  # included, so `call/2`'s default timeout shows too. No other tracer sees
+  # it, and it ends with the test.
+  defp call_trace do
+    session = :trace.session_create(:companion_test_calls, self(), [])
+    on_exit(fn -> :trace.session_destroy(session) end)
+    1 = :trace.function(session, {GenServer, :call, 3}, true, [:local])
+    session
+  end
+
+  defp trace_calls(session, pid), do: 1 = :trace.process(session, pid, true, [:call])
+
+  # Runs `fun` in a task that starts only once its calls are traced.
+  defp traced_task(session, fun) do
+    task =
+      Task.async(fn ->
+        receive do
+          :traced -> fun.()
+        after
+          5_000 -> :never_traced
+        end
+      end)
+
+    trace_calls(session, task.pid)
+    send(task.pid, :traced)
+    task
+  end
+
+  # The timeout `pid`'s traced call carried, for the request tagged `tag`.
+  defp call_timeout(pid, tag) do
+    receive do
+      {:trace, ^pid, :call, {GenServer, :call, [_server, request, timeout]}}
+      when is_tuple(request) and elem(request, 0) == tag ->
+        timeout
+    after
+      5_000 -> flunk("#{inspect(pid)} made no traced #{inspect(tag)} call")
+    end
+  end
+
+  defp wait_until(fun, attempts \\ 150)
+  defp wait_until(_fun, 0), do: flunk("condition never became true")
+
+  defp wait_until(fun, attempts) do
+    if fun.() do
+      :ok
+    else
+      Process.sleep(20)
+      wait_until(fun, attempts - 1)
+    end
   end
 end

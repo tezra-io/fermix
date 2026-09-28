@@ -3,18 +3,34 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Setup.ConfigStore
 
-  @mac_paths [
-    "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-    "/Applications/Chromium.app/Contents/MacOS/Chromium",
-    "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary"
+  # Every candidate carries the name a person knows it by, which is what a
+  # settings row and a Doctor row show: a path never crosses the management
+  # wire. The lists are in search order.
+  @mac_apps [
+    {"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome", "Google Chrome"},
+    {"/Applications/Chromium.app/Contents/MacOS/Chromium", "Chromium"},
+    {"/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+     "Google Chrome Canary"}
   ]
-  @path_names ~w(google-chrome-stable google-chrome chromium chromium-browser chrome)
+  @path_names [
+    {"google-chrome-stable", "Google Chrome"},
+    {"google-chrome", "Google Chrome"},
+    {"chromium", "Chromium"},
+    {"chromium-browser", "Chromium"},
+    {"chrome", "Chrome"}
+  ]
+  @configured_label "The configured browser"
+  @downloaded_label "Google Chrome for Testing"
+  @missing_sentence "No Chrome or Chromium is installed."
+
+  @type executable :: %{path: String.t(), label: String.t()}
 
   @spec start(Config.t(), map(), String.t(), String.t()) :: {:ok, map()} | {:error, Error.t()}
   def start(%Config{} = config, profile, owner_key, profile_name) do
-    with {:ok, executable} <- find_executable(config, profile),
+    with {:ok, %{path: executable}} <- resolve(config, profile),
          {:ok, headless} <- headless(profile),
          {:ok, requested_port} <- requested_port(profile),
          {:ok, profile_dir} <- profile_dir(owner_key, profile_name),
@@ -77,15 +93,56 @@ defmodule FermixCore.Browser.ChromeLauncher do
 
   def attach(%Config{}, _profile, _owner_key, _profile_name), do: :none
 
-  @spec find_executable(Config.t(), map() | nil) :: {:ok, String.t()} | {:error, Error.t()}
-  def find_executable(%Config{}, profile) do
-    candidates(profile)
-    |> Enum.find(&executable?/1)
+  @doc """
+  The browser a profile launches: the first candidate that is an executable
+  file, with the name a person knows it by.
+
+  The search order is the profile's own `executable_path`, then `CHROME_PATH`,
+  then the browsers installed on `PATH` and in `/Applications`, and last the
+  Chromium the meeting notetaker's `install-browser` step downloads into
+  Playwright's cache, so a machine with no browser of its own can still run
+  tasks once that step has run. `opts` carries the test seams `installed` (the
+  `PATH` and `/Applications` candidates) and `downloaded` (options for
+  `BrowserInstall.chromium_path/1`).
+  """
+  @spec resolve(Config.t(), map() | nil, keyword()) ::
+          {:ok, executable()} | {:error, Error.t()}
+  def resolve(%Config{}, profile, opts \\ []) when is_list(opts) do
+    profile
+    |> candidates(opts)
+    |> Enum.find(fn {path, _label} -> executable?(path) end)
     |> case do
       nil -> {:error, Error.new("chrome_missing", "Chrome executable was not found")}
-      path -> {:ok, path}
+      {path, label} -> {:ok, %{path: path, label: label}}
     end
   end
+
+  @doc """
+  The browser tasks run in: what the configured default profile launches.
+
+  Reads `[fermix_core.browser]` as the launcher does, so a configuration the
+  launcher refuses is answered with that refusal rather than with a browser it
+  would never start.
+  """
+  @spec resolve_default() :: {:ok, executable()} | {:error, Error.t()}
+  def resolve_default, do: :fermix_core |> Application.get_env(:browser, []) |> resolve_default()
+
+  @spec resolve_default(keyword() | map()) :: {:ok, executable()} | {:error, Error.t()}
+  def resolve_default(raw) when is_list(raw) or is_map(raw) do
+    with {:ok, config} <- Config.current(raw),
+         {:ok, profile, _name} <- Config.profile(config, nil) do
+      resolve(config, profile)
+    end
+  end
+
+  @doc """
+  The one sentence for a resolution, shared by the settings row and the Doctor
+  row so the two never describe the same machine in different words.
+  """
+  @spec sentence({:ok, executable()} | {:error, Error.t()}) :: String.t()
+  def sentence({:ok, %{label: label}}), do: "Tasks use #{label}."
+  def sentence({:error, %Error{code: "chrome_missing"}}), do: @missing_sentence
+  def sentence({:error, %Error{message: message}}), do: message
 
   defp ready_or_cleanup(config, requested_port, profile_dir, port_ref, os_pid, runtime) do
     case wait_until_ready(requested_port, profile_dir, port_ref, config) do
@@ -148,14 +205,38 @@ defmodule FermixCore.Browser.ChromeLauncher do
     |> Enum.join("\n")
   end
 
-  defp candidates(profile) do
-    [
-      profile_path(profile),
-      System.get_env("CHROME_PATH")
-      | Enum.map(@path_names, &System.find_executable/1) ++ @mac_paths
-    ]
-    |> Enum.reject(&is_nil/1)
-    |> Enum.uniq()
+  @doc """
+  Every candidate `resolve/3` tries, in order, as `{path, label}`. Exposed for
+  tests.
+  """
+  @spec candidates(map() | nil, keyword()) :: [{String.t(), String.t()}]
+  def candidates(profile, opts \\ []) when is_list(opts) do
+    configured =
+      for path <- [profile_path(profile), System.get_env("CHROME_PATH")],
+          is_binary(path) and path != "",
+          do: {path, @configured_label}
+
+    installed = Keyword.get_lazy(opts, :installed, &installed_candidates/0)
+    downloaded = downloaded_candidate(Keyword.get(opts, :downloaded, []))
+
+    Enum.uniq_by(configured ++ installed ++ downloaded, fn {path, _label} -> path end)
+  end
+
+  defp installed_candidates do
+    on_path =
+      for {name, label} <- @path_names,
+          path = System.find_executable(name),
+          is_binary(path),
+          do: {path, label}
+
+    on_path ++ @mac_apps
+  end
+
+  defp downloaded_candidate(opts) do
+    case BrowserInstall.chromium_path(opts) do
+      {:ok, path} -> [{path, @downloaded_label}]
+      {:error, :not_installed} -> []
+    end
   end
 
   defp profile_path(%{executable_path: path}) when is_binary(path), do: path

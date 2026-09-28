@@ -150,7 +150,12 @@ defmodule FermixCore.Browser.RoutingTest do
   test "the facade decides at the start, keeps it, reaps a lost pane, and marks the turn" do
     host = HostAvailability
     endpoint = endpoint()
-    {:ok, connection} = FermixTestSupport.FakeBrowserHostConnection.start_link(%{"tab.list" => {:ok, %{"tabs" => []}}})
+
+    {:ok, connection} =
+      FermixTestSupport.FakeBrowserHostConnection.start_link(%{
+        "tab.list" => {:ok, %{"tabs" => []}}
+      })
+
     on_exit(fn -> Process.exit(connection, :kill) end)
     :ok = HostAvailability.listening(host, endpoint)
     :ok = HostAvailability.attached(host, connection, 1)

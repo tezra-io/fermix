@@ -95,11 +95,15 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     defp record_or_refuse(state, event), do: {:ok, %{state | events: state.events ++ [event]}}
 
+    # `OpenAIClient.close/1` is a `WebSockex.cast`, so closing a socket that has
+    # already died does nothing: a call that ends on its socket's EXIT closes it.
     def close(pid) do
       Agent.update(pid, fn state ->
         send(state.test_pid, {:socket_closed, pid})
         %{state | closed?: true}
       end)
+    catch
+      :exit, {:noproc, _call} -> :ok
     end
 
     def closed?(pid), do: Agent.get(pid, & &1.closed?)
@@ -257,6 +261,26 @@ defmodule FermixCore.Realtime.SessionServerTest do
 
     assert :ok = SessionServer.handle_provider_event(server, {:session_updated, %{}})
     assert_receive {:realtime, %{type: "state", state: "listening"}}
+  end
+
+  # The session.update needs no socket, so it is built before one opens: a socket
+  # opened ahead of a failed build stayed open, unconfigured, until the voice
+  # connection stopped the session.
+  test "a call_start whose session.update cannot be built opens no socket" do
+    configure_sockets([:ok])
+    on_exit(&ProgrammableOpenAIClient.reset/0)
+
+    server =
+      start_reconnecting_server([10, 10, 10],
+        prompt_loader: fn _opts -> {:error, :prompt_unavailable} end
+      )
+
+    assert {:error, :prompt_unavailable} = SessionServer.call_start(server)
+
+    refute_received {:socket_started, _pid, _behavior}
+    assert ProgrammableOpenAIClient.attempts() == 0
+    assert SessionServer.openai_pid(server) == nil
+    assert_received {:realtime, %{type: "error", reason: "provider_send_failed: " <> _detail}}
   end
 
   test "call_start composes the prompt with the realtime overlay enabled" do
@@ -837,6 +861,48 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
   end
 
+  # A JSON frame that is not an object used to crash the socket process: the call
+  # reconnected into a fresh server conversation and lost its in-flight tools.
+  test "a JSON frame that is not an object is reported and keeps the socket" do
+    scope = "session:non-object-#{System.unique_integer([:positive])}"
+    test_pid = self()
+    handler = {__MODULE__, :non_object_frame, scope}
+
+    :telemetry.attach(
+      handler,
+      [:fermix, :realtime, :provider_error],
+      fn _event, _measurements, meta, _config -> send(test_pid, {:provider_error, meta}) end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        session_scope: scope,
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capabilities: [],
+        prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
+      )
+
+    assert :ok = SessionServer.call_start(server)
+    openai = SessionServer.openai_pid(server)
+
+    assert :ok = RealtimeSocket.deliver_frame(openai, ~s([1]))
+
+    assert_receive {:provider_error,
+                    %{session_id: ^scope, reason: ~s({:invalid_server_event, "[1]"})}}
+
+    assert Process.alive?(openai)
+    assert SessionServer.openai_pid(server) == openai
+    refute_received {:realtime, %{type: "state", state: "reconnecting"}}
+    refute_received {:realtime, %{type: "error"}}
+  end
+
   test "call_stop ends the session process and releases the socket", %{server: server} do
     Process.unlink(server)
     assert :ok = SessionServer.call_start(server)
@@ -1154,7 +1220,9 @@ defmodule FermixCore.Realtime.SessionServerTest do
         prompt_loader: fn _opts -> {:ok, %{messages: [], parts: [], accounting: []}} end
       )
 
-    assert :ok = SessionServer.handle_provider_event(pid, {:user_transcript_done, "hello"})
+    assert :ok =
+             SessionServer.handle_provider_event(pid, {:user_transcript_done, "item-1", "hello"})
+
     assert :ok = SessionServer.handle_provider_event(pid, {:assistant_transcript_done, "hi"})
     assert :ok = SessionServer.handle_provider_event(pid, {:response_done, %{}})
 
@@ -1474,6 +1542,58 @@ defmodule FermixCore.Realtime.SessionServerTest do
       GenServer.stop(server)
     end
 
+    # A socket that opens and takes its session.update but drops before
+    # session.updated has not brought the call back (tla/specs/realtime_session
+    # check 23). Counting it a success reset the budget on every open, so an
+    # upstream that kept closing there looped until the max-session timer.
+    test "sockets that drop before session.updated use up the reconnect budget" do
+      configure_sockets([:ok, :ok, :ok, :ok, :ok])
+      server = start_reconnecting_server([10, 10, 10])
+      Process.unlink(server)
+      ref = Process.monitor(server)
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.deliver(first, %{"type" => "session.updated", "session" => %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+
+      for _attempt <- 1..3 do
+        assert_receive {:socket_started, socket, :ok}
+        # Served after the attempt that opened it, so its session.update is sent.
+        assert SessionServer.openai_pid(server) == socket
+        assert [%{type: "session.update"}] = ProgrammableOpenAIClient.events(socket)
+        :ok = RealtimeSocket.finish_close(socket, {:remote, :closed})
+      end
+
+      assert_receive {:realtime, %{type: "error", reason: "provider_disconnected"}}
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_disconnected}}
+      assert ProgrammableOpenAIClient.attempts() == 4
+    end
+
+    # The budget is per outage: a reconnect OpenAI confirms gives the next drop
+    # every attempt again (tla/specs/realtime_session checks 08 and 09).
+    test "a confirmed reconnect restores the whole reconnect budget" do
+      configure_sockets([:ok, :ok, :ok, :ok])
+      server = start_reconnecting_server([10, 10])
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.deliver(first, %{"type" => "session.updated", "session" => %{}})
+
+      current =
+        Enum.reduce(1..3, first, fn _drop, socket ->
+          :ok = RealtimeSocket.finish_close(socket, {:remote, :closed})
+          assert_receive {:socket_started, next, :ok}
+          :ok = RealtimeSocket.deliver(next, %{"type" => "session.updated", "session" => %{}})
+          next
+        end)
+
+      assert SessionServer.openai_pid(server) == current
+      assert :sys.get_state(server).reconnect_attempts == 0
+      refute_received {:realtime, %{type: "error"}}
+
+      GenServer.stop(server)
+    end
+
     # RT-1's re-armed trigger is owed to the conversation that rejected it. A
     # reconnect opens a fresh one that never saw those outputs.
     test "a trigger re-armed by a rejection is not sent into the next conversation", %{
@@ -1620,6 +1740,178 @@ defmodule FermixCore.Realtime.SessionServerTest do
     end
   end
 
+  # A wrong OpenAI key (2026-09-26). OpenAI accepts the WebSocket, then answers
+  # session.update with an `invalid_api_key` error and never sends
+  # session.updated. The error was only logged: the companion waited for a
+  # `listening` that never came, gave up on its own start deadline and blamed a
+  # slow start, and the operator heard "voice doesn't detect my microphone".
+  describe "an error before the session is configured" do
+    setup do
+      configure_sockets([:ok, :ok])
+      on_exit(&ProgrammableOpenAIClient.reset/0)
+      scope = "session:refused-#{System.unique_integer([:positive])}"
+      attach_call_end_telemetry(scope)
+      %{scope: scope}
+    end
+
+    test "a refused key ends the call and tells the companion why", %{scope: scope} do
+      server = start_reconnecting_server([10, 10, 10], session_scope: scope)
+      Process.unlink(server)
+      ref = Process.monitor(server)
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, socket, :ok}
+      :ok = RealtimeSocket.deliver(socket, refused_key_event())
+
+      assert_receive {:realtime,
+                      %{
+                        type: "error",
+                        reason: "provider_refused",
+                        kind: "provider_refused",
+                        detail: detail
+                      }}
+
+      assert detail == "OpenAI did not accept the API key (invalid_api_key)."
+      # OpenAI's own sentence quotes the key back, masked but with its tail.
+      refute detail =~ "sk-"
+      refute detail =~ "Wx9Z"
+
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_refused}}
+      assert_receive {:socket_closed, ^socket}
+      refute_received {:realtime, %{type: "state", state: "listening"}}
+      refute_received {:realtime, %{type: "state", state: "reconnecting"}}
+      refute_receive {:socket_started, _pid, _behavior}, 100
+
+      assert_received {:provider_error, %{session_id: ^scope, reason: "invalid_api_key"}}
+      assert_received {:call_stop, %{session_id: ^scope, reason: "provider_refused"}}
+    end
+
+    test "the log names what was refused and never quotes the key", %{scope: scope} do
+      server = start_reconnecting_server([10, 10, 10], session_scope: scope)
+      Process.unlink(server)
+      ref = Process.monitor(server)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert :ok = SessionServer.call_start(server)
+          assert_receive {:socket_started, socket, :ok}
+          :ok = RealtimeSocket.deliver(socket, refused_key_event())
+          assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_refused}}
+        end)
+
+      assert log =~ "OpenAI refused the session"
+      assert log =~ "invalid_api_key"
+      refute log =~ "Wx9Z"
+      refute log =~ "sk-proj"
+    end
+
+    # A reconnect's socket is configured by the same session.update, so its
+    # refusal is the same dead end: the call has no session to go back to.
+    test "a refused reconnect ends the call instead of waiting on the socket", %{scope: scope} do
+      server = start_reconnecting_server([10, 10, 10], session_scope: scope)
+      Process.unlink(server)
+      ref = Process.monitor(server)
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, first, :ok}
+      :ok = RealtimeSocket.deliver(first, %{"type" => "session.updated", "session" => %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      :ok = RealtimeSocket.finish_close(first, {:remote, :closed})
+      assert_receive {:realtime, %{type: "state", state: "reconnecting"}}
+      assert_receive {:socket_started, second, :ok}
+      :ok = RealtimeSocket.deliver(second, rejected_update_event())
+
+      # A code with no sentence of its own is named, and the vendor's words are not
+      # forwarded: Fermix cannot vouch for what they quote.
+      assert_receive {:realtime,
+                      %{
+                        type: "error",
+                        reason: "provider_refused",
+                        kind: "provider_refused",
+                        detail: "OpenAI refused the voice session (invalid_value)."
+                      }}
+
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_refused}}
+      refute_receive {:socket_started, _pid, _behavior}, 100
+      assert_received {:call_stop, %{session_id: ^scope, reason: "provider_refused"}}
+    end
+
+    test "an error with no code still ends the call, in Fermix's words" do
+      server = start_reconnecting_server([10, 10, 10])
+      Process.unlink(server)
+      ref = Process.monitor(server)
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, socket, :ok}
+
+      :ok =
+        RealtimeSocket.deliver(socket, %{
+          "type" => "error",
+          "error" => %{"type" => "server_error", "message" => "sk-proj-****Wx9Z went wrong"}
+        })
+
+      assert_receive {:realtime,
+                      %{
+                        type: "error",
+                        reason: "provider_refused",
+                        detail: "OpenAI refused the voice session."
+                      }}
+
+      assert_receive {:DOWN, ^ref, :process, ^server, {:shutdown, :provider_refused}}
+    end
+
+    # Only the call's own socket can refuse it: an abandoned socket's error says
+    # nothing about the one that replaced it, even while that one is unconfigured.
+    test "another socket's error is dropped" do
+      configure_sockets([:ok, :update_fails, :ok, :ok])
+      server = start_reconnecting_server([10, 10, 10])
+      Process.unlink(server)
+      ref = Process.monitor(server)
+      {_first, closed, current} = reconnect_past_a_failed_update(server)
+
+      :ok = RealtimeSocket.deliver(closed, refused_key_event())
+      :ok = RealtimeSocket.deliver(current, %{"type" => "session.updated", "session" => %{}})
+
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+      refute_received {:realtime, %{type: "error"}}
+      refute_received {:DOWN, ^ref, :process, ^server, _reason}
+      assert SessionServer.openai_pid(server) == current
+
+      GenServer.stop(server)
+    end
+
+    # Once session.updated has configured the call, an in-band error is a hiccup
+    # on a live call: reported, never forwarded (the companion reads `error` as
+    # the end of the call), and the call goes on.
+    test "after session.updated an error is reported and the call goes on", %{scope: scope} do
+      server = start_reconnecting_server([10, 10, 10], session_scope: scope)
+      Process.unlink(server)
+      ref = Process.monitor(server)
+
+      assert :ok = SessionServer.call_start(server)
+      assert_receive {:socket_started, socket, :ok}
+      :ok = RealtimeSocket.deliver(socket, %{"type" => "session.updated", "session" => %{}})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      :ok = RealtimeSocket.deliver(socket, error_event(cancel_not_active_error()))
+      :ok = RealtimeSocket.deliver(socket, error_event(active_response_error()))
+
+      assert_receive {:provider_error,
+                      %{session_id: ^scope, reason: "response_cancel_not_active"}}
+
+      assert :ok = SessionServer.audio_chunk(server, <<0, 0, 0, 0>>)
+      assert SessionServer.openai_pid(server) == socket
+      appended = OpenAIClient.audio_append_event(<<0, 0, 0, 0>>)
+      assert appended in ProgrammableOpenAIClient.events(socket)
+      refute_received {:realtime, %{type: "error"}}
+      refute_received {:DOWN, ^ref, :process, ^server, _reason}
+      refute_received {:call_stop, _meta}
+
+      GenServer.stop(server)
+    end
+  end
+
   test "response_done with token usage updates reported cost and notifies companion" do
     {:ok, pid} =
       SessionServer.start_link(
@@ -1696,6 +1988,59 @@ defmodule FermixCore.Realtime.SessionServerTest do
       "code" => "conversation_already_has_active_response",
       "message" => "Conversation already has an active response in progress"
     }
+  end
+
+  # OpenAI's answer to a session.update sent with a wrong key, as it arrives on
+  # the socket: its message quotes the key back, masked but with its tail.
+  defp refused_key_event do
+    error_event(%{
+      "type" => "invalid_request_error",
+      "code" => "invalid_api_key",
+      "message" =>
+        "Incorrect API key provided: sk-proj-************************************Wx9Z. " <>
+          "You can find your API key at https://platform.openai.com/account/api-keys.",
+      "param" => nil,
+      "event_id" => nil
+    })
+  end
+
+  # A session.update OpenAI rejects for its content.
+  defp rejected_update_event do
+    error_event(%{
+      "type" => "invalid_request_error",
+      "code" => "invalid_value",
+      "message" => "Invalid value: 'nope'. Supported values are: 'alloy' and 'marin'.",
+      "param" => "session.audio.output.voice",
+      "event_id" => nil
+    })
+  end
+
+  defp cancel_not_active_error do
+    %{
+      "type" => "invalid_request_error",
+      "code" => "response_cancel_not_active",
+      "message" => "Cancellation failed: no active response found"
+    }
+  end
+
+  defp error_event(error), do: %{"type" => "error", "event_id" => "event_1", "error" => error}
+
+  # The two events that say how a call ended, for this test's call only: the
+  # handler is global, so it pins the session id.
+  defp attach_call_end_telemetry(scope) do
+    test_pid = self()
+    handler = {__MODULE__, :call_end, scope}
+
+    :telemetry.attach_many(
+      handler,
+      [[:fermix, :realtime, :provider_error], [:fermix, :realtime, :call_stop]],
+      fn [:fermix, :realtime, name], _measurements, meta, _config ->
+        if meta.session_id == scope, do: send(test_pid, {name, meta})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler) end)
   end
 
   defp creates(openai),

@@ -4,10 +4,32 @@ defmodule FermixCore.Companion.TimelineTest do
   alias Exqlite.Sqlite3
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.MobileSql
 
   @now ~U[2026-08-12 12:00:00Z]
+  @max_i64 9_223_372_036_854_775_807
+  @max_u64 18_446_744_073_709_551_615
   @day_seconds 86_400
   @media_ref String.duplicate("b", 64)
+
+  # Takes a database back to the shape it had before migration 36: every object
+  # the migration adds, and its version row.
+  @rewind_media_index_migration """
+  DROP TRIGGER mobile_timeline_media_ai;
+  DROP TRIGGER mobile_timeline_media_au;
+  DROP TABLE mobile_timeline_link_previews;
+  DROP TABLE mobile_timeline_media;
+  DELETE FROM schema_migrations WHERE version = 36;
+  """
+
+  # The append of every engine before migration 36, verbatim.
+  @legacy_timeline_insert """
+  INSERT INTO mobile_timeline (
+    agent_id, owner_id, profile_id, server_seq, kind, role, content,
+    client_msg_id, in_reply_to, media_refs_json, metadata_json, proactive_key, created_at,
+    request_client_msg_id, request_attempt, output_key
+  ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  """
 
   setup do
     unique = System.unique_integer([:positive])
@@ -258,6 +280,7 @@ defmodule FermixCore.Companion.TimelineTest do
 
   test "read frontier max-merges and remains durable across a repo restart", context do
     %{db_path: db_path, repo: repo} = context
+    append_rows(repo, 12)
 
     assert {:ok, 8} = Timeline.advance_read_frontier("main", 8, store_opts(repo))
     assert {:ok, 8} = Timeline.advance_read_frontier("main", 3, store_opts(repo))
@@ -266,6 +289,126 @@ defmodule FermixCore.Companion.TimelineTest do
     restart_repo(repo, db_path)
 
     assert {:ok, 11} = Timeline.read_frontier("main", store_opts(repo))
+  end
+
+  # A frontier past the newest row would suppress every later push and unread
+  # count, and it could never come back down: it is clamped to the head.
+  test "read frontier never passes the history head", %{repo: repo} do
+    assert {:ok, 0} = Timeline.advance_read_frontier("main", 5, store_opts(repo))
+
+    append_rows(repo, 3)
+    assert {:ok, 3} = Timeline.advance_read_frontier("main", 99, store_opts(repo))
+    assert {:ok, 3} = Timeline.read_frontier("main", store_opts(repo))
+
+    append_rows(repo, 2)
+    assert {:ok, 5} = Timeline.advance_read_frontier("main", 5, store_opts(repo))
+  end
+
+  # A frontier an older daemon stored past the head heals on the next report.
+  test "a stored frontier past the head comes back to it", %{db_path: db_path, repo: repo} do
+    append_rows(repo, 2)
+
+    with_raw_conn(db_path, fn conn ->
+      :ok =
+        Sqlite3.execute(conn, "UPDATE mobile_profile_state SET read_up_to_seq = 40;")
+    end)
+
+    assert {:ok, 2} = Timeline.advance_read_frontier("main", 1, store_opts(repo))
+  end
+
+  # The wire types every cursor as u64 and SQLite integers are i64: a cursor
+  # past every row means nothing after it, and never reaches the Repo process.
+  test "cursors beyond SQLite's integer range answer, and the Repo stays up", %{repo: repo} do
+    append_rows(repo, 3)
+    repo_pid = Process.whereis(repo)
+
+    for cursor <- [@max_i64, @max_i64 + 1, @max_u64] do
+      assert {:ok, %{messages: [], next_after_seq: next, history_head_seq: 3}} =
+               Timeline.history_page("main", store_opts(repo, after_seq: cursor, limit: 5))
+
+      assert next == cursor
+
+      assert {:ok, %{messages: messages}} =
+               Timeline.history_page("main", store_opts(repo, before_seq: cursor, limit: 5))
+
+      assert Enum.map(messages, & &1.server_seq) == [1, 2, 3]
+
+      assert {:ok, %{hits: [_ | _]}} =
+               Timeline.search("main", "row", store_opts(repo, before_seq: cursor))
+
+      assert {:ok, 3} = Timeline.advance_read_frontier("main", cursor, store_opts(repo))
+    end
+
+    assert Process.whereis(repo) == repo_pid
+  end
+
+  test "the Repo refuses an out-of-range integer in the caller", %{repo: repo} do
+    repo_pid = Process.whereis(repo)
+    selector = %{agent_id: "agent-a", owner_id: "owner-a", profile_id: "main"}
+
+    assert_raise FunctionClauseError, fn ->
+      Repo.get_mobile_history(selector, @max_i64 + 1, 5, server: repo)
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      Repo.advance_mobile_read_frontier(selector, @max_u64, @now, server: repo)
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      Repo.search_mobile_timeline(selector, "row", @max_i64 + 1, 5, server: repo)
+    end
+
+    assert Process.whereis(repo) == repo_pid
+  end
+
+  # A claim reads the high-water mark of earlier attempts inside the write
+  # transaction; over the whole timeline that is a scan per message, so the
+  # query must stay on the request-output index.
+  test "a claim's prior-attempt lookup uses the output index", %{db_path: db_path, repo: repo} do
+    append_rows(repo, 1)
+
+    plan =
+      with_raw_conn(db_path, fn conn ->
+        {:ok, stmt} =
+          Sqlite3.prepare(conn, "EXPLAIN QUERY PLAN " <> MobileSql.prior_attempt_high_water_sql())
+
+        :ok = Sqlite3.bind(stmt, ["agent-a", "owner-a", "main", "client-1"])
+        {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+        :ok = Sqlite3.release(conn, stmt)
+        Enum.map_join(rows, "\n", &List.last/1)
+      end)
+
+    assert plan =~ "USING COVERING INDEX idx_mobile_request_outputs"
+  end
+
+  test "revoking a device marks every unsettled request it claimed", %{repo: repo} do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "revoked-waiting")
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "revoked-running")
+    assert {:ok, {:started, _request}} = start_request(repo, "revoked-running")
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "revoked-done")
+    assert {:ok, {:started, _request}} = start_request(repo, "revoked-done")
+
+    assert {:ok, _request} =
+             Timeline.complete_client_request("main", "revoked-done", 1, %{}, store_opts(repo))
+
+    other = store_opts(repo, authenticated_device_id: "device-b", now: @now)
+
+    assert {:ok, {:claimed, _request}} =
+             Timeline.claim_client_request("main", "kept", "msg", %{"a" => 1}, other)
+
+    assert {:ok, marked} =
+             Timeline.cancel_device_requests("device-a", store_opts(repo, now: at(5)))
+
+    assert marked |> Enum.map(& &1.client_msg_id) |> Enum.sort() ==
+             ["revoked-running", "revoked-waiting"]
+
+    assert Enum.all?(marked, &(DateTime.compare(&1.cancelled_at, at(5)) == :eq))
+
+    assert {:ok, %{cancelled_at: nil}} =
+             Timeline.get_client_request("main", "kept", store_opts(repo))
+
+    assert {:ok, %{status: "completed", cancelled_at: nil}} =
+             Timeline.get_client_request("main", "revoked-done", store_opts(repo))
   end
 
   test "client request claims distinguish duplicate and conflicting payloads for 24 hours", %{
@@ -851,7 +994,9 @@ defmodule FermixCore.Companion.TimelineTest do
     assert same == enriched
   end
 
-  test "timeline media attachment authorizes a thumbnail without changing its parent row", %{
+  # STB-11: a link preview is the row's own card, stored with the row and
+  # delivered by history, never an attachment the user did not send.
+  test "a link preview is stored on its row, delivered by history, and authorizes its image", %{
     repo: repo
   } do
     assert {:ok, {:created, parent}} =
@@ -862,42 +1007,60 @@ defmodule FermixCore.Companion.TimelineTest do
                store_opts(repo)
              )
 
-    thumbnail =
-      media_descriptor(%{
-        "kind" => "image",
-        "mime" => "image/webp",
-        "filename" => "preview.webp"
-      })
+    preview = link_preview()
 
     assert {:ok, attached} =
-             Timeline.attach_timeline_media(
-               "main",
-               parent.server_seq,
-               thumbnail,
-               store_opts(repo)
-             )
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
 
     assert attached.server_seq == parent.server_seq
     assert attached.content == parent.content
-    assert attached.media_refs == [thumbnail]
+    assert attached.media_refs == []
+    assert attached.link_previews == [preview]
 
     assert {:ok, same} =
-             Timeline.attach_timeline_media(
-               "main",
-               parent.server_seq,
-               thumbnail,
-               store_opts(repo)
-             )
+             Timeline.attach_link_preview("main", parent.server_seq, preview, store_opts(repo))
 
     assert same == attached
 
-    assert {:ok, %{server_seq: seq, media: ^thumbnail}} =
-             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+    assert {:ok, %{messages: [row]}} =
+             Timeline.history_page("main", store_opts(repo, after_seq: 0, limit: 1))
 
-    assert seq == parent.server_seq
+    assert row.link_previews == [preview]
+    assert row.media_refs == []
+
+    image = preview["image"]
+    seq = parent.server_seq
+
+    assert {:ok, %{server_seq: ^seq, media: ^image}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
   end
 
-  test "timeline media attachment rejects a request output from an older attempt", %{repo: repo} do
+  test "a link preview names a url, a site and a title, and a well-formed image", %{repo: repo} do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    for broken <- [
+          Map.delete(link_preview(), "title"),
+          Map.put(link_preview(), "site", ""),
+          Map.put(link_preview(), "description", nil),
+          put_in(link_preview(), ["image", "ref"], "not-a-digest")
+        ] do
+      assert {:error, {:invalid_link_preview, _reason}} =
+               Timeline.attach_link_preview("main", parent.server_seq, broken, store_opts(repo))
+    end
+
+    without_image = Map.delete(link_preview(), "image")
+
+    assert {:ok, %{link_previews: [^without_image]}} =
+             Timeline.attach_link_preview(
+               "main",
+               parent.server_seq,
+               without_image,
+               store_opts(repo)
+             )
+  end
+
+  test "a link preview on a request output from an older attempt is refused", %{repo: repo} do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-preview")
     assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-preview")
 
@@ -920,15 +1083,235 @@ defmodule FermixCore.Companion.TimelineTest do
              )
 
     assert {:error, :stale_attempt} =
-             Timeline.attach_timeline_media(
+             Timeline.attach_link_preview(
                "main",
                output.server_seq,
-               media_descriptor(),
+               link_preview(),
                store_opts(repo)
              )
 
     assert {:error, :not_found} =
              Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+  end
+
+  # PERF-4: media_fetch authorizes a ref on every image the phone opens; it
+  # must be one index lookup, never a scan of the profile's whole timeline.
+  test "a media ref is authorized through the media index, never a timeline scan", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    assert {:ok, _row} =
+             Timeline.append(
+               "main",
+               %{role: "user", content: "", media_refs: [media_descriptor()]},
+               store_opts(repo)
+             )
+
+    plan =
+      with_raw_conn(db_path, fn conn ->
+        {:ok, stmt} =
+          Sqlite3.prepare(conn, "EXPLAIN QUERY PLAN " <> MobileSql.media_descriptor_sql())
+
+        :ok = Sqlite3.bind(stmt, ["agent-a", "owner-a", "main", @media_ref])
+        {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+        :ok = Sqlite3.release(conn, stmt)
+        Enum.map_join(rows, "\n", &List.last/1)
+      end)
+
+    assert plan =~ "USING COVERING INDEX idx_mobile_timeline_media_ref"
+    refute plan =~ "TEMP B-TREE"
+    refute plan =~ "SCAN"
+  end
+
+  test "a user row whose media refs are rewritten answers for its new refs only", %{repo: repo} do
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-swap")
+    old_ref = String.duplicate("c", 64)
+
+    assert {:ok, {:created, original}} =
+             Timeline.append_client_message(
+               "main",
+               "client-swap",
+               %{
+                 content: "",
+                 kind: "media",
+                 media_refs: [media_descriptor(%{"ref" => old_ref, "sha256" => old_ref})]
+               },
+               store_opts(repo)
+             )
+
+    assert {:ok, %{server_seq: seq}} =
+             Timeline.media_descriptor("main", old_ref, store_opts(repo))
+
+    assert seq == original.server_seq
+    assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-swap")
+
+    assert {:ok, _updated} =
+             Timeline.update_client_message(
+               "main",
+               "client-swap",
+               1,
+               %{media_refs: [media_descriptor()]},
+               store_opts(repo)
+             )
+
+    assert {:error, :not_found} = Timeline.media_descriptor("main", old_ref, store_opts(repo))
+
+    assert {:ok, %{server_seq: ^seq}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+  end
+
+  # Migration 36 runs on every install: the index is backfilled from the rows
+  # already written, and every row reads an empty preview list.
+  test "the media index migration backfills a database written before it", context do
+    %{db_path: db_path, repo: repo} = context
+    descriptor = media_descriptor()
+
+    assert {:ok, %{server_seq: 1}} =
+             Timeline.append(
+               "main",
+               %{role: "assistant", content: "before", media_refs: [descriptor]},
+               store_opts(repo)
+             )
+
+    stop_supervised!(Repo)
+    refs_json = Jason.encode!([%{"kind" => "image"}, 7, "text", descriptor])
+
+    with_raw_conn(db_path, fn conn ->
+      assert :ok =
+               Sqlite3.execute(conn, """
+               #{@rewind_media_index_migration}
+               INSERT INTO mobile_timeline (
+                 agent_id, owner_id, profile_id, server_seq, kind, role, content,
+                 media_refs_json, created_at
+               ) VALUES (
+                 'agent-a', 'owner-a', 'main', 2, 'media', 'user', '',
+                 '#{refs_json}',
+                 '2026-08-12T12:00:01.000000Z'
+               );
+               UPDATE mobile_profile_state SET next_server_seq = 3;
+               """)
+    end)
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    assert {:ok, versions} = Repo.migration_versions(server: repo)
+    assert 36 in versions
+
+    assert {:ok, %{server_seq: 2, media: ^descriptor}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+
+    assert {:ok, %{messages: rows}} = Timeline.history_page("main", store_opts(repo))
+    assert Enum.map(rows, & &1.link_previews) == [[], []]
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, [[2]]} = fetch_all(conn, "SELECT COUNT(*) FROM mobile_timeline_media")
+    end)
+
+    assert :ok = Repo.migrate(server: repo)
+
+    with_raw_conn(db_path, fn conn ->
+      assert {:ok, [[2]]} = fetch_all(conn, "SELECT COUNT(*) FROM mobile_timeline_media")
+    end)
+  end
+
+  # R5-2: every engine before migration 36 decodes a timeline row by position,
+  # from `SELECT *` and `RETURNING *`, into exactly sixteen columns, and a
+  # request row into nineteen. After a rollback it opens the database this
+  # engine migrated, so the migration adds no column to either table.
+  test "a database migrated to 36 is still read by an engine that decodes the old columns",
+       context do
+    %{db_path: db_path, repo: repo} = context
+
+    assert {:ok, parent} =
+             Timeline.append(
+               "main",
+               %{role: "assistant", content: "https://example.test/post"},
+               store_opts(repo)
+             )
+
+    assert {:ok, _row} =
+             Timeline.attach_link_preview(
+               "main",
+               parent.server_seq,
+               link_preview(),
+               store_opts(repo)
+             )
+
+    assert {:ok, {:claimed, _request}} = claim_request(repo, "client-legacy")
+
+    assert {:ok, {:created, _row}} =
+             Timeline.append_client_message(
+               "main",
+               "client-legacy",
+               %{content: "", kind: "media", media_refs: [media_descriptor()]},
+               store_opts(repo)
+             )
+
+    assert legacy_rows(db_path) == {[1, 2], ["client-legacy"]}
+
+    # A database written before migration 36, upgraded by this engine.
+    with_raw_conn(db_path, fn conn ->
+      assert :ok = Sqlite3.execute(conn, @rewind_media_index_migration)
+
+      assert :ok =
+               raw_execute(conn, @legacy_timeline_insert, legacy_row(3, [media_descriptor()]))
+
+      assert :ok = Sqlite3.execute(conn, "UPDATE mobile_profile_state SET next_server_seq = 4;")
+    end)
+
+    assert :ok = Repo.migrate(server: repo)
+    assert legacy_rows(db_path) == {[1, 2, 3], ["client-legacy"]}
+
+    assert {:ok, %{messages: [%{link_previews: []} | _rest]}} =
+             Timeline.history_page("main", store_opts(repo))
+  end
+
+  # R5-2: the media index is kept in the statement that writes a row's refs,
+  # so the rows an older engine writes after a rollback are indexed as they are
+  # written, and an upgrade back finds every ref it named.
+  test "media an older engine writes after the migration stays authorized", context do
+    %{db_path: db_path, repo: repo} = context
+    replaced = String.duplicate("c", 64)
+    written = String.duplicate("d", 64)
+
+    assert {:ok, %{server_seq: 1}} =
+             Timeline.append(
+               "main",
+               %{
+                 role: "user",
+                 content: "",
+                 media_refs: [media_descriptor(%{"ref" => replaced, "sha256" => replaced})]
+               },
+               store_opts(repo)
+             )
+
+    with_raw_conn(db_path, fn conn ->
+      written_refs = [media_descriptor(%{"ref" => written, "sha256" => written})]
+      assert :ok = raw_execute(conn, @legacy_timeline_insert, legacy_row(2, written_refs))
+      assert :ok = Sqlite3.execute(conn, "UPDATE mobile_profile_state SET next_server_seq = 3;")
+
+      # The older engine's link-preview path rewrote a row's media refs in place.
+      assert {:ok, [row]} =
+               raw_query(
+                 conn,
+                 """
+                 UPDATE mobile_timeline SET media_refs_json = ?
+                 WHERE agent_id = 'agent-a' AND owner_id = 'owner-a' AND profile_id = 'main'
+                   AND server_seq = 1
+                 RETURNING *
+                 """,
+                 [Jason.encode!([media_descriptor()])]
+               )
+
+      assert length(row) == 16
+    end)
+
+    assert {:ok, %{server_seq: 2}} = Timeline.media_descriptor("main", written, store_opts(repo))
+
+    assert {:ok, %{server_seq: 1}} =
+             Timeline.media_descriptor("main", @media_ref, store_opts(repo))
+
+    assert {:error, :not_found} = Timeline.media_descriptor("main", replaced, store_opts(repo))
   end
 
   test "terminal requests never recover or restart", %{repo: repo} do
@@ -1049,6 +1432,17 @@ defmodule FermixCore.Companion.TimelineTest do
     )
   end
 
+  defp append_rows(repo, count) do
+    Enum.each(1..count, fn index ->
+      assert {:ok, _row} =
+               Timeline.append(
+                 "main",
+                 %{role: "assistant", content: "row #{index}"},
+                 store_opts(repo)
+               )
+    end)
+  end
+
   defp at(offset_seconds) when is_integer(offset_seconds) do
     DateTime.add(@now, offset_seconds, :second)
   end
@@ -1083,6 +1477,23 @@ defmodule FermixCore.Companion.TimelineTest do
     repo
   end
 
+  defp link_preview do
+    %{
+      "url" => "https://example.test/post",
+      "site" => "Example",
+      "title" => "A post",
+      "description" => "What it says",
+      "image" => media_descriptor(%{"kind" => "image", "mime" => "image/webp", "size_bytes" => 9})
+    }
+  end
+
+  defp fetch_all(conn, sql) do
+    {:ok, stmt} = Sqlite3.prepare(conn, sql)
+    result = Sqlite3.fetch_all(conn, stmt)
+    :ok = Sqlite3.release(conn, stmt)
+    result
+  end
+
   defp media_descriptor(overrides \\ %{}) do
     Map.merge(
       %{
@@ -1094,6 +1505,84 @@ defmodule FermixCore.Companion.TimelineTest do
       },
       overrides
     )
+  end
+
+  # A row as the pre-36 engine's append binds it, for `@legacy_timeline_insert`.
+  defp legacy_row(server_seq, media_refs) do
+    ["agent-a", "owner-a", "main", server_seq, "media", "user", "", nil, nil] ++
+      [Jason.encode!(media_refs), nil, nil, "2026-08-12T12:00:0#{server_seq}.000000Z"] ++
+      [nil, nil, nil]
+  end
+
+  # Every row as the pre-36 engine reads it: `SELECT *` decoded by one clause
+  # of exactly sixteen timeline columns, and of nineteen request columns.
+  defp legacy_rows(db_path) do
+    with_raw_conn(db_path, fn conn ->
+      {:ok, timeline} = fetch_all(conn, "SELECT * FROM mobile_timeline ORDER BY server_seq")
+      {:ok, requests} = fetch_all(conn, "SELECT * FROM mobile_client_requests")
+      {Enum.map(timeline, &legacy_timeline_seq/1), Enum.map(requests, &legacy_request_id/1)}
+    end)
+  end
+
+  defp legacy_timeline_seq([
+         _agent_id,
+         _owner_id,
+         _profile_id,
+         server_seq,
+         _kind,
+         _role,
+         _content,
+         _client_msg_id,
+         _in_reply_to,
+         media_refs_json,
+         _metadata_json,
+         _proactive_key,
+         _created_at,
+         _request_client_msg_id,
+         _request_attempt,
+         _output_key
+       ]) do
+    _media_refs = Jason.decode!(media_refs_json)
+    server_seq
+  end
+
+  defp legacy_request_id([
+         _agent_id,
+         _owner_id,
+         _profile_id,
+         client_msg_id,
+         _request_type,
+         _status,
+         _payload_digest,
+         _payload_json,
+         _turn_id,
+         _result_server_seq,
+         _error_json,
+         _claimed_at,
+         _expires_at,
+         _updated_at,
+         _authenticated_device_id,
+         _runner_epoch,
+         _attempt,
+         _transport,
+         _cancelled_at
+       ]),
+       do: client_msg_id
+
+  defp raw_execute(conn, sql, params) do
+    {:ok, stmt} = Sqlite3.prepare(conn, sql)
+    :ok = Sqlite3.bind(stmt, params)
+    result = Sqlite3.step(conn, stmt)
+    :ok = Sqlite3.release(conn, stmt)
+    if result == :done, do: :ok, else: result
+  end
+
+  defp raw_query(conn, sql, params) do
+    {:ok, stmt} = Sqlite3.prepare(conn, sql)
+    :ok = Sqlite3.bind(stmt, params)
+    result = Sqlite3.fetch_all(conn, stmt)
+    :ok = Sqlite3.release(conn, stmt)
+    result
   end
 
   defp with_raw_conn(db_path, operation) do

@@ -225,6 +225,163 @@ defmodule FermixCore.Auth.StoreTest do
     end
   end
 
+  # A VM killed between a write's tmp and its rename leaves `auth.json.tmp.N`
+  # holding every profile's tokens, and nothing else would ever remove it. Every
+  # tmp writer holds the store lock, so the next locked write or delete removes
+  # the leftovers, and only those: regular files in the auth file's directory
+  # named exactly `<auth file>.tmp.<digits>`.
+  describe "a tmp a killed writer left" do
+    # The directory and the link have all-digit names a write's own tmp can
+    # never take (`unique_integer([:positive])` is never 0 and never renders a
+    # leading zero), so they reach the type check without ever colliding with
+    # the tmp the write itself makes. Returns the link's target, a file outside
+    # the auth directory.
+    defp seed_leftovers(path) do
+      dir = Path.dirname(path)
+      File.write!(path <> ".tmp.999", ~s({"tokens": "leftover"}))
+      File.write!(path <> ".tmp.keep-me", "not a tmp this module writes")
+      File.mkdir_p!(path <> ".tmp.0")
+      File.write!(Path.join(dir, "other.json.tmp.5"), "another file's tmp")
+      File.write!(path <> ".broken.123", "a recovery copy")
+
+      outside = SafeRm.make_tmp_dir!("auth-store-link-target")
+      ExUnit.Callbacks.on_exit(fn -> SafeRm.rm_rf!(outside) end)
+      target = Path.join(outside, "target.json")
+      File.write!(target, "a file a link names")
+      :ok = File.ln_s(target, path <> ".tmp.00")
+      target
+    end
+
+    defp assert_only_leftover_removed(path, target) do
+      dir = Path.dirname(path)
+      refute File.exists?(path <> ".tmp.999")
+      assert File.exists?(path <> ".tmp.keep-me")
+      assert File.dir?(path <> ".tmp.0")
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(path <> ".tmp.00")
+      assert File.read!(target) == "a file a link names"
+      assert File.exists?(Path.join(dir, "other.json.tmp.5"))
+      assert File.exists?(path <> ".broken.123")
+    end
+
+    test "is removed by the next write" do
+      path = locked_home()
+      target = seed_leftovers(path)
+
+      {result, log} = with_log(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+
+      assert result == :ok
+      assert_only_leftover_removed(path, target)
+      assert log =~ "removed #{path}.tmp.999"
+      assert {:ok, %{tokens: %{access_token: "a_at"}}} = Store.read("a:primary", path)
+    end
+
+    test "is removed by the next delete" do
+      path = locked_home()
+      :ok = Store.write("a:primary", plain_entry("a_at"), path)
+      target = seed_leftovers(path)
+
+      assert :ok = Store.delete_provider("a:primary", path)
+      assert_only_leftover_removed(path, target)
+    end
+  end
+
+  # The token document must never sit in a file another account can read, not
+  # even between a write and a chmod: the tmp a write renames over the auth file,
+  # and the `.broken` copy a refused write keeps, are made private before any
+  # byte lands, and the bytes go through the descriptor that created the file. A
+  # write that reopened it by path would re-create, with default permissions, a
+  # tmp a sweep removed after the chmod, and the rename would then publish it. A
+  # traced writer records the order of its own `File.open/3`, `File.chmod/2`,
+  # `IO.binwrite/2` and `File.write/3` calls, in a trace session of its own, so
+  # no other test's tracing meets it.
+  describe "private before any byte lands" do
+    defp traced_file_calls(fun) do
+      parent = self()
+      session = :trace.session_create(:auth_store_file_order, parent, [])
+
+      writer =
+        spawn(fn ->
+          receive do
+            :go -> send(parent, {:written, fun.()})
+          end
+        end)
+
+      1 = :trace.process(session, writer, true, [:call])
+      1 = :trace.function(session, {File, :open, 3}, true, [])
+      1 = :trace.function(session, {File, :chmod, 2}, true, [])
+      1 = :trace.function(session, {IO, :binwrite, 2}, true, [])
+      1 = :trace.function(session, {File, :write, 3}, true, [])
+      send(writer, :go)
+      assert_receive {:written, result}, 5_000
+      delivered = :trace.delivered(session, writer)
+      assert_receive {:trace_delivered, ^writer, ^delivered}, 5_000
+      true = :trace.session_destroy(session)
+      {result, collected_calls(writer, nil, [])}
+    end
+
+    # Bounded by the trace messages already delivered. `File.open/3` runs its
+    # function in the writer, so a descriptor write lands in the file the writer
+    # opened last.
+    defp collected_calls(writer, opened, acc) do
+      receive do
+        {:trace, ^writer, :call, {File, :open, [file, _modes, _fun]}} ->
+          collected_calls(writer, file, acc)
+
+        {:trace, ^writer, :call, {IO, :binwrite, [_device, _bytes]}} ->
+          collected_calls(writer, opened, [{:bytes, opened, :descriptor} | acc])
+
+        {:trace, ^writer, :call, {File, :write, [file, _bytes, _modes]}} ->
+          collected_calls(writer, opened, [{:bytes, file, :path} | acc])
+
+        {:trace, ^writer, :call, {File, :chmod, [file, mode]}} ->
+          collected_calls(writer, opened, [{:chmod, file, mode} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_private_before_bytes(calls, prefix) do
+      writes =
+        for {{:bytes, file, via}, at} <- Enum.with_index(calls),
+            is_binary(file) and String.starts_with?(file, prefix),
+            do: {file, via, at}
+
+      assert writes != [], "no write to a #{prefix}* file was traced: #{inspect(calls)}"
+
+      for {file, via, at} <- writes do
+        assert {:chmod, file, 0o600} in Enum.take(calls, at),
+               "#{file} got its bytes before it was private: #{inspect(calls)}"
+
+        assert via == :descriptor,
+               "#{file} was reopened by path for its bytes: #{inspect(calls)}"
+      end
+    end
+
+    test "the tmp a write renames over the auth file" do
+      path = locked_home()
+
+      {result, calls} =
+        traced_file_calls(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+
+      assert result == :ok
+      assert_private_before_bytes(calls, path <> ".tmp.")
+    end
+
+    test "the .broken copy a refused write keeps" do
+      path = locked_home()
+      File.write!(path, "{ not json ")
+
+      {{result, _log}, calls} =
+        traced_file_calls(fn ->
+          with_log(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+        end)
+
+      assert {:error, {:malformed_auth_file, ^path, backup, {:invalid_json, _at}}} = result
+      assert File.read!(backup) == "{ not json "
+      assert_private_before_bytes(calls, path <> ".broken.")
+    end
+  end
+
   describe "validate_permissions/1" do
     test "passes when auth file is missing" do
       assert :ok = Store.validate_permissions(tmp_path())

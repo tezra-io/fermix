@@ -36,7 +36,7 @@ defmodule FermixChannels.Gateway.Commands.Help do
   defp authorized?(command, message, metadata, context) do
     case command.authorize(message, metadata, context) do
       :ok -> true
-      {:error, :unauthorized} -> false
+      {:error, reason} when reason in [:unauthorized, :unattended] -> false
     end
   end
 

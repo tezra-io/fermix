@@ -51,7 +51,10 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
 
     defs = schema["$defs"]
     assert defs["hostError"]["properties"]["message"]["maxLength"] == Protocol.max_message_chars()
-    assert defs["availability"]["properties"]["reason"]["maxLength"] == Protocol.max_reason_chars()
+
+    assert defs["availability"]["properties"]["reason"]["maxLength"] ==
+             Protocol.max_reason_chars()
+
     assert defs["page"]["properties"]["nodes"]["maxItems"] == Protocol.max_nodes()
   end
 
@@ -75,7 +78,8 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
   end
 
   test "each event def requires what the decoder requires", %{schema: schema} do
-    for %{"type" => type} = frame <- jsonl(@events), type != "client_hello",
+    for %{"type" => type} = frame <- jsonl(@events),
+        type != "client_hello",
         field <- schema["$defs"][type]["required"] -- ["type"] do
       assert {:error, {:missing_field, ^field}} =
                Protocol.validate_event(type, frame |> Map.delete("type") |> Map.delete(field)),
@@ -97,17 +101,24 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
   test "the golden fixtures cover every request, result, error and event" do
     requests = request_frames()
     assert MapSet.new(requests, & &1["type"]) == MapSet.new(Protocol.requests())
-    assert MapSet.new(requests, & &1["kind"]) |> MapSet.delete(nil) == MapSet.new(Protocol.act_kinds())
+
+    assert MapSet.new(requests, & &1["kind"]) |> MapSet.delete(nil) ==
+             MapSet.new(Protocol.act_kinds())
 
     daemon = jsonl(@requests) |> Enum.reject(&Map.has_key?(&1, "id"))
     assert Enum.any?(daemon, &(&1["type"] == "server_hello"))
-    assert MapSet.new(daemon, & &1["reason"]) |> MapSet.delete(nil) == MapSet.new(Protocol.daemon_errors())
+
+    assert MapSet.new(daemon, & &1["reason"]) |> MapSet.delete(nil) ==
+             MapSet.new(Protocol.daemon_errors())
 
     responses = jsonl(@responses)
     types = request_types()
     answered = for %{"ok" => true, "id" => id} <- responses, into: MapSet.new(), do: types[id]
     assert answered == MapSet.new(Protocol.requests())
-    refused = for %{"ok" => false, "error" => error} <- responses, into: MapSet.new(), do: error["reason"]
+
+    refused =
+      for %{"ok" => false, "error" => error} <- responses, into: MapSet.new(), do: error["reason"]
+
     assert refused == MapSet.new(Protocol.host_errors())
 
     assert MapSet.new(jsonl(@events), & &1["type"]) ==
@@ -193,10 +204,18 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
 
     silent = %{"type" => "availability", "available" => false}
     refute schema_errors(silent, ref("hostEvent"), schema) == []
-    assert {:error, {:missing_field, "reason"}} = Protocol.decode_host_frame(Jason.encode!(silent))
+
+    assert {:error, {:missing_field, "reason"}} =
+             Protocol.decode_host_frame(Jason.encode!(silent))
 
     unobserved = %{"tab_id" => "t1", "url" => "https://example.com/", "observe" => true}
-    refute schema_errors(Map.merge(unobserved, %{"id" => 1, "type" => "tab.navigate"}), ref("daemonFrame"), schema) == []
+
+    refute schema_errors(
+             Map.merge(unobserved, %{"id" => 1, "type" => "tab.navigate"}),
+             ref("daemonFrame"),
+             schema
+           ) == []
+
     assert {:error, _} = Protocol.encode_request(1, "tab.navigate", unobserved)
 
     assert {:error, _} =
@@ -212,7 +231,9 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
     assert {:error, _} = Protocol.decode_host_frame(Jason.encode!(over))
 
     refute schema_errors(%{"type" => "tab.moved"}, ref("hostEvent"), schema) == []
-    assert {:error, {:unknown_event, "tab.moved"}} = Protocol.decode_host_frame(~s({"type":"tab.moved"}))
+
+    assert {:error, {:unknown_event, "tab.moved"}} =
+             Protocol.decode_host_frame(~s({"type":"tab.moved"}))
   end
 
   test "tab.open's visible carries the task's own intent, optional and boolean", %{schema: schema} do
@@ -304,7 +325,10 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
   defp schema_errors(value, schema, root) when is_map(schema) do
     conditional_errors(schema, value, root) ++
       closed_errors(schema, value) ++
-      Enum.flat_map(Map.drop(schema, ["if", "then", "additionalProperties"]), &keyword_errors(&1, value, root))
+      Enum.flat_map(
+        Map.drop(schema, ["if", "then", "additionalProperties"]),
+        &keyword_errors(&1, value, root)
+      )
   end
 
   defp conditional_errors(%{"if" => condition, "then" => branch}, value, root) do

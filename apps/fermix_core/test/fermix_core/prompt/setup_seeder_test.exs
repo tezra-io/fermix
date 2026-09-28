@@ -247,7 +247,9 @@ defmodule FermixCore.Prompt.SetupSeederTest do
       assert path =~ "IDENTITY.md"
     end
 
-    test "logs commit failures, propagates user-memory upsert error, leaves files on disk", %{
+    # Memory switched off is a home with no rows to seed, not a failed seed:
+    # the files are what the prompt reads, and they are on disk.
+    test "a disabled memory repo seeds the files uncommitted, skips the rows and logs both", %{
       agent_id: agent_id
     } do
       disabled_repo = :"setup_seeder_disabled_#{System.unique_integer([:positive])}"
@@ -261,8 +263,8 @@ defmodule FermixCore.Prompt.SetupSeederTest do
 
       log =
         capture_log(fn ->
-          assert {:error, :disabled} =
-                   SetupSeeder.seed(%{user_name: "Aira"}, repo: disabled_repo)
+          assert {:ok, files} = SetupSeeder.seed(%{user_name: "Aira"}, repo: disabled_repo)
+          assert Enum.all?(files, &(&1.outcome == :seeded_uncommitted))
 
           for path <- [
                 BootstrapPaths.identity_path(agent_id),
@@ -276,7 +278,7 @@ defmodule FermixCore.Prompt.SetupSeederTest do
         end)
 
       assert log =~ "commit failed"
-      assert log =~ "user-memory upsert failed"
+      assert log =~ "memory is disabled"
     end
   end
 end

@@ -49,6 +49,7 @@ defmodule FermixCore.Memory.Repo do
   @companion_migration_version 33
   @companion_cancel_migration_version 34
   @harness_vendor_config_migration_version 35
+  @mobile_media_index_migration_version 36
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -745,6 +746,7 @@ defmodule FermixCore.Memory.Repo do
           request_client_msg_id: String.t() | nil,
           request_attempt: non_neg_integer() | nil,
           output_key: String.t() | nil,
+          link_previews: [map()],
           created_at: DateTime.t()
         }
 
@@ -1181,6 +1183,14 @@ defmodule FermixCore.Memory.Repo do
     call({:delete_messages, selector}, opts)
   end
 
+  # SQLite integers are signed 64-bit, and Exqlite raises on a wider bind
+  # inside this process, which takes every child after it down with it. Each
+  # mobile integer is checked here, in the caller, so a bad value fails there.
+  @max_sqlite_integer 9_223_372_036_854_775_807
+
+  defguardp is_sqlite_seq(value)
+            when is_integer(value) and value >= 0 and value <= @max_sqlite_integer
+
   @spec append_mobile_timeline(mobile_timeline_attrs(), keyword()) ::
           {:ok, mobile_timeline_row()} | {:error, term()}
   def append_mobile_timeline(attrs, opts \\ []) when is_map(attrs) do
@@ -1206,7 +1216,7 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, map()} | {:error, term()}
   def get_mobile_history(selector, after_seq, limit, opts \\ [])
-      when is_map(selector) and is_integer(after_seq) and after_seq >= 0 and
+      when is_map(selector) and is_sqlite_seq(after_seq) and
              is_integer(limit) and limit > 0 and limit <= 200 do
     call({:get_mobile_history, selector, after_seq, limit}, opts)
   end
@@ -1214,7 +1224,7 @@ defmodule FermixCore.Memory.Repo do
   @spec get_mobile_history_before(mobile_profile_selector(), pos_integer(), 1..200, keyword()) ::
           {:ok, map()} | {:error, term()}
   def get_mobile_history_before(selector, before_seq, limit, opts \\ [])
-      when is_map(selector) and is_integer(before_seq) and before_seq > 0 and
+      when is_map(selector) and is_sqlite_seq(before_seq) and before_seq > 0 and
              is_integer(limit) and limit > 0 and limit <= 200 do
     call({:get_mobile_history_before, selector, before_seq, limit}, opts)
   end
@@ -1228,7 +1238,7 @@ defmodule FermixCore.Memory.Repo do
         ) :: {:ok, mobile_search_page()} | {:error, term()}
   def search_mobile_timeline(selector, query, before_seq, limit, opts \\ [])
       when is_map(selector) and is_binary(query) and
-             (is_nil(before_seq) or (is_integer(before_seq) and before_seq > 0)) and
+             (is_nil(before_seq) or (is_sqlite_seq(before_seq) and before_seq > 0)) and
              is_integer(limit) and limit > 0 do
     call({:search_mobile_timeline, selector, query, before_seq, limit}, opts)
   end
@@ -1247,15 +1257,16 @@ defmodule FermixCore.Memory.Repo do
     call({:get_mobile_media_descriptor, selector, ref}, opts)
   end
 
-  @spec attach_mobile_timeline_media(
+  @spec attach_mobile_link_preview(
           mobile_profile_selector(),
           pos_integer(),
           map(),
           keyword()
         ) :: {:ok, mobile_timeline_row()} | {:error, term()}
-  def attach_mobile_timeline_media(selector, server_seq, media_ref, opts \\ [])
-      when is_map(selector) and is_integer(server_seq) and server_seq > 0 and is_map(media_ref) do
-    call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, opts)
+  def attach_mobile_link_preview(selector, server_seq, preview, opts \\ [])
+      when is_map(selector) and is_sqlite_seq(server_seq) and server_seq > 0 and
+             is_map(preview) do
+    call({:attach_mobile_link_preview, selector, server_seq, preview}, opts)
   end
 
   @spec advance_mobile_read_frontier(
@@ -1265,7 +1276,7 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, non_neg_integer()} | {:error, term()}
   def advance_mobile_read_frontier(selector, reported_seq, %DateTime{} = now, opts \\ [])
-      when is_map(selector) and is_integer(reported_seq) and reported_seq >= 0 do
+      when is_map(selector) and is_sqlite_seq(reported_seq) do
     call({:advance_mobile_read_frontier, selector, reported_seq, now}, opts)
   end
 
@@ -1305,6 +1316,17 @@ defmodule FermixCore.Memory.Repo do
   def cancel_mobile_client_request(selector, client_msg_id, %DateTime{} = now, opts \\ [])
       when is_map(selector) and is_binary(client_msg_id) do
     call({:cancel_mobile_client_request, selector, client_msg_id, now}, opts)
+  end
+
+  @doc """
+  Record a cancel on every unsettled request one device claimed
+  (`MobileSql.cancel_device_requests/4`), answering the requests it marked.
+  """
+  @spec cancel_mobile_device_requests(map(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [mobile_client_request_row()]} | {:error, term()}
+  def cancel_mobile_device_requests(selector, device_id, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_binary(device_id) and device_id != "" do
+    call({:cancel_mobile_device_requests, selector, device_id, now}, opts)
   end
 
   @spec start_mobile_client_request(
@@ -1380,7 +1402,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 do
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) do
     call({:abandon_mobile_client_request, selector, client_msg_id, attempt, now}, opts)
   end
 
@@ -1402,7 +1424,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_binary(output_key) and is_map(attrs) do
     call(
       {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
@@ -1426,7 +1448,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(fields) do
     call({:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now}, opts)
   end
@@ -1447,7 +1469,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(attrs) do
     call({:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now}, opts)
   end
@@ -1460,7 +1482,7 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, mobile_timeline_row()} | {:error, term()}
   def update_mobile_client_message(selector, client_msg_id, attempt, attrs, opts \\ [])
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(attrs) do
     call({:update_mobile_client_message, selector, client_msg_id, attempt, attrs}, opts)
   end
@@ -3126,11 +3148,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, _from, state) do
+  def handle_call({:attach_mobile_link_preview, selector, server_seq, preview}, _from, state) do
     reply =
       with_connection(
         state,
-        &MobileSql.attach_timeline_media(&1, selector, server_seq, media_ref)
+        &MobileSql.attach_link_preview(&1, selector, server_seq, preview)
       )
 
     {:reply, reply, state}
@@ -3160,6 +3182,13 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:cancel_mobile_client_request, selector, client_msg_id, now}, _from, state) do
     reply = with_connection(state, &MobileSql.cancel_request(&1, selector, client_msg_id, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:cancel_mobile_device_requests, selector, device_id, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.cancel_device_requests(&1, selector, device_id, now))
+
     {:reply, reply, state}
   end
 
@@ -3961,8 +3990,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_computer_history_purges_migration(conn, versions),
          :ok <- apply_companion_migration(conn, versions),
          :ok <- apply_companion_cancel_migration(conn, versions),
-         :ok <- apply_harness_vendor_config_migration(conn, versions) do
+         :ok <- apply_harness_vendor_config_migration(conn, versions),
+         :ok <- apply_mobile_media_index_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The media-ref index and link-preview tables beside the timeline, with the
+  # backfill of every row already written, in one transaction with its version.
+  defp apply_mobile_media_index_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_media_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.media_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

@@ -1,5 +1,9 @@
 defmodule Fermix.CLI.AppManagedCommandTest do
-  use ExUnit.Case, async: true
+  # async: false — these tests capture `:stderr` and refute what it holds (never
+  # a secret, never "mutually exclusive"). `:standard_error` is one global device,
+  # so an async module writing to it concurrently lands in the capture and fails
+  # a refute that this module's own code satisfies.
+  use ExUnit.Case, async: false
 
   import ExUnit.CaptureIO
   import ExUnit.CaptureLog

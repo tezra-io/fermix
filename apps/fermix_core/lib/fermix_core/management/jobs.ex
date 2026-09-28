@@ -5,11 +5,11 @@ defmodule FermixCore.Management.Jobs do
 
   A sign-in, an import, a provider probe, a plugin install, a plugin check, a
   workspace discovery, a workspace binding, a capability install, a meetings
-  sign-in and a computer-use grant all take longer than a management request may
-  be held open, so each is a *job*: the starting method mints an id and returns
-  at once, `job.get` reports progress, and `job.cancel` stops it. One shape
-  covers every family, so a client writes one poller, one progress row and one
-  failure sentence rather than one per operation.
+  sign-in, a computer-use grant and a browser download all take longer than a
+  management request may be held open, so each is a *job*: the starting method
+  mints an id and returns at once, `job.get` reports progress, and `job.cancel`
+  stops it. One shape covers every family, so a client writes one poller, one
+  progress row and one failure sentence rather than one per operation.
 
   Every bound is explicit and monotonic:
 
@@ -48,7 +48,8 @@ defmodule FermixCore.Management.Jobs do
       phases: ["sidecar_downloading", "downloading", "verifying"]
     },
     meetings_signin: %{budget_ms: 660_000, phases: ["awaiting_signin"]},
-    computer_use_grant: %{budget_ms: 120_000, phases: []}
+    computer_use_grant: %{budget_ms: 120_000, phases: []},
+    browser_install: %{budget_ms: 900_000, phases: ["sidecar_downloading", "downloading"]}
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -81,6 +82,7 @@ defmodule FermixCore.Management.Jobs do
           | :capability_install
           | :meetings_signin
           | :computer_use_grant
+          | :browser_install
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome :: {:ok, map()} | {:error, {:unavailable | :refused, String.t()}}

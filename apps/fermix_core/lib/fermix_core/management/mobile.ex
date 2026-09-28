@@ -32,9 +32,13 @@ defmodule FermixCore.Management.Mobile do
   @states ~w(awaiting_scan awaiting_decision approved denied expired cancelled failed)a
   @outcome_reasons ~w(denied timeout cancelled)a
   @build_roles ~w(release development)a
-  @listener_states ~w(ready down)a
+  @listener_states ~w(ready down unavailable)a
+  @listener_reasons ~w(address_unavailable address_in_use permission_denied listen_failed)a
   @mdns_states ~w(advertising disabled down)a
   @credential_states ~w(ready missing)a
+  @delivery_states ~w(ready degraded down)a
+  @delivery_reasons ~w(connecting connect_failed connection_lost)a
+  @refusal_classes ~w(memory_disabled identity attachment_manifest trust_store)a
   # The channel is off, it could not start this boot, or it was turned on
   # after boot and has not started yet. None is a defect of the call, so none
   # is logged here.
@@ -47,11 +51,11 @@ defmodule FermixCore.Management.Mobile do
   @listener_sentence "The phone listener could not start. See the daemon log."
   @device_store_sentence "The paired-device list could not be read. See the daemon log."
   @start_sentence "The pairing window could not be opened. See the daemon log."
-  @rate_limited_sentence "Too many failed connection attempts. Start pairing again."
   @disconnected_sentence "The phone disconnected before you decided. Start pairing again."
   @no_attestation_sentence "This phone sent no secure-hardware proof."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
+  @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
 
   @type refusal ::
           {:busy, String.t()}
@@ -71,11 +75,11 @@ defmodule FermixCore.Management.Mobile do
       @listener_sentence,
       @device_store_sentence,
       @start_sentence,
-      @rate_limited_sentence,
       @disconnected_sentence,
       @no_attestation_sentence,
       @no_request_sentence,
-      @unknown_device_sentence
+      @unknown_device_sentence,
+      @owner_only_sentence
     ]
   end
 
@@ -85,6 +89,13 @@ defmodule FermixCore.Management.Mobile do
   """
   @spec off_sentence() :: String.t()
   def off_sentence, do: @off_sentence
+
+  @doc """
+  The sentence the daemon socket's refusal of a pairing or forgetting decision
+  carries when the caller is not the owner at a terminal of their own.
+  """
+  @spec owner_only_sentence() :: String.t()
+  def owner_only_sentence, do: @owner_only_sentence
 
   @doc "The phone channel as it stands. Answers with the channel off, too."
   @spec status(keyword()) :: result()
@@ -300,7 +311,6 @@ defmodule FermixCore.Management.Mobile do
     do: %{"device_id" => nil, "reason" => Atom.to_string(reason)}
 
   defp failure_view(nil), do: nil
-  defp failure_view(%{reason: :rate_limited}), do: failure("refused", @rate_limited_sentence)
 
   defp failure_view(%{reason: :device_disconnected}),
     do: failure("refused", @disconnected_sentence)
@@ -312,6 +322,7 @@ defmodule FermixCore.Management.Mobile do
       "enabled" => status.enabled,
       "started" => status.started,
       "refused" => status.refused,
+      "refusal" => refusal_word(status.refusal),
       "listener" => listener_view(status.listener),
       "mdns" => mdns_word(status.mdns),
       "tailnet" => %{
@@ -322,10 +333,7 @@ defmodule FermixCore.Management.Mobile do
         "present" => status.identity.present,
         "fingerprint" => status.identity.fingerprint
       },
-      "apns" => %{
-        "enabled" => status.apns.enabled,
-        "credentials" => credentials_word(status.apns.credentials)
-      },
+      "apns" => apns_view(status.apns),
       "paired_devices" => status.paired_devices,
       "protocol_version" => status.protocol_version,
       "pairing" => pairing_view(status.pairing)
@@ -335,13 +343,30 @@ defmodule FermixCore.Management.Mobile do
   defp listener_view(listener) do
     %{
       "status" => listener_word(listener.status),
+      "reason" => listener_reason(listener.reason),
       "port" => listener.port,
       "bind" => listener.bind,
       "candidates" => listener.candidates
     }
   end
 
+  defp apns_view(apns) do
+    %{
+      "enabled" => apns.enabled,
+      "credentials" => credentials_word(apns.credentials),
+      "delivery" => delivery_word(apns.delivery),
+      "reason" => delivery_reason(apns.reason)
+    }
+  end
+
   defp listener_word(status) when status in @listener_states, do: Atom.to_string(status)
+  defp delivery_word(delivery) when delivery in @delivery_states, do: Atom.to_string(delivery)
+  defp refusal_word(nil), do: nil
+  defp refusal_word(class) when class in @refusal_classes, do: Atom.to_string(class)
+  defp listener_reason(nil), do: nil
+  defp listener_reason(reason) when reason in @listener_reasons, do: Atom.to_string(reason)
+  defp delivery_reason(nil), do: nil
+  defp delivery_reason(reason) when reason in @delivery_reasons, do: Atom.to_string(reason)
   defp mdns_word(mdns) when mdns in @mdns_states, do: Atom.to_string(mdns)
 
   defp credentials_word(credentials) when credentials in @credential_states,

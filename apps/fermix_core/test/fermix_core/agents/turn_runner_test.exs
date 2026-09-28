@@ -1,6 +1,7 @@
 defmodule FermixCore.Agents.TurnRunnerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -12,6 +13,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Temporal.Access
   alias FermixCore.Tools.SendAttachment
   alias FermixTestSupport.ComputerHistoryCanary
 
@@ -864,6 +866,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert context.approval_fn == nil
     end
 
+    # The owner-inbox seam `Capabilities.AccessGate` uses on a channel without
+    # slash commands (ACP): threaded like `approval_fn`, absent when not given.
+    test "surfaces the message's owner_inbox_approval_fn in the tool-execution context" do
+      Process.put(:record_cwd_step, 0)
+      inbox_fn = fn _request -> {:ok, "TKN"} end
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-inbox", %{owner_inbox_approval_fn: inbox_fn})
+
+      assert context.owner_inbox_approval_fn == inbox_fn
+    end
+
+    test "leaves owner_inbox_approval_fn nil when the message carries none" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-no-inbox")
+
+      assert context.owner_inbox_approval_fn == nil
+    end
+
+    # A spoken yes binds to the call the daemon parked on, so only a trusted voice
+    # turn carries the call id; a forged `voice_call` on a chat message does not.
+    test "voice_call_id is the call id on a trusted voice turn" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-voice", %{
+          channel: "voice",
+          metadata: %{source: :voice, user_id: "voice", voice_call: voice_call()}
+        })
+
+      assert context.voice_call_id == "voice_live_42"
+    end
+
+    test "voice_call_id is nil on a chat turn carrying a forged voice_call" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-forged", %{metadata: forged_voice_call()})
+
+      assert context.voice_call_id == nil
+    end
+
     # CODING_HARNESS_ORCHESTRATION §23.2: a coding run launched from a
     # continuation turn must inherit depth+1, which only works if the notice's
     # metadata depth reaches the tool-execution context. A reset to 0 here would
@@ -927,6 +971,32 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert Map.has_key?(context, :session_env)
       assert context.session_env == nil
       assert context.redact_values == []
+    end
+
+    # The Buzz rule (owner decision, MOB-1) is enforced where it bites — computer
+    # use's `SessionManager` precheck, the browser's signed-in tab and the access
+    # gate — never by relabelling the turn's origin: every other attended feature
+    # (reminders, meetings, Recent Activity) keeps working from Buzz unchanged.
+    test "a Buzz ACP turn keeps its interactive origin and stays an attended owner turn" do
+      Process.put(:record_cwd_step, 0)
+
+      # A Buzz harness with an identity: relay, signing key and PATH.
+      session_env = %{
+        "BUZZ_RELAY_URL" => "wss://relay.example",
+        "BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue",
+        "PATH" => "/fake/bin"
+      }
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-buzz-turn", %{
+          channel: "acp",
+          session_env: session_env,
+          metadata: %{source: :acp, user_id: "acp", caller: :independent, acp_turn: 3}
+        })
+
+      assert Identity.multi_principal?(context.session_env)
+      assert context.computer_use_origin == :interactive
+      assert Access.attended_operator_turn?(context)
     end
 
     # A guest turn replies into the guest's own chat, while `send_attachment`
@@ -2218,6 +2288,12 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     store_name = :"tr_cwd_store_#{System.unique_integer([:positive])}"
 
     start_supervised!({CapabilityRegistry, name: registry_name})
+
+    # A voice turn builds its own profile from the registry (the voice capability
+    # boundary), so the recorder must be registered there to be called at all.
+    if Map.get(extra_msg, :channel) == "voice" do
+      :ok = CapabilityRegistry.register(registry_name, record_cwd_capability(self()))
+    end
 
     store =
       start_supervised!({ConversationStore, name: store_name, max_messages: :infinity, repo: nil})

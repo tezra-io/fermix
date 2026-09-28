@@ -71,6 +71,25 @@ defmodule FermixCore.Tools.TelemetryTest do
     refute Map.has_key?(metadata, :parent_session)
   end
 
+  # `Capabilities.AccessGate` labels a dispatched access-sensitive call through
+  # its context, so the executor's own event carries the label.
+  test "the access-gate label and intent ride from the context into the event" do
+    context = %{agent_name: "main", access_gate: "confirmed", access_intent: "intent-1"}
+
+    ToolTelemetry.exec("tesla_unlock_doors", context, true, 4,
+      metadata: %{access_gate: "spoofed"}
+    )
+
+    assert_receive {:tool_exec, _measurements, metadata}
+    assert metadata.access_gate == "confirmed"
+    assert metadata.access_intent == "intent-1"
+
+    ToolTelemetry.exec("file_read", %{agent_name: "main"}, true, 1)
+    assert_receive {:tool_exec, _measurements, metadata}
+    refute Map.has_key?(metadata, :access_gate)
+    refute Map.has_key?(metadata, :access_intent)
+  end
+
   test "a caller cannot override authoritative fields via metadata" do
     context = %{agent_name: "main", session_id: "main-1"}
 

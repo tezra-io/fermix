@@ -55,6 +55,41 @@ defmodule FermixCore.Prompt.SetupSeeder do
     end
   end
 
+  @doc """
+  Renders `USER.md` and `MEMORY.md` again from the memory rows. `seed/2` never
+  rewrites a file that exists, and the first boot seeds one from the machine's
+  facts, so this is how a personalization save reaches the file the model
+  reads: `seed/2` has upserted the answers as rows, and the rebuild draws the
+  document from them.
+  """
+  @spec rebuild_user_document(keyword()) :: {:ok, PromptFiles.prompt_memory()} | {:error, term()}
+  def rebuild_user_document(opts \\ []) when is_list(opts) do
+    # Memory switched off holds no rows, and a rebuild from no rows writes an
+    # empty file over the one the seed rendered, so the seeded values stand.
+    case MemoryRepo.enabled_server(Config.repo_server(opts)) do
+      nil ->
+        Logger.warning(
+          "prompt setup seed: memory is disabled, so USER.md keeps the values it was seeded with"
+        )
+
+        {:ok, %{user: nil, memory: nil}}
+
+      _server ->
+        PromptFiles.rebuild(
+          Keyword.get(opts, :agent_id, Config.agent_id(opts)),
+          Keyword.get(opts, :owner_id, Config.owner_id(opts)),
+          :event,
+          registry_opts(opts) ++
+            [
+              provenance: %{
+                trigger: "setup_save",
+                description: "Prompt file rebuild after a personalization save"
+              }
+            ]
+        )
+    end
+  end
+
   defp file_specs(agent_id, personalization, opts) do
     user_assigns = %{
       user_name: Map.get(personalization, :user_name, @placeholder_user_name),
@@ -212,6 +247,15 @@ defmodule FermixCore.Prompt.SetupSeeder do
           [:fermix, :prompt, :seed_user_memories],
           %{count: length(rows), duration_ms: elapsed_ms(started_at)},
           %{agent_id: agent_id, owner_id: owner_id}
+        )
+
+        :ok
+
+      # Memory switched off is a home with no rows to seed, the answer
+      # `PromptFiles.load_memories/2` gives it too; the files above are written.
+      {:error, :disabled} ->
+        Logger.warning(
+          "prompt setup seed: memory is disabled, so no user memory rows were seeded"
         )
 
         :ok

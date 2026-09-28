@@ -7,8 +7,10 @@ defmodule FermixChannels.Companion.ConnectionTest do
   import ExUnit.CaptureLog
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Companion.Timeline
@@ -22,7 +24,10 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  # Answers `Companion.Turns.cancel/3` and reports it.
+  # Stands in for `Companion.Turns`, the settlement owner: every request
+  # became a turn except an `inline-` one, which the gateway answered itself
+  # and which this settles, as Turns does, then reports; each cancel is
+  # reported too.
   defmodule TurnsStub do
     use GenServer
 
@@ -35,6 +40,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
     def handle_call({:cancel, profile, client_msg_id}, _from, test_pid) do
       send(test_pid, {:turns_cancel, profile, client_msg_id})
       {:reply, :ok, test_pid}
+    end
+
+    @impl true
+    def handle_cast(
+          {:settle_unless_handed_off, {_profile, id}, _attempt, %{settle: settle}},
+          test_pid
+        ) do
+      if String.starts_with?(id, "inline-"), do: send(test_pid, {:settled_inline, id, settle.()})
+      {:noreply, test_pid}
     end
   end
 
@@ -96,7 +110,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       request_coordinator: coordinator,
       gateway: GatewayStub,
       agent_server: queue_owner,
-      settlement_owner: queue_owner
+      settlement_owner: turns
     ]
 
     endpoint_opts = [
@@ -104,18 +118,20 @@ defmodule FermixChannels.Companion.ConnectionTest do
       socket_path: socket_path,
       max_clients: 2,
       connection_supervisor: connections,
-      connection_opts: [registry: registry, turns: turns, request_opts: request_opts]
+      connection_opts: [registry: registry, request_opts: request_opts]
     ]
 
     start_supervised!({Endpoint, endpoint_opts})
 
     %{
       endpoint_opts: endpoint_opts,
+      request_opts: request_opts,
       socket_path: socket_path,
       registry: registry,
       store_opts: store_opts,
       coordinator: coordinator,
-      queue_owner: queue_owner
+      queue_owner: queue_owner,
+      turns: turns
     }
   end
 
@@ -137,6 +153,83 @@ defmodule FermixChannels.Companion.ConnectionTest do
     send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
+  end
+
+  # FEAT-2: a client that was not connected when an approval went out gets it
+  # right after its server_hello, with the time it has left.
+  test "an approval still waiting follows the server_hello", ctx do
+    approvals =
+      start_supervised!(
+        {Approvals,
+         name: nil,
+         schedule: fn _message, _delay -> make_ref() end,
+         announce: fn _profile, _card, _transport -> :ok end},
+        id: :waiting_approvals
+      )
+
+    card = Output.approval(%{kind: :soul, text: "Apply?", token: "SOUL-T"})
+
+    assert :ok = Approvals.announce(approvals, "main", card, :companion)
+    restart_endpoint(ctx, approvals: approvals)
+
+    client = connect(ctx.socket_path)
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    assert %{"type" => "server_hello"} = recv(client)
+
+    assert %{"type" => "approval", "approval_id" => id, "ttl_s" => ttl} = recv(client)
+    assert id == card["approval_id"]
+    assert ttl in 299..300
+  end
+
+  # R1-2: a card raised on the phone resolves only from the phone (M19 §9.5),
+  # so the Mac is never re-sent it, and what a Mac request resolves is told
+  # to the Mac alone.
+  test "the Mac is re-sent only its own waiting approvals, and hears only its resolutions",
+       ctx do
+    test_pid = self()
+
+    approvals =
+      start_supervised!(
+        {Approvals,
+         name: nil,
+         schedule: fn _message, _delay -> make_ref() end,
+         announce: fn profile, event, audience ->
+           send(test_pid, {:announced, profile, event, audience})
+           :ok
+         end},
+        id: :origin_approvals
+      )
+
+    phone_card = Output.approval(%{kind: :sandbox, text: "Phone?", token: "PHONE-T"})
+    mac_card = Output.approval(%{kind: :sandbox, text: "Mac?", token: "MAC-T"})
+    assert :ok = Approvals.announce(approvals, "main", phone_card, :mobile)
+    assert :ok = Approvals.announce(approvals, "main", mac_card, :companion)
+
+    stop_supervised!(Endpoint)
+
+    ctx.endpoint_opts
+    |> Keyword.put(:connection_opts,
+      registry: ctx.registry,
+      approvals: approvals,
+      request_opts: ctx.request_opts ++ [approvals: approvals]
+    )
+    |> then(&start_supervised!({Endpoint, &1}))
+
+    client = hello(ctx.socket_path)
+    assert %{"type" => "approval", "token" => "MAC-T"} = recv(client)
+
+    send_line(client, message("mac-approve", "/confirm MAC-T"))
+    assert %{"type" => "accepted", "client_msg_id" => "mac-approve"} = recv(client)
+    assert_receive {:gateway_ingest, _message, gateway_opts}, 2_000
+
+    resolve = gateway_opts[:approval_resolution_fn]
+    assert :ok = resolve.(%{kind: :sandbox, token: "MAC-T", outcome: :approved})
+
+    assert_receive {:announced, "main", %{"t" => "approval_resolved", "outcome" => "approved"},
+                    :companion}
+
+    assert [%{"token" => "PHONE-T"}] = Approvals.pending(approvals, "main", :mobile)
+    assert Approvals.pending(approvals, "main", :companion) == []
   end
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
@@ -370,6 +463,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   end
 
   test "read state is told to every connection watching the profile", ctx do
+    append_rows(ctx, 5)
     first = hello(ctx.socket_path)
     second = hello(ctx.socket_path)
 
@@ -377,6 +471,134 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     assert %{"type" => "read_state", "read_up_to_seq" => 4} = recv(first)
     assert %{"type" => "read_state", "read_up_to_seq" => 4} = recv(second)
+
+    # A frontier is never ahead of the timeline.
+    send_line(first, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 99})
+    assert %{"type" => "read_state", "read_up_to_seq" => 5} = recv(first)
+  end
+
+  # The wire allows any u64 cursor and SQLite holds i64: every cursor past the
+  # timeline answers, and the Repo that serves all of core stays up.
+  test "cursors beyond SQLite's range answer on the companion socket", ctx do
+    append_rows(ctx, 2)
+    repo_pid = Process.whereis(ctx.store_opts[:repo])
+    client = hello(ctx.socket_path)
+
+    for cursor <- [
+          9_223_372_036_854_775_807,
+          9_223_372_036_854_775_808,
+          18_446_744_073_709_551_615
+        ] do
+      send_line(client, %{
+        "type" => "history_pull",
+        "profile_id" => "main",
+        "after_seq" => cursor,
+        "limit" => 5
+      })
+
+      assert %{"type" => "history_page", "messages" => [], "next_after_seq" => ^cursor} =
+               recv(client)
+
+      send_line(client, %{
+        "type" => "history_pull",
+        "profile_id" => "main",
+        "before_seq" => cursor,
+        "limit" => 5
+      })
+
+      assert %{"type" => "history_page", "messages" => [_first, _second]} = recv(client)
+
+      send_line(client, %{
+        "type" => "history_search",
+        "profile_id" => "main",
+        "query" => "row",
+        "before_seq" => cursor,
+        "limit" => 5
+      })
+
+      assert %{"type" => "search_results", "hits" => [_ | _]} = recv(client)
+
+      send_line(client, %{
+        "type" => "read_state",
+        "profile_id" => "main",
+        "read_up_to_seq" => cursor
+      })
+
+      assert %{"type" => "read_state", "read_up_to_seq" => 2} = recv(client)
+    end
+
+    assert Process.whereis(ctx.store_opts[:repo]) == repo_pid
+  end
+
+  # One page is one line the Mac reads under a 64 KiB cap: rows are cut at the
+  # byte budget, newest kept going back, oldest kept going forward.
+  test "a history page is cut to fit one line", ctx do
+    long = String.duplicate("z", 25 * 1_024)
+
+    for _row <- 1..4 do
+      assert {:ok, _row} =
+               Timeline.append("main", %{role: "assistant", content: long}, ctx.store_opts)
+    end
+
+    client = hello(ctx.socket_path)
+
+    send_line(client, %{
+      "type" => "history_pull",
+      "profile_id" => "main",
+      "after_seq" => 0,
+      "limit" => 10
+    })
+
+    forward = recv(client)
+    assert Enum.map(forward["messages"], & &1["server_seq"]) == [1, 2]
+    assert forward["next_after_seq"] == 2
+
+    send_line(client, %{
+      "type" => "history_pull",
+      "profile_id" => "main",
+      "before_seq" => 5,
+      "limit" => 10
+    })
+
+    backward = recv(client)
+    assert Enum.map(backward["messages"], & &1["server_seq"]) == [3, 4]
+    assert backward["next_before_seq"] == 3
+  end
+
+  # A request the gateway answered without a turn (here a slash command typed
+  # as text) is complete once ingest returns, instead of left running and run
+  # again at every boot.
+  test "a request answered without a turn is completed at once", ctx do
+    client = hello(ctx.socket_path)
+    send_line(client, message("inline-1", "/status"))
+    assert %{"type" => "accepted", "client_msg_id" => "inline-1"} = recv(client)
+    assert %{"type" => "row", "client_msg_id" => "inline-1"} = recv(client)
+    assert_receive {:gateway_ingest, _message, _opts}, 2_000
+
+    # The settlement owner reports once it has settled the request.
+    assert_receive {:settled_inline, "inline-1", :ok}, 2_000
+
+    assert {:ok, %{status: "completed"}} =
+             Timeline.get_client_request("main", "inline-1", ctx.store_opts)
+  end
+
+  # R4-2: a request that fails after its worker returned (an inline settlement
+  # the settlement owner could not record) is told through this socket's own
+  # error builder, as a failed worker is; at boot recovery nobody is waiting.
+  test "a request's late failure is told in this socket's own error", ctx do
+    client = hello(ctx.socket_path)
+    [{connection, nil}] = Registry.lookup(ctx.registry, "main")
+
+    assert :ok = Connection.transport(connection).report_failure.("mac-late", {:exit, :timeout})
+
+    assert recv(client) == %{
+             "type" => "error",
+             "reason" => "request_failed",
+             "message" => "{:exit, :timeout}",
+             "client_msg_id" => "mac-late"
+           }
+
+    assert :ok = Connection.transport(nil).report_failure.("mac-recovered", :already_settled)
   end
 
   test "turn events reach the socket, and each stream snapshot is sent as its unsent suffix",
@@ -476,11 +698,13 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     queue_owner = ctx.queue_owner
 
+    turns = ctx.turns
+
     recover = fn row, context, opts ->
       Connection.recover_request(
         row,
         context,
-        opts ++ [gateway: GatewayStub, agent_server: queue_owner, settlement_owner: queue_owner]
+        opts ++ [gateway: GatewayStub, agent_server: queue_owner, settlement_owner: turns]
       )
     end
 
@@ -576,6 +800,17 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
+  defp append_rows(ctx, count) do
+    Enum.each(1..count, fn index ->
+      assert {:ok, _row} =
+               Timeline.append(
+                 "main",
+                 %{role: "assistant", content: "row #{index}"},
+                 ctx.store_opts
+               )
+    end)
+  end
+
   defp forward(test_pid) do
     receive do
       message -> send(test_pid, message)
@@ -625,7 +860,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
       :gen_tcp.connect({:local, String.to_charlist(path)}, 0, [
         :binary,
         active: false,
-        packet: :line
+        packet: :line,
+        buffer: 128 * 1_024
       ])
 
     socket

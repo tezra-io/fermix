@@ -310,6 +310,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp watch_upstream(state), do: state.discoverer.watch_tools(state.client, self())
 
   defp register_tools(descriptors, %{contract: nil} = state) do
+    :ok = log_unmatched_overrides(descriptors, state)
     registered = Enum.flat_map(descriptors, &register_descriptor(&1, state))
     {:ok, %{state | registered_names: registered}}
   end
@@ -413,6 +414,23 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp maybe_register_client(_state), do: :ok
 
   # --- stdio registration (unchanged) ------------------------------------
+
+  # An override is keyed by the tool name the server advertises; one naming no
+  # advertised tool applies to nothing. For a plugin's access-sensitive flag that
+  # would leave a command ungated with no sign, so the mismatch is said out loud.
+  defp log_unmatched_overrides(descriptors, state) do
+    advertised = MapSet.new(descriptors, & &1.name)
+
+    state.tools_overrides
+    |> Map.keys()
+    |> Enum.reject(&MapSet.member?(advertised, &1))
+    |> Enum.each(fn name ->
+      Logger.error(
+        "MCP server #{state.server_name}: the override for #{name} names no advertised tool, " <>
+          "so it is not applied"
+      )
+    end)
+  end
 
   defp register_descriptor(descriptor, state) do
     overrides = Map.get(state.tools_overrides, descriptor.name, %{})

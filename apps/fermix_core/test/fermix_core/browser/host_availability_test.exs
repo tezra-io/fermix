@@ -80,7 +80,9 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     # unlocking after the app already said it is quitting) never reopens it.
     :ok = HostAvailability.report(host, true, nil)
     refute HostAvailability.usable?(HostAvailability.current(host))
-    assert HostAvailability.unavailable_reason(HostAvailability.current(host)) == "the app is quitting"
+
+    assert HostAvailability.unavailable_reason(HostAvailability.current(host)) ==
+             "the app is quitting"
   end
 
   test "stopping on a connection that is not the attached one changes nothing" do
@@ -128,7 +130,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     Process.exit(connection, :kill)
     assert_receive {:DOWN, ^ref, :process, ^connection, :killed}
 
-    current = eventually(host, & &1.attached == false)
+    current = eventually(host, &(&1.attached == false))
     refute HostAvailability.usable?(current)
     assert HostAvailability.unavailable_reason(current) == "the app disconnected"
   end
@@ -143,7 +145,7 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
 
     Process.exit(connection, :kill)
 
-    current = eventually(host, & &1.attached == false)
+    current = eventually(host, &(&1.attached == false))
     assert HostAvailability.unavailable_reason(current) == "the app quit"
     assert current.quit
   end
@@ -185,8 +187,12 @@ defmodule FermixCore.Browser.HostAvailabilityTest do
     current = HostAvailability.current(host)
 
     cond do
-      predicate.(current) -> current
-      attempts == 0 -> current
+      predicate.(current) ->
+        current
+
+      attempts == 0 ->
+        current
+
       true ->
         Process.sleep(10)
         eventually(host, predicate, attempts - 1)

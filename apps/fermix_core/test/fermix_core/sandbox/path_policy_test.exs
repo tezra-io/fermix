@@ -48,6 +48,23 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     FermixTestSupport.SafeRm.rm_rf!(outside)
   end
 
+  test "a protected root reached through a symlink is protected at its target" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-linked-root")
+    keys = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-linked-keys")
+    File.ln_s!(keys, Path.join(os_home, ".ssh"))
+
+    config = Config.normalize(mode: :open, os_home: os_home, workspace_root: os_home)
+    target = PathPolicy.canonical_path(keys)
+
+    assert target in PathPolicy.protected_paths(config)
+
+    assert {:error, {:protected_path, _path}} =
+             PathPolicy.allowed_path?(Path.join(keys, "id_ed25519"), config)
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
+    FermixTestSupport.SafeRm.rm_rf!(keys)
+  end
+
   test "caps symlink resolution hops" do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-hop")
 

@@ -30,18 +30,19 @@
 (*    (TLA_PLUS_MODELS.md 5.1);                                           *)
 (*  - the observe_start handshake: every Capturer starts already          *)
 (*    capturing (before the ack, sidecar frames are held, never written:  *)
-(*    capturer.ex:474-479);                                               *)
-(*  - observer.gap rows the Capturer writes itself (capturer.ex:539-553)  *)
+(*    capturer.ex:480-485);                                               *)
+(*  - observer.gap rows the Capturer writes itself (capturer.ex:545-559)  *)
 (*    and Ingest's per-event gates (allowlist, private window, scrubber), *)
 (*    which do not depend on timing;                                      *)
 (*  - the Summarizer.Scheduler child the Controller stops after the       *)
 (*    Capturer (controller.ex:86-91), the singleton lock, a 2nd daemon;   *)
 (*  - the DynamicSupervisor's 5 s shutdown kill (it only loses buffered   *)
-(*    events), a Capturer crash in the middle of a flush, a failed        *)
-(*    config save, a state-read error in Ingest's pause check (it fails   *)
-(*    open, ingest.ex:247-250), an unparseable horizon and an event with  *)
-(*    no integer ts (both fail closed, ingest.ex:232, :240): single-call  *)
-(*    facts, covered by ExUnit;                                           *)
+(*    events: stop_driver and the lock release come first, which          *)
+(*    TeardownBeforeTermFlush checks), a Capturer crash in the middle of  *)
+(*    a flush, a failed config save, a state-read error in Ingest's pause *)
+(*    check (it fails open, ingest.ex:247-250), an unparseable horizon    *)
+(*    and an event with no integer ts (both fail closed, ingest.ex:232,   *)
+(*    :240): single-call facts, covered by ExUnit;                        *)
 (*  - re-enable (the wizard's job, never a chat command: history.ex:12).  *)
 (*    The owner sends pause and purge at most once, and /history off     *)
 (*    once, or again after a daemon restart killed it unanswered.         *)
@@ -55,7 +56,7 @@
 (* "in the state before the step, if c holds this step sets x and y as    *)
 (* shown"; each branch names the variables it changes.                    *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ a51810e9e720
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/capturer.ex @ 175128b2e817
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/wire.ex @ 35da392f4930
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/ingest.ex @ bcf44c4e67ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/controller.ex @ 66ba8ebde374
@@ -107,10 +108,13 @@ CONSTANTS
                         \* stop is unconfirmed instead of "nothing new is captured"
                         \* (computer_history.ex:68-75, history.ex:447-452)
     InitChecksEnabled,  \* every Capturer start re-reads the enable bit and declines (:ignore)
-                        \* while the feature is off (capturer.ex:124-130)
-    InsertChecksIntervals \* the spool insert refuses, inside its own transaction, each row
+                        \* while the feature is off (capturer.ex:130-136)
+    InsertChecksIntervals, \* the spool insert refuses, inside its own transaction, each row
                         \* stamped inside a recorded purge interval (computer_history_sql.ex:
                         \* 358-402, :664-675). Off, it is the plain INSERT OR IGNORE of 693970b7
+    StopsBeforeFlush    \* terminate/2 runs stop_driver and the lock release before its
+                        \* best-effort flush (capturer.ex:603-605). Off, it is the code before
+                        \* the fix: the flush first, then the stop
 
 VARIABLES
     clock,        \* environment: the wall clock, in ticks
@@ -169,14 +173,13 @@ Places == {"unseen", "unread", "buffer", "batch", "spool", "dropped", "fenced", 
 
 (* Capturer states and the code each stands for:                           *)
 (*  none        : no process (never started, or deleted by terminate_child)*)
-(*  running     : between callbacks, reading its mailbox (capturer.ex:270-385) *)
+(*  running     : between callbacks, reading its mailbox (capturer.ex:276-391) *)
 (*  flushing    : inside a flush, pause check done, insert pending          *)
-(*                (capturer.ex:483-487 -> ingest.ex:187-201)               *)
-(*  term_check  : in terminate/2 (capturer.ex:594), its flush's pause      *)
-(*                check next                                               *)
-(*  term_insert : in terminate/2, its flush's insert next                  *)
+(*                (capturer.ex:489-493 -> ingest.ex:187-201)               *)
 (*  term_stop   : in terminate/2, stop_driver and the lock release next    *)
-(*                (:595-596)                                               *)
+(*                (capturer.ex:603-604); its first step                    *)
+(*  term_check  : in terminate/2, its flush's pause check next (:605)      *)
+(*  term_insert : in terminate/2, its flush's insert next                  *)
 (*  dead        : exited; the DynamicSupervisor has not handled it yet     *)
 CapStates == {"none", "running", "flushing", "term_check", "term_insert", "term_stop", "dead"}
 
@@ -301,7 +304,7 @@ Tick ==
 \* "ts", which becomes the row's ts: wire.ex:95, :125-129); the Port
 \* delivers the line to the Capturer's mailbox, and
 \* handle_info({port, {:data, {:eol, _}}}) -> route_frame -> ingest_event
-\* (capturer.ex:270-286, :401-407, :446-457) appends it to state.buffer.
+\* (capturer.ex:276-292, :407-413, :452-463) appends it to state.buffer.
 \* What decides "buffer" or "unread" is the line's position in the
 \* Capturer's mailbox relative to the :shutdown EXIT: a line ahead of the
 \* EXIT is handled first and buffered (receiving is folded into this step);
@@ -327,12 +330,12 @@ CapturerOthersUnchanged ==
                 pauseUntil, pausePc, purges, offPc, faultsLeft>>
     /\ GhostsUnchanged
 
-\* A flush: handle_info(:flush) on the 2 s timer (capturer.ex:352-362) or the
-\* 25-event size trigger (:451-452) -> flush/do_flush (:467-487) ->
+\* A flush: handle_info(:flush) on the 2 s timer (capturer.ex:358-368) or the
+\* 25-event size trigger (:457-458) -> flush/do_flush (:473-493) ->
 \* Ingest.ingest (ingest.ex:173). Its first Repo call,
 \* computer_history_ensure_state (ingest.ex:243), reads the horizon, and the
 \* gate splits the buffer event by event (ingest.ex:178). The dropped ones are
-\* gone; the Capturer empties its buffer either way (capturer.ex:487). When
+\* gone; the Capturer empties its buffer either way (capturer.ex:493). When
 \* none passes, Ingest returns with no insert call and the flush is over;
 \* otherwise the survivors go on to the insert. A :flush timer message queued
 \* ahead of the EXIT would write the same buffer terminate/2 writes, so a flush
@@ -357,35 +360,48 @@ FlushInsert ==
     /\ UNCHANGED <<sidecar, exitQueued, dsBox, dsBusy>>
     /\ CapturerOthersUnchanged
 
-\* terminate/2 (capturer.ex:589-598) runs on the :shutdown EXIT, because
-\* init traps exits (:140), or after a callback raised. Its flush makes the
-\* same per-event pause check (flush/1 of an empty buffer makes no call,
-\* :467), and inserts only when some event passed it.
+\* terminate/2 (capturer.ex:595-607) runs on the :shutdown EXIT, because
+\* init traps exits (:146), or after a callback raised. With StopsBeforeFlush
+\* its first step is stop_driver and the lock release (TermStop), then its
+\* flush (TermCheck, TermInsert), and the process exits after the flush.
+\* Without it, the flush comes first and the stop last.
+TermBegins == cap = "running" /\ exitQueued
+TermEntry == IF StopsBeforeFlush THEN "term_stop" ELSE "term_check"
+
+\* The process exits. Its EXIT reaches the DynamicSupervisor's mailbox.
+TermExits ==
+    /\ cap' = "dead"
+    /\ exitQueued' = FALSE
+    /\ dsBox' = Append(dsBox, [kind |-> "exit", n |-> inc, from |-> 0])
+
+TermNext(pc) == cap' = pc /\ UNCHANGED <<exitQueued, dsBox>>
+
+\* terminate/2's flush (:605) makes the same per-event pause check as
+\* FlushCheck (flush/1 of an empty buffer makes no call, :473), and inserts
+\* only when some event passed it.
 TermCheck ==
-    /\ \/ cap = "running" /\ exitQueued
-       \/ cap = "term_check"
+    /\ cap = "term_check" \/ (~StopsBeforeFlush /\ TermBegins)
     /\ where' = Split
-    /\ cap' = IF Kept = {} THEN "term_stop" ELSE "term_insert"
-    /\ UNCHANGED <<sidecar, exitQueued, dsBox, dsBusy>>
+    /\ IF Kept /= {} THEN TermNext("term_insert")
+       ELSE IF StopsBeforeFlush THEN TermExits
+       ELSE TermNext("term_stop")
+    /\ UNCHANGED <<sidecar, dsBusy>>
     /\ CapturerOthersUnchanged
 
 \* terminate/2's insert (the same Repo call as FlushInsert).
 TermInsert ==
     /\ cap = "term_insert"
     /\ where' = Insert
-    /\ cap' = "term_stop"
-    /\ UNCHANGED <<sidecar, exitQueued, dsBox, dsBusy>>
+    /\ IF StopsBeforeFlush THEN TermExits ELSE TermNext("term_stop")
+    /\ UNCHANGED <<sidecar, dsBusy>>
     /\ CapturerOthersUnchanged
 
-\* stop_driver (capturer.ex:595, :600-603) sends observe_stop and kills the
-\* sidecar; the lock is released (:596) and the process exits. Its EXIT
-\* reaches the DynamicSupervisor's mailbox.
+\* stop_driver (capturer.ex:603, :609-612) sends observe_stop and kills the
+\* sidecar, and the lock is released (:604). No Repo call.
 TermStop ==
-    /\ cap = "term_stop"
-    /\ cap' = "dead"
+    /\ cap = "term_stop" \/ (StopsBeforeFlush /\ TermBegins)
     /\ sidecar' = FALSE
-    /\ exitQueued' = FALSE
-    /\ dsBox' = Append(dsBox, [kind |-> "exit", n |-> inc, from |-> 0])
+    /\ IF StopsBeforeFlush THEN TermNext("term_check") ELSE TermExits
     /\ UNCHANGED <<where, dsBusy>>
     /\ CapturerOthersUnchanged
 
@@ -396,7 +412,7 @@ CapturerCrash ==
     /\ faultsLeft > 0
     /\ cap = "running"
     /\ ~exitQueued
-    /\ cap' = "term_check"
+    /\ cap' = TermEntry
     /\ faultsLeft' = faultsLeft - 1
     /\ UNCHANGED <<clock, where, ts, sidecar, exitQueued, inc, dsBox, dsBusy, dsFor, ctrl,
                    ctrlGen, ctrlPc, ctrlPid, ctrlCall, env, config, pauseUntil, pausePc,
@@ -419,9 +435,9 @@ DsUnchanged ==
     /\ GhostsUnchanged
 
 \* An EXIT at the head: restart the Capturer. The new process registers its
-\* name and runs init/1, which re-reads the enable bit (capturer.ex:124-130).
+\* name and runs init/1, which re-reads the enable bit (capturer.ex:130-136).
 \* Off: init returns :ignore, the name is unregistered and the
-\* DynamicSupervisor deletes the child. On: it bootstraps (:186-210) and opens
+\* DynamicSupervisor deletes the child. On: it bootstraps (:192-216) and opens
 \* a new sidecar. Folding register-then-read into one step is sound: a
 \* Controller whereis that runs after the flip either sees the new pid (and
 \* stops it) or the init read sees the flip.
@@ -831,6 +847,14 @@ PurgedWindowStaysPurged == \A e \in purged : where[e] /= "spool"
 \* Capturer process and no sidecar).
 CaptureStopped == cap = "none" /\ ~sidecar
 DisableEventuallyStops == [](offAcked \/ offUnconfirmed => <>[]CaptureStopped)
+
+\* capturer.ex:35-42 (teardown): terminate/2 stops the sidecar and releases
+\* the lock "first, then flush the buffer best-effort", because the flush's
+\* Repo calls can outlast the supervisor's shutdown timeout and the kill that
+\* follows "skips whatever is still ahead". So no Repo call of that flush
+\* runs while the sidecar is alive (the lock is released in the same step as
+\* the stop, and is not modelled).
+TeardownBeforeTermFlush == cap \in {"term_check", "term_insert"} => ~sidecar
 
 -----------------------------------------------------------------------------
 (* WITNESSES: violated when their scenario is reachable. *)

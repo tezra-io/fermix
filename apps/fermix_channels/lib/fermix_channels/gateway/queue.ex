@@ -76,6 +76,19 @@ defmodule FermixChannels.Gateway.Queue do
         }
 
   # --- Client API ---
+  #
+  # The stop calls below, and a turn's own calls to its Queue (the claim,
+  # `fresh?/1`, `mark_final_reply_delivered/1`), wait with no timeout, because
+  # every Queue callback is bounded. A callback waits on two things only, once
+  # per turn it stops or clears:
+  #   * the turn task's end (`terminate_active/2`): `Task.Supervisor` kills a
+  #     task still running 5 s after its `:shutdown`;
+  #   * the stopped-marker write (`mark_stopped_turn/3`): the store call keeps
+  #     its 5 s default, and its exit is caught and logged.
+  # So a busy Queue delays its callers instead of failing them: a timed-out stop
+  # crashed its caller, and a timed-out turn call read as "Queue gone" and
+  # dropped a finished reply. The call still monitors the Queue, so a dead
+  # Queue still ends the wait.
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -124,7 +137,7 @@ defmodule FermixChannels.Gateway.Queue do
   @spec stop_all(GenServer.server()) ::
           %{active_stopped: non_neg_integer(), pending_cleared: non_neg_integer()}
   def stop_all(server \\ __MODULE__) do
-    GenServer.call(server, :stop_all)
+    GenServer.call(server, :stop_all, :infinity)
   end
 
   @doc """
@@ -145,7 +158,7 @@ defmodule FermixChannels.Gateway.Queue do
           {:ok, %{active_stopped: 0 | 1, pending_cleared: non_neg_integer()}} | {:ok, :not_found}
   def stop_conversation(conversation_key, server \\ __MODULE__)
       when is_tuple(conversation_key) do
-    GenServer.call(server, {:stop_conversation, conversation_key})
+    GenServer.call(server, {:stop_conversation, conversation_key}, :infinity)
   end
 
   @doc """
@@ -171,7 +184,7 @@ defmodule FermixChannels.Gateway.Queue do
           {:ok, :stopped | :claimed | :dequeued | :not_found}
   def stop_turn(conversation_key, message_id, server \\ __MODULE__)
       when is_tuple(conversation_key) and is_binary(message_id) do
-    GenServer.call(server, {:stop_turn, conversation_key, message_id})
+    GenServer.call(server, {:stop_turn, conversation_key, message_id}, :infinity)
   end
 
   # --- GenServer Callbacks ---
@@ -579,10 +592,14 @@ defmodule FermixChannels.Gateway.Queue do
     outcome
   end
 
-  defp claim_turn_result(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:claim_turn_result, conversation_key, self()})
+  # No timeout (see the client API note): a busy Queue delays the claim, and
+  # an exit means the Queue is gone.
+  defp claim_turn_result(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:claim_turn_result, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> nil
+    :exit, reason ->
+      log_queue_gone(turn, :claim_turn_result, reason)
+      nil
   end
 
   # A one-shot (loopback) conversation — CLI `ask`, daemon — will not send a
@@ -657,17 +674,30 @@ defmodule FermixChannels.Gateway.Queue do
 
   # Is this turn still the conversation's active turn? Asked once, before final
   # delivery/commit. A dead queue (or a `/stop` that cleared this turn) means
-  # not fresh — suppress.
-  defp fresh?(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:fresh?, conversation_key, self()})
+  # not fresh — suppress. A busy one is waited for (see the client API note).
+  defp fresh?(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:fresh?, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> false
+    :exit, reason ->
+      log_queue_gone(turn, :fresh?, reason)
+      false
   end
 
-  defp mark_final_reply_delivered(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:final_reply_delivered, conversation_key, self()})
+  defp mark_final_reply_delivered(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:final_reply_delivered, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> :ok
+    :exit, reason ->
+      log_queue_gone(turn, :final_reply_delivered, reason)
+      :ok
+  end
+
+  # A call with no timeout exits only when the Queue is gone (its supervisor
+  # ends this task next), so each catch above means that and only that.
+  defp log_queue_gone(turn, call, reason) do
+    Logger.warning(
+      "Turn #{turn.request_id} for #{format_conversation_key(turn.conversation_key)} could " <>
+        "not make its #{call} call: its Queue is gone (#{inspect(reason)})"
+    )
   end
 
   # Wrap the raw channel reply closure so each SUCCESSFULLY-delivered mid-turn

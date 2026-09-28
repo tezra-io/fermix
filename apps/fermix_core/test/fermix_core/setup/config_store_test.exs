@@ -227,6 +227,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            }
   end
 
+  # R5-1: the phone channel's trust store refuses to load from anything but a
+  # 0700 directory, and a boot used to create this one at the umask's 0755.
+  test "the mobile directory is created private, and an open one is repaired at the next boot" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-dir")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    mobile = Path.join(tmp_home, "mobile")
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+
+    File.chmod!(mobile, 0o755)
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+  end
+
+  # The trust store refuses a symlinked directory by name; the boot leaves the
+  # directory it points at as it found it.
+  test "a symlinked mobile directory is left for the trust store to refuse" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-link")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    elsewhere = Path.join(tmp_home, "elsewhere")
+    File.mkdir_p!(elsewhere)
+    File.chmod!(elsewhere, 0o755)
+    File.ln_s!(elsewhere, Path.join(tmp_home, "mobile"))
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(elsewhere) == 0o755
+  end
+
+  defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
   test "an empty FERMIX_HOME is treated as unset, not a cwd-relative path" do
     # An empty string is truthy in Elixir, so `get_env() || default` did NOT
     # fall back — fermix_home/0 returned "" and workspace paths became
@@ -2031,9 +2064,9 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            |> Keyword.get(:allowed_hosts) == ["printer.local", "build.internal"]
   end
 
-  # `launch_app` is the section's second settable key: whether the engine may
-  # open the Fermix app to run a new task in its browser pane. It is a boolean
-  # with no normalization, and the round trip proves the file carries it.
+  # `launch_app` is a settable key too: whether the engine may open the Fermix
+  # app to run a new task in its browser pane. It is a boolean with no
+  # normalization, and the round trip proves the file carries it.
   test "save/load round-trips the browser launch_app key" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
@@ -2056,6 +2089,33 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     browser = Keyword.get(loaded.fermix_core, :browser, [])
     assert Keyword.get(browser, :launch_app) == false
     assert Keyword.get(browser, :allowed_hosts) == ["build.internal"]
+  end
+
+  test "how tasks run and the tab cap round-trip through the settings file" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    snapshot = %{
+      fermix_core: [browser: [default_profile: "fermix_headless", max_tabs: 4]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(default_profile = "fermix_headless")
+    assert contents =~ "max_tabs = 4"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    browser = Keyword.get(loaded.fermix_core, :browser, [])
+
+    assert browser[:default_profile] == "fermix_headless"
+    assert browser[:max_tabs] == 4
   end
 
   test "apply_snapshot puts browser config in Application env" do

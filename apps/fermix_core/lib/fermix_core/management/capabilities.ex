@@ -1,18 +1,25 @@
 defmodule FermixCore.Management.Capabilities do
   @moduledoc """
-  `capabilities.install.start`: the downloads a setup surface can start
-  (M34 native setup §7.3).
+  `capabilities.install.start` and `browser.install.start`: the downloads a
+  setup surface can start (M34 native setup §7.3).
 
   Three targets, one job kind. Each is idempotent — an installed half
   short-circuits — so re-running an install after a failure resumes rather than
   starting over, and each is single-flight per target so two panes cannot
   download the same helper twice.
 
+  The browser download is its own kind because its answer is different: it
+  runs the notetaker's install step (the helper, then its version-matched
+  Chromium) and then asks the launcher which browser tasks now run in, so a
+  download the launcher still cannot find is a failure rather than a green
+  check over a pane that says there is no browser.
+
   Refusals are the installer's own words. A target with no pinned release for
   this machine says so; it never downloads something unpinned.
   """
 
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.ComputerUse.SidecarInstaller, as: ComputerUseInstaller
   alias FermixCore.Management.Jobs
   alias FermixCore.Meetings.BrowserInstall
@@ -23,6 +30,10 @@ defmodule FermixCore.Management.Capabilities do
   require Logger
 
   @targets ~w(computer_use_sidecar meetbot local_stt)
+
+  @no_chromium_build "Fermix has no Chromium download for this machine."
+  @browser_still_missing "The download finished, but Fermix still finds no browser to run " <>
+                           "tasks in. See the daemon log."
 
   @type error :: {:invalid_params, String.t(), String.t()} | {:busy, String.t()}
 
@@ -55,6 +66,76 @@ defmodule FermixCore.Management.Capabilities do
       {:error, :busy} -> {:error, {:busy, "capability_install"}}
     end
   end
+
+  @doc """
+  Starts the download of a browser for tasks, single-flight.
+
+  The same two steps the notetaker's install takes, then the launcher's own
+  answer: the result names the browser tasks now run in. `opts` carries the
+  test seams `install`, `install_browser` and `resolve`.
+  """
+  @spec browser_install_start(keyword()) :: {:ok, map()} | {:error, error()}
+  def browser_install_start(opts \\ []) when is_list(opts) do
+    started =
+      Jobs.start(
+        :browser_install,
+        Keyword.merge(Keyword.get(opts, :jobs, []), name: "browser", run: browser_run(opts))
+      )
+
+    case started do
+      {:ok, view} -> {:ok, view}
+      {:error, :busy} -> {:error, {:busy, "browser_install"}}
+    end
+  end
+
+  defp browser_run(opts) do
+    install = Keyword.get(opts, :install, &MeetbotInstaller.install/0)
+    install_browser = Keyword.get(opts, :install_browser, &BrowserInstall.run/0)
+    resolve = Keyword.get(opts, :resolve, &ChromeLauncher.resolve_default/0)
+
+    fn _job_id, report ->
+      report.({:phase, "sidecar_downloading"})
+
+      case install.() do
+        {:ok, _path} -> download_chromium(install_browser, resolve, report)
+        {:error, reason} -> {:error, {:unavailable, browser_sentence(reason)}}
+      end
+    end
+  end
+
+  defp download_chromium(install_browser, resolve, report) do
+    report.({:phase, "downloading"})
+
+    case install_browser.() do
+      {:ok, _outcome} -> browser_found(resolve.())
+      {:error, reason} -> {:error, {:unavailable, browser_sentence(reason)}}
+    end
+  end
+
+  # The install is judged by what the launcher can now start, never by the
+  # installer's exit status alone.
+  defp browser_found({:ok, %{label: label}}),
+    do: {:ok, %{"installed" => true, "browser" => label}}
+
+  defp browser_found({:error, %{code: "chrome_missing"}}) do
+    Logger.error("management capabilities: the browser download finished and no browser resolves")
+
+    {:error, {:unavailable, @browser_still_missing}}
+  end
+
+  defp browser_found({:error, _refused} = refused),
+    do: {:error, {:unavailable, ChromeLauncher.sentence(refused)}}
+
+  # A machine the notetaker has no build for has no Chromium to download
+  # either, and the browser step's own failure is named as the browser's.
+  defp browser_sentence(:no_pinned_release), do: @no_chromium_build
+  defp browser_sentence({:unsupported_target, _target}), do: @no_chromium_build
+  defp browser_sentence({:no_pinned_artifact, _tag, _target}), do: @no_chromium_build
+
+  defp browser_sentence({:browser_install_failed, _status}),
+    do: "Chromium could not be installed."
+
+  defp browser_sentence(reason), do: sentence(reason)
 
   defp install_run("computer_use_sidecar", opts) do
     install = Keyword.get(opts, :install, &ComputerUseInstaller.install/0)

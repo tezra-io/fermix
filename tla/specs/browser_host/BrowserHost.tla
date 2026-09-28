@@ -112,7 +112,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/turn_marker.ex @ 9e55937dc45a
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/protocol.ex#listed_tab? @ 883cbc90b089
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser_host/link.ex @ 279273a16f24
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ 8e5a12ad7b4c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/connection.ex#attach,availability,host_stopping,task_request,bind_task,release_task,task_exited,write_request,cancel_task @ b174f6b006f9
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/endpoint.ex @ 50e6a7f26529
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/browser_host/supervisor.ex @ a91e3fe95333
 \* SOURCE: apps/fermix_core/priv/browser_host/PROTOCOL.md @ d9dfad12723c
@@ -179,7 +179,7 @@ CONSTANTS
     StoppingHandshake,  \* on quit an attached host sends host_stopping and holds its
                         \* quit for the daemon's answer (app-side, unpinned); the engine's
                         \* half is answering host.stop_ack behind every release
-                        \* (Connection.host_stopping, connection.ex:270-284, BROWSER-7).
+                        \* (Connection.host_stopping, connection.ex:279-291, BROWSER-7).
                         \* FALSE quits at once
     QuitBound,          \* the held quit ends when a bound elapses, answer or not
                         \* (app-side, unpinned)
@@ -499,7 +499,7 @@ TaskStep(t) ==
 
 \* HostServer takes the next answer or event from the host.
 \*  - attached: the connection is live, with no report yet (Connection.attach,
-\*    connection.ex:242-252; HostAvailability.attached, host_availability.ex:
+\*    connection.ex:248-258; HostAvailability.attached, host_availability.ex:
 \*    206-217, clearing any earlier connection's report, quit and launch).
 \*  - availability: kept (LastReportWins; HostAvailability.report, :163-169,
 \*    ignored once stopping -- BROWSER-5), then the tasks waiting on a launch
@@ -515,12 +515,12 @@ TaskStep(t) ==
 \*    with a sentence and its tabs are released (`host_error`, :466-475).
 \*  - stopping: in one callback every task bound to this host ends and
 \*    task.release goes for it -- the app side of the handshake and its own
-\*    release loop are Connection.host_stopping (connection.ex:270-284,
+\*    release loop are Connection.host_stopping (connection.ex:279-291,
 \*    BROWSER-1/7); HostServer's own end of each task is `lose`/`stop`
 \*    (host_server.ex:434-438,:107-129) on `{:browser_host_stopping, _}`
 \*    (:146-150) -- launching is no longer allowed (the person quit the app),
 \*    and the answer, host.stop_ack, is sent behind every release
-\*    (connection.ex:283, protocol.ex "host.stop_ack").
+\*    (connection.ex:290, protocol.ex "host.stop_ack").
 \*  - cancel: the one task task_id names ends the way EndHostTasks ends a
 \*    host failure -- NoChromeRetry decides it the same way -- and its
 \*    task.release goes behind whatever it already had queued
@@ -643,7 +643,7 @@ PersonCancel(t) ==
 \* The app connects: the hello handshake, then `attached` and its first
 \* availability report, in one reducer step (two real frames, PROTOCOL.md's
 \* "Handshake and attach"; the daemon's side of each is Connection.attach,
-\* connection.ex:242-252, and .availability, :256-266 -- folded into one step
+\* connection.ex:248-258, and .availability, :262-273 -- folded into one step
 \* here because nothing can act differently in the gap: HostAvailability
 \* treats "attached, no report yet" the same whichever of the two just
 \* landed). A new connection waits for HostServer to have taken the last
@@ -687,12 +687,12 @@ HostAct(t, i) ==
 \* The host takes the next request. What is on `toHost` is what the daemon's
 \* Connection wrote for it, in the order its one process took requests and
 \* releases off its own mailbox (task_request, bind_task, release_task,
-\* write_request, connection.ex:328-394 -- BROWSER-1's fix: a release can
+\* write_request, connection.ex:335-428 -- BROWSER-1's fix: a release can
 \* never overtake a request the same task sent before it). tab.open and
 \* page.act are host steps of their task (recorded for NoTaskWithoutHost).
 \* task.release releases the named tasks' tabs (idempotent: BROWSER-2). The
 \* answer to host_stopping (host.stop_ack, written behind every release,
-\* connection.ex:283) ends the held quit: the app detaches and exits, its
+\* connection.ex:290) ends the held quit: the app detaches and exits, its
 \* remaining tabs with it. The app's own ok/error reply to host.stop_ack is
 \* not modelled: nothing reads it.
 HostRecv ==

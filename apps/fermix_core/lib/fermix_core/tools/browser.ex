@@ -345,8 +345,8 @@ defmodule FermixCore.Tools.Browser do
       %{
         tag: "attached_tab_not_allowed",
         description:
-          "the person's own tab is used only on a turn they are present for; use the " <>
-            "managed profile"
+          "the person's own tab is used only on a turn they are present for, and never " <>
+            "from a Buzz channel; use the managed profile"
       },
       %{
         tag: "host_unavailable",

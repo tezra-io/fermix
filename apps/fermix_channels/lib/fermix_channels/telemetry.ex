@@ -1,12 +1,11 @@
 defmodule FermixChannels.Telemetry do
   @moduledoc false
 
-  @pair_statuses [:approved, :denied, :expired, :rate_limited, :cancelled, :device_disconnected]
+  @pair_statuses [:approved, :denied, :expired, :cancelled, :device_disconnected]
   @push_statuses [:sent, :failed]
   @transport_statuses [:degraded, :recovered]
 
-  @type pair_status ::
-          :approved | :denied | :expired | :rate_limited | :cancelled | :device_disconnected
+  @type pair_status :: :approved | :denied | :expired | :cancelled | :device_disconnected
   @type push_status :: :sent | :failed
   @type transport_status :: :degraded | :recovered
 

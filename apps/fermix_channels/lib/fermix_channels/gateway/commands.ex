@@ -65,16 +65,26 @@ defmodule FermixChannels.Gateway.Commands do
         |> Map.put(:content, Enum.join(args, " "))
         |> handler.execute(reply_fn, context)
 
-      {:error, :unauthorized} ->
+      # Both refusals keep the gateway's one `{:error, :unauthorized}` contract;
+      # the reason travels in the reply and the telemetry.
+      {:error, reason} when reason in [:unauthorized, :unattended] ->
         :telemetry.execute(
           [:fermix, :command, :unauthorized],
           %{count: 1},
-          %{command: handler.name(), channel: message.channel}
+          %{command: handler.name(), channel: message.channel, reason: reason}
         )
 
-        reply_fn.({:text, "This command requires owner permissions."})
+        reply_fn.({:text, refusal_text(reason)})
         {:error, :unauthorized}
     end
+  end
+
+  defp refusal_text(:unauthorized), do: "This command requires owner permissions."
+
+  defp refusal_text(:unattended) do
+    "This command must come from the owner in person (their chat, the Fermix app, or a " <>
+      "terminal they are at), not from a process Fermix started or one running without " <>
+      "a terminal."
   end
 
   defp put_command_name(message, name) do

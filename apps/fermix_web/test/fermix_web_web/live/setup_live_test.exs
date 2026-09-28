@@ -153,8 +153,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     System.put_env("FERMIX_HOME", tmp_home)
     FermixTestSupport.SecretWriterStub.reset()
 
-    # Force readiness to :setup_required so commit_snapshot/1 skips
-    # prompt-file seeding; these tests do not exercise the memory repo.
+    # No provider: readiness starts at :setup_required, the state these
+    # screens are looked at on. The suite's seeder stub keeps prompt-file
+    # seeding out of these tests, which run no memory repo.
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.delete_env(:fermix_channels, :telegram)

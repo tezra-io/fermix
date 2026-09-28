@@ -127,6 +127,28 @@ defmodule FermixCore.Capabilities.MCP.CapabilityTest do
       assert cap.hidden_from_agent? == true
     end
 
+    test "an access_sensitive? override reaches the metadata; absent reads false" do
+      descriptor = %{name: "unlock_doors", description: "Unlock.", input_schema: %{}}
+
+      flagged =
+        McpCapability.from_tool_descriptor("tesla", descriptor,
+          caller: StubCaller,
+          source_id: {:plugin, "tesla"},
+          name_prefix: "tesla_",
+          tool_overrides: %{access_sensitive?: true}
+        )
+
+      plain =
+        McpCapability.from_tool_descriptor("tesla", descriptor,
+          caller: StubCaller,
+          source_id: {:plugin, "tesla"},
+          name_prefix: "tesla_"
+        )
+
+      assert flagged.metadata.access_sensitive? == true
+      assert plain.metadata.access_sensitive? == false
+    end
+
     test "raises when descriptor has no :name" do
       assert_raise ArgumentError, fn ->
         McpCapability.from_tool_descriptor("github", %{description: "no name"})

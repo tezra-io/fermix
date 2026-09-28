@@ -130,11 +130,12 @@ defmodule FermixCore.Auth.TokenSupervisor do
   end
 
   @doc """
-  Lets go of a profile a tree-less CLI VM has just signed out of
-  (`fermix auth logout`, `fermix plugins auth logout`): the daemon's side of
-  its `auth_forget` request.
+  Lets go of a profile that has just been signed out: the in-daemon plugin
+  logout (`Plugins.Auth.logout/1`) after its delete, and the daemon's side of
+  the `auth_forget` request a tree-less CLI VM sends after its own
+  (`fermix auth logout`, `fermix plugins auth logout`).
 
-  The CLI deleted the stored entry; this VM may still hold the tokens. The
+  The caller deleted the stored entry; this VM may still hold the tokens. The
   manager serving the profile drops them, and deletes its plugin child's token
   file, through `forget/1`. A child of this supervisor is then stopped, so its
   next use starts a fresh manager from auth.json and serves a sign-in made
@@ -145,8 +146,8 @@ defmodule FermixCore.Auth.TokenSupervisor do
   the call held nothing, so that is `:ok` too.
 
   A `get_token` call queued on a child at the moment it is stopped exits in its
-  caller instead of answering `{:error, :auth_invalidated}`: a window of one
-  message, which a plugin logout's stop (`Plugins.Auth.logout/1`) already has.
+  caller instead of answering `{:error, :reauthorization_required}`: a window
+  of one message.
   """
   @spec forget_signed_out(String.t()) :: :ok
   def forget_signed_out(@codex_profile) do

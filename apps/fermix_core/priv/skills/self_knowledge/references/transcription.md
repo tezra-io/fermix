@@ -1,81 +1,41 @@
 # Transcription (speech to text)
 
-Inbound audio on every media-capable channel is transcribed before the agent sees
-it — Telegram (voice notes, audio files, and round video notes), WhatsApp, Slack,
-Discord, and Signal — and the meeting notetaker listens through the same engine.
-When a voice note also carries a caption, both are delivered: the caption first,
-then the transcript under a `[voice note transcript]` delimiter. One config
-section serves both: `[fermix_core.transcription]` (`backend`, `model`,
-`max_file_mb`, per-backend key slots), set from the setup page's Voice notes
-tab, from `fermix
-setup --transcription-backend`/`--transcription-model`/`--transcription-api-key`,
-or by hand. `fermix doctor`'s `transcription` row reports the active backend and
-whether what it needs resolves — offline, it never transcribes to find out.
+Inbound audio is transcribed before the agent sees it on every media channel: Telegram (voice notes, audio files, round video notes), WhatsApp, Slack, Discord and Signal. A voice note with a caption delivers both, the caption first, then the transcript under `[voice note transcript]`. The meeting notetaker uses the same backends.
 
-## Backends and their credentials
+## Choosing a backend
 
-Each hosted backend has its own optional key slot, always settable in the
-Voice notes tab (and `--transcription-api-key` stores under the selected
-backend's slot): `openai` (default, `gpt-4o-mini-transcribe`) and `xai`
-(SpaceXAI, Grok STT — modelless, so it has no model to pick and the card hides
-that field) take a transcription key that OVERRIDES the reused chat-provider key,
-or reuse that chat key if none is set. SpaceXAI STT REQUIRES an API key — the
-Grok subscription OAuth token does not work for `/v1/stt` — so paste one when the
-SpaceXAI provider is on OAuth. `deepgram` (`nova-3`) has no chat provider to
-reuse, so its `deepgram_api_key` is required. All three keys keychain as
-`@keyring`. OpenAI's list also offers `gpt-transcribe` beside the default mini
-model. `model` is a single shared key, so setup snaps it to the chosen backend's
-default on a backend switch (an unknown backend or non-positive `max_file_mb`
-fails config load loudly).
+- **Mac app**: Settings > Voice, section **Voice notes**: **Transcribe with**, **Model**, and the backend's key row.
+- **Linux and dev installs**: browser setup's **Voice notes** tab, or `fermix setup --transcription-backend`, `--transcription-model`, `--transcription-api-key` (stored under the selected backend's key).
+- Config: `[fermix_core.transcription]` `backend`, `model` (one shared key, reset to the new backend's default on a switch), `max_file_mb`, per-backend keys (in the keychain). An unknown backend or a non-positive `max_file_mb` fails config load.
+- `fermix doctor`'s `transcription` row reports the backend and whether what it needs resolves, without transcribing anything.
+
+| Backend | Models | Key |
+|---|---|---|
+| `openai` (default) | `gpt-4o-mini-transcribe` (default), `gpt-transcribe`, `gpt-4o-transcribe`, `whisper-1` | `openai_api_key` overrides the chat provider's OpenAI key, else reuses it |
+| `xai` (SpaceXAI) | none to pick | `xai_api_key` overrides the chat key, else reuses it; an API key is required, because a Grok subscription sign-in does not work for speech to text |
+| `deepgram` | `nova-3` (default), `nova-2` | `deepgram_api_key`, required |
+| `local` (on-device) | the installed speech model | none |
 
 ## The on-device `local` backend
 
-`local` runs a `fermix-stt` sidecar over a locally installed speech model: audio
-never leaves the machine and there is no key to configure. What it needs instead
-is an installed binary AND an installed model, and it reports which half is
-missing rather than degrading to a hosted backend.
+- It runs a `fermix-stt` helper over a locally installed model: audio never leaves the machine. It needs both the helper and the model, and names the missing half rather than falling back to a hosted backend.
+- **Setup does not offer it**: no picker lists it (Voice notes, either app, or the notetaker's choice), because its model download has not been walked end to end. A configuration that already names it keeps working and shows it, disabled; the Mac app's install refuses too. `local_offered = true` under `[fermix_core.transcription]` puts the choice back.
+- Writing `backend = "local"` by hand installs nothing: every call fails naming the missing half, and boot never downloads. Builds exist for Apple Silicon macOS, Linux x86_64 and Linux arm64; on any other machine (an Intel Mac) it is unavailable, and an older Linux C library can install it but not start it. There, `fermix doctor` says it is not available and a voice note gets a reply to choose another backend.
 
-**Setup does not offer this backend.** Picking it downloads a speech model on
-the spot, and that flow has never been walked end to end, so no picker lists
-`local`: not the Voice notes tab, not either app, not the notetaker's own
-backend choice. A configuration that already names it keeps transcribing
-on-device and is shown in the pickers, disabled, saying it cannot be chosen; a
-request that asks for it anyway is refused in that same sentence, and the
-install the macOS app's Voice pane offers refuses too. Setting `local_offered =
-true` under `[fermix_core.transcription]` puts the choice back, which is how the
-whole flow is walked before it ships.
+## Live streams
 
-Behind that, the backend is whole. Installing is a deliberate act, done from the
-Voice notes tab when `local` is selected. Writing `backend = "local"` into
-`config.toml` by hand installs nothing — every call then fails naming the
-missing half, and boot never downloads. A `fermix-stt` release is pinned for
-`macos-aarch64`, `linux-x86_64` and `linux-aarch64` — binary and model checksums
-both. Any other machine (an Intel Mac, for one: the release builds nothing for
-it) has no on-device speech rather than an unverified binary, and the Linux
-build needs a recent C library: on an older distribution it installs and then
-cannot start. Wherever it is in force on a machine that cannot run it, `fermix
-doctor` says it is not available here, and a voice note sent while it is
-selected gets a reply saying to choose another backend. None of those point at
-an install, because no install fixes it.
+A voice note is one round trip. A meeting is a live stream of 16 kHz mono s16le PCM: `deepgram`, `xai` and `local` stream natively (lower latency, word timings), and `openai` is driven in short spoken chunks, so every backend can feed a live listener. Each transcription is a traced provider call (`purpose: :transcription`, no token cost).
 
-## Files versus live streams
+## When it cannot transcribe
 
-A voice note is one file, transcribed in one round trip. A meeting is a live
-stream, and the same backend set serves it two ways: `deepgram`, `xai`, and
-`local` speak a streaming protocol natively, while a batch-only backend
-(`openai`) is driven by a chunked adapter that transcribes short spoken spans in
-order — so every backend can feed a live listener, with the streaming ones giving
-lower latency and word timings. A stream speaks exactly one audio format, 16 kHz
-mono s16le PCM, and callers convert before pushing.
+The sender gets a reply and no turn is scheduled:
 
-Every backend routes its round trip through the shared provider-call telemetry
-(`purpose: :transcription`, no token cost), so a transcription shows up in traces
-like any other provider call.
+| Condition | Reply | Fix on a Mac |
+|---|---|---|
+| No backend configured | "…no transcription backend is configured. Run `fermix setup` to add one." | Settings > Voice > **Voice notes** |
+| File over `max_file_mb` | the size limit | send a shorter clip |
+| On-device helper or model missing | "…Install it from `fermix setup` → Transcription." | choose a hosted backend in **Transcribe with** |
+| No on-device build for this machine | choose another backend | **Transcribe with** |
+| Provider error | "transcription failed. Please try again." | try again; check the key |
 
-## When it can't transcribe
-
-When transcription isn't configured, the file is over the size cap, or the
-provider errors, the sender gets a specific reply instead of a silent drop — not
-configured → run `fermix setup`; too large → the size-cap limit; on-device
-selected on a machine with no build for it → choose another backend; other
-failures → transcription failed, try again — and no turn is scheduled.
+The replies name `fermix setup`; translate them for a Mac app user.

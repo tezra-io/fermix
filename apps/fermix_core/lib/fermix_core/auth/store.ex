@@ -4,7 +4,9 @@ defmodule FermixCore.Auth.Store do
 
   Reads tolerate the M3-era flat shape (one provider, top-level keys)
   and normalize it to the new nested shape silently. Writes always
-  emit the new shape. Atomic via tmp+rename; perms forced to `0600`.
+  emit the new shape. Atomic via tmp+rename; the tmp is made `0600` before any
+  byte lands in it, and a tmp a killed writer left is removed by the next write
+  or delete.
 
   Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order the writers.
   Every auth profile has its own `TokenManager` process, and CLI VMs, sign-ins
@@ -383,6 +385,8 @@ defmodule FermixCore.Auth.Store do
   end
 
   defp merge_write(provider, entry, path) do
+    remove_leftover_tmps(path)
+
     with {:ok, current} <- read_for_write(path),
          updated <- put_provider(current, provider, entry),
          :ok <- atomic_write(path, encode(updated)) do
@@ -391,6 +395,8 @@ defmodule FermixCore.Auth.Store do
   end
 
   defp remove_write(provider, path) do
+    remove_leftover_tmps(path)
+
     with {:ok, current} <- read_existing(path),
          {:ok, updated} <- remove_provider(current, provider),
          :ok <- atomic_write(path, encode(updated)) do
@@ -430,10 +436,8 @@ defmodule FermixCore.Auth.Store do
   defp preserve_and_refuse(path, raw, reason) do
     backup = "#{path}.broken.#{System.system_time(:second)}"
 
-    case File.write(backup, raw, [:binary]) do
+    case write_private(backup, raw) do
       :ok ->
-        _ = File.chmod(backup, 0o600)
-
         Logger.error(
           "Auth.Store: refusing to overwrite #{path} (#{inspect(reason)}); preserved at #{backup}"
         )
@@ -569,8 +573,7 @@ defmodule FermixCore.Auth.Store do
     tmp = "#{path}.tmp.#{System.unique_integer([:positive, :monotonic])}"
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(tmp, contents, [:binary]),
-         :ok <- File.chmod(tmp, 0o600),
+         :ok <- write_private(tmp, contents),
          :ok <- File.rename(tmp, path) do
       :ok
     else
@@ -578,6 +581,68 @@ defmodule FermixCore.Auth.Store do
         _ = File.rm(tmp)
         Logger.warning("Auth.Store: failed to persist — #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  # Created empty, then made private, then filled: the only order in which the
+  # tokens never land in a file another account could read (`Auth.TokenFile`
+  # uses the same order). The bytes go through the descriptor that created the
+  # file, never a reopen by path: a tmp removed after the open (a sweep by a
+  # holder that broke this writer's store lock as stale) then fails the chmod
+  # or the rename instead of being re-created world-readable. `File.open/3`
+  # closes the descriptor on every path.
+  defp write_private(file, bytes) do
+    case File.open(file, [:write, :binary], &chmod_then_write(&1, file, bytes)) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp chmod_then_write(device, file, bytes) do
+    with :ok <- File.chmod(file, 0o600), do: IO.binwrite(device, bytes)
+  end
+
+  # Runs under the store lock, as every tmp writer (`atomic_write/2`) does, so
+  # a tmp seen here belongs to no live writer: a VM killed between its write
+  # and its rename left it, holding every profile's tokens, and nothing else
+  # would remove it. Only the names `atomic_write/2` makes are removed: a
+  # regular file in the auth file's own directory named `<auth file>.tmp.<n>`.
+  # A sweep that fails is logged and the write goes on, so a leftover never
+  # costs the rotation this write persists.
+  defp remove_leftover_tmps(path) do
+    dir = Path.dirname(path)
+    prefix = Path.basename(path) <> ".tmp."
+
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&leftover_tmp?(&1, prefix))
+        |> Enum.each(&remove_leftover(Path.join(dir, &1)))
+
+      {:error, reason} ->
+        Logger.warning(
+          "Auth.Store: could not list #{dir} for leftover tmp files: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp leftover_tmp?(name, prefix) do
+    String.starts_with?(name, prefix) and
+      String.replace_prefix(name, prefix, "") =~ ~r/\A[0-9]+\z/
+  end
+
+  # A directory or a link of that name is not one `atomic_write/2` made, so it
+  # is left alone.
+  defp remove_leftover(file) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(file),
+         :ok <- File.rm(file) do
+      Logger.warning("Auth.Store: removed #{file}, a tmp file a writer stopped before renaming")
+    else
+      {:ok, %File.Stat{}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Auth.Store: could not remove #{file}: #{inspect(reason)}")
     end
   end
 

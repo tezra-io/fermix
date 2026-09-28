@@ -29,6 +29,8 @@ defmodule FermixCore.Capabilities.Capability do
   the class alone was never a privacy boundary.
   """
 
+  alias FermixCore.Capabilities.AccessGate
+
   @type kind :: :builtin | :skill | :mcp
   @type policy_class ::
           :read_only | :read_write | :exec | :network | :external_api | :gui_control
@@ -97,11 +99,19 @@ defmodule FermixCore.Capabilities.Capability do
 
   @doc """
   Run the capability. The runtime owns dispatch — adapters never call this.
+
+  The one invoke boundary for every caller (the agent loop, the realtime voice
+  bridge, inbound MCP), so `Capabilities.AccessGate` decides here whether an
+  access-sensitive command may run; a held call returns its result without the
+  executor ever being called.
   """
   @spec execute(t(), map(), map()) :: term()
-  def execute(%__MODULE__{executor: {mod, fun, extra}}, args, context)
+  def execute(%__MODULE__{executor: {mod, fun, extra}} = capability, args, context)
       when is_map(args) and is_map(context) and is_list(extra) do
-    apply(mod, fun, [args, context | extra])
+    case AccessGate.admit(capability, args, context) do
+      {:dispatch, context} -> apply(mod, fun, [args, context | extra])
+      {:held, result} -> {:ok, result}
+    end
   end
 
   defp fetch_required!(attrs, key) do

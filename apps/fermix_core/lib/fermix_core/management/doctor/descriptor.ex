@@ -191,6 +191,7 @@ defmodule FermixCore.Management.Doctor.Descriptor do
   defp network_checks do
     [
       spec("auth_probe", :connectivity, :critical, :configured, &Checks.auth_probe/0),
+      spec("realtime_key", :connectivity, :warning, :configured, &Checks.realtime_key/0),
       spec("channel_health", :connectivity, :warning, :configured, &Checks.channel_health/0),
       spec("mobile", :connectivity, :warning, :configured, &Checks.mobile/0),
       spec("web_search_probe", :connectivity, :info, :configured, fn ->

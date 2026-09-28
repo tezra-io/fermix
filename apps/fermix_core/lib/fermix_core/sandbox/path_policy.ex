@@ -235,7 +235,7 @@ defmodule FermixCore.Sandbox.PathPolicy do
        Enum.map(@protected_home_dirs, &Path.join(os_home, &1)) ++
        vendor_credential_paths(os_home) ++
        Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
-    |> Enum.map(&canonical_path/1)
+    |> Enum.map(&link_resolved_path/1)
   end
 
   @doc """
@@ -264,10 +264,20 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
+  # A protected root needs its symlinks resolved but not its on-disk casing:
+  # `protected?/2` compares on the case fold, and `real_case/2` lists every
+  # directory on the way, for every root, on every sandbox decision.
+  defp link_resolved_path(path) do
+    case path |> expand_path("/") |> resolve_components(64, &keep_case/2) do
+      {:ok, resolved} -> resolved
+      {:error, _reason} -> Path.expand(path)
+    end
+  end
+
   defp resolve(path, base) do
     path
     |> expand_path(base)
-    |> resolve_components(64)
+    |> resolve_components(64, &real_case/2)
   end
 
   defp expand_path("~", _base), do: System.user_home!()
@@ -275,32 +285,32 @@ defmodule FermixCore.Sandbox.PathPolicy do
   defp expand_path("/" <> _rest = path, _base), do: Path.expand(path)
   defp expand_path(path, base), do: Path.expand(path, base)
 
-  defp resolve_components(path, 0), do: {:error, {:too_many_symlinks, path}}
+  defp resolve_components(path, 0, _name), do: {:error, {:too_many_symlinks, path}}
 
-  defp resolve_components(path, hops_left) do
+  defp resolve_components(path, hops_left, name) do
     parts = Path.expand(path) |> Path.split()
-    resolve_parts("/", Enum.drop(parts, 1), hops_left)
+    resolve_parts("/", Enum.drop(parts, 1), hops_left, name)
   end
 
-  defp resolve_parts(current, [], _hops_left), do: {:ok, current}
+  defp resolve_parts(current, [], _hops_left, _name), do: {:ok, current}
 
-  defp resolve_parts(current, [part | rest], hops_left) do
-    next = join_part(current, real_case(current, part))
+  defp resolve_parts(current, [part | rest], hops_left, name) do
+    next = join_part(current, name.(current, part))
 
     case File.lstat(next) do
-      {:ok, %{type: :symlink}} -> resolve_symlink(next, rest, hops_left)
-      {:ok, _stat} -> resolve_parts(next, rest, hops_left)
+      {:ok, %{type: :symlink}} -> resolve_symlink(next, rest, hops_left, name)
+      {:ok, _stat} -> resolve_parts(next, rest, hops_left, name)
       {:error, :enoent} -> {:ok, append_parts(next, rest)}
       {:error, reason} -> {:error, reason}
     end
   end
 
-  defp resolve_symlink(path, rest, hops_left) do
+  defp resolve_symlink(path, rest, hops_left, name) do
     with {:ok, target} <- File.read_link(path) do
       target
       |> symlink_target(Path.dirname(path))
       |> append_parts(rest)
-      |> resolve_components(hops_left - 1)
+      |> resolve_components(hops_left - 1, name)
     end
   end
 
@@ -324,6 +334,8 @@ defmodule FermixCore.Sandbox.PathPolicy do
       {:error, _reason} -> part
     end
   end
+
+  defp keep_case(_dir, part), do: part
 
   defp pick_case(entries, part) do
     if part in entries do

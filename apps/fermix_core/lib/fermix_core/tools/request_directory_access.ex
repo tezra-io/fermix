@@ -241,6 +241,8 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     |> String.trim()
   end
 
+  @resume_note "Once you confirm, I'll resume automatically."
+
   @doc """
   The line an owner-approval prompt on the sandbox `/confirm` flow ends with.
   One home for the token-visibility rule: the coding harness's vendor-config
@@ -254,17 +256,21 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   remain in the text or the owner could not confirm at all. Replay is
   independently blocked (operator-only confirm + same-origin binding), so this is
   info-disclosure hardening, not a bypass fix.
+
+  `after_confirm` says what happens once the owner confirms: a resumed request
+  here, or the daemon running the command itself (`Capabilities.AccessGate`).
   """
-  @spec approval_line(String.t(), map()) :: String.t()
-  def approval_line(token, context) when is_binary(token) and is_map(context) do
+  @spec approval_line(String.t(), map(), String.t()) :: String.t()
+  def approval_line(token, context, after_confirm \\ @resume_note)
+      when is_binary(token) and is_map(context) and is_binary(after_confirm) do
     chat_type = Map.get(context, :chat_type)
     private_button? = Map.get(context, :private_approval_button?, false)
 
     if omit_token?(chat_type, private_button?) do
       "Approve with the button below, or privately via `/confirm` in a DM or the CLI " <>
-        "(expires in 60s). Once you confirm, I'll resume automatically."
+        "(expires in 60s). " <> after_confirm
     else
-      "Approve with `/confirm #{token}` (expires in 60s). Once you confirm, I'll resume automatically."
+      "Approve with `/confirm #{token}` (expires in 60s). " <> after_confirm
     end
   end
 

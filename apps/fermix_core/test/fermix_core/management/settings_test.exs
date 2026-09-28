@@ -10,13 +10,17 @@ defmodule FermixCore.Management.SettingsTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.AnswerMap
+  alias FermixCore.Management.Settings.Browser
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -44,7 +48,9 @@ defmodule FermixCore.Management.SettingsTest do
     :harness,
     :tools,
     :sandbox,
-    :secret_writer
+    :browser,
+    :secret_writer,
+    :secret_store
   ]
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
 
@@ -122,7 +128,7 @@ defmodule FermixCore.Management.SettingsTest do
 
     test "every pane a section names is a pane the app routes to" do
       panes = ~w(providers personality memory channels voice meetings computer coding
-                 search images sandbox)
+                 search images sandbox browser secrets)
 
       for section <- Settings.sections() do
         assert section.pane in panes, "#{section.id} names an unroutable pane"
@@ -280,6 +286,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"value" => "claude-opus-5"} = row("providers.anthropic", "default_model")
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
+    end
+
+    # The picker's value is the model in force, so a provider nobody has chosen
+    # a model for still shows the one the daemon will call.
+    test "a model row names the catalog default until a model is chosen" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      for descriptor <- Descriptor.all() do
+        assert %{"value" => value} = row("providers.#{descriptor.id}", "default_model")
+        assert value == ModelCatalog.default_model_for(descriptor.id)
+      end
     end
 
     # The macOS app draws its model picker from these options, so a catalog
@@ -1053,11 +1070,284 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # The managed task browser's pane. Its first row is the launcher's answer,
+  # injected here so the host's own Chrome never decides a verdict; the other
+  # three are the `[fermix_core.browser]` keys a person sets.
+  describe "the browser section" do
+    test "publishes the browser in force and three live settings with their defaults" do
+      Application.delete_env(:fermix_core, :browser)
+
+      assert %{id: "browser", pane: "browser", title: "Browser"} in Settings.sections()
+
+      rows = rows("browser")
+
+      assert Enum.map(rows, &{&1["key"], &1["kind"]}) == [
+               {"browser_executable", "text"},
+               {"browser_default_profile", "choice"},
+               {"browser_max_tabs", "number"},
+               {"browser_allowed_hosts", "list"}
+             ]
+
+      refute Row.restart?(:browser)
+      assert Enum.all?(rows, &(&1["restart"] == false))
+      assert row("browser", "browser_executable")["read_only"] == true
+
+      assert row("browser", "browser_default_profile")["value"] == "fermix"
+
+      assert option_values("browser", "browser_default_profile") ==
+               ~w(fermix fermix_headless fermix_visible)
+
+      assert %{"value" => 10, "min" => 1, "max" => nil, "step" => 1, "format" => "integer"} =
+               row("browser", "browser_max_tabs")
+
+      assert row("browser", "browser_allowed_hosts")["value"] == ["localhost", "127.0.0.1", "::1"]
+    end
+
+    test "the browser in force is a name, and no browser is a sentence" do
+      found = fn _block -> {:ok, %{path: "/Applications/x", label: "Google Chrome"}} end
+
+      missing = fn _block ->
+        {:error, BrowserError.new("chrome_missing", "Chrome executable was not found")}
+      end
+
+      assert %{"value" => "Google Chrome", "footer" => nil} = executable_row(found)
+
+      assert %{"value" => nil, "footer" => "No Chrome or Chromium is installed."} =
+               executable_row(missing)
+    end
+
+    # A download does not clear a configuration the launcher refuses, so the row
+    # says what the launcher would say. The default resolver reads the section's
+    # own snapshot, not the host, which is what makes this case hermetic: the
+    # refusal comes before any browser is looked for.
+    test "a browser configuration the launcher refuses is named in its own words" do
+      snapshot = %{fermix_core: [browser: [default_profile: "selected_tab"]]}
+      [executable | _rest] = Browser.rows("browser", snapshot)
+
+      assert executable["value"] == nil
+
+      assert executable["footer"] ==
+               ~s(default_profile "selected_tab" is not a browser profile tasks can run in)
+    end
+
+    test "each key is written, reads back, and asks for no restart", %{home: home} do
+      writes = [
+        {"browser_default_profile", "fermix_headless", :default_profile},
+        {"browser_max_tabs", 4, :max_tabs},
+        {"browser_allowed_hosts", ["nas.local", "192.168.1.20"], :allowed_hosts}
+      ]
+
+      for {key, value, config_key} <- writes do
+        assert {:ok, result} = Settings.apply("browser", %{key => value})
+
+        assert result["applied"] == [key]
+        refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "browser"))
+        assert Application.get_env(:fermix_core, :browser)[config_key] == value
+        assert row("browser", key)["value"] == value
+      end
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(default_profile = "fermix_headless")
+      assert contents =~ "max_tabs = 4"
+    end
+
+    test "a value the browser would refuse at launch is refused in its own words" do
+      Application.delete_env(:fermix_core, :browser)
+
+      refusals = [
+        {"browser_max_tabs", 0, "max_tabs must be a positive integer"},
+        {"browser_max_tabs", 2.5, "max_tabs must be a positive integer"},
+        {"browser_allowed_hosts", ["münchen.de"], "is not a canonical host spelling"}
+      ]
+
+      for {key, value, sentence} <- refusals do
+        assert {:error, {:invalid_params, ^key, refusal}} =
+                 Settings.apply("browser", %{key => value})
+
+        assert refusal =~ sentence
+      end
+
+      assert Application.get_env(:fermix_core, :browser) == nil
+    end
+
+    test "how tasks run takes only the managed profiles it publishes" do
+      assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
+               Settings.apply("browser", %{"browser_default_profile" => "selected_tab"})
+
+      assert sentence == "This setting takes one of its published values."
+    end
+
+    test "the browser in force is shown here and changed elsewhere" do
+      assert {:error, {:invalid_params, "browser_executable", sentence}} =
+               Settings.apply("browser", %{"browser_executable" => "Chromium"})
+
+      assert sentence == "This setting is shown here and changed elsewhere."
+    end
+
+    # The golden illustrates a write that asks for no restart, but the restart
+    # state is the daemon's whole, so a reason another section left standing is
+    # not this write's. The reason list is compared by what this write adds.
+    test "the browser apply fixture carries the shape the writer returns" do
+      assert {:ok, result} =
+               Settings.apply("browser", %{"browser_default_profile" => "fermix_headless"})
+
+      golden = named_fixture_result("settings_apply_browser")
+
+      assert golden["restart"] == %{"required" => false, "reasons" => []}
+      refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "browser"))
+      assert shape(without_reasons(result)) == shape(without_reasons(golden))
+    end
+  end
+
   # The pitfall this exists for: a section that normalizes strings into atoms
   # must render them back in the spelling the parser accepts, or the very next
   # load raises and the daemon cannot boot on the file it just wrote. Seeded
   # with the NORMALIZED application-env shapes, because the live snapshot is
   # what a save actually persists.
+  # The store a new secret is written to. On a Linux desktop that logs in with a
+  # fingerprint the login keyring stays locked, and before this section the file
+  # store could be chosen only from a terminal, so a key saved from the app met
+  # an unlock prompt for a password its owner did not know.
+  describe "the secrets section" do
+    # The suite's compiled telegram token is plaintext, and every save secures a
+    # plaintext value into the store in force, the switching save included. The
+    # token is dropped so each case observes only the secret it saves itself.
+    setup do
+      Application.delete_env(:fermix_core, :secret_store)
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+    end
+
+    test "publishes one closed choice between the two stores, the keyring by default" do
+      assert %{id: "secrets", pane: "secrets", title: "Secrets"} in Settings.sections()
+
+      assert [row] = rows("secrets")
+
+      assert %{
+               "key" => "secret_store",
+               "kind" => "choice",
+               "label" => "Keep secrets in",
+               "value" => "keyring",
+               "suggestions" => false,
+               "read_only" => false
+             } = row
+
+      assert Enum.map(row["options"], &{&1["value"], &1["label"], &1["disabled"]}) == [
+               {"keyring", "Your keyring", false},
+               {"file", "A private file", false}
+             ]
+
+      assert row["footer"] =~ "Fermix home"
+      assert row["info"] =~ "`fermix setup --migrate-secrets`"
+    end
+
+    # `config_store.ex` applies the store on every save, so the flag the row
+    # derives says no restart, and the restart state after a switch agrees.
+    test "the row asks for no restart, because the store is applied live" do
+      assert %{"restart" => false} = row("secrets", "secret_store")
+      assert Row.restart?(:secret_store) == false
+    end
+
+    test "reads the store in force" do
+      Application.put_env(:fermix_core, :secret_store, :file)
+
+      assert %{"value" => "file"} = row("secrets", "secret_store")
+    end
+
+    test "choosing the file store takes effect at once, and the next secret lands in it", %{
+      home: home
+    } do
+      lock_keyring()
+
+      assert {:error, {:secret_store_failed, "telegram_bot_token", "locked"}} =
+               Secrets.set("telegram_bot_token", "1:abc")
+
+      assert {:ok, result} = Settings.apply("secrets", %{"secret_store" => "file"})
+
+      assert result["applied"] == ["secret_store"]
+      assert result["side_effects"] == []
+      refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "secret_store"))
+      assert Application.get_env(:fermix_core, :secret_store) == :file
+      assert settings_file(home) =~ ~s(secret_store = "file")
+      assert %{"value" => "file"} = row("secrets", "secret_store")
+
+      assert {:ok, %{"present" => true}} = Secrets.set("telegram_bot_token", "1:abc")
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:ok, "1:abc"}
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.file_sentinel()}")
+      SecretWriterStub.clear_verdict(:keyring)
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) ==
+               {:error, :missing_secret}
+    end
+
+    test "choosing the keyring again switches back", %{home: home} do
+      assert {:ok, _file} = Settings.apply("secrets", %{"secret_store" => "file"})
+      assert {:ok, result} = Settings.apply("secrets", %{"secret_store" => "keyring"})
+
+      assert result["applied"] == ["secret_store"]
+      assert Application.get_env(:fermix_core, :secret_store) == :keyring
+      refute settings_file(home) =~ "secret_store"
+      assert %{"value" => "keyring"} = row("secrets", "secret_store")
+
+      assert {:ok, %{"present" => true}} = Secrets.set("telegram_bot_token", "1:abc")
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) == {:ok, "1:abc"}
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:error, :missing_secret}
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.sentinel()}")
+    end
+
+    test "a secret already saved stays in the store it was saved to", %{home: home} do
+      assert {:ok, _stored} = Secrets.set("telegram_bot_token", "1:abc")
+      assert {:ok, _file} = Settings.apply("secrets", %{"secret_store" => "file"})
+
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.sentinel()}")
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) == {:ok, "1:abc"}
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:error, :missing_secret}
+    end
+
+    test "a store that is not one of the two is refused, and nothing changes", %{home: home} do
+      for value <- ["vault", "Keyring", ""] do
+        assert {:error, {:invalid_params, "secret_store", sentence}} =
+                 Settings.apply("secrets", %{"secret_store" => value})
+
+        assert sentence == "This setting takes one of its published values."
+      end
+
+      assert Application.get_env(:fermix_core, :secret_store) == nil
+      refute File.exists?(Path.join(home, "config.toml"))
+    end
+
+    # The refusal as the app meets it: the field and the sentence ride
+    # `details`, so the pane can put the sentence under the control.
+    test "the wire refusal names the row and says why" do
+      request = %{
+        request_id: "req-1",
+        protocol_version: 2,
+        method: "settings.apply",
+        params: %{"section" => "secrets", "values" => %{"secret_store" => "vault"}}
+      }
+
+      assert Router.route(request) ==
+               {:error, :invalid_params,
+                %{
+                  "field" => "secret_store",
+                  "sentence" => "This setting takes one of its published values."
+                }}
+    end
+  end
+
+  # A cancelled unlock prompt, the way `secret.set` met the owner's keyring.
+  defp lock_keyring do
+    SecretWriterStub.set_verdict(%{
+      store: :keyring,
+      state: :locked,
+      sentence: "the login keyring is locked"
+    })
+  end
+
+  defp settings_file(home), do: File.read!(Path.join(home, "config.toml"))
+
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()
@@ -1283,6 +1573,24 @@ defmodule FermixCore.Management.SettingsTest do
       assert result["restart"]["reasons"] != []
       assert shape(result) == shape(fixture_result("settings.reload"))
     end
+  end
+
+  defp without_reasons(result), do: update_in(result, ["restart"], &Map.delete(&1, "reasons"))
+
+  defp executable_row(resolve) do
+    "browser"
+    |> Browser.rows(%{fermix_core: []}, resolve: resolve)
+    |> Enum.find(&(&1["key"] == "browser_executable"))
+  end
+
+  defp named_fixture_result(name) do
+    :fermix_core
+    |> Application.app_dir("priv/management/fixtures/success.jsonl")
+    |> File.read!()
+    |> String.split("\n", trim: true)
+    |> Enum.map(&Jason.decode!/1)
+    |> Enum.find(&(&1["name"] == name))
+    |> get_in(["response", "result"])
   end
 
   defp fixture_result(method) do

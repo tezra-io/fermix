@@ -16,8 +16,9 @@ defmodule FermixCore.Tools.RunJobNow do
   def description do
     "Run a scheduled job immediately, out of band, without waiting for its next " <>
       "scheduled time. The run executes through the normal scheduled-job runner " <>
-      "(same isolation, delivery, and confinement) and the job's timed cadence is " <>
-      "left unchanged. Use this to test a job or fulfil an on-demand request."
+      "(same isolation, delivery, and confinement). A recurring job keeps its timed " <>
+      "cadence; a one-off run now is done and does not fire again at its time. " <>
+      "Use this to test a job or fulfil an on-demand request."
   end
 
   @impl true
@@ -33,7 +34,7 @@ defmodule FermixCore.Tools.RunJobNow do
 
   @impl true
   def when_to_use do
-    "Run a scheduled job right now (to test it or satisfy an immediate request) without disturbing its schedule."
+    "Run a scheduled job right now (to test it or satisfy an immediate request); a recurring job keeps its schedule, a one-off is then done."
   end
 
   @impl true
@@ -64,7 +65,8 @@ defmodule FermixCore.Tools.RunJobNow do
   end
 
   defp do_execute(args, context) do
-    with {:ok, job_id} <- Support.required_string(args, "job_id") do
+    with {:ok, job_id} <- Support.required_string(args, "job_id"),
+         :ok <- Support.check_job_access(job_id, context) do
       scheduler = Map.get(context, :scheduler, Scheduler)
 
       case Scheduler.run_now(scheduler, job_id) do
@@ -72,7 +74,8 @@ defmodule FermixCore.Tools.RunJobNow do
         {:error, reason} -> Support.error(reason)
       end
     else
-      {:error, reason} -> {:ok, Tool.error(reason)}
+      {:error, reason} when is_binary(reason) -> {:ok, Tool.error(reason)}
+      {:error, reason} -> Support.error(reason)
     end
   catch
     :exit, reason -> {:ok, Tool.error("scheduler_unavailable: #{inspect(reason)}")}

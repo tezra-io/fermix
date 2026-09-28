@@ -23,6 +23,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Providers.ModelCatalog
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -297,6 +298,49 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert shape(finished) == shape(fixture_result("computer_use.grant.start", %{}))
   end
 
+  # The browser download's goldens are its two terminal views: the one a client
+  # reads the browser's name from, and the one it reads the daemon's sentence
+  # from. Each is the job the real run finishes with, against the live registry,
+  # with only the downloads and the launcher's answer injected.
+  test "the golden browser download views are the ones its job finishes with" do
+    installed = fn -> {:ok, "/tmp/fermix-meetbot"} end
+    found = fn -> {:ok, %{path: "/tmp/chrome", label: "Google Chrome for Testing"}} end
+
+    cases = [
+      {"job_get_browser_install_completed", fn -> {:ok, :installed} end, "completed"},
+      {"job_get_browser_install_failed", fn -> {:error, {:browser_install_failed, 1}} end,
+       "failed"}
+    ]
+
+    for {golden, install_browser, status} <- cases do
+      jobs = jobs()
+
+      opts = [
+        operation_opts: [
+          jobs: jobs,
+          install: installed,
+          install_browser: install_browser,
+          resolve: found
+        ]
+      ]
+
+      request = %{
+        request_id: "req-1",
+        protocol_version: 2,
+        method: "browser.install.start",
+        params: %{}
+      }
+
+      assert {:ok, started} = Router.route(request, opts)
+      assert {:ok, finished} = eventually_terminal(jobs, started["job_id"])
+      expected = named_fixture_result(golden)
+
+      assert finished["status"] == status
+      assert finished["kind"] == expected["kind"]
+      assert shape(finished) == shape(expected)
+    end
+  end
+
   # The section inventory is what three consumers walk, so a fixture that lists
   # a section the daemon does not serve, or omits one it does, is a client
   # rendering a pane that answers nothing.
@@ -310,6 +354,30 @@ defmodule FermixCore.Management.ProtocolContractTest do
       |> Enum.map(& &1["id"])
 
     assert fixture == published
+  end
+
+  # A provider section's Model row offers the catalog, and `default_model` is
+  # the model in force, which for an unconfigured provider is the catalog's
+  # default. The two are one list, so a golden whose options lag the catalog
+  # holds a value none of its options can show: the app's choice control drew
+  # a blank popup for `gpt-6-astra` while the options still began at
+  # `gpt-5.6-sol`.
+  test "every golden provider section offers the catalog's models and holds one of them" do
+    for fixture <- fixtures(@successes),
+        String.starts_with?(fixture["name"], "settings_get_providers_") do
+      result = fixture["response"]["result"]
+      "providers." <> provider = result["id"]
+      row = Enum.find(result["rows"], &(&1["key"] == "default_model"))
+
+      expected =
+        provider
+        |> String.to_existing_atom()
+        |> ModelCatalog.models_for()
+        |> Enum.map(&Row.option(&1.id, &1.label))
+
+      assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
+      assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
+    end
   end
 
   # Every kind and format a row may carry is pinned to the module, so a kind
@@ -572,8 +640,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
          enabled: true,
          started: true,
          refused: false,
+         refusal: nil,
          listener: %{
            status: :ready,
+           reason: nil,
            port: 4031,
            bind: "0.0.0.0",
            candidates: ["wss://192.168.1.20:4031/ws"]
@@ -581,7 +651,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
          mdns: :advertising,
          tailnet: %{detected: true, candidates: ["100.101.102.103"]},
          identity: %{present: true, fingerprint: "3f9a 1c2e 7b4d 05a8"},
-         apns: %{enabled: false, credentials: :missing},
+         apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
          paired_devices: 1,
          protocol_version: 1,
          pairing: %{session_id: @session_id, state: :awaiting_decision}
@@ -721,7 +791,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
        [operation_opts: [logout: fn _name -> :ok end]]},
       {"capabilities.install.start", %{"target" => "computer_use_sidecar"},
        [operation_opts: [jobs: jobs(), install: fn -> {:ok, "/tmp/compux"} end]]},
-      {"meetings.signin.start", %{}, [operation_opts: [jobs: jobs()] ++ signin()]}
+      {"meetings.signin.start", %{}, [operation_opts: [jobs: jobs()] ++ signin()]},
+      {"browser.install.start", %{}, [operation_opts: [jobs: jobs(), install: fn -> block() end]]}
     ]
   end
 
@@ -907,6 +978,13 @@ defmodule FermixCore.Management.ProtocolContractTest do
     |> fixtures()
     |> Enum.filter(&(&1["method"] == method))
     |> Enum.find(&matching_result?(&1, params))
+    |> get_in(["response", "result"])
+  end
+
+  defp named_fixture_result(name) do
+    @successes
+    |> fixtures()
+    |> Enum.find(&(&1["name"] == name))
     |> get_in(["response", "result"])
   end
 

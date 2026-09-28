@@ -1,8 +1,9 @@
 defmodule FermixCore.Management.InstallsTest do
   @moduledoc """
-  The three job-backed device operations: `capabilities.install.start`,
-  `computer_use.grant.start` and `meetings.signin.start`, plus the one read
-  beside them, `computer_use.permissions.get`.
+  The job-backed device operations: `capabilities.install.start`,
+  `browser.install.start`, `computer_use.grant.start` and
+  `meetings.signin.start`, plus the one read beside them,
+  `computer_use.permissions.get`.
 
   Every installer, prompt and sign-in is injected, so nothing here downloads a
   binary, raises an OS dialog or launches a browser.
@@ -10,6 +11,7 @@ defmodule FermixCore.Management.InstallsTest do
 
   use ExUnit.Case, async: true
 
+  alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Capabilities
   alias FermixCore.Management.ComputerUse
   alias FermixCore.Management.Jobs
@@ -234,6 +236,154 @@ defmodule FermixCore.Management.InstallsTest do
     end
   end
 
+  # The download is the notetaker's own install step, and it is judged by what
+  # the launcher can start afterwards: the result names that browser.
+  describe "browser.install.start" do
+    @found {:ok, %{path: "/tmp/chrome", label: "Google Chrome for Testing"}}
+
+    test "downloads the helper, then Chromium, and names the browser tasks now use", %{
+      jobs: jobs
+    } do
+      owner = self()
+
+      install = fn ->
+        send(owner, {:sidecar, self()})
+
+        receive do
+          :finish -> {:ok, "/tmp/fermix-meetbot"}
+        end
+      end
+
+      install_browser = fn ->
+        send(owner, :browser)
+        {:ok, :installed}
+      end
+
+      assert {:ok, started} =
+               Capabilities.browser_install_start(
+                 browser_opts(jobs, install: install, install_browser: install_browser)
+               )
+
+      assert started["kind"] == "browser_install"
+      assert started["budget_ms"] == Jobs.budget_ms(:browser_install)
+
+      assert_receive {:sidecar, pid}
+      assert {:ok, running} = Jobs.get(started["job_id"], jobs)
+      assert running["phase"] == "sidecar_downloading"
+
+      send(pid, :finish)
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert_receive :browser
+      assert done["status"] == "completed"
+      assert done["result"] == %{"installed" => true, "browser" => "Google Chrome for Testing"}
+    end
+
+    # An installer that exits 0 is not a browser: the launcher has to find one,
+    # or the pane would show a finished download beside "no browser".
+    test "a download the launcher still cannot find fails rather than completing", %{
+      jobs: jobs
+    } do
+      missing = fn ->
+        {:error, BrowserError.new("chrome_missing", "Chrome executable was not found")}
+      end
+
+      assert {:ok, started} =
+               Capabilities.browser_install_start(browser_opts(jobs, resolve: missing))
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["code"] == "unavailable"
+
+      assert done["failure"]["sentence"] ==
+               "The download finished, but Fermix still finds no browser to run tasks in. " <>
+                 "See the daemon log."
+    end
+
+    # A refused browser configuration is not cleared by a download, so the job
+    # says what the launcher would say rather than that nothing was found.
+    test "a refused browser configuration is answered in its own words", %{jobs: jobs} do
+      refused = fn ->
+        {:error, BrowserError.new("invalid_config", "max_tabs must be a positive integer")}
+      end
+
+      assert {:ok, started} =
+               Capabilities.browser_install_start(browser_opts(jobs, resolve: refused))
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["failure"]["sentence"] == "max_tabs must be a positive integer"
+    end
+
+    test "a machine the notetaker has no build for has no Chromium download", %{jobs: jobs} do
+      for reason <- [
+            :no_pinned_release,
+            {:unsupported_target, "windows-x86_64"},
+            {:no_pinned_artifact, "v0.3.4", "macos-x86_64"}
+          ] do
+        install = fn -> {:error, reason} end
+
+        assert {:ok, started} =
+                 Capabilities.browser_install_start(browser_opts(jobs, install: install))
+
+        assert {:ok, done} = terminal(jobs, started["job_id"])
+
+        assert done["status"] == "failed"
+        assert done["phase"] == "sidecar_downloading"
+        assert done["failure"]["sentence"] == "Fermix has no Chromium download for this machine."
+      end
+    end
+
+    test "a failed Chromium step fails in the browser's own words", %{jobs: jobs} do
+      install_browser = fn -> {:error, {:browser_install_failed, 1}} end
+
+      assert {:ok, started} =
+               Capabilities.browser_install_start(
+                 browser_opts(jobs, install_browser: install_browser)
+               )
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["status"] == "failed"
+      assert done["phase"] == "downloading"
+      assert done["failure"]["sentence"] == "Chromium could not be installed."
+    end
+
+    test "a download that did not match its checksum says so", %{jobs: jobs} do
+      install = fn -> {:error, {:checksum_mismatch, "a", "b"}} end
+
+      assert {:ok, started} =
+               Capabilities.browser_install_start(browser_opts(jobs, install: install))
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+
+      assert done["failure"]["sentence"] ==
+               "The download did not match the checksum it was published with."
+    end
+
+    test "a second download is refused as busy", %{jobs: jobs} do
+      owner = self()
+
+      install = fn ->
+        send(owner, :installing)
+
+        receive do
+          :finish -> {:ok, "/tmp/fermix-meetbot"}
+        end
+      end
+
+      assert {:ok, _first} =
+               Capabilities.browser_install_start(browser_opts(jobs, install: install))
+
+      assert_receive :installing
+
+      assert {:error, {:busy, "browser_install"}} =
+               Capabilities.browser_install_start(browser_opts(jobs, install: install))
+    end
+  end
+
   describe "computer_use.permissions.get" do
     test "a probed helper reports its grants and when they were read" do
       probe = fn ->
@@ -416,6 +566,20 @@ defmodule FermixCore.Management.InstallsTest do
       assert {:error, {:busy, "meetings_signin"}} =
                Meetings.signin_start(signin_opts(jobs, signin))
     end
+  end
+
+  # Every download and the launcher's answer injected: nothing here fetches a
+  # helper or a browser, and the host's own Chrome never decides a verdict.
+  defp browser_opts(jobs, overrides) do
+    Keyword.merge(
+      [
+        jobs: jobs,
+        install: fn -> {:ok, "/tmp/fermix-meetbot"} end,
+        install_browser: fn -> {:ok, :already} end,
+        resolve: fn -> @found end
+      ],
+      overrides
+    )
   end
 
   defp signin_opts(jobs, signin) do
