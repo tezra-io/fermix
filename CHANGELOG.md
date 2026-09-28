@@ -21,6 +21,9 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   runs that command at once when you ask for it directly, and asks you first
   when the request follows content someone else wrote. The Tesla plugin marks
   unlock, Sentry, trunk and window vent from its 1.2.0 release.
+- **The catalog offers Tesla 1.2.0.** Setup's Plugins page flags an installed
+  1.1.1 as withdrawn and offers the update, which the confirmation for car
+  commands needs.
 
 ### Changed
 
