@@ -21,10 +21,14 @@ defmodule FermixCore.Realtime.LiveTurn do
     * **A stopped reply stays stopped.** Live keeps speaking a reply after an
       interrupt, so its voice is dropped until the output has carried no voice
       for `@stopped_reply_gap_ms`; voice after that is a new reply.
-    * **The operator has finished speaking** when the microphone, having carried
-      speech, has been quiet for `@hangover_ms` and no reply has started. It is
-      not read while the reply can still be heard: the app does no echo
-      cancellation, so the pet's own voice reaches the microphone.
+    * **The operator has finished speaking** when Live's own recognition has
+      stopped sending their words for `@words_hangover_ms` and no reply has
+      started. Words, not loudness: an energy detector on the microphone took
+      every burst of typing for a sentence (owner, 2026-09-28: "everytime I
+      type it goes to thinking mode ... because of keyboard noise"), and Live
+      transcribes speech, not keys. Words that arrive while the reply can
+      still be heard do not count: the app does no echo cancellation, so the
+      pet's own voice reaches the microphone.
 
   Only the pet's presentation follows from this. Nothing here reaches the
   provider, which runs its own turn-taking.
@@ -37,9 +41,10 @@ defmodule FermixCore.Realtime.LiveTurn do
   # int16 RMS. Live's voice measured 244 to 3,667 per 100 ms chunk and its
   # padding 0 to 49, so this sits clear of both.
   @voiced_rms 100
-  # int16 RMS, about -36 dBFS: the level the repo's energy VAD takes for speech.
-  @speech_rms 500
-  @hangover_ms 700
+  # Live sends the operator's words in fragments with gaps between them, up to
+  # 0.78 s inside one sentence in the measured call; a second without one is
+  # the end of what they said.
+  @words_hangover_ms 1_000
   @echo_tail_ms 400
   # A reply that never comes (the provider heard noise, or chose silence) must
   # not leave the pet thinking for the rest of the call.
@@ -125,31 +130,40 @@ defmodule FermixCore.Realtime.LiveTurn do
   def muted(%__MODULE__{} = turn), do: %{turn | voice_at: nil, thinking_since: nil}
 
   @doc """
-  A microphone chunk (PCM16) the provider was sent. Answers the state the pet
-  should move to, if any. `speaking?` is whether a reply is being announced.
+  A fragment of the operator's words arrived from Live's recognition. Answers
+  the state the pet should move to, if any: speaking again while the pet is
+  thinking is listening. `speaking?` is whether a reply is being announced.
   """
-  @spec input(t(), binary(), integer(), boolean()) :: {:thinking | :listening | nil, t()}
-  def input(%__MODULE__{} = turn, pcm, now, speaking?)
-      when is_binary(pcm) and is_integer(now) and is_boolean(speaking?) do
+  @spec words(t(), integer(), boolean()) :: {:listening | nil, t()}
+  def words(%__MODULE__{} = turn, now, speaking?)
+      when is_integer(now) and is_boolean(speaking?) do
     cond do
       speaking? or reply_audible?(turn, now) -> {nil, %{turn | voice_at: nil}}
-      rms(pcm) >= @speech_rms -> heard(turn, now)
-      true -> quiet(turn, now)
+      is_nil(turn.thinking_since) -> {nil, %{turn | voice_at: now}}
+      true -> {:listening, %{turn | voice_at: now, thinking_since: nil}}
     end
+  end
+
+  @doc """
+  The clock of the operator's turn, advanced by each microphone chunk (the
+  pet streams one every 100 ms for the whole call). Answers `:thinking` once
+  their words have stopped for `@words_hangover_ms` with no reply started, and
+  `:listening` once a reply has failed to come for `@thinking_limit_ms`.
+  """
+  @spec tick(t(), integer(), boolean()) :: {:thinking | :listening | nil, t()}
+  def tick(%__MODULE__{} = turn, now, speaking?) when is_integer(now) and is_boolean(speaking?) do
+    if speaking?, do: {nil, turn}, else: quiet(turn, now)
   end
 
   defp reply_audible?(%__MODULE__{voiced_until: nil}, _now), do: false
   defp reply_audible?(turn, now), do: now < turn.voiced_until + @echo_tail_ms
-
-  defp heard(%__MODULE__{thinking_since: nil} = turn, now), do: {nil, %{turn | voice_at: now}}
-  defp heard(turn, now), do: {:listening, %{turn | voice_at: now, thinking_since: nil}}
 
   defp quiet(%__MODULE__{thinking_since: since} = turn, now)
        when is_integer(since) and now - since >= @thinking_limit_ms,
        do: {:listening, %{turn | thinking_since: nil}}
 
   defp quiet(%__MODULE__{voice_at: at, thinking_since: nil} = turn, now)
-       when is_integer(at) and now - at >= @hangover_ms,
+       when is_integer(at) and now - at >= @words_hangover_ms,
        do: {:thinking, %{turn | voice_at: nil, thinking_since: now}}
 
   defp quiet(turn, _now), do: {nil, turn}
