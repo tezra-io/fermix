@@ -1,9 +1,9 @@
 --------------------------- MODULE RealtimeSession ---------------------------
 (***************************************************************************)
 (* FermixCore.Realtime.SessionServer for ONE voice call after call_start: *)
-(* how a tool result becomes the model's next spoken response, and how   *)
-(* the call keeps exactly one upstream OpenAI socket across drops and     *)
-(* reconnects.                                                            *)
+(* how a tool result becomes the model's next spoken response, how the    *)
+(* call keeps exactly one upstream OpenAI socket across drops and         *)
+(* reconnects, and how it ends when OpenAI refuses to configure one.      *)
 (*                                                                         *)
 (* Processes: the session GenServer and its one mailbox; its tool tasks   *)
 (* (async_nolink on the Realtime TaskSupervisor); the confirmed run of an *)
@@ -27,7 +27,12 @@
 (* create). The model has it by construction: ProvRead queues the         *)
 (* rejection while the response is active, and RespDone queues its done   *)
 (* in a later step on the same socket. The re-armed trigger rests on it   *)
-(* (handle_active_response_race, session_server.ex:1465-1485).            *)
+(* (handle_active_response_race, session_server.ex:1515-1535).            *)
+(*                                                                         *)
+(* Observed of OpenAI (2026-09-26, a wrong key): it accepts the WebSocket, *)
+(* then answers session.update with an error (invalid_api_key) and never  *)
+(* sends session.updated. Whether it then closes the socket is not known, *)
+(* so the model leaves it open; Drop may still close it.                  *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (*  - audio, transcripts other than the owner's yes, usage and cost       *)
@@ -36,21 +41,23 @@
 (*  - interrupt: its response.cancel only ends the active response early, *)
 (*    which RespDone already allows at any time;                          *)
 (*  - a tool task crash: its :DOWN is answered exactly like a result      *)
-(*    (session_server.ex:448-453), so TaskFinish covers both; likewise a  *)
-(*    confirmed run's crash (:440-444) and DispatchFinish;                *)
+(*    (session_server.ex:466-471), so TaskFinish covers both; likewise a  *)
+(*    confirmed run's crash (:458-462) and DispatchFinish;                *)
 (*  - a second confirmed run: Yeses is at most 1, so at most one outcome  *)
-(*    is held (held_outcomes is a list, oldest first, :1321-1326);        *)
+(*    is held (held_outcomes is a list, oldest first, :1371-1376);        *)
 (*  - the warning terminate/2 logs for an outcome still held when the     *)
-(*    call ends (warn_unspoken_outcomes, :551, :1331-1338);               *)
+(*    call ends (warn_unspoken_outcomes, :569, :1381-1388);               *)
 (*  - the access gate's own state: what a call has read from outside      *)
 (*    (outside_sources), the waiting stamp tool_call_context gives each   *)
-(*    tool task (:1228-1234), and the binding of the owner's answer to    *)
+(*    tool task (:1278-1284), and the binding of the owner's answer to    *)
 (*    the first input item committed after the park (bind_access_answer   *)
-(*    and answer_access, :1244-1273). The owner's yes is one step, Yes,   *)
+(*    and answer_access, :1294-1323). The owner's yes is one step, Yes,   *)
 (*    and needs only that a tool call has run. A spoken no only adds a    *)
 (*    passive status item (no response.create) and starts nothing;        *)
 (*  - call_start: the call starts connected on socket 1, configured, with *)
-(*    the operator's first response under way;                            *)
+(*    the operator's first response under way. OpenAI refusing socket 1's *)
+(*    session.update takes the same clause (session_server.ex:420) as a   *)
+(*    reconnect's refusal, which is modelled; ExUnit covers socket 1's;   *)
 (*  - the network between OpenAI and the socket process: an event OpenAI *)
 (*    emits lands in the session's mailbox in the same step;              *)
 (*  - WebSockex itself (deps/websockex, 0.5.1 in mix.lock; not pinnable): *)
@@ -62,18 +69,19 @@
 (*    (handle_initial_conn_failure defaults to false, websockex.ex:610).  *)
 (*    WebSockex does not trap exits, so any non-normal exit of the        *)
 (*    session kills its sockets through the link: end_call and call_stop  *)
-(*    exit with {:shutdown, _} (:712-716, :301-312), and a crash or a     *)
+(*    exit with {:shutdown, _} (:730-734, :301-312), and a crash or a     *)
 (*    supervisor shutdown is non-normal too. terminate/2 also closes      *)
-(*    openai_pid (:545-560);                                              *)
+(*    openai_pid (:563-578);                                              *)
 (*  - SessionServer.handle_provider_event/2 (session_server.ex:102): a    *)
 (*    test seam nothing in lib calls. It acts on an event without the pid *)
-(*    check, so NoFreeze, NoStrayTimer and NoTickWhileConnected hold only *)
-(*    while it stays one.                                                 *)
+(*    check, and an error before session.updated does not end the call    *)
+(*    through it, so NoFreeze, NoStrayTimer, NoTickWhileConnected and     *)
+(*    NoUnconfiguredWait hold only while it stays one.                    *)
 (*                                                                         *)
 (* One step = one session callback, one task finishing, one timer firing, *)
 (* or one thing OpenAI, the network or the owner does.                    *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 66336f954ef4
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 604b617c39b2
 \* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ 2518e5b51bff
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -89,38 +97,43 @@ CONSTANTS
                     \* speech (turn_detection create_response: true, openai_client.ex:427)
     Yeses,          \* 0 or 1: the owner says yes to an access-sensitive command a tool
                     \* call parked, and the session starts its confirmed run
-                    \* (answer_access -> start_access_dispatch, session_server.ex:1263-1291)
+                    \* (answer_access -> start_access_dispatch, session_server.ex:1313-1341)
     OpensCanFail,   \* a reconnect's WebSocket handshake fails (start_link returns an error)
     UpdatesCanFail, \* a reconnect's socket opens, but sending session.update to it fails
     UsersCanStop,   \* the operator ends the call (call_stop, session_server.ex:301)
     LateVadCreated, \* a VAD response takes its context in one step and OpenAI emits its
                     \* response.created in a later one; FALSE emits it in the same step
+    OpenAICanRefuse, \* OpenAI answers a reconnect's session.update with an error instead
+                     \* of session.updated: a refused key, a refused configuration
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off only by the checks that show a property needs it.
     DefersWhileCallsPending,   \* finish_tool_turn holds the trigger while other calls
-                               \* of the batch are in flight (session_server.ex:1439)
+                               \* of the batch are in flight (session_server.ex:1489)
     DefersWhileResponseActive, \* ... and while OpenAI's response is active; the
-                               \* response.done then sends it (:1443, flush_deferred_response :1452)
+                               \* response.done then sends it (:1493, flush_deferred_response :1502)
     RearmsOnRejection,         \* a response.create OpenAI rejected for an active response
-                               \* is owed again (handle_active_response_race, :1478)
+                               \* is owed again (handle_active_response_race, :1528)
     CancelsToolsOnReconnect,   \* schedule_reconnect kills in-flight tool tasks, and
-                               \* Task.shutdown flushes their replies (:651 -> :728-729)
+                               \* Task.shutdown flushes their replies (:669 -> :776-777)
     ClosesUnconfigured,        \* resume_provider_session closes a socket whose
-                               \* session.update failed (:696)
-    EndsWhenExhausted,         \* no reconnect left ends the call (end_call, :712)
+                               \* session.update failed (:714)
+    EndsWhenExhausted,         \* no reconnect left ends the call (end_call, :730)
     ResetsAttemptsOnSuccess,   \* a reconnect OpenAI confirms resets reconnect_attempts: the
-                               \* new socket's first session.updated (:875)
-    ResetsOnlyWhenConfirmed,   \* ... and nothing earlier does (:508). FALSE resets it as soon
+                               \* new socket's first session.updated (:923)
+    ResetsOnlyWhenConfirmed,   \* ... and nothing earlier does (:526). FALSE resets it as soon
                                \* as the socket opens and takes its session.update, as the code
                                \* did before the reset moved (:467 at 35a6acdc)
     OwnSocketOnly,             \* only openai_pid's events, errors and EXIT are acted on;
-                               \* any other socket's are dropped (:409, :471, :480, :486)
-    HoldsOutcome               \* a confirmed run's outcome that lands while the call is not
+                               \* any other socket's are dropped (:420, :427, :489, :498,
+                               \* :504)
+    HoldsOutcome,              \* a confirmed run's outcome that lands while the call is not
                                \* live, or whose status item cannot be sent, is held and told
                                \* once OpenAI confirms the next socket (speak_outcome
-                               \* :1304-1319, speak_held_outcomes :879, :1325-1326). FALSE
+                               \* :1354-1369, speak_held_outcomes :927, :1375-1376). FALSE
                                \* sends it whatever the call's state, as before (:1277-1281
                                \* at 82a91e60)
+    EndsOnRefusal              \* an error on openai_pid before its session.updated ends
+                               \* the call (:420 -> refuse_call :745 -> end_call :730)
 
 ASSUME Yeses \in {0, 1}
 
@@ -160,7 +173,7 @@ VARIABLES
     rejected,     \* OpenAI rejected a response.create: a response was already active
     tries,        \* reconnect attempts run since OpenAI last confirmed the call's socket
                   \* (its first session.updated)
-    ended,        \* why the session ended: "none", "stop", "exhausted"
+    ended,        \* why the session ended: "none", "stop", "exhausted", "refused"
     noteSent      \* the session put the confirmed run's status item on the wire to an
                   \* open socket
 
@@ -175,7 +188,7 @@ vars == <<session, task, disp, sockets, provider, book>>
 SockIds == 1..MaxSockets
 ClientEvents == ({"create", "update", "note"} \X {None}) \cup ({"out"} \X Calls)
 Msgs ==
-    ({"created", "done", "reject", "updated", "disc", "yes"} \X SockIds \X {None})
+    ({"created", "done", "reject", "updated", "refused", "disc", "yes"} \X SockIds \X {None})
     \cup ({"call"} \X SockIds \X Calls)
     \cup ({"result"} \X {None} \X Calls)
     \cup ({"tick", "dispatched"} \X {None} \X {None})
@@ -203,7 +216,7 @@ TypeOK ==
     /\ noteAt \in SockIds \cup {None}
     /\ dropsLeft \in 0..Drops /\ vadLeft \in 0..VadTurns /\ yesLeft \in 0..Yeses
     /\ rejected \in BOOLEAN /\ tries \in Nat
-    /\ ended \in {"none", "stop", "exhausted"}
+    /\ ended \in {"none", "stop", "exhausted", "refused"}
     /\ noteSent \in BOOLEAN
 
 -----------------------------------------------------------------------------
@@ -222,10 +235,10 @@ NextSock ==
 \* or its EXIT.
 Emit(k, kind, c) == mbox' = Append(mbox, <<kind, k, c>>)
 
-\* send_openai/2 -> OpenAIClient.send_event (session_server.ex:1517,
+\* send_openai/2 -> OpenAIClient.send_event (session_server.ex:1567,
 \* openai_client.ex:65): a call into the socket process, which writes the frames
 \* in order. To a socket that is closing or gone, or with no openai_pid
-\* (:1521), the send fails and is only reported (send_openai_events). The
+\* (:1571), the send fails and is only reported (send_openai_events). The
 \* session learns which from the send's result.
 CanSend == sock /= None /\ sstate[sock] = "open"
 
@@ -237,17 +250,17 @@ SendUp(es) ==
 KillTasks == [c \in Calls |-> IF task[c] \in {"running", "replied"} THEN "killed" ELSE task[c]]
 
 \* Task.shutdown(task, :brutal_kill) also takes the task's reply out of the
-\* mailbox (session_server.ex:722-723, :729). A confirmed run's reply is not a
+\* mailbox (session_server.ex:770-771, :777). A confirmed run's reply is not a
 \* tool task's, and stays queued.
 NotResult(m) == m[1] /= "result"
 
-\* terminate/2 (session_server.ex:545-560) and what the exit causes: kill the tool
+\* terminate/2 (session_server.ex:563-578) and what the exit causes: kill the tool
 \* tasks, cancel the timers, close openai_pid. Every socket is linked to the
 \* session, which exits with {:shutdown, _}, so every socket dies with it, and
 \* nothing reaches a dead session's mailbox. s is sstate as the calling callback
 \* left it. A confirmed run is not stopped (cancel_pending_tool_calls covers
 \* only tool tasks); its reply then reaches no one. An outcome still held is
-\* only logged (warn_unspoken_outcomes, :551).
+\* only logged (warn_unspoken_outcomes, :569).
 EndSession(why, s) ==
     /\ alive' = FALSE
     /\ ended' = why
@@ -261,16 +274,16 @@ EndSession(why, s) ==
     /\ respActive' = FALSE /\ needsResp' = FALSE
     /\ UNCHANGED <<attempts, ready, disp, held>>
 
-\* schedule_reconnect/1 (session_server.ex:635-677), and end_call/2 (:712) when
+\* schedule_reconnect/1 (session_server.ex:653-695), and end_call/2 (:730) when
 \* it returns :exhausted. m and s are the mailbox and sstate as the calling
 \* callback left them.
 \*  - It does not close openai_pid: its callers reach it only once that socket
 \*    is dead, or with none.
-\*  - Process.send_after (:664) replaces reconnect_timer. A timer still armed
+\*  - Process.send_after (:682) replaces reconnect_timer. A timer still armed
 \*    would fire with no ref left to it; with OwnSocketOnly nothing reaches
 \*    here while one is armed (NoStrayTimer).
 \*  - It leaves a confirmed run alone: cancel_pending_tool_calls kills only
-\*    pending_tool_calls (:728-729), so the run's reply may land in the
+\*    pending_tool_calls (:776-777), so the run's reply may land in the
 \*    reconnect window or on the next socket. It leaves a held outcome held.
 Reconnect(m, s) ==
     IF attempts < MaxAttempts
@@ -287,7 +300,7 @@ Reconnect(m, s) ==
     ELSE IF EndsWhenExhausted
     THEN EndSession("exhausted", s)
     \* The teardown end_call replaced: the session lived on with no socket and
-    \* no timer (the comment at session_server.ex:703-711).
+    \* no timer (the comment at session_server.ex:721-729).
     ELSE /\ sock' = None /\ ready' = FALSE /\ timer' = "none"
          /\ task' = KillTasks /\ pending' = {} /\ mbox' = SelectSeq(m, NotResult)
          /\ respActive' = FALSE /\ needsResp' = FALSE
@@ -296,7 +309,7 @@ Reconnect(m, s) ==
 
 \* A response starts in k's conversation. It reads the outputs appended so
 \* far, and the confirmed run's status item if it is there; the comment at
-\* session_server.ex:1428-1438 records that a response "snapshotted context"
+\* session_server.ex:1478-1488 records that a response "snapshotted context"
 \* when it began, so an item appended later is not part of it.
 StartResponse(k) ==
     /\ pActive' = [pActive EXCEPT ![k] = TRUE]
@@ -306,7 +319,7 @@ StartResponse(k) ==
 -----------------------------------------------------------------------------
 (* The session GenServer: one callback per message, oldest first *)
 
-\* The trigger rule finish_tool_turn (session_server.ex:1439-1450) applies after
+\* The trigger rule finish_tool_turn (session_server.ex:1489-1500) applies after
 \* the session has put es on the wire to openai_pid: with calls of the batch in
 \* flight, or OpenAI's response active, the trigger is owed; otherwise it goes
 \* with es.
@@ -318,36 +331,37 @@ FinishTurn(p, es) ==
     ELSE needsResp' = FALSE /\ SendUp(es \o <<<<"create", None>>>>)
 
 \* The confirmed run's outcome, told: Fermix's status item goes to openai_pid
-\* (speak_outcome -> send_openai_seq, session_server.ex:1306-1308), then
-\* finish_tool_turn (:1309), as for a tool result.
+\* (speak_outcome -> send_openai_seq, session_server.ex:1356-1358), then
+\* finish_tool_turn (:1359), as for a tool result.
 Tell ==
     /\ noteSent' = (noteSent \/ CanSend)
     /\ FinishTurn(pending, <<<<"note", None>>>>)
 
-\* speak_held_outcomes (:1325-1326) runs each held outcome through
+\* speak_held_outcomes (:1375-1376) runs each held outcome through
 \* speak_outcome again, with provider_ready? already true: told now, or held
-\* again when its status item cannot be sent (:1311-1317).
+\* again when its status item cannot be sent (:1361-1367).
 SpeakHeld ==
     IF held /\ CanSend
     THEN Tell /\ held' = FALSE
     ELSE UNCHANGED <<held, noteSent, needsResp, up>>
 
 \* A message from openai_pid, or from any socket when OwnSocketOnly is off:
-\* handle_info({:openai_realtime_event, pid, event}) (session_server.ex:409),
-\* and the EXIT clause (:486) for "disc".
+\* handle_info({:openai_realtime_event, pid, event}) (session_server.ex:427),
+\* and the EXIT clause (:504) for "disc". An error before session.updated
+\* does not get here with EndsOnRefusal: see Refuse.
 OnSocketMsg(msg, rest) ==
     CASE msg[1] = "disc" ->
-           \* :486 -> schedule_reconnect, or end_call when exhausted
+           \* :504 -> schedule_reconnect, or end_call when exhausted
            /\ Reconnect(rest, sstate)
            /\ UNCHANGED <<tries, noteSent>>
       [] msg[1] = "created" ->
-           \* {:response_created, _} (:931)
+           \* {:response_created, _} (:979)
            /\ respActive' = TRUE
            /\ mbox' = rest
            /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, needsResp, held,
                           task, disp, sockets, book>>
       [] msg[1] = "done" ->
-           \* {:response_done, _} (:939), ending in flush_deferred_response (:1452)
+           \* {:response_done, _} (:987), ending in flush_deferred_response (:1502)
            /\ respActive' = FALSE
            /\ IF needsResp /\ pending = {}
               THEN needsResp' = FALSE /\ SendUp(<<<<"create", None>>>>)
@@ -356,26 +370,32 @@ OnSocketMsg(msg, rest) ==
            /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, held, task, disp,
                           sstate, book>>
       [] msg[1] = "call" ->
-           \* {:function_call, call} (:923) -> dispatch_tool_call (:975)
+           \* {:function_call, call} (:971) -> dispatch_tool_call (:1025)
            /\ task' = [task EXCEPT ![msg[3]] = "running"]
            /\ pending' = pending \cup {msg[3]}
            /\ mbox' = rest
            /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, respActive, needsResp,
                           held, disp, sockets, book>>
       [] msg[1] = "reject" ->
-           \* {:error, conversation_already_has_active_response} (:950) ->
-           \* handle_active_response_race (:1478) owes the trigger again; the
+           \* {:error, conversation_already_has_active_response} (:998) ->
+           \* handle_active_response_race (:1528) owes the trigger again; the
            \* rejecting response's response.done sends it
            /\ needsResp' = (needsResp \/ RearmsOnRejection)
            /\ mbox' = rest
            /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, respActive,
                           held, task, disp, sockets, book>>
+      [] msg[1] = "refused" ->
+           \* any other {:error, _} (:998) is only reported; without EndsOnRefusal
+           \* (the old code) even one that came before session.updated
+           /\ mbox' = rest
+           /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, respActive,
+                          needsResp, held, task, disp, sockets, book>>
       [] msg[1] = "updated" ->
-           \* {:session_updated, _} (:865-880). The first one for a socket sets
-           \* provider_ready?, resets reconnect_attempts (:875), and runs
-           \* start_timers -> cancel_timers (:1719-1736), which forgets
+           \* {:session_updated, _} (:913-928). The first one for a socket sets
+           \* provider_ready?, resets reconnect_attempts (:923), and runs
+           \* start_timers -> cancel_timers (:1769-1786), which forgets
            \* reconnect_timer: an armed timer is cancelled, and a fired one's tick
-           \* stays queued. Then speak_held_outcomes (:879): OpenAI has confirmed
+           \* stays queued. Then speak_held_outcomes (:927): OpenAI has confirmed
            \* this socket, so a held outcome is told.
            /\ ready' = TRUE
            /\ timer' = IF ready THEN timer ELSE "none"
@@ -387,8 +407,8 @@ OnSocketMsg(msg, rest) ==
            /\ UNCHANGED <<alive, sock, stray, pending, respActive, task, disp, sstate, ended>>
       [] msg[1] = "yes" ->
            \* The owner's yes to the parked command: {:input_audio_committed, _}
-           \* (:893) -> bind_access_answer (:1244), then {:user_transcript_done, _, _}
-           \* (:855) -> answer_access (:1263) -> start_access_dispatch (:1279), which
+           \* (:941) -> bind_access_answer (:1294), then {:user_transcript_done, _, _}
+           \* (:903) -> answer_access (:1313) -> start_access_dispatch (:1329), which
            \* runs AccessGate.confirm off the loop.
            /\ disp' = "running"
            /\ mbox' = rest
@@ -396,15 +416,25 @@ OnSocketMsg(msg, rest) ==
                           needsResp, held, task, sockets, book>>
 
 \* A message from a socket that is not openai_pid: the catch-all for events and
-\* errors (session_server.ex:480) or the EXIT catch-all (:503). Nothing but the
+\* errors (session_server.ex:498) or the EXIT catch-all (:521). Nothing but the
 \* mailbox changes.
 DropStale(rest) ==
     /\ mbox' = rest
     /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, respActive, needsResp,
                    held, task, disp, sockets, book>>
 
-\* A tool task's reply: handle_info({ref, result}) (session_server.ex:417) ->
-\* apply_tool_result (:1389) -> append_tool_output (:1413) -> finish_tool_turn.
+\* An error from openai_pid before its session.updated, of any kind: the clause
+\* at session_server.ex:420 matches {:error, _} while provider_ready? is false.
+Refuses(msg) == EndsOnRefusal /\ ~ready /\ msg[1] \in {"reject", "refused"}
+
+\* refuse_call (session_server.ex:745) -> end_call(:provider_refused) (:730):
+\* the call ends, and terminate/2 closes the refused socket.
+Refuse ==
+    /\ EndSession("refused", sstate)
+    /\ UNCHANGED <<tries, noteSent>>
+
+\* A tool task's reply: handle_info({ref, result}) (session_server.ex:435) ->
+\* apply_tool_result (:1439) -> append_tool_output (:1463) -> finish_tool_turn.
 \* The output always goes to openai_pid; the trigger goes with it only when
 \* nothing defers it.
 OnResult(c, rest) ==
@@ -417,11 +447,11 @@ OnResult(c, rest) ==
                    book>>
 
 \* The confirmed run's reply: handle_info({ref, {status, outcome}})
-\* (session_server.ex:430), or its :DOWN (:440), answered alike ->
-\* access_dispatched (:1293) -> speak_outcome (:1304-1319). While the call is
-\* not live (provider_ready? false, :1304), or when the status item's send
-\* fails (openai_pid is dead, its EXIT still queued, :1311-1317), the outcome is
-\* held (hold_outcome, :1321) for the next socket OpenAI confirms. Otherwise it
+\* (session_server.ex:448), or its :DOWN (:458), answered alike ->
+\* access_dispatched (:1343) -> speak_outcome (:1354-1369). While the call is
+\* not live (provider_ready? false, :1354), or when the status item's send
+\* fails (openai_pid is dead, its EXIT still queued, :1361-1367), the outcome is
+\* held (hold_outcome, :1371) for the next socket OpenAI confirms. Otherwise it
 \* is told. The run is not one of pending_tool_calls, so it holds back no
 \* batch's trigger, and nothing tells it apart from a trigger already on the
 \* wire. With HoldsOutcome off, the status item and the trigger go out
@@ -435,9 +465,9 @@ OnDispatched(rest) ==
     /\ UNCHANGED <<alive, sock, ready, attempts, timer, stray, pending, respActive,
                    task, sstate, tries, ended>>
 
-\* handle_info(:reconnect_attempt) (session_server.ex:505-526) ->
-\* attempt_reconnect (:679) -> open_openai_session (:564; start_link returns
-\* after the handshake) -> resume_provider_session (:690). It does not check
+\* handle_info(:reconnect_attempt) (session_server.ex:523-544) ->
+\* attempt_reconnect (:697) -> open_openai_session (:582; start_link returns
+\* after the handshake) -> resume_provider_session (:708). It does not check
 \* whether the call is already connected.
 OnTick(rest) ==
     LET k == NextSock IN
@@ -446,12 +476,12 @@ OnTick(rest) ==
        /\ tries' = tries + 1
        /\ Reconnect(rest, sstate)
        /\ UNCHANGED noteSent
-    \/ \* the socket opens but session.update fails: close it (:696), schedule again
+    \/ \* the socket opens but session.update fails: close it (:714), schedule again
        /\ UpdatesCanFail /\ k /= None
        /\ tries' = tries + 1
        /\ Reconnect(rest, [sstate EXCEPT ![k] = IF ClosesUnconfigured THEN "closing" ELSE "open"])
        /\ UNCHANGED noteSent
-    \/ \* connected, with session.update on the wire (:508-515); the ref to an
+    \/ \* connected, with session.update on the wire (:526-533); the ref to an
        \* armed timer is dropped. The attempt stays counted until the socket's
        \* session.updated: OpenAI has not confirmed it yet.
        /\ k /= None
@@ -479,10 +509,11 @@ HandleNext ==
             [] msg[1] = "dispatched" -> OnDispatched(rest)
             [] msg[1] = "tick" -> OnTick(rest)
             [] FromSocket(msg) /\ Stale(msg) -> DropStale(rest)
-            [] FromSocket(msg) /\ ~Stale(msg) -> OnSocketMsg(msg, rest)
+            [] FromSocket(msg) /\ ~Stale(msg) /\ Refuses(msg) -> Refuse
+            [] FromSocket(msg) /\ ~Stale(msg) /\ ~Refuses(msg) -> OnSocketMsg(msg, rest)
     /\ UNCHANGED provider
 
-\* Process.send_after(self(), :reconnect_attempt, delay) (session_server.ex:664) fires.
+\* Process.send_after(self(), :reconnect_attempt, delay) (session_server.ex:682) fires.
 TimerFires ==
     /\ alive /\ timer = "armed"
     /\ timer' = "fired"
@@ -531,7 +562,9 @@ DispatchFinish ==
 
 \* OpenAI reads the next client event on k.
 \*  - A function_call_output, or Fermix's status item, joins the conversation.
-\*  - A session.update is answered with session.updated.
+\*  - A session.update is answered with session.updated or, with
+\*    OpenAICanRefuse, with an error: a refused key or configuration. The
+\*    socket is not configured, and stays open.
 \*  - A response.create starts a response, or is rejected with
 \*    conversation_already_has_active_response while one is active.
 ProvRead(k) ==
@@ -547,7 +580,8 @@ ProvRead(k) ==
                  /\ noteAt' = k
                  /\ UNCHANGED <<pActive, out, outAt, rejected, mbox>>
             [] e[1] = "update" ->
-                 /\ Emit(k, "updated", None)
+                 /\ \/ Emit(k, "updated", None)
+                    \/ OpenAICanRefuse /\ Emit(k, "refused", None)
                  /\ UNCHANGED <<pActive, out, outAt, note, noteAt, rejected>>
             [] e[1] = "create" /\ pActive[k] ->
                  /\ rejected' = TRUE
@@ -717,14 +751,14 @@ Settled ==
     /\ ~pActive[sock]
     /\ timer = "none"
 
-\* finish_tool_turn (session_server.ex:1428-1438): racing triggers left "a
+\* finish_tool_turn (session_server.ex:1478-1488): racing triggers left "a
 \* silent stall until the operator spoke again". Read as: once the call has
 \* settled, every tool output in the live conversation has had a response
 \* start after it.
 NoSilentStall ==
     Settled => \A c \in Calls : ~(out[c] = "appended" /\ outAt[c] = sock)
 
-\* The comment on the confirmed run's reply (session_server.ex:425-429): "The
+\* The comment on the confirmed run's reply (session_server.ex:443-447): "The
 \* model is told through Fermix's status item, and one response is owed so it
 \* can tell the owner, in this conversation or, when the call is not live, the
 \* next one OpenAI confirms." Read as: once the call has settled, a run that
@@ -737,26 +771,26 @@ OutcomeAnswered ==
     Settled => /\ disp = "done" => noteSent
                /\ ~(note = "appended" /\ noteAt = sock)
 
-\* finish_tool_turn (session_server.ex:1428-1438): "a trigger sent before its
+\* finish_tool_turn (session_server.ex:1478-1488): "a trigger sent before its
 \* response.done is the race itself", and the deferral "avoids every rejection
 \* the session can foresee". Read as: with no server-VAD response the session
 \* has not heard of, and no confirmed run (Witness_OutcomeTriggerRejected),
 \* OpenAI never rejects a response.create.
 NoRejectedTrigger == ~rejected
 
-\* schedule_reconnect (session_server.ex:643-645): abandon in-flight tool tasks
+\* schedule_reconnect (session_server.ex:661-663): abandon in-flight tool tasks
 \* "rather than let a late result fire at (or tear down) the new session".
 \* Read as: a tool output only ever joins the conversation that called it.
 LateResultStaysHome ==
     \A c \in Calls : out[c] /= "none" => outAt[c] = issuer[c]
 
-\* resume_provider_session (session_server.ex:686-689): leaving an unconfigured
+\* resume_provider_session (session_server.ex:704-707): leaving an unconfigured
 \* socket open "leaks an upstream connection per retry". Read as: while the
 \* call lives, every open socket is openai_pid.
 NoOrphanSocket ==
     alive => \A k \in SockIds : sstate[k] = "open" => k = sock
 
-\* end_call (session_server.ex:703-711) makes a live call with no provider
+\* end_call (session_server.ex:721-729) makes a live call with no provider
 \* connection "unrepresentable"; audio_chunk (:350-351): "openai_pid is nil
 \* ONLY inside the bounded reconnect window". Read as: a live session has a
 \* socket, or a reconnect timer on the way.
@@ -782,11 +816,18 @@ AttemptsBounded ==
 NoStrayTimer ==
     stray = 0 /\ (timer /= "none" => sock = None)
 
-\* Proposed rule: handle_info(:reconnect_attempt) (session_server.ex:505) has no
+\* Proposed rule: handle_info(:reconnect_attempt) (session_server.ex:523) has no
 \* guard, so a tick that reached a connected call would open a second socket and
 \* orphan the first. No tick is ever queued while the call is connected.
 NoTickWhileConnected ==
     ~(alive /\ sock /= None /\ <<"tick", None, None>> \in Range(mbox))
+
+\* The clause at session_server.ex:408-425: after an error that answers its
+\* session.update, "this socket will never configure the call", and a call left
+\* on it "waits for a listening that never comes". Read as: once nothing is in
+\* flight to or from the call's socket, the call is configured.
+NoUnconfiguredWait ==
+    (alive /\ sock /= None /\ mbox = <<>> /\ up[sock] = <<>>) => ready
 
 -----------------------------------------------------------------------------
 (* WITNESSES: each is violated when its scenario is reachable. *)
