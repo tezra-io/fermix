@@ -150,10 +150,18 @@ defmodule FermixChannels.Channels.Companion do
     fn media -> send_media(profile_id, media, opts) end
   end
 
+  # A provider call is not a tool: `tool_event` is a tool's lifecycle, named,
+  # never the model call that picks it. The turn's thinking state already
+  # reaches the client through `turn_started` and the first `text_delta`.
   @impl true
   def build_activity_callback(%Message{} = message) do
     turn_id = turn_id(message)
-    fn event -> broadcast(message.chat_id, Output.tool_event(turn_id, event)) end
+
+    fn
+      :provider_start -> :ok
+      :provider_response -> :ok
+      event -> broadcast(message.chat_id, Output.tool_event(turn_id, event))
+    end
   end
 
   @impl true
