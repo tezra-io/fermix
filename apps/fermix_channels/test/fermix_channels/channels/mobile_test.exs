@@ -376,6 +376,10 @@ defmodule FermixChannels.Channels.MobileTest do
                     %{"t" => "text_done", "text" => "final", "server_seq" => 73}}
 
     activity = Mobile.build_activity_callback(message)
+    assert :ok = activity.(:provider_start)
+    assert :ok = activity.(:provider_response)
+    refute_receive {:mobile_event, "main", %{"t" => "tool_event"}}
+
     assert :ok = activity.({:tool_start, "shell"})
     assert_receive {:mobile_event, "main", %{"t" => "tool_event", "phase" => "start"}}
 
