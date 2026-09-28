@@ -340,8 +340,8 @@ spec run by hand.
   one process every request and release of a task pass through: both
   `:browser_host_request` and `:browser_host_release` are handled off the same
   mailbox, in the order they arrived (`task_request`, `release_task`,
-  `connection.ex:328-365`), and both are written to the socket by the same
-  `write_request` (`:382-394`). Holds in the design (check 07) and in the
+  `connection.ex:335-372`), and both are written to the socket by the same
+  `write_request` (`:411-428`). Holds in the design (check 07) and in the
   code.
 - **Counterexample (explored, 12 states):** a variant in which the host may
   take a `task.release` ahead of requests queued before it.
@@ -371,7 +371,7 @@ spec run by hand.
 - **Status:** fixed (7cc024ee, 32297ead). `Connection.release_task` pops the
   task id out of `state.tasks` on its first release and writes `task.release`
   only then; a second release for the same task id finds nothing and writes
-  nothing (`connection.ex:356-365`, matching `PROTOCOL.md`'s "Idempotent: a
+  nothing (`connection.ex:363-372`, matching `PROTOCOL.md`'s "Idempotent: a
   second release for the same task answers `released: []`"). On the daemon
   side, `HostServer.stop/1` is a no-op once `task` is already `nil`
   (`host_server.ex:107-108`), so ending an already-ended task never sends a
@@ -520,7 +520,7 @@ spec run by hand.
   are the app's own, unpinned. `Connection.host_stopping` releases every task
   still bound to it (`Enum.reduce` over `state.tasks`, calling
   `release_task`) before it answers `host.stop_ack` behind them
-  (`connection.ex:270-284`), matching `PROTOCOL.md`'s "Quit mid-task": the
+  (`connection.ex:279-291`), matching `PROTOCOL.md`'s "Quit mid-task": the
   daemon never answers before every release it owes is on the wire. Holding
   the quit for that answer, or ending the hold on its own bound if the answer
   is lost, is `BrowserHostReducer`'s job in `tezra-io/fermix-macos`, still
