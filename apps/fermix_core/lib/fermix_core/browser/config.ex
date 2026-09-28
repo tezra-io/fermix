@@ -37,6 +37,9 @@ defmodule FermixCore.Browser.Config do
     * `host_launch_timeout_ms` — one deadline for opening the Fermix app and
       hearing its browser host attach and report, before a new `fermix` task
       is decided (`HostLauncher`).
+    * `host_launch_cooldown_ms` — after the app was opened on demand and did not
+      attach by that deadline (quit before it connected, crashed, refused by
+      macOS), how long new tasks run on Chrome without opening it again.
 
   ## Teardown
 
@@ -157,6 +160,7 @@ defmodule FermixCore.Browser.Config do
           cdp_ready_poll_interval_ms: pos_integer(),
           cdp_version_probe_timeout_ms: pos_integer(),
           host_launch_timeout_ms: pos_integer(),
+          host_launch_cooldown_ms: pos_integer(),
           stop_grace_ms: pos_integer(),
           kill_grace_ms: pos_integer(),
           start_failure_threshold: pos_integer(),
@@ -198,6 +202,7 @@ defmodule FermixCore.Browser.Config do
             cdp_ready_poll_interval_ms: 100,
             cdp_version_probe_timeout_ms: 500,
             host_launch_timeout_ms: 3_000,
+            host_launch_cooldown_ms: 300_000,
             stop_grace_ms: 2_000,
             kill_grace_ms: 2_000,
             start_failure_threshold: 3,
@@ -225,7 +230,7 @@ defmodule FermixCore.Browser.Config do
     max_live_profiles max_tabs idle_profile_ttl_ms idle_sweep_interval_ms action_timeout_ms
     navigation_timeout_ms cdp_keepalive_ms cdp_response_grace_ms launch_timeout_ms
     cdp_ready_poll_interval_ms cdp_version_probe_timeout_ms host_launch_timeout_ms
-    stop_grace_ms kill_grace_ms
+    host_launch_cooldown_ms stop_grace_ms kill_grace_ms
     start_failure_threshold start_cooldown_ms start_cooldown_max_ms start_retries
     shutdown_slack_ms wait_default_ms
     wait_max_ms wait_poll_interval_ms download_default_ms download_max_ms download_max_bytes

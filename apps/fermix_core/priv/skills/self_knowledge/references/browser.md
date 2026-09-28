@@ -16,21 +16,27 @@ else is using it. On a desktop it is a real window the person can see.
 The default profile `fermix` can run on either of two implementations of the
 same browser surface: the managed Chrome above, driven over CDP, or the Fermix
 app's own browser pane, which the app hosts and the engine drives over a local
-wire. Which one is decided once, when a conversation starts using the browser:
-the pane when the app's browser host is connected and its last report says the
-pane is ready, the managed Chrome otherwise. When the app is not connected and
-`[fermix_core.browser] launch_app` allows it (on by default for the engine
-inside the app), the engine opens the app in the background once and waits a
-few seconds for its browser to connect and report before deciding. The
-choice holds for as long as that browser use lives. A Chrome task stays in
-Chrome when the pane appears,
-and a pane task that loses its pane (the app quit, the pane closed) answers
-`host_lost` with the app's reason and ends there; tell the person, and do not
-redo the task in another browser on your own. The next browser use after
-that is decided afresh. `fermix_visible`, `fermix_headless` and
-`selected_tab` are never routed to the pane. This engine cannot drive the
-pane yet, so a pane profile answers `host_unavailable`, and until it can,
-nothing attaches and `fermix` is the managed Chrome.
+wire (`browser_host.sock`). Which one is decided once, when a conversation
+starts using the browser: the pane when the app's browser host is connected
+and its last report says the pane is ready, the managed Chrome otherwise. When
+the app is not connected and `[fermix_core.browser] launch_app` allows it (on
+by default for the engine inside the app), the engine opens the app in the
+background once and waits a few seconds for its browser to connect and report
+before deciding; if that launch never attaches (the person quits the app
+before it connects, or it crashes), a short cooldown follows before the engine
+tries opening it again, so a burst of tasks in that window all run on Chrome
+rather than each opening the app in turn. The choice holds for as long as that
+browser use lives. A Chrome task stays in Chrome when the pane appears, and a
+pane task that loses its pane mid-task (the app quit, the Mac locked or slept)
+answers `host_lost` with the app's reason and ends there; tell the person, and
+do not redo the task in another browser on your own. The person can also
+cancel a pane task directly, from its own tab in the app ("Cancel task"):
+that answers `cancelled` — the pane itself is fine, so say it was cancelled,
+not that the browser went away. Every later browser call in the same turn
+answers that same sentence too, rather than quietly starting a fresh task on
+Chrome — the turn that saw the loss or the cancel stays that way. The next
+browser use, in a fresh turn, is decided afresh. `fermix_visible`,
+`fermix_headless` and `selected_tab` are never routed to the pane.
 
 ## Where a name points
 

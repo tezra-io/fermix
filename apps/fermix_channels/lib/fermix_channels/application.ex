@@ -3,6 +3,7 @@ defmodule FermixChannels.Application do
 
   use Application
 
+  alias FermixChannels.BrowserHost
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.WhatsApp
   alias FermixChannels.Companion
@@ -64,6 +65,8 @@ defmodule FermixChannels.Application do
         # The companion chat socket, after the queue for the same reason. Its
         # registry is always present; the socket runs whenever the daemon does.
         {Companion.Supervisor, serve?: daemon_boot?(), boot_epoch: request_boot_epoch},
+        # The Fermix app's browser host socket; it runs whenever the daemon does.
+        {BrowserHost.Supervisor, serve?: daemon_boot?()},
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,

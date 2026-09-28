@@ -1,0 +1,14 @@
+{"type":"client_hello","protocol_version":1}
+{"type":"attached","host_version":"0.2.0","profile_id":"fermix-web-3c9a"}
+{"type":"availability","available":true}
+{"type":"availability","available":false,"reason":"the Mac is locked"}
+{"type":"tab.closed","tab_id":"t2","by":"task"}
+{"type":"tab.closed","tab_id":"t5","by":"page"}
+{"type":"dialog.opened","tab_id":"t1","kind":"confirm","message":"Leave this page?"}
+{"type":"dialog.opened","tab_id":"t1","kind":"prompt","message":"Your name","default":"Guest"}
+{"type":"download.began","download_id":"d1","tab_id":"t2","filename":"report.pdf"}
+{"type":"download.progress","download_id":"d1","received_bytes":65536,"total_bytes":91022}
+{"type":"download.finished","download_id":"d1","tab_id":"t2","state":"completed","path":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d/report.pdf","bytes":91022}
+{"type":"download.finished","download_id":"d2","tab_id":"t2","state":"failed","reason":"the server closed the connection"}
+{"type":"task.cancel","task_id":"task-2","reason":"cancelled by the person"}
+{"type":"host_stopping"}

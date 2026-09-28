@@ -13,7 +13,7 @@ defmodule FermixCore.Browser.Backend do
 
   `CDP.Backend` drives Chrome over the DevTools protocol, whoever launched it
   and whichever transport reaches it. `HostServer` is the Fermix app's own
-  browser pane (`:fermix_app`), over the app's local wire.
+  browser pane (`:fermix_app`), over the app's local wire (`browser_host.sock`).
 
   ## The contract
 
@@ -25,7 +25,9 @@ defmodule FermixCore.Browser.Backend do
   marked reported, a document response taken out of the mailbox).
 
   Arguments arrive validated for shape by `FermixCore.Browser`; a backend
-  keeps its own floor under a direct call.
+  keeps its own floor under a direct call. The context carries `:caller`, the
+  process that made the call (`ProfileServer` stamps it), which a backend may
+  bind its runtime's life to.
   """
 
   alias FermixCore.Browser.CDP
@@ -65,8 +67,12 @@ defmodule FermixCore.Browser.Backend do
   @doc "Tear the runtime down. Idempotent, and called on every exit path."
   @callback stop(state()) :: state()
 
-  @doc "A message the runtime sent the server process: an event, port output, an exit."
-  @callback handle_message(message :: term(), state()) :: state()
+  @doc """
+  A message the runtime sent the server process: an event, port output, an
+  exit. `{:stop, state}` ends the profile between requests, as a `:reap` does
+  with one: the runtime is gone for good, and the next request starts afresh.
+  """
+  @callback handle_message(message :: term(), state()) :: state() | {:stop, state()}
 
   @doc "The page console entries a failed operation carries, newest first."
   @callback console_buffer(state()) :: [map()]

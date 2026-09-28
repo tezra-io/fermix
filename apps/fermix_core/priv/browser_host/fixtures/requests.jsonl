@@ -1,0 +1,42 @@
+{"type":"server_hello","min_version":1,"max_version":1}
+{"id":1,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5},"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
+{"id":2,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/report.pdf","observe":false,"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
+{"id":3,"type":"tab.navigate","tab_id":"t1","url":"https://example.com/login","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
+{"id":4,"type":"tab.list","task_id":"task-9f2c1a7e4b0d"}
+{"id":5,"type":"tab.focus","tab_id":"t1"}
+{"id":6,"type":"tab.close","tab_id":"t2"}
+{"id":7,"type":"page.snapshot","tab_id":"t1","mode":"full","max_chars":50000,"depth":8}
+{"id":8,"type":"page.screenshot","tab_id":"t1","full_page":false,"path":"/Users/person/.fermix/workspace/browser/artifacts/0bqP3d/screenshots/41.png"}
+{"id":9,"type":"page.pdf","tab_id":"t1","path":"/Users/person/.fermix/workspace/browser/artifacts/0bqP3d/pdf/42.pdf"}
+{"id":10,"type":"page.act","tab_id":"t1","kind":"click","ref":13,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
+{"id":11,"type":"page.act","tab_id":"t1","kind":"fill","ref":11,"text":"person@example.com","observe":false}
+{"id":12,"type":"page.act","tab_id":"t1","kind":"fill_form","fields":[{"ref":11,"text":"person@example.com"},{"ref":12,"text":"correct horse"}],"observe":false}
+{"id":13,"type":"page.act","tab_id":"t1","kind":"type","ref":11,"text":".uk","observe":false}
+{"id":14,"type":"page.act","tab_id":"t1","kind":"submit","ref":12,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
+{"id":15,"type":"page.act","tab_id":"t1","kind":"press","key":"Enter","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
+{"id":16,"type":"page.act","tab_id":"t1","kind":"hover","ref":7,"observe":false}
+{"id":17,"type":"page.act","tab_id":"t1","kind":"get","field":"rect","selector":"#checkout","observe":false}
+{"id":18,"type":"page.act","tab_id":"t1","kind":"wait","wait_until":"text","text":"Order placed","timeout_ms":5000,"observe":false}
+{"id":19,"type":"page.act","tab_id":"t1","kind":"click_coords","x":412.5,"y":208,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
+{"id":20,"type":"page.upload","tab_id":"t1","ref":21,"path":"/Users/person/.fermix/workspace/cv.pdf"}
+{"id":21,"type":"dialog.resolve","tab_id":"t1","accept":true,"text":"yes"}
+{"id":22,"type":"cookies.get","tab_id":"t1"}
+{"id":23,"type":"cookies.clear","tab_id":"t1"}
+{"id":24,"type":"host.status"}
+{"id":25,"type":"task.release","task_id":"task-9f2c1a7e4b0d"}
+{"id":26,"type":"host.stop_ack"}
+{"id":27,"type":"page.act","tab_id":"t1","kind":"wait","wait_until":"element","ref":13,"timeout_ms":5000,"observe":false}
+{"type":"error","reason":"invalid_json"}
+{"type":"error","reason":"invalid_frame"}
+{"type":"error","reason":"missing_type"}
+{"type":"error","reason":"line_too_large"}
+{"type":"error","reason":"handshake_required"}
+{"type":"error","reason":"unexpected_client_hello"}
+{"type":"error","reason":"attach_required"}
+{"type":"error","reason":"unexpected_attached"}
+{"type":"error","reason":"host_already_attached"}
+{"type":"error","reason":"missing_field","field":"protocol_version"}
+{"type":"error","reason":"invalid_field","field":"available"}
+{"type":"error","reason":"unknown_event","event":"tab.moved"}
+{"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"type":"error","reason":"untrusted_host","message":"the browser host must be a process the daemon did not start: a process placed as daemon_descendant"}

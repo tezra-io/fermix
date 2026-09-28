@@ -31,7 +31,7 @@ defmodule FermixCore.Browser.RoutingTest do
   defp host(:usable) do
     host = host(:empty)
     :ok = HostAvailability.listening(host, endpoint())
-    :ok = HostAvailability.attached(host)
+    :ok = HostAvailability.attached(host, endpoint(), 1)
     :ok = HostAvailability.report(host, true, nil)
     host
   end
@@ -72,7 +72,7 @@ defmodule FermixCore.Browser.RoutingTest do
 
     launcher = fn _timeout_ms ->
       send(test, :opened)
-      :ok = HostAvailability.attached(pane)
+      :ok = HostAvailability.attached(pane, endpoint(), 1)
       HostAvailability.report(pane, true, nil)
     end
 
@@ -91,7 +91,7 @@ defmodule FermixCore.Browser.RoutingTest do
 
     attached = host(:empty)
     :ok = HostAvailability.listening(attached, endpoint())
-    :ok = HostAvailability.attached(attached)
+    :ok = HostAvailability.attached(attached, endpoint(), 1)
     assert route(ctx, "owner-silent", "fermix", @managed, attached) == {@managed, :cdp}
 
     :ok = HostAvailability.report(attached, false, "the pane is closed")
@@ -128,13 +128,17 @@ defmodule FermixCore.Browser.RoutingTest do
   end
 
   # End to end through the tool's own entry point and the browser tree's own
-  # processes: decided at the start, kept while the profile lives, and a pane
-  # that goes away fails its task and takes the profile with it.
-  test "the facade decides at the start, keeps it, and reaps a lost pane" do
+  # processes: decided at the start, kept while the profile lives, a pane that
+  # goes away fails its task and takes the profile with it, and the turn that
+  # saw the loss answers the same sentence for the rest of the turn instead of
+  # being routed to Chrome (`TurnMarker`).
+  test "the facade decides at the start, keeps it, reaps a lost pane, and marks the turn" do
     host = HostAvailability
     endpoint = endpoint()
+    {:ok, connection} = FermixTestSupport.FakeBrowserHostConnection.start_link(%{"tab.list" => {:ok, %{"tabs" => []}}})
+    on_exit(fn -> Process.exit(connection, :kill) end)
     :ok = HostAvailability.listening(host, endpoint)
-    :ok = HostAvailability.attached(host)
+    :ok = HostAvailability.attached(host, connection, 1)
     :ok = HostAvailability.report(host, true, nil)
 
     conversation = {"cli", "routing-#{System.unique_integer([:positive])}", :root}
@@ -142,18 +146,20 @@ defmodule FermixCore.Browser.RoutingTest do
     {:ok, owner} = Scope.owner_key(context)
     on_exit(fn -> ProfileManager.stop_owner(owner) end)
 
-    assert {{:error, %Error{code: "host_unavailable"}}, :fermix_app} =
-             Browser.execute(%{"action" => "tabs"}, context)
-
+    assert {{:ok, encoded}, :fermix_app} = Browser.execute(%{"action" => "tabs"}, context)
+    assert Jason.decode!(encoded) == %{"ok" => true, "tabs" => []}
     assert ProfileManager.backend(owner, "fermix") == :fermix_app
 
-    :ok = HostAvailability.detached(host, "the app quit")
+    Process.exit(connection, :kill)
 
     assert {{:error, %Error{code: "host_lost"} = error}, :fermix_app} =
              Browser.execute(%{"action" => "tabs"}, context)
 
-    assert error.message =~ "no longer available: the app quit"
+    assert error.message =~ "no longer available: the app disconnected"
     assert eventually_reaped(owner)
+
+    assert {{:error, ^error}, :fermix_app} = Browser.execute(%{"action" => "tabs"}, context)
+    assert ProfileManager.backend(owner, "fermix") == nil
   end
 
   defp eventually_reaped(owner, attempts \\ 40) do

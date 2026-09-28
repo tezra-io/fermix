@@ -257,6 +257,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
       "realtime.sock",
       "browser_bridge.sock",
       "companion.sock",
+      "browser_host.sock",
       "memory.db-wal",
       "memory.db-shm",
       "memory.db-journal",
