@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:159-161` → `mobile_sql.ex:181-191`), and
+  companion channels (`output.ex:227-229` → `mobile_sql.ex:356-366`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -56,7 +56,7 @@ least one check):
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
   filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1582`). The
   per-row re-read (`:1602`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1042`) repeat it inside the same Repo callback (`repo.ex:2899-2902`), where
+  (`:1042`) repeat it inside the same Repo callback (`repo.ex:3012-3015`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
   under `:rest_for_one` (`application.ex:250-251`, `:268`).
@@ -198,7 +198,7 @@ still holds.
   reminder runs in that configuration. Reminder targets are limited to
   `telegram slack discord signal whatsapp` (`registry.ex:48`, enforced at
   `:1458` and `:1503`). The only adapters that read `proactive_key` are mobile
-  and companion, both through `output.ex:159-161`. The `temporal:<id>` key that
+  and companion, both through `output.ex:227-229`. The `temporal:<id>` key that
   `delivery.ex:70` attaches to every send is ignored by every platform a
   reminder can reach.
 - **Never attempt six, never two workers:** both hold (check 01), each covered
@@ -403,7 +403,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   business. With `PlatformCanBeSlow = FALSE` the platform always answers inside
   the watchdog, so the watchdog can only catch a send that never reached it.
 - **Repo call timeouts.** `Memory.Repo` calls use `GenServer.call`'s 5 s default
-  and nobody catches the exit (`repo.ex:3777-3780`).
+  and nobody catches the exit (`repo.ex:3917-3920`).
   - A timed-out claim crashes the scheduler (a `SchedulerRestart`). The claim
     still lands before the boot sweep, since both queue in the Repo's mailbox in
     order.

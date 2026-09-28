@@ -4,6 +4,7 @@ defmodule FermixCore.Companion.TimelineSearchTest do
   alias Exqlite.Sqlite3
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
+  alias FermixCore.Memory.Repo.MobileSql
 
   @now ~U[2026-09-25 12:00:00Z]
 
@@ -114,6 +115,30 @@ defmodule FermixCore.Companion.TimelineSearchTest do
 
     assert Enum.map(last.hits, & &1.server_seq) == [1]
     assert last.next_before_seq == nil
+  end
+
+  # PERF-8: the index hands matches over newest first, so a page stops at its
+  # limit; ordering by the joined row's server_seq sorted every match first.
+  test "search reads matches newest first instead of sorting every match", %{
+    db_path: db_path,
+    repo: repo
+  } do
+    append_all(repo, Enum.map(1..3, &"note number #{&1}"))
+
+    plan =
+      with_raw_conn(db_path, fn conn ->
+        {:ok, stmt} = Sqlite3.prepare(conn, "EXPLAIN QUERY PLAN " <> MobileSql.search_rows_sql())
+        params = ["[", "]", ~s("note"*), "agent-a", "owner-a", "main", nil, nil, 3]
+        :ok = Sqlite3.bind(stmt, params)
+        {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+        :ok = Sqlite3.release(conn, stmt)
+        Enum.map_join(rows, "\n", &List.last/1)
+      end)
+
+    assert [outer, inner] = String.split(plan, "\n")
+    assert outer =~ "SCAN mobile_timeline_fts VIRTUAL TABLE"
+    assert inner =~ "SEARCH t USING INTEGER PRIMARY KEY (rowid=?)"
+    refute plan =~ "TEMP B-TREE"
   end
 
   test "search stays inside its profile and owner", %{repo: repo} do

@@ -1075,10 +1075,15 @@ defmodule Fermix.CLI.Doctor.Checks do
   # A surface refused this boot or a channel enabled after boot runs no
   # listener, no announcement and no device store, so each probe below would
   # report a symptom of the one cause named here instead.
-  defp mobile_daemon_result(_config, %{status: :reported, report: %{"refused" => true}}, _opts) do
+  defp mobile_daemon_result(
+         _config,
+         %{status: :reported, report: %{"refused" => true} = report},
+         _opts
+       ) do
     fail(
       "mobile companion",
-      "identity files 0600; mobile surface refused this boot; see the daemon log"
+      "identity files 0600; mobile surface refused this boot" <>
+        refusal_class(report) <> "; see the daemon log"
     )
   end
 
@@ -1113,15 +1118,27 @@ defmodule Fermix.CLI.Doctor.Checks do
        )
        when is_list(candidates) do
     probe = Keyword.get(opts, :health_probe, &mobile_health_probe/2)
+    timeout_ms = Keyword.get(opts, :health_timeout_ms, @mobile_health_timeout_ms)
 
-    if is_function(probe, 2) do
-      mobile_candidate_health(candidates, probe)
+    if is_function(probe, 2) and is_integer(timeout_ms) and timeout_ms > 0 do
+      mobile_candidate_health(candidates, &probe.(&1, timeout_ms))
     else
       {:fail, "invalid mobile health probe"}
     end
   end
 
+  # A channel that cannot listen on its address stays up and retries on its
+  # own, so the reason is the fact to report, and there is nothing to probe.
+  defp mobile_listener(
+         %{"listener" => %{"status" => "unavailable", "reason" => reason}},
+         _opts
+       ),
+       do: {:fail, "listener unavailable (#{reason}); it keeps retrying"}
+
   defp mobile_listener(_report, _opts), do: {:fail, "listener down"}
+
+  defp refusal_class(%{"refusal" => class}) when is_binary(class), do: " (#{class})"
+  defp refusal_class(_report), do: ""
 
   defp mobile_candidate_health([], _probe), do: {:fail, "no advertised candidates"}
 
@@ -1139,7 +1156,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp healthy_mobile_candidate(candidate, probe) when is_binary(candidate) do
     with {:ok, health_url} <- mobile_health_url(candidate),
-         :ok <- probe.(health_url, @mobile_health_timeout_ms) do
+         :ok <- probe.(health_url) do
       candidate
     else
       {:error, _reason} -> nil
@@ -1159,6 +1176,8 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  # /healthz names the protocol version the daemon serves, which this app
+  # cannot read from the channels app: any version marks a Fermix listener.
   defp mobile_health_probe(url, timeout_ms) do
     request_opts = [
       retry: false,
@@ -1167,9 +1186,15 @@ defmodule Fermix.CLI.Doctor.Checks do
     ]
 
     case Req.get(url, request_opts) do
-      {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => 1}}} -> :ok
-      {:ok, %Req.Response{status: status}} -> {:error, {:unexpected_status, status}}
-      {:error, reason} -> {:error, reason}
+      {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => v}}}
+      when is_integer(v) and v > 0 ->
+        :ok
+
+      {:ok, %Req.Response{status: status}} ->
+        {:error, {:unexpected_status, status}}
+
+      {:error, reason} ->
+        {:error, reason}
     end
   end
 
@@ -1186,15 +1211,25 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
   defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
 
+  # Push connects lazily and stays up when Apple is unreachable, so credentials
+  # that resolve are not yet delivery: the daemon says which it is.
   defp mobile_apns(report, config) do
     push = Keyword.get(config, :push, [])
+    apns = Map.get(report, "apns", %{})
 
     cond do
       Keyword.get(push, :enabled, false) == false -> {:ok, "APNs disabled"}
-      get_in(report, ["apns", "credentials"]) == "ready" -> {:ok, "APNs ready"}
-      true -> {:fail, "APNs credentials missing"}
+      apns["credentials"] != "ready" -> {:fail, "APNs credentials missing"}
+      apns["delivery"] == "ready" -> {:ok, "APNs ready"}
+      apns["delivery"] == "degraded" -> apns_degraded(apns["reason"])
+      true -> {:fail, "APNs not delivering: no push dispatcher is running"}
     end
   end
+
+  defp apns_degraded("connecting"), do: {:warn, "APNs connecting to Apple"}
+
+  defp apns_degraded(reason),
+    do: {:warn, "APNs degraded (#{reason}); the next push reconnects"}
 
   defp mobile_device_count(%{"paired_devices" => count}) when is_integer(count) and count > 0 do
     suffix = if count == 1, do: "device", else: "devices"

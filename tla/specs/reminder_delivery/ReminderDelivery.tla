@@ -75,7 +75,7 @@ CONSTANTS
                              \* status = 'pending' (temporal_sql.ex:1582). The
                              \* per-row re-read (:1602) and the UPDATE's WHERE
                              \* (:1042) repeat it inside the same Repo call
-                             \* (repo.ex:2899-2902), so they add nothing here.
+                             \* (repo.ex:3012-3015), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
                              \* :rest_for_one (application.ex:245-246, :263)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
@@ -177,9 +177,9 @@ SweptTo ==
     ELSE "pending"
 
 \* The platform puts the reminder in front of the user. The companion timeline
-\* drops a second message with the same key (output.ex:159-161, which the
-\* mobile and companion adapters write through -> mobile_sql.ex:181-191,
-\* unique index :48-50); no other platform reads the key.
+\* drops a second message with the same key (output.ex:227-229, which the
+\* mobile and companion adapters write through -> mobile_sql.ex:356-366,
+\* unique index :49-51); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0
 Show ==
     IF AlreadyShownUnderKey
@@ -222,7 +222,7 @@ Claimable ==
     /\ due /\ valid /\ eventLive
 
 \* :due_tick or :reconcile_tick -> run_due -> claim_due (scheduler.ex:238-248)
-\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:2899-2902) that
+\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:3012-3015) that
 \* runs the due scan and every per-row claim (temporal_sql.ex:1010-1047):
 \* delivering and attempt_count + 1 before any I/O. The free-slot guard is
 \* the spec's bound, not free_slots/1 (DeliverySupervisor allows 4).

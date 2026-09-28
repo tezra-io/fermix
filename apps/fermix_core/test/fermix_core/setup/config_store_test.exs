@@ -227,6 +227,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            }
   end
 
+  # R5-1: the phone channel's trust store refuses to load from anything but a
+  # 0700 directory, and a boot used to create this one at the umask's 0755.
+  test "the mobile directory is created private, and an open one is repaired at the next boot" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-dir")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    mobile = Path.join(tmp_home, "mobile")
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+
+    File.chmod!(mobile, 0o755)
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+  end
+
+  # The trust store refuses a symlinked directory by name; the boot leaves the
+  # directory it points at as it found it.
+  test "a symlinked mobile directory is left for the trust store to refuse" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-link")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    elsewhere = Path.join(tmp_home, "elsewhere")
+    File.mkdir_p!(elsewhere)
+    File.chmod!(elsewhere, 0o755)
+    File.ln_s!(elsewhere, Path.join(tmp_home, "mobile"))
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(elsewhere) == 0o755
+  end
+
+  defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
   test "an empty FERMIX_HOME is treated as unset, not a cwd-relative path" do
     # An empty string is truthy in Elixir, so `get_env() || default` did NOT
     # fall back — fermix_home/0 returned "" and workspace paths became

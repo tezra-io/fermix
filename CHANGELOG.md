@@ -264,6 +264,116 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saying that OpenAI did not accept the API key. Any other refusal of a voice
   session, when a call starts or when it reconnects, ends the call the same way
   and names OpenAI's error code.
+- **A background task started from the Mac chat runs once and posts its
+  result.** Typed in the chat, `/bg` and `/background` left their request open
+  after they started, so a restart of the daemon within a day started the same
+  background work again. The result is now posted to the chat when the work
+  finishes, the request closes with it, and a restart runs nothing twice.
+- **A slash command typed in the Mac chat is answered once.** A command the
+  daemon answers at once, such as `/help`, `/status` or `/new`, stayed open
+  after its answer, and the next start of the daemon within a day ran it again
+  and wrote a second answer. It now closes with its answer. So does a message
+  answered without a turn, such as the reply sent while the daemon's queue
+  restarts. If its answer cannot be recorded, the chat now says the command
+  failed instead of running it again at the next start.
+- **`/ultra` sent as a command gets its answer.** A chat client that sent
+  `/ultra`, or any other command that becomes a turn, as a command rather than
+  as typed text had its request closed at once, so the turn's reply was thrown
+  away and no answer appeared. The request now closes with the turn's answer.
+- **`/skills approve` answers in order.** Approving a new or changed skill
+  says "Approved — drafting…" first and the drafting outcome after it, on every
+  channel; a draft that failed fast could arrive before the approval. Typed in
+  the Mac chat, an approval now closes with its outcome instead of staying open
+  to run again after a restart.
+- **Paging through a long Mac chat history keeps its place.** A page of long
+  messages is now cut to fit what one line of the chat socket carries, about
+  60 KiB, and it says where it stopped, so the next page continues from there
+  with nothing skipped, forward or back.
+- **A history request with an impossible position no longer restarts Fermix's
+  memory.** A chat client asking for history, search or read state past the
+  largest position the database can hold crashed the memory process, which
+  restarted the core of the daemon and could stop it. Such a position now reads
+  as past the newest message.
+- **The read marker never passes the newest message.** A client could report
+  that it had read messages that did not exist yet, and the messages written
+  after that counted as read, so they showed as read and sent no notification.
+  The marker is now held at the newest message, and one stored past it is
+  brought back the next time a client reports.
+- **The Mac chat keeps its connection when the memory database is slow.** The
+  process that ends every chat turn crashed when a memory write took longer
+  than five seconds or a stop reached a queue that had just restarted: every
+  Mac chat connection dropped, the turns it was tracking never ended on screen,
+  and their messages ran again at the next start. It now logs the failure and
+  still ends each turn once, and a message sent while it is busy is never
+  failed for waiting.
+- **An approval card comes back when the Mac app reconnects.** A card sent
+  while the app was closed or reconnecting was never shown, so what the turn
+  asked for could not be granted. Cards still waiting are now sent again when
+  the app connects, with the time they have left, and a card whose time runs
+  out is withdrawn as expired. A card that was answered or ran out while the
+  app was away is not sent again: the chat protocol now has the app drop every
+  card it shows when it reconnects and keep only the ones sent again. A card
+  stays with the device whose turn raised it, the only one that can answer it:
+  the Mac never shows a phone's card, and a phone never shows the Mac's.
+- **Searching a long chat history is fast.** Search went through every message
+  of the conversation to find a rare word, which took over a second on a long
+  history. It now reads the matches newest first and answers in well under a
+  millisecond, with the same results.
+- **Only you can pair or forget a phone.** Starting, deciding or cancelling a
+  pairing and revoking a phone, over the management socket, `fermix pair` or
+  `fermix devices revoke`, are now refused when the caller is a process Fermix
+  started itself (an agent's shell command, a coding run, a job) or a detached
+  one, with "Only the owner can pair or forget a phone; run this from your own
+  terminal." Reading the phone channel's status and paired phones stays open.
+- **`fermix devices` works with the phone channel off.** `fermix devices list`
+  shows the phones in `devices.toml` and `fermix devices revoke` removes one
+  whether or not the channel is running; with it off, a revoke still cancels
+  what that phone had asked for, so none of it runs later. Turning the
+  channel off in settings no longer refuses pairing and revoking before the
+  restart that applies it.
+- **The phone channel can no longer stop the daemon.** With
+  `[fermix_channels.mobile] enabled = true`, an address the phone listener
+  could not bind, or Apple's push service being unreachable, at start or
+  later, stopped the whole daemon. The listener now reports itself unavailable
+  with the reason and keeps retrying for up to a day, push connects on first
+  use and reads as degraded while Apple cannot be reached, and with memory
+  turned off the phone channel is refused for that boot by name instead of
+  starting half-working. `fermix doctor` and `mobile.status` say which. The
+  phone channel is still off by default, and no phone app is released yet:
+  this is the daemon half, shipped first so the apps can be built against it.
+- **Pairing a phone can finish, and a stranger cannot stop it.** In the daemon
+  half of the phone channel, approving a phone never saved it, so a pairing
+  could not complete. A stranger on the network could end the owner's pairing
+  window by failing handshakes, hold every connection by never finishing one, or
+  grow one connection's memory without limit; failed handshakes now refuse only
+  the address they came from, a connection gets one HTTP request and fifteen
+  seconds from connecting to reach the phone's own handshake, every step of that
+  handshake ends after ten seconds, and a connection that has not authenticated
+  is held to a small memory bound. A clock stepped back no longer locks paired
+  phones out, the paired-phone list survives a power loss, and the phone and the
+  pane use the same word for how a pairing ended.
+- **The phone and the Mac chat share one live conversation.** In the daemon
+  half of the phone channel, every message and reply, from a phone, the Mac
+  chat or a job, now reaches every connected phone and the Mac as it is
+  written, with its attachments and link previews, and read state is shared. A
+  phone can stop one of its own requests, a failed message is reported to the
+  phone that sent it even after it reconnected, a revoked phone's waiting
+  requests are cancelled instead of run, and a phone's approval cards wait for
+  it, are sent again when it connects and push a content-free "Approval needed"
+  while it is away. Long replies and history pages arrive in parts instead of
+  closing the connection, downloads stream without holding up the chat, and a
+  reply streams to the phone every tenth of a second where the model streams at
+  all. The app that uses this is not released yet.
+- **The phone channel's limits hold.** In the same daemon half, an upload can
+  no longer evict stored media or leave files open, a large attachment list can
+  no longer stop the channel at start, link previews are stored with their
+  message and fetched under a deadline and a limit, and a job delivered to the
+  phone channel while it is off is kept in the chat without fetching links or
+  sending a push. Media lookups are indexed: the first start after upgrading
+  adds that index beside the chat timeline once, on every install, whether or
+  not the phone channel is on. It changes nothing an older Fermix reads, so
+  going back to an earlier release still opens the chat, and what that release
+  writes stays indexed for when you upgrade again.
 
 ## [0.11.0] - 2026-09-23
 

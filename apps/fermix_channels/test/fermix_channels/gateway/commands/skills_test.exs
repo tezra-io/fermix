@@ -94,6 +94,22 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
     Commands.dispatch(Commands.parse(message), reply_fn, context)
   end
 
+  defp next_command_event do
+    receive do
+      {:skills_reply, text} -> {:reply, text}
+      {:command_terminal, outcome} -> {:terminal, outcome}
+    after
+      2_000 -> flunk("the command said nothing more")
+    end
+  end
+
+  defp defer_to(test_pid) do
+    fn ->
+      send(test_pid, :command_deferred)
+      fn outcome -> send(test_pid, {:command_terminal, outcome}) end
+    end
+  end
+
   defp maybe_put_defer(context, nil), do: context
   defp maybe_put_defer(context, defer), do: Map.put(context, :defer_command_fn, defer)
 
@@ -168,6 +184,36 @@ defmodule FermixChannels.Gateway.Commands.SkillsTest do
     assert File.exists?(Path.join([ctx.skills_root, "invoice_chase", "SKILL.md"]))
     assert {:ok, ledger} = Repo.get_skill_curation_ledger("invoice_chase", server: ctx.repo)
     assert ledger.status == "active"
+  end
+
+  # R2-1: the drafting outcome arrives after the command returned, so the
+  # command stays open until it is delivered, and the outcome follows its ack.
+  test "approving a new-skill proposal settles the command only after its outcome", ctx do
+    row = insert_proposal!(ctx, %{})
+
+    assert :ok =
+             dispatch("/skills approve #{row.token}", ctx, defer_command_fn: defer_to(self()))
+
+    assert_received :command_deferred
+
+    # In the order they happened: the ack, the outcome, then the settlement.
+    assert {:reply, ack} = next_command_event()
+    assert ack =~ "drafting invoice_chase"
+    assert {:reply, outcome} = next_command_event()
+    assert outcome =~ "invoice_chase is live"
+    assert {:terminal, :completed} = next_command_event()
+  end
+
+  test "an approve that drafts nothing settles its command at once", ctx do
+    row = insert_proposal!(ctx, %{})
+    {:ok, _declined} = Proposals.decline(row.token, ~U[2026-07-02 10:00:00Z], repo: ctx.repo)
+
+    assert :ok =
+             dispatch("/skills approve #{row.token}", ctx, defer_command_fn: defer_to(self()))
+
+    assert_received {:skills_reply, refusal}
+    assert refusal =~ "no longer pending"
+    assert_received {:command_terminal, :completed}
   end
 
   test "tokens are single-use through the command path", ctx do

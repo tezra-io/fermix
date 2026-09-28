@@ -3,7 +3,7 @@
 Models how Fermix rotates OAuth refresh tokens and stores them in
 `~/.fermix/auth.json`. The daemon runs one `TokenManager` GenServer per auth
 profile: the top-level `TokenManager` for Codex (`application.ex:173`,
-`:362-364`), and a child under `TokenSupervisor` for every other profile
+`:366-368`), and a child under `TokenSupervisor` for every other profile
 (`token_supervisor.ex:238-266`). A tree-less CLI VM refreshes a profile directly,
 with no manager (`token_supervisor.ex:222-225`, `:313-331`;
 `codex_token.ex:15-23`). Every refresher persists through `Store.write`, which
@@ -17,7 +17,7 @@ profile's manager forget its tokens and stops it (plugin logout,
 `token_supervisor.ex:132-171`) or only forgets them (provider sign-out,
 `management/auth.ex:135-142`). A logout from a tree-less CLI VM deletes the
 entry the same way, then has a running daemon let go of the profile over the
-control socket (`auth_forget`, `cli/daemon.ex:804-834` →
+control socket (`auth_forget`, `cli/daemon.ex:852-882` →
 `TokenSupervisor.forget_signed_out`).
 
 Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
@@ -132,7 +132,7 @@ least one check):
   `cli/daemon/client.ex:61-74`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops a
   `TokenSupervisor` child; the top-level Codex manager is only forgotten
-  (`cli/daemon.ex:580`, `:804-834`; `token_supervisor.ex:132-171`). Off, the
+  (`cli/daemon.ex:628`, `:852-882`; `token_supervisor.ex:132-171`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
@@ -493,7 +493,7 @@ failed before the fix. To see a counterexample, run
     restart of the daemon (from the Fermix app, or `fermix restart` for a
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
-    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:580`, `:804-834`;
+    `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:628`, `:852-882`;
     `token_supervisor.ex:132-171`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile` for a
@@ -562,7 +562,7 @@ grace window.
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
-  turns that into `internal_error` (`cli/daemon.ex:321-331`), and
+  turns that into `internal_error` (`cli/daemon.ex:364-374`), and
   `revert_route` (`management/auth.ex:139`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:72`) is the same call
   and can meet the same wait. Its caller then exits after the delete: the
@@ -615,8 +615,8 @@ grace window.
   `forget_signed_out` stops a `TokenSupervisor` child, the `anthropic_oauth`
   and `xai_oauth` profiles included. `TokenManager` does not trap exits, so a
   `get_token` call queued on that manager at that moment exits in its caller
-  (a provider request, `providers/anthropic/messages.ex:582`,
-  `providers/xai/responses.ex:229`) instead of answering
+  (a provider request, `providers/anthropic/messages.ex:621`,
+  `providers/xai/responses.ex:233`) instead of answering
   `{:error, :reauthorization_required}`. The window is one message. The
   in-daemon plugin logout reaches it through the same `forget_signed_out`
   (`plugins/auth.ex:72`), and had it before through its bare `stop_profile`.

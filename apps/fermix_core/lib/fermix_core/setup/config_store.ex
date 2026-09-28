@@ -517,7 +517,7 @@ defmodule FermixCore.Setup.ConfigStore do
   def ensure_workspace do
     with :ok <- File.mkdir_p(fermix_home()) do
       _ = restrict_home_permissions()
-      mkdir_workspace_paths()
+      with :ok <- mkdir_workspace_paths(), do: restrict_mobile_dir()
     end
   end
 
@@ -528,6 +528,34 @@ defmodule FermixCore.Setup.ConfigStore do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # `mobile/` holds the phone channel's trust store, which reads only a 0700
+  # directory, so it is created that way, and one an earlier boot left at the
+  # umask's mode is repaired. Best-effort like the home's own mode: a failure
+  # is logged, and the trust store names what it refuses. A symlink is left as
+  # it is: the trust store refuses it, and the directory it points at is not
+  # this boot's to change.
+  defp restrict_mobile_dir do
+    dir = workspace_paths().mobile
+
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} -> restrict_dir(dir)
+      {:ok, %File.Stat{}} -> :ok
+      {:error, reason} -> log_unrestricted(dir, reason)
+    end
+  end
+
+  defp restrict_dir(dir) do
+    case File.chmod(dir, 0o700) do
+      :ok -> :ok
+      {:error, reason} -> log_unrestricted(dir, reason)
+    end
+  end
+
+  defp log_unrestricted(dir, reason) do
+    Logger.error("could not restrict #{dir} to 0700: #{inspect(reason)}")
+    :ok
   end
 
   @doc """

@@ -22,6 +22,8 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.SkillCuration.Proposals
 
+  @ack_gate_timeout_ms 5_000
+
   @impl true
   def name, do: "skills"
 
@@ -149,6 +151,9 @@ defmodule FermixChannels.Gateway.Commands.Skills do
   defp settle_command(finish, {:ok, _counts}), do: finish.(:completed)
   defp settle_command(finish, {:error, reason}), do: finish.({:failed, reason})
 
+  defp settle_completed(nil), do: :ok
+  defp settle_completed(finish), do: finish.(:completed)
+
   defp review_outcome_text({:ok, counts}), do: review_text(counts)
 
   defp review_outcome_text({:error, :concurrent_run}),
@@ -168,17 +173,25 @@ defmodule FermixChannels.Gateway.Commands.Skills do
     end
   end
 
+  # A drafting outcome lands after this command returned, so the command stays
+  # open until it is delivered (the approve->drafting notify pattern, deferred
+  # as `review` is), and it is delivered after the "drafting" ack even when
+  # the drafting task finishes first. Any other answer settles it at once.
   defp run_approval(row, token, message, reply_fn, context) do
+    finish_command = defer_command(context)
+    gate = ack_gate()
+
     opts =
       core_opts(context) ++
         [
-          notify: outcome_notifier(reply_fn),
+          notify: gated_notifier(gate, outcome_notifier(reply_fn, finish_command)),
           parent_session: "command:skills:#{message.channel}:#{message.chat_id}"
         ]
 
     case SkillCuration.approve_proposal(token, opts) do
       {:ok, :drafting} ->
         reply(reply_fn, "Approved — drafting #{row.skill_name} now, outcome follows.")
+        release_after_ack(gate)
 
       {:ok, {:archived, _path}} ->
         reply(
@@ -186,11 +199,47 @@ defmodule FermixChannels.Gateway.Commands.Skills do
           "Archived #{row.skill_name}. Reversible: `/skills restore #{row.skill_name}`."
         )
 
+        settle_completed(finish_command)
+
       {:error, {:invalid_status, status}} ->
         reply(reply_fn, "This proposal is no longer pending (status: #{status}).")
+        settle_completed(finish_command)
 
       {:error, reason} ->
         reply(reply_fn, "Approve failed: #{format_reason(reason)}")
+        settle_completed(finish_command)
+    end
+
+    :ok
+  end
+
+  # One cell the command and the drafting task race to set: whichever sets it
+  # first is ahead of the other, so the outcome is delivered after the ack.
+  defp ack_gate, do: %{owner: self(), ref: make_ref(), latch: :atomics.new(1, [])}
+
+  # In the drafting task: a written ack lets the outcome go now; otherwise it
+  # is handed to the command, which delivers it once its ack is out.
+  defp gated_notifier(gate, deliver) do
+    fn result ->
+      if :atomics.compare_exchange(gate.latch, 1, 0, 1) == :ok,
+        do: send(gate.owner, {gate.ref, fn -> deliver.(result) end}),
+        else: deliver.(result)
+    end
+  end
+
+  # In the command, its ack written: an outcome that came first is delivered
+  # now. It was sent right after the task set the cell, so the wait is
+  # bounded, and an outcome that never comes is reported, not waited on.
+  defp release_after_ack(%{ref: ref} = gate) do
+    if :atomics.compare_exchange(gate.latch, 1, 0, 1) == :ok do
+      :ok
+    else
+      receive do
+        {^ref, deliver} -> deliver.()
+      after
+        @ack_gate_timeout_ms ->
+          Logger.error("skills approval: the drafting outcome was never handed over")
+      end
     end
   end
 
@@ -365,12 +414,17 @@ defmodule FermixChannels.Gateway.Commands.Skills do
     end
   end
 
-  defp outcome_notifier(reply_fn) do
-    fn
-      {:ok, outcome} -> reply_fn.({:text, outcome_text(outcome)})
-      {:error, reason} -> reply_fn.({:text, "Skill drafting failed: #{format_reason(reason)}"})
+  defp outcome_notifier(reply_fn, finish_command) do
+    fn result ->
+      reply_fn.({:text, drafting_outcome_text(result)})
+      settle_command(finish_command, result)
     end
   end
+
+  defp drafting_outcome_text({:ok, outcome}), do: outcome_text(outcome)
+
+  defp drafting_outcome_text({:error, reason}),
+    do: "Skill drafting failed: #{format_reason(reason)}"
 
   defp outcome_text(outcome) do
     warning =

@@ -14,11 +14,18 @@ defmodule FermixChannels.Mobile.Management do
   `pair_decide/3`, `pair_cancel/2`, `devices_list/1`, `devices_revoke/2`,
   `status/1`) answer atom-keyed facts; `FermixCore.Management.Mobile` turns
   them into wire JSON and owns every sentence.
+
+  Settings are boot-bound: the enable switch reaches the application env at
+  once, but the subtree starts and stops only at boot. So every verb gates on
+  whether the subtree is running, never on the switch alone, and the paired
+  devices, which are a file, are listed and revoked from that file while it is
+  not running.
   """
 
   require Logger
 
   alias Fermix.CLI.TerminalQR
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -28,6 +35,8 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
+  alias FermixChannels.Mobile.Push.PigeonDispatcher
+  alias FermixChannels.Mobile.SocketHandler
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
 
   @max_wait_ms 120_000
@@ -59,7 +68,7 @@ defmodule FermixChannels.Mobile.Management do
           ttl_ms: non_neg_integer() | nil,
           request: request_view() | nil,
           outcome: nil | %{device_id: String.t()} | %{reason: :denied | :timeout | :cancelled},
-          failure: nil | %{reason: :rate_limited | :device_disconnected}
+          failure: nil | %{reason: :device_disconnected}
         }
   @type device_row :: %{
           device_id: String.t(),
@@ -76,8 +85,10 @@ defmodule FermixChannels.Mobile.Management do
           enabled: boolean(),
           started: boolean(),
           refused: boolean(),
+          refusal: nil | :memory_disabled | :identity | :attachment_manifest | :trust_store,
           listener: %{
-            status: :ready | :down,
+            status: :ready | :down | :unavailable,
+            reason: nil | Listener.failure(),
             port: :inet.port_number(),
             bind: String.t(),
             candidates: [String.t()]
@@ -85,7 +96,12 @@ defmodule FermixChannels.Mobile.Management do
           mdns: :advertising | :disabled | :down,
           tailnet: %{detected: boolean(), candidates: [String.t()]},
           identity: %{present: boolean(), fingerprint: String.t() | nil},
-          apns: %{enabled: boolean(), credentials: :ready | :missing},
+          apns: %{
+            enabled: boolean(),
+            credentials: :ready | :missing,
+            delivery: :ready | :degraded | :down,
+            reason: nil | :connecting | :connect_failed | :connection_lost
+          },
           paired_devices: non_neg_integer(),
           protocol_version: pos_integer(),
           pairing: nil | %{session_id: String.t(), state: session_state()}
@@ -107,7 +123,7 @@ defmodule FermixChannels.Mobile.Management do
   def begin_pairing(opts) when is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
+    with :ok <- require_serving(opts),
          {:ok, window} <- invoke(opts, :open_pair, &PairManager.open/1, [manager]) do
       finish_pairing_setup(window, manager, opts)
     end
@@ -154,7 +170,7 @@ defmodule FermixChannels.Mobile.Management do
              is_integer(timeout_ms) and timeout_ms in 1..@max_wait_ms and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
+    with :ok <- require_serving(opts),
          {:ok, request} <-
            invoke(opts, :await_request, &PairManager.await_request/3, [
              manager,
@@ -174,7 +190,7 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
+    with :ok <- require_serving(opts),
          {:ok, device} <-
            invoke(opts, :approve_pair, &PairManager.approve/2, [manager, session_id]) do
       {:ok,
@@ -190,7 +206,7 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
+    with :ok <- require_serving(opts),
          :ok <- invoke(opts, :deny_pair, &PairManager.deny/2, [manager, session_id]) do
       {:ok, %{approved: false}}
     end
@@ -206,7 +222,7 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
+    with :ok <- require_serving(opts),
          :ok <- invoke(opts, :cancel_pair, &PairManager.cancel/2, [manager, session_id]) do
       {:ok, %{cancelled: true}}
     end
@@ -218,10 +234,7 @@ defmodule FermixChannels.Mobile.Management do
   @doc false
   @spec list_devices(keyword()) :: {:ok, %{devices: [map()]}} | {:error, term()}
   def list_devices(opts) when is_list(opts) do
-    store = Keyword.get(opts, :device_store, DeviceStore)
-
-    with :ok <- require_enabled_config(opts),
-         {:ok, devices} <- invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
+    with {:ok, devices} <- paired_devices(opts) do
       {:ok, %{devices: Enum.map(devices, &public_device/1)}}
     end
   end
@@ -233,11 +246,8 @@ defmodule FermixChannels.Mobile.Management do
   @spec revoke_device(String.t(), keyword()) ::
           {:ok, %{device_id: String.t()}} | {:error, term()}
   def revoke_device(device_id, opts)
-      when is_binary(device_id) and device_id != "" and is_list(opts) do
-    with :ok <- require_enabled_config(opts) do
-      revoke(device_id, opts)
-    end
-  end
+      when is_binary(device_id) and device_id != "" and is_list(opts),
+      do: revoke(device_id, opts)
 
   @doc "Open one pairing window and return its session with the one-time pairing URI."
   @spec pair_start() :: {:ok, %{session: session(), uri: String.t()}} | {:error, start_error()}
@@ -249,8 +259,7 @@ defmodule FermixChannels.Mobile.Management do
   def pair_start(opts) when is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
-         :ok <- require_serving(opts),
+    with :ok <- require_serving(opts),
          {:ok, window} <- open_window(manager, opts),
          {:ok, uri} <- start_uri(window, manager, opts),
          {:ok, record} <- read_session(manager, window.session_id, opts) do
@@ -268,8 +277,7 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
-         :ok <- require_serving(opts),
+    with :ok <- require_serving(opts),
          {:ok, record} <- read_session(manager, session_id, opts) do
       {:ok, session_view(record)}
     end
@@ -292,8 +300,7 @@ defmodule FermixChannels.Mobile.Management do
              is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
-         :ok <- require_serving(opts),
+    with :ok <- require_serving(opts),
          {:ok, record} <- read_session(manager, session_id, opts) do
       decide_record(record, approved?, manager, opts)
     end
@@ -309,24 +316,25 @@ defmodule FermixChannels.Mobile.Management do
       when is_binary(session_id) and session_id != "" and is_list(opts) do
     manager = Keyword.get(opts, :pair_manager, PairManager)
 
-    with :ok <- require_enabled_config(opts),
-         :ok <- require_serving(opts),
+    with :ok <- require_serving(opts),
          {:ok, record} <- read_session(manager, session_id, opts) do
       cancel_record(record, manager, opts)
     end
   end
 
-  @doc "Paired devices, oldest first. Empty while the channel is not running."
+  @doc "Paired devices, oldest first, from the stored file while the channel is not running."
   @spec devices_list() :: {:ok, [device_row()]} | {:error, term()}
   def devices_list, do: devices_list([])
 
   @doc false
   @spec devices_list(keyword()) :: {:ok, [device_row()]} | {:error, term()}
   def devices_list(opts) when is_list(opts) do
-    if running?(mobile_config(opts), opts), do: listed_rows(opts), else: {:ok, []}
+    with {:ok, devices} <- paired_devices(opts) do
+      {:ok, oldest_rows(devices)}
+    end
   end
 
-  @doc "Revoke one paired device and close its live socket."
+  @doc "Revoke one paired device and close its live socket; from the file while not running."
   @spec devices_revoke(String.t()) ::
           {:ok, %{device_id: String.t()}} | {:error, refusal() | :device_not_found | term()}
   def devices_revoke(device_id), do: devices_revoke(device_id, [])
@@ -335,12 +343,8 @@ defmodule FermixChannels.Mobile.Management do
   @spec devices_revoke(String.t(), keyword()) ::
           {:ok, %{device_id: String.t()}} | {:error, refusal() | :device_not_found | term()}
   def devices_revoke(device_id, opts)
-      when is_binary(device_id) and device_id != "" and is_list(opts) do
-    with :ok <- require_enabled_config(opts),
-         :ok <- require_serving(opts) do
-      revoke(device_id, opts)
-    end
-  end
+      when is_binary(device_id) and device_id != "" and is_list(opts),
+      do: revoke(device_id, opts)
 
   @doc """
   The mobile channel's facts. With the channel off, the surface refused this
@@ -356,17 +360,18 @@ defmodule FermixChannels.Mobile.Management do
   @spec status(keyword()) :: {:ok, status()} | {:error, term()}
   def status(opts) when is_list(opts) do
     config = mobile_config(opts)
-    refused? = surface_refusal(opts) != :none
-    started? = enabled?(config) and serving?(refused?, opts)
+    refusal = surface_refusal(opts)
+    started? = refusal == :none and subtree_started?(opts)
 
     with {:ok, runtime} <- runtime_facts(started?, config, opts) do
       {:ok,
        Map.merge(runtime, %{
          enabled: enabled?(config),
          started: started?,
-         refused: refused?,
+         refused: refusal != :none,
+         refusal: refusal_fact(refusal),
          identity: identity_fact(opts),
-         apns: apns_status(Keyword.get(config, :push, enabled: false)),
+         apns: apns_status(Keyword.get(config, :push, enabled: false), started?, opts),
          protocol_version: Protocol.protocol_version()
        })}
     end
@@ -400,13 +405,17 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
-  # The v1 verbs' gate after the flag: a surface refused this boot, then a
-  # subtree that has not started yet, each named before any process call.
+  # The pairing verbs' gate: a running subtree serves whatever the switch says
+  # now, because settings are boot-bound. With nothing running the refusal is
+  # named before any process call: the switch off, a surface refused this
+  # boot, or one turned on that has not started yet. Without the gate these
+  # surfaced as raw `{:dependency_exit, _, {:noproc, _}}` tuples.
   defp require_serving(opts) do
     cond do
+      subtree_started?(opts) -> :ok
+      not enabled?(mobile_config(opts)) -> {:error, :mobile_disabled}
       surface_refusal(opts) != :none -> {:error, :mobile_surface_refused}
-      not subtree_started?(opts) -> {:error, :mobile_not_started}
-      true -> :ok
+      true -> {:error, :mobile_not_started}
     end
   end
 
@@ -415,20 +424,13 @@ defmodule FermixChannels.Mobile.Management do
     Keyword.get(opts, :refusal, &MobileSupervisor.refusal/1).(store)
   end
 
-  defp running?(config, opts) do
-    enabled?(config) and serving?(surface_refusal(opts) != :none, opts)
-  end
+  defp refusal_fact(:none), do: nil
+  defp refusal_fact({:error, reason}), do: MobileSupervisor.refusal_word(reason)
 
-  defp serving?(true = _refused?, _opts), do: false
-  defp serving?(false = _refused?, opts), do: subtree_started?(opts)
-
-  # Settings writes reach the application env at once, but the mobile subtree
-  # starts only at boot: an enabled flag is not a running channel. A registered
-  # pair manager is, and looking the name up sends no message.
-  defp subtree_started?(opts) do
-    manager = Keyword.get(opts, :pair_manager, PairManager)
-    opts |> Keyword.get(:whereis, &GenServer.whereis/1) |> apply([manager]) |> is_pid()
-  end
+  # An enabled flag is not a running channel, and a disabled one does not stop
+  # one. The running subtree is its supervisor (`Mobile.Supervisor.running?/1`).
+  defp subtree_started?(opts),
+    do: MobileSupervisor.running?(Keyword.get(opts, :whereis, &GenServer.whereis/1))
 
   # The identity guard reads the trust store to tell a first pairing from a
   # lost identity, so a store it cannot read is named for the store, not for
@@ -544,17 +546,20 @@ defmodule FermixChannels.Mobile.Management do
     }
   end
 
-  defp session_state(status) when status in [:rate_limited, :device_disconnected], do: :failed
+  defp session_state(:device_disconnected), do: :failed
   defp session_state(status), do: status
 
+  # The words are the pair manager's, so the phone's `pair_denied` and this
+  # view name each ending the same way.
   defp session_outcome(%{status: :approved, device_id: device_id}), do: %{device_id: device_id}
-  defp session_outcome(%{status: :denied}), do: %{reason: :denied}
-  defp session_outcome(%{status: :expired}), do: %{reason: :timeout}
-  defp session_outcome(%{status: :cancelled}), do: %{reason: :cancelled}
+
+  defp session_outcome(%{status: status}) when status in [:denied, :expired, :cancelled],
+    do: %{reason: PairManager.outcome_reason(status)}
+
   defp session_outcome(_record), do: nil
 
-  defp session_failure(status) when status in [:rate_limited, :device_disconnected],
-    do: %{reason: status}
+  defp session_failure(:device_disconnected),
+    do: %{reason: PairManager.outcome_reason(:device_disconnected)}
 
   defp session_failure(_status), do: nil
 
@@ -575,12 +580,14 @@ defmodule FermixChannels.Mobile.Management do
     }
   end
 
-  defp listed_rows(opts) do
-    store = Keyword.get(opts, :device_store, DeviceStore)
-
-    case invoke(opts, :list_devices, &DeviceStore.list/1, [store]) do
-      {:ok, devices} -> {:ok, oldest_rows(devices)}
-      {:error, reason} -> {:error, reason}
+  # The running store serializes every write, so it answers while it runs;
+  # otherwise nothing else writes the file, and it is read where it lies.
+  defp paired_devices(opts) do
+    if subtree_started?(opts) do
+      store = Keyword.get(opts, :device_store, DeviceStore)
+      invoke(opts, :list_devices, &DeviceStore.list/1, [store])
+    else
+      DeviceStore.list(Keyword.take(opts, [:root]))
     end
   end
 
@@ -594,9 +601,7 @@ defmodule FermixChannels.Mobile.Management do
   end
 
   defp revoke(device_id, opts) do
-    registry = Keyword.get(opts, :device_registry, DeviceRegistry)
-
-    case invoke(opts, :revoke_device, &DeviceRegistry.revoke/2, [registry, device_id]) do
+    case revoke_call(device_id, opts) do
       :ok -> {:ok, %{device_id: device_id}}
       # The facade's wire vocabulary: the registry's tuple would reach the CLI
       # as an inspect() dump, and the id is already in the caller's hands.
@@ -605,10 +610,31 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  # A running registry also closes the phone's live socket; with nothing
+  # running there is no socket, and the row is deleted from the file. Either
+  # way, what the device asked for stops with it.
+  defp revoke_call(device_id, opts) do
+    if subtree_started?(opts) do
+      registry = Keyword.get(opts, :device_registry, DeviceRegistry)
+      invoke(opts, :revoke_device, &DeviceRegistry.revoke/2, [registry, device_id])
+    else
+      with :ok <- DeviceStore.delete(device_id, Keyword.take(opts, [:root])) do
+        revoke_requests(device_id, opts)
+      end
+    end
+  end
+
+  # The device is already gone from the file; what it asked for stops by the
+  # registry's own revocation (`Companion.Turns.revoke_device/2`).
+  defp revoke_requests(device_id, opts) do
+    revoke = Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1))
+    :ok = revoke.(device_id)
+  end
+
   defp runtime_facts(false, config, _opts) do
     {:ok,
      %{
-       listener: listener_fact(:down, configured_bind(config), configured_port(config), []),
+       listener: listener_fact(:down, nil, configured_bind(config), configured_port(config), []),
        mdns: idle_mdns(config),
        tailnet: %{detected: false, candidates: []},
        paired_devices: 0,
@@ -685,10 +711,15 @@ defmodule FermixChannels.Mobile.Management do
          {:ok, fingerprint} <- binary_field(identity, :tls_fingerprint, 32),
          {:ok, secret} <- binary_field(window, :secret, 32),
          {:ok, name} <- host_label(opts) do
+      # Discovery orders candidates best first, so the link keeps the likeliest
+      # routes, as hello_ack does, and stays a QR code a phone can scan.
+      addresses =
+        candidates |> Enum.take(SocketHandler.max_candidates()) |> Enum.map(& &1.address)
+
       query =
         URI.encode_query([
           {"v", "1"},
-          {"candidates", Jason.encode!(Enum.map(candidates, & &1.address))},
+          {"candidates", Jason.encode!(addresses)},
           {"port", Integer.to_string(port)},
           {"tls_fp", Base.encode16(fingerprint, case: :lower)},
           {"gateway_pk", Base.encode64(gateway_public)},
@@ -700,7 +731,12 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
-  defp discover(opts), do: invoke(opts, :discover, &Discovery.discover/0, [])
+  # Status and the pairing verbs run only while the subtree does, so they read
+  # its discovery cache, the list its sockets send.
+  defp discover(opts) do
+    discovery = Keyword.get(opts, :discovery, Discovery)
+    invoke(opts, :discover, fn -> Discovery.candidates(discovery) end, [])
+  end
 
   defp host_label(opts) do
     case Keyword.get(opts, :host_label, &:inet.gethostname/0).() do
@@ -746,15 +782,24 @@ defmodule FermixChannels.Mobile.Management do
     configured_port = configured_port(config)
 
     case process_query(opts, :listener_status, &Listener.status/1, [server]) do
-      {:listening, {address, port}} -> listener_fact(:ready, address, port, addresses)
-      :dormant -> listener_fact(:down, bind, configured_port, addresses)
-      {:error, _reason} -> listener_fact(:down, bind, configured_port, addresses)
+      {:listening, {address, port}} ->
+        listener_fact(:ready, nil, address, port, addresses)
+
+      {:unavailable, failure} ->
+        listener_fact(:unavailable, failure, bind, configured_port, addresses)
+
+      :dormant ->
+        listener_fact(:down, nil, bind, configured_port, addresses)
+
+      {:error, _reason} ->
+        listener_fact(:down, nil, bind, configured_port, addresses)
     end
   end
 
-  defp listener_fact(status, bind, port, addresses) do
+  defp listener_fact(status, reason, bind, port, addresses) do
     %{
       status: status,
+      reason: reason,
       port: port,
       bind: bind_text(bind),
       candidates: endpoint_candidates(addresses, port)
@@ -785,11 +830,36 @@ defmodule FermixChannels.Mobile.Management do
     Enum.map(addresses, &"wss://#{&1}:#{port}/ws")
   end
 
-  defp apns_status(push) do
+  defp apns_status(push, started?, opts) do
     case PushConfig.new(push) do
-      {:ok, %PushConfig{enabled: true}} -> %{enabled: true, credentials: :ready}
-      {:ok, %PushConfig{enabled: false}} -> %{enabled: false, credentials: :missing}
-      {:error, _reason} -> %{enabled: Keyword.get(push, :enabled, false), credentials: :missing}
+      {:ok, %PushConfig{enabled: true}} ->
+        Map.merge(%{enabled: true, credentials: :ready}, push_delivery(started?, opts))
+
+      {:ok, %PushConfig{enabled: false}} ->
+        %{enabled: false, credentials: :missing, delivery: :down, reason: nil}
+
+      {:error, _reason} ->
+        %{
+          enabled: Keyword.get(push, :enabled, false),
+          credentials: :missing,
+          delivery: :down,
+          reason: nil
+        }
+    end
+  end
+
+  # The dispatcher connects lazily and stays up when APNs is unreachable, so
+  # delivery is its own fact: ready, degraded with the reason, or down when no
+  # dispatcher runs (the channel is not running, or its key did not resolve).
+  defp push_delivery(false, _opts), do: %{delivery: :down, reason: nil}
+
+  defp push_delivery(true, opts) do
+    server = Keyword.get(opts, :push_dispatcher, PigeonDispatcher)
+
+    case process_query(opts, :push_status, &PigeonDispatcher.status/1, [server]) do
+      :ready -> %{delivery: :ready, reason: nil}
+      {:degraded, reason} -> %{delivery: :degraded, reason: reason}
+      {:error, _reason} -> %{delivery: :down, reason: nil}
     end
   end
 
@@ -802,18 +872,13 @@ defmodule FermixChannels.Mobile.Management do
     if Keyword.get(config, :enabled, false), do: :ok, else: {:error, :mobile_disabled}
   end
 
-  # The flag gate every daemon-facing entry point shares. With the channel off
-  # the mobile subtree is not running at all, so a process call from here would
-  # surface as a raw `{:dependency_exit, _, {:noproc, _}}` tuple instead of the
-  # actionable refusal the CLI renders for "mobile_disabled".
-  defp require_enabled_config(opts), do: opts |> mobile_config() |> require_enabled()
-
   defp require_listener(opts) do
     server = Keyword.get(opts, :listener, Listener)
 
     case process_query(opts, :listener_status, &Listener.status/1, [server]) do
       {:listening, {_bind, port}} when is_integer(port) and port > 0 -> :ok
       :dormant -> {:error, :listener_down}
+      {:unavailable, failure} -> {:error, {:listener_unavailable, failure}}
       {:error, reason} -> {:error, {:listener_unavailable, reason}}
       other -> {:error, {:invalid_listener_status, other}}
     end

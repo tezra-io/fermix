@@ -597,8 +597,10 @@ defmodule FermixCore.Management.ProtocolContractTest do
          enabled: true,
          started: true,
          refused: false,
+         refusal: nil,
          listener: %{
            status: :ready,
+           reason: nil,
            port: 4031,
            bind: "0.0.0.0",
            candidates: ["wss://192.168.1.20:4031/ws"]
@@ -606,7 +608,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
          mdns: :advertising,
          tailnet: %{detected: true, candidates: ["100.101.102.103"]},
          identity: %{present: true, fingerprint: "3f9a 1c2e 7b4d 05a8"},
-         apns: %{enabled: false, credentials: :missing},
+         apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
          paired_devices: 1,
          protocol_version: 1,
          pairing: %{session_id: @session_id, state: :awaiting_decision}

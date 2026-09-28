@@ -109,7 +109,12 @@ defmodule FermixChannels.Gateway do
     case streaming_config(ChannelRegistry.channel_key(message.channel), channel) do
       "draft" ->
         if draft_capable?(channel),
-          do: DraftStream.build_spec(channel, message, rotation_opts(channel))
+          do:
+            DraftStream.build_spec(
+              channel,
+              message,
+              rotation_opts(channel) ++ pacing_opts(channel)
+            )
 
       "block" ->
         DraftStream.build_block_spec(message.channel, fn text -> reply_fn.({:text, text}) end,
@@ -151,6 +156,14 @@ defmodule FermixChannels.Gateway do
     else
       []
     end
+  end
+
+  # A channel's own draft pacing (D8), resolved here like rotation; without the
+  # callback the engine keeps its constants.
+  defp pacing_opts(channel) do
+    if function_exported?(channel, :draft_pacing, 0),
+      do: [pacing: channel.draft_pacing()],
+      else: []
   end
 
   defp raw_stream?(channel) do

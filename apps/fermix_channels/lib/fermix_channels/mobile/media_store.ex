@@ -6,6 +6,12 @@ defmodule FermixChannels.Mobile.MediaStore do
   atomically renamed into the SHA-256 namespace only after size and digest
   verification. Durable blobs are never handed to gateway cleanup code;
   `materialize_attachment/2` returns a disposable copy instead.
+
+  Uploads in flight are bounded per uploading process and in all, each
+  uploader is monitored so its partial files go when it does, and a
+  reservation never evicts a committed blob: only committed bytes do. An
+  attach id is a short-lived handle for the message that follows its upload:
+  it expires, a blob keeps only its newest few, and the manifest has a bound.
   """
 
   use GenServer
@@ -18,6 +24,14 @@ defmodule FermixChannels.Mobile.MediaStore do
   @manifest_max_bytes 16 * 1_024 * 1_024
   @open_attempts 3
   @sha256 ~r/\A[0-9a-f]{64}\z/
+  @empty_sha256 "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+  @max_uploads_per_owner 4
+  @max_uploads 16
+  # Longer than a claimed request lives (24 h), so boot recovery still finds
+  # the attachments of a request it re-runs.
+  @attachment_ttl_s 48 * 3_600
+  @max_attach_ids_per_blob 8
+  @default_max_attachments 4_096
 
   @type server :: GenServer.server()
   @type upload_spec :: %{
@@ -126,10 +140,10 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   @impl true
-  def handle_call({:begin_upload, spec}, _from, state) do
+  def handle_call({:begin_upload, spec}, {owner, _tag}, state) do
     with {:ok, upload} <- normalize_upload(spec, state.max_media_bytes),
          :ok <- ensure_new_upload(state, upload.attach_id) do
-      begin_valid_upload(upload, state)
+      begin_valid_upload(upload, owner, state)
     else
       {:error, reason} -> {:reply, {:error, reason}, state}
     end
@@ -150,7 +164,7 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   def handle_call({:cancel_upload, attach_id}, _from, state) do
-    case pop_upload(state, attach_id) do
+    case drop_upload(state, attach_id) do
       {:ok, upload, next} ->
         case cleanup_upload(upload) do
           :ok -> {:reply, :ok, next}
@@ -178,17 +192,28 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   def handle_call({:attachment, attach_id}, _from, state) do
-    case Map.fetch(state.attachments, attach_id) do
+    case unexpired_attachment(state, attach_id) do
       {:ok, attachment} -> reply_with_live_attachment(attachment, state)
       :error -> {:reply, {:error, :unknown_attachment}, state}
     end
   end
 
   def handle_call({:materialize_attachment, attach_id}, _from, state) do
-    case Map.fetch(state.attachments, attach_id) do
+    case unexpired_attachment(state, attach_id) do
       {:ok, attachment} -> materialize_live_attachment(attachment, state)
       :error -> {:reply, {:error, :unknown_attachment}, state}
     end
+  end
+
+  # An uploader that goes away takes its partial uploads with it.
+  @impl true
+  def handle_info({:DOWN, _ref, :process, owner, _reason}, state) do
+    {:noreply, cancel_owned_uploads(state, owner)}
+  end
+
+  def handle_info(message, state) do
+    Logger.warning("mobile media store ignored an unexpected message: #{inspect(message)}")
+    {:noreply, state}
   end
 
   @impl true
@@ -203,30 +228,84 @@ defmodule FermixChannels.Mobile.MediaStore do
     :ok
   end
 
-  defp begin_valid_upload(upload, state) do
-    case existing_blob(state, upload.sha256) do
-      {:ok, _blob} ->
+  defp begin_valid_upload(upload, owner, state) do
+    cond do
+      match?({:ok, _blob}, existing_blob(state, upload.sha256)) ->
         state
         |> touch_blob(upload.sha256)
         |> persist_completed_attachment(upload, {:ok, :present})
 
-      :error ->
-        open_upload(upload, state)
+      upload.size_bytes == 0 ->
+        commit_empty_upload(upload, state)
+
+      true ->
+        open_upload(upload, owner, state)
     end
   end
 
-  defp open_upload(upload, state) do
-    case make_room(state, upload.size_bytes) do
-      {:ok, room} -> open_upload_with_room(upload, room)
-      {:error, reason, next} -> {:reply, {:error, reason}, next}
+  # Nothing follows a zero-byte upload, so it is committed as it begins: no
+  # partial file stays open and no upload slot is taken.
+  defp commit_empty_upload(%{sha256: @empty_sha256} = upload, state) do
+    with {:ok, temp} <- write_temp_bytes(state.upload_dir, <<>>),
+         {:ok, committed} <- install_empty_blob(temp, state.media_dir) do
+      state
+      |> record_blob(@empty_sha256, 0, committed)
+      |> persist_completed_attachment(upload, {:ok, :present})
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
     end
   end
 
-  defp open_upload_with_room(upload, room) do
-    case open_unique(room.upload_dir, @open_attempts) do
+  defp commit_empty_upload(upload, state) do
+    mismatch = {:sha256_mismatch, expected: upload.sha256, actual: @empty_sha256}
+    {:reply, {:error, mismatch}, state}
+  end
+
+  defp install_empty_blob(temp, media_dir) do
+    case install_blob(temp, @empty_sha256, media_dir) do
+      {:ok, committed} -> {:ok, committed}
+      {:error, reason} -> cleanup_install_error(temp, reason)
+    end
+  end
+
+  defp open_upload(upload, owner, state) do
+    with :ok <- upload_slot(state, owner),
+         :ok <- reserve_room(state, upload.size_bytes) do
+      open_upload_with_room(upload, owner, state)
+    else
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  defp upload_slot(state, owner) do
+    cond do
+      owned_upload_count(state, owner) >= @max_uploads_per_owner ->
+        {:error, :upload_limit_reached}
+
+      map_size(state.uploads) >= @max_uploads ->
+        {:error, :store_upload_limit_reached}
+
+      true ->
+        :ok
+    end
+  end
+
+  # A reservation is bytes nobody has sent yet: held within the quota, it
+  # never evicts a committed blob to fit. Committing the upload may.
+  defp reserve_room(state, incoming) do
+    reserved = Enum.reduce(state.uploads, 0, fn {_id, upload}, acc -> acc + upload.size_bytes end)
+
+    if reserved + incoming > state.max_store_bytes,
+      do: {:error, {:store_quota_exceeded, incoming}},
+      else: :ok
+  end
+
+  defp open_upload_with_room(upload, owner, state) do
+    case open_unique(state.upload_dir, @open_attempts) do
       {:ok, path, io} ->
         active =
           Map.merge(upload, %{
+            owner: owner,
             path: path,
             io: io,
             next_index: 0,
@@ -234,10 +313,10 @@ defmodule FermixChannels.Mobile.MediaStore do
             hash: :crypto.hash_init(:sha256)
           })
 
-        {:reply, {:ok, :upload}, put_in(room.uploads[upload.attach_id], active)}
+        {:reply, {:ok, :upload}, put_upload(state, active)}
 
       {:error, reason} ->
-        {:reply, {:error, reason}, room}
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -306,22 +385,41 @@ defmodule FermixChannels.Mobile.MediaStore do
 
   defp commit_upload(upload, state) do
     with :ok <- :file.sync(upload.io),
-         :ok <- File.close(upload.io),
-         {:ok, committed} <- install_blob(upload.path, upload.sha256, state.media_dir) do
-      {_removed, uploads} = Map.pop(state.uploads, upload.attach_id)
-
-      state
-      |> Map.put(:uploads, uploads)
-      |> record_blob(upload.sha256, upload.size_bytes, committed)
-      |> persist_completed_attachment(upload, {:ok, upload.sha256})
+         :ok <- File.close(upload.io) do
+      admit_upload(upload, state)
     else
       {:error, reason} -> fail_upload(upload, {:commit_failed, reason}, state)
     end
   end
 
+  # Committed bytes are what may evict a blob to fit.
+  defp admit_upload(upload, state) do
+    case make_room(state, upload.size_bytes) do
+      {:ok, room} -> install_upload(upload, room)
+      {:error, reason, next} -> fail_upload(upload, reason, next)
+    end
+  end
+
+  defp install_upload(upload, state) do
+    case install_blob(upload.path, upload.sha256, state.media_dir) do
+      {:ok, committed} ->
+        {:ok, _upload, next} = drop_upload(state, upload.attach_id)
+
+        next
+        |> record_blob(upload.sha256, upload.size_bytes, committed)
+        |> persist_completed_attachment(upload, {:ok, upload.sha256})
+
+      {:error, reason} ->
+        fail_upload(upload, {:commit_failed, reason}, state)
+    end
+  end
+
   defp fail_upload(upload, reason, state) do
-    {_removed, uploads} = Map.pop(state.uploads, upload.attach_id)
-    next = %{state | uploads: uploads}
+    next =
+      case drop_upload(state, upload.attach_id) do
+        {:ok, _upload, next} -> next
+        :error -> state
+      end
 
     case cleanup_upload(upload) do
       :ok ->
@@ -377,9 +475,9 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
+  # Room for committed bytes: the least recently used blobs are evicted.
   defp make_room(state, incoming) do
-    reserved = Enum.reduce(state.uploads, 0, fn {_id, upload}, acc -> acc + upload.size_bytes end)
-    needed = state.total_bytes + reserved + incoming - state.max_store_bytes
+    needed = state.total_bytes + incoming - state.max_store_bytes
 
     cond do
       incoming > state.max_store_bytes ->
@@ -550,7 +648,25 @@ defmodule FermixChannels.Mobile.MediaStore do
       Path.type(root) != :absolute -> {:error, :root_not_absolute}
       not is_integer(max_media) or max_media <= 0 -> {:error, :invalid_max_media_bytes}
       not is_integer(max_store) or max_store <= 0 -> {:error, :invalid_max_store_bytes}
-      true -> {:ok, config(root, max_media, max_store)}
+      true -> with_attachment_limits(config(root, max_media, max_store), opts)
+    end
+  end
+
+  # The wall clock an attach id's age is read on (unix seconds), and the
+  # manifest's bound; both are seams a test sets.
+  defp with_attachment_limits(config, opts) do
+    clock = Keyword.get(opts, :clock, fn -> System.os_time(:second) end)
+    max_attachments = Keyword.get(opts, :max_attachments, @default_max_attachments)
+
+    cond do
+      not is_function(clock, 0) ->
+        {:error, :invalid_clock}
+
+      not is_integer(max_attachments) or max_attachments <= 0 ->
+        {:error, :invalid_max_attachments}
+
+      true ->
+        {:ok, Map.merge(config, %{clock: clock, max_attachments: max_attachments})}
     end
   end
 
@@ -571,7 +687,9 @@ defmodule FermixChannels.Mobile.MediaStore do
       blobs: blobs,
       total_bytes: total,
       uploads: %{},
+      owners: %{},
       attachments: attachments,
+      next_attachment_seq: next_attachment_seq(attachments),
       access_clock: map_size(blobs)
     })
   end
@@ -655,37 +773,42 @@ defmodule FermixChannels.Mobile.MediaStore do
         {:ok, %{}, true}
 
       {:ok, stat} ->
-        load_existing_manifest(config.manifest_path, stat, blobs)
+        load_existing_manifest(config, stat, blobs)
 
       {:error, reason} ->
         {:error, {:attachment_manifest_stat_failed, reason}}
     end
   end
 
-  defp load_existing_manifest(path, %{type: :regular, mode: mode, size: size}, blobs) do
+  # Attach ids are short-lived handles, so a manifest past its size bound is
+  # no store worth refusing the boot over: it is dropped, and `init/1` says so
+  # (`:oversized`) and writes an empty one.
+  defp load_existing_manifest(config, %{type: :regular, mode: mode, size: size}, blobs) do
     permissions = Bitwise.band(mode, 0o777)
 
     cond do
       permissions != 0o600 ->
-        {:error, {:insecure_attachment_manifest, path, permissions}}
+        {:error, {:insecure_attachment_manifest, config.manifest_path, permissions}}
 
       size > @manifest_max_bytes ->
-        {:error, {:attachment_manifest_too_large, size, @manifest_max_bytes}}
+        {:ok, %{}, {:oversized, size}}
 
       true ->
-        decode_attachment_manifest(path, blobs)
+        decode_attachment_manifest(config, blobs)
     end
   end
 
-  defp load_existing_manifest(path, _stat, _blobs),
-    do: {:error, {:invalid_attachment_manifest_target, path}}
+  defp load_existing_manifest(config, _stat, _blobs),
+    do: {:error, {:invalid_attachment_manifest_target, config.manifest_path}}
 
-  defp decode_attachment_manifest(path, blobs) do
-    with {:ok, bytes} <- File.read(path),
+  defp decode_attachment_manifest(config, blobs) do
+    with {:ok, bytes} <- File.read(config.manifest_path),
          {:ok, decoded} <- Jason.decode(bytes),
-         {:ok, attachments} <- validate_attachment_manifest(decoded) do
+         {:ok, attachments} <- validate_attachment_manifest(decoded, config.clock.()) do
       live =
-        Map.filter(attachments, fn {_id, attachment} -> Map.has_key?(blobs, attachment.ref) end)
+        attachments
+        |> Map.filter(fn {_id, attachment} -> Map.has_key?(blobs, attachment.ref) end)
+        |> prune_attachments(config)
 
       {:ok, live, map_size(live) != map_size(attachments)}
     else
@@ -693,15 +816,19 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
-  defp validate_attachment_manifest(%{"version" => 1, "attachments" => entries})
+  # An entry written before attach ids aged is dated to this load, and ranks
+  # below every entry written since.
+  defp validate_attachment_manifest(%{"version" => 1, "attachments" => entries}, now)
        when is_list(entries) do
-    Enum.reduce_while(entries, {:ok, %{}}, &accumulate_attachment/2)
+    Enum.reduce_while(entries, {:ok, %{}}, fn entry, acc ->
+      accumulate_attachment(entry, now, acc)
+    end)
   end
 
-  defp validate_attachment_manifest(_decoded), do: {:error, :invalid_shape}
+  defp validate_attachment_manifest(_decoded, _now), do: {:error, :invalid_shape}
 
-  defp accumulate_attachment(entry, {:ok, attachments}) do
-    case validate_attachment_entry(entry) do
+  defp accumulate_attachment(entry, now, {:ok, attachments}) do
+    case validate_attachment_entry(entry, now) do
       {:ok, attachment} -> add_attachment(attachment, attachments)
       {:error, reason} -> {:halt, {:error, reason}}
     end
@@ -715,14 +842,16 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
-  defp validate_attachment_entry(entry) when is_map(entry) do
+  defp validate_attachment_entry(entry, now) when is_map(entry) do
     attachment = %{
       attach_id: Map.get(entry, "attach_id"),
       ref: Map.get(entry, "ref"),
       kind: Map.get(entry, "kind"),
       mime_type: Map.get(entry, "mime_type"),
       file_name: Map.get(entry, "file_name"),
-      size_bytes: Map.get(entry, "size_bytes")
+      size_bytes: Map.get(entry, "size_bytes"),
+      created_at: Map.get(entry, "created_at", now),
+      seq: Map.get(entry, "seq", 0)
     }
 
     with :ok <- nonempty(attachment.attach_id, :attach_id),
@@ -730,33 +859,94 @@ defmodule FermixChannels.Mobile.MediaStore do
          :ok <- nonempty(attachment.kind, :kind),
          :ok <- nonempty(attachment.mime_type, :mime_type),
          :ok <- manifest_size(attachment.size_bytes),
+         :ok <- manifest_integer(attachment.created_at, :created_at),
+         :ok <- manifest_integer(attachment.seq, :seq),
          :ok <- optional_name(attachment.file_name) do
       {:ok, attachment}
     end
   end
 
-  defp validate_attachment_entry(_entry), do: {:error, :invalid_entry}
+  defp validate_attachment_entry(_entry, _now), do: {:error, :invalid_entry}
 
-  defp manifest_size(value) when is_integer(value) and value >= 0, do: :ok
-  defp manifest_size(_value), do: {:error, {:invalid_field, :size_bytes}}
+  defp manifest_size(value), do: manifest_integer(value, :size_bytes)
 
-  defp completed_attachment(upload) do
+  defp manifest_integer(value, _field) when is_integer(value) and value >= 0, do: :ok
+  defp manifest_integer(_value, field), do: {:error, {:invalid_field, field}}
+
+  defp completed_attachment(upload, state) do
     %{
       attach_id: upload.attach_id,
       ref: upload.sha256,
       kind: upload.kind,
       mime_type: upload.mime,
       file_name: upload.name,
-      size_bytes: upload.size_bytes
+      size_bytes: upload.size_bytes,
+      created_at: state.clock.(),
+      seq: state.next_attachment_seq
     }
+  end
+
+  defp next_attachment_seq(attachments) do
+    attachments |> Map.values() |> Enum.map(& &1.seq) |> Enum.max(fn -> 0 end) |> Kernel.+(1)
+  end
+
+  # Expired handles go, a blob keeps its newest few, and the manifest keeps
+  # its newest `max_attachments`.
+  defp prune_attachments(attachments, config) do
+    oldest_live = config.clock.() - @attachment_ttl_s
+
+    attachments
+    |> Map.values()
+    |> Enum.filter(&(&1.created_at >= oldest_live))
+    |> Enum.sort_by(& &1.seq, :desc)
+    |> newest_per_blob()
+    |> Enum.take(config.max_attachments)
+    |> Map.new(&{&1.attach_id, &1})
+  end
+
+  defp newest_per_blob(newest_first) do
+    {kept, _counts} =
+      Enum.reduce(newest_first, {[], %{}}, fn attachment, {kept, counts} ->
+        count = Map.get(counts, attachment.ref, 0)
+
+        if count < @max_attach_ids_per_blob,
+          do: {[attachment | kept], Map.put(counts, attachment.ref, count + 1)},
+          else: {kept, counts}
+      end)
+
+    Enum.reverse(kept)
+  end
+
+  defp unexpired_attachment(state, attach_id) do
+    with {:ok, attachment} <- Map.fetch(state.attachments, attach_id),
+         true <- attachment.created_at >= state.clock.() - @attachment_ttl_s do
+      {:ok, attachment}
+    else
+      _missing_or_expired -> :error
+    end
   end
 
   defp ensure_attachment_manifest(_state, false), do: :ok
   defp ensure_attachment_manifest(state, true), do: persist_attachment_manifest(state)
 
+  defp ensure_attachment_manifest(state, {:oversized, size}) do
+    Logger.error(
+      "mobile attachment manifest #{state.manifest_path} was #{size} bytes, past its " <>
+        "#{@manifest_max_bytes}-byte bound; its attach ids were dropped and an empty one written"
+    )
+
+    persist_attachment_manifest(state)
+  end
+
   defp persist_completed_attachment(state, upload, success_reply) do
-    attachment = completed_attachment(upload)
-    next = put_in(state.attachments[upload.attach_id], attachment)
+    attachment = completed_attachment(upload, state)
+
+    next = %{
+      state
+      | attachments:
+          state.attachments |> Map.put(upload.attach_id, attachment) |> prune_attachments(state),
+        next_attachment_seq: state.next_attachment_seq + 1
+    }
 
     case persist_attachment_manifest(next) do
       :ok -> {:reply, success_reply, next}
@@ -827,7 +1017,7 @@ defmodule FermixChannels.Mobile.MediaStore do
 
   defp reply_with_live_attachment(attachment, state) do
     case existing_blob(state, attachment.ref) do
-      {:ok, _blob} -> {:reply, {:ok, attachment}, state}
+      {:ok, _blob} -> {:reply, {:ok, public_attachment(attachment)}, state}
       :error -> invalidate_missing_attachment(attachment.ref, state)
     end
   end
@@ -843,12 +1033,15 @@ defmodule FermixChannels.Mobile.MediaStore do
     case copy_to_temp(blob.path, state.materialized_dir) do
       {:ok, temp_path} ->
         next = touch_blob(state, attachment.ref)
-        {:reply, {:ok, Map.put(attachment, :path, temp_path)}, next}
+        {:reply, {:ok, attachment |> public_attachment() |> Map.put(:path, temp_path)}, next}
 
       {:error, reason} ->
         {:reply, {:error, reason}, state}
     end
   end
+
+  # A handle's age and rank are the store's own bookkeeping.
+  defp public_attachment(attachment), do: Map.drop(attachment, [:created_at, :seq])
 
   defp invalidate_missing_attachment(ref, state) do
     next = forget_blob(state, ref)
@@ -942,12 +1135,74 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
-  defp pop_upload(state, attach_id) do
+  # Every upload in flight is counted against the process that began it, which
+  # is monitored while it has one.
+  defp put_upload(state, upload) do
+    owned =
+      case Map.fetch(state.owners, upload.owner) do
+        {:ok, %{ids: ids} = owned} -> %{owned | ids: MapSet.put(ids, upload.attach_id)}
+        :error -> %{ref: Process.monitor(upload.owner), ids: MapSet.new([upload.attach_id])}
+      end
+
+    %{
+      state
+      | uploads: Map.put(state.uploads, upload.attach_id, upload),
+        owners: Map.put(state.owners, upload.owner, owned)
+    }
+  end
+
+  defp drop_upload(state, attach_id) do
     case Map.pop(state.uploads, attach_id) do
       {nil, _uploads} -> :error
-      {upload, uploads} -> {:ok, upload, %{state | uploads: uploads}}
+      {upload, uploads} -> {:ok, upload, release_owner(%{state | uploads: uploads}, upload)}
     end
   end
+
+  defp release_owner(state, %{owner: owner, attach_id: attach_id}) do
+    case Map.fetch(state.owners, owner) do
+      {:ok, %{ref: ref, ids: ids}} ->
+        remaining = MapSet.delete(ids, attach_id)
+        forget_owner_if_idle(state, owner, ref, remaining)
+
+      :error ->
+        state
+    end
+  end
+
+  defp forget_owner_if_idle(state, owner, ref, remaining) do
+    if MapSet.size(remaining) == 0 do
+      Process.demonitor(ref, [:flush])
+      %{state | owners: Map.delete(state.owners, owner)}
+    else
+      %{state | owners: Map.put(state.owners, owner, %{ref: ref, ids: remaining})}
+    end
+  end
+
+  defp owned_upload_count(state, owner) do
+    case Map.fetch(state.owners, owner) do
+      {:ok, %{ids: ids}} -> MapSet.size(ids)
+      :error -> 0
+    end
+  end
+
+  defp cancel_owned_uploads(state, owner) do
+    ids =
+      case Map.fetch(state.owners, owner) do
+        {:ok, %{ids: ids}} -> MapSet.to_list(ids)
+        :error -> []
+      end
+
+    Enum.reduce(ids, state, fn attach_id, acc ->
+      {:ok, upload, next} = drop_upload(acc, attach_id)
+      log_cleanup(cleanup_upload(upload), attach_id)
+      next
+    end)
+  end
+
+  defp log_cleanup(:ok, _attach_id), do: :ok
+
+  defp log_cleanup({:error, reason}, attach_id),
+    do: Logger.error("mobile upload #{attach_id} cleanup failed: #{inspect(reason)}")
 
   defp cleanup_upload(upload) do
     close_result = File.close(upload.io)

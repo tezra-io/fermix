@@ -745,6 +745,12 @@
       "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
     },
     {
+      "method": "(errors)",
+      "field": "unavailable:capability,sentence",
+      "kind": "engine_only",
+      "why": "unavailable is illustrated twice: once with details {capability} for a capability that could not answer, and once with details {capability, sentence} for the phone channel refusing a pairing or forgetting decision from a caller that is not the owner. The sentence is what tells that refusal from a channel that is not running; without it the CLI sent the operator to doctor, which reported the channel healthy. The draft predates the phone pairing surface and drew only the {capability} case."
+    },
+    {
       "method": "(schema)",
       "field": "error_codes:unknown_pairing_session",
       "kind": "engine_only",

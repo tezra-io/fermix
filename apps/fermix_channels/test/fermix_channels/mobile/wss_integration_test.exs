@@ -96,6 +96,100 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
     assert %{"t" => "pong", "seq" => 2} = pong
   end
 
+  test "a long reply reaches the phone as event_part frames and the session stays open" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-event-parts")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+    assert {:ok, identity} = Identity.ensure(root: root)
+    device = Noise.generate_keypair()
+    registry = start_registry()
+    listener = start_listener(root, device.public, registry)
+    assert {:ok, {{127, 0, 0, 1}, port}} = Listener.listener_info(listener)
+
+    client = start_supervised!({WssClient, {pinned_connection(port), self()}})
+    assert_receive {:wss_connected, ^client, :ssl, {:ok, _der}}, @timeout_ms
+
+    assert {:ok, noise} =
+             Noise.initialize(:initiator, :ik,
+               static_keypair: device,
+               remote_static: identity.gateway_public_key
+             )
+
+    noise = complete_handshake(client, noise)
+
+    hello = %{
+      "device_id" => @device_id,
+      "app_version" => "1.0.0",
+      "last_server_seq" => 0,
+      "protocol_v" => Protocol.protocol_version()
+    }
+
+    {%{"t" => "hello_ack"}, noise} = round_trip(client, "hello", hello, 1, noise)
+
+    # Just over the 4 KiB header cap, then the 64 KiB reply that used to close
+    # the socket with 1002.
+    {reply, noise} = fan_out_text_done(client, registry, String.duplicate("a", 5_000), noise)
+    assert reply["text"] == String.duplicate("a", 5_000)
+
+    long = String.duplicate("é", 32_768)
+    {reply, noise} = fan_out_text_done(client, registry, long, noise)
+    assert reply["text"] == long
+
+    {pong, _noise} = round_trip(client, "ping", %{}, 2, noise)
+    assert %{"t" => "pong"} = pong
+  end
+
+  # The unauthenticated heap cap (SEC-1) would kill a paired phone's media
+  # transfer. Once hello attaches the device, the socket carries the larger
+  # cap: a message past the small one reaches the handler, which refuses it as
+  # too large rather than dying without a close code.
+  test "an attached device's socket is held to the larger authenticated heap cap" do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-heap")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+
+    assert {:ok, identity} = Identity.ensure(root: root)
+    device = Noise.generate_keypair()
+    registry = start_registry()
+    listener = start_listener(root, device.public, registry)
+    assert {:ok, {{127, 0, 0, 1}, port}} = Listener.listener_info(listener)
+
+    client =
+      start_supervised!({WssClient, {pinned_connection(port), self()}}, restart: :temporary)
+
+    assert_receive {:wss_connected, ^client, :ssl, _peercert}, @timeout_ms
+
+    assert {:ok, noise} =
+             Noise.initialize(:initiator, :ik,
+               static_keypair: device,
+               remote_static: identity.gateway_public_key
+             )
+
+    noise = complete_handshake(client, noise)
+
+    hello = %{
+      "device_id" => @device_id,
+      "app_version" => "1.0.0",
+      "last_server_seq" => 0,
+      "protocol_v" => Protocol.protocol_version()
+    }
+
+    {%{"t" => "hello_ack"}, _noise} = round_trip(client, "hello", hello, 1, noise)
+
+    chunk = :binary.copy(<<0>>, 60 * 1_024)
+    assert :ok = WebSockex.send_frame(client, {:fragment, :binary, chunk})
+
+    for _index <- 1..100 do
+      assert :ok = WebSockex.send_frame(client, {:continuation, chunk})
+    end
+
+    monitor = Process.monitor(client)
+    assert :ok = WebSockex.send_frame(client, {:finish, chunk})
+
+    assert_receive {:DOWN, ^monitor, :process, ^client,
+                    {:remote, 1009, "mobile frame too large"}},
+                   @timeout_ms
+  end
+
   defp start_registry do
     name = unique_name("Registry")
 
@@ -156,6 +250,34 @@ defmodule FermixChannels.Mobile.WssIntegrationTest do
     assert {:ok, response_plaintext, noise} = Noise.decrypt(noise, response)
     {header, <<>>} = decode_server_frame(response_plaintext)
     {header, noise}
+  end
+
+  # The registry fans the logical event out to the device's socket; the phone
+  # reads frames until the event_part run is complete and reassembles it.
+  defp fan_out_text_done(client, registry, text, noise) do
+    event = %{"t" => "text_done", "turn_id" => "turn-1", "server_seq" => 7, "text" => text}
+    assert :ok = DeviceRegistry.send_device_event(registry, @device_id, event)
+
+    {first, noise} = receive_frame(client, noise)
+    assert %{"t" => "event_part", "index" => 0, "count" => count} = first.header
+    assert count >= 2
+
+    {tails, noise} =
+      Enum.map_reduce(1..(count - 1), noise, fn index, noise ->
+        {part, noise} = receive_frame(client, noise)
+        assert %{"t" => "event_part", "index" => ^index, "count" => ^count} = part.header
+        {part.bytes, noise}
+      end)
+
+    logical = Jason.decode!(IO.iodata_to_binary([first.bytes | tails]))
+    assert Map.delete(logical, "text") == Map.delete(event, "text")
+    {logical, noise}
+  end
+
+  defp receive_frame(client, noise) do
+    assert {:ok, plaintext, noise} = Noise.decrypt(noise, receive_binary(client))
+    {header, bytes} = decode_server_frame(plaintext)
+    {%{header: header, bytes: bytes}, noise}
   end
 
   defp receive_binary(client) do

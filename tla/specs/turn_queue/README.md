@@ -17,12 +17,13 @@ messages covers the interleavings that matter.
   per-conversation stop path, so they have the same effect on one
   conversation.
 - `UsersCanStopTurn`: a stop that names one message, `Named`
-  (`Queue.stop_turn`): the companion socket's `cancel`. Several clients share
-  that conversation, so a stop can name a waiting message while another turn
-  runs, and it can arrive after its own turn ended.
+  (`Queue.stop_turn`): a `cancel` from the companion socket or the phone,
+  which `Companion.Turns` sends. Several clients share that conversation, so a
+  stop can name a waiting message while another turn runs, and it can arrive
+  after its own turn ended.
 - `TasksCanCrash`: the turn task dies at any step. Its own code raises or
   exits, or a linked helper exits: the typing loop (`typing.ex:24`, linked
-  until `with_indicator` returns) or DraftStream (`draft_stream.ex:172`,
+  until `with_indicator` returns) or DraftStream (`draft_stream.ex:182`,
   linked until the task exits). A helper's exit can land anywhere, including
   where nothing in the task can raise: between delivering the reply and
   marking it delivered ("shown"), in the claim gap ("invoking"), and after the
@@ -171,12 +172,12 @@ watch was added to the model).
   message unanswered by design, so that the owner can retry.
 - A daemon stop: the Queue dies and nothing restarts it. Turns in flight leave
   their persisted user message without a marker.
-- Consumers other than `Acp.Peer`. Mobile's `RequestCoordinator` also watches
-  the Queue, but it releases the request for a re-run instead of answering it.
-  The companion socket's `Companion.Turns` watches the Queue it handed each
-  turn to and answers the turn the Peer's way, with one `turn_error`
-  (`interrupted`), dropping a result that arrives after it. Voice watches
-  nothing.
+- Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
+  the companion socket's turns and the phone's alike, watches the Queue it
+  handed each turn to and answers the turn the Peer's way, with one
+  `turn_error` (`interrupted`), dropping a result that arrives after it. It
+  holds the request's fence, so the request is failed once, not released for a
+  re-run. Voice watches nothing.
 
 ## Findings
 
@@ -338,8 +339,9 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   - `invoke_turn_result` also catches `:exit` and `:throw`, and logs every
     kind (`:926-941`).
 - **Trade-off:** `/stop` can no longer cut a claimed turn whose closure hangs.
-  Today's closures are bounded (ACP sends, voice dispatches, mobile store
-  calls that time out).
+  Today's closures are bounded (ACP sends, voice dispatches, and the companion
+  and phone channels' call into `Companion.Turns`, whose store calls time
+  out).
 - **Impact (before the fix):** an ACP prompt was never answered and the
   session refused later prompts; a mobile request stayed `running` and was
   re-run after the next restart; voice lost only a `{:failed}` on the error
@@ -391,8 +393,8 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   it.
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
-    `GenServer.whereis`, as the companion transports' `handoff_settlement`
-    does (`requests.ex:264-280`), gives the prompt to that pid, and monitors it.
+    `GenServer.whereis`, as `Companion.Turns` does at its hand-off
+    (`turns.ex:255-260`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
@@ -418,10 +420,11 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   - Companion socket: like ACP. `Companion.Turns` tracks every turn it hands
     to a Queue, ends each one on that Queue's `:DOWN` with one `turn_error`
     (`interrupted`), and drops a result that arrives after it.
-  - Mobile: unchanged. It fences on the Queue pid
-    (`RequestCoordinator.handoff`), releases the attempt, and re-runs it on a
-    resend or at boot. It does not hang, except when the Queue restarts
-    between the hand-off and the fence (see What remains).
+  - Mobile: like the companion socket. Its turns go through
+    `Companion.Turns` too, which holds each request's fence
+    (`RequestCoordinator.handoff` moves it there once ingest returns) and
+    fails the request once on the Queue's `:DOWN` instead of releasing it for
+    a re-run.
   - Voice: accepted. The delegation stays open until the operator cancels it
     or the call ends.
   - Every channel without a watch: a message sent while the Queue is
@@ -431,12 +434,10 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
   their persisted user messages stay open in history; an ACP retry of the
   failed prompt adds a second user message after the open one. A turn that
   finished its reply just as its Queue died can be answered as failed, if the
-  `:DOWN` reaches the Peer before the result. Mobile resolves the Queue after
-  `Gateway.ingest` returns, so a Queue restart in between would fence the new
-  Queue, which never got the request (reported outside this spec). A cancel
-  that reached the Peer while no Queue was registered (`session/cancel`,
-  `$/cancel_request` or a bridge disconnect, all through `stop_turn`) exited
-  `:noproc` in its call to the Queue's name: the Peer's connection ended and
+  `:DOWN` reaches the Peer before the result. A cancel that reached the Peer
+  while no Queue was registered (`session/cancel`, `$/cancel_request` or a
+  bridge disconnect, all through `stop_turn`) exited `:noproc` in its call
+  to the Queue's name: the Peer's connection ended and
   its open prompts got no answer. Fixed (f1712e1e): the
   turn keeps the Queue it was handed to beside its monitor
   (`Session.put_queue_ref`), `stop_turn` (`peer.ex:726-734`) stops that
@@ -460,7 +461,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Code:** after QUEUE-6's fix neither a stop nor the callback itself can
   kill the task in that gap. A linked helper still can: the typing loop
   (`typing.ex:24`, linked until `Typing.with_indicator` returns, which is
-  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:172`,
+  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:182`,
   linked until the task exits; its post-seal sweep runs beside the commit).
 - **Owner question:** close this too, by calling `finish_turn` after
   `Typing.with_indicator` returns (`turn_task/7` would take the outcome from

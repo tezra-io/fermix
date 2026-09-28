@@ -1225,6 +1225,20 @@ defmodule FermixChannels.DispatcherTest do
     def discard_draft(%Message{}, _handle), do: :ok
   end
 
+  # Draft-capable with its own pacing: the gateway hands it to the engine.
+  defmodule PacedDraftChannel do
+    def build_text_reply(%Message{}), do: fn _text -> :ok end
+    def build_media_reply(%Message{}), do: fn _media_part -> {:error, :media_unsupported} end
+
+    def stream_capability, do: :draft_edit
+    def draft_pacing, do: %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
+
+    def open_draft(%Message{}, _text), do: {:ok, 1}
+    def edit_draft(%Message{}, _handle, _text), do: :ok
+    def seal_draft(%Message{}, _handle, _text), do: {:ok, nil}
+    def discard_draft(%Message{}, _handle), do: :ok
+  end
+
   # Draft-capable but with no rotation callback: proves the gateway wires
   # rotation only when the channel exports it.
   defmodule PlainDraftChannel do
@@ -1306,6 +1320,17 @@ defmodule FermixChannels.DispatcherTest do
       assert %FermixChannels.Gateway.DraftStream.Spec{mode: :draft} = agent_message.stream_spec
       assert agent_message.stream_spec.rotate_at == nil
       assert agent_message.stream_spec.measure == nil
+      # D8: and it keeps the engine's own pacing, byte for byte.
+      assert agent_message.stream_spec.pacing == nil
+    end
+
+    test "a channel that declares its draft pacing hands it to the engine" do
+      assert :ok = dispatch_for_streaming(PacedDraftChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert agent_message.stream_spec.pacing ==
+               %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
     end
 
     test "no stream_spec when streaming is explicitly off" do

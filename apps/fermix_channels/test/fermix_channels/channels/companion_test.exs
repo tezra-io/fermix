@@ -4,6 +4,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Authorizer
@@ -119,7 +120,16 @@ defmodule FermixChannels.Channels.CompanionTest do
 
   setup do
     previous = Application.fetch_env(:fermix_channels, :companion_store)
+    previous_approvals = Application.fetch_env(:fermix_channels, :companion_approvals)
     Application.put_env(:fermix_channels, :companion_store, StoreStub)
+
+    approvals =
+      start_supervised!(
+        {Approvals, name: nil, schedule: fn _message, _delay -> make_ref() end},
+        id: :companion_test_approvals
+      )
+
+    Application.put_env(:fermix_channels, :companion_approvals, approvals)
     Process.register(self(), :companion_adapter_test)
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
     start_supervised!(Turns)
@@ -131,9 +141,14 @@ defmodule FermixChannels.Channels.CompanionTest do
         {:ok, value} -> Application.put_env(:fermix_channels, :companion_store, value)
         :error -> Application.delete_env(:fermix_channels, :companion_store)
       end
+
+      case previous_approvals do
+        {:ok, value} -> Application.put_env(:fermix_channels, :companion_approvals, value)
+        :error -> Application.delete_env(:fermix_channels, :companion_approvals)
+      end
     end)
 
-    :ok
+    {:ok, approvals: approvals}
   end
 
   describe "registry entry" do
@@ -341,15 +356,16 @@ defmodule FermixChannels.Channels.CompanionTest do
     message = request_message()
 
     assert :ok = Turns.handle_message(Map.from_struct(message), queue)
+    handed_off(queue)
 
-    refute_receive {:enqueued, "mac-1"}, 100
+    refute_received {:enqueued, "mac-1"}
     assert_received {:failed, "main", "mac-1", 3, %{error: ":cancelled"}}
 
     assert_received {:companion_event,
                      %{"t" => "turn_error", "turn_id" => "turn-mac-1", "code" => "cancelled"}}
 
     # Its turn has ended: a stop finds nothing to stop, and a late outcome is dropped.
-    assert :ok = Turns.cancel("main", "mac-1")
+    assert :ok = Turns.cancel(Turns, "main", "mac-1")
     refute_received {:stop_turn, _key, _id}
     assert :ok = Companion.build_turn_result(message).({:completed})
     refute_receive {:completed, _profile, _id, _attempt}, 100
@@ -363,8 +379,9 @@ defmodule FermixChannels.Channels.CompanionTest do
     recovered = %{recovered | metadata: %{recovered.metadata | companion_attempt: 4}}
 
     assert :ok = Turns.handle_message(Map.from_struct(recovered), queue)
+    handed_off(queue)
 
-    refute_receive {:enqueued, "mac-1"}, 100
+    refute_received {:enqueued, "mac-1"}
     assert_received {:failed, "main", "mac-1", 4, _fields}
     assert_received {:companion_event, %{"t" => "turn_error", "code" => "cancelled"}}
   end
@@ -373,11 +390,11 @@ defmodule FermixChannels.Channels.CompanionTest do
     queue = start_supervised!({QueueSink, self()}, id: :queue_sink)
     track(request_message(), queue)
 
-    assert :ok = Turns.cancel("main", "mac-1")
+    assert :ok = Turns.cancel(Turns, "main", "mac-1")
     assert_receive {:stop_turn, {"companion", "main", :root}, "mac-1"}
 
     # Another request's cancel never stops this turn.
-    assert :ok = Turns.cancel("main", "mac-2")
+    assert :ok = Turns.cancel(Turns, "main", "mac-2")
     refute_receive {:stop_turn, _key, "mac-2"}, 100
   end
 
@@ -409,7 +426,7 @@ defmodule FermixChannels.Channels.CompanionTest do
     turns = GenServer.whereis(Turns)
 
     :ok = :sys.suspend(turns)
-    cancel = Task.async(fn -> Turns.cancel("main", "mac-1") end)
+    cancel = Task.async(fn -> Turns.cancel(Turns, "main", "mac-1") end)
     wait_until(fn -> mailbox_size(turns) >= 1 end)
     queue_ref = Process.monitor(queue)
     Process.exit(queue, :kill)
@@ -439,7 +456,7 @@ defmodule FermixChannels.Channels.CompanionTest do
     trace = call_trace()
     trace_calls(trace, turns)
 
-    cancel = traced_task(trace, fn -> Turns.cancel("main", "mac-1") end)
+    cancel = traced_task(trace, fn -> Turns.cancel(Turns, "main", "mac-1") end)
     assert_receive {:stop_waiting, "mac-1", ^queue}
     reply = traced_task(trace, fn -> Companion.build_text_reply(message).("partial") end)
     wait_until(fn -> mailbox_size(turns) >= 1 end)
@@ -492,7 +509,9 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
   end
 
-  test "tool activity and approvals reach the profile, with no null fields" do
+  test "tool activity and approvals reach the profile, with no null fields", %{
+    approvals: approvals
+  } do
     message = request_message()
     activity = Companion.build_activity_callback(message)
     assert :ok = activity.({:tool_start, "shell"})
@@ -507,11 +526,24 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert approval["deny_command"] == "/deny TOK"
     assert approval["text"] == "Allow this?"
     refute Map.has_key?(approval, "detail")
+
+    # FEAT-2: kept for a Mac client that connects after it went out.
+    assert [%{"approval_id" => id}] = Approvals.pending(approvals, "main", :companion)
+    assert Approvals.pending(approvals, "main", :mobile) == []
+    assert id == approval["approval_id"]
   end
 
   test "media does not travel on this socket" do
     assert {:error, :unsupported_media} =
              Companion.send_media("main", %{kind: :image, path: "/tmp/x.png"}, [])
+  end
+
+  # The hand-off is sent to Turns, not awaited: once Turns and then the queue
+  # have answered, whatever the hand-off did has happened.
+  defp handed_off(queue) do
+    _turns = :sys.get_state(Turns)
+    _queue = :sys.get_state(queue)
+    :ok
   end
 
   # Hand the message to a queue through Turns, as the gateway does for every

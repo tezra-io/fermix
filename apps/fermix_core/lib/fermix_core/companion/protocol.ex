@@ -45,13 +45,13 @@ defmodule FermixCore.Companion.Protocol do
 
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
-  # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks. Nor
-  # is `row`, the live announcement of every row written outside a turn's
-  # completion, which only this wire carries.
-  @shared_client_events ~w(msg command read_state)
+  # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks.
+  # `cancel` stops one request's turn on either wire, and `row` announces a
+  # timeline row to every client of the profile that did not stream its turn.
+  @shared_client_events ~w(msg command cancel read_state)
   @shared_server_events ~w(
-    accepted turn_started text_delta tool_event text_done turn_error approval approval_resolved
-    read_state
+    accepted turn_started text_delta tool_event text_done turn_error row approval
+    approval_resolved read_state
   )
 
   @client_required %{

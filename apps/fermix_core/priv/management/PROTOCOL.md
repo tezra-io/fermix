@@ -224,13 +224,13 @@ daemon onto anything else.
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
-| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, and whether it was refused this boot, the listener (`status`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, push credentials, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
 | `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
 | `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
 | `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
 | `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
-| `mobile.devices.list` | none | Every paired phone, oldest first, at most 64. Minimum version `2`. |
-| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. Minimum version `2`. |
+| `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
+| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -303,19 +303,50 @@ Notes that the shapes alone do not carry:
   daemon verifies a phone's secure hardware, `platform`, `build_role` and
   `boot_state` are null on a request and on a device, and `attestation.status`
   is `unavailable` with the daemon's sentence.
-- **`mobile.status` and `mobile.devices.list` answer with the channel off**:
-  `enabled` is false and the list is empty, so a pane can always read the
-  state. The switch reaches the daemon at once but the channel starts only at
-  boot, so `started` is false until a restart after enabling it, and `refused`
-  is true when the channel could not start this boot (the daemon log says
-  why); the list is empty whenever the channel is not running. `identity.fingerprint` is the SHA-256 of the gateway public key a phone
+- **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
+  with the channel off**, so a pane can always read the state and the owner
+  can always forget a phone: while the channel is not running the paired
+  phones are read from, and forgotten in, the paired-device file. Every row
+  of the channel's settings is boot-bound: the switch reaches the daemon at
+  once but the channel starts and stops only at boot, so `enabled` is the
+  switch and `started` whether the channel runs, and the two differ until a
+  restart. Every verb goes by `started`, never by the switch: a channel
+  switched off keeps serving, pairing and revoking until the restart.
+  `refused` is true when the channel could not start this boot, and
+  `refusal` names the class: `memory_disabled` (the conversation lives in the
+  memory store, which is off), `identity`, `attachment_manifest` or
+  `trust_store`; the daemon log says what to repair. `paired_devices` counts
+  the running channel's phones and is 0 while it is not running.
+  `identity.fingerprint` is the SHA-256 of the gateway public key a phone
   pins, lowercase hex in groups of four, null until the first pairing creates
   it. A decide with no phone waiting and a revoke of an id no phone has are
   `invalid_params` with the daemon's sentence. `unavailable`
-  {`capability`: `mobile`} means the phone channel could not answer at all:
-  `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel` and
-  `mobile.devices.revoke` answer it while the channel is off, could not start
-  this boot, or has not started yet.
+  {`capability`: `mobile`} with no `sentence` means the phone channel could
+  not answer at all: `mobile.pair.get`, `mobile.pair.decide` and
+  `mobile.pair.cancel` answer it while the channel is not running.
+- **A running channel that cannot listen stays up.** `listener.status` is
+  `unavailable` when the channel runs but cannot listen on its address, with
+  `listener.reason` one of `address_unavailable` (the address is not up yet,
+  such as a tailnet address at login), `address_in_use` (another program holds
+  the port), `permission_denied` or `listen_failed`. The channel retries on
+  its own, from one second doubling to a minute, and stops retrying after a
+  day until the next restart. `listener.reason` is null in every other state.
+- **Push connects when there is something to send.** `apns.delivery` is
+  `ready`, `degraded` while a connection to Apple is being made or when the
+  last one failed or was lost (`apns.reason`: `connecting`, `connect_failed`
+  or `connection_lost`; the next push reconnects), or `down` when no push
+  dispatcher runs: the channel is not running, push is off, or its
+  credentials did not resolve. A connect is given up after ten seconds, and
+  the status answers while one runs.
+- **Pairing and forgetting a phone are the owner's decisions.**
+  `mobile.pair.start`, `mobile.pair.decide`, `mobile.pair.cancel` and
+  `mobile.devices.revoke` answer `unavailable` {`capability`: `mobile`,
+  `sentence`: "Only the owner can pair or forget a phone; run this from your
+  own terminal."} to a process the daemon itself started (a shell command the
+  agent ran, a coding harness), to a detached process nobody is watching, and
+  to a caller the daemon cannot place, and the daemon log says so. The
+  sentence is what tells this refusal from a channel that is not running.
+  Reading a session and the status stay open to every caller.
 - **`channels.mobile` is the phone channel's settings section**: the enable
   switch, the port, the address it listens on and the local-network
   announcement, every row boot-bound. It is a section of its own rather than a
@@ -602,7 +633,7 @@ Notes that the shapes alone do not carry:
 | `client_too_old` | The declared version is below the daemon's floor. |
 | `daemon_too_old` | The declared version is above the daemon's ceiling. |
 | `internal_error` | The daemon failed to complete the request. Details are always empty. |
-| `unavailable` | The named capability could not answer. `details.capability` names it. |
+| `unavailable` | The named capability could not answer. `details.capability` names it. `details.sentence`, when present, is the daemon's own sentence for this refusal. |
 | `busy` | Another operation of this kind is already running. |
 | `lease_expired` | The lifecycle lease's window elapsed and the daemon resumed. |
 | `unknown_lease` | The lease was never issued by this daemon, or was already consumed. |
@@ -623,7 +654,7 @@ degrades to `unknown_lease`.
 
 `message` is a fixed per-code string and never varies with the request; it names
 the CLASS of failure. The daemon's own sentence about THIS request, when it has
-one, is `details.sentence`. Two codes carry one:
+one, is `details.sentence`. Three codes carry one:
 
 - `invalid_params` — every request-path refusal that has something to say to the
   operator. `details.field` names the parameter and `details.sentence` says why:
@@ -634,6 +665,9 @@ one, is `details.sentence`. Two codes carry one:
   id.", and every settings validation refusal. A refusal with nothing to
   add carries `field` alone.
 - `config_unreadable` — `details.sentence` is the parser's own message.
+- `unavailable` — only when the phone channel refuses a pairing or forgetting
+  decision from a caller that is not the owner: "Only the owner can pair or
+  forget a phone; run this from your own terminal."
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that

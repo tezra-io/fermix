@@ -14,6 +14,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixChannels.Mobile.DeviceStore
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Harness.Ledger
@@ -162,7 +163,7 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
 
     test "a mobile grant resumes with its connection-authenticated ingress context", %{root: root} do
       origin =
-        mobile_origin("device-1",
+        mobile_origin(pair_device!(),
           resume: %{content: "finish on mobile", reply_target: "main", sender: "alice"}
         )
 
@@ -852,4 +853,31 @@ defmodule FermixChannels.Gateway.Commands.RequestGrantTest do
   defp restore_env(key, value), do: System.put_env(key, value)
   defp restore_sandbox(nil), do: Application.delete_env(:fermix_core, :sandbox)
   defp restore_sandbox(value), do: Application.put_env(:fermix_core, :sandbox, value)
+
+  # A device paired in a throwaway trust store, run under the name the
+  # authorizer asks: a paired device is authorized only while the store holds it.
+  defp pair_device! do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("paired-device")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    start_supervised!({DeviceStore, root: root, name: DeviceStore})
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    id =
+      [{a, 8}, {b, 4}, {c, 4}, {d, 4}, {e, 12}]
+      |> Enum.map_join("-", fn {part, width} ->
+        part |> Integer.to_string(16) |> String.pad_leading(width, "0") |> String.downcase()
+      end)
+
+    {:ok, _device} =
+      DeviceStore.add(DeviceStore, %{
+        device_id: id,
+        name: "iPhone",
+        model: "iPhone17,1",
+        noise_pk: :crypto.strong_rand_bytes(32),
+        created_at: ~U[2026-09-27 09:00:00Z],
+        apns_key_salt: :crypto.strong_rand_bytes(32)
+      })
+
+    id
+  end
 end

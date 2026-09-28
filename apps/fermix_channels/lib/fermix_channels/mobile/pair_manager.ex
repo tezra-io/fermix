@@ -3,9 +3,15 @@ defmodule FermixChannels.Mobile.PairManager do
   Daemon-owned lifecycle for the single live mobile pairing window.
 
   Secrets and pending requests exist only in this process. A window lasts at
-  most 120 seconds and five failed handshakes close it. Identity, listener,
-  persistence, clocks, timers, and randomness are injected at the boundary so
-  tests never bind ports, touch the host filesystem, or sleep for expiry.
+  most 120 seconds. Failed handshakes are counted per source address: the
+  fifth from one address refuses that address for the rest of the window, and
+  nothing is counted while a phone is waiting for the owner's decision. No
+  number of failures ends the window, so a stranger cannot end the ceremony
+  at all: only the owner, the phone and the 120 seconds can. The same phone
+  reconnecting (proven by its Noise key) takes its waiting request over.
+  Identity, listener, persistence, clocks, timers, and randomness are
+  injected at the boundary so tests never bind ports, touch the host
+  filesystem, or sleep for expiry.
 
   A closed window leaves a secret-free record behind so a management client
   that polls can still read how the ceremony ended: at most eight records,
@@ -19,7 +25,14 @@ defmodule FermixChannels.Mobile.PairManager do
   alias FermixChannels.Mobile.Identity
 
   @max_ttl_ms 120_000
+  # Per source address: one noisy peer is refused alone. A failed handshake
+  # proves nothing about who sent it (garbage needs neither the pairing secret
+  # nor the gateway key, and the gateway key is in every pairing QR), so no
+  # count of them may end the window for everyone. The addresses one window
+  # remembers are bounded; a failure from an address past the bound is not
+  # counted, since a peer with that many addresses gains nothing from one more.
   @max_failures 5
+  @max_tracked_sources 1_024
   @max_wait_ms 120_000
   @max_text_bytes 128
   @max_retained 8
@@ -42,8 +55,10 @@ defmodule FermixChannels.Mobile.PairManager do
           noise_pk: <<_::256>>,
           sas: String.t()
         }
-  @type terminal_status ::
-          :approved | :denied | :expired | :cancelled | :rate_limited | :device_disconnected
+  @type terminal_status :: :approved | :denied | :expired | :cancelled | :device_disconnected
+  @type outcome_reason :: :approved | :denied | :timeout | :cancelled | :device_disconnected
+  @typedoc "Where a handshake came from; `:unknown` when the caller cannot say."
+  @type source :: :inet.ip_address() | :unknown
   @type record :: %{
           session_id: session_id(),
           status: :awaiting_scan | :awaiting_decision | terminal_status(),
@@ -74,6 +89,10 @@ defmodule FermixChannels.Mobile.PairManager do
   @spec retention_ms() :: pos_integer()
   def retention_ms, do: @retention_ms
 
+  @doc "Most source addresses one window counts failed handshakes for."
+  @spec max_tracked_sources() :: pos_integer()
+  def max_tracked_sources, do: @max_tracked_sources
+
   @doc """
   Open the one pairing window. A failed step is named: `{:identity, reason}`
   for the identity guard or `ensure_identity`, `{:listener, reason}` for the
@@ -85,7 +104,22 @@ defmodule FermixChannels.Mobile.PairManager do
   def open(server \\ __MODULE__), do: GenServer.call(server, :open)
 
   @spec current(GenServer.server()) :: {:ok, map()} | :none
-  def current(server \\ __MODULE__), do: GenServer.call(server, :current)
+  def current(server \\ __MODULE__), do: current(server, :unknown)
+
+  @doc "The open window as a handshake from `source` sees it: none once refused."
+  @spec current(GenServer.server(), source()) :: {:ok, map()} | :none
+  def current(server, source), do: GenServer.call(server, {:current, source})
+
+  @doc """
+  The one word the phone's `pair_denied` and the management session view use
+  for how a ceremony ended. A window that ran out is `timeout` on both.
+  """
+  @spec outcome_reason(terminal_status()) :: outcome_reason()
+  def outcome_reason(:expired), do: :timeout
+
+  def outcome_reason(status)
+      when status in [:approved, :denied, :cancelled, :device_disconnected],
+      do: status
 
   @doc """
   The session as it stands: the open window's record, or a finished one still
@@ -122,10 +156,21 @@ defmodule FermixChannels.Mobile.PairManager do
   end
 
   @spec record_failure(GenServer.server(), session_id()) ::
-          {:ok, 1..4} | {:error, :expired | :rate_limited | :session_not_found}
-  def record_failure(server, session_id)
-      when is_binary(session_id) and session_id != "" do
-    GenServer.call(server, {:record_failure, session_id})
+          {:ok, 0..4} | {:error, :timeout | :rate_limited | :session_not_found}
+  def record_failure(server, session_id), do: record_failure(server, session_id, :unknown)
+
+  @doc """
+  Count one failed handshake from `source`. Its fifth refuses that source for
+  the rest of the window, which stays open for everyone else. With a request
+  waiting for the owner, or once the window remembers
+  `max_tracked_sources/0` other addresses, nothing is counted.
+  """
+  @spec record_failure(GenServer.server(), session_id(), source()) ::
+          {:ok, 0..4} | {:error, :timeout | :rate_limited | :session_not_found}
+  def record_failure(server, session_id, source)
+      when is_binary(session_id) and session_id != "" and
+             (is_tuple(source) or source == :unknown) do
+    GenServer.call(server, {:record_failure, session_id, source})
   end
 
   @spec approve(GenServer.server(), session_id()) :: {:ok, map()} | {:error, term()}
@@ -171,10 +216,9 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
-  def handle_call(:current, _from, state) do
+  def handle_call({:current, source}, _from, state) do
     state = expire_if_due(state)
-    reply = if state.window, do: {:ok, public_window(state.window)}, else: :none
-    {:reply, reply, state}
+    {:reply, current_for(state.window, source), state}
   end
 
   def handle_call({:session, session_id}, _from, state) do
@@ -189,8 +233,9 @@ defmodule FermixChannels.Mobile.PairManager do
 
   def handle_call({:submit_request, session_id, attrs}, _from, state) do
     with {:ok, state, window} <- fetch_window(state, session_id),
-         :ok <- request_available(window),
-         {:ok, request} <- normalize_request(attrs) do
+         {:ok, request} <- normalize_request(attrs),
+         :ok <- request_available(window, request) do
+      :ok = release_replaced_socket(window.request, request)
       public = public_request(request)
       window = %{window | request: request}
       window = reply_waiter(window, :request_waiter, {:ok, public}, state)
@@ -221,9 +266,9 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
-  def handle_call({:record_failure, session_id}, _from, state) do
+  def handle_call({:record_failure, session_id, source}, _from, state) do
     with {:ok, state, window} <- fetch_window(state, session_id) do
-      failure_reply(state, %{window | failures: window.failures + 1})
+      failure_reply(state, window, source)
     else
       {:error, reason, state} -> {:reply, {:error, reason}, state}
     end
@@ -329,7 +374,7 @@ defmodule FermixChannels.Mobile.PairManager do
         expires_at_ms: now + state.ttl_ms,
         timer_ref: timer_ref,
         timer_token: timer_token,
-        failures: 0,
+        failures_by_source: %{},
         request: nil,
         request_waiter: nil,
         decision_waiter: nil
@@ -438,20 +483,41 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
-  defp failure_reply(state, %{failures: failures} = window) when failures >= @max_failures do
-    state = %{state | window: window} |> close_window(:rate_limited)
-    {:reply, {:error, :rate_limited}, state}
+  # A phone waiting for the owner has proven the pairing secret; handshake
+  # noise from anyone else cannot touch that ceremony, so it is not counted.
+  defp failure_reply(state, %{request: request} = window, source) when not is_nil(request),
+    do: {:reply, {:ok, source_failures(window, source)}, state}
+
+  defp failure_reply(state, window, source) do
+    counts = window.failures_by_source
+
+    if Map.has_key?(counts, source) or map_size(counts) < @max_tracked_sources do
+      count = min(source_failures(window, source) + 1, @max_failures)
+      window = %{window | failures_by_source: Map.put(counts, source, count)}
+      {:reply, counted_failure(count), %{state | window: window}}
+    else
+      {:reply, {:ok, 0}, state}
+    end
   end
 
-  defp failure_reply(state, window) do
-    {:reply, {:ok, window.failures}, %{state | window: window}}
+  defp counted_failure(count) when count >= @max_failures, do: {:error, :rate_limited}
+  defp counted_failure(count), do: {:ok, count}
+
+  defp source_failures(window, source), do: Map.get(window.failures_by_source, source, 0)
+
+  defp current_for(nil, _source), do: :none
+
+  defp current_for(window, source) do
+    if source_failures(window, source) >= @max_failures,
+      do: :none,
+      else: {:ok, public_window(window)}
   end
 
   defp close_window(state, status, socket_result \\ nil) do
     window = state.window
     now = state.clock.()
     cancel_timer(window.timer_ref, state)
-    terminal_reply = {:error, terminal_reason(status)}
+    terminal_reply = {:error, outcome_reason(status)}
     window = reply_waiter(window, :request_waiter, terminal_reply, state)
     _window = reply_waiter(window, :decision_waiter, terminal_reply, state)
     notify_socket(window, socket_result || terminal_reply)
@@ -614,8 +680,20 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
-  defp request_available(%{request: nil}), do: :ok
-  defp request_available(_window), do: {:error, :request_pending}
+  # The Noise key is authenticated by the handshake the request arrived on, so
+  # a request with the waiting one's key is that phone on a new connection:
+  # the old one went quiet without a FIN (a network change, a suspended app).
+  defp request_available(%{request: nil}, _request), do: :ok
+
+  defp request_available(%{request: %{noise_pk: key}}, %{noise_pk: key}), do: :ok
+  defp request_available(_window, _request), do: {:error, :request_pending}
+
+  defp release_replaced_socket(%{socket_pid: old}, %{socket_pid: new}) when old != new do
+    send(old, {:mobile_replaced, new})
+    :ok
+  end
+
+  defp release_replaced_socket(_waiting, _request), do: :ok
   defp require_request(%{request: nil}), do: {:error, :request_missing}
   defp require_request(_window), do: :ok
 
@@ -631,7 +709,6 @@ defmodule FermixChannels.Mobile.PairManager do
       :identity,
       :opened_at_ms,
       :expires_at_ms,
-      :failures,
       :request
     ])
     |> Map.update(:request, nil, &optional_public_request/1)
@@ -734,11 +811,17 @@ defmodule FermixChannels.Mobile.PairManager do
     fn identity -> apply(FermixChannels.Mobile.Listener, :activate, [listener, identity]) end
   end
 
-  defp default_persist_device(device_store, _root) when not is_nil(device_store),
-    do: fn attrs -> apply(FermixChannels.Mobile.DeviceStore, :add, [device_store, attrs]) end
+  defp default_persist_device(device_store, _root) when not is_nil(device_store) do
+    fn attrs ->
+      apply(FermixChannels.Mobile.DeviceStore, :add_approved, [device_store, attrs])
+    end
+  end
 
-  defp default_persist_device(_device_store, root),
-    do: fn attrs -> apply(FermixChannels.Mobile.DeviceStore, :add, [attrs, [root: root]]) end
+  defp default_persist_device(_device_store, root) do
+    fn attrs ->
+      apply(FermixChannels.Mobile.DeviceStore, :add_approved, [attrs, [root: root]])
+    end
+  end
 
   defp default_emit_pair(status, duration_us) do
     apply(FermixChannels.Telemetry, :emit_pair, [:mobile, status, duration_us])
@@ -746,12 +829,6 @@ defmodule FermixChannels.Mobile.PairManager do
 
   defp matching_timer?(%{session_id: session_id, timer_token: token}, session_id, token), do: true
   defp matching_timer?(_window, _session_id, _token), do: false
-  defp terminal_reason(:approved), do: :approved
-  defp terminal_reason(:denied), do: :denied
-  defp terminal_reason(:expired), do: :expired
-  defp terminal_reason(:rate_limited), do: :rate_limited
-  defp terminal_reason(:cancelled), do: :cancelled
-  defp terminal_reason(:device_disconnected), do: :device_disconnected
 
   defp field(attrs, atom_key, string_key),
     do: Map.get(attrs, atom_key, Map.get(attrs, string_key))
@@ -782,6 +859,8 @@ defmodule FermixChannels.Mobile.PairManager do
   defp cancel_waiter_timer(nil, _state), do: :ok
   defp cancel_waiter_timer(waiter, state), do: cancel_timer(waiter.timer_ref, state)
 
+  # Lowercase: the trust store accepts only the canonical lowercase form, and
+  # `Integer.to_string/2` writes hex digits in uppercase.
   defp uuid do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
     c = bor(band(c, 0x0FFF), 0x4000)
@@ -789,7 +868,7 @@ defmodule FermixChannels.Mobile.PairManager do
 
     [{a, 8}, {b, 4}, {c, 4}, {d, 4}, {e, 12}]
     |> Enum.map_join("-", fn {value, width} ->
-      value |> Integer.to_string(16) |> String.pad_leading(width, "0")
+      value |> Integer.to_string(16) |> String.downcase() |> String.pad_leading(width, "0")
     end)
   end
 end

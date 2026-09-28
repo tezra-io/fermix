@@ -30,8 +30,14 @@ activity, and a connection whose process cannot be identified is refused. A tool
 approval shows up as an approve/deny card answered with the same `/confirm` and
 `/deny` routes as on the other chats. That includes an access-sensitive plugin
 command (such as a car unlock) asked for after reading outside content: Fermix
-runs exactly that command once the card is approved. At most four clients connect at once; a
-fifth is refused and told why.
+runs exactly that command once the card is approved. A card still waiting is
+sent again when the app reconnects, with the time it has left, and is withdrawn
+as expired when that runs out. A card that was answered or ran out while the
+app was away is not sent again: the app drops every card it shows when it
+reconnects and keeps only the ones sent again. A card belongs to the chat whose
+turn raised it, because its token resolves only there: a phone's card never
+shows here, and this chat's never shows on a phone. At most four clients
+connect at once; a fifth is refused and told why.
 
 ## Conversation and timeline
 
@@ -46,11 +52,18 @@ Messages are delivered at least once: each carries a client message id the
 daemon claims durably before it acknowledges, so a resend after a dropped
 connection is recognized and never runs the turn twice. A request the daemon
 accepted but could not finish because it stopped runs again when it next
-starts. Claims are kept for 24 hours.
+starts. Claims are kept for 24 hours. A slash command, typed as a message or
+sent as a command, settles its request with its answer: one answered at once
+(`/help`, `/new`) is settled then and never runs again at the next start (if
+its answer cannot be recorded, the request fails and the chat is told), one
+that becomes a turn (`/ultra`) is answered and settled by that turn, and one
+that answers later (`/background`, `/skills review`, `/skills approve`) keeps
+its request open and posts its result to this chat when it is done.
 
 ## Streaming, cancel and stop
 
-A reply streams live as it is generated, with tool activity alongside it. Each
+A reply streams live as it is generated, with tool activity alongside it (a
+tool's detail and a turn's error text are cut to 512 bytes). Each
 reply part becomes one timeline row only when the turn completes; a cancelled
 or failed turn ends with an error and keeps nothing of its draft, and a turn
 the daemon lost to a restart of its queue ends as interrupted. An offline
@@ -69,9 +82,14 @@ so it is not run again at the next boot.
 
 Every row is announced live to the connected clients the moment it is written,
 whoever writes it: the sender's own message, a slash command's answer, a job's
-delivery, a message or reply from the phone. History pages both ways from a
-cursor: forward from the last row a client showed (the catch-up read after a
-reconnect) and backward from any row (scrolling up), up to 200 rows a page. Full-text search covers the whole timeline, newest first, with a
+delivery, a message or reply from the phone. This chat's rows, its turns'
+replies included, reach the phones the same way, and read state is shared with
+them, never past the newest row. History pages both ways from a cursor: forward
+from the last row a client showed (the catch-up read after a reconnect) and
+backward from any row (scrolling up), up to 200 rows a page, fewer when the
+rows are long: a page stays under about 60 KiB, and its cursor then names the
+last row it carries, so the next read continues from there. Full-text search
+covers the whole timeline, newest first, with a
 plain-text excerpt around each match and the matched ranges; every word of the
 query must match, each as a word prefix, and results page backward the same
 way.

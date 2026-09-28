@@ -473,26 +473,44 @@ replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
 them in lockstep with the exporter's clauses, or a `call_stop` arriving without
 its opener reads as a `:subagent` phantom root.
 
-## Sessionless channel points (pairing, push, transport posture)
+## Sessionless channel points (pairing, push, render, transport posture)
 
 Pairing decisions and push deliveries are **point events with no agent
 session** (like plugin dist): a pairing resolves in `PairManager` and a push
 fires after the turn already closed. Both go through `FermixChannels.Telemetry`
 — `emit_pair(channel, status, duration_us)` with
-`status ∈ approved | denied | expired | rate_limited | cancelled |
-device_disconnected` (`cancelled`: the window closed before a decision, by an
-owner's cancel, a dropped `fermix pair` connection or a failed setup;
-`device_disconnected`: the phone was gone when the owner approved), and
+`status ∈ approved | denied | expired | cancelled | device_disconnected`
+(`cancelled`: the window closed before a decision, by an owner's cancel, a
+dropped `fermix pair` connection or a failed setup; `device_disconnected`: the
+phone was gone when the owner approved), and
 `emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
-(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). Never
-hand-roll the event, and never attach device names, tokens, or preview bodies —
-the payloads are ciphertext by design and the trace must not be the plaintext
-side channel. `Trace.TelemetryHandler` maps both to `agent_event` rows; the
-Opik exporter deliberately does **not** subscribe (no session to nest under),
-so a missing pair/push trace in Opik is expected, not a bug.
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only).
+`expired` is the window's own end, which the phone and the management wire
+both call `timeout`. Failed handshakes refuse only the address they came from
+and never end a window, so they have no pair status. Never hand-roll the
+event, and never attach device names, tokens, or preview bodies — the payloads
+are ciphertext by design and the trace must not be the plaintext side channel.
+`Trace.TelemetryHandler` maps both to `agent_event` rows; the Opik exporter
+deliberately does **not** subscribe (no session to nest under), so a missing
+pair/push trace in Opik is expected, not a bug.
 
-A channel **transport** crossing into or out of a degraded posture is the third
+A channel **render** is a point of the same family:
+`emit_render(channel, result, duration_us)` emits `[:fermix, :channel,
+:render]` (`duration_us`; `channel`/`status` metadata, atoms only, `:ok` or the
+error's class). Telegram emits it per rendered reply (`:ok`, or
+`:plain_fallback` when a chunk is resent as raw Markdown). The mobile socket
+emits it only when it drops a fan-out event it cannot encode for one phone
+(`FermixChannels.Mobile.SocketHandler`, `drop_event/4`): `status` is the
+reason's leading atom (`event_too_large`, `null_field`, `invalid_payload`,
+…, or `encode_failed`), never the event, and the session stays open, because
+an outbound encode failure is the daemon's fault, not the phone's. A waiting
+approval card it cannot encode when a phone says hello is dropped the same way.
+The daemon log carries the event type and a bounded reason. No handler turns a
+render into a trace row, and Opik does not subscribe; the benchmark runner
+reads it as `channel_render`.
+
+A channel **transport** crossing into or out of a degraded posture is another
 event of this family: `emit_transport(channel, status, consecutive_failures,
 error_class)` with `status ∈ degraded | recovered`, emitting
 `[:fermix, :channel, :transport]` (`count: 1` + `consecutive_failures`;

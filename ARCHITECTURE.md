@@ -344,8 +344,9 @@ second resource-store process to coordinate.
 
 `Setup.ConfigStore` owns `FERMIX_HOME`, the persisted `config.toml`, and the
 standard workspace paths (workspace, grants, bootstrap, skills, plugins,
-browser, journals, realtime, mobile, traces, logs, and `memory.db`). Secrets
-live in the OS keychain, named by profile rather than by home.
+browser, journals, realtime, mobile, traces, logs, and `memory.db`); it keeps
+`mobile` at 0700, the only mode the phone's trust store reads. Secrets live in
+the OS keychain, named by profile rather than by home.
 
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's
@@ -536,7 +537,10 @@ handshake, exported in `priv/companion/`) by `FermixChannels.Companion`; the
 mobile wire validates the chat events it shares through the same module.
 `Companion.Timeline` is the durable timeline the phone and the Mac share
 (profile `main`), paged in both directions and searched through an FTS5 index
-its own writes maintain.
+its own writes maintain. Its media index and link previews live in side
+tables beside `mobile_timeline` (the index kept by SQLite triggers, so every
+writer keeps it), and that table's columns stay the ones every released
+engine decodes, so an older release still reads a newer database.
 
 Architecture Invariant: each wire is defined once, in its protocol module, and
 exported; `protocol_contract_test.exs` fails when the management export drifts,
@@ -609,21 +613,68 @@ Current channels:
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
-  conversation history.
+  conversation history. `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
+  the device store and registry, `PairManager`, `MediaStore`, the bounded
+  link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
+  dispatcher when push is configured (it connects on the first push, never at
+  boot, and a push waits for that connect only until its deadline), the
+  transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
+  addresses a phone can reach), the `Listener` and the mDNS advertiser. The
+  `Listener` binds through `Mobile.TlsTransport`, ThousandIsland's TLS
+  transport with a bounded handshake and with every read before the WebSocket
+  upgrade bounded by one upgrade deadline; before that upgrade a connection
+  gets one HTTP/1.1 request with bounded headers. A bind that fails leaves the
+  `Listener` `unavailable` and retrying rather than stopping the subtree.
+  Admission refuses the whole subtree for the boot, with a named class, when
+  memory is off or the identity, attachment manifest or trust store cannot be
+  read. Whether the channel runs has one answer, `Mobile.Supervisor.running?/1`
+  (the supervisor's name is registered): the management verbs and a delivered
+  row's push and link previews read it, so a job delivered while the channel
+  is off is only a row of the shared timeline.
 - The two companion transports share one request path (`Companion.Requests`:
-  the durable `client_msg_id` claim, the attempt fence, ingest, history, search)
-  and one set of turn outputs (`Companion.Output`); each transport's
-  `Mobile.RequestCoordinator` instance reruns only its own unfinished requests
-  at boot. A companion-socket turn reaches the Queue through `Companion.Turns`,
-  which writes its replies and sends `text_done` only on the `{:completed}`
-  outcome, and its `cancel` stops one named turn: the cancel is recorded on
-  the request (`cancelled_at`), and `Companion.Turns`, which owns the hand-off
-  to the queue, reads that mark as it enqueues and sends any
-  `Queue.stop_turn/3` itself, so a cancel is never lost between claim and
-  queue, and boot recovery never reruns a cancelled request. Every
-  other timeline row, whichever transport or job writes it, is announced to
-  the socket's connections as a `row` the moment it is written
-  (`Channels.Companion.announce_row/3`).
+  the durable `client_msg_id` claim, the attempt fence, ingest, history, search,
+  read state and cancel) and one set of turn outputs (`Companion.Output`); each
+  transport's `Mobile.RequestCoordinator` instance reruns only its own
+  unfinished requests at boot. `Companion.Turns` is the Gateway agent and
+  settlement owner of both transports and runs on every real boot, whether or
+  not this boot serves `companion.sock`. A request's hand-off reaches it as a
+  cast; once ingest returns, the request's worker moves the coordinator's
+  fence onto it and casts the request's settlement behind the hand-off, and
+  `Turns` completes a request no turn was handed off for (a slash command
+  answered inline), in mailbox order. A turn it tracks settles from the
+  Queue's outcome: a companion turn's replies are held and written, with
+  `text_done`, only on `{:completed}`, while a phone turn streams and writes
+  its own rows and is only settled. A `cancel` from either transport
+  (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
+  `Turns`, which owns the hand-off to the queue, reads that mark as it enqueues
+  and sends any `Queue.stop_turn/3` itself, so a cancel is never lost between
+  claim and queue and boot recovery never reruns a cancelled request; a
+  revoked phone's requests are marked the same way, by `Turns`, so the device
+  registry that revoked it never waits on the store. A store call inside
+  `Turns` that exits (a Repo timeout or restart) is logged as that request's
+  error, a stop waits on its queue however busy it is and leaves a queue that
+  is gone to its `:DOWN`, and a settlement that fails, in the store or by a
+  raise in the request path's settle code, fails the request and sends its
+  client `request_failed`, so none of these crashes `Turns`; a raise in its
+  own code or store calls is a defect and crashes it to `Companion.Supervisor`.
+- `Companion.Fanout` is the one way a logical chat event reaches everyone
+  watching a profile: the `companion.sock` connections and, while the mobile
+  subtree runs, every connected phone, each wire getting only the events in
+  its own catalog. Every timeline row, whichever transport or job writes it,
+  and every `read_state` reach both transports (a row built once, by
+  `Companion.Output.row/2`, in the phone's history-message shape, and
+  projected to the Mac's `row` fields); a turn's stream and ending stay with
+  the transport that ran it, and the other one learns the reply as a `row`.
+- `Companion.Approvals` keeps the approval cards still waiting for the owner,
+  each for the transport whose turn raised it, the only one its token resolves
+  from. It announces each card and, when it resolves or expires, its
+  `approval_resolved`, through one announce, to the connections open then; it
+  re-sends the cards after a phone's `hello_ack` and a Mac client's
+  `server_hello` with the time each has left, and holds at most 64.
+  A card that ended while a client was away is never withdrawn, so both wires'
+  clients drop every card they show at that handshake and keep only the ones
+  sent after it. It runs on every boot, after the registry and `Turns` in
+  `Companion.Supervisor`.
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`).
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
@@ -721,14 +772,11 @@ own top-level `:one_for_one` trees. Inside the channels tree,
 turn tasks run under, so a Queue that dies takes its turns with it and the
 restarted Queue never runs a turn beside a survivor. Nothing then sends those
 turns' results, so `Acp.Peer` watches the Queue process it handed each prompt
-to and answers the prompt as a failed turn. Mobile's `RequestCoordinator`
-fences the request on the Queue it finds after the hand-off and releases it when
-that Queue dies (a restart between the hand-off and that lookup leaves the
-attempt running until its fence expires). `Companion.Turns` watches the Queue
-it handed each companion-socket turn to, ends the turn as `interrupted` when
-that Queue dies, and holds the request's fence itself, so the request is failed
-once rather than released. Voice does not watch (accepted: a call is bounded
-and the operator can cancel it).
+to and answers the prompt as a failed turn. `Companion.Turns` watches the
+Queue it handed each turn of either companion transport to, ends the turn as
+`interrupted` when that Queue dies, and holds the request's fence itself, so
+the request is failed once rather than released for a rerun. Voice does not
+watch (accepted: a call is bounded and the operator can cancel it).
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
 dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s

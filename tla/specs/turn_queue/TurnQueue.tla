@@ -2,7 +2,7 @@
 (***************************************************************************)
 (* FermixChannels.Gateway.Queue for ONE conversation: the FIFO of waiting *)
 (* messages, the single active turn, the turn task's steps, /stop, a stop *)
-(* that names one message (the companion socket's cancel), a               *)
+(* that names one message (a companion socket or phone cancel), a          *)
 (* crashing turn task, and the Queue process itself crashing and being     *)
 (* restarted by its supervisor; and one consumer that waits on each        *)
 (* message's result, Acp.Peer, with its watch on the Queue.                *)
@@ -20,10 +20,10 @@
 (*  - the terminal_error_owner? branch (only who sends the error text);   *)
 (*  - other conversations (independent: the Queue keys all state by       *)
 (*    conversation);                                                       *)
-(*  - consumers other than Acp.Peer: mobile's RequestCoordinator releases  *)
-(*    a request on the Queue's :DOWN instead of answering it; the          *)
-(*    companion socket's Companion.Turns answers it the Peer's way (a      *)
-(*    turn_error, interrupted); voice watches no Queue.                    *)
+(*  - consumers other than Acp.Peer: Companion.Turns, which settles the    *)
+(*    turns of the companion socket and the phone alike, answers the       *)
+(*    Queue's :DOWN the Peer's way (a turn_error, interrupted); voice      *)
+(*    watches no Queue.                                                    *)
 (*                                                                         *)
 (* One step = one indivisible thing in the code: one Queue callback, or   *)
 (* one step of the turn task between two calls into another process.     *)
@@ -47,13 +47,14 @@ CONSTANTS
     \* Environment switches: what may happen to the queue.
     UsersCanStop,       \* /stop (Stopper -> Queue.stop_all, stopper.ex:44) or a voice or
                         \* ACP cancel (Queue.stop_conversation); same per-conversation effect
-    UsersCanStopTurn,   \* a stop that names one message (Queue.stop_turn, queue.ex:185): the
-                        \* companion socket's cancel, which one of several clients sharing
-                        \* the conversation sends at any moment, even after its turn ended
+    UsersCanStopTurn,   \* a stop that names one message (Queue.stop_turn, queue.ex:185): a
+                        \* companion socket or phone cancel, which Companion.Turns sends for
+                        \* one of several clients sharing the conversation at any moment,
+                        \* even after its turn ended
     Named,              \* the message a named stop names (one of Msgs)
     TasksCanCrash,      \* the turn task dies at any step: its own code raises or exits, or a
                         \* linked helper (typing loop, typing.ex:24; DraftStream,
-                        \* draft_stream.ex:172) exits, which can land anywhere
+                        \* draft_stream.ex:182) exits, which can land anywhere
     QueueCanCrash,      \* the Queue GenServer dies and its supervisor restarts it empty
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by exactly one kind of check to show a property needs it.

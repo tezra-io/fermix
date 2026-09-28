@@ -11,8 +11,10 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   require Logger
 
+  alias FermixChannels.Channels.Mobile, as: MobileChannel
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
+  alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.MdnsAdvertiser
@@ -21,10 +23,19 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Memory.Repo, as: MemoryRepo
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
   @secret_sentinels FermixCore.Setup.SecretWriter.sentinels()
+  @identity_faults [:identity_incomplete, :identity_unreadable, :invalid_identity_transaction]
+  @manifest_faults [
+    :insecure_attachment_manifest,
+    :invalid_attachment_manifest,
+    :invalid_attachment_manifest_target,
+    :attachment_manifest_stat_failed
+  ]
 
   @doc """
   Start the mobile subtree, or refuse it when its durable state is unusable.
@@ -35,8 +46,11 @@ defmodule FermixChannels.Mobile.Supervisor do
   down with it — a child's `init` `{:stop, ...}` would escalate through this
   supervisor into an application crash-loop under the service manager. So the
   subtree does not start, the reason is recorded for `health`/`doctor`, and
-  the application keeps running. Transient faults (a port already in use) stay
-  loud child failures on purpose.
+  the application keeps running. Memory turned off is refused the same way:
+  the phone's whole timeline lives in `Memory.Repo`, which then refuses every
+  call. Environmental faults (an address not up yet, a port another daemon
+  holds, APNs unreachable) never refuse or stop anything: the listener and the
+  push dispatcher stay up, degraded, and say why.
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -51,10 +65,45 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   defp admission_check(opts, root) do
     with {:ok, _devices} <- DeviceStore.list(root: root),
-         :ok <- Identity.admissible(root: root) do
-      MediaStore.manifest_admissible(media_opts(opts, root, nil))
+         :ok <- Identity.admissible(root: root),
+         :ok <- MediaStore.manifest_admissible(media_opts(opts, root, nil)) do
+      memory_available(opts)
     end
   end
+
+  # The phone's timeline lives in the running memory Repo, which answers
+  # `{:error, :disabled}` to every call when memory is off. The Repo's own
+  # answer is the one the timeline gets, so it is asked rather than config.
+  defp memory_available(opts) do
+    enabled? = Keyword.get(opts, :memory_enabled?, &memory_repo_enabled?/0)
+    if enabled?.(), do: :ok, else: {:error, :memory_disabled}
+  end
+
+  defp memory_repo_enabled? do
+    not is_nil(MemoryRepo.enabled_server(MemoryConfig.repo_server()))
+  end
+
+  @doc "The word `mobile.status` publishes for the class of a boot refusal."
+  @spec refusal_word(term()) :: :memory_disabled | :identity | :attachment_manifest | :trust_store
+  def refusal_word(:memory_disabled), do: :memory_disabled
+
+  def refusal_word(reason) when is_tuple(reason) and elem(reason, 0) in @identity_faults,
+    do: :identity
+
+  def refusal_word(reason) when is_tuple(reason) and elem(reason, 0) in @manifest_faults,
+    do: :attachment_manifest
+
+  def refusal_word(_reason), do: :trust_store
+
+  @doc """
+  Whether the phone subtree runs: this supervisor's registered name is alive.
+  A refused boot starts nothing, and every child runs under this supervisor,
+  so no child's name stands in for the subtree. Looking the name up sends no
+  message; `whereis` replaces the lookup in a test.
+  """
+  @spec running?((GenServer.name() -> pid() | nil)) :: boolean()
+  def running?(whereis \\ &GenServer.whereis/1) when is_function(whereis, 1),
+    do: is_pid(whereis.(__MODULE__))
 
   @doc "Reason the mobile surface refused to start for a trust store, if it did."
   @spec refusal(atom()) :: {:error, term()} | :none
@@ -94,25 +143,20 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   # The remedy differs per fault class, and copy that names the wrong file
   # sends the operator repairing the wrong thing.
+  defp refusal_detail(_root, :memory_disabled) do
+    "memory is turned off, and the phone's conversation lives in the memory store. " <>
+      "Turn memory back on, then restart."
+  end
+
   defp refusal_detail(root, reason)
-       when elem(reason, 0) in [
-              :identity_incomplete,
-              :identity_unreadable,
-              :invalid_identity_transaction
-            ] do
+       when elem(reason, 0) in @identity_faults do
     "the mobile identity material under #{root} is unusable (#{inspect(reason)}). " <>
       "Fermix never regenerates partial identity material — restore the missing files, " <>
       "or remove the whole identity directory to re-pair every device, then restart."
   end
 
   defp refusal_detail(_root, reason)
-       when elem(reason, 0) in [
-              :insecure_attachment_manifest,
-              :attachment_manifest_too_large,
-              :invalid_attachment_manifest,
-              :invalid_attachment_manifest_target,
-              :attachment_manifest_stat_failed
-            ] do
+       when elem(reason, 0) in @manifest_faults do
     "the mobile attachment manifest is unusable (#{inspect(reason)}). " <>
       "Repair or remove the file, then restart."
   end
@@ -140,7 +184,11 @@ defmodule FermixChannels.Mobile.Supervisor do
        name: names.pair_manager,
        device_store: names.device_store,
        listener: names.listener},
-      {MediaStore, media_opts(opts, root, names.media_store)}
+      {MediaStore, media_opts(opts, root, names.media_store)},
+      MobileChannel.unfurl_supervisor_spec(
+        names.unfurl_supervisor,
+        MobileChannel.max_concurrent_unfurls()
+      )
     ]
 
     with {:ok, push_children} <- push_children(config, names) do
@@ -153,9 +201,11 @@ defmodule FermixChannels.Mobile.Supervisor do
                name: names.request_coordinator,
                boot_epoch: boot_epoch,
                store_opts: Keyword.put(Keyword.get(opts, :store_opts, []), :transport, "mobile"),
-               recovery_limit: Keyword.get(opts, :recovery_limit, 200)},
+               recovery_limit: Keyword.get(opts, :recovery_limit, 200),
+               device_store: names.device_store},
               id: names.request_coordinator
             ),
+            {Discovery, name: names.discovery},
             {Listener, listener_opts(opts, root, names)},
             {MdnsAdvertiser, mdns_opts(opts, names)}
           ]
@@ -201,6 +251,8 @@ defmodule FermixChannels.Mobile.Supervisor do
       device_registry: DeviceRegistry,
       pair_manager: PairManager,
       media_store: MediaStore,
+      unfurl_supervisor: FermixChannels.Mobile.UnfurlSupervisor,
+      discovery: Discovery,
       listener: Listener,
       mdns_advertiser: MdnsAdvertiser,
       push_dispatcher: PigeonDispatcher,
@@ -281,6 +333,7 @@ defmodule FermixChannels.Mobile.Supervisor do
         pair_manager: names.pair_manager,
         media_store: names.media_store,
         request_coordinator: names.request_coordinator,
+        discovery: names.discovery,
         max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
         push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment)
       ]

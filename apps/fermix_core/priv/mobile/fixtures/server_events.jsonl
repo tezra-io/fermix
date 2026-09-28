@@ -1,21 +1,38 @@
-{"v":1,"t":"hello_ack","seq":1,"session_id":"mobile-session-1","min_version":1,"max_version":1,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[],"history_head_seq":12,"read_up_to_seq":11,"caps":{"max_media_bytes":20971520,"commands":[]}}
-{"v":1,"t":"accepted","seq":2,"client_msg_id":"client-1","duplicate":false}
-{"v":1,"t":"attach_status","seq":3,"attach_id":"attach-1","status":"upload"}
-{"v":1,"t":"turn_started","seq":4,"profile_id":"main","turn_id":"turn-1","in_reply_to":"client-1"}
-{"v":1,"t":"text_delta","seq":5,"turn_id":"turn-1","text":"Hel"}
-{"v":1,"t":"tool_event","seq":6,"turn_id":"turn-1","tool":"web_search","phase":"start"}
-{"v":1,"t":"text_done","seq":7,"turn_id":"turn-1","server_seq":12,"text":"Hello"}
-{"v":1,"t":"media_begin","seq":8,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","server_seq":13,"kind":"document","mime":"application/pdf","size_bytes":3,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","filename":"answer.pdf"}
-{"v":1,"t":"media_end","seq":10,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
-{"v":1,"t":"turn_error","seq":11,"turn_id":"turn-2","code":"provider_error","message":"The turn failed"}
-{"v":1,"t":"reaction","seq":12,"in_reply_to":"client-1","emoji":"👍"}
-{"v":1,"t":"approval","seq":13,"approval_id":"approval-1","kind":"sandbox","text":"Allow this command?","token":"opaque-token","ttl_s":60,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
-{"v":1,"t":"approval_resolved","seq":14,"approval_id":"approval-1","outcome":"approved"}
-{"v":1,"t":"link_preview","seq":15,"in_reply_to":12,"url":"https://example.com","site":"Example","title":"Example page"}
-{"v":1,"t":"read_state","seq":16,"profile_id":"main","read_up_to_seq":12}
-{"v":1,"t":"history_page","seq":17,"profile_id":"main","messages":[{"server_seq":12,"role":"assistant","content":"Hello","ts":"2026-08-12T12:00:00Z","media_refs":[]}],"next_after_seq":12}
-{"v":1,"t":"notice","seq":18,"kind":"compaction","text":"Conversation compacted"}
-{"v":1,"t":"pair_approved","seq":2,"device_id":"device-1","candidates":[],"profiles":[{"id":"main","name":"Fermix"}]}
-{"v":1,"t":"pair_denied","seq":2,"reason":"owner_denied"}
-{"v":1,"t":"error","seq":19,"code":"unsupported","message":"Unknown event","ref_seq":99}
-{"v":1,"t":"pong","seq":20}
+{"v":1,"t":"hello_ack","seq":1,"session_id":"mobile-session-1","min_version":1,"max_version":1,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"},{"host":"192.168.1.8","interface":"en0","scope":"lan"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"max_media_bytes":20971520}}
+{"v":1,"t":"approval","seq":2,"approval_id":"sandbox-rC4mUqHuVQfhEasTL7YUIBJq3N9kEXbbvfYTp5sZrM8","kind":"sandbox","text":"Allow reading ~/Documents?","token":"opaque-token","ttl_s":37,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
+{"v":1,"t":"accepted","seq":3,"client_msg_id":"client-1","duplicate":false}
+{"v":1,"t":"accepted","seq":4,"client_msg_id":"client-0","duplicate":true,"server_seq":11}
+{"v":1,"t":"row","seq":5,"profile_id":"main","server_seq":13,"role":"user","text":"Hello","ts":"2026-09-27T09:00:00.000000Z","media_refs":[],"kind":"text","client_msg_id":"client-1"}
+{"v":1,"t":"attach_status","seq":6,"attach_id":"attach-1","status":"upload"}
+{"v":1,"t":"attach_status","seq":7,"attach_id":"attach-1","status":"present"}
+{"v":1,"t":"turn_started","seq":8,"profile_id":"main","turn_id":"turn-client-1","in_reply_to":"client-1"}
+{"v":1,"t":"text_delta","seq":9,"turn_id":"turn-client-1","text":"Hel"}
+{"v":1,"t":"tool_event","seq":10,"turn_id":"turn-client-1","tool":"web_search","phase":"start"}
+{"v":1,"t":"tool_event","seq":11,"turn_id":"turn-client-1","tool":"web_search","phase":"stop","detail":"%{status: :ok}"}
+{"v":1,"t":"text_done","seq":12,"turn_id":"turn-client-1","server_seq":14,"text":"Hello"}
+{"v":1,"t":"text_done","seq":13,"turn_id":"turn-client-5","server_seq":15,"text":"The first part of a reply too long to send whole","truncated":true}
+{"v":1,"t":"media_begin","seq":14,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","server_seq":16,"kind":"document","mime":"application/pdf","size_bytes":3,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","filename":"answer.pdf"}
+{"v":1,"t":"media_end","seq":16,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"v":1,"t":"turn_error","seq":17,"turn_id":"turn-client-2","code":"cancelled","message":"cancelled"}
+{"v":1,"t":"row","seq":18,"profile_id":"main","server_seq":17,"role":"user","text":"Look at this","ts":"2026-09-27T09:01:00.000000Z","media_refs":[{"ref":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","kind":"image","mime":"image/jpeg","size_bytes":48213,"filename":"photo.jpg"}],"kind":"media","client_msg_id":"ipad-1"}
+{"v":1,"t":"row","seq":19,"profile_id":"main","server_seq":18,"role":"assistant","text":"You have one meeting, at 10.","ts":"2026-09-27T09:01:05.000000Z","media_refs":[],"kind":"text","in_reply_to":"mac-1","metadata":{"turn_id":"turn-mac-1"}}
+{"v":1,"t":"reaction","seq":20,"in_reply_to":"client-1","emoji":"👍"}
+{"v":1,"t":"approval_resolved","seq":21,"approval_id":"sandbox-rC4mUqHuVQfhEasTL7YUIBJq3N9kEXbbvfYTp5sZrM8","outcome":"approved"}
+{"v":1,"t":"approval_resolved","seq":22,"approval_id":"soul-Q5h0Yb2o8b0bM6c2yXjOq7rNf3oHk6hQyq1ZkGq1c1Y","outcome":"expired"}
+{"v":1,"t":"link_preview","seq":23,"in_reply_to":13,"url":"https://example.com","site":"Example","title":"Example page"}
+{"v":1,"t":"link_preview","seq":24,"in_reply_to":13,"url":"https://example.org/post","site":"Example Org","title":"A post","description":"What the page says about itself.","image_ref":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}
+{"v":1,"t":"read_state","seq":25,"profile_id":"main","read_up_to_seq":18}
+{"v":1,"t":"history_page","seq":26,"profile_id":"main","messages":[{"server_seq":13,"role":"user","content":"see https://example.com","ts":"2026-09-27T09:00:00.000000Z","media_refs":[],"kind":"text","client_msg_id":"client-1","link_previews":[{"url":"https://example.com","site":"Example","title":"Example page"},{"url":"https://example.org/post","site":"Example Org","title":"A post","description":"What the page says about itself.","image_ref":"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"}]},{"server_seq":14,"role":"assistant","content":"Hello","ts":"2026-09-27T09:00:04.000000Z","media_refs":[],"kind":"text","in_reply_to":"client-1","metadata":{"turn_id":"turn-client-1"}}],"next_after_seq":14,"history_head_seq":18}
+{"v":1,"t":"history_page","seq":27,"profile_id":"main","messages":[],"next_after_seq":18446744073709551615,"history_head_seq":18}
+{"v":1,"t":"notice","seq":28,"kind":"compaction","text":"Conversation compacted"}
+{"v":1,"t":"error","seq":29,"code":"request_failed","message":"{:ingest_failed, :timeout}","client_msg_id":"client-3"}
+{"v":1,"t":"error","seq":30,"code":"media_descriptor_mismatch","message":":media_descriptor_mismatch","ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
+{"v":1,"t":"error","seq":31,"code":"media_fetch_backlog_full","message":":media_fetch_backlog_full","ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"v":1,"t":"error","seq":32,"code":"unsupported","message":"{:unknown_event, \"future_event\"}"}
+{"v":1,"t":"error","seq":33,"code":"store_quota_exceeded","message":"{:store_quota_exceeded, 5242880}"}
+{"v":1,"t":"error","seq":34,"code":"attachment_unavailable","message":"{:attachment_unavailable, \"photo-1\", :unknown_attachment}","client_msg_id":"client-4"}
+{"v":1,"t":"pong","seq":35}
+{"v":1,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"client protocol 2 is outside 1..1","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"v":1,"t":"pair_approved","seq":1,"device_id":"0d6f3a52-2f4b-4bb4-9a31-6f7e1d9b8c21","candidates":[{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"},{"host":"192.168.1.8","interface":"en0","scope":"lan"}],"profiles":[{"id":"main","name":"Fermix"}]}
+{"v":1,"t":"pair_denied","seq":1,"reason":"denied"}
+{"v":1,"t":"pair_denied","seq":1,"reason":"timeout"}

@@ -118,7 +118,7 @@ CONSTANTS
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:123-128, :139-146)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:165-169)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:323-324, :372-380)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:267-283, plugins_command.ex:504-529, cli/daemon.ex:804-834)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:267-283, plugins_command.ex:504-529, cli/daemon.ex:852-882)
 
 ASSUME /\ CodexProfiles \subseteq Profiles
        /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
@@ -509,7 +509,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      (plugins_command.ex:262, :504-529; auth_command.ex:223-241,
 \*      :267-283, :295-298): an `auth_forget` request on the control socket
 \*      (cli/daemon/client.ex:61-74), answered by forget_signed_out
-\*      (cli/daemon.ex:580, :804-834). Without CliLogoutReachesDaemon, or
+\*      (cli/daemon.ex:628, :852-882). Without CliLogoutReachesDaemon, or
 \*      when the daemon does not answer "ok" (the CLI then exits non-zero),
 \*      nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete

@@ -14,6 +14,9 @@ defmodule FermixCore.Companion.Timeline do
   alias FermixCore.Plugins.CanonicalJson
 
   @request_ttl_seconds 86_400
+  # The wire types every sequence and cursor as u64; SQLite integers are i64.
+  # No row can sit above this, so a larger cursor means the same as this one.
+  @max_sqlite_integer 9_223_372_036_854_775_807
   @max_history_limit 200
   @default_history_limit 50
   @default_search_limit 20
@@ -73,7 +76,8 @@ defmodule FermixCore.Companion.Timeline do
   One page of a profile's timeline, oldest first. `:after_seq` (default 0)
   pages forward and answers `next_after_seq`; `:before_seq` pages backward
   from it and answers `next_before_seq` only when an older row exists. The two
-  cursors exclude each other.
+  cursors exclude each other. A cursor past every row pages from the newest
+  row a timeline can hold.
   """
   @spec history_page(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
   def history_page(profile_id, opts \\ []) when is_binary(profile_id) do
@@ -101,7 +105,7 @@ defmodule FermixCore.Companion.Timeline do
       Repo.search_mobile_timeline(
         profile_selector(profile_id, opts),
         query,
-        before_seq,
+        clamp_optional(before_seq),
         limit,
         repo_opts(opts)
       )
@@ -123,26 +127,36 @@ defmodule FermixCore.Companion.Timeline do
     end
   end
 
-  @spec attach_timeline_media(String.t(), pos_integer(), map(), keyword()) ::
+  @doc """
+  Store one link preview on its row (`url`, `site`, `title`, an optional
+  `description` and an optional `image` media descriptor). The row's history
+  carries it from then on, and `media_descriptor/3` serves its image.
+  """
+  @spec attach_link_preview(String.t(), pos_integer(), map(), keyword()) ::
           {:ok, Repo.mobile_timeline_row()} | {:error, term()}
-  def attach_timeline_media(profile_id, server_seq, media_ref, opts \\ [])
+  def attach_link_preview(profile_id, server_seq, preview, opts \\ [])
       when is_binary(profile_id) and is_integer(server_seq) and server_seq > 0 and
-             is_map(media_ref) do
-    Repo.attach_mobile_timeline_media(
+             is_map(preview) do
+    Repo.attach_mobile_link_preview(
       profile_selector(profile_id, opts),
       server_seq,
-      media_ref,
+      preview,
       repo_opts(opts)
     )
   end
 
+  @doc """
+  Move the profile's read frontier to `reported_seq`, never backward and never
+  past the newest row: a frontier ahead of the timeline would mark every later
+  row read before it exists.
+  """
   @spec advance_read_frontier(String.t(), non_neg_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
   def advance_read_frontier(profile_id, reported_seq, opts \\ [])
       when is_binary(profile_id) and is_integer(reported_seq) and reported_seq >= 0 do
     Repo.advance_mobile_read_frontier(
       profile_selector(profile_id, opts),
-      reported_seq,
+      clamp_cursor(reported_seq),
       now(opts),
       repo_opts(opts)
     )
@@ -203,6 +217,22 @@ defmodule FermixCore.Companion.Timeline do
     Repo.cancel_mobile_client_request(
       profile_selector(profile_id, opts),
       client_msg_id,
+      now(opts),
+      repo_opts(opts)
+    )
+  end
+
+  @doc """
+  Record a cancel on every unsettled request a device claimed, as its
+  revocation does, and answer the requests it marked.
+  """
+  @spec cancel_device_requests(String.t(), keyword()) ::
+          {:ok, [Repo.mobile_client_request_row()]} | {:error, term()}
+  def cancel_device_requests(device_id, opts \\ [])
+      when is_binary(device_id) and device_id != "" do
+    Repo.cancel_mobile_device_requests(
+      owner_selector(opts),
+      device_id,
       now(opts),
       repo_opts(opts)
     )
@@ -397,7 +427,7 @@ defmodule FermixCore.Companion.Timeline do
         {:error, :conflicting_history_cursors}
 
       {:error, {:ok, before}} ->
-        with :ok <- validate_before_seq(before), do: {:ok, {:before, before}}
+        with :ok <- validate_before_seq(before), do: {:ok, {:before, clamp_cursor(before)}}
 
       {{:ok, after_seq}, :error} ->
         with :ok <- validate_after_seq(after_seq), do: {:ok, {:after, after_seq}}
@@ -407,8 +437,19 @@ defmodule FermixCore.Companion.Timeline do
     end
   end
 
-  defp fetch_history(selector, {:after, after_seq}, limit, repo_opts),
-    do: Repo.get_mobile_history(selector, after_seq, limit, repo_opts)
+  defp clamp_cursor(seq), do: min(seq, @max_sqlite_integer)
+
+  defp clamp_optional(nil), do: nil
+  defp clamp_optional(seq), do: clamp_cursor(seq)
+
+  # An empty page answers the cursor it was asked for, even one past the
+  # range a row can have.
+  defp fetch_history(selector, {:after, after_seq}, limit, repo_opts) do
+    with {:ok, page} <-
+           Repo.get_mobile_history(selector, clamp_cursor(after_seq), limit, repo_opts) do
+      {:ok, %{page | next_after_seq: max(page.next_after_seq, after_seq)}}
+    end
+  end
 
   defp fetch_history(selector, {:before, before_seq}, limit, repo_opts),
     do: Repo.get_mobile_history_before(selector, before_seq, limit, repo_opts)
