@@ -896,9 +896,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   end
 
   describe "audio output" do
-    test "the first delta announces speaking once and user speech returns to listening", %{
-      clock: clock
-    } do
+    test "the first delta announces speaking once", %{clock: clock} do
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
@@ -913,9 +911,6 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:realtime, %{type: "audio_delta", audio: ^first}}
       assert_receive {:realtime, %{type: "audio_delta", audio: ^second}}
       refute_receive {:realtime, %{type: "state", state: "speaking"}}
-
-      send(session, {:openai_live_event, {:transcript_delta, :user, "stop", 100, 200}})
-      assert_receive {:realtime, %{type: "state", state: "listening"}}
     end
   end
 
@@ -1057,15 +1052,30 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_received {:realtime, %{type: "state", state: "listening"}}
     end
 
-    # The app does no echo cancellation: the pet's own reply reaches its
-    # microphone, and must not be taken for the operator speaking.
+    # Where echo cancellation fails the pet's own reply reaches its microphone,
+    # and Live transcribes it as the operator's words.
+    test "words during a reply leave the pet speaking until it has played", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 10)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(300)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+
+      words(session, clock, 100)
+      refute_receive {:realtime, %{type: "state", state: "listening"}}, 150
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 1_000
+    end
+
+    # Live's words trail the audio: in a call through display speakers the
+    # reply's last word arrived as the operator's after the reply had played,
+    # and the pet sat thinking (2026-09-28).
     test "the reply heard back through the microphone is not the operator", %{clock: clock} do
       session = listening_session(clock, reply_margin_ms: 10)
 
-      send(session, {:openai_live_event, {:audio_delta, reply_audio(1_000)}})
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(200)}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 1_000
 
-      words(session, clock, 500)
+      words(session, clock, 1_500)
       mic(session, clock, 4_000, :silence)
 
       refute_received {:realtime, %{type: "state", state: "thinking"}}

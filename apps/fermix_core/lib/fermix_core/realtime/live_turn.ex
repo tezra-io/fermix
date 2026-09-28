@@ -26,9 +26,15 @@ defmodule FermixCore.Realtime.LiveTurn do
       started. Words, not loudness: an energy detector on the microphone took
       every burst of typing for a sentence (owner, 2026-09-28: "everytime I
       type it goes to thinking mode ... because of keyboard noise"), and Live
-      transcribes speech, not keys. Words that arrive while the reply can
-      still be heard do not count: the app does no echo cancellation, so the
-      pet's own voice reaches the microphone.
+      transcribes speech, not keys.
+    * **The pet's own voice is not the operator.** Its reply comes back
+      through the microphone wherever echo cancellation fails, and a test call
+      through display speakers (2026-09-28) heard the reply's last word
+      transcribed as the operator's and left the pet thinking until
+      `@thinking_limit_ms`. Live's words trail the audio they transcribe, by
+      0.6 to 1.2 s in a measured call, so no words count while a reply is
+      playing or for `@echo_tail_ms` after it: they are its echo, or the
+      operator's own sentence arriving late.
 
   Only the pet's presentation follows from this. Nothing here reaches the
   provider, which runs its own turn-taking.
@@ -45,7 +51,9 @@ defmodule FermixCore.Realtime.LiveTurn do
   # 0.78 s inside one sentence in the measured call; a second without one is
   # the end of what they said.
   @words_hangover_ms 1_000
-  @echo_tail_ms 400
+  # Covers the reply's echo reaching the microphone and Live's delay in
+  # transcribing it.
+  @echo_tail_ms 2_000
   # A reply that never comes (the provider heard noise, or chose silence) must
   # not leave the pet thinking for the rest of the call.
   @thinking_limit_ms 15_000

@@ -65,10 +65,10 @@ defmodule FermixCore.Realtime.LiveTurnTest do
       assert {:thinking, _turn} = LiveTurn.tick(turn, 1_100, false)
     end
 
-    test "words heard while the reply can still be heard are not the operator" do
+    test "the reply's echo, transcribed after it has played, is not the operator" do
       {:voice, turn, 1_000} = LiveTurn.output(LiveTurn.new(), reply(1_000), 0)
 
-      {nil, turn} = LiveTurn.words(turn, 1_399, false)
+      {nil, turn} = LiveTurn.words(turn, 2_999, false)
       assert {nil, turn} = LiveTurn.tick(turn, 5_000, false)
 
       {nil, turn} = LiveTurn.words(turn, 5_100, false)

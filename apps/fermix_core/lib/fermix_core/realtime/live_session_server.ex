@@ -484,7 +484,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
 
     record_caption(state, speaker, delta, start_ms, end_ms)
-    {:noreply, state |> read_operator_words(speaker) |> resume_listening(speaker)}
+    {:noreply, read_operator_words(state, speaker)}
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
@@ -986,9 +986,6 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.state(value))
     %{state | speaking?: value == "speaking"}
   end
-
-  defp resume_listening(%{speaking?: true} = state, :user), do: notify_state(state, "listening")
-  defp resume_listening(state, _speaker), do: state
 
   # The reply's audio goes to the pet, and the pet hears when it has played out
   # (Live sends no end of a reply).
