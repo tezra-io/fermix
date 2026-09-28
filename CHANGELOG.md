@@ -72,6 +72,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A fresh home is complete after the first boot.** The daemon's first boot
+  now seeds `config.toml` with what the machine already knows, the system time
+  zone, the account's full name and a default communication style, and writes
+  the prompt files from them. Until now both waited for the last screen of
+  setup, so a first run that ended early, for example by signing in from the
+  app's Settings pane, left a home with no config, no prompt files and setup
+  reported as unfinished for good. Personalization no longer gates readiness:
+  it is seeded, About you edits it, and a later edit reaches `USER.md`. The
+  CLI wizard and the web setup offer the machine's time zone as their default
+  instead of New York.
 - **A provider names its model as soon as it is signed in.** The setup row,
   the settings Model row and Home's provider line now carry the model the
   daemon calls the provider with: the one chosen in Settings, or the catalog

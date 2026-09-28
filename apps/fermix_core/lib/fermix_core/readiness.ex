@@ -149,11 +149,13 @@ defmodule FermixCore.Readiness do
   @doc """
   The failures that alone mean setup is incomplete.
 
-  One configured provider plus the three personalization values. An enabled but
-  half-configured channel, and realtime without an OpenAI key, are real failures
-  the operator should see and are not reasons to call setup unfinished: the
-  shipped `telegram: [enabled: true]` default fires on every fresh install, and
-  realtime-without-a-key fires on every companion install.
+  One configured provider. The three personalization values are seeded from
+  the machine on the first boot (`Setup.HomeSeeder`), so a missing one is a
+  nudge to tell Fermix about you, never a reason to call setup unfinished; the
+  same goes for an enabled but half-configured channel and for realtime
+  without an OpenAI key: the shipped `telegram: [enabled: true]` default fires
+  on every fresh install, and realtime-without-a-key on every companion
+  install.
   """
   @spec gating_failures([failure()]) :: [failure()]
   def gating_failures(failures) when is_list(failures),
@@ -212,7 +214,7 @@ defmodule FermixCore.Readiness do
   end
 
   defp personalization_row do
-    gating(
+    advisory(
       %{
         component: "personalization",
         action:

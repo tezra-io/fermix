@@ -53,6 +53,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.EngineOwner
+  alias FermixCore.Setup.HomeSeeder
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretAclState
   alias FermixCore.Setup.SecretWriteLog
@@ -193,6 +194,11 @@ defmodule FermixCore.Application do
         # the realtime supervisor composes a prompt — one pass, before any turn,
         # so nothing can read a half-migrated set and no cache needs invalidating.
         TemplateReconciler,
+        # A home with no config yet is seeded here (owner rule of 2026-09-27):
+        # after the registry and the repo the prompt seed needs, before the
+        # restart state and the boot report so both read the seeded file as
+        # the baseline rather than as a change made behind their backs.
+        HomeSeeder,
         ConversationStore,
         Store,
         # Before the boot report and the restart state, because both of those

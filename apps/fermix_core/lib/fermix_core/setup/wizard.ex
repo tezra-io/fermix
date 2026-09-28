@@ -18,6 +18,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFacts
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
@@ -604,13 +605,7 @@ defmodule FermixCore.Setup.Wizard do
         label: "Your name",
         required?: missing_component?(state, "personalization")
       },
-      %{
-        key: :timezone,
-        label: "Your timezone (e.g. America/Los_Angeles; blank = America/New_York)",
-        # Keep in sync with the web setup default in FermixWebWeb.SetupLive.
-        default: "America/New_York",
-        required?: missing_component?(state, "personalization")
-      },
+      timezone_prompt(state),
       %{
         key: :communication_style,
         label: "Preferred communication style (e.g. concise and direct)",
@@ -799,7 +794,10 @@ defmodule FermixCore.Setup.Wizard do
       |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
-    commit_snapshot(snapshot)
+    with {:ok, report} <- commit_snapshot(snapshot) do
+      refresh_user_document(answers)
+      {:ok, report}
+    end
   end
 
   @type sandbox_mode :: :strict | :standard | :open
@@ -1076,7 +1074,7 @@ defmodule FermixCore.Setup.Wizard do
     with :ok <- RestartState.writable(),
          :ok <- ConfigStore.save_snapshot(snapshot, supervised),
          :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
-         {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
+         {:ok, seeding_results} <- seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
   end
@@ -1212,14 +1210,14 @@ defmodule FermixCore.Setup.Wizard do
   @doc """
   Re-runs prompt-file seeding against the current persisted snapshot.
 
-  Used by the CLI re-run path: when setup is already ready and the operator
-  re-runs `mix fermix.setup` (e.g., after deleting `SOUL.md`), this recreates
-  any missing files without requiring new answers. Idempotent — files that
-  already exist are skipped by `SetupSeeder`.
+  Used by the CLI re-run path: when the operator re-runs `mix fermix.setup`
+  (e.g., after deleting `SOUL.md`), this recreates any missing files without
+  requiring new answers. Idempotent — files that already exist are skipped by
+  `SetupSeeder`.
   """
   @spec seed_now() :: {:ok, [seeding_result()]} | {:error, term()}
   def seed_now do
-    maybe_seed_prompt_files(ConfigStore.current_snapshot())
+    seed_prompt_files(ConfigStore.current_snapshot())
   end
 
   defp build_state(snapshot, readiness) do
@@ -1230,6 +1228,28 @@ defmodule FermixCore.Setup.Wizard do
       validation_errors: readiness.failures,
       dirty?: false
     }
+  end
+
+  @personalization_keys [:user_name, :timezone, :communication_style]
+
+  # The machine's own zone is the default, the same answer the first boot
+  # seeds (`Setup.MachineFacts`); a machine that cannot say offers none, and
+  # the question stands as it is.
+  defp timezone_prompt(state) do
+    required? = missing_component?(state, "personalization")
+
+    case MachineFacts.timezone() do
+      {:ok, zone} ->
+        %{
+          key: :timezone,
+          label: "Your timezone (e.g. America/Los_Angeles; blank = #{zone})",
+          default: zone,
+          required?: required?
+        }
+
+      :error ->
+        %{key: :timezone, label: "Your timezone (e.g. America/Los_Angeles)", required?: required?}
+    end
   end
 
   @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
@@ -2599,32 +2619,47 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp maybe_seed_prompt_files(snapshot) do
-    if seeding_ready?() do
-      personalization = personalization_map(snapshot)
+  # Every save seeds, and the first boot seeds before any save
+  # (`Setup.HomeSeeder`): the seeder is per-file idempotent and never
+  # overwrites, so a later save can only add back a file someone deleted.
+  # Until 2026-09-27 the seed waited for readiness to gate on nothing, which
+  # tied the prompt files to the last screen of setup and left every home that
+  # never reached it on in-memory placeholders.
+  defp seed_prompt_files(snapshot) do
+    case prompt_seeder().seed(personalization_map(snapshot)) do
+      {:ok, results} ->
+        {:ok, results}
 
-      case SetupSeeder.seed(personalization) do
-        {:ok, results} ->
-          {:ok, results}
-
-        {:error, reason} = error ->
-          Logger.warning("setup wizard prompt seed failed: #{inspect(reason)}")
-          error
-      end
-    else
-      {:ok, []}
+      {:error, reason} = error ->
+        Logger.warning("setup wizard prompt seed failed: #{inspect(reason)}")
+        error
     end
   end
 
-  # Keyed on the GATING predicate, not on `status`. The seeder's only inputs are
-  # the personalization values, which are a gating component; a half-configured
-  # channel has nothing to do with prompt files, and gating a seed on it would
-  # withhold them from every home that ships `telegram: [enabled: true]`.
-  # `SetupSeeder.seed/1` is per-file idempotent and never overwrites, so running
-  # it on more saves is safe by construction.
-  defp seeding_ready? do
-    Readiness.report().failures |> Readiness.gating_failures() |> Enum.empty?()
+  # `SetupSeeder` never rewrites a `USER.md` that exists, and the first boot
+  # seeds one from the machine's facts, so the person's own answers would never
+  # reach the file the model reads. The seed has upserted them as memory rows;
+  # the rebuild renders the file from those rows.
+  defp refresh_user_document(answers) do
+    if Enum.any?(@personalization_keys, &answered?(answers, &1)) do
+      case prompt_seeder().rebuild_user_document([]) do
+        {:ok, _rendered} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "USER.md was not rebuilt after a personalization save: #{inspect(reason)}"
+          )
+      end
+    end
+
+    :ok
   end
+
+  # The prompt seeder needs the resource registry and the memory repo, which a
+  # test that saves a setting has no reason to run; `config/test.exs` pins a
+  # stub here and the seeding tests put the real one back.
+  defp prompt_seeder, do: Application.get_env(:fermix_core, :prompt_seeder, SetupSeeder)
 
   defp personalization_map(snapshot) do
     snapshot

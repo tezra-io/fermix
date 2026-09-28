@@ -87,10 +87,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
 
     previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
     previous_memory = Application.get_env(:fermix_core, :memory, [])
+    # The suite pins a seeder stub; a test that runs a repo wants the real one.
+    previous_seeder = Application.get_env(:fermix_core, :prompt_seeder)
+    Application.put_env(:fermix_core, :prompt_seeder, FermixCore.Prompt.SetupSeeder)
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
+      Application.put_env(:fermix_core, :prompt_seeder, previous_seeder)
       restart_global_memory_repo!()
       FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)
@@ -237,10 +241,14 @@ defmodule Mix.Tasks.Fermix.SetupTest do
 
     previous_bootstrap = Application.get_env(:fermix_core, :prompt_bootstrap, [])
     previous_memory = Application.get_env(:fermix_core, :memory, [])
+    # The suite pins a seeder stub; a test that runs a repo wants the real one.
+    previous_seeder = Application.get_env(:fermix_core, :prompt_seeder)
+    Application.put_env(:fermix_core, :prompt_seeder, FermixCore.Prompt.SetupSeeder)
 
     on_exit(fn ->
       Application.put_env(:fermix_core, :prompt_bootstrap, previous_bootstrap)
       Application.put_env(:fermix_core, :memory, previous_memory)
+      Application.put_env(:fermix_core, :prompt_seeder, previous_seeder)
       restart_global_memory_repo!()
       FermixTestSupport.SafeRm.rm_rf!(tmp_home)
     end)

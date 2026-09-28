@@ -48,6 +48,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.MachineFacts
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
@@ -1509,6 +1510,13 @@ defmodule FermixWebWeb.SetupLive do
   defp build_provider_form(snapshot),
     do: build_provider_form(snapshot, current_provider(snapshot))
 
+  defp machine_timezone do
+    case MachineFacts.timezone() do
+      {:ok, zone} -> zone
+      :error -> ""
+    end
+  end
+
   defp build_provider_form(snapshot, provider) do
     provider_block = provider_block(snapshot, provider)
 
@@ -2204,9 +2212,10 @@ defmodule FermixWebWeb.SetupLive do
       # shows the current name; blank on save keeps it.
       bot_name: snapshot |> get_fermix_core(:agent) |> Keyword.get(:name, ""),
       user_name: Keyword.get(personalization, :user_name, ""),
-      # Default to New York so the form is never blank; the agent reads this
-      # (via Application env) to stamp each turn with the current local date.
-      timezone: Keyword.get(personalization, :timezone, "America/New_York"),
+      # The machine's own zone, the one the first boot seeds; blank where the
+      # machine cannot say. The agent reads the saved value (via Application
+      # env) to stamp each turn with the current local date.
+      timezone: Keyword.get_lazy(personalization, :timezone, &machine_timezone/0),
       communication_style: Keyword.get(personalization, :communication_style, ""),
       skill_curation_enabled:
         snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
