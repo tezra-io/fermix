@@ -17,6 +17,7 @@
 | Search | **Web search** backend and its key (the Brave key also powers place search) |
 | Images | **Images** backend, **Model**, its key |
 | Sandbox | **Sandbox** mode, **Command profile**, **Allowed environment variables** |
+| Browser | which browser tasks run in (read-only), **Run tasks**, **Most open tabs**, **Private hosts the browser may open**; downloads Chromium when none is installed |
 | Permissions | macOS permissions |
 
 - **Linux and dev installs**: browser setup (`fermix setup` opens it with a one-time `/setup?t=…` link; the durable setup token never goes in a URL), the terminal wizard (`fermix setup --terminal`), `fermix setup --<flag>` for headless values, or `config.toml`, then `fermix restart`.
@@ -36,7 +37,7 @@
 | `[fermix_core.tools.web_search]` | backend and its keys |
 | `[fermix_core.tools.tool_search]` | `enabled` (tool-schema deferral; on when absent) |
 | `[fermix_core.tools.generate_image]` | `backend` (`openai`, `xai`, `google`, `openai_codex`), `model`, `size`, `google_api_key`; nothing else |
-| `[fermix_core.browser]` | `allowed_hosts` only |
+| `[fermix_core.browser]` | `allowed_hosts`, `default_profile` (how tasks run), `max_tabs` |
 | `[fermix_core.compaction]` | `enabled`, `threshold`, `reasoning_effort` |
 | `[fermix_core.transcription]` | `backend` (`openai`, `xai`, `deepgram`, `local`), `model`, `max_file_mb`, `openai_api_key`/`xai_api_key` (override the chat key), `deepgram_api_key` (required for Deepgram), all in the keychain; `local_offered` (puts the unshipped on-device choice back in setup) |
 | `[fermix_core.meetings]` | `enabled` (off by default), `bot_name`, `announce`, `announce_message`, `transcription_backend`, `retain_audio`, the Zoom RTMS values `zoom_account_id`, `zoom_client_id`, `zoom_client_secret` (kept in the keychain) and `zoom_ws_subscription_id` |

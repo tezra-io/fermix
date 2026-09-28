@@ -42,6 +42,71 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
     end
   end
 
+  # Which browser a task runs in. Every case injects the installed browsers and
+  # the downloaded one's cache, so the host's own Chrome never decides a verdict.
+  describe "resolve/3 and candidates/2" do
+    setup %{home: home} do
+      previous = System.get_env("CHROME_PATH")
+      System.delete_env("CHROME_PATH")
+      on_exit(fn -> restore_env("CHROME_PATH", previous) end)
+
+      root = Path.join(home, "ms-playwright")
+      downloaded = install_chromium(root, "chromium-1234")
+
+      %{
+        downloaded: downloaded,
+        opts: [downloaded: [root: root, target: "linux-x86_64"]],
+        installed: fake_browser(home, "installed-chromium")
+      }
+    end
+
+    test "the configured path leads and the downloaded Chromium comes last", context do
+      configured = fake_browser(context.home, "configured")
+      System.put_env("CHROME_PATH", configured)
+      opts = [installed: [{context.installed, "Chromium"}]] ++ context.opts
+
+      assert ChromeLauncher.candidates(%{executable_path: "/nowhere/chrome"}, opts) == [
+               {"/nowhere/chrome", "The configured browser"},
+               {configured, "The configured browser"},
+               {context.installed, "Chromium"},
+               {context.downloaded, "Google Chrome for Testing"}
+             ]
+    end
+
+    test "an installed browser wins over the downloaded Chromium", context do
+      opts = [installed: [{context.installed, "Chromium"}]] ++ context.opts
+
+      assert ChromeLauncher.resolve(%Config{}, nil, opts) ==
+               {:ok, %{path: context.installed, label: "Chromium"}}
+    end
+
+    test "with nothing installed, tasks run in the downloaded Chromium", context do
+      opts = [installed: [{"/nowhere/Chromium", "Chromium"}]] ++ context.opts
+
+      assert {:ok, found} = ChromeLauncher.resolve(%Config{}, nil, opts)
+      assert found == %{path: context.downloaded, label: "Google Chrome for Testing"}
+      assert ChromeLauncher.sentence({:ok, found}) == "Tasks use Google Chrome for Testing."
+    end
+
+    test "with nothing at all, the refusal and its sentence say so", %{home: home} do
+      opts = [installed: [], downloaded: [root: Path.join(home, "empty"), target: "linux-x86_64"]]
+
+      assert {:error, %{code: "chrome_missing"}} =
+               missing = ChromeLauncher.resolve(%Config{}, nil, opts)
+
+      assert ChromeLauncher.sentence(missing) == "No Chrome or Chromium is installed."
+    end
+
+    # The launcher refuses a configuration it cannot read, so the answer for the
+    # browser tasks run in is that refusal, never a browser it would not start.
+    test "a refused configuration is answered with its own sentence" do
+      assert {:error, error} = refused = ChromeLauncher.resolve_default(max_tabs: 0)
+
+      assert error.code == "invalid_config"
+      assert ChromeLauncher.sentence(refused) == "max_tabs must be a positive integer"
+    end
+  end
+
   describe "read_devtools_port/1" do
     test "reads the port from the first line of DevToolsActivePort", %{home: home} do
       dir = Path.join(home, "profile")
@@ -260,6 +325,22 @@ defmodule FermixCore.Browser.ChromeLauncherTest do
       {:error, _reason} ->
         false
     end
+  end
+
+  defp install_chromium(root, revision) do
+    dir = Path.join(root, revision)
+    executable = Path.join([dir, "chrome-linux64", "chrome"])
+    File.mkdir_p!(Path.dirname(executable))
+    File.write!(executable, "#!/bin/sh\n")
+    File.write!(Path.join(dir, "INSTALLATION_COMPLETE"), "")
+    executable
+  end
+
+  defp fake_browser(home, name) do
+    path = Path.join([home, "bin", name])
+    File.mkdir_p!(Path.dirname(path))
+    File.write!(path, "#!/bin/sh\n")
+    path
   end
 
   defp restore_env(name, nil), do: System.delete_env(name)

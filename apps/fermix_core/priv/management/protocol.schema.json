@@ -117,7 +117,8 @@
     "mobile.pair.decide": 2,
     "mobile.pair.cancel": 2,
     "mobile.devices.list": 2,
-    "mobile.devices.revoke": 2
+    "mobile.devices.revoke": 2,
+    "browser.install.start": 2
   },
   "$defs": {
     "request": {
@@ -177,7 +178,8 @@
             "mobile.pair.decide",
             "mobile.pair.cancel",
             "mobile.devices.list",
-            "mobile.devices.revoke"
+            "mobile.devices.revoke",
+            "browser.install.start"
           ]
         },
         "params": { "type": "object" }
@@ -498,6 +500,13 @@
             "properties": { "method": { "const": "mobile.devices.revoke" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/mobile_devices_revoke_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "browser.install.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/browser_install_start_params" } } }
         }
       ]
     },
@@ -608,7 +617,8 @@
         { "$ref": "#/$defs/mobile_pair_decide_result" },
         { "$ref": "#/$defs/mobile_pair_cancel_result" },
         { "$ref": "#/$defs/mobile_devices_list_result" },
-        { "$ref": "#/$defs/mobile_devices_revoke_result" }
+        { "$ref": "#/$defs/mobile_devices_revoke_result" },
+        { "$ref": "#/$defs/browser_install_start_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1608,7 +1618,8 @@
         "plugin_workspace_select",
         "capability_install",
         "meetings_signin",
-        "computer_use_grant"
+        "computer_use_grant",
+        "browser_install"
       ]
     },
     "jobStatus": {
@@ -2125,6 +2136,12 @@
       "additionalProperties": false
     },
     "meetings_signin_start_result": { "$ref": "#/$defs/jobView" },
+    "browser_install_start_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "browser_install_start_result": { "$ref": "#/$defs/jobView" },
     "computer_use_grant_start_params": {
       "type": "object",
       "required": [],

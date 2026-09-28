@@ -78,7 +78,12 @@ defmodule FermixCore.Management.Copy do
     "Google Meet",
     "Zoom",
     "Personality",
-    "Tailscale"
+    "Tailscale",
+    "Google Chrome for Testing",
+    "Google Chrome Canary",
+    "Google Chrome",
+    "Chromium",
+    "Chrome"
   ]
 
   @doc """

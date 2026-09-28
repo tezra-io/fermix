@@ -937,6 +937,78 @@
       "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
     },
     {
+      "method": "(schema)",
+      "field": "job_kinds:browser_install",
+      "kind": "engine_only",
+      "why": "The browser download is its own job kind, browser_install, because its result names the browser tasks now run in. The draft predates it; one jobView shape still covers it, so a client that has not re-vendored decodes it as an unknown kind rather than failing."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:browser.install.start",
+      "kind": "engine_only",
+      "why": "The browser download (browser.install.start) postdates the draft: it runs the meeting notetaker's own install step for a machine with no Chrome or Chromium, and is added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.install.start=2",
+      "kind": "engine_only",
+      "why": "browser.install.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.install.start",
+      "kind": "engine_only",
+      "why": "browser.install.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "job.get",
+      "field": "failure.code",
+      "kind": "engine_only",
+      "why": "The export now illustrates a failed job.get view (a browser download whose Chromium step failed), so jobFailure's code and sentence appear on job.get; the draft illustrates only a completed one. The shape is the published jobFailure, unchanged."
+    },
+    {
+      "method": "job.get",
+      "field": "failure.sentence",
+      "kind": "engine_only",
+      "why": "The export now illustrates a failed job.get view (a browser download whose Chromium step failed), so jobFailure's code and sentence appear on job.get; the draft illustrates only a completed one. The shape is the published jobFailure, unchanged."
+    },
+    {
+      "method": "job.get",
+      "field": "result.browser",
+      "kind": "engine_only",
+      "why": "A finished browser download's result is {installed, browser}: the launcher's answer after the download, carried as flat scalars like every job result. The draft illustrates only a provider probe's result, and the field is an open object in both."
+    },
+    {
+      "method": "job.get",
+      "field": "result.installed",
+      "kind": "engine_only",
+      "why": "A finished browser download's result is {installed, browser}: the launcher's answer after the download, carried as flat scalars like every job result. The draft illustrates only a provider probe's result, and the field is an open object in both."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_allowed_hosts",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_default_profile",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_executable",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_max_tabs",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
       "method": "settings.get:secrets",
       "field": "rows:secret_store",
       "kind": "engine_only",

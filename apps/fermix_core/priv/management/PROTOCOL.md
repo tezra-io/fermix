@@ -231,6 +231,7 @@ daemon onto anything else.
 | `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
 | `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
 | `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
+| `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -246,7 +247,7 @@ Notes that the shapes alone do not carry:
   60000 ms, `plugin_install` 600000 ms, `plugin_check` 30000 ms,
   `plugin_workspaces_discover` 60000 ms, `plugin_workspace_select` 60000 ms,
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
-  `computer_use_grant` 120000 ms. At most 4 jobs run at once, at most one per
+  `computer_use_grant` 120000 ms, `browser_install` 900000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`.
@@ -256,7 +257,8 @@ Notes that the shapes alone do not carry:
   `verifying`; `plugin_install`: `downloading`; `plugin_check`: `probing`;
   `plugin_workspaces_discover`: `listing`; `plugin_workspace_select`: `binding`;
   `capability_install`: `sidecar_downloading`, `downloading`,
-  `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none.
+  `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none;
+  `browser_install`: `sidecar_downloading`, `downloading`.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:
@@ -353,6 +355,35 @@ Notes that the shapes alone do not carry:
   channels-inventory entry, because the phone channel has no credential.
   `setup.state.get` carries a `mobile` channel row after the inventory
   channels, always `configured`, with mode `listener` while it is enabled.
+- **`browser` is the managed task browser's section**, under pane `browser`,
+  published on every install. Its first row, `browser_executable`, is read-only
+  and says which browser the launcher would start for a task: `value` is that
+  browser's name (`Google Chrome`, `Chromium`, `Google Chrome Canary`, `Chrome`,
+  `Google Chrome for Testing` for the Chromium Fermix downloads, or `The
+  configured browser` for one set by path), and null when there is none, with
+  the daemon's sentence in `footer`: `No Chrome or Chromium is installed.`, or
+  the refusal of a browser configuration the launcher would not start, which a
+  download does not clear. A path never crosses the wire. The other three rows
+  are the `[fermix_core.browser]` keys a person sets. `browser_default_profile`
+  is how tasks run, and its options are the managed profile names, which is how
+  that section already spells it: `fermix` (automatically: in a window where
+  there is a display, otherwise in the background), `fermix_headless` and
+  `fermix_visible`. `browser_max_tabs` is a whole number from 1, with no
+  ceiling. `browser_allowed_hosts` replaces the whole list, and its value is the
+  list in force: the shipped default until the file names one. Every row
+  carries `restart: false`, because a call reads the section when it runs; a
+  browser already running takes a new tab cap when it next starts.
+  `settings.apply` refuses a value the browser would refuse at launch, in the
+  browser's own sentence.
+- **`browser.install.start` completes only once the launcher finds a
+  browser.** It runs the meeting notetaker's own install step (the notetaker's
+  helper, then the Chromium build that helper is pinned to, about 150 MB, and a
+  fast no-op when it is already there) and then asks the launcher which browser
+  tasks now run in. It completes with `result` {`installed`: true, `browser`:
+  that browser's name}. A machine the notetaker has no build for, a Chromium
+  step that fails, and a download the launcher still cannot find each fail the
+  job with the daemon's sentence. One download runs at a time (`busy`
+  {`operation`: `browser_install`}).
 - **A live model listing never degrades to the catalog.** The two answer
   different questions, so a live fetch that fails answers `unavailable`
   {`capability`: `model_listing`} and `source` always names where the rows on
@@ -721,8 +752,9 @@ own client tests against the same golden frames the daemon is tested against.
   it.
 - `fixtures/success.jsonl` — one full success envelope per method, for
   `settings.get` one per section, because a section with no golden result is a
-  pane whose row keys nothing on the far side is held to, and for
-  `mobile.pair.get` one per session state.
+  pane whose row keys nothing on the far side is held to, for
+  `mobile.pair.get` one per session state, and for `job.get` a browser download
+  both completed and failed.
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as
@@ -731,8 +763,8 @@ own client tests against the same golden frames the daemon is tested against.
   requests, partial-marker rejects that must never fall through to v0, both
   `client_too_old` and `daemon_too_old`, an N-1 client calling a v2 method
   (`expect: refused_by_router`, answered by the router with `method_not_found`
-  and `requires`, once for a settings method, once for the plugin surface and
-  once for the phone pairing surface),
+  and `requires`, once for a settings method, once for the plugin surface, once
+  for the phone pairing surface and once for the browser download),
   and one golden response (`expect: response`) showing every optional field of
   a plugin row absent at once, which is the rendering a client owes a daemon
   that knows less than it does.
