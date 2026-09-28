@@ -133,8 +133,15 @@ defmodule FermixCore.Setup.Doctor do
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
           | {:server_error, status :: pos_integer(), body :: term()}
           | {:network, reason :: term()}
+  @type key_probe_error ::
+          :no_key
+          | {:refused, status :: 401 | 403, code :: String.t() | nil}
+          | {:server_error, status :: pos_integer()}
+          | {:network, reason :: term()}
 
   @openai_default_url "https://api.openai.com/v1/responses"
+  # The host both voice engines dial. Listing models is free and sends no prompt.
+  @openai_models_url "https://api.openai.com/v1/models"
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   # xAI base_url is a ROOT (the adapter appends /responses); the probe must
@@ -209,6 +216,52 @@ defmodule FermixCore.Setup.Doctor do
     provider = active_provider()
     probe_provider(provider, opts)
   end
+
+  @doc """
+  Whether OpenAI accepts the `openai` provider key, the one a voice call dials
+  with whatever the primary provider is. One GET of the model list: free, no
+  prompt, and no model named, so any key OpenAI would accept passes.
+
+  A refusal carries its status and OpenAI's error code, never the message or the
+  body: for a refused key OpenAI's message quotes the key's tail.
+  """
+  @spec probe_openai_key(keyword()) ::
+          {:ok, %{latency_ms: non_neg_integer()}} | {:error, key_probe_error()}
+  def probe_openai_key(opts \\ []) when is_list(opts) do
+    case FermixCore.Config.provider_api_key(:openai) do
+      {:ok, key} -> request_openai_models(key, opts)
+      {:error, :not_configured} -> {:error, :no_key}
+    end
+  end
+
+  defp request_openai_models(key, opts) do
+    start = System.monotonic_time(:millisecond)
+
+    Req.new(url: @openai_models_url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
+    |> Req.merge(probe_req_options(opts))
+    |> Req.request()
+    |> classify_key_probe(start)
+  end
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, start) when status in 200..299,
+    do: {:ok, %{latency_ms: elapsed_ms(start)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, _start)
+       when status in [401, 403],
+       do: {:error, {:refused, status, openai_error_code(body)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _start),
+    do: {:error, {:server_error, status}}
+
+  defp classify_key_probe({:error, reason}, _start), do: {:error, {:network, reason}}
+
+  # OpenAI's `code` is a fixed identifier such as `invalid_api_key`; anything
+  # else in that field is dropped rather than repeated.
+  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
+  end
+
+  defp openai_error_code(_body), do: nil
 
   @doc """
   Offline freshness sweep over the auth store: the sorted profile names whose

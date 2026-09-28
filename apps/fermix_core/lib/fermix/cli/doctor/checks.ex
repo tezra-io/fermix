@@ -924,8 +924,8 @@ defmodule Fermix.CLI.Doctor.Checks do
       {:ok, _key} ->
         ok(
           "realtime voice",
-          "enabled; OpenAI voice key present " <>
-            "(engine #{config.engine}, model #{config.model})"
+          "enabled; OpenAI voice key saved " <>
+            "(engine #{config.engine}, model #{config.model}); the network checks test it"
         )
 
       {:error, _reason} ->
@@ -936,6 +936,48 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
     end
   end
+
+  @doc """
+  Whether OpenAI accepts the voice key, asked of OpenAI (network scope).
+
+  `realtime/0` can only say a key is saved; a wrong or revoked one reads as
+  present there and fails only when a call starts. Only a refused key fails: a
+  restricted key can be refused the model list and still hold a call, so any
+  other refusal warns. Voice off is `nil`, not applicable, and asks nothing.
+  """
+  @spec realtime_key(keyword()) :: result() | nil
+  def realtime_key(opts \\ []) when is_list(opts) do
+    if RealtimeConfig.current().enabled? do
+      opts |> ProviderProbe.probe_openai_key() |> format_realtime_key()
+    end
+  end
+
+  # The refused-key sentence is the one a refused call shows, word for word.
+  defp format_realtime_key({:ok, %{latency_ms: ms}}),
+    do: ok("realtime voice key", "OpenAI accepted the API key (#{ms}ms)")
+
+  defp format_realtime_key({:error, {:refused, _status, "invalid_api_key"}}),
+    do: fail("realtime voice key", "OpenAI did not accept the API key (invalid_api_key).")
+
+  defp format_realtime_key({:error, {:refused, status, code}}) do
+    warn(
+      "realtime voice key",
+      "OpenAI refused this check (#{refusal_label(status, code)}); " <>
+        "if the key is restricted, make sure it allows Realtime"
+    )
+  end
+
+  defp format_realtime_key({:error, {:server_error, status}}),
+    do: warn("realtime voice key", "OpenAI answered HTTP #{status}; try again later")
+
+  defp format_realtime_key({:error, {:network, reason}}),
+    do: warn("realtime voice key", "could not reach OpenAI: #{inspect(reason)}")
+
+  defp format_realtime_key({:error, :no_key}),
+    do: warn("realtime voice key", "no OpenAI API key is saved, so a voice call cannot start")
+
+  defp refusal_label(status, nil), do: "HTTP #{status}"
+  defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
 
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()

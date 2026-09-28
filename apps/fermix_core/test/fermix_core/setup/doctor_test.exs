@@ -238,6 +238,108 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # The voice call's key is the `openai` provider key whatever the primary is,
+  # so an install that chats through Codex has a key no provider probe reaches.
+  describe "probe_openai_key/1" do
+    test "reads the model list with the key and sends no prompt" do
+      put_provider(:openai, api_key: "sk-test")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert conn.method == "GET"
+        assert conn.host == "api.openai.com"
+        assert conn.request_path == "/v1/models"
+        assert body == ""
+        assert ["Bearer sk-test"] = Plug.Conn.get_req_header(conn, "authorization")
+        Plug.Conn.send_resp(conn, 200, ~s({"object":"list","data":[]}))
+      end
+
+      assert {:ok, %{latency_ms: ms}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert is_integer(ms) and ms >= 0
+    end
+
+    # OpenAI's message for a refused key quotes the key's tail, so the result
+    # carries the status and the code and nothing else from the body.
+    test "a refused key answers its status and code, never OpenAI's message" do
+      put_provider(:openai, api_key: "sk-bad-abcd")
+
+      error = %{
+        "message" => "Incorrect API key provided: sk-bad-abcd",
+        "type" => "invalid_request_error",
+        "code" => "invalid_api_key"
+      }
+
+      plug = fn conn -> json(conn, 401, Jason.encode!(%{"error" => error})) end
+
+      result = Doctor.probe_openai_key(req_options: [plug: plug])
+
+      assert result == {:error, {:refused, 401, "invalid_api_key"}}
+      refute inspect(result) =~ "abcd"
+    end
+
+    test "a refusal without a code answers its status alone" do
+      put_provider(:openai, api_key: "sk-restricted")
+
+      plug = fn conn ->
+        json(
+          conn,
+          403,
+          ~s({"error":{"message":"You have insufficient permissions","code":null}})
+        )
+      end
+
+      assert {:error, {:refused, 403, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+    end
+
+    test "a code that is not an identifier is dropped" do
+      put_provider(:openai, api_key: "sk-test")
+
+      plug = fn conn ->
+        json(conn, 401, ~s({"error":{"code":"key sk-test is wrong"}}))
+      end
+
+      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+    end
+
+    test "a body that is not an OpenAI error is a refusal without a code" do
+      put_provider(:openai, api_key: "sk-test")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "Unauthorized") end
+
+      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+    end
+
+    test "any other status is a server error carrying no body" do
+      put_provider(:openai, api_key: "sk-test")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 503, ~s({"error":"busy"})) end
+
+      assert {:error, {:server_error, 503}} = Doctor.probe_openai_key(req_options: [plug: plug])
+    end
+
+    test "a transport failure is a network error" do
+      put_provider(:openai, api_key: "sk-test")
+      adapter = fn req -> {req, %Req.TransportError{reason: :econnrefused}} end
+
+      assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
+               Doctor.probe_openai_key(req_options: [adapter: adapter])
+    end
+
+    test "no saved key makes no request" do
+      Application.put_env(:fermix_core, :providers, openai: [])
+      adapter = fn _req -> flunk("a probe with no key reached the network") end
+
+      assert {:error, :no_key} = Doctor.probe_openai_key(req_options: [adapter: adapter])
+    end
+
+    # OpenAI answers errors as JSON, which is what lets Req decode the code.
+    defp json(conn, status, body) do
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(status, body)
+    end
+  end
+
   describe "probe_provider/2 — :anthropic" do
     test "sends x-api-key header and anthropic-version" do
       put_provider(:anthropic, api_key: "sk-ant-test", default_model: "claude-sonnet-4-6")

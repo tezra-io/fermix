@@ -24,6 +24,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 - **The catalog offers Tesla 1.2.0.** Setup's Plugins page flags an installed
   1.1.1 as withdrawn and offers the update, which the confirmation for car
   commands needs.
+- **Doctor checks the voice key with OpenAI.** The network checks
+  (`fermix doctor --full`, and Run network checks in the app) gain a realtime
+  voice key row. It asks OpenAI whether it accepts the saved key, which is free
+  and sends no prompt, and a refused key fails with the sentence a refused call
+  shows plus a button to the Voice settings. Before, Doctor only said a key was
+  saved, and a chat on a Codex sign-in never tested the voice key at all.
 
 ### Changed
 

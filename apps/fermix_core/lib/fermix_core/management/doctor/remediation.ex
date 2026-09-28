@@ -71,6 +71,11 @@ defmodule FermixCore.Management.Doctor.Remediation do
       body: "A saved sign-in has expired, so this provider cannot answer.",
       action: %{kind: "settings_pane", target: "providers"}
     },
+    "realtime_key.failed" => %{
+      title: "Replace the OpenAI API key",
+      body: "OpenAI does not accept the saved key, so a voice call cannot start.",
+      action: %{kind: "settings_pane", target: "voice"}
+    },
     "engine_alignment.warning" => %{
       title: "Restart Fermix to finish updating",
       body:
