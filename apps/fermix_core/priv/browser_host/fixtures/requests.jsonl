@@ -1,5 +1,5 @@
 {"type":"server_hello","min_version":1,"max_version":1}
-{"id":1,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5},"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
+{"id":1,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/","visible":true,"observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5},"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
 {"id":2,"type":"tab.open","task_id":"task-9f2c1a7e4b0d","url":"https://example.com/report.pdf","observe":false,"download_dir":"/Users/person/.fermix/workspace/browser/downloads/0bqP3d","task_tab_cap":10,"tab_cap":60}
 {"id":3,"type":"tab.navigate","tab_id":"t1","url":"https://example.com/login","observe":true,"snapshot":{"mode":"interactive","max_chars":50000,"depth":5}}
 {"id":4,"type":"tab.list","task_id":"task-9f2c1a7e4b0d"}

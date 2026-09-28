@@ -215,6 +215,30 @@ defmodule FermixCore.BrowserHost.ProtocolContractTest do
     assert {:error, {:unknown_event, "tab.moved"}} = Protocol.decode_host_frame(~s({"type":"tab.moved"}))
   end
 
+  test "tab.open's visible carries the task's own intent, optional and boolean", %{schema: schema} do
+    base = %{
+      "task_id" => "task-1",
+      "url" => "https://example.com/",
+      "observe" => false,
+      "download_dir" => "/tmp",
+      "task_tab_cap" => 10,
+      "tab_cap" => 60
+    }
+
+    assert {:ok, _line} = Protocol.encode_request(1, "tab.open", base)
+    assert {:ok, _line} = Protocol.encode_request(1, "tab.open", Map.put(base, "visible", true))
+    assert {:ok, _line} = Protocol.encode_request(1, "tab.open", Map.put(base, "visible", false))
+
+    invalid = Map.put(base, "visible", "yes")
+    assert {:error, {:invalid_field, "visible"}} = Protocol.encode_request(1, "tab.open", invalid)
+
+    refute schema_errors(
+             Map.merge(invalid, %{"id" => 1, "type" => "tab.open"}),
+             ref("daemonFrame"),
+             schema
+           ) == []
+  end
+
   test "no exported field accepts an explicit null", %{schema: schema, protocol: protocol} do
     assert null_typed_paths(schema, "#") == []
     assert protocol =~ "never an explicit `null`"

@@ -3,13 +3,15 @@ defmodule FermixCore.Browser.Routing do
   Which backend a conversation's browser use runs on, decided once, when it
   starts.
 
-  The named profile `fermix` is the one profile routed. It runs in the Fermix
-  app's browser pane (`:fermix_app`) when the app's browser host is attached
-  and its last report says the pane is available (`HostAvailability`), and in
-  the managed Chrome (`:managed`) exactly as before otherwise. When no host is
+  The named profiles `fermix` and `fermix_visible` are the ones routed: the
+  pane is the visible browser, so a task on either runs in the Fermix app's
+  browser pane (`:fermix_app`) when the app's browser host is attached and its
+  last report says the pane is available (`HostAvailability`), and in the
+  managed Chrome (`:managed`) exactly as before otherwise. When no host is
   attached and `launch_app` allows it, the app is opened first and the
-  decision waits for it under one deadline (`HostLauncher`). Every other
-  profile is what its configuration says.
+  decision waits for it under one deadline (`HostLauncher`). `fermix_headless`
+  and `selected_tab`, and every other profile, run what their configuration
+  says and are never routed to the pane.
 
   The decision is made when no profile is live for the conversation and never
   again while one is: a live profile's registry entry records the backend it
@@ -26,7 +28,7 @@ defmodule FermixCore.Browser.Routing do
   alias FermixCore.Browser.ProfileManager
   alias FermixCore.Trace
 
-  @routed_profile "fermix"
+  @routed_profiles ~w(fermix fermix_visible)
 
   @doc """
   The profile a request runs on, and the backend that implies.
@@ -50,16 +52,17 @@ defmodule FermixCore.Browser.Routing do
   def pin(profile, :fermix_app), do: %{profile | mode: :fermix_app}
   def pin(profile, :cdp), do: profile
 
-  defp decide(owner, @routed_profile, %{mode: :managed} = profile, config, context, opts) do
+  defp decide(owner, profile_name, %{mode: :managed} = profile, config, context, opts)
+       when profile_name in @routed_profiles do
     launcher_opts = Keyword.take(opts, [:host_availability, :launcher, :now, :sleep])
 
     case HostLauncher.decide(config, launcher_opts) do
       :fermix_app ->
-        trace(context, owner, :fermix_app, nil)
+        trace(context, owner, profile_name, :fermix_app, nil)
         {pin(profile, :fermix_app), :fermix_app}
 
       {:managed, reason} ->
-        trace(context, owner, :cdp, reason)
+        trace(context, owner, profile_name, :cdp, reason)
         {profile, :cdp}
     end
   end
@@ -69,10 +72,10 @@ defmodule FermixCore.Browser.Routing do
 
   # Why a task ran where it did is answered here and nowhere else, so the
   # decision is traced beside the launch events of the profile it starts.
-  defp trace(context, owner, backend, reason) do
+  defp trace(context, owner, profile_name, backend, reason) do
     Trace.record(:agent_event, Map.get(context, :agent_name, "browser"), %{
       "event" => "browser_route",
-      "profile" => @routed_profile,
+      "profile" => profile_name,
       "owner" => owner,
       "backend" => Atom.to_string(backend),
       "reason" => reason

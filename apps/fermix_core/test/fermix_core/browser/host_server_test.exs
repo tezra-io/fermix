@@ -47,9 +47,8 @@ defmodule FermixCore.Browser.HostServerTest do
   defp start_server(opts) do
     {:ok, config} = Config.current(%{})
 
-    spec =
-      {ProfileServer,
-       [owner_key: "owner-pane", profile_name: "fermix", profile: @pane, config: config] ++ opts}
+    defaults = [owner_key: "owner-pane", profile_name: "fermix", profile: @pane, config: config]
+    spec = {ProfileServer, Keyword.merge(defaults, opts)}
 
     start_supervised!(Supervisor.child_spec(spec, restart: :temporary))
   end
@@ -143,6 +142,7 @@ defmodule FermixCore.Browser.HostServerTest do
           assert payload["observe"] == true
           assert String.starts_with?(payload["task_id"], "task-")
           assert String.starts_with?(payload["download_dir"], "/")
+          refute Map.has_key?(payload, "visible")
           {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => "", "page" => page("about:blank")}}
         end
       })
@@ -154,6 +154,22 @@ defmodule FermixCore.Browser.HostServerTest do
     assert result["page"] == "changed"
     assert result["snapshot"] =~ "<browser_page_content>"
     assert [{"tab.open", _payload}] = FakeBrowserHostConnection.requests(connection)
+  end
+
+  test "a task on the visible profile tells the app to show its pane and window" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => fn payload ->
+          assert payload["visible"] == true
+          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+        end
+      })
+
+    pid = start_server(host_availability: host, profile_name: "fermix_visible")
+
+    assert {:ok, _result} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+    assert [{"tab.open", payload}] = FakeBrowserHostConnection.requests(connection)
+    assert payload["visible"] == true
   end
 
   test "an act on an identical page renders through the shared snapshot renderer and answers unchanged" do

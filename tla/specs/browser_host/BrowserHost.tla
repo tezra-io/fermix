@@ -36,7 +36,7 @@
 (*    since a crashed launch and a quit before attach look identical;      *)
 (*  - FermixCore.Browser.Routing: decides a task's backend once, when no   *)
 (*    profile is live for it, and pins every later request of it to the    *)
-(*    backend the live profile was started on (for_request, routing.ex:40) *)
+(*    backend the live profile was started on (for_request, routing.ex:42) *)
 (*    (ProfileManager.backend, not this spec's: it is not one of the files *)
 (*    below, since it also covers profiles this design never routes);      *)
 (*  - FermixCore.Browser.execute/dispatch (browser.ex): where a call first *)
@@ -143,7 +143,7 @@ CONSTANTS
     \* Mechanism switches: what the design does about it. TRUE is the design;
     \* each is switched off only by the checks that show a rule needs it.
     DecideOnceAtStart,  \* the backend is decided once, when no profile is live for the
-                        \* task (Routing.for_request, routing.ex:40-46), and a host task is
+                        \* task (Routing.for_request, routing.ex:42-48), and a host task is
                         \* bound to the connection it was decided on and refused on any
                         \* other (HostServer.check_host, host_server.ex:417-430); FALSE
                         \* re-decides before every step
@@ -401,7 +401,7 @@ Settle(v) ==
 (* boundary                                                               *)
 
 \* A task's first browser call: decided once, when no profile is live for it
-\* (Routing.for_request, routing.ex:40-46; ProfileManager.backend is nil).
+\* (Routing.for_request, routing.ex:42-48; ProfileManager.backend is nil).
 \*  - An attached host whose report says available runs it, bound to this
 \*    connection (HostAvailability.usable?, host_availability.ex:116-119).
 \*    With LastReportWins that is the last report; without, the first after
@@ -449,7 +449,7 @@ Deadline ==
 
 \* Where t's next step goes. DecideOnceAtStart: where it was decided --
 \* route[t] never changes once set, because Routing.for_request only
-\* re-decides when no profile is live (routing.ex:42-45) and a live host
+\* re-decides when no profile is live (routing.ex:44-47) and a live host
 \* profile's task is refused on any other connection (check_host,
 \* host_server.ex:417-430). Without it the step re-decides from what
 \* HostServer knows now, and NoChromeRetry still refuses Chrome to a task

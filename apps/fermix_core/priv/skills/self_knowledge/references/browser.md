@@ -11,14 +11,16 @@ default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
 else is using it. On a desktop it is a real window the person can see.
 
-## Two backends for `fermix`, decided once
+## Two backends for `fermix` and `fermix_visible`, decided once
 
-The default profile `fermix` can run on either of two implementations of the
-same browser surface: the managed Chrome above, driven over CDP, or the Fermix
-app's own browser pane, which the app hosts and the engine drives over a local
-wire (`browser_host.sock`). Which one is decided once, when a conversation
-starts using the browser: the pane when the app's browser host is connected
-and its last report says the pane is ready, the managed Chrome otherwise. When
+The default profile `fermix`, and `fermix_visible`, can each run on either of
+two implementations of the same browser surface: the managed Chrome above,
+driven over CDP, or the Fermix app's own browser pane, which the app hosts
+and the engine drives over a local wire (`browser_host.sock`) and, for a
+`fermix_visible` task, shows in its own window. Which one is decided once,
+when a conversation starts using the browser: the pane when the app's
+browser host is connected and its last report says the pane is ready, the
+managed Chrome otherwise. When
 the app is not connected and `[fermix_core.browser] launch_app` allows it (on
 by default for the engine inside the app), the engine opens the app in the
 background once and waits a few seconds for its browser to connect and report
@@ -35,8 +37,8 @@ that answers `cancelled` — the pane itself is fine, so say it was cancelled,
 not that the browser went away. Every later browser call in the same turn
 answers that same sentence too, rather than quietly starting a fresh task on
 Chrome — the turn that saw the loss or the cancel stays that way. The next
-browser use, in a fresh turn, is decided afresh. `fermix_visible`,
-`fermix_headless` and `selected_tab` are never routed to the pane.
+browser use, in a fresh turn, is decided afresh. `fermix_headless` and
+`selected_tab` are never routed to the pane.
 
 ## Where a name points
 

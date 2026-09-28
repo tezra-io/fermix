@@ -57,11 +57,16 @@ defmodule FermixCore.Browser.RoutingTest do
     )
   end
 
-  test "a new browser use of fermix runs on the app's pane when its host is usable", ctx do
-    assert {%{mode: :fermix_app} = profile, :fermix_app} =
-             route(ctx, "owner-new", "fermix", @managed, host(:usable))
+  test "fermix and fermix_visible both run on the app's pane when its host is usable", ctx do
+    profiles = %{"fermix" => @managed, "fermix_visible" => %{@managed | headless: false}}
 
-    assert Map.take(profile, [:headless, :cdp_port]) == %{headless: :auto, cdp_port: :auto}
+    for {name, profile} <- profiles do
+      assert {%{mode: :fermix_app} = routed, :fermix_app} =
+               route(ctx, "owner-new-#{name}", name, profile, host(:usable))
+
+      assert Map.take(routed, [:headless, :cdp_port]) == Map.take(profile, [:headless, :cdp_port]),
+             "`#{name}` lost its own headless/cdp_port"
+    end
   end
 
   test "a new browser use opens the app when launching is on, then runs on its pane", ctx do
@@ -86,23 +91,33 @@ defmodule FermixCore.Browser.RoutingTest do
     assert_received :opened
   end
 
-  test "with no usable host, fermix is the managed Chrome exactly as before", ctx do
-    assert route(ctx, "owner-none", "fermix", @managed, host(:empty)) == {@managed, :cdp}
+  test "with no usable host, fermix and fermix_visible are the managed Chrome exactly as before",
+       ctx do
+    profiles = %{"fermix" => @managed, "fermix_visible" => %{@managed | headless: false}}
+
+    for {name, profile} <- profiles do
+      assert route(ctx, "owner-none-#{name}", name, profile, host(:empty)) == {profile, :cdp}
+    end
 
     attached = host(:empty)
     :ok = HostAvailability.listening(attached, endpoint())
     :ok = HostAvailability.attached(attached, endpoint(), 1)
-    assert route(ctx, "owner-silent", "fermix", @managed, attached) == {@managed, :cdp}
+
+    for {name, profile} <- profiles do
+      assert route(ctx, "owner-silent-#{name}", name, profile, attached) == {profile, :cdp}
+    end
 
     :ok = HostAvailability.report(attached, false, "the pane is closed")
-    assert route(ctx, "owner-busy", "fermix", @managed, attached) == {@managed, :cdp}
+
+    for {name, profile} <- profiles do
+      assert route(ctx, "owner-busy-#{name}", name, profile, attached) == {profile, :cdp}
+    end
   end
 
-  test "no profile but fermix is routed, whatever the host says", ctx do
+  test "no profile but fermix and fermix_visible are routed, whatever the host says", ctx do
     usable = host(:usable)
 
     profiles = %{
-      "fermix_visible" => %{@managed | headless: false},
       "fermix_headless" => %{@managed | headless: true},
       "selected_tab" => %{mode: :attached_tab, headless: false, cdp_port: :auto},
       "mine" => %{mode: :existing_session, headless: :auto, cdp_port: :auto, cdp_url: "ws://x"}
