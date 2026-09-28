@@ -30,6 +30,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and sends no prompt, and a refused key fails with the sentence a refused call
   shows plus a button to the Voice settings. Before, Doctor only said a key was
   saved, and a chat on a Codex sign-in never tested the voice key at all.
+- **The apps can choose where secrets are kept.** A Secrets section in Settings
+  offers two stores: your keyring (the default) or a private file, one `0600`
+  file per secret in your Fermix home. On a Linux desktop that logs in with a
+  fingerprint the login keyring stays locked, so saving a Telegram token from
+  the app raised an unlock prompt for a password its owner may not know, and a
+  cancelled prompt refused the save with `locked`. Until now the file store
+  could only be chosen from a terminal (`fermix setup --secret-store file`, or
+  the wizard's question when the keyring refuses). The choice takes effect at
+  once, with no restart: the next key you save goes to the chosen store. Keys
+  already saved stay where they are; `fermix setup --migrate-secrets` moves
+  them.
 
 ### Changed
 

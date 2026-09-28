@@ -935,6 +935,12 @@
       "field": "rows:mobile_port",
       "kind": "engine_only",
       "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:secrets",
+      "field": "rows:secret_store",
+      "kind": "engine_only",
+      "why": "The secrets section, under a secrets pane the draft predates, chooses the store a new secret is written to: the keyring or a private file in the Fermix home, for a Linux desktop whose login keyring stays locked after a fingerprint login. Its one row is an ordinary closed choice; an app that does not know the pane decodes it as unrecognised and draws no section for it."
     }
   ]
 }

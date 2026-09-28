@@ -1185,6 +1185,7 @@
         "search",
         "images",
         "sandbox",
+        "secrets",
         "permissions"
       ]
     },

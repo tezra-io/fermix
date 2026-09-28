@@ -438,8 +438,22 @@ Notes that the shapes alone do not carry:
   the one short line under the control and is always shown; `info` is a
   paragraph a client puts behind an `(i)` beside the row and reveals on demand.
   It is `null` on every row with nothing more to say, which is most of them.
-  Today one row carries it: the Venice model row, where the privacy tier in each
-  model's label is two words that mean materially different things.
+  Today two rows carry it: the Venice model row, where the privacy tier in each
+  model's label is two words that mean materially different things, and the
+  secrets section's store row, where the choice trades a keyring password for
+  a file that is not encrypted.
+- **The secrets section chooses where a new secret is kept.** Section
+  `secrets`, pane `secrets`, publishes one closed choice row, `secret_store`:
+  `keyring` (the default, and what a home that never chose reads as) or `file`,
+  one `0600` file per secret under the Fermix home's `secrets/` directory. It
+  exists for a Linux desktop that logs in with a fingerprint or automatically,
+  where the login keyring stays locked and every save asks for its password.
+  `settings.apply` records the choice in `[fermix_core] secret_store` and applies
+  it at once, so the very next `secret.set` writes to the chosen store and the
+  row carries `restart: false`. Choosing moves nothing: a secret already saved
+  stays in the store it was saved to and is read back from there, and `fermix
+  setup --migrate-secrets` is what moves them. `secret.set` refusing a locked
+  keyring (`secret_store_failed`, reason `locked`) is unchanged.
 - **The sandbox section publishes one row per environment variable name.**
   After `sandbox_env_allow` come the allowed names in allow-list order, then
   the names Fermix still stores but no longer allows, sorted. Each row's key is
