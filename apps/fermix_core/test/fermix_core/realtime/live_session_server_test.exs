@@ -904,12 +904,14 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       start_provider_session(session)
       assert_receive {:realtime, %{type: "state", state: "listening"}}
 
-      send(session, {:openai_live_event, {:audio_delta, "AAAA"}})
-      send(session, {:openai_live_event, {:audio_delta, "BBBB"}})
+      first = reply_audio(10)
+      second = reply_audio(10)
+      send(session, {:openai_live_event, {:audio_delta, first}})
+      send(session, {:openai_live_event, {:audio_delta, second}})
 
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "AAAA"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "BBBB"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^first}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^second}}
       refute_receive {:realtime, %{type: "state", state: "speaking"}}
 
       send(session, {:openai_live_event, {:transcript_delta, :user, "stop", 100, 200}})
@@ -960,9 +962,63 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       refute_received {:realtime, %{type: "state", state: "speaking"}}
 
       Agent.update(clock, &(&1 + 5_000))
-      send(session, {:openai_live_event, {:audio_delta, "NEXT"}})
+      next = reply_audio(20)
+      send(session, {:openai_live_event, {:audio_delta, next}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
-      assert_receive {:realtime, %{type: "audio_delta", audio: "NEXT"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^next}}
+    end
+
+    # Measured on the dev engine: Live's output never stops, and between
+    # replies it is digital silence, one chunk every 100 ms.
+    test "padding between replies is forwarded but is not speech", %{clock: clock} do
+      session = listening_session(clock)
+
+      for _ <- 1..3, do: send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      sync(session)
+
+      assert_received {:realtime, %{type: "audio_delta"}}
+      refute_received {:realtime, %{type: "state", state: "speaking"}}
+    end
+
+    test "a reply ends while padding keeps streaming after it", %{clock: clock} do
+      session = listening_session(clock, reply_margin_ms: 10)
+
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+
+      for _ <- 1..5, do: send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+
+      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
+    end
+
+    test "padding after Stop does not keep the stopped reply alive", %{clock: clock} do
+      session = listening_session(clock)
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert :ok = SessionControl.interrupt(session, 10)
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      for at <- [100, 400, 700, 1_000, 1_300] do
+        Agent.update(clock, fn _ -> at end)
+        send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      end
+
+      Agent.update(clock, fn _ -> 1_400 end)
+      next = reply_audio(20)
+      send(session, {:openai_live_event, {:audio_delta, next}})
+      assert_receive {:realtime, %{type: "state", state: "speaking"}}
+      assert_receive {:realtime, %{type: "audio_delta", audio: ^next}}
+    end
+
+    test "the operator falling quiet announces thinking while padding streams", %{clock: clock} do
+      session = listening_session(clock)
+
+      send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      mic(session, clock, 0, :speech)
+      send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
+      mic(session, clock, 2_000, :silence)
+
+      assert_received {:realtime, %{type: "state", state: "thinking"}}
     end
 
     test "the operator falling quiet after speaking announces thinking", %{clock: clock} do
@@ -1287,7 +1343,18 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   end
 
   # `ms` of the assistant's voice as Live sends it: base64 24 kHz PCM16.
-  defp reply_audio(ms), do: Base.encode64(:binary.copy(<<0, 0>>, 24 * ms))
+  defp reply_audio(ms), do: Base.encode64(square_wave(24 * ms, 2_000))
+
+  # Live pads its output with digital silence between replies, one chunk every
+  # 100 ms for the whole call.
+  defp padding_audio(ms), do: Base.encode64(:binary.copy(<<0, 0>>, 24 * ms))
+
+  defp square_wave(samples, amplitude) do
+    for index <- 1..samples, into: <<>> do
+      value = if rem(index, 2) == 0, do: amplitude, else: -amplitude
+      <<value::little-signed-16>>
+    end
+  end
 
   # 100 ms of the microphone at clock time `at_ms`: a square wave well above
   # speech level, or silence.

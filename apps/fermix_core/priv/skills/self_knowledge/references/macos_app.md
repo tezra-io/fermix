@@ -49,6 +49,22 @@ Each cause is a sentence; nothing in the configuration is changed.
 - No answer in 90 seconds, or three exits in a row → **Run Doctor** or **View full log**.
 - Home shows "Another Fermix service is registered on this Mac" → **Show me how to remove it**.
 
+## The Browser pane
+
+The daemon serves this pane for the app. Its top row says which browser the
+agent's tasks run in, by name (Google Chrome, Chromium, Google Chrome Canary,
+or Google Chrome for Testing when Fermix downloaded it), or "No Chrome or
+Chromium is installed." when there is none; below it are the three
+`[fermix_core.browser]` settings a person owns: how tasks run (automatically,
+in the background, or in a window they can watch; each keeps its own logins),
+the most tabs a browser keeps open, and the private hosts the browser may open.
+None needs a restart. With no browser, the pane's action is a download job: it
+runs the meeting notetaker's own install step (its helper, then the Chromium
+build it is pinned to, about 150 MB) and completes naming the browser tasks now
+use, or fails with a sentence, including when the launcher still finds none.
+This is the managed browser tasks run in, not the app's own in-window browser
+for the person's browsing, which the daemon never sees.
+
 ## A standalone `fermix` pointed at the app's home
 
 Someone who wants a terminal installs the standalone binary and, if the app's home is not `~/.fermix`, exports `FERMIX_HOME`. Against the app's home:

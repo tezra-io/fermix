@@ -533,6 +533,20 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert id == approval["approval_id"]
   end
 
+  test "a provider call is not a tool event" do
+    message = request_message()
+    activity = Companion.build_activity_callback(message)
+
+    assert :ok = activity.(:provider_start)
+    assert :ok = activity.(:provider_response)
+    refute_receive {:companion_event, %{"t" => "tool_event"}}
+
+    assert :ok = activity.({:tool_start, "shell"})
+
+    assert_receive {:companion_event,
+                    %{"t" => "tool_event", "tool" => "shell", "phase" => "start"}}
+  end
+
   test "media does not travel on this socket" do
     assert {:error, :unsupported_media} =
              Companion.send_media("main", %{kind: :image, path: "/tmp/x.png"}, [])

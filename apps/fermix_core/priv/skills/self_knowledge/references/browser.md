@@ -9,7 +9,35 @@ The `browser` tool drives Chromium over CDP. Which browser it drives is the
 instances, in its own profile directory, with its own logins. This is the
 default and the right answer for almost everything: it opens and closes tabs, it
 redirects downloads into the workspace, it reads and clears cookies, and nobody
-else is using it. On a desktop it is a real window the person can see.
+else is using it.
+
+Which of the three a call without `profile` uses is `[fermix_core.browser]
+default_profile`, the person's "how tasks run" choice: `fermix` (the shipped
+default) runs in a window wherever there is a display and in the background on
+a server without one, `fermix_headless` always runs in the background, and
+`fermix_visible` always opens a window they can watch. Each profile keeps its own
+logins, so a site signed in under one is signed out under the others. A call can
+still name a profile for one task, such as `fermix_visible` when the person asks
+to watch. `max_tabs` (default 10) is how many tabs a managed browser keeps open
+before closing the oldest one a task is not using; it applies from the browser's
+next start. `allowed_hosts` and `launch_app` (both below) are the section's
+other keys; `default_profile` refuses `selected_tab` and any name no profile
+carries.
+
+## Which browser the managed profiles launch
+
+The launcher takes the first of these that exists: the profile's own
+`executable_path`, then `CHROME_PATH`, then Chrome or Chromium on `PATH`
+(`google-chrome-stable`, `google-chrome`, `chromium`, `chromium-browser`,
+`chrome`), then Google Chrome, Chromium and Google Chrome Canary in
+`/Applications`, and last Google Chrome for Testing from Playwright's cache: the
+Chromium the meeting notetaker's `install-browser` step downloads, found as the
+newest complete `chromium-<revision>` under `PLAYWRIGHT_BROWSERS_PATH`, or else
+`~/Library/Caches/ms-playwright` on macOS and `~/.cache/ms-playwright` on Linux.
+So a machine with no browser of its own runs tasks once that download has run.
+With none of them a launch refuses `chrome_missing`. `fermix doctor`'s `browser`
+row names the browser in force and its path ("Tasks use Google Chrome."), or
+says "No Chrome or Chromium is installed."
 
 ## Two backends for `fermix`, decided once
 
@@ -45,8 +73,9 @@ Limits of the managed browser:
 - A download is vetted at its source URL too: a refused one is cancelled, any
   partial file deleted, and the tool answers `download_blocked`.
 - A URL host must be canonical ASCII (an IDN in its `xn--` form).
-- `[fermix_core.browser] allowed_hosts` and `launch_app` are its settings, the
-  former the escape hatch for a refused host; timeouts and caps are internal.
+- `default_profile`, `max_tabs` (above), `allowed_hosts` and `launch_app` are
+  `[fermix_core.browser]`'s four settable keys; `allowed_hosts` is the escape
+  hatch for a refused host; timeouts and caps are internal.
 - Operating rules (snapshots, `act`, the `page` field, `webmcp`): the `browser`
   tool description and the `browser-guidance` skill.
 

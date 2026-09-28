@@ -21,7 +21,6 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Boot.PathBaseline
   alias FermixCore.Browser.ChromeLauncher
-  alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -1697,21 +1696,19 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp shim_path(nil), do: Application.app_dir(:fermix_nif, "priv/disclaim")
   defp shim_path(path) when is_binary(path), do: path
 
-  # `BrowserConfig.current/0` refuses an operator-authored `[fermix_core.browser]`
-  # section that is out of range or names an unusable profile — the exact host
-  # whose owner runs `fermix doctor` to find out why. Binding it with `{:ok, _}`
-  # would kill the whole run with a MatchError and print nothing.
+  # The browser tasks run in, in the sentence the settings row publishes, plus
+  # where it lives. `resolve_default/0` answers a refused `[fermix_core.browser]`
+  # section (out of range, or naming an unusable profile) with the refusal
+  # itself — the exact host whose owner runs `fermix doctor` to find out why.
+  # Binding it with `{:ok, _}` would kill the whole run with a MatchError and
+  # print nothing.
   defp browser_chrome_result do
-    case BrowserConfig.current() do
-      {:ok, config} -> browser_chrome_row(config)
-      {:error, error} -> warn("browser", "disclaim shim ready; #{error.message}")
-    end
-  end
+    case ChromeLauncher.resolve_default() do
+      {:ok, found} = resolved ->
+        ok("browser", "disclaim shim ready; #{ChromeLauncher.sentence(resolved)} (#{found.path})")
 
-  defp browser_chrome_row(config) do
-    case ChromeLauncher.find_executable(config, nil) do
-      {:ok, path} -> ok("browser", "disclaim shim ready; Chrome at #{path}")
-      {:error, _error} -> warn("browser", "disclaim shim ready; no Chrome/Chromium found")
+      {:error, _error} = refused ->
+        warn("browser", "disclaim shim ready; #{ChromeLauncher.sentence(refused)}")
     end
   end
 

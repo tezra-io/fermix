@@ -2,11 +2,11 @@ defmodule FermixCore.Browser.Config do
   @moduledoc """
   Single source of truth for every browser timeout, interval, and bound.
 
-  All durations are milliseconds. None of these are user-facing; they are
-  system tunables overridable through `config :fermix_core, :browser, ...`.
-  Keeping them here (instead of as literals scattered across the runtime)
-  makes every browser timeout greppable, documentable, and adjustable in one
-  place.
+  All durations are milliseconds. Three fields are a person's to set in
+  `[fermix_core.browser]` (`config_keys/0`); the rest are system tunables
+  overridable only through `config :fermix_core, :browser, ...`. Keeping them
+  here (instead of as literals scattered across the runtime) makes every
+  browser timeout greppable, documentable, and adjustable in one place.
 
   ## Capacity
 
@@ -106,24 +106,32 @@ defmodule FermixCore.Browser.Config do
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.Policy
   alias FermixCore.BuildInfo
+  alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Wizard
 
   @default_allowed_hosts ["localhost", "127.0.0.1", "::1"]
 
-  # The two keys of this struct an operator sets from `config.toml`. Everything
-  # else here is a timeout, a cap, a buffer size or a profile shape — tuning,
-  # which is an internal constant rather than a config surface. `allowed_hosts`
-  # is different in kind: it is the documented recovery for every host the policy
-  # refuses (`browser_guidance` SKILL.md tells the operator to list the host
-  # there), so a refusal without it is a refusal with no way out.
+  # The keys of this struct a person sets from `config.toml`, each one a choice
+  # about how the browser behaves for them rather than tuning:
   #
-  # `launch_app` is the other, and a posture too: whether the engine may open the
-  # Fermix app to run a new `fermix` task in the app's browser pane. Unset, it
-  # is derived from the build (`launch_app_default/1`).
+  #   * `allowed_hosts` is the documented recovery for every host the policy
+  #     refuses (`browser_guidance` SKILL.md tells the operator to list the host
+  #     there), so a refusal without it is a refusal with no way out.
+  #   * `default_profile` is how tasks run: it names one of the managed profiles
+  #     below, and each of those is how the configuration already says headless
+  #     or visible, so choosing between them needs no second key.
+  #   * `max_tabs` is how many tabs a task may keep open, which is memory the
+  #     person pays for.
+  #   * `launch_app` is a posture too: whether the engine may open the Fermix
+  #     app to run a new `fermix` task in the app's browser pane. Unset, it is
+  #     derived from the build (`launch_app_default/1`).
   #
-  # The config store rejects any other key in the section BY NAME, so an operator
-  # reaching for `action_timeout_ms` is told it is not settable instead of
-  # editing a line that silently does nothing.
-  @config_keys [:allowed_hosts, :launch_app]
+  # Everything else here is a timeout, a buffer size or a profile shape, which is
+  # an internal constant rather than a config surface. The config store rejects
+  # any other key in the section BY NAME, so an operator reaching for
+  # `action_timeout_ms` is told it is not settable instead of editing a line that
+  # silently does nothing.
+  @config_keys [:allowed_hosts, :default_profile, :max_tabs, :launch_app]
   # `selected_tab` is the tab the person grants with the browser extension
   # (M42 slice 7). It is built in rather than configured because there is
   # nothing to configure: the grant names the tab, and the person makes it.
@@ -241,8 +249,8 @@ defmodule FermixCore.Browser.Config do
   # Bounds on the `webmcp` action. Constants rather than struct fields: every
   # one of them bounds page-controlled text (a tool's name, description, schema
   # and result) or the one argument the model supplies, so there is no posture
-  # an operator would want to take on them — `[fermix_core.browser]` still
-  # accepts `allowed_hosts` and `launch_app` alone. The call budget defaults to
+  # an operator would want to take on them — `[fermix_core.browser]` accepts
+  # none of them. The call budget defaults to
   # `action_timeout_ms` and is clamped to `call_max_ms`, which covers a page's
   # own long waits without letting one hold the profile indefinitely.
   @webmcp_limits %{
@@ -256,7 +264,7 @@ defmodule FermixCore.Browser.Config do
 
   # Bounds on the `act` action itself. Constants rather than struct fields, for
   # the same reason as `@webmcp_limits`: neither is a posture an operator would
-  # want to take — `[fermix_core.browser]` still accepts its two keys alone.
+  # want to take — `[fermix_core.browser]` accepts neither.
   # `settle_budget_ms` is the cost of looking at the page after an action, and
   # the poll runs inside the profile's `handle_call`, so it is deliberately
   # short: a page holding a JS dialog answers nothing at all, and this is what
@@ -377,6 +385,32 @@ defmodule FermixCore.Browser.Config do
     end
   end
 
+  @doc """
+  Persists a partial change to `[fermix_core.browser]`, the one writer for it.
+
+  The merged block is read through `current/1` first, so a value the browser
+  would refuse at its next launch is refused here in that same sentence
+  (`{:invalid_value, sentence}`) and nothing is written. What passes commits
+  through the wizard's shared write tail, where the external-change refusal
+  and the baseline re-record live, exactly as `Meetings.Config.save/1` does.
+  """
+  @spec save(keyword()) :: {:ok, map()} | {:error, {:invalid_value, String.t()} | term()}
+  def save(changes) when is_list(changes) do
+    snapshot = ConfigStore.current_snapshot()
+    core = Map.get(snapshot, :fermix_core, [])
+    browser = core |> Keyword.get(:browser, []) |> Keyword.merge(changes)
+
+    case current(browser) do
+      {:ok, _config} ->
+        snapshot
+        |> Map.put(:fermix_core, Keyword.put(core, :browser, browser))
+        |> Wizard.commit_snapshot()
+
+      {:error, %Error{message: sentence}} ->
+        {:error, {:invalid_value, sentence}}
+    end
+  end
+
   @spec current() :: {:ok, t()} | {:error, Error.t()}
   def current do
     :fermix_core
@@ -469,8 +503,27 @@ defmodule FermixCore.Browser.Config do
          :ok <- validate_depth_bounds(config),
          :ok <- boolean(:launch_app, config.launch_app),
          :ok <- validate_allowed_hosts(config.allowed_hosts),
-         :ok <- validate_profiles(config.profiles) do
+         :ok <- validate_profiles(config.profiles),
+         :ok <- validate_default_profile(config) do
       {:ok, config}
+    end
+  end
+
+  # The default names a profile every run can use. The person's own tab is used
+  # only on a turn they attend, so as the default it would refuse every
+  # scheduled, delegated and guest run, and a name no profile carries would
+  # refuse every run at all.
+  defp validate_default_profile(%__MODULE__{default_profile: name, profiles: profiles}) do
+    case profiles do
+      %{^name => %{mode: mode}} when mode != :attached_tab ->
+        :ok
+
+      _other ->
+        {:error,
+         Error.new(
+           "invalid_config",
+           "default_profile #{inspect(name)} is not a browser profile tasks can run in"
+         )}
     end
   end
 
