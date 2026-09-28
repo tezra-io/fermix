@@ -20,8 +20,8 @@ what is left out and every step folded into another.
   what the platform took survive. This also covers a crash of any core child
   started before the `RunnerSupervisor` (`CommandHostSupervisor` through
   `MainAgent`, `Memory.Repo`, `Trace` and `Finch` among them,
-  `application.ex:168-224`) or of the `RunnerSupervisor` itself, since
-  `:rest_for_one` restarts every job process in each case (`:263`). A
+  `application.ex:168-229`) or of the `RunnerSupervisor` itself, since
+  `:rest_for_one` restarts every job process in each case (`:268`). A
   runner's send helper and its AgentLoop are linked to it, so none outlives
   the restart; `LoopDiesWithRunner` off lets the loop outlive it (JOB-8).
 - `SchedulerCrashes`: how many times the Scheduler alone may die, at any point
@@ -484,7 +484,7 @@ shortest and can change between runs.
   runs of one job.
 - **Code (before the fix, at `35a6acdc`):** a crash of any core child started
   before `JobRunnerSupervisor` restarts the job subtree under `:rest_for_one`
-  (`application.ex:168-220`, `:259`): not only `Memory.Repo` and the children
+  (`application.ex:168-225`, `:264`): not only `Memory.Repo` and the children
   after it, but also `CommandHostSupervisor`, `Finch`, `Trace`,
   `TokenSupervisor`, `CapabilityRegistry`, `McpSupervisor` and the rest. The
   runner dies with its supervisor, but its AgentLoop was `spawn_monitor`ed,
@@ -557,7 +557,7 @@ shortest and can change between runs.
   write or Scheduler call (`job_registry_support.ex:33-38`): a request the owner
   never made. That check's job-row read feeds no modelled column. The store
   of parked confirmations (`Capabilities.AccessGate.Pending`,
-  `application.ex:221`) is one more core child started before the
+  `application.ex:226`) is one more core child started before the
   `RunnerSupervisor`, so its crash is the daemon crash above.
 - The run-row value `unset` stands for the `"none"` the claim writes before a
   result exists (`scheduler.ex:633`). The final `"none"` of `delivery_mode
