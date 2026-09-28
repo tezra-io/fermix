@@ -250,6 +250,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   to drop the connection, and end a GPT-Live call. A connection that keeps
   closing while it is being set up now ends the call after three tries instead
   of reconnecting for the rest of the session.
+- **A voice call whose OpenAI key is refused now says so.** With a wrong or
+  revoked key, OpenAI accepted the voice connection and then refused the
+  session, and Fermix only logged it: the call waited for an answer that never
+  came until the app gave up with "Fermix did not start the call in time", which
+  looked like a microphone problem. The call now ends at once with an error
+  saying that OpenAI did not accept the API key. Any other refusal of a voice
+  session, when a call starts or when it reconnects, ends the call the same way
+  and names OpenAI's error code.
 
 ## [0.11.0] - 2026-09-23
 

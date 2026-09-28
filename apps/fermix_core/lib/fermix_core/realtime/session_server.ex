@@ -405,7 +405,25 @@ defmodule FermixCore.Realtime.SessionServer do
     end
   end
 
+  # OpenAI answered the call's socket with an error before its `session.updated`:
+  # this socket will never configure the call. `session.update` is the first event
+  # the session sends on every socket (`call_start`, `resume_provider_session`), and
+  # OpenAI answers a socket's events in order (tla/specs/realtime_session assumes
+  # the same), so an error that arrives first is about that `session.update` or
+  # the connection itself; a refused key (`invalid_api_key`) is the common one. It
+  # is never one of the hiccups a live call forgives below: those answer later
+  # events, which OpenAI reads after it has sent `session.updated`. So ANY error
+  # here ends the call, not a list of codes: a code the list missed would be the
+  # old dead end, a call that waits for a `listening` that never comes until the
+  # companion gives up on its own start deadline and blames a slow start.
   @impl true
+  def handle_info(
+        {:openai_realtime_event, pid, {:error, error}},
+        %{openai_pid: pid, provider_ready?: false} = state
+      ) do
+    refuse_call(state, error)
+  end
+
   def handle_info({:openai_realtime_event, pid, event}, %{openai_pid: pid} = state) do
     {:noreply, handle_provider_event_internal(event, state)}
   end
@@ -709,11 +727,41 @@ defmodule FermixCore.Realtime.SessionServer do
   # call then streamed audio into a void indefinitely while the companion sat on
   # its last frame (observed: 43 s, ended only by the operator). The fix is not to
   # detect that state — it is to make it unrepresentable.
-  defp end_call(state, reason) when is_atom(reason) do
-    notify(state.companion, %{type: "error", reason: Atom.to_string(reason)})
+  defp end_call(state, reason, detail \\ nil) when is_atom(reason) do
+    notify(state.companion, terminal_error(reason, detail))
     RealtimeTelemetry.call_stop(telemetry_meta(state), usage_measurements(state.usage), reason)
     {:stop, {:shutdown, reason}, state}
   end
+
+  # A refusal carries the published `kind` and a `detail` sentence, as a Live
+  # call's does (PROTOCOL.md); every other ending keeps the frame it always had.
+  defp terminal_error(reason, nil), do: %{type: "error", reason: Atom.to_string(reason)}
+
+  defp terminal_error(:provider_refused, detail) when is_binary(detail),
+    do: %{type: "error", reason: "provider_refused", kind: "provider_refused", detail: detail}
+
+  # OpenAI refused the call's session. Reported like every provider error, then
+  # ended: `terminate/2` closes the refused socket.
+  defp refuse_call(state, error) do
+    Logger.warning("realtime: OpenAI refused the session: #{refusal_log(error)}")
+    RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
+    end_call(state, :provider_refused, refusal_detail(error))
+  end
+
+  # The companion puts `detail` on screen, so it is Fermix's sentence, never
+  # OpenAI's message: for a refused key that message quotes the key back, masked
+  # but with its last characters. OpenAI's `code` is a fixed identifier, safe to
+  # show and what a reader searches for, so it is named when it looks like one.
+  defp refusal_detail(%{"code" => "invalid_api_key"}),
+    do: "OpenAI did not accept the API key (invalid_api_key)."
+
+  defp refusal_detail(%{"code" => code}) when is_binary(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code),
+      do: "OpenAI refused the voice session (#{code}).",
+      else: "OpenAI refused the voice session."
+  end
+
+  defp refusal_detail(_error), do: "OpenAI refused the voice session."
 
   # A tool task belongs to the provider connection whose call it answers. When
   # that connection is lost — teardown (drop_session), reconnect (a fresh
@@ -954,7 +1002,9 @@ defmodule FermixCore.Realtime.SessionServer do
       # Reported, not fatal. If the error is genuinely terminal OpenAI closes the
       # socket and its EXIT clause handles that as the one reconnect path;
       # tearing down here instead disarmed that path. No companion `error` frame:
-      # the pet reads that as terminal and shuts its side down mid-call.
+      # the pet reads that as terminal and shuts its side down mid-call. On the
+      # socket, an error before `session.updated` ends the call instead
+      # (`refuse_call/2`): there is no configured session to keep.
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
       RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
       state
@@ -1831,4 +1881,9 @@ defmodule FermixCore.Realtime.SessionServer do
   defp tool_name(_call), do: "unknown"
 
   defp call_id(call), do: Map.get(call, "call_id") || Map.get(call, :call_id) || ""
+
+  # What `refuse_call/2` logs: what OpenAI refused, without its message, for the
+  # reason `detail` leaves it out: a refused key's message quotes the key's tail.
+  defp refusal_log(%{} = error), do: inspect(Map.take(error, ["type", "code", "param"]))
+  defp refusal_log(error), do: inspect(error)
 end
