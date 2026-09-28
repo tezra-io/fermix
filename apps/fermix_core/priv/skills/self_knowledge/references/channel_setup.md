@@ -4,10 +4,10 @@ The answer to "how do I connect Telegram / Discord / Slack / WhatsApp / Signal?"
 
 ## Where the values go
 
-- **Mac app** (production on a Mac): Settings > Channels > the channel's row > **Set up…** (**Change…** once set). Paste each token and click **Store** beside it (or press Return): closing the sheet first discards the token, whatever the sheet's "Saved as you type" says. Other fields save on Return or when you leave them. Make sure the switch beside the row is on (storing a token does not turn it on), then **Restart to apply** > **Restart…**. Never send a Mac app user to `fermix setup` (on an app-managed Mac it only opens the app), or to `config.toml` for anything the app has a field for.
+- **Mac app** (production on a Mac): Settings > Channels > the channel's row > **Set up…** (**Change…** once set). Paste each token and press Return (the row then reads **Stored**; the released app also has a **Store** button): a token not yet stored is dropped when the sheet closes, whatever the sheet's "Saved as you type" says. Other fields save on Return or when you leave them. Make sure the switch beside the row is on (storing a token does not turn it on), then **Restart to apply** > **Restart…**. Never send a Mac app user to `fermix setup` (on an app-managed Mac it only opens the app), or to `config.toml` for anything the app has a field for.
 - **Linux or dev install**: browser setup (`fermix setup`) > Channels tab > the channel's card > **Save channel**, then **Apply & restart**. Headless: the `fermix setup --<channel>-…` flags below, then `fermix restart` (a token passed as a flag lands in shell history; the Channels tab avoids that). Or the `[fermix_channels.<name>]` keys in `config.toml`. Browser and terminal setup have no on/off switch: saving a credential turns the channel on.
 - Tokens and secrets go to the OS keychain/keyring (or the file store); `config.toml` holds only `@keyring`/`@file`. Ids and phone numbers are plain `config.toml` text and must be quoted strings: an unquoted `owner_user_id`, `bot_user_id`, `phone_number_id` or Signal `account` is silently dropped.
-- A restart is always needed: channels start only at boot. No channel starts until setup is complete (provider, name, time zone, style).
+- A restart is always needed: channels start only at boot. No channel starts until a provider is connected.
 
 ## Telegram
 

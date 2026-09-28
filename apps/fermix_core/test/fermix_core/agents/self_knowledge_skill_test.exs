@@ -84,8 +84,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   end
 
   # The channel's surface is the management protocol: a settings section and
-  # the `mobile.*` methods the desktop apps' Phone pane is built on, with the
-  # config flag still the route on a host with no pane. The self-reference must
+  # the `mobile.*` methods a desktop Phone pane would be built on, with the
+  # config flag the route on a host with no pane. The self-reference must
   # name both, must say pairing on an app-managed Mac is the app's, and must not
   # point an owner at surfaces that do not exist. The refutations name concrete
   # withdrawn artifacts rather than a phrasing allowlist, so a true sentence
@@ -203,6 +203,72 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
              reference =~ "ever deletes a Fermix home"
   end
 
+  # Production Fermix on a Mac is the app, which ships no `fermix` command, so
+  # an owner asking "how do I set up / update you?" must get the app's own
+  # labels. Each label below is a control a correct answer cannot do without.
+  # The refutation names a withdrawn artifact: no desktop package ships.
+  test "answers a Mac app owner with the app's own controls" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(macos_app_reference_path())
+
+    assert body =~ "Check for Updates…"
+
+    for label <- [
+          "Set up Fermix",
+          "Open Login Items settings",
+          "Connect your AI",
+          "Verify and save",
+          "Use as primary",
+          "Restart Fermix…",
+          "Check for Updates…",
+          "Reload settings from disk"
+        ] do
+      assert reference =~ label, "macos_app reference does not name #{label}"
+    end
+
+    for text <- [body, reference, File.read!(service_unit_reference_path())] do
+      refute text =~ "fermix-desktop"
+    end
+  end
+
+  # Voice, computer use, the notetaker and the sandbox are settings panes on a
+  # Mac, so "how do I turn it on?" needs the pane. The refutation names a
+  # withdrawn artifact: the voice companion ships inside the Fermix app, not
+  # as a separate FermixPet app.
+  test "sends a Mac app owner to the pane for each desktop feature" do
+    body = File.read!(self_knowledge_path())
+
+    for pane <- [
+          "Settings > Voice",
+          "Settings > Computer",
+          "Settings > Meetings",
+          "Settings > Sandbox"
+        ] do
+      assert body =~ pane, "self-knowledge body does not name #{pane}"
+    end
+
+    for text <- [
+          body,
+          File.read!(reference_path("voice")),
+          File.read!(reference_path("computer_use"))
+        ] do
+      refute text =~ "FermixPet"
+    end
+  end
+
+  # After the first provider, the primary moves only by an explicit action; a
+  # self-reference that says saving a provider promotes it sends an owner to
+  # the wrong control.
+  test "names the explicit action that changes the primary provider" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(providers_reference_path())
+
+    for text <- [body, reference] do
+      assert text =~ "Use as primary"
+      assert text =~ "Set primary"
+    end
+  end
+
   # No repository serves the packages, so the family commands `fermix upgrade`
   # prints find nothing. An agent asked "how do I update you?" on a packaged
   # host must not stop at `apt upgrade`.
@@ -298,6 +364,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     |> Enum.join("\n")
   end
 
+  defp providers_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/providers.md", __DIR__)
+  end
+
   defp service_unit_reference_path do
     Path.expand("../../../priv/skills/self_knowledge/references/service_unit.md", __DIR__)
   end
@@ -348,6 +418,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   defp mobile_reference_path do
     Path.expand("../../../priv/skills/self_knowledge/references/mobile.md", __DIR__)
+  end
+
+  defp reference_path(name) do
+    Path.expand("../../../priv/skills/self_knowledge/references/#{name}.md", __DIR__)
   end
 
   test "stays decomposed: main body has headroom, references are bounded, pointers resolve" do

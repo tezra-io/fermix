@@ -38,7 +38,7 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 
 ## Delivery
 
-`none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode.
+`none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode. The two defaults are `config.toml` keys only; no settings pane or setup tab writes them.
 
 `channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session refuses it outright, so schedule to an explicit channel there. From the Mac app's chat it delivers into the companion timeline, written even while the app is closed and caught up when it reconnects (`companion` reference).
 
@@ -54,7 +54,7 @@ Trust is stamped from the creating turn and never widens; a context carrying no 
 
 ## Lifecycle
 
-A recurring job due older than the freshness window (`[fermix_core.jobs] run_freshness_window_seconds`, default 3600) is skipped rather than fired at the wrong wall-clock and its schedule advances; a one-off never goes stale and runs late instead. `expires_at` marks the job expired.
+A recurring run more than an hour overdue (a fixed window, not a setting) is skipped rather than fired at the wrong wall-clock, and its schedule advances; a one-off never goes stale and runs late instead. `expires_at` marks the job expired.
 
 A schedule or timezone that no longer parses is terminal: the job moves to `disabled` with the reason in `last_error` and is never retried. Fix it with `update_job`, then `resume_job`.
 

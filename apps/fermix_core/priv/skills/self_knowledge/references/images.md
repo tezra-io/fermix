@@ -26,12 +26,13 @@ it `paths`: one to six local paths, in the order you want to refer to them
 
 ## How an image reaches the model
 
-Each provider encodes an image at its own edge from one neutral content part, and
-the text-only request shape is unchanged, so prompt caching is unaffected. A tool
-result carries an image the same way an inbound message does: an Anthropic
-`tool_result` content array, or a placeholder tool message plus a following user
-image turn on the OpenAI-shaped wires. A route with no vision fails loud rather
-than dropping the image.
+Inbound images, `view_image` results and images a tool returns (a `browser`
+screenshot) all reach the model as image content. Anthropic, the OpenAI
+Responses/Codex wire and Grok take images. OpenRouter, Mistral, Venice and Ollama
+depend on the model: a model the built-in catalog marks text-only (Ollama's three
+default models, Venice's GLM 5.3) is refused before the call, any other model is
+sent the image and the provider refuses it if it cannot see. An image is never
+silently dropped. Prompt caching is unaffected.
 
 ## Making an image (`generate_image`)
 
@@ -40,19 +41,18 @@ sandbox path or `inbound:last` — the image just sent in this chat. Optional
 `mask` (a PNG-alpha mask whose transparent regions are the only parts edited;
 OpenAI backend only), `size` and `model` round out the arguments.
 
-The operator's config (`[fermix_core.tools.generate_image] backend`) picks the
-provider — `openai`, `xai`, `google`, or `openai_codex`. `edit` and `mask` are
-gated against the chosen backend's declared capabilities and rejected loudly
-when unsupported, never silently dropped. The backend reuses the OpenAI or
-SpaceXAI chat key, or `GEMINI_API_KEY` for Google.
+The backend is `[fermix_core.tools.generate_image] backend` (Mac: Settings >
+Images): `openai`, `xai`, `google` or `openai_codex`, plus optional `model` and
+`size`. `edit` and `mask` are refused loudly on a backend that lacks them.
+OpenAI and SpaceXAI reuse their chat key; Google takes `google_api_key` in that
+section (the Mac Images pane's key row), with `GEMINI_API_KEY` as the fallback.
+Any other key in the section stops the daemon from booting.
 
-The **`openai_codex`** backend is different: it needs no API key and generates
-`gpt-image-2` through the ChatGPT-subscription Codex OAuth connection (billed to
-the subscription, not the platform API), via the built-in image tool on the
-Codex responses endpoint — an **experimental, undocumented** surface gated to
-ChatGPT auth (a plan that does not entitle it returns `auth_failed`). It
-supports generate and edit but no `mask`; a `router_model` config key names the
-GPT-5.x model that carries the image tool.
+**`openai_codex`** needs no API key: it generates `gpt-image-2` through the
+ChatGPT subscription sign-in (billed to the subscription), over an experimental,
+undocumented Codex surface; a plan without it answers `auth_failed`. Generate
+and edit, no `mask`. The model that carries the image tool is fixed internally,
+not a setting.
 
 ### Save, look, then send
 
