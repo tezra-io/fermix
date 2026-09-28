@@ -1014,7 +1014,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       session = listening_session(clock)
 
       send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       send(session, {:openai_live_event, {:audio_delta, padding_audio(100)}})
       mic(session, clock, 2_000, :silence)
 
@@ -1024,7 +1024,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     test "the operator falling quiet after speaking announces thinking", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 200, :silence)
       refute_received {:realtime, %{type: "state", state: "thinking"}}
 
@@ -1038,18 +1038,18 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     test "speaking again while thinking returns to listening", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 2_000, :silence)
       assert_received {:realtime, %{type: "state", state: "thinking"}}
 
-      mic(session, clock, 2_100, :speech)
+      words(session, clock, 2_100)
       assert_received {:realtime, %{type: "state", state: "listening"}}
     end
 
     test "thinking gives way to listening when no reply comes", %{clock: clock} do
       session = listening_session(clock)
 
-      mic(session, clock, 0, :speech)
+      words(session, clock, 0)
       mic(session, clock, 2_000, :silence)
       assert_received {:realtime, %{type: "state", state: "thinking"}}
 
@@ -1065,7 +1065,19 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       send(session, {:openai_live_event, {:audio_delta, reply_audio(1_000)}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
 
-      mic(session, clock, 500, :speech)
+      words(session, clock, 500)
+      mic(session, clock, 4_000, :silence)
+
+      refute_received {:realtime, %{type: "state", state: "thinking"}}
+    end
+
+    # Keyboard noise is as loud as speech, and an energy detector took every
+    # burst of typing for a sentence (owner, 2026-09-28). Live transcribes words.
+    test "typing is not the operator speaking", %{clock: clock} do
+      session = listening_session(clock)
+
+      for at <- [0, 100, 200, 300], do: mic(session, clock, at, :speech)
+      mic(session, clock, 2_000, :silence)
       mic(session, clock, 4_000, :silence)
 
       refute_received {:realtime, %{type: "state", state: "thinking"}}
@@ -1073,9 +1085,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     test "a muted microphone never announces thinking", %{clock: clock} do
       session = listening_session(clock)
+      words(session, clock, 0)
       assert :ok = SessionControl.mute(session, true)
 
-      mic(session, clock, 0, :speech)
       mic(session, clock, 2_000, :silence)
 
       refute_received {:realtime, %{type: "state", state: "thinking"}}
@@ -1354,6 +1366,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       value = if rem(index, 2) == 0, do: amplitude, else: -amplitude
       <<value::little-signed-16>>
     end
+  end
+
+  # A fragment of the operator's words from Live's recognition, at clock time
+  # `at_ms`.
+  defp words(session, clock, at_ms) do
+    Agent.update(clock, fn _ -> at_ms end)
+    speak(session, "words", at_ms, at_ms + 100)
   end
 
   # 100 ms of the microphone at clock time `at_ms`: a square wave well above

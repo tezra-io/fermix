@@ -16,17 +16,6 @@ defmodule FermixCore.Realtime.LiveTurnTest do
     end
   end
 
-  # 100 ms of microphone: a square wave well above speech level, or silence.
-  defp mic(:speech), do: square(3_000)
-  defp mic(:silence), do: square(0)
-
-  defp square(amplitude) do
-    for index <- 1..2_400, into: <<>> do
-      value = if rem(index, 2) == 0, do: amplitude, else: -amplitude
-      <<value::little-signed-16>>
-    end
-  end
-
   describe "output/3" do
     test "reports how long a reply takes to play, across chunks" do
       {:voice, turn, 250} = LiveTurn.output(LiveTurn.new(), reply(250), 1_000)
@@ -54,66 +43,66 @@ defmodule FermixCore.Realtime.LiveTurnTest do
     end
   end
 
-  describe "input/4" do
-    test "speech and then a quiet hangover announce thinking, once" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:speech), 0, false)
-      {nil, turn} = LiveTurn.input(turn, mic(:silence), 600, false)
-      {:thinking, turn} = LiveTurn.input(turn, mic(:silence), 700, false)
+  describe "words/3 and tick/3" do
+    test "words and then a second with none announce thinking, once" do
+      {nil, turn} = LiveTurn.words(LiveTurn.new(), 0, false)
+      {nil, turn} = LiveTurn.tick(turn, 900, false)
+      {:thinking, turn} = LiveTurn.tick(turn, 1_000, false)
 
-      assert {nil, _turn} = LiveTurn.input(turn, mic(:silence), 800, false)
+      assert {nil, _turn} = LiveTurn.tick(turn, 1_100, false)
     end
 
-    test "silence alone is not a turn" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:silence), 0, false)
+    test "the clock alone is not a turn" do
+      {nil, turn} = LiveTurn.tick(LiveTurn.new(), 0, false)
 
-      assert {nil, _turn} = LiveTurn.input(turn, mic(:silence), 5_000, false)
+      assert {nil, _turn} = LiveTurn.tick(turn, 5_000, false)
     end
 
     test "padding is not heard back as the reply" do
       {:silence, turn} = LiveTurn.output(LiveTurn.new(), padding(5_000), 0)
-      {nil, turn} = LiveTurn.input(turn, mic(:speech), 100, false)
+      {nil, turn} = LiveTurn.words(turn, 100, false)
 
-      assert {:thinking, _turn} = LiveTurn.input(turn, mic(:silence), 800, false)
+      assert {:thinking, _turn} = LiveTurn.tick(turn, 1_100, false)
     end
 
-    test "the reply heard back is not the operator, until its echo has passed" do
+    test "words heard while the reply can still be heard are not the operator" do
       {:voice, turn, 1_000} = LiveTurn.output(LiveTurn.new(), reply(1_000), 0)
 
-      {nil, turn} = LiveTurn.input(turn, mic(:speech), 1_399, false)
-      assert {nil, turn} = LiveTurn.input(turn, mic(:silence), 5_000, false)
+      {nil, turn} = LiveTurn.words(turn, 1_399, false)
+      assert {nil, turn} = LiveTurn.tick(turn, 5_000, false)
 
-      {nil, turn} = LiveTurn.input(turn, mic(:speech), 5_100, false)
-      assert {:thinking, _turn} = LiveTurn.input(turn, mic(:silence), 5_800, false)
+      {nil, turn} = LiveTurn.words(turn, 5_100, false)
+      assert {:thinking, _turn} = LiveTurn.tick(turn, 6_100, false)
     end
 
     test "nothing is read while a reply is being announced" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:speech), 0, true)
+      {nil, turn} = LiveTurn.words(LiveTurn.new(), 0, true)
 
-      assert {nil, _turn} = LiveTurn.input(turn, mic(:silence), 5_000, false)
+      assert {nil, _turn} = LiveTurn.tick(turn, 5_000, false)
     end
 
     test "thinking ends when the operator speaks again, or when no reply comes" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:speech), 0, false)
-      {:thinking, thinking} = LiveTurn.input(turn, mic(:silence), 700, false)
+      {nil, turn} = LiveTurn.words(LiveTurn.new(), 0, false)
+      {:thinking, thinking} = LiveTurn.tick(turn, 1_000, false)
 
-      assert {:listening, _turn} = LiveTurn.input(thinking, mic(:speech), 800, false)
-      assert {nil, _turn} = LiveTurn.input(thinking, mic(:silence), 15_699, false)
-      assert {:listening, _turn} = LiveTurn.input(thinking, mic(:silence), 15_700, false)
+      assert {:listening, _turn} = LiveTurn.words(thinking, 1_100, false)
+      assert {nil, _turn} = LiveTurn.tick(thinking, 15_999, false)
+      assert {:listening, _turn} = LiveTurn.tick(thinking, 16_000, false)
     end
 
     test "a reply ends the thinking it answers" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:speech), 0, false)
-      {:thinking, turn} = LiveTurn.input(turn, mic(:silence), 700, false)
+      {nil, turn} = LiveTurn.words(LiveTurn.new(), 0, false)
+      {:thinking, turn} = LiveTurn.tick(turn, 1_000, false)
 
-      {:voice, turn, _plays_for} = LiveTurn.output(turn, reply(20), 800)
+      {:voice, turn, _plays_for} = LiveTurn.output(turn, reply(20), 1_100)
 
       assert turn.thinking_since == nil
     end
 
-    test "muting forgets the speech heard before it" do
-      {nil, turn} = LiveTurn.input(LiveTurn.new(), mic(:speech), 0, false)
+    test "muting forgets the words heard before it" do
+      {nil, turn} = LiveTurn.words(LiveTurn.new(), 0, false)
 
-      assert {nil, _turn} = LiveTurn.input(LiveTurn.muted(turn), mic(:silence), 5_000, false)
+      assert {nil, _turn} = LiveTurn.tick(LiveTurn.muted(turn), 5_000, false)
     end
   end
 end

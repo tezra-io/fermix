@@ -247,7 +247,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     case audio_drop_reason(state, audio) do
       nil ->
         state = send_provider(state, OpenAILiveClient.audio_append_event(audio))
-        {:noreply, read_operator_turn(state, audio)}
+        {:noreply, advance_operator_turn(state)}
 
       reason ->
         Logger.debug("voice_live: dropped microphone chunk (#{reason})")
@@ -484,7 +484,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
 
     record_caption(state, speaker, delta, start_ms, end_ms)
-    {:noreply, resume_listening(state, speaker)}
+    {:noreply, state |> read_operator_words(speaker) |> resume_listening(speaker)}
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
@@ -998,18 +998,24 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     arm_reply_timer(state, plays_for_ms + state.reply_margin_ms)
   end
 
-  # What the microphone says about the operator's turn: finished speaking, or
-  # speaking again. Live reports neither.
-  defp read_operator_turn(state, audio) do
-    {signal, turn} = LiveTurn.input(state.turn, audio, now(state), state.speaking?)
-    state = %{state | turn: turn}
-
-    case signal do
-      nil -> state
-      :thinking -> notify_state(state, "thinking")
-      :listening -> notify_state(state, "listening")
-    end
+  # The operator's turn, from Live's recognition of their words: a fragment is
+  # them speaking, and the microphone's steady chunks are the clock that notices
+  # when the words have stopped. Live reports neither turn boundary itself.
+  defp read_operator_words(state, :user) do
+    {signal, turn} = LiveTurn.words(state.turn, now(state), state.speaking?)
+    move_turn(%{state | turn: turn}, signal)
   end
+
+  defp read_operator_words(state, _speaker), do: state
+
+  defp advance_operator_turn(state) do
+    {signal, turn} = LiveTurn.tick(state.turn, now(state), state.speaking?)
+    move_turn(%{state | turn: turn}, signal)
+  end
+
+  defp move_turn(state, nil), do: state
+  defp move_turn(state, :thinking), do: notify_state(state, "thinking")
+  defp move_turn(state, :listening), do: notify_state(state, "listening")
 
   defp notify_call_ready(state) do
     notify(
