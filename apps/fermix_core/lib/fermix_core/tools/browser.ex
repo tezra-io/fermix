@@ -347,6 +347,29 @@ defmodule FermixCore.Tools.Browser do
         description:
           "the person's own tab is used only on a turn they are present for, and never " <>
             "from a Buzz channel; use the managed profile"
+      },
+      %{
+        tag: "host_unavailable",
+        description:
+          "the Fermix app's browser cannot be driven from this engine; nothing was done"
+      },
+      %{
+        tag: "host_lost",
+        description:
+          "the Fermix app's browser went away mid-task, and the task's browser with it; tell " <>
+            "the person what happened rather than redoing the task in another browser"
+      },
+      %{
+        tag: "cancelled",
+        description:
+          "the person cancelled this task's browser use from the Fermix app; tell them it was " <>
+            "cancelled rather than continuing or redoing it"
+      },
+      %{
+        tag: "unsupported_in_fermix_app",
+        description:
+          "the Fermix app's browser does not carry this verb (a page's WebMCP tools); use " <>
+            "snapshot and act"
       }
     ]
   end
@@ -361,16 +384,16 @@ defmodule FermixCore.Tools.Browser do
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do
     start = System.monotonic_time(:millisecond)
-    outcome = FermixCore.Browser.execute(args, context)
+    {outcome, backend} = FermixCore.Browser.execute(args, context)
     duration = System.monotonic_time(:millisecond) - start
     result = to_tool_result(outcome)
     success = match?({:ok, %{success: true}}, result)
-    metadata = safe_metadata(args, outcome)
+    metadata = safe_metadata(args, outcome, backend)
 
     log_failure(success, metadata)
 
-    # Safe metadata (action/kind/profile/url/target/selector + error code &
-    # summary on failure) is always recorded; raw `input`/`output` bodies stay
+    # Safe metadata (action/kind/profile/url/target/selector, the backend that
+    # served the call + error code & summary on failure) is always recorded; raw `input`/`output` bodies stay
     # gated behind `capture_content?/0`.
     ToolTelemetry.exec("browser", context, success, duration,
       metadata: metadata,
@@ -423,8 +446,10 @@ defmodule FermixCore.Tools.Browser do
   # Always-on, body-free trace fields: structural identifiers plus a bounded
   # error code/summary on failure. URLs are reduced to scheme+host+path so query
   # tokens and userinfo never reach an ungated field; raw args/output ride the
-  # gated `:input`/`:result` instead.
-  defp safe_metadata(args, outcome) do
+  # gated `:input`/`:result` instead. `backend` is which implementation served
+  # the call (`cdp` or `fermix_app`), the one decided when the task started;
+  # absent when the call never reached a profile.
+  defp safe_metadata(args, outcome, backend) do
     %{
       action: Map.get(args, "action"),
       kind: Map.get(args, "kind"),
@@ -435,7 +460,8 @@ defmodule FermixCore.Tools.Browser do
       profile: Map.get(args, "profile"),
       url: sanitize_url(Map.get(args, "url")),
       target_ref: Map.get(args, "target"),
-      selector: Map.get(args, "selector")
+      selector: Map.get(args, "selector"),
+      backend: backend_label(backend)
     }
     |> reject_nil()
     |> put_error(outcome)
@@ -443,6 +469,9 @@ defmodule FermixCore.Tools.Browser do
 
   defp webmcp_op(op) when op in ["list", "call"], do: op
   defp webmcp_op(_op), do: nil
+
+  defp backend_label(nil), do: nil
+  defp backend_label(backend) when backend in [:cdp, :fermix_app], do: Atom.to_string(backend)
 
   defp put_error(metadata, {:error, %{code: code, message: message}}) do
     metadata

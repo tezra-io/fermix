@@ -2211,11 +2211,12 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # `[fermix_core.browser]`. Three keys are settable (`BrowserConfig.config_keys/0`):
+  # `[fermix_core.browser]`. Four keys are settable (`BrowserConfig.config_keys/0`):
   # `allowed_hosts`, the documented recovery for a host the browser policy
-  # refuses, `default_profile`, how tasks run, and `max_tabs`. Every other field
-  # of `Browser.Config` is a timeout, a buffer size or a profile shape: tuning,
-  # which stays an internal constant.
+  # refuses, `default_profile`, how tasks run, `max_tabs`, and `launch_app`,
+  # whether the engine may open the Fermix app for its browser pane. Every
+  # other field of `Browser.Config` is a timeout, a buffer size or a profile
+  # shape: tuning, which stays an internal constant.
   #
   # Unknown keys are rejected here at the parse boundary rather than dropped. The
   # keys an operator most plausibly writes (`action_timeout_ms`) are REAL struct

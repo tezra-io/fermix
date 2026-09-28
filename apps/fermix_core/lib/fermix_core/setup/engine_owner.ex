@@ -112,10 +112,13 @@ defmodule FermixCore.Setup.EngineOwner do
   defp string_or_nil(value) when is_binary(value) and value != "", do: value
   defp string_or_nil(_value), do: nil
 
-  # The running bundle is the directory the engine executable sits in, walked up
-  # to the `.app`. Absent on a standalone engine, which is what makes a
-  # standalone boot's marker unable to claim the home for an app.
-  defp app_bundle_path do
+  @doc """
+  The app bundle this engine runs inside: the directory the engine executable
+  sits in, walked up to the `.app`. `nil` on a standalone engine, which is what
+  makes a standalone boot's marker unable to claim the home for an app.
+  """
+  @spec app_bundle_path() :: String.t() | nil
+  def app_bundle_path do
     case :code.root_dir() |> to_string() |> String.split("/Contents/") do
       [bundle | _rest] -> if String.ends_with?(bundle, ".app"), do: bundle, else: nil
       _no_bundle -> nil

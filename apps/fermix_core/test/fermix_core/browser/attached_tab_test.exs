@@ -318,8 +318,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
   # ── the capability surface, whole ──────────────────────────────────────────
 
   # Every capability a granted tab does NOT have, and the action that asks for
-  # it. The three with no action are init steps rather than verbs, named here
-  # with the reason — so a capability added later either declares its action or
+  # it. The four with no action are init steps or housekeeping rather than
+  # verbs, named here — so a capability added later either declares its action or
   # fails this test, and cannot quietly become a browser-wide command that
   # reaches the person's browser.
   @capability_actions %{
@@ -330,7 +330,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
     downloads: {"download", %{"timeout_ms" => 50}},
     download_redirect: :not_an_action,
     target_discovery: :not_an_action,
-    target_attach: :not_an_action
+    target_attach: :not_an_action,
+    tab_cap: :not_an_action
   }
 
   test "every browser-wide capability the grant lacks refuses by name", ctx do
@@ -583,7 +584,8 @@ defmodule FermixCore.Browser.AttachedTabTest do
 
   test "the person's own tab is refused to every turn they are not present for" do
     for {label, context} <- @unattended do
-      result = Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
+      {result, nil} =
+        Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, context)
 
       assert match?({:error, %Error{code: "attached_tab_not_allowed"}}, result),
              "#{label} reached the granted tab: #{inspect(result)}"
@@ -591,13 +593,13 @@ defmodule FermixCore.Browser.AttachedTabTest do
   end
 
   test "an attended owner turn reaches it, and the managed profile is untouched" do
-    assert {:ok, json} =
+    assert {{:ok, json}, nil} =
              Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, @attended)
 
     assert %{"profile" => "selected_tab", "running" => false} = Jason.decode!(json)
 
     guest = Map.merge(@base, %{source_trust: :guest, computer_use_origin: :interactive})
-    assert {:ok, managed} = Browser.execute(%{"action" => "status"}, guest)
+    assert {{:ok, managed}, nil} = Browser.execute(%{"action" => "status"}, guest)
     assert %{"running" => false} = Jason.decode!(managed)
   end
 
@@ -626,7 +628,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
     # send the tab CDP.
     daemon_grant!("https://example.com/dash")
 
-    assert {:error, %Error{code: "attached_tab_not_allowed", message: message}} =
+    assert {{:error, %Error{code: "attached_tab_not_allowed", message: message}}, nil} =
              Browser.execute(%{"action" => "snapshot", "profile" => "selected_tab"}, @buzz)
 
     assert message =~ "Buzz channel"
@@ -640,7 +642,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   test "a turn nobody is present for keeps its own sentence from Buzz too" do
     background = Map.put(@buzz, :computer_use_origin, :unattended)
 
-    assert {:error, %Error{code: "attached_tab_not_allowed", message: message}} =
+    assert {{:error, %Error{code: "attached_tab_not_allowed", message: message}}, nil} =
              Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, background)
 
     assert message =~ "present for"
@@ -649,7 +651,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   test "an editor session without a relay reads the granted tab as before" do
     daemon_grant!("https://example.com/dash")
 
-    assert {:ok, json} =
+    assert {{:ok, json}, :cdp} =
              Browser.execute(%{"action" => "snapshot", "profile" => "selected_tab"}, @zed)
 
     assert %{"url" => "https://example.com/dash", "snapshot" => snapshot} = Jason.decode!(json)
@@ -658,7 +660,7 @@ defmodule FermixCore.Browser.AttachedTabTest do
   end
 
   test "a Buzz channel keeps the managed profile" do
-    assert {:ok, json} = Browser.execute(%{"action" => "status"}, @buzz)
+    assert {{:ok, json}, nil} = Browser.execute(%{"action" => "status"}, @buzz)
     assert %{"running" => false} = Jason.decode!(json)
   end
 end

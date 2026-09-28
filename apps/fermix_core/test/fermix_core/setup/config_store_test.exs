@@ -2064,6 +2064,33 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            |> Keyword.get(:allowed_hosts) == ["printer.local", "build.internal"]
   end
 
+  # `launch_app` is a settable key too: whether the engine may open the Fermix
+  # app to run a new task in its browser pane. It is a boolean with no
+  # normalization, and the round trip proves the file carries it.
+  test "save/load round-trips the browser launch_app key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [browser: [allowed_hosts: ["build.internal"], launch_app: false]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "launch_app = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    browser = Keyword.get(loaded.fermix_core, :browser, [])
+    assert Keyword.get(browser, :launch_app) == false
+    assert Keyword.get(browser, :allowed_hosts) == ["build.internal"]
+  end
+
   test "how tasks run and the tab cap round-trip through the settings file" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

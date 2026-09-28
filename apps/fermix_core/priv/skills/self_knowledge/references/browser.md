@@ -20,8 +20,9 @@ logins, so a site signed in under one is signed out under the others. A call can
 still name a profile for one task, such as `fermix_visible` when the person asks
 to watch. `max_tabs` (default 10) is how many tabs a managed browser keeps open
 before closing the oldest one a task is not using; it applies from the browser's
-next start. `allowed_hosts` is the third and last key a person sets there;
-`default_profile` refuses `selected_tab` and any name no profile carries.
+next start. `allowed_hosts` and `launch_app` (both below) are the section's
+other keys; `default_profile` refuses `selected_tab` and any name no profile
+carries.
 
 ## Which browser the managed profiles launch
 
@@ -38,6 +39,33 @@ With none of them a launch refuses `chrome_missing`. `fermix doctor`'s `browser`
 row names the browser in force and its path ("Tasks use Google Chrome."), or
 says "No Chrome or Chromium is installed."
 
+## Two backends for `fermix`, decided once
+
+The default profile `fermix` can run on either of two implementations of the
+same browser surface: the managed Chrome above, driven over CDP, or the Fermix
+app's own browser pane, which the app hosts and the engine drives over a local
+wire (`browser_host.sock`). Which one is decided once, when a conversation
+starts using the browser: the pane when the app's browser host is connected
+and its last report says the pane is ready, the managed Chrome otherwise. When
+the app is not connected and `[fermix_core.browser] launch_app` allows it (on
+by default for the engine inside the app), the engine opens the app in the
+background once and waits a few seconds for its browser to connect and report
+before deciding; if that launch never attaches (the person quits the app
+before it connects, or it crashes), a short cooldown follows before the engine
+tries opening it again, so a burst of tasks in that window all run on Chrome
+rather than each opening the app in turn. The choice holds for as long as that
+browser use lives. A Chrome task stays in Chrome when the pane appears, and a
+pane task that loses its pane mid-task (the app quit, the Mac locked or slept)
+answers `host_lost` with the app's reason and ends there; tell the person, and
+do not redo the task in another browser on your own. The person can also
+cancel a pane task directly, from its own tab in the app ("Cancel task"):
+that answers `cancelled` — the pane itself is fine, so say it was cancelled,
+not that the browser went away. Every later browser call in the same turn
+answers that same sentence too, rather than quietly starting a fresh task on
+Chrome — the turn that saw the loss or the cancel stays that way. The next
+browser use, in a fresh turn, is decided afresh. `fermix_visible`,
+`fermix_headless` and `selected_tab` are never routed to the pane.
+
 Limits of the managed browser:
 - Live tabs are capped: each `open` past the cap closes the oldest non-active
   tab, so a long-idle tab may be gone.
@@ -45,8 +73,9 @@ Limits of the managed browser:
 - A download is vetted at its source URL too: a refused one is cancelled, any
   partial file deleted, and the tool answers `download_blocked`.
 - A URL host must be canonical ASCII (an IDN in its `xn--` form).
-- `[fermix_core.browser] allowed_hosts` is the only setting and the escape hatch
-  for a refused host; timeouts and caps are internal.
+- `default_profile`, `max_tabs` (above), `allowed_hosts` and `launch_app` are
+  `[fermix_core.browser]`'s four settable keys; `allowed_hosts` is the escape
+  hatch for a refused host; timeouts and caps are internal.
 - Operating rules (snapshots, `act`, the `page` field, `webmcp`): the `browser`
   tool description and the `browser-guidance` skill.
 
@@ -91,7 +120,8 @@ managed profile is the simpler workspace, and it does not borrow their browser.
 
 What holds exactly as before: the read gate (a page whose live host the policy
 refuses returns nothing, and it is re-asked on every settle poll), the
-navigation checks, and the upload path confinement.
+navigation checks, and the upload path confinement. It is the same CDP
+backend with a different transport underneath, not a second implementation.
 `navigate` is the one navigation a granted tab may make, and it
 hands the page back the same way it does in the managed profile: through the
 same settle, the same read gate on the address the page committed to, and the
