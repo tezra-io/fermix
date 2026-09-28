@@ -461,11 +461,17 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp handle_live_event({:audio_delta, delta}, state) do
     case LiveTurn.output(state.turn, delta, now(state)) do
-      {:drop, turn} ->
+      {:voice, turn, plays_for_ms} ->
+        {:noreply, forward_reply_audio(%{state | turn: turn}, delta, plays_for_ms)}
+
+      # Live pads its output with silence between replies, and the pet plays
+      # the stream as it comes; padding is not speech.
+      {:silence, turn} ->
+        notify(state, LiveFrames.audio_delta(delta))
         {:noreply, %{state | turn: turn}}
 
-      {:forward, turn, plays_for_ms} ->
-        {:noreply, forward_reply_audio(%{state | turn: turn}, delta, plays_for_ms)}
+      {:drop, turn} ->
+        {:noreply, %{state | turn: turn}}
     end
   end
 

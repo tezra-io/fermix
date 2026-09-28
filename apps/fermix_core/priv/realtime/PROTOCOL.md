@@ -159,8 +159,11 @@ completion event, so nothing here waits for one.
 Live publishes no turn boundaries either, so the daemon reads the turn from the
 audio it relays: `thinking` once the microphone, having carried speech, has
 been quiet for a moment and no reply has started (the microphone is not read
-while the reply can still be heard), and `listening` once the audio of a reply
-has had time to play out. They drive only the pet's presentation.
+while the reply can still be heard), and `listening` once the voice of a reply
+has had time to play out. They drive only the pet's presentation. Live's output
+never stops: between replies `audio_delta` carries digital silence, one chunk
+every 100 ms, so a pet must read speaking from the daemon's `state` and from
+the voice in the audio, never from audio merely arriving.
 
 ```
 pet  -> daemon:  call_start
