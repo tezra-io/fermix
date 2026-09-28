@@ -396,7 +396,9 @@ defmodule FermixCore.Setup.RuntimeTest do
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
 
   describe "personalization defaults" do
-    test "blank timezone answer falls back to America/New_York" do
+    # The default is the machine's own zone (`Setup.MachineFacts`), which the
+    # suite pins to New York.
+    test "blank timezone answer falls back to the machine's time zone" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home, personalization: false)

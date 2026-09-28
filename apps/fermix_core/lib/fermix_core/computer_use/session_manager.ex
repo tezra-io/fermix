@@ -5,7 +5,8 @@ defmodule FermixCore.ComputerUse.SessionManager do
   per turn) and reused across actions in the same conversation.
 
   `ensure/3` is keyed by `conversation_key`; it resolves the session's origin from
-  the call context and **fails closed** for an unattended host-mode origin (§7.6)
+  the call context and **fails closed** for an unattended host-mode origin (§7.6),
+  and for a turn from a shared Buzz channel (`Acp.Identity.multi_principal?/1`),
   before any process or sidecar is started or a running session is handed back.
   It also refuses while the global `CaptureHealth` breaker is open, so a wedged
   capture host stops being handed fresh sidecars (`WATCH_HARDENING.md` §3). The
@@ -15,6 +16,7 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   require Logger
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
@@ -25,14 +27,15 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   @doc """
   Find or start the computer-use session for `context`'s conversation. Returns the
-  session pid, or fails closed for an unattended host origin — also when a session
-  is already running for the conversation.
+  session pid, or fails closed for an unattended host origin or a shared Buzz
+  channel — also when a session is already running for the conversation.
   """
   @spec ensure(Config.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure(%Config{} = config, context, opts \\ []) when is_map(context) do
     key = conversation_key(context)
 
     with :ok <- precheck_host_origin(config, origin(context)),
+         :ok <- precheck_shared_channel(context),
          :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
       case Registry.lookup(CuSupervisor.registry(), key) do
         [{pid, _}] -> {:ok, pid}
@@ -226,6 +229,17 @@ defmodule FermixCore.ComputerUse.SessionManager do
     if Safety.host_start_allowed?(origin),
       do: :ok,
       else: {:error, {:host_start_refused, origin}}
+  end
+
+  # A Buzz-wired ACP session is a channel other people can post in, so its turn is
+  # not proof the owner is present (owner decision, MOB-1), even though the turn is
+  # attended by every other measure. Checked here, beside the origin gate and for
+  # the same reasons, rather than by relabelling the origin: every other attended
+  # feature but the owner's own browser tab (`Browser`) keeps working from Buzz.
+  defp precheck_shared_channel(context) do
+    if Identity.multi_principal?(Map.get(context, :session_env)),
+      do: {:error, :shared_channel},
+      else: :ok
   end
 
   defp default_driver, do: ComputerUse.driver_spec()

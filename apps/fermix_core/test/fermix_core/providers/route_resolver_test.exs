@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
 
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Anthropic.Messages, as: AnthropicMessages
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ChatCompletions
   alias FermixCore.Providers.OpenAI.Codex
   alias FermixCore.Providers.OpenAI.Responses
@@ -100,6 +101,17 @@ defmodule FermixCore.Providers.RouteResolverTest do
         )
 
       assert api[:reasoning_effort] == :xhigh
+    end
+
+    # The route, Doctor's probe and the published rows read one resolver, so a
+    # provider with no chosen model runs on the catalog default everywhere.
+    test ":openai with no chosen model routes to the catalog default" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+      {route_key, opts} = RouteResolver.resolve!(provider: :openai)
+
+      assert route_key.model == ModelCatalog.default_model_for(:openai)
+      assert opts[:model] == ModelCatalog.default_model_for(:openai)
     end
 
     test ":openai rejects auth_mode :oauth; Codex OAuth is a separate provider" do

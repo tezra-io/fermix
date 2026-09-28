@@ -83,6 +83,12 @@ defmodule FermixCore.Management.Doctor.RemediationTest do
              Remediation.action_kinds()
   end
 
+  # The voice key is replaced where voice is set up, on either app.
+  test "a refused voice key opens the Voice pane" do
+    assert %{"action" => %{"kind" => "settings_pane", "target" => "voice"}} =
+             Remediation.fetch("realtime_key", "failed")
+  end
+
   test "a none action still names a kind so a surface never guesses" do
     assert %{"action" => %{"kind" => "none", "target" => nil}} =
              Remediation.fetch("engine_path_baseline", "warning")

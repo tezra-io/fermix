@@ -98,6 +98,78 @@ defmodule FermixCore.Auth.RefreshClientTest do
     end
   end
 
+  # 408 and 429 say the endpoint did not act on the request, not that the grant
+  # is dead, so they take the bounded retries a 5xx takes and never end as the
+  # permanent 4xx that quarantines a live grant. `:retry_sleep` records each
+  # backoff instead of sleeping it.
+  describe "refresh — a 408 or 429 is transient" do
+    # Answers `status` to the first `failures` requests, then a token pair.
+    defp flaky_plug(status, failures) do
+      parent = self()
+      seen = :counters.new(1, [])
+
+      fn conn ->
+        :counters.add(seen, 1, 1)
+        send(parent, :token_request)
+
+        {code, body} =
+          if :counters.get(seen, 1) <= failures,
+            do: {status, %{"error" => "slow_down"}},
+            else: {200, %{"access_token" => "new_at", "refresh_token" => "new_rt"}}
+
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(code, Jason.encode!(body))
+      end
+    end
+
+    defp recorded_sleep(parent), do: fn ms -> send(parent, {:retry_sleep, ms}) end
+
+    # The Codex path and the provider path, each with its own fresh options.
+    defp both_paths(options) do
+      [
+        {:codex, fn -> RefreshClient.refresh("old_rt", options.()) end},
+        {:plugin, fn -> RefreshClient.refresh(provider("github"), "old_rt", options.()) end}
+      ]
+    end
+
+    defp flaky(status, failures) do
+      parent = self()
+      fn -> [plug: flaky_plug(status, failures), retry_sleep: recorded_sleep(parent)] end
+    end
+
+    test "one 429 or 408, then a 200, refreshes on both paths" do
+      for status <- [408, 429], {path, refresh} <- both_paths(flaky(status, 1)) do
+        assert {{:ok, %{access_token: "new_at"}}, ^path} = {refresh.(), path}
+        assert_received {:retry_sleep, 350}
+      end
+    end
+
+    test "a 429 or 408 on every attempt ends after three, and not as a permanent 4xx" do
+      for status <- [408, 429], {path, refresh} <- both_paths(flaky(status, 3)) do
+        assert {{:error, "Refresh failed (" <> detail}, ^path} = {refresh.(), path}
+        assert String.starts_with?(detail, "#{status})")
+        for _attempt <- 1..3, do: assert_received(:token_request)
+        refute_received :token_request
+        assert_received {:retry_sleep, 350}
+        assert_received {:retry_sleep, 700}
+      end
+    end
+
+    # A seam that is not a one-argument function is refused before the first
+    # request, not at the first retry deep inside a locked refresh.
+    test "a :retry_sleep that is not a one-argument function is refused up front" do
+      for bad <- [:later, fn -> :ok end],
+          {path, refresh} <- both_paths(fn -> [plug: flaky_plug(429, 3), retry_sleep: bad] end) do
+        assert_raise ArgumentError, ~r/:retry_sleep must be a one-argument function/, fn ->
+          refresh.()
+        end
+
+        refute_received :token_request, "#{path} sent a request before refusing the seam"
+      end
+    end
+  end
+
   # `extra_token_params` belongs to the authorization-code exchange alone: Tesla
   # refuses an exchange without `audience` and its refresh form is documented
   # without one, so a refresh that copied the exchange's extras would be sending

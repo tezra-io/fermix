@@ -544,8 +544,8 @@ defmodule FermixCore.Harness.ManagerTest do
       refute summary_error(row) =~ "unsupported_delivery_platform"
       refute_receive {:delivered, _destination, _text}, 200
 
-      # `pending` would be retry theater: the worker has no acp path, so it could
-      # only overwrite the real reason with the platform term.
+      # `pending` would lose the real reason: the worker has no acp path, so it
+      # could only dead-letter the row under a name of its own.
       worker = start_delivery_worker(ctx)
       _ = tick_worker(worker)
       refute_receive {:delivered, _destination, _text}, 200
@@ -597,6 +597,34 @@ defmodule FermixCore.Harness.ManagerTest do
       row = await_delivery_status(ctx.repo, run_id, "dead_letter")
       assert summary_error(row) =~ "continuation_disabled"
       refute_receive {:delivered, _destination, _text}, 200
+    end
+
+    # A Manager that dies inside the dispatch records no outcome, so the row is
+    # still pending when its lease ends. The worker resolves `acp` through the
+    # channels map, as production does, and has no wire for it: it dead-letters
+    # the row on its first due tick under a name of its own, never after a
+    # string of refused attempts that end in the platform word.
+    test "a Manager death mid-dispatch dead-letters on the worker's first due tick", ctx do
+      manager = start_manager(ctx, continuation_dispatcher: GatedDispatcher)
+      {:ok, run_id} = Manager.start_run(client_request(ctx, completing_stub(ctx)), manager)
+      assert_receive {:dispatch_gate, _dispatch, _notice}, 5_000
+
+      :ok = stop_supervised!(manager)
+
+      worker =
+        start_delivery_worker(ctx,
+          delivery_opts: [channels: %{"telegram" => RecordingAdapter}],
+          now_fn: fn -> DateTime.add(DateTime.utc_now(), 3, :minute) end
+        )
+
+      _ = tick_worker(worker)
+
+      assert {:ok, row} = Ledger.get(run_id, server: ctx.repo)
+      assert row.delivery_status == "dead_letter"
+      assert row.last_delivery_error =~ "handoff_unrecorded"
+      refute row.last_delivery_error =~ "unsupported_delivery_platform"
+      assert row.delivery_attempts == 0
+      refute_received {:delivered, _destination, _text}
     end
 
     # The regression guard for all of the above: a framework-delivered origin
@@ -658,11 +686,11 @@ defmodule FermixCore.Harness.ManagerTest do
       refute_received {:delivered, _destination, _text}
     end
 
-    # The worker resolves `acp` through the channels map, as production does,
-    # so its send to the client-owned origin is refused. Before the lease that
-    # refused attempt landed before the Manager's dead letter and bumped
-    # `delivery_attempts`; the order that also overwrote the named cause cannot
-    # be forced, so the attempt count is the discriminator.
+    # The worker resolves `acp` through the channels map, as production does.
+    # Before the lease its tick acted on the row before the Manager's dead
+    # letter: a refused send that bumped `delivery_attempts`, and now a dead
+    # letter of its own. The order that also overwrote the named cause cannot
+    # be forced, so the row as the tick leaves it is the discriminator.
     test "a worker tick during a failing client-owned dispatch leaves the dead letter alone",
          ctx do
       Application.put_env(
@@ -680,6 +708,9 @@ defmodule FermixCore.Harness.ManagerTest do
         start_delivery_worker(ctx, delivery_opts: [channels: %{"telegram" => RecordingAdapter}])
 
       _ = tick_worker(worker)
+
+      assert {:ok, %{delivery_status: "pending", delivery_attempts: 0}} =
+               Ledger.get(run_id, server: ctx.repo)
 
       send(dispatch, :release)
       row = await_delivery_status(ctx.repo, run_id, "dead_letter")

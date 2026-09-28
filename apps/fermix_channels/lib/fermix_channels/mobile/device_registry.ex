@@ -6,10 +6,18 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
   monitors those processes and makes replacement atomic: attaching a new socket
   stores it before notifying the old one, so stale `terminate/2` and `:DOWN`
   cleanup can never remove the replacement.
+
+  Revoking a device also stops what it already asked for: every unsettled
+  request it claimed is marked cancelled and its handed-off turns are stopped
+  (`Companion.Turns.revoke_device/2`), so none runs, is answered or is
+  recovered after the revocation. That work is handed to `Companion.Turns`,
+  never done here: a store call that stalls or exits must not stop this
+  process, whose restart would drop every phone's socket.
   """
 
   use GenServer
 
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Mobile.DeviceStore
 
   @type device_id :: String.t()
@@ -82,17 +90,15 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     GenServer.call(server, {:send_device_event, device_id, event})
   end
 
-  @doc "Fan a logical event out to a profile for per-session encryption."
-  @spec send_profile_event(profile_id(), map()) :: non_neg_integer()
-  def send_profile_event(profile_id, event)
+  @doc """
+  Fan a logical event out to every socket of a profile for per-session
+  encryption, without waiting: a registry that is not running (the mobile
+  subtree is off) has no socket to reach.
+  """
+  @spec broadcast(GenServer.server(), profile_id(), map()) :: :ok
+  def broadcast(server, profile_id, event)
       when is_binary(profile_id) and profile_id != "" and is_map(event) do
-    send_profile_event(__MODULE__, profile_id, event)
-  end
-
-  @spec send_profile_event(GenServer.server(), profile_id(), map()) :: non_neg_integer()
-  def send_profile_event(server, profile_id, event)
-      when is_binary(profile_id) and profile_id != "" and is_map(event) do
-    GenServer.call(server, {:send_profile_event, profile_id, event})
+    GenServer.cast(server, {:broadcast, profile_id, event})
   end
 
   @impl true
@@ -104,7 +110,8 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
        by_ref: %{},
        device_store: Keyword.get(opts, :device_store, DeviceStore),
        authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
-       delete_device: Keyword.get(opts, :delete_device, &DeviceStore.delete/2)
+       delete_device: Keyword.get(opts, :delete_device, &DeviceStore.delete/2),
+       revoke_requests: Keyword.get(opts, :revoke_requests, &Turns.revoke_device(Turns, &1))
      }}
   end
 
@@ -152,13 +159,19 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     {:reply, :ok, remove_if_current(state, device_id, pid)}
   end
 
+  # The device leaves the trust store and its presence, and what it asked for
+  # is handed to `Companion.Turns` without waiting (moduledoc).
   def handle_call({:revoke, device_id}, _from, state) do
     case state.delete_device.(state.device_store, device_id) do
       :ok ->
-        {:reply, :ok, revoke_presence(state, device_id)}
+        state = revoke_presence(state, device_id)
+        :ok = state.revoke_requests.(device_id)
+        {:reply, :ok, state}
 
       {:error, {:device_not_found, ^device_id}} = missing ->
-        {:reply, missing, revoke_presence(state, device_id)}
+        state = revoke_presence(state, device_id)
+        :ok = state.revoke_requests.(device_id)
+        {:reply, missing, state}
 
       {:error, _reason} = error ->
         {:reply, error, state}
@@ -186,10 +199,14 @@ defmodule FermixChannels.Mobile.DeviceRegistry do
     end
   end
 
-  def handle_call({:send_profile_event, profile_id, event}, _from, state) do
-    entries = Enum.filter(Map.values(state.by_device), &(&1.profile_id == profile_id))
-    Enum.each(entries, &send(&1.pid, {:mobile_event, event}))
-    {:reply, length(entries), state}
+  @impl true
+  def handle_cast({:broadcast, profile_id, event}, state) do
+    state.by_device
+    |> Map.values()
+    |> Enum.filter(&(&1.profile_id == profile_id))
+    |> Enum.each(&send(&1.pid, {:mobile_event, event}))
+
+    {:noreply, state}
   end
 
   @impl true

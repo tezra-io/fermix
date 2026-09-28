@@ -600,4 +600,65 @@ defmodule FermixCore.Browser.AttachedTabTest do
     assert {:ok, managed} = Browser.execute(%{"action" => "status"}, guest)
     assert %{"running" => false} = Jason.decode!(managed)
   end
+
+  # ── not from a shared Buzz channel ─────────────────────────────────────────
+
+  # A Buzz-wired ACP session is a channel other people can post in, so its turn
+  # is not proof the owner is present (owner decision, MOB-1), although it is
+  # attended by every other measure. The relay URL in the session env is the one
+  # signal (`Acp.Identity.multi_principal?/1`); an editor client like Zed has none.
+  @buzz Map.put(@attended, :session_env, %{
+          "BUZZ_RELAY_URL" => "wss://relay.example.test",
+          "PATH" => "/usr/bin"
+        })
+  @zed Map.put(@attended, :session_env, %{"PATH" => "/usr/bin"})
+
+  # The daemon's own grants table, which `Browser.execute/2` reaches through
+  # `ProfileManager`, holding one live grant.
+  defp daemon_grant!(href) do
+    start_supervised!(Supervisor.child_spec({Grants, []}, id: :daemon_grants))
+    grant!(Grants, href)
+    on_exit(fn -> Browser.reap_conversation(@base.conversation_key) end)
+  end
+
+  test "a Buzz channel is refused the person's own tab before the bridge is asked" do
+    # A refusal any later would let the profile server claim the live grant and
+    # send the tab CDP.
+    daemon_grant!("https://example.com/dash")
+
+    assert {:error, %Error{code: "attached_tab_not_allowed", message: message}} =
+             Browser.execute(%{"action" => "snapshot", "profile" => "selected_tab"}, @buzz)
+
+    assert message =~ "Buzz channel"
+    assert message =~ "Fermix app"
+    assert message =~ "your own chat"
+    assert message =~ "voice"
+    assert collected_cdp() == []
+    assert {:ok, _grant} = Grants.claim(Grants, "owner-present")
+  end
+
+  test "a turn nobody is present for keeps its own sentence from Buzz too" do
+    background = Map.put(@buzz, :computer_use_origin, :unattended)
+
+    assert {:error, %Error{code: "attached_tab_not_allowed", message: message}} =
+             Browser.execute(%{"action" => "status", "profile" => "selected_tab"}, background)
+
+    assert message =~ "present for"
+  end
+
+  test "an editor session without a relay reads the granted tab as before" do
+    daemon_grant!("https://example.com/dash")
+
+    assert {:ok, json} =
+             Browser.execute(%{"action" => "snapshot", "profile" => "selected_tab"}, @zed)
+
+    assert %{"url" => "https://example.com/dash", "snapshot" => snapshot} = Jason.decode!(json)
+    assert snapshot =~ "Where to?"
+    refute collected_cdp() == []
+  end
+
+  test "a Buzz channel keeps the managed profile" do
+    assert {:ok, json} = Browser.execute(%{"action" => "status"}, @buzz)
+    assert %{"running" => false} = Jason.decode!(json)
+  end
 end

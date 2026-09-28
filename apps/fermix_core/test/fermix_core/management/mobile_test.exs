@@ -132,7 +132,6 @@ defmodule FermixCore.Management.MobileTest do
 
     test "a failed session carries the daemon's own sentence for each reason" do
       sentences = %{
-        rate_limited: "Too many failed connection attempts. Start pairing again.",
         device_disconnected: "The phone disconnected before you decided. Start pairing again."
       }
 
@@ -143,6 +142,17 @@ defmodule FermixCore.Management.MobileTest do
 
         assert view["failure"] == %{"code" => "refused", "sentence" => sentence}
         assert view["outcome"] == nil
+      end
+    end
+
+    # A failed handshake refuses only its own address and never ends a window,
+    # so no session fails as rate limited, and the adapter publishes no word
+    # for it.
+    test "a failure reason the channel never produces is refused loudly" do
+      session = session(:failed, ttl_ms: nil, failure: %{reason: :rate_limited})
+
+      assert_raise FunctionClauseError, fn ->
+        Mobile.pair_get(@session_id, fake({:ok, session}))
       end
     end
   end
@@ -306,8 +316,10 @@ defmodule FermixCore.Management.MobileTest do
                "enabled" => true,
                "started" => true,
                "refused" => false,
+               "refusal" => nil,
                "listener" => %{
                  "status" => "ready",
+                 "reason" => nil,
                  "port" => 4031,
                  "bind" => "0.0.0.0",
                  "candidates" => ["wss://192.168.1.20:4031/ws"]
@@ -315,7 +327,12 @@ defmodule FermixCore.Management.MobileTest do
                "mdns" => "advertising",
                "tailnet" => %{"detected" => false, "candidates" => []},
                "identity" => %{"present" => true, "fingerprint" => "3f9a 1c2e"},
-               "apns" => %{"enabled" => false, "credentials" => "missing"},
+               "apns" => %{
+                 "enabled" => false,
+                 "credentials" => "missing",
+                 "delivery" => "down",
+                 "reason" => nil
+               },
                "paired_devices" => 1,
                "protocol_version" => 1,
                "pairing" => %{"session_id" => @session_id, "state" => "awaiting_decision"}
@@ -338,13 +355,56 @@ defmodule FermixCore.Management.MobileTest do
     end
 
     test "a surface refused this boot is published as refused, not as off" do
-      refused = Map.merge(status(), %{started: false, refused: true, pairing: nil})
+      refused =
+        Map.merge(status(), %{started: false, refused: true, refusal: :trust_store, pairing: nil})
 
       assert {:ok, view} = Mobile.status(fake({:ok, refused}))
 
       assert view["enabled"] == true
       assert view["started"] == false
       assert view["refused"] == true
+      assert view["refusal"] == "trust_store"
+    end
+
+    # STB-16: memory off refuses the surface, and the refusal is named.
+    test "each refusal class is published by its word" do
+      for word <- ~w(memory_disabled identity attachment_manifest trust_store)a do
+        refused = Map.merge(status(), %{started: false, refused: true, refusal: word})
+        assert {:ok, %{"refusal" => published}} = Mobile.status(fake({:ok, refused}))
+        assert published == Atom.to_string(word)
+      end
+    end
+
+    # STB-6: a listener that cannot bind stays up and says why.
+    test "a listener that cannot bind is published as unavailable with its reason" do
+      for reason <- ~w(address_unavailable address_in_use permission_denied listen_failed)a do
+        listener = %{status(:listener) | status: :unavailable, reason: reason}
+        assert {:ok, view} = Mobile.status(fake({:ok, %{status() | listener: listener}}))
+        assert view["listener"]["status"] == "unavailable"
+        assert view["listener"]["reason"] == Atom.to_string(reason)
+      end
+    end
+
+    # STB-5: APNs unreachable degrades push rather than stopping the channel.
+    # R1-9: a connect under way is its own reason.
+    test "push delivery is published as ready, degraded with its reason, or down" do
+      for {delivery, reason} <- [
+            ready: nil,
+            degraded: :connecting,
+            degraded: :connect_failed,
+            degraded: :connection_lost,
+            down: nil
+          ] do
+        apns = %{enabled: true, credentials: :ready, delivery: delivery, reason: reason}
+        assert {:ok, view} = Mobile.status(fake({:ok, %{status() | apns: apns}}))
+
+        assert view["apns"] == %{
+                 "enabled" => true,
+                 "credentials" => "ready",
+                 "delivery" => Atom.to_string(delivery),
+                 "reason" => reason && Atom.to_string(reason)
+               }
+      end
     end
   end
 
@@ -392,11 +452,11 @@ defmodule FermixCore.Management.MobileTest do
              "The phone listener could not start. See the daemon log.",
              "The paired-device list could not be read. See the daemon log.",
              "The pairing window could not be opened. See the daemon log.",
-             "Too many failed connection attempts. Start pairing again.",
              "The phone disconnected before you decided. Start pairing again.",
              "This phone sent no secure-hardware proof.",
              "No phone is waiting for a decision.",
-             "No paired phone has that id."
+             "No paired phone has that id.",
+             "Only the owner can pair or forget a phone; run this from your own terminal."
            ]
   end
 
@@ -410,7 +470,7 @@ defmodule FermixCore.Management.MobileTest do
       denied: session(:denied, ttl_ms: nil, outcome: %{reason: :denied}),
       expired: session(:expired, ttl_ms: nil, outcome: %{reason: :timeout}),
       cancelled: session(:cancelled, ttl_ms: nil, outcome: %{reason: :cancelled}),
-      failed: session(:failed, ttl_ms: nil, failure: %{reason: :rate_limited})
+      failed: session(:failed, ttl_ms: nil, failure: %{reason: :device_disconnected})
     ]
   end
 
@@ -460,8 +520,10 @@ defmodule FermixCore.Management.MobileTest do
       enabled: true,
       started: true,
       refused: false,
+      refusal: nil,
       listener: %{
         status: :ready,
+        reason: nil,
         port: 4031,
         bind: "0.0.0.0",
         candidates: ["wss://192.168.1.20:4031/ws"]
@@ -469,12 +531,14 @@ defmodule FermixCore.Management.MobileTest do
       mdns: :advertising,
       tailnet: %{detected: false, candidates: []},
       identity: %{present: true, fingerprint: "3f9a 1c2e"},
-      apns: %{enabled: false, credentials: :missing},
+      apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
       paired_devices: 1,
       protocol_version: 1,
       pairing: %{session_id: @session_id, state: :awaiting_decision}
     }
   end
+
+  defp status(:listener), do: status().listener
 
   defp failed_start(code, sentence) do
     %{

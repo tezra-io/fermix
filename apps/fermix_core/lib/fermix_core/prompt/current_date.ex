@@ -14,10 +14,9 @@ defmodule FermixCore.Prompt.CurrentDate do
   A date changes once a day; a clock time would bust the cache every turn.
   Agents that need the precise time run `date`.
 
-  The date is reported in UTC because the runtime ships no IANA timezone
-  database. The user's configured timezone (collected at setup, defaulting to
-  `America/New_York`) is attached as a label so the agent can reason about
-  their local date when it matters.
+  The date is reported in UTC. The user's configured timezone (seeded from the
+  machine on the first boot, edited at setup) is attached as a label so the
+  agent can reason about their local date when it matters.
   """
 
   @spec note() :: String.t()

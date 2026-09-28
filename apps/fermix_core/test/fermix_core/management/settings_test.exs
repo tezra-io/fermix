@@ -12,6 +12,7 @@ defmodule FermixCore.Management.SettingsTest do
 
   alias FermixCore.Browser.Error, as: BrowserError
   alias FermixCore.Management.Copy
+  alias FermixCore.Management.Router
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.AnswerMap
@@ -19,6 +20,7 @@ defmodule FermixCore.Management.SettingsTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Providers.Descriptor
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -47,7 +49,8 @@ defmodule FermixCore.Management.SettingsTest do
     :tools,
     :sandbox,
     :browser,
-    :secret_writer
+    :secret_writer,
+    :secret_store
   ]
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
 
@@ -125,7 +128,7 @@ defmodule FermixCore.Management.SettingsTest do
 
     test "every pane a section names is a pane the app routes to" do
       panes = ~w(providers personality memory channels voice meetings computer coding
-                 search images sandbox browser)
+                 search images sandbox browser secrets)
 
       for section <- Settings.sections() do
         assert section.pane in panes, "#{section.id} names an unroutable pane"
@@ -283,6 +286,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert %{"value" => "claude-opus-5"} = row("providers.anthropic", "default_model")
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
+    end
+
+    # The picker's value is the model in force, so a provider nobody has chosen
+    # a model for still shows the one the daemon will call.
+    test "a model row names the catalog default until a model is chosen" do
+      Application.put_env(:fermix_core, :providers, [])
+
+      for descriptor <- Descriptor.all() do
+        assert %{"value" => value} = row("providers.#{descriptor.id}", "default_model")
+        assert value == ModelCatalog.default_model_for(descriptor.id)
+      end
     end
 
     # The macOS app draws its model picker from these options, so a catalog
@@ -1190,6 +1204,150 @@ defmodule FermixCore.Management.SettingsTest do
   # load raises and the daemon cannot boot on the file it just wrote. Seeded
   # with the NORMALIZED application-env shapes, because the live snapshot is
   # what a save actually persists.
+  # The store a new secret is written to. On a Linux desktop that logs in with a
+  # fingerprint the login keyring stays locked, and before this section the file
+  # store could be chosen only from a terminal, so a key saved from the app met
+  # an unlock prompt for a password its owner did not know.
+  describe "the secrets section" do
+    # The suite's compiled telegram token is plaintext, and every save secures a
+    # plaintext value into the store in force, the switching save included. The
+    # token is dropped so each case observes only the secret it saves itself.
+    setup do
+      Application.delete_env(:fermix_core, :secret_store)
+      Application.put_env(:fermix_channels, :telegram, enabled: false)
+      on_exit(fn -> SecretWriterStub.clear_verdict(:keyring) end)
+    end
+
+    test "publishes one closed choice between the two stores, the keyring by default" do
+      assert %{id: "secrets", pane: "secrets", title: "Secrets"} in Settings.sections()
+
+      assert [row] = rows("secrets")
+
+      assert %{
+               "key" => "secret_store",
+               "kind" => "choice",
+               "label" => "Keep secrets in",
+               "value" => "keyring",
+               "suggestions" => false,
+               "read_only" => false
+             } = row
+
+      assert Enum.map(row["options"], &{&1["value"], &1["label"], &1["disabled"]}) == [
+               {"keyring", "Your keyring", false},
+               {"file", "A private file", false}
+             ]
+
+      assert row["footer"] =~ "Fermix home"
+      assert row["info"] =~ "`fermix setup --migrate-secrets`"
+    end
+
+    # `config_store.ex` applies the store on every save, so the flag the row
+    # derives says no restart, and the restart state after a switch agrees.
+    test "the row asks for no restart, because the store is applied live" do
+      assert %{"restart" => false} = row("secrets", "secret_store")
+      assert Row.restart?(:secret_store) == false
+    end
+
+    test "reads the store in force" do
+      Application.put_env(:fermix_core, :secret_store, :file)
+
+      assert %{"value" => "file"} = row("secrets", "secret_store")
+    end
+
+    test "choosing the file store takes effect at once, and the next secret lands in it", %{
+      home: home
+    } do
+      lock_keyring()
+
+      assert {:error, {:secret_store_failed, "telegram_bot_token", "locked"}} =
+               Secrets.set("telegram_bot_token", "1:abc")
+
+      assert {:ok, result} = Settings.apply("secrets", %{"secret_store" => "file"})
+
+      assert result["applied"] == ["secret_store"]
+      assert result["side_effects"] == []
+      refute Enum.any?(result["restart"]["reasons"], &(&1["section"] == "secret_store"))
+      assert Application.get_env(:fermix_core, :secret_store) == :file
+      assert settings_file(home) =~ ~s(secret_store = "file")
+      assert %{"value" => "file"} = row("secrets", "secret_store")
+
+      assert {:ok, %{"present" => true}} = Secrets.set("telegram_bot_token", "1:abc")
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:ok, "1:abc"}
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.file_sentinel()}")
+      SecretWriterStub.clear_verdict(:keyring)
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) ==
+               {:error, :missing_secret}
+    end
+
+    test "choosing the keyring again switches back", %{home: home} do
+      assert {:ok, _file} = Settings.apply("secrets", %{"secret_store" => "file"})
+      assert {:ok, result} = Settings.apply("secrets", %{"secret_store" => "keyring"})
+
+      assert result["applied"] == ["secret_store"]
+      assert Application.get_env(:fermix_core, :secret_store) == :keyring
+      refute settings_file(home) =~ "secret_store"
+      assert %{"value" => "keyring"} = row("secrets", "secret_store")
+
+      assert {:ok, %{"present" => true}} = Secrets.set("telegram_bot_token", "1:abc")
+
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) == {:ok, "1:abc"}
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:error, :missing_secret}
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.sentinel()}")
+    end
+
+    test "a secret already saved stays in the store it was saved to", %{home: home} do
+      assert {:ok, _stored} = Secrets.set("telegram_bot_token", "1:abc")
+      assert {:ok, _file} = Settings.apply("secrets", %{"secret_store" => "file"})
+
+      assert settings_file(home) =~ ~s(bot_token = "#{SecretWriter.sentinel()}")
+      assert SecretWriterStub.get(:telegram_bot_token, store: :keyring) == {:ok, "1:abc"}
+      assert SecretWriterStub.get(:telegram_bot_token, store: :file) == {:error, :missing_secret}
+    end
+
+    test "a store that is not one of the two is refused, and nothing changes", %{home: home} do
+      for value <- ["vault", "Keyring", ""] do
+        assert {:error, {:invalid_params, "secret_store", sentence}} =
+                 Settings.apply("secrets", %{"secret_store" => value})
+
+        assert sentence == "This setting takes one of its published values."
+      end
+
+      assert Application.get_env(:fermix_core, :secret_store) == nil
+      refute File.exists?(Path.join(home, "config.toml"))
+    end
+
+    # The refusal as the app meets it: the field and the sentence ride
+    # `details`, so the pane can put the sentence under the control.
+    test "the wire refusal names the row and says why" do
+      request = %{
+        request_id: "req-1",
+        protocol_version: 2,
+        method: "settings.apply",
+        params: %{"section" => "secrets", "values" => %{"secret_store" => "vault"}}
+      }
+
+      assert Router.route(request) ==
+               {:error, :invalid_params,
+                %{
+                  "field" => "secret_store",
+                  "sentence" => "This setting takes one of its published values."
+                }}
+    end
+  end
+
+  # A cancelled unlock prompt, the way `secret.set` met the owner's keyring.
+  defp lock_keyring do
+    SecretWriterStub.set_verdict(%{
+      store: :keyring,
+      state: :locked,
+      sentence: "the login keyring is locked"
+    })
+  end
+
+  defp settings_file(home), do: File.read!(Path.join(home, "config.toml"))
+
   describe "the save then load round trip" do
     test "every section a write touches survives being written and read back", %{home: home} do
       seed_normalized_app_env()

@@ -29,7 +29,8 @@ defmodule FermixChannels.Channels.Acp.Session do
   the fence `seq`, how many bytes of the reply have been written as chunks, the
   tool cards minted so far (each an id and the ACP kind computed at its start),
   how many externally-visible effects the turn has already performed, and the
-  Peer's monitor on the Queue it handed the turn to (nil until the hand-off).
+  Queue it handed the turn to with the Peer's monitor on it (both nil until the
+  hand-off).
   """
   @type turn :: %{
           seq: pos_integer(),
@@ -39,6 +40,7 @@ defmodule FermixChannels.Channels.Acp.Session do
           tool_seq: non_neg_integer(),
           tools: %{String.t() => {String.t(), String.t()}},
           effects: non_neg_integer(),
+          queue: pid() | nil,
           queue_ref: reference() | nil
         }
 
@@ -104,6 +106,7 @@ defmodule FermixChannels.Channels.Acp.Session do
       tool_seq: 0,
       tools: %{},
       effects: 0,
+      queue: nil,
       queue_ref: nil
     }
 
@@ -224,20 +227,26 @@ defmodule FermixChannels.Channels.Acp.Session do
   def effects(%__MODULE__{turn: nil}), do: 0
 
   @doc """
-  Record the Peer's monitor on the Queue the open turn was handed to. The Peer
-  answers the turn from that monitor's `:DOWN` if the Queue dies first, and
-  drops the monitor when the turn closes.
+  Record the Queue the open turn was handed to and the Peer's monitor on it.
+  The Peer sends a cancel of the turn to that Queue, answers the turn from the
+  monitor's `:DOWN` if the Queue dies first, and drops the monitor when the
+  turn closes.
   """
-  @spec put_queue_ref(t(), reference()) :: t()
-  def put_queue_ref(%__MODULE__{turn: turn} = session, ref)
-      when is_map(turn) and is_reference(ref) do
-    %{session | turn: %{turn | queue_ref: ref}}
+  @spec put_queue_ref(t(), pid(), reference()) :: t()
+  def put_queue_ref(%__MODULE__{turn: turn} = session, queue, ref)
+      when is_map(turn) and is_pid(queue) and is_reference(ref) do
+    %{session | turn: %{turn | queue: queue, queue_ref: ref}}
   end
 
   @doc "The open turn's monitor on its Queue, or nil."
   @spec queue_ref(t()) :: reference() | nil
   def queue_ref(%__MODULE__{turn: %{queue_ref: ref}}), do: ref
   def queue_ref(%__MODULE__{turn: nil}), do: nil
+
+  @doc "The Queue the open turn was handed to, or nil."
+  @spec queue(t()) :: pid() | nil
+  def queue(%__MODULE__{turn: %{queue: queue}}), do: queue
+  def queue(%__MODULE__{turn: nil}), do: nil
 
   defp fold_block(%{"type" => "text", "text" => text}) when is_binary(text), do: {:ok, text}
 

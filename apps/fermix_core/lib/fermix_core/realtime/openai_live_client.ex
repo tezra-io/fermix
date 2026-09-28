@@ -263,11 +263,23 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
 
   def decode_server_event(other), do: {:error, {:invalid_server_event, other}}
 
+  # Valid JSON that is not an object is reported, never matched away: Live has
+  # no reconnect, so a CaseClauseError here ended the call. Only a bounded
+  # description travels to the session.
   @impl true
   def handle_frame({:text, payload}, state) when is_binary(payload) do
     case Jason.decode(payload) do
       {:ok, %{} = event} ->
         notify_parent(state.parent, event)
+        {:ok, state}
+
+      {:ok, other} ->
+        send(
+          state.parent,
+          {:openai_live_error,
+           {:invalid_server_event, inspect(other, limit: 5, printable_limit: 120)}}
+        )
+
         {:ok, state}
 
       {:error, reason} ->

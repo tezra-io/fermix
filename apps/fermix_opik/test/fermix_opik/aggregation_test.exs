@@ -87,6 +87,79 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  # The daemon runs a confirmed access-sensitive command when the owner taps,
+  # usually after the turn that parked it has shipped. It carries that turn's
+  # session_id (so it pairs with the held call by `access_intent`) and must still
+  # ship rather than be dropped at the closed-session tombstone.
+  describe "a confirmed access-sensitive run" do
+    @held %{
+      tool: "tesla_unlock_doors",
+      success: false,
+      session_id: "main-1",
+      access_gate: "held_this_chat",
+      access_intent: "intent-1"
+    }
+
+    @confirmed %{
+      tool: "tesla_unlock_doors",
+      success: true,
+      session_id: "main-1",
+      access_gate: "confirmed",
+      access_intent: "intent-1"
+    }
+
+    @turn_close {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+                 %{
+                   channel: :telegram,
+                   chat_id: "c1",
+                   sender: "u1",
+                   session_id: "main-1",
+                   agent: "main"
+                 }}
+
+    test "after its turn shipped, it ships as its own trace carrying the tool span" do
+      {state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 0}, @held},
+          @turn_close,
+          {[:fermix, :tool, :exec], %{duration_ms: 900}, @confirmed}
+        ])
+
+      assert [%{trace: turn}, %{trace: late, spans: [span]}] = closed
+      assert turn.name == "agent:main"
+      assert late.name == "access_gate:confirmed"
+      assert late.metadata.session_id == "main-1"
+      assert late.metadata.access_intent == "intent-1"
+      assert span.trace_id == late.id
+      assert span.name == "tesla_unlock_doors"
+      assert span.metadata.access_gate == "confirmed"
+      assert span.metadata.access_intent == "intent-1"
+      assert state.dropped_after_close == 0
+      assert state.traces == %{}
+    end
+
+    test "while its turn is still open, it nests under that turn like any tool span" do
+      {_state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 0}, @held},
+          {[:fermix, :tool, :exec], %{duration_ms: 900}, @confirmed},
+          @turn_close
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "agent:main"
+      assert length(spans_of_type(spans, "tool")) == 2
+    end
+
+    test "any other late tool span is still dropped at the tombstone" do
+      {state, closed} =
+        run([@turn_close, {[:fermix, :tool, :exec], %{duration_ms: 1}, @held}])
+
+      assert length(closed) == 1
+      assert state.dropped_after_close == 1
+    end
+  end
+
   test "draft-stream phases nest as child spans under the turn trace, never as roots" do
     {_state, closed} =
       run([

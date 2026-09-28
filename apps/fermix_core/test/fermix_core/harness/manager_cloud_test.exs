@@ -290,6 +290,17 @@ defmodule FermixCore.Harness.ManagerCloudTest do
       assert {:error, :not_found} = Manager.stop_tracking("hr_000000000000", manager)
     end
 
+    # The rule cancel/3 follows: a ledger read error on a run the Manager does
+    # not track is the answer, never a false "no coding run found". A disabled
+    # Repo answers every read `{:error, :disabled}`.
+    test "a ledger read error on an untracked run is returned as itself", ctx do
+      repo = :"harness_cloud_disabled_repo_#{System.unique_integer([:positive])}"
+      start_supervised!(Supervisor.child_spec({Repo, name: repo, enabled: false}, id: repo))
+      manager = start_manager(%{ctx | repo: repo})
+
+      assert {:error, :disabled} = Manager.stop_tracking("hr_000000000000", manager)
+    end
+
     # M29 §17.6(d) branch 3: a client-owned origin has no framework wire, so the
     # abandoned run dead-letters by its OWN name rather than being handed to a text
     # path that could only report `{:unsupported_delivery_platform, "acp"}`.

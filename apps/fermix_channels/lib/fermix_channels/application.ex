@@ -62,8 +62,11 @@ defmodule FermixChannels.Application do
         # delegation accepted before the queue is up has nowhere to run.
         FermixChannels.Voice.Supervisor,
         # The companion chat socket, after the queue for the same reason. Its
-        # registry is always present; the socket runs whenever the daemon does.
-        {Companion.Supervisor, serve?: daemon_boot?(), boot_epoch: request_boot_epoch},
+        # registry is always present, its turns' settlement runs on every real
+        # boot (the phone's requests settle there too), and the socket runs
+        # whenever the daemon does.
+        {Companion.Supervisor,
+         serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,
@@ -121,6 +124,11 @@ defmodule FermixChannels.Application do
   defp daemon_boot? do
     @compiled_env != :test and Application.get_env(:fermix_core, :daemon_socket_enabled, false)
   end
+
+  # Every real boot settles companion and phone turns, a `:source` boot that
+  # serves no daemon socket included; a test tree starts the settlement each
+  # test drives.
+  defp settles?, do: @compiled_env != :test
 
   @doc false
   @spec log_missing_ingress_authorization(Readiness.report()) :: :ok

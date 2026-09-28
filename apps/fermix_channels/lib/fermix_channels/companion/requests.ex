@@ -7,29 +7,47 @@ defmodule FermixChannels.Companion.Requests do
   A `msg` or `command` is claimed durably under its `client_msg_id` before
   anything runs, answered `accepted` (a resend is answered `duplicate` and never
   runs twice), fenced to one attempt per boot by the request coordinator,
-  written to the timeline as the user's row, and ingested through the Gateway,
-  after which the Queue owns its settlement. History, search and read state are
-  reads and one monotonic write over the same timeline.
+  written to the timeline as the user's row, and ingested through the Gateway.
+  History, search and read state are reads and one monotonic write over the
+  same timeline, and a `cancel` stops one request's turn.
+
+  `Companion.Turns` is the Gateway's agent for both transports, so a request
+  that becomes a turn is handed to the queue through it and settled by it from
+  the turn's outcome. A request the gateway answered without a turn (a slash
+  command answered inline, an empty or unauthorized message, an ingress
+  failure the gateway already replied to) is settled once ingest returns, by
+  `Turns`, in order with the hand-offs, when none was made for it, so none is
+  left running: one it cannot complete is failed there, and its client told.
+  Nothing here waits on `Turns` for either.
+
+  A command that answers after ingest returns (`/background`, a `/skills`
+  review or approval) defers its request, whether it came as a `command` or
+  was typed as a `msg`: the request stays running until the command reports
+  its end, so its late answer is still the request's output.
 
   A transport differs only in what it hands in, as a `t:transport/0`: the
   channel adapter the turn runs on, how its claims are attributed, the ingress
-  context the Gateway sees, where replies meant for this one client go, and
-  the post-commit effects only the phone has (link previews, push).
+  context the Gateway sees, where replies meant for this one client go, how
+  it tells that client a request failed, how many bytes one history page may
+  take, and the post-commit effects only the phone has (link previews, push).
 
   Events are logical maps (`%{"t" => type, ...}`) handed to the caller's
   `:event_sink`, a 2-arity function of a target and an event: the transport's
   own `reply_to` for this client, or `{:profile, profile_id}` for everyone
-  watching the profile.
+  watching the profile on either transport (`Companion.Fanout`).
 
-  Once ingest has returned, the request coordinator's liveness fence moves to
-  the process that settles the request from then on: `:settlement_owner` when
-  the caller names one (the companion socket's `Companion.Turns`), otherwise
-  the queue itself (`:agent_server`).
+  Once ingest returns, the request coordinator's liveness fence moves to the
+  settlement owner (`:settlement_owner`, `Companion.Turns` unless a caller
+  names another), so its death, not this client's disconnect, releases the
+  attempt, and a dead queue fails the request there instead of releasing it.
   """
 
   require Logger
 
+  alias FermixChannels.Companion.Approvals
+  alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Mobile.MediaStore
@@ -52,22 +70,30 @@ defmodule FermixChannels.Companion.Requests do
     * `:reply_to` — the event-sink target for events only this client gets
       (`accepted`, a history page, search results); `nil` when no client is
       waiting (boot recovery).
+    * `:report_failure` — a function of a request's `client_msg_id` and the
+      cause of its failure that tells this client, in the error its own wire
+      builds, that a request failed after its worker returned.
     * `:attempt_key` — the message metadata key the adapter reads the attempt
       from.
+    * `:max_page_bytes` — the most a `history_page` may take once encoded, under
+      what the transport can carry in one event.
     * `:after_user_append` — `nil`, or a function of the profile, the new user
       row, its text and the options, run once the row is created.
-    * `:after_command` — `nil`, or a function of the profile, the settled
-      command request and the options.
+    * `:after_settle` — `nil`, or a function of the profile, the request and the
+      options, run when a request is settled here rather than by its turn: an
+      inline answer, or a deferred command's end.
   """
   @type transport :: %{
-          required(:name) => :mobile | :companion,
+          required(:name) => Fanout.transport(),
           required(:channel) => module(),
           required(:claimant) => keyword(),
           required(:ingress_context) => map(),
           required(:reply_to) => term(),
+          required(:report_failure) => (String.t(), term() -> :ok | {:error, term()}),
           required(:attempt_key) => atom(),
+          required(:max_page_bytes) => pos_integer(),
           required(:after_user_append) => (String.t(), map(), String.t(), keyword() -> :ok) | nil,
-          required(:after_command) => (String.t(), map(), keyword() -> :ok) | nil
+          required(:after_settle) => (String.t(), map(), keyword() -> :ok) | nil
         }
 
   @doc "Claim, acknowledge and run one decoded `msg` or `command`."
@@ -91,7 +117,8 @@ defmodule FermixChannels.Companion.Requests do
 
   @doc """
   Answer one `history_pull` with a page to this client. `after_seq` pages
-  forward; `before_seq` (companion only) pages backward.
+  forward; `before_seq` (companion only) pages backward. A page is cut to the
+  transport's `max_page_bytes`, and its cursor then names the last row sent.
   """
   @spec history(map(), transport(), keyword()) :: :ok | {:error, term()}
   def history(payload, transport, opts) when is_map(payload) and is_list(opts) do
@@ -101,21 +128,33 @@ defmodule FermixChannels.Companion.Requests do
              profile,
              store_opts(opts, history_cursor(payload) ++ [limit: payload["limit"]])
            ),
-         {:ok, messages} <- timeline_messages(page) do
-      emit(opts, transport.reply_to, history_event(profile, page, messages))
+         {:ok, messages} <- timeline_messages(page),
+         {:ok, event} <-
+           fit_page(history_event(profile, page, messages), payload, transport.max_page_bytes) do
+      emit(opts, transport.reply_to, event)
     end
   end
 
   @doc """
-  Record a cancel on a request that has not settled (`:marked`), or report that
-  it already did (`:settled`). The mark is what the hand-off to the queue and
-  boot recovery read.
+  Cancel one request's turn, whichever client sent it. The cancel is recorded
+  on the request first, the mark the hand-off to the queue and boot recovery
+  read, then `Companion.Turns` stops its turn if it was handed off. A request
+  already settled, or never claimed, is left alone, and other turns are
+  untouched. Nothing is answered here: the turn ends on the wire from its
+  outcome, a `turn_error` (code `cancelled`), or its `text_done` when it had
+  already finished.
   """
-  @spec cancel(String.t(), String.t(), keyword()) ::
-          {:ok, {:marked | :settled, map()}} | {:error, term()}
-  def cancel(profile, client_id, opts)
-      when is_binary(profile) and is_binary(client_id) and is_list(opts) do
-    store(opts).cancel_client_request(profile, client_id, store_opts(opts))
+  @spec cancel(map(), keyword()) :: :ok | {:error, term()}
+  def cancel(payload, opts) when is_map(payload) and is_list(opts) do
+    with {:ok, profile} <- profile(payload),
+         {:ok, client_id} <- required(payload, "client_msg_id") do
+      case store(opts).cancel_client_request(profile, client_id, store_opts(opts)) do
+        {:ok, {:marked, _request}} -> Turns.cancel(settlement_owner(opts), profile, client_id)
+        {:ok, {:settled, _request}} -> :ok
+        {:error, :not_found} -> :ok
+        {:error, reason} -> {:error, reason}
+      end
+    end
   end
 
   @doc "Answer one `history_search` with a page of hits to this client."
@@ -152,34 +191,6 @@ defmodule FermixChannels.Companion.Requests do
       })
     end
   end
-
-  @doc """
-  The exported shape of one timeline row. Internal columns never ship, so a
-  column added later can never leak to a client, and `ts` is always there.
-  """
-  @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
-  def timeline_message(
-        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = created_at} =
-          row
-      )
-      when is_integer(seq) and seq > 0 and is_binary(role) and is_binary(content) do
-    message =
-      %{
-        "server_seq" => seq,
-        "role" => role,
-        "content" => content,
-        "ts" => DateTime.to_iso8601(created_at),
-        "media_refs" => Map.get(row, :media_refs) || []
-      }
-      |> maybe_put("kind", Map.get(row, :kind))
-      |> maybe_put("client_msg_id", Map.get(row, :client_msg_id))
-      |> maybe_put("in_reply_to", Map.get(row, :in_reply_to))
-      |> maybe_put("metadata", Map.get(row, :metadata))
-
-    {:ok, message}
-  end
-
-  def timeline_message(row), do: {:error, {:invalid_timeline_row, Map.get(row, :server_seq)}}
 
   defp claim_and_run(event, type, profile, client_id, transport, opts) do
     claim_opts =
@@ -263,28 +274,48 @@ defmodule FermixChannels.Companion.Requests do
          {:ok, {append_status, row}} <-
            append_user(run.profile, message, run.client_id, media_refs, opts),
          :ok <- after_user_append(run.transport, append_status, run.profile, row, message, opts),
-         :ok <- ingest_gateway(message, run, opts),
-         :ok <- handoff_settlement(run, opts) do
-      finish_synchronous_request(run, deferred?(run.deferred_ref), opts)
+         :ok <- ingest_gateway(message, run, opts) do
+      settle_after_ingest(run, opts)
     end
   end
 
-  # Ingest has returned, so the turn now runs inside the queue and this process
-  # may disconnect at any moment. Move the coordinator's liveness fence onto the
-  # settlement owner so its death — not this client's disconnect — releases the
-  # attempt.
-  defp handoff_settlement(run, opts) do
-    owner_name = Keyword.get(opts, :settlement_owner, Keyword.get(opts, :agent_server, Queue))
+  # Ingest has returned, and this process may disconnect at any moment, so the
+  # settlement owner holds the attempt's fence from here. A deferred command's
+  # background run settles the request when it reports. Otherwise the owner
+  # decides, after the hand-off this process sent it during ingest: a turn it
+  # was handed settles from its outcome, and a request answered inline is
+  # settled there and then.
+  defp settle_after_ingest(run, opts) do
+    with {:ok, owner} <- handoff_settlement(run, settlement_owner(opts), opts) do
+      if deferred?(run.deferred_ref), do: :ok, else: settle_unless_handed_off(owner, run, opts)
+    end
+  end
 
+  defp settle_unless_handed_off(owner, run, opts) do
+    settlement = %{
+      settle: fn -> settle_inline(run, opts) end,
+      fail: fn cause -> fail_attempt(run, cause, opts) end,
+      report: fn cause -> report_failure(run, cause) end
+    }
+
+    Turns.settle_unless_handed_off(owner, run.profile, run.client_id, run.attempt, settlement)
+  end
+
+  # Move the coordinator's liveness fence onto the settlement owner so its
+  # death, not this client's disconnect, releases the attempt.
+  defp handoff_settlement(run, owner_name, opts) do
     case GenServer.whereis(owner_name) do
       owner when is_pid(owner) ->
-        coordinator(opts).handoff(
-          coordinator_server(opts),
-          run.profile,
-          run.client_id,
-          run.attempt,
-          owner
-        )
+        :ok =
+          coordinator(opts).handoff(
+            coordinator_server(opts),
+            run.profile,
+            run.client_id,
+            run.attempt,
+            owner
+          )
+
+        {:ok, owner}
 
       nil ->
         {:error, {:settlement_owner_unavailable, owner_name}}
@@ -295,6 +326,22 @@ defmodule FermixChannels.Companion.Requests do
     fields = %{error: %{type: run.type, reason: inspect(cause)}}
 
     settle_failed(run.profile, run.client_id, run.attempt, fields, opts)
+  end
+
+  # A request that fails once its worker has returned is told to its client
+  # here, correlated by its `client_msg_id`, in the error its own transport
+  # builds for a failed request (`t:transport/0`).
+  defp report_failure(run, cause) do
+    case run.transport.report_failure.(run.client_id, cause) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning(
+          "companion request #{run.client_id} failed, and its client could not be told: " <>
+            inspect(reason)
+        )
+    end
   end
 
   # One client event that becomes a gateway message is one inbound message for
@@ -359,10 +406,9 @@ defmodule FermixChannels.Companion.Requests do
 
   defp after_user_append(_transport, _status, _profile, _row, _message, _opts), do: :ok
 
-  defp finish_synchronous_request(%{type: "msg"}, _deferred?, _opts), do: :ok
-  defp finish_synchronous_request(%{type: "command"}, true, _opts), do: :ok
-
-  defp finish_synchronous_request(%{type: "command"} = run, false, opts) do
+  # The gateway answered the request without a turn, and any reply it wrote is
+  # already the request's output, so the request is complete.
+  defp settle_inline(run, opts) do
     with {:ok, request} <-
            store(opts).complete_client_request(
              run.profile,
@@ -371,20 +417,22 @@ defmodule FermixChannels.Companion.Requests do
              %{},
              store_opts(opts)
            ) do
-      after_command(run.transport, run.profile, request, opts)
+      after_settle(run.transport, run.profile, request, opts)
     end
   end
 
-  defp deferred_lifecycle("msg", _profile, _client_id, _attempt, _transport, _opts),
-    do: {nil, nil}
-
-  defp deferred_lifecycle("command", profile, client_id, attempt, transport, opts) do
+  # A `msg` gets the lifecycle a `command` has: the gateway reads a slash
+  # command in either, and calls this only for a command that answers later.
+  defp deferred_lifecycle(type, profile, client_id, attempt, transport, opts) do
     owner = self()
     ref = make_ref()
 
     defer = fn ->
       send(owner, {ref, :deferred})
-      fn outcome -> settle_deferred(outcome, profile, client_id, attempt, transport, opts) end
+
+      fn outcome ->
+        settle_deferred(outcome, type, profile, client_id, attempt, transport, opts)
+      end
     end
 
     {ref, defer}
@@ -400,7 +448,7 @@ defmodule FermixChannels.Companion.Requests do
     end
   end
 
-  defp settle_deferred(:completed, profile, client_id, attempt, transport, opts) do
+  defp settle_deferred(:completed, _type, profile, client_id, attempt, transport, opts) do
     with {:ok, request} <-
            store(opts).complete_client_request(
              profile,
@@ -409,12 +457,12 @@ defmodule FermixChannels.Companion.Requests do
              %{},
              store_opts(opts)
            ) do
-      after_command(transport, profile, request, opts)
+      after_settle(transport, profile, request, opts)
     end
   end
 
-  defp settle_deferred({:failed, reason}, profile, client_id, attempt, transport, opts) do
-    fields = %{error: %{type: "command", reason: inspect(reason)}}
+  defp settle_deferred({:failed, reason}, type, profile, client_id, attempt, transport, opts) do
+    fields = %{error: %{type: type, reason: inspect(reason)}}
 
     with {:ok, request} <-
            store(opts).fail_client_request(
@@ -424,35 +472,36 @@ defmodule FermixChannels.Companion.Requests do
              fields,
              store_opts(opts)
            ) do
-      after_command(transport, profile, request, opts)
+      after_settle(transport, profile, request, opts)
     end
   end
 
-  defp after_command(%{after_command: effect}, profile, request, opts)
+  defp after_settle(%{after_settle: effect}, profile, request, opts)
        when is_function(effect, 3),
        do: effect.(profile, request, opts)
 
-  defp after_command(_transport, _profile, _request, _opts), do: :ok
+  defp after_settle(_transport, _profile, _request, _opts), do: :ok
 
   defp ingest_gateway(message, run, opts) do
     gateway(opts).ingest([message],
       channel: run.transport.channel,
-      agent: Keyword.get(opts, :agent, Queue),
+      agent: Keyword.get(opts, :agent, Turns),
       agent_server: Keyword.get(opts, :agent_server, Queue),
       ingress_context: run.transport.ingress_context,
       defer_command_fn: run.defer_command_fn,
-      approval_resolution_fn: approval_resolution_fn(message.chat_id, opts),
+      approval_resolution_fn: approval_resolution_fn(message.chat_id, run.transport.name, opts),
       ingest_enriched_fn: enrichment_fn(message.chat_id, run.client_id, run.attempt, opts)
     )
   end
 
-  defp approval_resolution_fn(profile_id, opts) do
+  # A token resolves only on the transport that raised its card, which is the
+  # one this request came on, so the card is forgotten and its resolution
+  # announced there alone; a client that connects from then on is never sent
+  # it again.
+  defp approval_resolution_fn(profile_id, transport, opts) do
     fn %{kind: kind, token: token, outcome: outcome} ->
-      best_effort_emit(
-        opts,
-        {:profile, profile_id},
-        Output.approval_resolved(kind, token, outcome)
-      )
+      resolved = Output.approval_resolved(kind, token, outcome)
+      Approvals.resolve(approvals(opts), profile_id, resolved, transport)
     end
   end
 
@@ -576,7 +625,7 @@ defmodule FermixChannels.Companion.Requests do
   defp timeline_messages(%{messages: rows}) when is_list(rows) do
     rows
     |> Enum.reduce_while({:ok, []}, fn row, {:ok, acc} ->
-      case timeline_message(row) do
+      case Output.timeline_message(row) do
         {:ok, message} -> {:cont, {:ok, [message | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
@@ -627,9 +676,59 @@ defmodule FermixChannels.Companion.Requests do
     end
   end
 
+  # A page's rows are added while the encoded page stays within the budget,
+  # oldest first going forward and newest first going back, and at least one
+  # always ships so the client moves on. A cut page's cursor names the last
+  # row sent, and the client pulls the rest from it.
+  defp fit_page(%{"messages" => messages} = event, payload, budget) do
+    with {:ok, sizes} <- encoded_sizes(messages),
+         {:ok, [base]} <- encoded_sizes([%{event | "messages" => []}]) do
+      if base + Enum.sum(sizes) <= budget,
+        do: {:ok, event},
+        else: {:ok, cut_page(event, Enum.zip(messages, sizes), payload, budget - base)}
+    end
+  end
+
+  defp cut_page(event, sized, %{"before_seq" => _before}, room) do
+    kept = sized |> Enum.reverse() |> take_within(room) |> Enum.reverse()
+    event |> Map.put("messages", kept) |> Map.put("next_before_seq", hd(kept)["server_seq"])
+  end
+
+  defp cut_page(event, sized, _payload, room) do
+    kept = take_within(sized, room)
+    event |> Map.put("messages", kept) |> Map.put("next_after_seq", List.last(kept)["server_seq"])
+  end
+
+  defp take_within([{first, size} | rest], room) do
+    {kept, _left} =
+      Enum.reduce_while(rest, {[first], room - size}, fn {message, size}, {kept, left} ->
+        if size <= left,
+          do: {:cont, {[message | kept], left - size}},
+          else: {:halt, {kept, left}}
+      end)
+
+    Enum.reverse(kept)
+  end
+
+  # Each element's JSON size plus the separator that follows it in a list.
+  defp encoded_sizes(terms) do
+    Enum.reduce_while(terms, {:ok, []}, fn term, {:ok, sizes} ->
+      case Jason.encode(term) do
+        {:ok, json} -> {:cont, {:ok, [byte_size(json) + 1 | sizes]}}
+        {:error, reason} -> {:halt, {:error, {:unencodable_history_page, reason}}}
+      end
+    end)
+    |> then(fn
+      {:ok, sizes} -> {:ok, Enum.reverse(sizes)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
   defp store(opts), do: Keyword.get(opts, :store, Timeline)
+  defp settlement_owner(opts), do: Keyword.get(opts, :settlement_owner, Turns)
   defp gateway(opts), do: Keyword.get(opts, :gateway, Gateway)
   defp coordinator(opts), do: Keyword.get(opts, :coordinator, RequestCoordinator)
+  defp approvals(opts), do: Keyword.get(opts, :approvals, Approvals.server())
 
   defp coordinator_server(opts),
     do: Keyword.get(opts, :request_coordinator, RequestCoordinator)

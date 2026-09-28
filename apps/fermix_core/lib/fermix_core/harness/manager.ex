@@ -161,10 +161,13 @@ defmodule FermixCore.Harness.Manager do
   it `blocked/:tracking_stopped`, and delivers the task URL — never claiming the
   vendor task itself stopped (no cancel exists on that surface). Returns
   `{:ok, task_url}`. A local run is `{:error, :not_cloud}`; an already-terminal
-  cloud run is `{:error, :already_terminal}`; an unknown id is `{:error, :not_found}`.
+  cloud run is `{:error, :already_terminal}`; an unknown id is `{:error, :not_found}`;
+  a ledger read error is `{:error, reason}`.
   """
-  @spec stop_tracking(run_id(), GenServer.server()) ::
-          {:ok, String.t() | nil} | {:error, :not_found | :not_cloud | :already_terminal}
+  # The error is `term()` for the reason cancel/3's is: a ledger read error is
+  # the Repo's own reason. The doc above names the reasons this function adds
+  # itself: `:not_found`, `:not_cloud` and `:already_terminal`.
+  @spec stop_tracking(run_id(), GenServer.server()) :: {:ok, String.t() | nil} | {:error, term()}
   def stop_tracking(run_id, server \\ __MODULE__) when is_binary(run_id) do
     GenServer.call(server, {:stop_tracking, run_id})
   end
@@ -816,8 +819,8 @@ defmodule FermixCore.Harness.Manager do
       {:error, :not_found} ->
         {:reply, {:error, :not_found}, state}
 
-      {:error, _reason} ->
-        {:reply, {:error, :not_found}, state}
+      {:error, reason} ->
+        {:reply, {:error, reason}, state}
     end
   end
 
@@ -1219,12 +1222,12 @@ defmodule FermixCore.Harness.Manager do
   end
 
   # A dispatch failure on a client-owned surface is TERMINAL here (M29 §17.6(d)
-  # branch 1). Leaving the row `pending` would be retry theater: the worker has no
-  # wire for this platform, so its only possible act is to overwrite the real
-  # reason — a forgotten credential the operator fixes by reconnecting — with the
-  # useless `unsupported_delivery_platform` word.
+  # branch 1). Leaving the row `pending` would lose the real reason: the worker
+  # has no wire for this platform, so it can only dead-letter the row as
+  # `:handoff_unrecorded`, and the operator would never learn of a forgotten
+  # credential they fix by reconnecting.
   defp continuation_failed(row, reason, state) do
-    if client_owned?(row) do
+    if Delivery.client_owned?(row) do
       dead_letter(row, reason, state)
     else
       log_continuation_failed(row, reason)
@@ -1248,7 +1251,7 @@ defmodule FermixCore.Harness.Manager do
   # causes, four names, because one of them is fixed by reconnecting a client and
   # the operator cannot act on a word that covers all four.
   defp no_continuation(row, reason, state) do
-    if client_owned?(row) do
+    if Delivery.client_owned?(row) do
       dead_letter(row, reason, state)
     else
       deliver_and_mark(row, state)
@@ -1277,10 +1280,6 @@ defmodule FermixCore.Harness.Manager do
   # Same ceiling the DeliveryWorker applies to its own `last_delivery_error`, so a
   # dispatch reason carrying a large term cannot bloat the ledger row.
   defp bounded_error(reason), do: reason |> inspect() |> String.slice(0, @delivery_error_max)
-
-  # One source for "is this origin owned by a client": the frozen origin snapshot
-  # the launch wrote (§17.4). Never a channel-name list in this module.
-  defp client_owned?(row), do: is_map(Map.get(row, :client_origin))
 
   defp deliver_and_mark(row, state) do
     case Delivery.deliver(row, state.delivery_opts) do

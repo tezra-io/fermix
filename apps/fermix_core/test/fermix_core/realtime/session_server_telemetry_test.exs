@@ -224,7 +224,10 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
 
     assert :ok =
-             SessionServer.handle_provider_event(server, {:user_transcript_done, "hello there"})
+             SessionServer.handle_provider_event(
+               server,
+               {:user_transcript_done, "item-1", "hello there"}
+             )
 
     assert :ok =
              SessionServer.handle_provider_event(server, {:assistant_transcript_done, "hi back"})

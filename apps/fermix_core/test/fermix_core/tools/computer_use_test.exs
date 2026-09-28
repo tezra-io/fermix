@@ -538,6 +538,40 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert result.error =~ "attended session"
       refute_received {:driver_execute, %{"action" => "screenshot"}}
     end
+
+    # A Buzz channel is one other people can post in, so even the owner's own
+    # request there is refused, and the sentence names where to ask instead.
+    test "a Buzz-wired turn is refused, naming the Fermix app, own chat and voice" do
+      key = {"acp", "acp-buzz-session", :root}
+      config = Config.normalize(enabled: true)
+
+      start_supervised!(
+        {Session,
+         [
+           name: {:via, Registry, {CuSupervisor.registry(), key}},
+           config: config,
+           driver: {StubDriver, [test_pid: self()]},
+           origin: :interactive,
+           session_id: "cua_buzz_test"
+         ]}
+      )
+
+      context = %{
+        agent_name: "main",
+        conversation_key: key,
+        computer_use_config: config,
+        computer_use_origin: :interactive,
+        session_env: %{"BUZZ_RELAY_URL" => "wss://relay.example.test"}
+      }
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == false
+      assert result.error =~ "Buzz channel"
+      assert result.error =~ "Fermix app"
+      assert result.error =~ "your own chat"
+      assert result.error =~ "voice"
+      refute_received {:driver_execute, %{"action" => "screenshot"}}
+    end
   end
 
   # M42 slice 1 §3/§4.1: every computer_use exec records what happened to the INPUT

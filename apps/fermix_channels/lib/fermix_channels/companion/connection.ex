@@ -38,6 +38,9 @@ defmodule FermixChannels.Companion.Connection do
   require Logger
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Approvals
+  alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Turns
   alias FermixCore.Companion.Protocol
@@ -46,7 +49,9 @@ defmodule FermixChannels.Companion.Connection do
   @profile "main"
   @max_pending_requests 32
   @max_tracked_streams 8
-  @max_error_message 512
+  # One `history_page` is one line; the rows are cut to fit under the 64 KiB
+  # line a client reads.
+  @max_page_bytes 60 * 1_024
   @handover_timeout_ms 5_000
 
   # The closed vocabulary of `error.reason` this socket sends, besides
@@ -98,7 +103,7 @@ defmodule FermixChannels.Companion.Connection do
       pending: [],
       worker: nil,
       registry: Keyword.get(opts, :registry, Companion.registry()),
-      turns: Keyword.get(opts, :turns, Turns),
+      approvals: Keyword.get(opts, :approvals, Approvals.server()),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       request_opts: Keyword.get(opts, :request_opts, []),
       # Placed once at handover, before any line is read (moduledoc); the
@@ -221,7 +226,8 @@ defmodule FermixChannels.Companion.Connection do
   defp dispatch(%{type: type} = event, state) when type in ["msg", "command"],
     do: queue_request(event, state)
 
-  defp dispatch(%{type: "cancel", payload: payload}, state), do: cancel(payload, state)
+  defp dispatch(%{type: "cancel", payload: payload}, state),
+    do: answer(Requests.cancel(payload, request_opts(state)), state)
 
   defp dispatch(%{type: "history_pull", payload: payload}, state),
     do: answer(Requests.history(payload, transport(self()), read_opts(state)), state)
@@ -247,10 +253,39 @@ defmodule FermixChannels.Companion.Connection do
     {min, max} = Protocol.supported_version_range()
 
     with {:ok, _owner} <- Registry.register(state.registry, @profile, nil),
-         :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state) do
+         :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state),
+         :ok <- send_pending_approvals(state) do
       {:cont, %{state | version: version}}
     else
       _failed -> {:stop, state}
+    end
+  end
+
+  # An approval still waiting for the owner is written right after the
+  # server_hello, in the step that joined the registry, so a client that was
+  # not connected when it went out shows it, and its resolution can only
+  # arrive after it. Only a card raised here: a phone's resolves only there.
+  defp send_pending_approvals(state) do
+    state.approvals
+    |> Approvals.pending(@profile, :companion)
+    |> Enum.reduce_while(:ok, fn approval, :ok ->
+      case write_pending_approval(approval, state) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  # A card this wire has no shape for is a daemon bug, reported and skipped;
+  # a socket that cannot be written ends the connection.
+  defp write_pending_approval(%{"t" => type} = approval, state) do
+    case Protocol.encode_server_event(type, Map.delete(approval, "t")) do
+      {:ok, line} ->
+        :gen_tcp.send(state.socket, line)
+
+      {:error, reason} ->
+        Logger.error("companion connection dropped a waiting approval: #{inspect(reason)}")
+        :ok
     end
   end
 
@@ -268,31 +303,6 @@ defmodule FermixChannels.Companion.Connection do
     _ = send_event("error", payload, state)
     {:stop, state}
   end
-
-  # Stops the one turn the request named and writes nothing itself. The cancel
-  # is recorded on the request first; then `Companion.Turns`, which hands every
-  # turn to the queue, stops it there if it was handed off. A request not
-  # queued yet never is, one already settled is left alone, and other turns in
-  # the conversation are untouched. The turn ends on the wire from its outcome:
-  # a `turn_error` (code `cancelled`), or its `text_done` when it had already
-  # finished.
-  defp cancel(%{"profile_id" => @profile, "client_msg_id" => client_msg_id}, state) do
-    case Requests.cancel(@profile, client_msg_id, request_opts(state)) do
-      {:ok, {:marked, _request}} ->
-        answer(Turns.cancel(@profile, client_msg_id, state.turns), state)
-
-      {:ok, {:settled, _request}} ->
-        {:cont, state}
-
-      {:error, :not_found} ->
-        {:cont, state}
-
-      {:error, reason} ->
-        answer({:error, reason}, state)
-    end
-  end
-
-  defp cancel(_payload, state), do: answer({:error, :unsupported_profile}, state)
 
   defp answer(:ok, state), do: {:cont, state}
 
@@ -444,7 +454,8 @@ defmodule FermixChannels.Companion.Connection do
     do: %{
       "reason" => "unidentified_client",
       "message" =>
-        "the daemon could not identify the process on this connection: " <> bounded_inspect(cause)
+        "the daemon could not identify the process on this connection: " <>
+          Output.error_message(cause)
     }
 
   defp error_fields(reason) when reason in @named_reasons,
@@ -453,32 +464,49 @@ defmodule FermixChannels.Companion.Connection do
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.
   defp error_fields({:request_failed, cause}),
-    do: %{"reason" => "request_failed", "message" => bounded_inspect(cause)}
+    do: %{"reason" => "request_failed", "message" => Output.error_message(cause)}
 
   defp error_fields(reason),
-    do: %{"reason" => "request_failed", "message" => bounded_inspect(reason)}
+    do: %{"reason" => "request_failed", "message" => Output.error_message(reason)}
 
-  defp bounded_inspect(term) do
-    term |> inspect(limit: 5, printable_limit: 256) |> String.slice(0, @max_error_message)
-  end
-
-  defp transport(reply_to) do
+  @doc """
+  What this socket hands the shared request path (`t:Companion.Requests.transport/0`),
+  with `reply_to` the connection whose client asked: its own pid, or `nil` at
+  boot recovery, when nobody is waiting.
+  """
+  @spec transport(pid() | nil) :: Requests.transport()
+  def transport(reply_to) when is_pid(reply_to) or is_nil(reply_to) do
     %{
       name: :companion,
       channel: Companion,
       claimant: [],
       ingress_context: %{transport: :companion},
       reply_to: reply_to,
+      report_failure: request_failure_reporter(reply_to),
       attempt_key: :companion_attempt,
+      max_page_bytes: @max_page_bytes,
       after_user_append: &announce_user_row/4,
-      after_command: nil
+      after_settle: nil
     }
   end
 
-  # A user's row is announced to every connection watching the profile as it
-  # is written, the sender's own included, carrying its `client_msg_id`.
+  # A request that fails after its worker returned is written as a failed
+  # worker's is (`{:companion_request_failed, ...}`), by the connection that
+  # took it.
+  defp request_failure_reporter(nil), do: fn _client_msg_id, _cause -> :ok end
+
+  defp request_failure_reporter(connection) do
+    fn client_msg_id, cause ->
+      send(connection, {:companion_request_failed, client_msg_id, {:request_failed, cause}})
+      :ok
+    end
+  end
+
+  # A user's row is announced to every client watching the profile as it is
+  # written, this sender's own connection and the phones included, carrying its
+  # `client_msg_id`, each wire in its own shape.
   defp announce_user_row(profile, row, _text, opts),
-    do: Keyword.fetch!(opts, :event_sink).({:profile, profile}, Companion.row_event(profile, row))
+    do: Keyword.fetch!(opts, :event_sink).({:profile, profile}, Output.row(profile, row))
 
   defp request_opts(state) do
     registry = state.registry
@@ -501,7 +529,7 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp sink(registry, {:profile, profile_id}, event),
-    do: Companion.broadcast(profile_id, event, registry)
+    do: Fanout.announce(profile_id, event, companion_registry: registry)
 
   defp sink(_registry, nil, _event), do: :ok
 

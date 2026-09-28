@@ -21,7 +21,8 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert Protocol.shared_server_events() -- Protocol.server_events() == []
     refute "history_pull" in Protocol.shared_client_events()
     refute "history_page" in Protocol.shared_server_events()
-    refute "row" in Protocol.shared_server_events()
+    assert "cancel" in Protocol.shared_client_events()
+    assert "row" in Protocol.shared_server_events()
   end
 
   test "negotiates directionally" do

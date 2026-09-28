@@ -2,13 +2,15 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://fermix.sh/mobile/protocol.schema.json",
   "title": "Fermix mobile companion protocol JSON header",
-  "description": "JSON-header contract inside Noise-encrypted mobile frames. Source of truth: FermixChannels.Mobile.Protocol.",
+  "description": "JSON-header contract inside Noise-encrypted mobile frames, plus the pairing link. Source of truth: FermixChannels.Mobile.Protocol. See PROTOCOL.md. An optional field is absent, never null.",
   "x-protocol-version": 1,
   "x-supported-version-range": {"min": 1, "max": 1},
   "x-frame-format": "uint32be-json-length + json-header + raw-bytes",
   "x-max-json-header-bytes": 4096,
   "x-max-raw-chunk-bytes": 61440,
   "x-max-plaintext-bytes": 65519,
+  "x-max-event-bytes": 1048576,
+  "x-max-event-parts": 18,
   "$defs": {
     "envelope": {
       "type": "object",
@@ -24,7 +26,7 @@
       "required": ["v", "t", "seq"],
       "properties": {
         "t": {"enum": [
-          "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command",
+          "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
           "history_pull", "media_fetch", "push_register", "ack", "read_state",
           "pair_request", "unpair", "ping"
         ]}
@@ -36,6 +38,7 @@
         {"if": {"properties": {"t": {"const": "attach_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/attach_chunk"}},
         {"if": {"properties": {"t": {"const": "attach_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/attach_end"}},
         {"if": {"properties": {"t": {"const": "command"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/command"}},
+        {"if": {"properties": {"t": {"const": "cancel"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/cancel"}},
         {"if": {"properties": {"t": {"const": "history_pull"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/history_pull"}},
         {"if": {"properties": {"t": {"const": "media_fetch"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_fetch"}},
         {"if": {"properties": {"t": {"const": "push_register"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_register"}},
@@ -53,9 +56,9 @@
         "t": {"enum": [
           "hello_ack", "accepted", "attach_status", "turn_started", "text_delta",
           "tool_event", "text_done", "media_begin", "media_chunk", "media_end",
-          "turn_error", "reaction", "approval", "approval_resolved", "link_preview",
+          "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
           "read_state", "history_page", "notice", "pair_approved", "pair_denied",
-          "error", "pong"
+          "error", "pong", "event_part"
         ]}
       },
       "allOf": [
@@ -70,6 +73,7 @@
         {"if": {"properties": {"t": {"const": "media_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_chunk"}},
         {"if": {"properties": {"t": {"const": "media_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_end"}},
         {"if": {"properties": {"t": {"const": "turn_error"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/turn_error"}},
+        {"if": {"properties": {"t": {"const": "row"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/row"}},
         {"if": {"properties": {"t": {"const": "reaction"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/reaction"}},
         {"if": {"properties": {"t": {"const": "approval"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/approval"}},
         {"if": {"properties": {"t": {"const": "approval_resolved"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/approval_resolved"}},
@@ -80,7 +84,8 @@
         {"if": {"properties": {"t": {"const": "pair_approved"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_approved"}},
         {"if": {"properties": {"t": {"const": "pair_denied"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_denied"}},
         {"if": {"properties": {"t": {"const": "error"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/error"}},
-        {"if": {"properties": {"t": {"const": "pong"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pong"}}
+        {"if": {"properties": {"t": {"const": "pong"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pong"}},
+        {"if": {"properties": {"t": {"const": "event_part"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/event_part"}}
       ]
     },
     "hello": {
@@ -89,7 +94,7 @@
       "properties": {
         "t": {"const": "hello"}, "device_id": {"type": "string", "minLength": 1},
         "app_version": {"type": "string", "minLength": 1},
-        "last_server_seq": {"type": "integer", "minimum": 0},
+        "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "protocol_v": {"type": "integer", "minimum": 1}
       }
     },
@@ -127,10 +132,14 @@
       "required": ["v", "t", "seq", "client_msg_id", "profile_id", "name"],
       "properties": {"t": {"const": "command"}, "client_msg_id": {"type": "string", "minLength": 1}, "profile_id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}, "args": {"type": "string"}}
     },
+    "cancel": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "client_msg_id"],
+      "properties": {"t": {"const": "cancel"}, "profile_id": {"type": "string", "minLength": 1}, "client_msg_id": {"type": "string", "minLength": 1}}
+    },
     "history_pull": {
       "allOf": [{"$ref": "#/$defs/envelope"}],
       "required": ["v", "t", "seq", "profile_id", "after_seq", "limit"],
-      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}
+      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}
     },
     "media_fetch": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "ref"],
@@ -142,11 +151,11 @@
     },
     "ack": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "server_seq"],
-      "properties": {"t": {"const": "ack"}, "server_seq": {"type": "integer", "minimum": 0}}
+      "properties": {"t": {"const": "ack"}, "server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
     },
     "read_state": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "read_up_to_seq"],
-      "properties": {"t": {"const": "read_state"}, "profile_id": {"type": "string", "minLength": 1}, "read_up_to_seq": {"type": "integer", "minimum": 0}}
+      "properties": {"t": {"const": "read_state"}, "profile_id": {"type": "string", "minLength": 1}, "read_up_to_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
     },
     "pair_request": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_name", "model", "app_version"],
@@ -161,18 +170,18 @@
         "t": {"const": "hello_ack"}, "session_id": {"type": "string", "minLength": 1},
         "min_version": {"type": "integer", "minimum": 1}, "max_version": {"type": "integer", "minimum": 1},
         "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}},
-        "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}},
+        "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}},
         "history_head_seq": {"type": "integer", "minimum": 0}, "read_up_to_seq": {"type": "integer", "minimum": 0},
         "caps": {"$ref": "#/$defs/caps"}
       }
     },
     "profile": {
       "type": "object", "required": ["id", "name"],
-      "properties": {"id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1}}
+      "properties": {"id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 128, "x-max-bytes": 128}}
     },
     "candidate": {
       "type": "object", "required": ["host", "interface", "scope"],
-      "properties": {"host": {"type": "string", "minLength": 1}, "interface": {"type": "string", "minLength": 1}, "scope": {"enum": ["lan", "tailnet"]}}
+      "properties": {"host": {"type": "string", "minLength": 1, "maxLength": 253}, "interface": {"type": "string", "minLength": 1}, "scope": {"enum": ["lan", "tailnet"]}}
     },
     "caps": {
       "type": "object", "required": ["commands", "max_media_bytes"],
@@ -209,12 +218,26 @@
         "media_refs": {"type": "array", "items": {"$ref": "#/$defs/mediaRef"}},
         "client_msg_id": {"type": "string", "minLength": 1},
         "in_reply_to": {"type": "string", "minLength": 1},
-        "metadata": {"type": "object"}
+        "metadata": {"type": "object"},
+        "link_previews": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/$defs/linkPreviewCard"}},
+        "truncated": {"const": true}
+      }
+    },
+    "linkPreviewCard": {
+      "type": "object", "required": ["url", "site", "title"],
+      "description": "A link preview the phone channel stored on its row, as its link_preview event carried it. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "properties": {
+        "url": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048},
+        "site": {"type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120},
+        "title": {"type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300},
+        "description": {"type": "string", "maxLength": 600, "x-max-bytes": 600},
+        "image_ref": {"type": "string", "minLength": 1}
       }
     },
     "accepted": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "client_msg_id", "duplicate"],
-      "properties": {"t": {"const": "accepted"}, "client_msg_id": {"type": "string", "minLength": 1}, "duplicate": {"type": "boolean"}}
+      "description": "server_seq is present only on a duplicate whose request already has a reply row: that reply's seq.",
+      "properties": {"t": {"const": "accepted"}, "client_msg_id": {"type": "string", "minLength": 1}, "duplicate": {"type": "boolean"}, "server_seq": {"type": "integer", "minimum": 1}}
     },
     "attach_status": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "attach_id", "status"],
@@ -230,11 +253,12 @@
     },
     "tool_event": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "tool", "phase"],
-      "properties": {"t": {"const": "tool_event"}, "turn_id": {"type": "string", "minLength": 1}, "tool": {"type": "string", "minLength": 1}, "phase": {"enum": ["start", "stop"]}, "detail": {"type": "string"}}
+      "properties": {"t": {"const": "tool_event"}, "turn_id": {"type": "string", "minLength": 1}, "tool": {"type": "string", "minLength": 1}, "phase": {"enum": ["start", "stop"]}, "detail": {"type": "string", "maxLength": 512, "x-max-bytes": 512}}
     },
     "text_done": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "server_seq", "text"],
-      "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}}
+      "description": "truncated is present, and true, only when text was cut to keep the event within x-max-event-bytes; the stored row is whole.",
+      "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}, "truncated": {"const": true}}
     },
     "media_begin": {
       "allOf": [{"$ref": "#/$defs/envelope"}],
@@ -252,7 +276,24 @@
     },
     "turn_error": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "code", "message"],
-      "properties": {"t": {"const": "turn_error"}, "turn_id": {"type": "string", "minLength": 1}, "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}}
+      "properties": {"t": {"const": "turn_error"}, "turn_id": {"type": "string", "minLength": 1}, "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512}}
+    },
+    "row": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "server_seq", "role", "text", "ts", "media_refs"],
+      "description": "A timeline row the client did not stream: the companion wire's row event, extended on this wire with the history message's fields (text in place of content), so it renders as a history page would give it.",
+      "properties": {
+        "t": {"const": "row"}, "profile_id": {"type": "string", "minLength": 1},
+        "server_seq": {"type": "integer", "minimum": 1}, "role": {"type": "string", "minLength": 1},
+        "text": {"type": "string"},
+        "ts": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}"},
+        "media_refs": {"type": "array", "items": {"$ref": "#/$defs/mediaRef"}},
+        "kind": {"type": "string", "minLength": 1},
+        "client_msg_id": {"type": "string", "minLength": 1},
+        "in_reply_to": {"type": "string", "minLength": 1},
+        "metadata": {"type": "object"},
+        "link_previews": {"type": "array", "minItems": 1, "maxItems": 4, "items": {"$ref": "#/$defs/linkPreviewCard"}},
+        "truncated": {"const": true}
+      }
     },
     "reaction": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "in_reply_to", "emoji"],
@@ -268,34 +309,71 @@
     },
     "link_preview": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "in_reply_to", "url", "site", "title"],
-      "properties": {"t": {"const": "link_preview"}, "in_reply_to": {"type": "integer", "minimum": 0}, "url": {"type": "string", "minLength": 1}, "site": {"type": "string", "minLength": 1}, "title": {"type": "string", "minLength": 1}, "description": {"type": "string"}, "image_ref": {"type": "string", "minLength": 1}}
+      "description": "in_reply_to is the server_seq of the row the preview belongs to. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "properties": {"t": {"const": "link_preview"}, "in_reply_to": {"type": "integer", "minimum": 1}, "url": {"type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048}, "site": {"type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120}, "title": {"type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300}, "description": {"type": "string", "maxLength": 600, "x-max-bytes": 600}, "image_ref": {"type": "string", "minLength": 1}}
     },
     "history_page": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "messages"],
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "messages", "next_after_seq", "history_head_seq"],
+      "description": "Messages oldest first. next_after_seq is the last message sent, or the cursor asked for on an empty page. A page holds at most limit messages and at most 256 KiB of them, so it can hold fewer: pull again from next_after_seq while it is below history_head_seq.",
       "properties": {
         "t": {"const": "history_page"}, "profile_id": {"type": "string", "minLength": 1},
-        "messages": {"type": "array", "items": {"$ref": "#/$defs/historyMessage"}},
-        "next_after_seq": {"type": "integer", "minimum": 0},
+        "messages": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/historyMessage"}},
+        "next_after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "history_head_seq": {"type": "integer", "minimum": 0}
       }
     },
     "notice": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "kind", "text"],
+      "x-reserved": true, "description": "Reserved: in the catalog, never sent by this daemon yet.",
       "properties": {"t": {"const": "notice"}, "kind": {"type": "string", "minLength": 1}, "text": {"type": "string", "minLength": 1}}
     },
     "pair_approved": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles"],
-      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}}
+      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}}
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
-      "properties": {"t": {"const": "pair_denied"}, "reason": {"type": "string", "minLength": 1}}
+      "properties": {"t": {"const": "pair_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected"]}}
     },
     "error": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "code", "message"],
-      "properties": {"t": {"const": "error"}, "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1}, "ref_seq": {"type": "integer", "minimum": 1}}
+      "description": "A refusal. code names it; message describes it for logs and is never parsed; client_msg_id names the request a failure ends; ref names the blob a media_fetch failure is for; direction, client_version, min_version and max_version come with unsupported_protocol_version. ref_seq is reserved.",
+      "properties": {
+        "t": {"const": "error"}, "code": {"type": "string", "minLength": 1}, "message": {"type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512},
+        "client_msg_id": {"type": "string", "minLength": 1},
+        "ref": {"type": "string", "minLength": 1},
+        "direction": {"enum": ["client_too_old", "client_too_new"]},
+        "client_version": {"type": "integer"},
+        "min_version": {"type": "integer", "minimum": 1},
+        "max_version": {"type": "integer", "minimum": 1},
+        "ref_seq": {"type": "integer", "minimum": 1, "x-reserved": true}
+      }
     },
-    "pong": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "pong"}}}
+    "pong": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "pong"}}},
+    "event_part": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "description": "Server only. One frame of a contiguous run of count frames with consecutive seq; the raw tails, concatenated in index order, are the JSON object of one logical server event (with t, without v and seq), at most x-max-event-bytes.",
+      "required": ["v", "t", "seq", "index", "count"],
+      "properties": {"t": {"const": "event_part"}, "index": {"type": "integer", "minimum": 0, "maximum": 17}, "count": {"type": "integer", "minimum": 2, "maximum": 18}}
+    },
+    "pairingLink": {
+      "type": "object",
+      "x-uri-prefix": "fermix://pair?",
+      "description": "The query of a fermix://pair link, decoded as application/x-www-form-urlencoded. Not a frame: the owner's QR code carries it. An unknown parameter is ignored.",
+      "required": ["v", "candidates", "port", "tls_fp", "gateway_pk", "secret", "name"],
+      "properties": {
+        "v": {"const": "1"},
+        "candidates": {
+          "type": "string", "contentMediaType": "application/json",
+          "contentSchema": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 253}}
+        },
+        "port": {"type": "string", "pattern": "^[1-9][0-9]{0,4}$"},
+        "tls_fp": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "gateway_pk": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
+        "secret": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
+        "name": {"type": "string", "minLength": 1}
+      }
+    }
   },
   "anyOf": [
     {"$ref": "#/$defs/clientEvent"},

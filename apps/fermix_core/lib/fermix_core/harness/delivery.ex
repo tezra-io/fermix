@@ -102,6 +102,15 @@ defmodule FermixCore.Harness.Delivery do
   def deliver_timeout_ms, do: @deliver_timeout_ms
 
   @doc """
+  Whether `row`'s origin is owned by a client (M29 §17.6(d)): the frozen origin
+  snapshot the launch wrote carries a client origin (§17.4). Such an origin has
+  no framework text path. The one source the Manager and the DeliveryWorker
+  both read; never a channel-name list.
+  """
+  @spec client_owned?(map()) :: boolean()
+  def client_owned?(row) when is_map(row), do: is_map(Map.get(row, :client_origin))
+
+  @doc """
   Makes ONE bounded send attempt for `row`, returning `{:ok, :sent | :skipped}`
   or `{:error, reason}` for the caller (Manager inline / DeliveryWorker) to
   record. Mode `none` → `:skipped`; `local` → `:sent` without a channel send.

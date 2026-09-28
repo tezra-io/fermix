@@ -76,13 +76,16 @@ header lists everything else left out.
   Off, the exit reads as a confirmed stop (the code at 693970b7).
 - `InitChecksEnabled`: every Capturer start, a DynamicSupervisor restart
   included, re-reads `ComputerHistory.operative?/0` and returns `:ignore`
-  while the feature is off (`capturer.ex:124-130`); the DynamicSupervisor then
+  while the feature is off (`capturer.ex:130-136`); the DynamicSupervisor then
   deletes the child.
 - `InsertChecksIntervals`: the spool insert refuses, inside its own
   transaction, each row whose `ts` lies inside a recorded purge interval,
   bounds inclusive like the purge's `DELETE` (`computer_history_sql.ex:358-402`,
   `:664-675`), the CH-2 fix. Off, it is the plain `INSERT OR IGNORE` of
   693970b7.
+- `StopsBeforeFlush`: `terminate/2` runs `stop_driver` and the lock release
+  before its best-effort flush (`capturer.ex:603-605`), the C1 fix. Off, it is
+  the code before the fix: the flush first, then the stop.
 
 ## What holds
 
@@ -103,6 +106,19 @@ point, reconcile timeouts that may fire before the `:shutdown`
   is still in force, in 6 and 5 states. The first also rests on the CH-1 fix:
   `PauseByStamp` off (check 27) brings back CH-1's 7-state path, a flush
   after the horizon.
+- `terminate/2` stops the sidecar and releases the lock before its flush
+  makes any Repo call (a proposed rule from the Capturer moduledoc; C1, fixed in
+  eebf68fb). Those Repo calls can outlast the
+  DynamicSupervisor's 5 s shutdown, and the kill that follows skips whatever
+  `terminate/2` has not reached. This rests on `StopsBeforeFlush` (check 30):
+  flush-first, a Capturer crash reaches the flush's pause check with the
+  sidecar still alive, in 2 states. The lock is not modelled; its release is
+  in the same step as the stop. Test: `capturer_test.exs` "a flush blocked on
+  the Repo leaves the sidecar reaped and the lock released". A degrade
+  (`degrade/2`, `capturer.ex:580-586`, not modelled) takes the same order,
+  because a `:shutdown` that arrives during its flush is killed 5 s later.
+  Test: "a degrade flush blocked on the Repo leaves the sidecar reaped and the
+  lock released".
 
 Check 05 runs with a Controller or a Capturer crash at any point, daemon
 restarts and reconcile timeouts, including ones that fire before the
@@ -164,6 +180,10 @@ same:
 | 01 | `MaxFaults = 2` | holds | 14,393,154 |
 | 05 | `MaxFaults = 2` | holds | 535,592 |
 
+With `StopsBeforeFlush` (the C1 fix), 05 at `MaxFaults = 2`, with
+`TeardownBeforeTermFlush` added, holds with 577,452 distinct states
+(`-workers 1`). The 01 row above predates the switch and was not re-run.
+
 On the previous revision (before the CH-1, CH-3 and CH-4 fixes, with 01 at
 `ControllerCanCrash = CapturerCanCrash = ReconcileCanStall = FALSE` and 05 at
 `CapturerCanCrash = FALSE`):
@@ -223,7 +243,7 @@ Controller's split lookup and crashes at any point) both held: 01 with
 - **The terminate-time flush of `/history off` writes only events captured
   before the acknowledgement: confirmed (check 01, witness 07).** The EXIT
   queues behind the Capturer's earlier messages, and `terminate/2` flushes
-  only what is already buffered (`capturer.ex:589-598`). The reply waits for
+  only what is already buffered (`capturer.ex:595-607`). The reply waits for
   that. The plan did not anticipate the other paths to the same reply that
   broke the disable half, CH-3 and CH-4; with both fixed, 01 no longer needs
   the timing assumption it once did.
@@ -273,7 +293,7 @@ the fixed code.
   clock for both, since both read the same machine's wall clock.
 - **Impact:** the last seconds of every pause are recorded, although the owner
   was told "paused until X". This breaks M32 invariant 12 for the pause.
-  Frames held while the recorder is handshaking (`capturer.ex:447-452`) can
+  Frames held while the recorder is handshaking (`capturer.ex:453-458`) can
   widen the window.
 - **Fix:** Ingest reads the horizon once and splits the batch event by event
   (`ingest.ex:173-179`): an event is dropped when `min(ts, now) < pause_until`
@@ -282,7 +302,7 @@ the fixed code.
   The paused count is added to `dropped`, and a batch with no survivors makes
   no insert call (`:183-192`). Every flush path (timer, size trigger, ack,
   `exit_status`, degrade, `terminate/2`) reaches Ingest through `do_flush`
-  (`capturer.ex:483-487`), so each is covered. Side effect, allowed by
+  (`capturer.ex:489-493`), so each is covered. Side effect, allowed by
   MILESTONE_32 §7.1 ("discarded"): events still buffered from before the pause
   began are dropped too, as the old flush-time check already did. Tests:
   `ingest_test.exs` "pause horizon (inv. 12)"; `history_test.exs` "pause is
@@ -390,7 +410,7 @@ the fixed code.
     a crash mid-call) and returns `:ok`, and `history.ex:448` ignores the
     result.
   - Neither the Capturer nor Ingest reads the enable bit
-    (`capturer.ex:106-156`, `ingest.ex:171-202`).
+    (`capturer.ex:112-162`, `ingest.ex:171-202`).
 - **Impact:** events captured between the reply and the Capturer's actual stop
   are stored.
 - **Confidence, check 12:** it needs the Controller to die **alone**, for
@@ -413,7 +433,7 @@ the fixed code.
   saved setting; an unconfirmed stop says the recorder could not be confirmed
   stopped and points to `/history status`. There a Capturer that does not
   answer the status call in time reads "not answering (it may still be
-  running)", not "not running" (`capturer.ex:107-116`, `history.ex:123`), so
+  running)", not "not running" (`capturer.ex:113-122`, `history.ex:123`), so
   "not running" means the process is gone. `Controller.reconcile/2` waits
   15 s (`controller.ex:45`, `:53-54`), above the two children's 5 s
   shutdowns, so a slow `terminate/2` flush no longer turns into a false
@@ -455,8 +475,8 @@ the fixed code.
   - `ensure_stopped` returns `:ok` on a nil pid and ignores a `terminate_child`
     error (`controller.ex:112-121`).
   - The Capturer is a `:permanent` child (the `use GenServer` default,
-    `capturer.ex:43`) of the DynamicSupervisor (`supervisor.ex:55`).
-  - Its `init` (`capturer.ex:106-156`) and Ingest never check the enable bit.
+    `capturer.ex:49`) of the DynamicSupervisor (`supervisor.ex:55`).
+  - Its `init` (`capturer.ex:112-162`) and Ingest never check the enable bit.
   - `reconcile_runtime` is called only from `history.ex:448`.
 - **Impact:** capture continues after "Computer history disabled — nothing new
   is captured" until the daemon restarts. `config.toml` says disabled, so the
@@ -467,7 +487,7 @@ the fixed code.
   - The first path needs the Controller's `whereis` to run between the old
     Capturer's exit and its restart. The DynamicSupervisor restarts the child
     in the same message that handles its EXIT, and `Capturer.init` does no
-    I/O (`capturer.ex:106-156`; the lock and the Port wait for
+    I/O (`capturer.ex:112-162`; the lock and the Port wait for
     `handle_continue`). So the window is the time the EXIT spends in the
     DynamicSupervisor's mailbox: microseconds when it is idle.
   - The second path needs the Capturer to exit and be restarted between the
@@ -477,7 +497,7 @@ the fixed code.
 - **Fix:** `Capturer.init/1` re-reads the one resolver,
   `ComputerHistory.operative?/0` (injectable as `:operative_fun`), and
   returns `:ignore` while the feature is off, before it traps exits or builds
-  any state (`capturer.ex:124-130`). On a restart the DynamicSupervisor then
+  any state (`capturer.ex:130-136`). On a restart the DynamicSupervisor then
   deletes the child. The name is registered before `init` runs and History
   flips the env before it calls, so either the Controller's `whereis` sees
   the new pid and stops it, or `init` reads the flip and declines: both paths
@@ -542,10 +562,14 @@ the fixed code.
   which the model allows.
 - A `:flush` timer message queued ahead of the EXIT writes the same buffer
   `terminate/2` writes, so flushes are modelled only before the EXIT.
-- `terminate/2` finishes within the DynamicSupervisor's 5 s shutdown. For the
-  spool, a kill would only lose buffered events; it would also skip
-  `stop_driver` and the lock release (`capturer.ex:595-596`), which no
-  property here reads.
+- `terminate/2` finishes within the DynamicSupervisor's 5 s shutdown. A kill
+  after it would only lose buffered events: `stop_driver` and the lock release
+  run before the flush (`capturer.ex:603-604`), which `TeardownBeforeTermFlush`
+  checks. A `:kill` that skips `terminate/2` altogether closes the Port, the
+  sidecar exits on stdin EOF (one wedged in a native call does not, and leaks
+  until killed: `Compux.Port.kill/1`'s doc), and the lock goes stale 30 s after
+  its last heartbeat and is broken by the next acquire (`singleton_lock.ex:34`);
+  the lock is not modelled.
 - The sidecar's `ts` and the daemon's `utc_now()` read the same machine clock
   (CH-1, CH-2).
 - The purge fence works at tick granularity: an event captured after the

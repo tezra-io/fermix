@@ -11,11 +11,12 @@ pinned by checksum** rather than hand-copying the shapes.
 
 **One chat vocabulary.** The chat events are the same payloads the mobile wire
 (`priv/mobile/`) carries inside its Noise envelope; the mobile codec validates
-the ones it shares (`msg`, `command`, `read_state`, `accepted`, `turn_started`,
-`text_delta`, `tool_event`, `text_done`, `turn_error`, `approval`,
-`approval_resolved`) through the same module. This wire adds `cancel`,
-`history_search`, `search_results`, `row`, and a backward cursor on
-`history_pull` and `history_page`.
+the ones it shares (`msg`, `command`, `cancel`, `read_state`, `accepted`,
+`turn_started`, `text_delta`, `tool_event`, `text_done`, `turn_error`, `row`,
+`approval`, `approval_resolved`) through the same module. This wire adds
+`history_search`, `search_results`, and a backward cursor on `history_pull`
+and `history_page`. The phone's `row` carries more than this wire's: the whole
+history message. This wire's `row` is unchanged.
 
 ## Transport
 
@@ -34,7 +35,8 @@ the ones it shares (`msg`, `command`, `read_state`, `accepted`, `turn_started`,
   a single `\n`, with a `type` discriminator. There is no length prefix; a
   client line longer than **65,536 bytes** is refused with
   `error: line_too_large` and the connection is closed. Daemon lines are not
-  capped (a history page can be long).
+  capped, though a `history_page` is kept to about 60 KiB (see *Delivery and
+  the outbox*).
 - **Clients:** at most **4** connections at once. A fifth is answered with
   `error: max_clients_reached` and closed.
 - **Direction:** *client events* flow companion → daemon; *server events* flow
@@ -112,10 +114,10 @@ in a fixed order:
 | `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
-| `cancel` | `profile_id`, `client_msg_id` | Stops the turn of that request, running or waiting, and no other. Never answered itself; see *Streaming a turn*. |
-| `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). |
+| `cancel` | `profile_id`, `client_msg_id` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. |
+| `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
 | `history_search` | `profile_id`, `query` (1–256 characters), `limit` (1–50); `before_seq?` | Full-text search of the timeline, newest first, below `before_seq` when given. |
-| `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier. |
+| `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
 
 `profile_id` is `main`, the one profile; any other is refused with
 `error: unsupported_profile`.
@@ -128,14 +130,14 @@ in a fixed order:
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | Durable receipt for a `msg` or `command`; clears the outbox item. `server_seq` is present only on a duplicate whose request already has a reply row: that reply's seq. A first `accepted` never carries it; the request's own row arrives as a `row`. |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
-| `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. |
+| `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
 | `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
-| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row written outside a turn's completion, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a row written from the phone. |
-| `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. |
-| `approval_resolved` | `approval_id`, `outcome` | `approved`, `denied`, or `expired`. |
-| `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection. |
-| `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first. |
+| `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn. |
+| `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
+| `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
+| `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
+| `history_page` | `profile_id`, `messages[]`, `history_head_seq`; `next_after_seq?`, `next_before_seq?` | Messages oldest first, at most `limit` and about 60 KiB of them. |
 | `search_results` | `profile_id`, `query`, `hits[]`; `next_before_seq?` | Hits newest first. |
 | `error` | `reason`; `message?`, `field?`, `event?`, `client_msg_id?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | A refusal; see *Errors*. |
 
@@ -143,10 +145,14 @@ in a fixed order:
 
 A `history_page` message is the exported timeline row and nothing else:
 `server_seq`, `role`, `content`, `ts` (RFC 3339, UTC), `media_refs[]`, plus
-optional `kind`, `client_msg_id`, `in_reply_to`, and `metadata`. A
-`media_refs[]` entry carries `ref`, `kind`, `mime`, and `size_bytes`, plus
-optional `sha256`, `filename`, and `caption`. Internal storage columns are never
-shipped.
+optional `kind`, `client_msg_id`, `in_reply_to`, `metadata` and
+`link_previews[]`. A `media_refs[]` entry carries `ref`, `kind`, `mime`, and
+`size_bytes`, plus optional `sha256`, `filename`, and `caption`. A
+`link_previews[]` entry is a link preview the phone channel stored on the row:
+`url` (at most 2,048 bytes), `site` (120), `title` (300), and optional
+`description` (600) and `image_ref`; a row carries at most 4, and has the key
+only when it has one. `metadata` never holds a null. Internal storage columns
+are never shipped.
 
 A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain
 text around the matches, `…` where it was cut), and `ranges[]`, each
@@ -162,8 +168,16 @@ written, whoever writes it: the reply of a turn started on this socket as
 that turn's `text_done`, and every other row as a `row` (the user's message,
 including to the connection that sent it; a slash command's answer; a
 scheduled job's delivery, written whether or not a client is connected; a
-message or reply written from the phone). The phone's own wire is unchanged;
-it does not carry `row`.
+message from a phone and the reply to a phone's turn).
+
+The phones hear this socket the same way: every row written here reaches them
+as their own `row`, which carries the whole history message, and the reply of
+a turn started here reaches them as a `row` too, since they never saw that
+turn start. What crosses the two transports is the timeline and the read
+frontier. A turn's stream and its ending (`turn_started`, `text_delta`,
+`tool_event`, `text_done`, `turn_error`) stay with the transport that ran the
+turn, and so do approvals, whose token resolves only there (see
+*Approvals*).
 
 `server_seq` is assigned inside the write that stores the row, from a
 per-profile counter that never goes back, whoever writes (a turn, a job, the
@@ -202,9 +216,30 @@ the point after which the companion stops resending. Claims last 24 hours.
 History is recovered exactly: `history_pull(after_seq)` returns the rows after
 a cursor, oldest first, with `next_after_seq` (the last row returned, or the
 cursor itself on an empty page) and `history_head_seq`.
-`history_pull(before_seq)` returns the newest `limit` rows before a cursor,
-oldest first, and `next_before_seq` (its oldest row) only when an older row
-exists. `history_search` pages the same way.
+`history_pull(before_seq)` returns the newest rows before a cursor, oldest
+first, and `next_before_seq` (its oldest row) only when an older row exists.
+`history_search` pages the same way.
+
+A page holds at most `limit` rows and at most about 60 KiB of them, so it can
+hold fewer than asked; it always holds at least one row when there is one. A
+forward page keeps its oldest rows and its `next_after_seq` names the last one
+sent; a backward page keeps its newest rows and its `next_before_seq` names
+the oldest one sent. A client pulls on from that cursor. A cursor above
+2^63-1 (the largest row number the store holds) is one past every row: a
+forward page is then empty and echoes the cursor, and a backward page or a
+search starts from the newest row.
+
+The read frontier moves forward and never past the newest row: the daemon
+stores `min(max(stored, reported), history_head_seq)` and sends the result to
+every connection. A frontier stored past the newest row earlier comes back to
+it on the next report.
+
+A request that fails after `accepted` is answered
+`error{reason: "request_failed", message, client_msg_id}` with a message of at
+most 512 bytes. A request that failed stays failed: its resend is a duplicate
+and never runs again. A `msg` whose text runs a command that answers later
+(`/background` and `/bg`, `/skills review`, `/skills approve`) stays running
+until the command reports, and its later answer arrives as a `row`.
 
 ## Streaming a turn
 
@@ -224,7 +259,9 @@ daemon's turn queue:
 - it was cancelled or failed: one `turn_error` (`cancelled`, or the failure's
   code), and nothing of its draft is kept;
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
-  with code `interrupted`.
+  with code `interrupted`;
+- the request could not be handed to the turn queue: one `turn_error` with
+  code `turn_failed`.
 
 `turn_error` is live-only and carries no seq: a cancelled or failed message
 leaves its user's row (announced as a `row` when it was written) with no
@@ -241,9 +278,30 @@ a cancel for a request that already ended changes nothing.
 ## Approvals
 
 When a tool needs the owner's approval, the daemon sends `approval`. The
-companion answers by sending one of the routes as a `command`: `/confirm TOKEN`
-is `command{name: "confirm", args: "TOKEN"}`. `approval_resolved` reports the
-outcome to every connection.
+companion answers by sending one of the routes as a `command`: drop the
+leading `/`, the first word is `name` and the rest is `args`. `/confirm TOKEN`
+is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
+`command{name: "soul", args: "apply TOKEN"}`.
+
+- A card belongs to the transport whose turn raised it, the only one its token
+  resolves from: this socket gets the cards its own turns raise, and never a
+  phone's. Its re-send, expiry and resolution go to this socket's connections
+  alone.
+- `approval_resolved` reports the outcome to every connection of this socket:
+  `approved` or `denied` when the owner answered, `expired` when the card's
+  `ttl_s` ran out.
+- Right after `server_hello`, the daemon sends again every card of the profile
+  still waiting that this socket's turns raised, oldest first, each with
+  `ttl_s` set to the seconds it has left, rounded up. A client keys cards by
+  `approval_id`, so a card it already shows is replaced, not doubled.
+- When `server_hello` arrives, a client drops every card it shows and keeps
+  only the ones the daemon sends after it. `approval_resolved` goes only to the
+  connections open when a card is answered or expires, so a card that ended
+  while the client was away is never withdrawn: it is simply not sent again.
+- Waiting cards live in the daemon's memory, as their tokens do: a restart
+  forgets them without resolving them, so a client also drops a card when its
+  own `ttl_s` runs out. The daemon keeps at most 64; past that a card still
+  goes out live but is not sent again, so a reconnect drops it.
 
 ## Errors
 
@@ -262,7 +320,7 @@ outcome to every connection.
 | `client_message_conflict` | `client_msg_id` | open |
 | `unsupported_profile` | `client_msg_id?` | open |
 | `request_backlog_full` | — | open |
-| `request_failed` | `message`, `client_msg_id?` | open |
+| `request_failed` | `message` (at most 512 bytes), `client_msg_id?` | open |
 
 ## Chat sequence
 

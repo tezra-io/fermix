@@ -418,6 +418,62 @@ defmodule FermixCore.Plugins.RegistryTest do
     end
   end
 
+  # One spelling (the `requires_setting` precedent): only the literal `true`, only
+  # on a tool that changes something, and absent means not sensitive.
+  describe "per-tool access_sensitive" do
+    test "an http tool and an mcp preview that change something may carry it" do
+      http = http_tool("notion_unlock") |> Map.merge(%{"read_only" => false})
+      mcp = mcp_tool("notion_open") |> Map.merge(%{"read_only" => false})
+
+      for tool <- [http, mcp] do
+        manifest = access_manifest(Map.put(tool, "access_sensitive", true))
+
+        assert {:ok, plugin} = Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+        assert [%{"access_sensitive" => true}] = plugin.tools
+      end
+    end
+
+    test "a read-only tool may not carry it" do
+      manifest = access_manifest(Map.put(http_tool("notion_search"), "access_sensitive", true))
+
+      assert {:error, {:access_sensitive_read_only_tool, "notion_search"}} =
+               Registry.decode_manifest(manifest, "/tmp/notion/plugin.json")
+    end
+
+    test "any value other than the literal true is refused" do
+      for value <- [false, "true", 1] do
+        tool =
+          http_tool("notion_unlock")
+          |> Map.merge(%{"read_only" => false, "access_sensitive" => value})
+
+        assert {:error, {:invalid_access_sensitive, "notion_unlock"}} =
+                 Registry.decode_manifest(access_manifest(tool), "/tmp/notion/plugin.json")
+      end
+    end
+
+    test "a manifest without the field loads unchanged" do
+      tool = http_tool("notion_unlock") |> Map.put("read_only", false)
+
+      assert {:ok, plugin} =
+               Registry.decode_manifest(access_manifest(tool), "/tmp/notion/plugin.json")
+
+      assert [tool] == plugin.tools
+    end
+  end
+
+  defp access_manifest(tool) do
+    v2_manifest("notion")
+    |> api_key_auth()
+    |> Map.put("runtime", %{
+      "kind" => "node",
+      "min_version" => "20",
+      "command" => "node",
+      "args" => ["src/index.js"],
+      "vendored" => false
+    })
+    |> Map.put("tools", [tool])
+  end
+
   # The runtime half of the gate (M8 §9.3): the local process itself may be
   # gated on one of its own manifest's `config` keys, so an operator switch
   # decides whether a vendored helper runs at all — not just which of its tools

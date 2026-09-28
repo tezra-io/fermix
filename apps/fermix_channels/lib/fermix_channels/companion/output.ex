@@ -5,16 +5,24 @@ defmodule FermixChannels.Companion.Output do
 
   It owns the timeline rows a reply becomes (a request's outputs fenced by its
   attempt, a proactive delivery deduplicated by its key, or a plain append),
-  the settlement of the request that asked for them, and the logical chat
-  events (`%{"t" => type, ...}`) a turn produces. Each transport frames those
-  events in its own envelope and fans them out its own way; nothing here does
-  I/O beyond the store it is handed.
+  the settlement of the request that asked for them, the logical chat events
+  (`%{"t" => type, ...}`) a turn produces, and the exported shape of a row that
+  history pages and `row` events carry. Each transport frames those events in
+  its own envelope and fans them out its own way; nothing here does I/O beyond
+  the store it is handed.
 
   An absent optional field is an absent key, never an explicit null.
   """
 
+  alias FermixCore.Text
+
   @sandbox_ttl_s 60
   @soul_ttl_s 300
+  # A failure reason or a tool's result can be any term, and an event header is
+  # capped: its text is cut to these many bytes. Every error message of both
+  # wires takes the first bound (`error_message/1`).
+  @max_error_message_bytes 512
+  @max_tool_detail_bytes 512
 
   @typedoc "A `FermixCore.Companion.Timeline`-shaped store module."
   @type store :: module()
@@ -73,7 +81,7 @@ defmodule FermixChannels.Companion.Output do
       "turn_id" => turn_id,
       "tool" => tool,
       "phase" => "stop",
-      "detail" => inspect(detail)
+      "detail" => detail |> inspect() |> Text.truncate_utf8(@max_tool_detail_bytes)
     }
 
   def tool_event(turn_id, event),
@@ -82,7 +90,7 @@ defmodule FermixChannels.Companion.Output do
       "turn_id" => turn_id,
       "tool" => "unknown",
       "phase" => "stop",
-      "detail" => inspect(event)
+      "detail" => event |> inspect() |> Text.truncate_utf8(@max_tool_detail_bytes)
     }
 
   @doc "A turn's terminal failure, `cancelled` included."
@@ -92,8 +100,68 @@ defmodule FermixChannels.Companion.Output do
       "t" => "turn_error",
       "turn_id" => turn_id,
       "code" => error_code(reason),
-      "message" => error_message(reason)
+      "message" => turn_error_message(reason)
     }
+
+  @doc """
+  A failure reason as the `message` of an error on either wire: its shallow
+  inspection, cut to 512 bytes, never inside a UTF-8 code point. A reason can
+  carry an exception and its stacktrace, so the event that reports it can
+  always be written.
+  """
+  @spec error_message(term()) :: String.t()
+  def error_message(reason) do
+    reason
+    |> inspect(limit: 5, printable_limit: 256)
+    |> Text.truncate_utf8(@max_error_message_bytes)
+  end
+
+  @doc """
+  The `row` event that announces one timeline row as it is written, in the
+  phone's shape: the row's history message (`timeline_message/1`), its text as
+  `text`, and the profile, so a phone renders a row it did not write as a
+  history page gives it. `Companion.Fanout` gives the Mac's wire only the
+  fields its own `row` has.
+  """
+  @spec row(String.t(), map()) :: event()
+  def row(profile_id, row) when is_binary(profile_id) and is_map(row) do
+    {:ok, %{"content" => text} = message} = timeline_message(row)
+
+    message
+    |> Map.delete("content")
+    |> Map.merge(%{"t" => "row", "profile_id" => profile_id, "text" => text})
+  end
+
+  @doc """
+  The exported shape of one timeline row, a history page's message. Internal
+  columns never ship, so a column added later can never leak to a client, and
+  `ts` is always there. A row's link previews ship as the cards `link_preview`
+  sent, the image as its ref. Nothing ships as an explicit null.
+  """
+  @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
+  def timeline_message(
+        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = created_at} =
+          row
+      )
+      when is_integer(seq) and seq > 0 and is_binary(role) and is_binary(content) do
+    message =
+      %{
+        "server_seq" => seq,
+        "role" => role,
+        "content" => content,
+        "ts" => DateTime.to_iso8601(created_at),
+        "media_refs" => Map.get(row, :media_refs) || []
+      }
+      |> maybe_put("kind", Map.get(row, :kind))
+      |> maybe_put("client_msg_id", Map.get(row, :client_msg_id))
+      |> maybe_put("in_reply_to", Map.get(row, :in_reply_to))
+      |> maybe_put("metadata", present_metadata(Map.get(row, :metadata)))
+      |> maybe_put("link_previews", preview_cards(Map.get(row, :link_previews)))
+
+    {:ok, message}
+  end
+
+  def timeline_message(row), do: {:error, {:invalid_timeline_row, Map.get(row, :server_seq)}}
 
   @doc """
   An owner-approval card with its exact approve and deny command routes. The
@@ -219,9 +287,13 @@ defmodule FermixChannels.Companion.Output do
       content: text,
       kind: "text",
       in_reply_to: value(attrs, :in_reply_to),
-      metadata: %{"turn_id" => value(attrs, :turn_id)}
+      metadata: turn_metadata(value(attrs, :turn_id))
     }
   end
+
+  # A reply outside any turn (a delivery) has no turn to name.
+  defp turn_metadata(nil), do: nil
+  defp turn_metadata(turn_id), do: %{"turn_id" => turn_id}
 
   defp client_output?(attrs) do
     is_binary(value(attrs, :in_reply_to)) and value(attrs, :in_reply_to) != "" and
@@ -252,8 +324,26 @@ defmodule FermixChannels.Companion.Output do
 
   defp error_code(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp error_code(_reason), do: "turn_failed"
-  defp error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp error_message(reason), do: inspect(reason)
+  defp turn_error_message(reason) when is_atom(reason), do: Atom.to_string(reason)
+  defp turn_error_message(reason), do: error_message(reason)
+
+  # A row stored before metadata dropped its nulls still carries them.
+  defp present_metadata(metadata) when is_map(metadata) do
+    present = Map.reject(metadata, fn {_key, value} -> is_nil(value) end)
+    if map_size(present) == 0, do: nil, else: present
+  end
+
+  defp present_metadata(metadata), do: metadata
+
+  defp preview_cards(previews) when is_list(previews) and previews != [] do
+    Enum.map(previews, fn preview ->
+      preview
+      |> Map.take(~w(url site title description))
+      |> maybe_put("image_ref", get_in(preview, ["image", "ref"]))
+    end)
+  end
+
+  defp preview_cards(_previews), do: nil
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key) || Map.get(map, Atom.to_string(key))

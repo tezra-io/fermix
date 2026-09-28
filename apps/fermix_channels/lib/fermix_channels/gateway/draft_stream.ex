@@ -48,6 +48,11 @@ defmodule FermixChannels.Gateway.DraftStream do
     it (or the reverse) is a half-wired spec, so it is refused where the spec is
     built. Unset, the draft freezes at the channel's own limit (pre-S2 behavior).
 
+    `pacing` is the channel's own throttle (`Gateway.Channel.draft_pacing/0`),
+    read once when the engine starts: its edit interval, the characters a
+    draft needs before it opens, and its edit cap (`:infinity` for none). Unset,
+    the engine's constants apply, tuned for chat platforms' edit budgets.
+
     `ephemeral_send`/`delete` are the optional thought-sweep pair
     (CHANNEL_LONGFORM_PRESENTATION §5, decision §9.1): a silent send that
     answers with the platform ids of the messages it created, and a delete for
@@ -70,6 +75,7 @@ defmodule FermixChannels.Gateway.DraftStream do
       :delete,
       :measure,
       :rotate_at,
+      :pacing,
       mode: :draft
     ]
 
@@ -84,12 +90,14 @@ defmodule FermixChannels.Gateway.DraftStream do
             ephemeral_send: (String.t() -> {:ok, [term()]} | {:error, term()}) | nil,
             delete: (term() -> :ok | {:error, term()}) | nil,
             measure: (String.t() -> non_neg_integer()) | nil,
-            rotate_at: pos_integer() | nil
+            rotate_at: pos_integer() | nil,
+            pacing: FermixChannels.Gateway.Channel.draft_pacing() | nil
           }
   end
 
   # Throttle policy (design §5.5). Constants, not operator config — the only
-  # operator knob is the per-channel `streaming` mode switch. The keyword
+  # operator knob is the per-channel `streaming` mode switch. A channel with
+  # no platform edit budget declares its own pacing in the spec; the keyword
   # overrides on start_link/2 exist for tests.
   @edit_interval_ms 1_000
   @min_draft_chars 30
@@ -117,7 +125,8 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   `opts` carries the rotation pair the gateway resolved from the channel:
   `:measure` (rendered-length measurer) and `:rotate_at` (card size). Omitted,
-  the draft freezes at the channel's own limit instead of rotating.
+  the draft freezes at the channel's own limit instead of rotating. `:pacing`
+  is the channel's own throttle; omitted, the engine's constants apply.
   """
   @spec build_spec(module(), struct(), keyword()) :: Spec.t()
   def build_spec(channel, %{channel: channel_name} = message, opts \\ [])
@@ -130,7 +139,8 @@ defmodule FermixChannels.Gateway.DraftStream do
       seal: fn handle, text -> channel.seal_draft(message, handle, text) end,
       discard: fn handle -> channel.discard_draft(message, handle) end,
       measure: Keyword.get(opts, :measure),
-      rotate_at: Keyword.get(opts, :rotate_at)
+      rotate_at: Keyword.get(opts, :rotate_at),
+      pacing: Keyword.get(opts, :pacing)
     }
   end
 
@@ -181,6 +191,7 @@ defmodule FermixChannels.Gateway.DraftStream do
 
     valid? || raise ArgumentError, "draft-mode spec requires open/edit/seal/discard closures"
     assert_rotation!(spec)
+    assert_pacing!(spec)
   end
 
   defp assert_spec!(%Spec{mode: :block} = spec) do
@@ -201,6 +212,23 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp assert_rotation!(_spec) do
     raise ArgumentError,
           "draft rotation requires both a measure closure and a positive rotate_at"
+  end
+
+  # Pacing is whole or absent: a channel that names an interval but no cap
+  # would run on a mix of its own numbers and a platform's.
+  defp assert_pacing!(%Spec{pacing: nil}), do: :ok
+
+  defp assert_pacing!(%Spec{
+         pacing: %{edit_interval_ms: interval, min_draft_chars: min_chars, max_edits: cap}
+       })
+       when is_integer(interval) and interval > 0 and is_integer(min_chars) and min_chars > 0 and
+              ((is_integer(cap) and cap > 0) or cap == :infinity),
+       do: :ok
+
+  defp assert_pacing!(%Spec{pacing: pacing}) do
+    raise ArgumentError,
+          "draft pacing requires a positive edit_interval_ms and min_draft_chars and a " <>
+            "positive or :infinity max_edits, got: #{inspect(pacing)}"
   end
 
   # Thoughts are ephemeral or absent (decision §9.1): a spec that can post them
@@ -253,7 +281,8 @@ defmodule FermixChannels.Gateway.DraftStream do
   defp init(spec, opts) do
     Process.flag(:trap_exit, true)
     now = monotonic_ms()
-    interval = positive_integer(Keyword.get(opts, :edit_interval_ms), @edit_interval_ms)
+    pacing = pacing(spec)
+    interval = positive_integer(Keyword.get(opts, :edit_interval_ms), pacing.edit_interval_ms)
 
     loop(%{
       spec: spec,
@@ -304,8 +333,8 @@ defmodule FermixChannels.Gateway.DraftStream do
       # turn, swept at seal/discard.
       thought_ids: [],
       interval_ms: interval,
-      min_chars: positive_integer(Keyword.get(opts, :min_draft_chars), @min_draft_chars),
-      max_edits: positive_integer(Keyword.get(opts, :max_edits), @max_edits),
+      min_chars: positive_integer(Keyword.get(opts, :min_draft_chars), pacing.min_draft_chars),
+      max_edits: positive_integer(Keyword.get(opts, :max_edits), pacing.max_edits),
       block_min: positive_integer(Keyword.get(opts, :block_min_chars), @block_min_chars),
       block_max: positive_integer(Keyword.get(opts, :block_max_chars), @block_max_chars),
       idle_ms: positive_integer(Keyword.get(opts, :idle_flush_ms), @idle_flush_ms)
@@ -436,8 +465,21 @@ defmodule FermixChannels.Gateway.DraftStream do
   end
 
   defp frozen?(state) do
-    state.failures >= @max_consecutive_failures or state.write_count >= state.max_edits
+    state.failures >= @max_consecutive_failures or edits_spent?(state)
   end
+
+  defp edits_spent?(%{max_edits: :infinity}), do: false
+  defp edits_spent?(state), do: state.write_count >= state.max_edits
+
+  # The channel's own pacing when its spec declares one, else the constants.
+  defp pacing(%Spec{pacing: nil}),
+    do: %{
+      edit_interval_ms: @edit_interval_ms,
+      min_draft_chars: @min_draft_chars,
+      max_edits: @max_edits
+    }
+
+  defp pacing(%Spec{pacing: pacing}), do: pacing
 
   # Measured on the LIVE slice (everything after the last rotation seal), never
   # on the whole buffer: sealed bubbles are finished messages the engine must
@@ -536,8 +578,9 @@ defmodule FermixChannels.Gateway.DraftStream do
   # The rotation seal is itself a write: once the budget is spent, rotating
   # would overrun max_edits by one. Freeze instead — same bound frozen?
   # enforces at tick entry.
-  defp maybe_rotate(%{write_count: writes, max_edits: cap} = state) when writes >= cap,
-    do: state
+  defp maybe_rotate(%{write_count: writes, max_edits: cap} = state)
+       when is_integer(cap) and writes >= cap,
+       do: state
 
   defp maybe_rotate(state) do
     live = live_text(state)

@@ -180,6 +180,33 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
+  # Stands in for a ConversationStore stalled on a busy Repo: every marker
+  # write waits, unanswered, until the test opens the gate, so the Queue
+  # callback that writes it stays blocked for as long as the test holds it.
+  defmodule GatedStore do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, %{test_pid: test_pid, open?: false, waiting: []}}
+
+    @impl true
+    def handle_call({:append_stopped_marker, _key, _content, _opts}, _from, %{open?: true} = s),
+      do: {:reply, :marked, s}
+
+    def handle_call({:append_stopped_marker, key, _content, _opts}, from, state) do
+      send(state.test_pid, {:marker_waiting, key})
+      {:noreply, %{state | waiting: [from | state.waiting]}}
+    end
+
+    @impl true
+    def handle_info(:open, state) do
+      Enum.each(state.waiting, &GenServer.reply(&1, :marked))
+      {:noreply, %{state | open?: true, waiting: []}}
+    end
+  end
+
   setup do
     task_supervisor = start_supervised!({Task.Supervisor, []})
     {:ok, %{test_pid: self(), task_supervisor: task_supervisor}}
@@ -599,6 +626,197 @@ defmodule FermixChannels.Gateway.QueueTest do
       {Queue, pid, :worker, _modules} when is_pid(pid) -> pid
       _child -> nil
     end)
+  end
+
+  # A Queue callback can wait on the ConversationStore: a crashed or stopped
+  # turn's stopped marker is written inside it (QUEUE-4), and the store can
+  # stall on a busy Repo. A turn that asks its Queue anything meanwhile waits
+  # for the answer; a busy Queue must never read as a gone one, which made a
+  # finished turn drop its reply unseen. The gate stays shut only until the
+  # turn is seen waiting: no test waits out a production call budget. What
+  # tells a wait with no budget from one with a budget it has not used up yet
+  # is the call itself, so each test traces the waiting calls and reads the
+  # timeout they carry.
+  describe "a Queue busy in a slow store call" do
+    test "a finished turn waits for its Queue and delivers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+      test_pid = ctx.test_pid
+
+      result_fn = fn outcome -> send(test_pid, {:turn_result, outcome}) end
+      Queue.enqueue(queue, make_msg("crash one", "c1", test_pid))
+      Queue.enqueue(queue, make_msg("crash two", "c2", test_pid))
+      Queue.enqueue(queue, Map.put(make_msg("b", "c3", test_pid), :turn_result_fn, result_fn))
+      assert_receive {:turn_started, "crash one", crash_one}, 5_000
+      assert_receive {:turn_started, "crash two", crash_two}, 5_000
+      assert_receive {:turn_started, "b", turn_b}, 5_000
+      trace_calls(call_trace(), turn_b)
+
+      capture_log(fn ->
+        # Two crashed turns: the Queue writes one marker in each :DOWN, so it
+        # stays busy past any single store call's own timeout.
+        send(crash_one, {:proceed, :crash})
+        send(crash_two, {:proceed, :crash})
+        assert_receive {:marker_waiting, _key}, 5_000
+
+        send(turn_b, {:proceed, :reply})
+        assert eventually(fn -> queued_call?(queue, turn_b, :fresh?) end, 250)
+        send(store, :open)
+
+        assert_receive {:reply, "reply:b"}, 5_000
+        assert_receive {:turn_result, {:completed}}, 5_000
+      end)
+
+      assert call_timeout(turn_b, :fresh?) == :infinity
+      assert call_timeout(turn_b, :final_reply_delivered) == :infinity
+      assert call_timeout(turn_b, :claim_turn_result) == :infinity
+    end
+
+    # `/stop` (`Stopper`) asks the Queue to stop everything: one marker write
+    # per stopped turn, inside one callback.
+    test "a stop waits for its marker writes and answers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("one", "c1", ctx.test_pid))
+      Queue.enqueue(queue, make_msg("two", "c2", ctx.test_pid))
+      assert_receive {:turn_started, "one", _one}, 5_000
+      assert_receive {:turn_started, "two", _two}, 5_000
+
+      stop = traced_task(call_trace(), fn -> Queue.stop_all(queue) end)
+      assert_receive {:marker_waiting, _key}, 5_000
+      send(store, :open)
+
+      assert %{active_stopped: 2, pending_cleared: 0} = Task.await(stop)
+      assert call_timeout(stop.pid, :stop_all) == :infinity
+    end
+
+    # An ACP or voice cancel stops one conversation: one marker write.
+    test "a conversation stop waits for its marker write and answers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("one", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "one", _one}, 5_000
+
+      stop = traced_task(call_trace(), fn -> Queue.stop_conversation(key("c1"), queue) end)
+      assert_receive {:marker_waiting, _key}, 5_000
+      send(store, :open)
+
+      assert {:ok, %{active_stopped: 1, pending_cleared: 0}} = Task.await(stop)
+      assert call_timeout(stop.pid, :stop_conversation) == :infinity
+    end
+  end
+
+  # `pid`'s `tag` call is in the Queue's mailbox, waiting for the callback that
+  # is running to finish.
+  defp queued_call?(queue, pid, tag) do
+    {:messages, messages} = Process.info(queue, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^pid, _}, {^tag, _key, ^pid}}, &1))
+  end
+
+  # A trace session of this test's own on `GenServer.call/3`, local calls
+  # included, so `call/2`'s default timeout shows too. No other tracer sees
+  # it, and it ends with the test.
+  defp call_trace do
+    session = :trace.session_create(:queue_test_calls, self(), [])
+    on_exit(fn -> :trace.session_destroy(session) end)
+    1 = :trace.function(session, {GenServer, :call, 3}, true, [:local])
+    session
+  end
+
+  defp trace_calls(session, pid), do: 1 = :trace.process(session, pid, true, [:call])
+
+  # Runs `fun` in a task that starts only once its calls are traced.
+  defp traced_task(session, fun) do
+    task =
+      Task.async(fn ->
+        receive do
+          :traced -> fun.()
+        after
+          5_000 -> :never_traced
+        end
+      end)
+
+    trace_calls(session, task.pid)
+    send(task.pid, :traced)
+    task
+  end
+
+  # The timeout `pid`'s traced call carried, for the request `tag` or tagged
+  # `tag`.
+  defp call_timeout(pid, tag) do
+    receive do
+      {:trace, ^pid, :call, {GenServer, :call, [_server, request, timeout]}}
+      when request == tag or (is_tuple(request) and elem(request, 0) == tag) ->
+        timeout
+    after
+      5_000 -> flunk("#{inspect(pid)} made no traced #{inspect(tag)} call")
+    end
+  end
+
+  # A turn task outlives its Queue only for the moment QueueSupervisor takes to
+  # kill it; here it runs under the test's own Task.Supervisor, so it stays.
+  describe "a turn whose Queue is gone" do
+    test "logs that it could not ask whether it is still active, and delivers nothing", ctx do
+      queue = start_queue(ctx)
+      Queue.enqueue(queue, make_msg("orphan", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "orphan", turn_pid}, 5_000
+      ref = Process.monitor(turn_pid)
+      :ok = stop_supervised(:gateway_queue)
+      refute Process.alive?(queue)
+
+      log =
+        capture_log(fn ->
+          send(turn_pid, {:proceed, :reply})
+          assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+        end)
+
+      assert log =~ "could not make its fresh? call"
+      assert log =~ "its Queue is gone"
+      refute_received {:reply, _text}
+      refute_received {:committed, _response}
+    end
+
+    test "logs each call it could not make after it delivered", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      reply_fn = fn {:text, text} ->
+        send(test_pid, {:delivering, text, self()})
+
+        receive do
+          :delivered -> :ok
+        after
+          5_000 -> :ok
+        end
+      end
+
+      msg =
+        make_msg("late", "c1", test_pid)
+        |> Map.put(:reply_fn, reply_fn)
+        |> Map.put(:turn_result_fn, fn outcome -> send(test_pid, {:turn_result, outcome}) end)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "late", turn_pid}, 5_000
+      ref = Process.monitor(turn_pid)
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:delivering, "reply:late", ^turn_pid}, 5_000
+      :ok = stop_supervised(:gateway_queue)
+      refute Process.alive?(queue)
+
+      log =
+        capture_log(fn ->
+          send(turn_pid, :delivered)
+          assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+        end)
+
+      assert log =~ "could not make its final_reply_delivered call"
+      assert log =~ "could not make its claim_turn_result call"
+      # It committed (it had passed fresh?), but no Queue handed it its outcome.
+      assert_received {:committed, "reply:late"}
+      refute_received {:turn_result, _outcome}
+    end
   end
 
   describe "failure handling" do

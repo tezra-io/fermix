@@ -32,6 +32,14 @@
         "invokes skill self_knowledge",
         "explains the sandbox gates file/exec built-ins with modes (strict/standard/open) and always-denied protected paths"
       ]
+    },
+    {
+      "name": "connect_telegram",
+      "prompt": "How do I connect Fermix to Telegram?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "names the bot token from @BotFather /newbot and the numeric Telegram user id (from @userinfobot, not /whoami) as the two values, entered in the Mac app's Settings > Channels > Telegram or browser setup on Linux, then a restart and pressing Start (/start) in the bot's chat"
+      ]
     }
   ]
 }

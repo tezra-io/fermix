@@ -110,11 +110,14 @@ defmodule FermixCore.Capabilities.MCP.Capability do
       policy: Keyword.get(opts, :policy)
     }
 
+    # `access_sensitive?` comes only from a plugin manifest (`Dist.McpSource`);
+    # operator `[mcp.servers.*]` overrides cannot set it.
     base_metadata = %{
       mcp_server: server,
       mcp_source: source_label(source_id),
       original_name: original,
-      sanitized_name: sanitized
+      sanitized_name: sanitized,
+      access_sensitive?: Map.get(overrides, :access_sensitive?, false) == true
     }
 
     Capability.new(%{

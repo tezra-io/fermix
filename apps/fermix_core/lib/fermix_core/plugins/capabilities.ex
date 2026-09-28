@@ -72,6 +72,7 @@ defmodule FermixCore.Plugins.Capabilities do
         plugin_tool: name,
         auth_profile: auth_profile,
         read_only?: Map.get(tool, "read_only") == true,
+        access_sensitive?: Map.get(tool, "access_sensitive") == true,
         category: :plugin,
         when_to_use: tool_description(plugin, tool),
         examples: [],

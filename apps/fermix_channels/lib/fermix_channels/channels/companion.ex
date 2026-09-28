@@ -11,9 +11,11 @@ defmodule FermixChannels.Channels.Companion do
   The adapter owns no socket. It writes to the timeline through
   `Companion.Output` (the same writes and events the mobile adapter makes) and
   broadcasts the logical events to every connection watching the profile,
-  through the `registry/0` those connections join after their handshake. A
-  turn's replies and its ending go through `Companion.Turns`, which writes and
-  announces them only once the queue fires the turn's outcome.
+  through the `registry/0` those connections join after their handshake. A row
+  it writes reaches the phones too (`Companion.Fanout`); an approval stays on
+  this socket, the only transport its token resolves from. A turn's replies
+  and its ending go through `Companion.Turns`, which writes and announces them
+  only once the queue fires the turn's outcome.
 
   The stream tier is `:raw`: the gateway hands the turn `build_raw_stream_callback/1`
   verbatim. The loop's stream events are cumulative snapshots, so the callback
@@ -26,6 +28,8 @@ defmodule FermixChannels.Channels.Companion do
 
   require Logger
 
+  alias FermixChannels.Companion.Approvals
+  alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
@@ -103,38 +107,6 @@ defmodule FermixChannels.Channels.Companion do
     dispatch(registry, profile_id, {:companion_event, event})
   end
 
-  @doc """
-  Announce one timeline row written outside a turn's completion (a user's
-  message, a slash command's answer, a delivery, a row the phone wrote) to
-  every connection watching `profile_id`, as it is written. A turn's own reply
-  is announced by its `text_done` instead.
-  """
-  @spec announce_row(String.t(), map(), atom()) :: :ok
-  def announce_row(profile_id, row, registry \\ @registry)
-      when is_binary(profile_id) and is_map(row) and is_atom(registry) do
-    Registry.dispatch(registry, profile_id, fn entries ->
-      event = row_event(profile_id, row)
-      Enum.each(entries, fn {pid, _value} -> send(pid, {:companion_event, event}) end)
-    end)
-  end
-
-  @doc "The `row` event that announces one timeline row: what a client shows."
-  @spec row_event(String.t(), map()) :: map()
-  def row_event(
-        profile_id,
-        %{server_seq: seq, role: role, content: content, created_at: %DateTime{} = at} = row
-      ) do
-    %{
-      "t" => "row",
-      "profile_id" => profile_id,
-      "server_seq" => seq,
-      "role" => role,
-      "text" => content,
-      "ts" => DateTime.to_iso8601(at)
-    }
-    |> put_present("client_msg_id", Map.get(row, :client_msg_id))
-  end
-
   @impl true
   def parse_webhook(_params), do: {:error, :unsupported_transport}
 
@@ -186,7 +158,9 @@ defmodule FermixChannels.Channels.Companion do
 
   @impl true
   def build_turn_result(%Message{} = message) do
-    fn outcome -> Turns.outcome(message, outcome) end
+    fn outcome ->
+      with {:ok, _settled} <- Turns.outcome(message, outcome), do: :ok
+    end
   end
 
   @impl true
@@ -195,12 +169,17 @@ defmodule FermixChannels.Channels.Companion do
     send_approval(message, %{kind: :sandbox, text: text, token: token})
   end
 
-  @doc "Deliver a kind-aware approval card with exact approve and deny routes."
+  @doc """
+  Deliver a kind-aware approval card with exact approve and deny routes, to
+  this socket's connections alone: its token resolves only from here (M19
+  §9.5). It is kept until it resolves or expires, for a client that connects
+  later.
+  """
   @impl true
   @spec send_approval(Message.t(), map()) :: :ok | {:error, term()}
   def send_approval(%Message{} = message, %{kind: kind, text: text, token: token} = spec)
       when kind in [:sandbox, :soul] and is_binary(text) and is_binary(token) do
-    broadcast(message.chat_id, Output.approval(spec))
+    Approvals.announce(Approvals.server(), message.chat_id, Output.approval(spec), :companion)
   end
 
   @doc """
@@ -240,9 +219,12 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   # A row written here is no turn's completion (a slash command's answer, a
-  # delivery), so it is announced as a `row`, not a `text_done`; a row the
-  # store deduplicated was announced when it was created.
-  defp announce_written(:created, profile, row), do: announce_row(profile, row)
+  # delivery), so it is announced as a `row`, not a `text_done`, to every
+  # watcher of the profile, each wire in its own shape; a row the store
+  # deduplicated was announced when it was created.
+  defp announce_written(:created, profile, row),
+    do: Fanout.announce(profile, Output.row(profile, row))
+
   defp announce_written(:existing, _profile, _row), do: :ok
 
   # One durable timeline row is one delivered outbound message; a row the store
@@ -359,7 +341,4 @@ defmodule FermixChannels.Channels.Companion do
   def store, do: Application.get_env(:fermix_channels, :companion_store, Timeline)
 
   defp new_turn_id, do: "turn-#{System.unique_integer([:positive, :monotonic])}"
-
-  defp put_present(map, _key, nil), do: map
-  defp put_present(map, key, value), do: Map.put(map, key, value)
 end

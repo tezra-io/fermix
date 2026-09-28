@@ -83,6 +83,9 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
         :crash ->
           raise "scripted turn crash"
+
+        {:crash, message} ->
+          raise message
       after
         20_000 -> {:ok, "scripted runner timed out", 0}
       end
@@ -658,6 +661,26 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       refute response["error"]["message"] =~ "s3cret-value-in-the-reason"
       refute response["error"]["message"] =~ "tool_exploded"
     end
+
+    # A provider's credential refusal comes back as a typed error, never as a
+    # raise, so a crash is a process failure however its reason reads: a raise
+    # at line 401 must not send Buzz to dead-letter the prompt instead of
+    # retrying it.
+    test "a crashed turn whose reason reads like an auth failure is an internal error", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "hi"}])
+      assert_receive {:turn_started, _msg, runner}, 5_000
+
+      {{_frames, response}, _log} =
+        with_log(fn ->
+          send(runner, {:crash, "boom at line 401: unauthorized"})
+          recv_response(client, 3)
+        end)
+
+      assert response["error"]["code"] == -32_603
+      refute response["error"]["message"] =~ "Re-authenticate"
+    end
   end
 
   # A Queue that dies takes its turn tasks with it (`QueueSupervisor`), and no
@@ -787,6 +810,109 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       assert {[], %{"error" => %{"code" => -32_800}}} = recv_response(client, 3)
       assert {:monitors, []} = Process.info(peer, :monitors)
     end
+
+    # The Peer is held while the cancel and then the Queue's death reach it, so
+    # it reads the cancel with its prompt's Queue already gone and the `:DOWN`
+    # still queued behind it: the window in which no Queue may be registered.
+    test "a cancel that finds its prompt's Queue gone answers cancelled, once", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, _msg, _runner}, 5_000
+
+      {{frames, response}, log} =
+        with_log(fn ->
+          :ok = :sys.suspend(peer)
+          notify(client, "session/cancel", %{"sessionId" => session_id})
+          wait_until(fn -> mailbox_size(peer) >= 1 end)
+          kill_queue(ctx)
+          wait_until(fn -> mailbox_size(peer) >= 2 end)
+          :ok = :sys.resume(peer)
+          recv_response(client, 3)
+        end)
+
+      assert frames == []
+      assert response["result"] == %{"stopReason" => "cancelled"}
+      assert log =~ "the Queue that held its turn is gone"
+
+      # Answered once: closing the turn flushed the dead Queue's :DOWN.
+      assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
+      assert {:monitors, []} = Process.info(peer, :monitors)
+
+      # The connection lives on and takes the next prompt.
+      wait_until(fn -> is_pid(queue_child(ctx.queue_sup)) end)
+      prompt(client, 4, session_id, [%{"type" => "text", "text" => "again"}])
+      assert_receive {:turn_started, _msg, next_runner}, 5_000
+      finish(next_runner, "done")
+      assert {_frames, %{"result" => %{"stopReason" => "end_turn"}}} = recv_response(client, 4)
+    end
+
+    # The same window for `$/cancel_request`, held open: with the Queue's
+    # supervisor suspended, no Queue is registered while the Peer reads it.
+    test "a cancel by request id that finds its prompt's Queue gone answers once", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, _msg, _runner}, 5_000
+      :ok = :sys.suspend(ctx.queue_sup)
+
+      {response, log} =
+        try do
+          with_log(fn ->
+            :ok = :sys.suspend(peer)
+            notify(client, "$/cancel_request", %{"requestId" => 3})
+            wait_until(fn -> mailbox_size(peer) >= 1 end)
+            kill_queue(ctx)
+            wait_until(fn -> mailbox_size(peer) >= 2 end)
+            :ok = :sys.resume(peer)
+            recv_response(client, 3)
+          end)
+        after
+          :ok = :sys.resume(ctx.queue_sup)
+        end
+
+      assert {[], %{"error" => %{"code" => -32_800}}} = response
+      assert log =~ "the Queue that held its turn is gone"
+
+      # Answered once: closing the turn flushed the dead Queue's :DOWN.
+      assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
+      assert {:monitors, []} = Process.info(peer, :monitors)
+    end
+
+    test "a bridge disconnect after the Queue died ends the Peer normally", ctx do
+      client = initialized(ctx)
+      session_id = new_session(client, 2)
+      peer = peer_of(session_id)
+      peer_ref = Process.monitor(peer)
+      prompt(client, 3, session_id, [%{"type" => "text", "text" => "long job"}])
+      assert_receive {:turn_started, _msg, _runner}, 5_000
+
+      {_result, log} =
+        with_log(fn ->
+          :ok = :sys.suspend(peer)
+          :ok = :gen_tcp.close(client)
+          wait_until(fn -> mailbox_size(peer) >= 1 end)
+          :ok = stop_supervised(:acp_queue)
+          :ok = :sys.resume(peer)
+          assert_receive {:DOWN, ^peer_ref, :process, ^peer, :normal}, 5_000
+        end)
+
+      assert log =~ "the Queue that held its turn is gone"
+    end
+  end
+
+  defp mailbox_size(pid) do
+    {:message_queue_len, size} = Process.info(pid, :message_queue_len)
+    size
+  end
+
+  defp kill_queue(ctx) do
+    queue = GenServer.whereis(ctx.queue)
+    ref = Process.monitor(queue)
+    Process.exit(queue, :kill)
+    assert_receive {:DOWN, ^ref, :process, ^queue, :killed}, 5_000
   end
 
   # A prompt is answered with a JSON-RPC error only while re-running it is safe.

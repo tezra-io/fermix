@@ -138,5 +138,56 @@ defmodule FermixCore.Capabilities.CapabilityTest do
       assert {:ok, %{args: %{}, context: %{}, suffix: "bonus"}} =
                Capability.execute(cap, %{}, %{})
     end
+
+    # The access gate sits at this one boundary: a held call returns the gate's
+    # result and the executor is never applied.
+    test "a flagged capability in a context with no owner never calls its executor" do
+      cap =
+        Capability.new(%{
+          name: "tesla_unlock_doors",
+          description: "x",
+          parameters: %{},
+          kind: :mcp,
+          policy_class: :external_api,
+          metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"},
+          executor: {FakeExecutor, :no_extra, []}
+        })
+
+      assert {:ok, %{success: false, error: error}} =
+               Capability.execute(cap, %{"vin" => "V"}, %{agent_name: "worker", subagent_depth: 1})
+
+      assert error =~ "not sent"
+    end
+
+    test "a flagged capability in a tainted context never calls its executor" do
+      cap =
+        Capability.new(%{
+          name: "tesla_unlock_doors",
+          description: "x",
+          parameters: %{},
+          kind: :mcp,
+          policy_class: :external_api,
+          metadata: %{access_sensitive?: true, plugin_owned?: true, plugin: "tesla"},
+          executor: {FakeExecutor, :no_extra, []}
+        })
+
+      test_pid = self()
+
+      tainted = %{
+        agent_name: "main",
+        source_trust: :operator,
+        computer_use_origin: :interactive,
+        conversation_key: {"telegram", "cap-#{System.unique_integer([:positive])}", :root},
+        outside_sources: MapSet.new([{:tool, "web_fetch"}]),
+        reply_fn: fn part -> send(test_pid, {:reply, part}) end,
+        approval_fn: fn _request -> {:ok, "TOKEN", :new} end
+      }
+
+      assert {:ok, %{success: false, error: error}} =
+               Capability.execute(cap, %{"vin" => "V"}, tainted)
+
+      assert error =~ "Not sent"
+      assert_received {:reply, {:approval_prompt, _prompt, "TOKEN"}}
+    end
   end
 end

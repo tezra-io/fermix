@@ -1,6 +1,8 @@
 defmodule FermixCore.Jobs.SchedulerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Scheduler
@@ -396,6 +398,48 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     defp request_tag(request) when is_tuple(request), do: elem(request, 0)
     defp request_tag(request) when is_atom(request), do: request
+  end
+
+  defmodule RefuseDeliveryWriteRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo that refuses the first
+    # job_runs write recording a `:status` delivery, the way a full disk would,
+    # and reports the caller to the test. Every later request, the Scheduler's
+    # crash-path write included, reaches the real Repo.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      {:ok,
+       %{
+         real: Keyword.fetch!(opts, :real),
+         notify: Keyword.fetch!(opts, :notify),
+         status: Keyword.fetch!(opts, :status),
+         armed: true
+       }}
+    end
+
+    @impl true
+    def handle_call(
+          {:upsert_job_run, %{delivery_status: status}},
+          {caller, _tag},
+          %{armed: true, status: status} = state
+        ) do
+      send(state.notify, {:delivery_write_refused, caller})
+      {:reply, {:error, :injected_fault}, %{state | armed: false}}
+    end
+
+    def handle_call(request, _from, state),
+      do: {:reply, GenServer.call(state.real, request), state}
+  end
+
+  defmodule RefusedDelivery do
+    @moduledoc false
+    # A channel adapter whose platform refuses every send with a non-transient
+    # error, so the run's delivery fails with that reason and no retry.
+    def send_message(_target, _text, _opts), do: {:error, :chat_not_found}
   end
 
   setup do
@@ -1596,6 +1640,189 @@ defmodule FermixCore.Jobs.SchedulerTest do
     end
   end
 
+  describe "refused writes after a run" do
+    # A Repo that refuses the delivery-status write after a send (a full disk)
+    # must not leave the row to the reaper's generic "no live runner" text: the
+    # runner dies naming the outcome, and the Scheduler's crash path records it.
+    test "a refused delivery-status write fails the delivery with its real cause", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      assert {:ok, job} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Refused Delivery Write",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Run, then report.",
+                   delivery_mode: "local"
+                 },
+                 repo: repo,
+                 now: ~U[2026-05-02 14:00:00Z]
+               )
+
+      job_id = job.id
+
+      proxy =
+        start_supervised!({RefuseDeliveryWriteRepo, real: repo, notify: self(), status: "sent"})
+
+      scheduler = start_scheduler(proxy, runner_supervisor, [])
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:delivery_write_refused, runner}
+      await_reaped(runner, scheduler)
+
+      assert {:ok, run} = Repo.get_job_run(run_id, server: repo)
+      assert run.status == "ok"
+      assert run.delivery_status == "failed"
+      assert run.delivery_error =~ "delivery_status_write_failed"
+      assert run.delivery_error =~ ~s("sent")
+      refute run.delivery_error =~ "no live runner"
+    end
+
+    # A delivery that failed on the platform and whose "failed" write is then
+    # refused: the recorded cause must still carry the platform's own reason.
+    test "a refused write of a failed delivery keeps the platform's reason", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      assert {:ok, job} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Refused Failed Delivery Write",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Run, then report.",
+                   delivery_mode: "channel",
+                   delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+                 },
+                 repo: repo,
+                 now: ~U[2026-05-02 14:00:00Z]
+               )
+
+      job_id = job.id
+
+      proxy =
+        start_supervised!({RefuseDeliveryWriteRepo, real: repo, notify: self(), status: "failed"})
+
+      scheduler = start_scheduler(proxy, runner_supervisor, delivery_adapter: RefusedDelivery)
+
+      assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+      assert_receive {:job_runner, :started, run_id, ^job_id}
+      assert_receive {:delivery_write_refused, runner}
+      await_reaped(runner, scheduler)
+
+      assert {:ok, run} = Repo.get_job_run(run_id, server: repo)
+      assert run.status == "ok"
+      assert run.delivery_status == "failed"
+      assert run.delivery_error =~ "delivery_status_write_failed"
+      assert run.delivery_error =~ ":chat_not_found"
+    end
+
+    test "a refused memory-source write after a run is logged and the run completes", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Refused Source Write")
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(start_fault_repo(repo, :upsert_memory_source), runner_supervisor, [])
+
+      log =
+        capture_log(fn ->
+          assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+          assert_receive {:job_runner, :started, run_id, ^job_id}
+          assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+        end)
+
+      assert log =~ "Scheduled job #{job_id} memory source update failed: :injected_fault"
+    end
+
+    test "a failed memory-source lookup after a failed run is logged", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Failed Source Lookup")
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(start_fault_repo(repo, :get_memory_source), runner_supervisor,
+          adapter: FailingAdapter
+        )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+          assert_receive {:job_runner, :started, run_id, ^job_id}
+          assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+        end)
+
+      assert log =~ "Scheduled job #{job_id} memory source lookup failed: :injected_fault"
+    end
+
+    test "a refused memory-source write on the crash path is logged", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      {:ok, job} = seed_recurring_job(repo, "Refused Crash Source Write")
+      job_id = job.id
+
+      scheduler =
+        start_scheduler(start_fault_repo(repo, :upsert_memory_source), runner_supervisor,
+          runner_module: LiveRunner
+        )
+
+      log =
+        capture_log(fn ->
+          assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+          assert_receive {:job_runner, :started, _run_id, ^job_id}
+          # The run is still queued, so the crash path settles it and then
+          # writes the job's memory source.
+          assert [{_id, runner, _type, _modules}] =
+                   DynamicSupervisor.which_children(runner_supervisor)
+
+          Process.exit(runner, :kill)
+          await_reaped(runner, scheduler)
+        end)
+
+      assert log =~
+               "Scheduled job source #{job.memory_source_id} crash status write failed: :injected_fault"
+    end
+
+    test "a refused memory-source write on expiry is logged", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      assert {:ok, job} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Refused Expiry Source Write",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Expire.",
+                   expires_at: ~U[2026-05-02 14:10:00Z]
+                 },
+                 repo: repo,
+                 now: ~U[2026-05-02 14:00:00Z]
+               )
+
+      scheduler =
+        start_scheduler(start_fault_repo(repo, :upsert_memory_source), runner_supervisor, [])
+
+      log =
+        capture_log(fn ->
+          assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:10:00Z])
+        end)
+
+      assert {:ok, %{state: "completed"}} = Registry.get_job(job.id, repo: repo)
+
+      assert log =~
+               "Scheduled job source #{job.memory_source_id} expiry status write failed: :injected_fault"
+    end
+  end
+
   defp seed_broken_schedule_job(repo, opts) do
     {:ok, job} =
       Registry.create_job(
@@ -1744,14 +1971,32 @@ defmodule FermixCore.Jobs.SchedulerTest do
     pid
   end
 
-  # A barrier, not a wait: the DOWN proves `pid` is dead, and the Scheduler's
-  # own monitor fired at that same exit, so one :sys.get_state round trip
-  # returns only after its DOWN handler (the reaper) has run.
+  # A barrier on the Scheduler's own DOWN. Our DOWN proves `pid` is dead, but a
+  # monitor taken after the kill can answer :noproc before the dying process has
+  # sent the Scheduler its DOWN. process_info is answered in signal order, so
+  # once it no longer lists the monitor, that DOWN is already queued ahead of
+  # the :sys.get_state request, which returns only after the reaper has run.
   defp await_reaped(pid, scheduler) do
     ref = Process.monitor(pid)
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    await_monitor_released(scheduler, pid, 2_000)
     _state = :sys.get_state(scheduler)
     :ok
+  end
+
+  defp await_monitor_released(scheduler, pid, 0) do
+    flunk("scheduler #{inspect(scheduler)} still monitors dead runner #{inspect(pid)}")
+  end
+
+  defp await_monitor_released(scheduler, pid, attempts) do
+    {:monitors, monitors} = Process.info(GenServer.whereis(scheduler), :monitors)
+
+    if {:process, pid} in monitors do
+      Process.sleep(1)
+      await_monitor_released(scheduler, pid, attempts - 1)
+    else
+      :ok
+    end
   end
 
   defp assert_due_timer_backoff(scheduler) do
@@ -1779,6 +2024,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
          reconciliation_interval_ms: Keyword.get(opts, :reconciliation_interval_ms, 60_000),
          runner_module: Keyword.get(opts, :runner_module, FermixCore.Jobs.Runner),
          adapter: Keyword.get(opts, :adapter, TerminalAdapter),
+         delivery_adapter: Keyword.get(opts, :delivery_adapter),
          adapter_opts: [
            sleep_ms: Keyword.get(opts, :runner_delay_ms, 0),
            response:

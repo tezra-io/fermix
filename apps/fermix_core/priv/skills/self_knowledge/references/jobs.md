@@ -22,6 +22,8 @@
 
 No other parameters exist: the iteration cap (100), isolation, the `job:<id>` memory scope, the `[SILENT]` marker and `capability_policy` are fixed.
 
+**Access-sensitive tools** (a plugin tool its manifest marks `access_sensitive`, such as a car unlock) are reached by a scheduled run only when the job's `allowed_tools` names them; an empty allowlist does not cover them, and a run that calls one anyway gets a refusal (a tool failure in that run). `schedule_job` naming one, and `update_job`, `resume_job` or `run_job_now` on a job that names one, are refused unless the request is the owner's own clean, direct ask (their chat, app or voice, having read nothing from outside this turn, not a delegated worker); jobs that already name one keep running.
+
 `task` is the run's entire brief. It cannot see the conversation that created it, so bake in every value it needs (location, account, recipient) and keep timing in `schedule`/`expires_at`. Ask for a missing detail rather than inventing one; revise with `update_job` rather than recreating.
 
 ## Schedule grammar
@@ -36,7 +38,7 @@ Exactly one of three forms. Free-form English ("daily at 8am") is rejected.
 
 ## Delivery
 
-`none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode.
+`none` sends nothing, `local` records without a channel send, `origin` replies into the creating conversation, `channel` sends to an explicit `delivery_target`. Delivery resolves once at creation and is snapshotted, so later config edits never retarget a job: an explicit mode wins; a `delivery_target` alone implies `channel`; neither falls to `[fermix_core.jobs] default_delivery_mode`/`default_delivery_target`, else `none`. A job the owner expects to hear from needs an explicit mode. The two defaults are `config.toml` keys only; no settings pane or setup tab writes them.
 
 `channel` with no target and no configured default is rejected, as is a target missing `platform` or a destination key. `origin` derives platform, chat id and thread from the creating chat and is rejected without one; an ACP session refuses it outright, so schedule to an explicit channel there. From the Mac app's chat it delivers into the companion timeline, written even while the app is closed and caught up when it reconnects (`companion` reference).
 
@@ -52,7 +54,7 @@ Trust is stamped from the creating turn and never widens; a context carrying no 
 
 ## Lifecycle
 
-A recurring job due older than the freshness window (`[fermix_core.jobs] run_freshness_window_seconds`, default 3600) is skipped rather than fired at the wrong wall-clock and its schedule advances; a one-off never goes stale and runs late instead. `expires_at` marks the job expired.
+A recurring run more than an hour overdue (a fixed window, not a setting) is skipped rather than fired at the wrong wall-clock, and its schedule advances; a one-off never goes stale and runs late instead. `expires_at` marks the job expired.
 
 A schedule or timezone that no longer parses is terminal: the job moves to `disabled` with the reason in `last_error` and is never retried. Fix it with `update_job`, then `resume_job`.
 

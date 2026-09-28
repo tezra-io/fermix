@@ -75,14 +75,16 @@ defmodule FermixCore.ReadinessTest do
              )
     end
 
-    test "missing personalization gates" do
+    # The first boot seeds personalization from the machine (`Setup.HomeSeeder`),
+    # so a missing value is a nudge, never a reason to call setup unfinished.
+    test "missing personalization is advisory" do
       seed_ready_home()
       Application.put_env(:fermix_core, :personalization, [])
 
       report = Readiness.report()
 
-      assert report.status == :setup_required
-      assert Enum.any?(report.failures, &(&1.detail_key == "personalization" and &1.gating))
+      assert report.status == :ready
+      assert Enum.any?(report.failures, &(&1.detail_key == "personalization" and not &1.gating))
     end
 
     # Ready is "no gating failure remains", and every advisory failure stays in
@@ -247,13 +249,12 @@ defmodule FermixCore.ReadinessTest do
   end
 
   describe "report/0" do
-    test "includes personalization failure alongside other failures" do
+    test "includes the personalization failure alongside other failures, as advisory" do
       Application.put_env(:fermix_core, :personalization, [])
 
       report = Readiness.report()
 
-      assert report.status == :setup_required
-      assert Enum.any?(report.failures, &(&1.component == "personalization"))
+      assert Enum.any?(report.failures, &(&1.component == "personalization" and not &1.gating))
     end
 
     test "openai_codex readiness uses Codex auth and does not require an OpenAI API key" do

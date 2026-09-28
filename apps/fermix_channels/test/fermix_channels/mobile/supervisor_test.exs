@@ -3,6 +3,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Channels.Mobile, as: MobileChannel
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.Management
@@ -41,6 +42,18 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     assert Enum.find_index(ids, &(&1 == instance_names.request_coordinator)) <
              Enum.find_index(ids, &(&1 == Listener))
+
+    # Sockets read their candidates from the discovery cache.
+    assert Enum.find_index(ids, &(&1 == FermixChannels.Mobile.Discovery)) <
+             Enum.find_index(ids, &(&1 == Listener))
+
+    # Link previews resolve under a bounded supervisor, up before any socket.
+    assert Enum.find_index(ids, &(&1 == instance_names.unfurl_supervisor)) <
+             Enum.find_index(ids, &(&1 == Listener))
+
+    unfurls = Enum.find(children, &(&1.id == instance_names.unfurl_supervisor))
+    assert {Task.Supervisor, :start_link, [unfurl_opts]} = unfurls.start
+    assert unfurl_opts[:max_children] == MobileChannel.max_concurrent_unfurls()
   end
 
   test "a fresh install starts a dormant listener until first pairing creates identity" do
@@ -61,6 +74,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
                boot_epoch: "fresh-install-test-epoch",
                start_listener?: true,
                listener: [bind: {127, 0, 0, 1}, port: 0],
+               memory_enabled?: fn -> true end,
                names: instance_names
              )
 
@@ -237,10 +251,11 @@ defmodule FermixChannels.Mobile.SupervisorTest do
              Management.health(config: [enabled: true], device_store: store)
 
     # The management verbs name the refusal; status still answers, from
-    # configuration alone, because nothing it could ask was meant to run.
+    # configuration alone, because nothing it could ask was meant to run. The
+    # device list reads the file where it lies, and names what is wrong with it.
     refused = [config: [enabled: true], device_store: store, root: root]
     assert {:error, :mobile_surface_refused} = Management.pair_start(refused)
-    assert {:ok, []} = Management.devices_list(refused)
+    assert {:error, {:devices_decode_failed, ^path, _}} = Management.devices_list(refused)
 
     assert {:ok, %{enabled: true, started: false, refused: true, paired_devices: 0, pairing: nil}} =
              Management.status(refused)
@@ -267,6 +282,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
         boot_epoch: "repaired-boot-epoch",
         start_listener?: false,
         listener: [bind: {127, 0, 0, 1}, port: 0],
+        memory_enabled?: fn -> true end,
         names: instance_names
       )
     end
@@ -356,6 +372,53 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     refute Process.whereis(store)
   end
 
+  # STB-16: the whole timeline lives in Memory.Repo, which answers
+  # `{:error, :disabled}` to everything with memory off. A subtree started then
+  # fails every hello while health reports ready; refuse it, named, instead.
+  test "memory turned off refuses the subtree with a named reason" do
+    root = SafeRm.make_tmp_dir!("mobile-memory-disabled")
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    instance_names = names()
+    store = instance_names.device_store
+    on_exit(fn -> MobileSupervisor.forget_refusal(store) end)
+
+    log =
+      capture_log(fn ->
+        assert :ignore ==
+                 MobileSupervisor.start_link(
+                   name: nil,
+                   root: root,
+                   boot_epoch: "memory-disabled-epoch",
+                   start_listener?: false,
+                   memory_enabled?: fn -> false end,
+                   names: instance_names
+                 )
+      end)
+
+    assert {:error, :memory_disabled} = MobileSupervisor.refusal(store)
+    assert log =~ "memory is turned off"
+    refute Process.whereis(store)
+    refute File.exists?(Path.join(root, "mobile"))
+
+    assert {:ok, %{refused: true, refusal: :memory_disabled}} =
+             Management.status(config: [enabled: true], device_store: store, root: root)
+  end
+
+  test "each refusal publishes the word for its fault class" do
+    for {reason, word} <- [
+          {:memory_disabled, :memory_disabled},
+          {{:identity_incomplete, ["/x/tls.crt"]}, :identity},
+          {{:identity_unreadable, "/x", :eacces}, :identity},
+          {{:invalid_identity_transaction, "/x"}, :identity},
+          {{:insecure_attachment_manifest, "/x", 0o644}, :attachment_manifest},
+          {{:devices_decode_failed, "/x", :bad}, :trust_store},
+          {{:devices_store_empty, "/x"}, :trust_store}
+        ] do
+      assert MobileSupervisor.refusal_word(reason) == word
+    end
+  end
+
   defp push_config(key) do
     [
       advertise_mdns: false,
@@ -378,6 +441,8 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       device_registry: Module.concat(__MODULE__, "Registry#{suffix}"),
       pair_manager: Module.concat(__MODULE__, "Pair#{suffix}"),
       media_store: Module.concat(__MODULE__, "Media#{suffix}"),
+      unfurl_supervisor: Module.concat(__MODULE__, "Unfurl#{suffix}"),
+      discovery: Module.concat(__MODULE__, "Discovery#{suffix}"),
       request_coordinator: Module.concat(__MODULE__, "Coordinator#{suffix}"),
       listener: Module.concat(__MODULE__, "Listener#{suffix}"),
       mdns_advertiser: Module.concat(__MODULE__, "Mdns#{suffix}"),

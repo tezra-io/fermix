@@ -52,7 +52,11 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     assert Enum.all?(previews, fn preview ->
              preview.site == "Example" and preview.title == "Fermix" and
                preview.description == "A private assistant" and
-               preview.image_ref == String.duplicate("a", 64)
+               preview.image == %{
+                 ref: String.duplicate("a", 64),
+                 mime: "image/png",
+                 size_bytes: byte_size("png-bytes")
+               }
            end)
 
     assert_receive {:request, %{url: "https://93.184.216.34/a", original_host: "example.com"},
@@ -84,7 +88,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       end
     end
 
-    assert {:ok, [%{title: "Title", image_ref: nil}], [warning]} =
+    assert {:ok, [%{title: "Title", image: nil}], [warning]} =
              Unfurl.resolve("https://example.com/a",
                resolver: resolver(),
                request: request,
@@ -178,7 +182,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       {:ok, %{status: status, headers: %{}, body: body, private: %{}}}
     end
 
-    assert {:ok, [%{title: "Title", image_ref: nil}], [warning]} =
+    assert {:ok, [%{title: "Title", image: nil}], [warning]} =
              Unfurl.resolve("https://example.com/a", resolver: resolver(), request: page)
 
     assert warning == {"https://example.com/missing.png", {:http_status, 500}}
@@ -213,7 +217,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       end
     end
 
-    assert {:ok, [%{title: "Title", image_ref: nil}], [warning]} =
+    assert {:ok, [%{title: "Title", image: nil}], [warning]} =
              Unfurl.resolve("https://example.com/a",
                resolver: resolver(),
                request: request,

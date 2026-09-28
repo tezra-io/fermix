@@ -128,6 +128,23 @@ defmodule Fermix.CLI.DevicesCommandTest do
     assert stderr =~ "fermix doctor"
   end
 
+  # R2-2: a caller the daemon refused as not the owner is told that, not that
+  # the channel is down while doctor reports it healthy.
+  test "revoking from a process that is not the owner says why it was refused" do
+    sentence = "Only the owner can pair or forget a phone; run this from your own terminal."
+
+    client = fn "mobile.devices.revoke", _params, _opts ->
+      {:error,
+       {:management_error, "unavailable", "The requested management capability is unavailable.",
+        %{"capability" => "mobile", "sentence" => sentence}}}
+    end
+
+    {status, _stdout, stderr} = run(["revoke", @device_id], client)
+
+    assert status == 1
+    assert stderr == "fermix devices revoke: #{sentence}\n"
+  end
+
   test "rejects malformed ids before calling the daemon" do
     client = fn _method, _params, _opts -> flunk("no call may run") end
 

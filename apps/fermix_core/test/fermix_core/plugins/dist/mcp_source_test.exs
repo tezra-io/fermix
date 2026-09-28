@@ -125,6 +125,28 @@ defmodule FermixCore.Plugins.Dist.McpSourceTest do
     assert spec.capability_metadata.category == :plugin
   end
 
+  # `tools_overrides` is keyed by the helper's own descriptor name, which is the
+  # manifest preview name without the plugin prefix.
+  test "a flagged mcp preview becomes an access_sensitive? override under the helper's name",
+       ctx do
+    unlock = %{
+      "name" => "obsidian_unlock_vault",
+      "description" => "Unlock the vault",
+      "rail" => "mcp",
+      "read_only" => false,
+      "access_sensitive" => true
+    }
+
+    manifest = update_in(obsidian_manifest(), ["tools"], &(&1 ++ [unlock]))
+    dir = write_plugin(ctx.checkout, "obsidian", manifest)
+    File.mkdir_p!(Path.join(dir, "src"))
+    File.write!(Path.join(dir, "src/index.js"), "// server")
+    enable("obsidian", [{"OBSIDIAN_VAULT_PATH", "/tmp/vault"}])
+
+    assert {:ok, [spec]} = McpSource.server_specs(source_opts(ctx))
+    assert spec.tools_overrides == %{"unlock_vault" => %{access_sensitive?: true}}
+  end
+
   test "non-path args and absolute args pass through unresolved", ctx do
     manifest =
       obsidian_manifest()

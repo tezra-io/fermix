@@ -65,6 +65,57 @@ defmodule FermixChannels.Gateway.Commands.AuthorizationTest do
     end
   end
 
+  # SIDE-V1: the local sockets' transport trust makes every same-user peer an
+  # operator, but the daemon reads who is on the other end (`SocketPeer`). A
+  # process it started, or one no terminal is attached to, is not the owner, so
+  # the approval family refuses it through `in_person/1`; the role gates, which
+  # every other owner command uses, answer by role alone.
+  describe "who sent it (metadata.caller)" do
+    test "in_person/1 refuses a process the daemon started or a detached one" do
+      for caller <- [:daemon_descendant, :detached] do
+        {_message, metadata, _context} = build_local("cli", caller)
+
+        assert Authorization.in_person(metadata) == {:error, :unattended}
+      end
+    end
+
+    test "in_person/1 admits a person's terminal or app, and a message with no caller" do
+      for channel <- ["cli", "companion"] do
+        {_message, metadata, _context} = build_local(channel, :independent)
+
+        assert Authorization.in_person(metadata) == :ok
+      end
+
+      assert Authorization.in_person(%{user_id: "cli"}) == :ok
+    end
+
+    test "the role gates answer by role alone, whoever sent it" do
+      for caller <- [:daemon_descendant, :detached, :independent] do
+        {message, metadata, context} = build_local("cli", caller)
+
+        assert Authorization.owner_only(message, metadata, context) == :ok
+        assert Authorization.operator_only(message, metadata, context) == :ok
+      end
+    end
+  end
+
+  defp build_local(channel, caller) do
+    metadata = %{user_id: channel, caller: caller}
+
+    message =
+      Message.new!(%{
+        id: "msg-#{System.unique_integer([:positive])}",
+        content: "/confirm ABC",
+        sender: channel,
+        channel: channel,
+        chat_id: channel,
+        reply_target: channel,
+        metadata: metadata
+      })
+
+    {message, metadata, %{authorization: %Decision{role: :operator, trust: :operator}}}
+  end
+
   defp build(user_id, role) do
     message =
       Message.new!(%{

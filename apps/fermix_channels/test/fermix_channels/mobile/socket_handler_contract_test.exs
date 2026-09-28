@@ -106,6 +106,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
                update_device: fn _store, @new_device_id, %{last_seen: %DateTime{}} ->
                  {:ok, %{device_id: @new_device_id}}
                end,
+               discover: fn -> {:ok, []} end,
                hello_ack_builder: fn _state -> {:ok, hello_ack_payload()} end
              )
 
@@ -160,6 +161,62 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert socket.phase == :ready
     assert socket.client_seq == 2
     assert socket.server_seq == 2
+  end
+
+  test "a hello from a newer app is refused typed, encrypted at the daemon's version" do
+    gateway = Noise.generate_keypair()
+    device = Noise.generate_keypair()
+
+    assert {:ok, client} =
+             Noise.initialize(:initiator, :ik,
+               static_keypair: device,
+               remote_static: gateway.public
+             )
+
+    assert {:ok, socket} =
+             SocketHandler.init(
+               gateway_keypair: gateway,
+               device_store: :device_store,
+               device_registry: :unused_registry,
+               find_device: fn :device_store, _remote_static ->
+                 {:ok, %{device_id: @device_id}}
+               end
+             )
+
+    {client, socket} = complete_handshake(client, socket)
+    daemon_version = Protocol.protocol_version()
+    next_version = daemon_version + 1
+
+    hello = %{
+      "device_id" => @device_id,
+      "app_version" => "9.0.0",
+      "last_server_seq" => 0,
+      "protocol_v" => next_version
+    }
+
+    header =
+      hello |> Map.merge(%{"v" => next_version, "t" => "hello", "seq" => 1}) |> Jason.encode!()
+
+    assert {:ok, ciphertext, client} =
+             Noise.encrypt(client, <<byte_size(header)::32, header::binary>>)
+
+    assert {:stop, {:unsupported_protocol_version, :client_too_new},
+            {1002, "unsupported mobile protocol version"}, [{:binary, refusal}], _socket} =
+             SocketHandler.handle_in({ciphertext, opcode: :binary}, socket)
+
+    assert {:ok, plaintext, _client} = Noise.decrypt(client, refusal)
+    {min, max} = Protocol.supported_version_range()
+
+    assert {%{
+              "v" => ^daemon_version,
+              "t" => "error",
+              "seq" => 1,
+              "code" => "unsupported_protocol_version",
+              "direction" => "client_too_new",
+              "client_version" => ^next_version,
+              "min_version" => ^min,
+              "max_version" => ^max
+            }, <<>>} = decode_server_frame(plaintext)
   end
 
   defp start_registry do

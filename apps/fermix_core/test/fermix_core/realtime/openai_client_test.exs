@@ -202,9 +202,11 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
                "transcript" => "hello"
              })
 
-    assert {:ok, {:user_transcript_done, "question"}} =
+    # The item id binds a spoken answer to the committed item it transcribes.
+    assert {:ok, {:user_transcript_done, "item-7", "question"}} =
              OpenAIClient.decode_server_event(%{
                "type" => "conversation.item.input_audio_transcription.completed",
+               "item_id" => "item-7",
                "transcript" => "question"
              })
 
@@ -257,6 +259,28 @@ defmodule FermixCore.Realtime.OpenAIClientTest do
       assert {:ok, _state} = OpenAIClient.handle_frame({:text, ~s({"no":"type"})}, %{parent: me})
 
       assert_received {:openai_realtime_error, ^me, {:invalid_server_event, %{"no" => "type"}}}
+    end
+
+    # Valid JSON that is not an object used to raise a CaseClauseError in the
+    # socket, which killed it and cost the call a reconnect.
+    test "JSON that is not an object is an error that carries the socket pid" do
+      me = self()
+
+      for payload <- [~s([1]), ~s("text"), ~s(42), ~s(null)] do
+        assert {:ok, _state} = OpenAIClient.handle_frame({:text, payload}, %{parent: me})
+        assert_received {:openai_realtime_error, ^me, {:invalid_server_event, shown}}
+        assert shown == payload |> Jason.decode!() |> inspect()
+      end
+    end
+
+    test "a non-object frame reaches the session as a bounded description" do
+      me = self()
+      huge = Jason.encode!([String.duplicate("x", 10_000) | Enum.to_list(1..10_000)])
+
+      assert {:ok, _state} = OpenAIClient.handle_frame({:text, huge}, %{parent: me})
+
+      assert_received {:openai_realtime_error, ^me, {:invalid_server_event, shown}}
+      assert byte_size(shown) < 200
     end
 
     # The socket's EXIT is the one signal that it died. A second notice from
