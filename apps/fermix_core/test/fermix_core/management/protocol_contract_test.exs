@@ -23,6 +23,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
+  alias FermixCore.Providers.ModelCatalog
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -310,6 +311,30 @@ defmodule FermixCore.Management.ProtocolContractTest do
       |> Enum.map(& &1["id"])
 
     assert fixture == published
+  end
+
+  # A provider section's Model row offers the catalog, and `default_model` is
+  # the model in force, which for an unconfigured provider is the catalog's
+  # default. The two are one list, so a golden whose options lag the catalog
+  # holds a value none of its options can show: the app's choice control drew
+  # a blank popup for `gpt-6-astra` while the options still began at
+  # `gpt-5.6-sol`.
+  test "every golden provider section offers the catalog's models and holds one of them" do
+    for fixture <- fixtures(@successes),
+        String.starts_with?(fixture["name"], "settings_get_providers_") do
+      result = fixture["response"]["result"]
+      "providers." <> provider = result["id"]
+      row = Enum.find(result["rows"], &(&1["key"] == "default_model"))
+
+      expected =
+        provider
+        |> String.to_existing_atom()
+        |> ModelCatalog.models_for()
+        |> Enum.map(&Row.option(&1.id, &1.label))
+
+      assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
+      assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
+    end
   end
 
   # Every kind and format a row may carry is pinned to the module, so a kind
