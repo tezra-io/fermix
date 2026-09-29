@@ -52,6 +52,7 @@ defmodule FermixCore.Browser.HostServer do
   @behaviour FermixCore.Browser.Backend
 
   alias FermixCore.Browser.Capabilities
+  alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.HostAvailability
@@ -71,10 +72,6 @@ defmodule FermixCore.Browser.HostServer do
   @observing_kinds ~w(click submit click_coords)
   @download_buffer 10
   @reason_chars 200
-
-  # The one named profile whose task tells the app to show its pane and
-  # window; every other profile that reaches this backend runs unseen.
-  @visible_profile "fermix_visible"
 
   @cancelled_sentence "The person cancelled the browser task in the Fermix app."
 
@@ -211,7 +208,7 @@ defmodule FermixCore.Browser.HostServer do
             "tab_cap" => state.config.max_tabs * state.config.max_live_profiles
           }
           |> observe_fields(observe?, fresh_options(state))
-          |> visible_field(state.profile_name)
+          |> visible_field(state.profile_name, state.config)
 
         state
         |> request("tab.open", payload, navigation_timeout(state.config))
@@ -670,10 +667,25 @@ defmodule FermixCore.Browser.HostServer do
 
   defp observe_fields(payload, false, _opts), do: Map.put(payload, "observe", false)
 
-  # Carries the task's own intent, not a look at the page: absent unless the
-  # task runs on the visible profile, never an explicit false.
-  defp visible_field(payload, @visible_profile), do: Map.put(payload, "visible", true)
-  defp visible_field(payload, _profile_name), do: payload
+  # Carries the task's own intent, not a look at the page: present, and true,
+  # exactly when the profile's own window would be visible in the managed
+  # Chrome it stands in for — `fermix_visible` always, `fermix` unless
+  # `FERMIX_BROWSER_HEADLESS` overrides automatic to headless, and never for
+  # `fermix_headless`, which stays absent rather than an explicit false.
+  defp visible_field(payload, profile_name, config) do
+    if visible_profile?(profile_name, config),
+      do: Map.put(payload, "visible", true),
+      else: payload
+  end
+
+  defp visible_profile?(profile_name, config) do
+    case Config.profile(config, profile_name) do
+      {:ok, %{headless: false}, _name} -> true
+      {:ok, %{headless: true}, _name} -> false
+      {:ok, %{headless: :auto}, _name} -> ChromeLauncher.headless_override() != {:ok, true}
+      {:error, %Error{}} -> false
+    end
+  end
 
   # The page the app handed back after a navigation or an action, judged and
   # rendered with the options of the look it is compared against. Identical

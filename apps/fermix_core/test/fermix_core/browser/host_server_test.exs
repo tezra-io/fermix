@@ -142,7 +142,7 @@ defmodule FermixCore.Browser.HostServerTest do
           assert payload["observe"] == true
           assert String.starts_with?(payload["task_id"], "task-")
           assert String.starts_with?(payload["download_dir"], "/")
-          refute Map.has_key?(payload, "visible")
+          assert payload["visible"] == true
 
           {:ok,
            %{
@@ -177,6 +177,48 @@ defmodule FermixCore.Browser.HostServerTest do
     assert {:ok, _result} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
     assert [{"tab.open", payload}] = FakeBrowserHostConnection.requests(connection)
     assert payload["visible"] == true
+  end
+
+  test "a task on the headless profile never tells the app to show its pane" do
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => fn payload ->
+          refute Map.has_key?(payload, "visible")
+          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+        end
+      })
+
+    pid = start_server(host_availability: host, profile_name: "fermix_headless")
+
+    assert {:ok, _result} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+    assert [{"tab.open", payload}] = FakeBrowserHostConnection.requests(connection)
+    refute Map.has_key?(payload, "visible")
+  end
+
+  test "an explicit headless override keeps the automatic profile's pane unseen" do
+    prior = System.get_env("FERMIX_BROWSER_HEADLESS")
+    System.put_env("FERMIX_BROWSER_HEADLESS", "1")
+
+    on_exit(fn ->
+      case prior do
+        nil -> System.delete_env("FERMIX_BROWSER_HEADLESS")
+        value -> System.put_env("FERMIX_BROWSER_HEADLESS", value)
+      end
+    end)
+
+    {host, connection} =
+      usable_host(%{
+        "tab.open" => fn payload ->
+          refute Map.has_key?(payload, "visible")
+          {:ok, %{"tab_id" => "t1", "url" => "about:blank", "title" => ""}}
+        end
+      })
+
+    pid = start_server(host_availability: host)
+
+    assert {:ok, _result} = req(pid, "open", %{"url" => "about:blank", "observe" => false})
+    assert [{"tab.open", payload}] = FakeBrowserHostConnection.requests(connection)
+    refute Map.has_key?(payload, "visible")
   end
 
   test "an act on an identical page renders through the shared snapshot renderer and answers unchanged" do
