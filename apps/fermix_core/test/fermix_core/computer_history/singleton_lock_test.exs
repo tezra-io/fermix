@@ -101,6 +101,11 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
     # Looping the pairwise race many times shakes out the timing interleavings; a
     # single persistent double-winner would mean both capturers heartbeat forever
     # and double-record, so this asserts the property that actually matters.
+    #
+    # The racers use the production window. A sub-second one cannot tell the
+    # winner's fresh lock from a stale one (see the live-lock test above): when
+    # a trial straddled a second boundary, the loser read the lock written a
+    # moment ago as stale, broke it, and both won.
     test "two daemons racing to break the same stale lock — never both win, over many trials", %{
       path: path
     } do
@@ -111,9 +116,7 @@ defmodule FermixCore.ComputerHistory.SingletonLockTest do
           winners =
             [1, 2]
             |> Task.async_stream(
-              fn i ->
-                SingletonLock.acquire(path, stale_after_ms: 300, home: "/tmp/home-#{i}")
-              end,
+              fn i -> SingletonLock.acquire(path, home: "/tmp/home-#{i}") end,
               max_concurrency: 2,
               timeout: 5_000
             )
