@@ -968,18 +968,23 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       DraftStream.push(pid, {:text_delta, @two_paras})
       assert_receive {:open, {:bubble, 1}, @two_paras}
       assert_receive {:seal, {:bubble, 1}, @para_one}
+      # The rotation's own flush opens the next bubble whether or not more text
+      # has arrived (see the first rotation test), so it is awaited before the
+      # restart below, which would otherwise race it.
+      assert_receive {:open, {:bubble, 2}, @para_two}
       # Mid-stream provider retry: the SSE cumulative restarts from scratch,
       # shorter than the already-sealed prefix. The engine clamps — no write
       # for the empty live slice, no crash.
       DraftStream.push(pid, {:text_delta, "Para"})
       Process.sleep(30)
       refute_received {:open, _handle, _text}
+      refute_received {:edit, _handle, _text}
 
       # The retried stream regrows past the sealed offset; the live slice
       # resumes rendering from there.
       full = @two_paras <> " and now it finishes."
       DraftStream.push(pid, {:text_delta, full})
-      assert_receive {:open, {:bubble, 2}, live}
+      assert_receive {:edit, {:bubble, 2}, live}
       assert live == @para_two <> " and now it finishes."
 
       final = full <> " Done."
@@ -999,9 +1004,11 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       assert_receive {:open, {:bubble, 1}, ^text}
       assert_receive {:seal, {:bubble, 1}, ^head}
       # A grapheme-counted offset would slice mid-word here (the head measures
-      # 45 characters but 51 bytes).
+      # 45 characters but 51 bytes). The rotation's own flush opens the next
+      # bubble with the live slice before any further push can race it.
+      assert_receive {:open, {:bubble, 2}, ^tail}
       DraftStream.push(pid, {:text_delta, text <> " Done."})
-      assert_receive {:open, {:bubble, 2}, live}
+      assert_receive {:edit, {:bubble, 2}, live}
       assert live == tail <> " Done."
     end
 
@@ -1010,8 +1017,13 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:text_delta, @two_paras})
       assert_receive {:seal, {:bubble, 1}, @para_one}
+      # Each write is awaited before the next push. The rotation's own flush
+      # opens bubble 2 whether or not " more" has arrived, and a push that
+      # raced it became an edit of its own, taken here for the last one.
+      assert_receive {:open, {:bubble, 2}, @para_two}
+      more = @para_two <> " more"
       DraftStream.push(pid, {:text_delta, @two_paras <> " more"})
-      assert_receive {:open, {:bubble, 2}, _live}
+      assert_receive {:edit, {:bubble, 2}, ^more}
       DraftStream.push(pid, {:text_delta, @two_paras <> " more and more"})
       assert_receive {:edit, {:bubble, 2}, edited}
       assert edited == @para_two <> " more and more"
