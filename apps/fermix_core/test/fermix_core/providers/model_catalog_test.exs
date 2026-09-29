@@ -57,10 +57,12 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.default_model_for(:xai) == "grok-4.7"
     end
 
-    test "the GPT-6 Sol and Luna models follow Astra on both OpenAI routes" do
+    test "GPT-6.1 Sol and GPT-6 Luna follow Astra on both OpenAI routes, and GPT-6 Sol is gone" do
       for provider <- [:openai, :openai_codex] do
-        assert ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna" | _rest] =
+        assert ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna" | _rest] =
                  Enum.map(ModelCatalog.models_for(provider), & &1.id)
+
+        refute ModelCatalog.known_model?(provider, "gpt-6-sol")
       end
     end
 
@@ -68,6 +70,13 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       ids = Enum.map(ModelCatalog.models_for(:anthropic), & &1.id)
 
       assert "claude-opus-5-5" in ids
+      assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
+    end
+
+    test "Claude Sonnet 5.5 is offered without moving the Anthropic default" do
+      ids = Enum.map(ModelCatalog.models_for(:anthropic), & &1.id)
+
+      assert "claude-sonnet-5-5" in ids
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
 
@@ -119,7 +128,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.4-mini") == 272_000
       # The current generation stretches to 872k on Codex.
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-astra") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-sol") == 872_000
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6.1-sol") == 872_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-luna") == 872_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 872_000
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-terra") == 872_000
@@ -128,13 +137,14 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       # 1,050,000 window: 0.85 * 320_000 = 272_000, exactly the input-token
       # boundary above which OpenAI reprices the full request at 2x/1.5x.
       assert ModelCatalog.context_window_for(:openai, "gpt-6-astra") == 320_000
-      assert ModelCatalog.context_window_for(:openai, "gpt-6-sol") == 320_000
+      assert ModelCatalog.context_window_for(:openai, "gpt-6.1-sol") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-6-luna") == 320_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 272_000
       # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
       assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
+      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-5-5") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5-1") == 1_000_000
       assert ModelCatalog.context_window_for(:anthropic, "claude-opus-5-5") == 1_000_000
@@ -200,6 +210,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   describe "max_output_tokens_for/2" do
     test "returns cataloged output ceilings for Anthropic models" do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-4-6") == 64_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-5-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5") == 64_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-fable-5-1") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5-5") == 128_000
@@ -266,7 +277,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-astra") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6-astra") == nil
-      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-sol") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-sol") == nil
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6-luna") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
       assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.6-sol") == nil
@@ -287,7 +299,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       refute :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.5")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6-astra")
       assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-astra")
-      assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6-sol")
+      assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6.1-sol")
       assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-luna")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.6-sol")
       assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-5.6-sol")

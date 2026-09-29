@@ -74,6 +74,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   list and forget paired phones, over the same methods `fermix pair` and
   `fermix devices` now use. No desktop app has a Phone pane on them yet, and
   no phone app is released.
+- **GPT-6.1 Sol and Claude Sonnet 5.5 are in the model lists.** GPT-6.1 Sol
+  takes GPT-6 Sol's place for a ChatGPT sign-in and for an OpenAI API key, and
+  Claude Sonnet 5.5 joins the Anthropic list; no provider's default changes.
+  GPT-6 Sol is no longer offered. A provider still set to it keeps working, but
+  Fermix no longer knows its context window and compacts conversations
+  earlier, and Doctor flags a sub-agent or scheduled-job model still set to it.
+  Choosing another model in Settings clears both.
 
 ### Changed
 
