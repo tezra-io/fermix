@@ -712,12 +712,20 @@ defmodule FermixCore.Auth.TokenManagerTest do
         proactive_refresh_margin_ms: 4_500
       )
 
-      assert eventually(fn ->
-               match?(
-                 {:ok, %{tokens: %{access_token: "new_at"}}},
-                 Store.read(:openai_codex, path)
-               )
-             end)
+      # Only the background timer can write new_at here. The refresh behind it
+      # takes lockfiles, then writes and renames auth.json, and those filename
+      # calls queue on the VM's one file server with every concurrent test's,
+      # so a loaded runner held it past 2 s. The poll still returns the moment
+      # the refresh lands.
+      assert eventually(
+               fn ->
+                 match?(
+                   {:ok, %{tokens: %{access_token: "new_at"}}},
+                   Store.read(:openai_codex, path)
+                 )
+               end,
+               10_000
+             )
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
@@ -889,7 +897,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
     )
   end
 
-  defp eventually(fun, deadline_ms \\ 2_000) do
+  defp eventually(fun, deadline_ms) do
     poll(fun, System.monotonic_time(:millisecond) + deadline_ms)
   end
 
