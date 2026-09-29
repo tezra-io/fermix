@@ -791,11 +791,11 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
       # Served after the Peer finished handing the prompt over.
       _ = :sys.get_state(peer)
-      assert {:monitors, [process: ^queue]} = Process.info(peer, :monitors)
+      assert watched_processes(peer) == [queue]
 
       finish(runner, "done")
       assert {_frames, %{"result" => %{"stopReason" => "end_turn"}}} = recv_response(client, 3)
-      assert {:monitors, []} = Process.info(peer, :monitors)
+      assert watched_processes(peer) == []
     end
 
     test "a prompt cancelled by request id leaves no watch on the Queue", ctx do
@@ -808,7 +808,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
       notify(client, "$/cancel_request", %{"requestId" => 3})
 
       assert {[], %{"error" => %{"code" => -32_800}}} = recv_response(client, 3)
-      assert {:monitors, []} = Process.info(peer, :monitors)
+      assert watched_processes(peer) == []
     end
 
     # The Peer is held while the cancel and then the Queue's death reach it, so
@@ -838,7 +838,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
       # Answered once: closing the turn flushed the dead Queue's :DOWN.
       assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
-      assert {:monitors, []} = Process.info(peer, :monitors)
+      assert watched_processes(peer) == []
 
       # The connection lives on and takes the next prompt.
       wait_until(fn -> is_pid(queue_child(ctx.queue_sup)) end)
@@ -878,7 +878,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
 
       # Answered once: closing the turn flushed the dead Queue's :DOWN.
       assert {:error, :timeout} = :gen_tcp.recv(client, 0, 300)
-      assert {:monitors, []} = Process.info(peer, :monitors)
+      assert watched_processes(peer) == []
     end
 
     test "a bridge disconnect after the Queue died ends the Peer normally", ctx do
@@ -906,6 +906,14 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
   defp mailbox_size(pid) do
     {:message_queue_len, size} = Process.info(pid, :message_queue_len)
     size
+  end
+
+  # The processes the Peer watches. A socket send monitors its port until the
+  # driver replies (prim_inet), and the client can read the line before that
+  # reply reaches the Peer, so a port monitor is a send in flight, not a watch.
+  defp watched_processes(peer) do
+    {:monitors, monitors} = Process.info(peer, :monitors)
+    for {:process, pid} <- monitors, do: pid
   end
 
   defp kill_queue(ctx) do
