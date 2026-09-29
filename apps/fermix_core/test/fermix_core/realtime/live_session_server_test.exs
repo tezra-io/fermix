@@ -927,16 +927,26 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
     end
 
+    # How long the reply plays is LiveTurn's (live_turn_test); here, each chunk
+    # re-arms the played-out timer. The margin keeps both timers from firing, and
+    # each expiry is delivered by hand, so no wall-clock window is raced.
     test "a later chunk of the same reply keeps it speaking", %{clock: clock} do
-      session = listening_session(clock, reply_margin_ms: 200)
+      session = listening_session(clock, reply_margin_ms: 60_000)
 
       send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
       assert_receive {:realtime, %{type: "state", state: "speaking"}}
-      Process.sleep(120)
-      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      %{reply_timer: {_timer, first}} = sync(session)
 
-      refute_receive {:realtime, %{type: "state", state: "listening"}}, 150
-      assert_receive {:realtime, %{type: "state", state: "listening"}}, 500
+      send(session, {:openai_live_event, {:audio_delta, reply_audio(20)}})
+      %{reply_timer: {_timer, current}} = sync(session)
+      assert current != first
+
+      send(session, {:reply_played_out, first})
+      sync(session)
+      refute_received {:realtime, %{type: "state", state: "listening"}}
+
+      send(session, {:reply_played_out, current})
+      assert_receive {:realtime, %{type: "state", state: "listening"}}
     end
 
     test "the rest of a stopped reply is dropped, and a later reply plays", %{clock: clock} do
