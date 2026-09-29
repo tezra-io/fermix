@@ -897,7 +897,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
     )
   end
 
-  defp eventually(fun, deadline_ms \\ 2_000) do
+  defp eventually(fun, deadline_ms) do
     poll(fun, System.monotonic_time(:millisecond) + deadline_ms)
   end
 
