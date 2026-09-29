@@ -362,10 +362,18 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
   # after it takes the exiting connection's `:DOWN` — a step after the socket
   # itself closes, from the caller's point of view. So connecting right behind
   # a connection this test just closed retries the transient refusal instead
-  # of racing that teardown.
+  # of racing that teardown. The endpoint refuses at accept, before any hello:
+  # it writes the refusal and closes, so a hello sent after that close fails
+  # (`:closed` on Linux) while the refusal line still waits to be read. The
+  # reply is the verdict, not the send.
   defp connect_handshaken(path, attempts \\ 40) do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    hello = Jason.encode!(%{"type" => "client_hello", "protocol_version" => 1}) <> "\n"
+
+    case :gen_tcp.send(client, hello) do
+      :ok -> :ok
+      {:error, :closed} -> :ok
+    end
 
     case recv(client) do
       %{"type" => "error", "reason" => "host_already_attached"} when attempts > 0 ->
