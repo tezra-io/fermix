@@ -9,8 +9,6 @@ defmodule FermixChannels.Mobile.WssLimitsTest do
 
   use ExUnit.Case, async: false
 
-  import ExUnit.CaptureLog
-
   alias FermixChannels.Mobile.Identity
   alias FermixChannels.Mobile.Listener
 
@@ -48,6 +46,20 @@ defmodule FermixChannels.Mobile.WssLimitsTest do
     end
   end
 
+  defmodule HeapCapReport do
+    @moduledoc false
+
+    # A logger handler that hands the test the VM's report of a process killed
+    # at its heap cap. The VM sends that report to the system logger, which can
+    # log it after the killed connection's socket has already closed.
+    @spec log(:logger.log_event(), :logger.handler_config()) :: :ok
+    def log(event, %{config: %{test: test}}) do
+      text = event |> :logger_formatter.format(%{template: [:msg]}) |> IO.chardata_to_string()
+      if text =~ "maximum heap size", do: send(test, {:heap_cap_report, text})
+      :ok
+    end
+  end
+
   setup do
     root = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-wss-limits")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
@@ -72,18 +84,17 @@ defmodule FermixChannels.Mobile.WssLimitsTest do
   # caps an unauthenticated connection's heap, shared binaries included, so
   # the connection is killed and its memory released instead of the VM's.
   test "an unauthenticated fragmented message past the heap cap kills its connection", ctx do
+    :ok = :logger.add_handler(:wss_heap_cap_report, HeapCapReport, %{config: %{test: self()}})
+    on_exit(fn -> :logger.remove_handler(:wss_heap_cap_report) end)
     client = connect(ctx.port)
     :erlang.garbage_collect()
     before = :erlang.memory(:binary)
 
-    log =
-      capture_log(fn ->
-        sent = stream_fragments(client, @attack_bytes)
-        assert sent < @attack_bytes, "the listener accepted #{sent} bytes of one message"
-        assert_receive {:wss_disconnected, ^client, _reason}, @timeout_ms
-      end)
+    sent = stream_fragments(client, @attack_bytes)
+    assert sent < @attack_bytes, "the listener accepted #{sent} bytes of one message"
+    assert_receive {:wss_disconnected, ^client, _reason}, @timeout_ms
+    assert_receive {:heap_cap_report, _text}, @timeout_ms
 
-    assert log =~ "maximum heap size"
     :erlang.garbage_collect()
     grown = :erlang.memory(:binary) - before
     assert grown < div(@attack_bytes, 2), "binary memory grew by #{grown} bytes"
