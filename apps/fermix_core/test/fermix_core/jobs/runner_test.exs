@@ -2759,6 +2759,11 @@ defmodule FermixCore.Jobs.RunnerTest do
           %{tool_calls: [attach_call("call_#{index}", image_path, "Attachment #{index}")]}
         end
 
+      # Each attachment's sandbox read gate lists every directory above the
+      # image to recover its on-disk casing, and the image sits under the
+      # machine's temp directory: about 115 ms a call beside 24,000 entries, so
+      # seventeen calls outran 5 s on a loaded macOS runner. The bound is only
+      # how long to wait for the exit; the cap is what this test proves.
       assert_runner_exits_normally(
         job,
         run,
@@ -2767,7 +2772,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         output_base_dir: output_base_dir,
         delivery_adapter: MediaDelivery,
         delivery_opts: [test_pid: self()],
-        exit_timeout_ms: 5_000,
+        exit_timeout_ms: 30_000,
         script: attempts ++ [%{content: "Done."}]
       )
 
