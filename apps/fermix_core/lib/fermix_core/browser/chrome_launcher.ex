@@ -252,10 +252,23 @@ defmodule FermixCore.Browser.ChromeLauncher do
   end
 
   defp auto_headless? do
+    case headless_override() do
+      {:ok, headless} -> headless
+      :none -> linux_without_display?()
+    end
+  end
+
+  @doc """
+  An explicit `FERMIX_BROWSER_HEADLESS` signal, honoured before any host
+  default. `HostServer` asks this too, so an automatic pane task's `visible`
+  field follows the same override the managed Chrome above follows.
+  """
+  @spec headless_override() :: {:ok, boolean()} | :none
+  def headless_override do
     case System.get_env("FERMIX_BROWSER_HEADLESS") do
-      value when value in ["1", "true", "TRUE", "yes"] -> true
-      value when value in ["0", "false", "FALSE", "no"] -> false
-      _other -> linux_without_display?()
+      value when value in ["1", "true", "TRUE", "yes"] -> {:ok, true}
+      value when value in ["0", "false", "FALSE", "no"] -> {:ok, false}
+      _other -> :none
     end
   end
 

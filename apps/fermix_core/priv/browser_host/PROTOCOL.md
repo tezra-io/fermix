@@ -115,12 +115,13 @@ interprets. A request whose `observe` is `true` carries a `snapshot` object
 (`mode`, `max_chars`, `depth`) naming the look the app takes at the page right
 after the request completes; `observe: false` carries no `snapshot`.
 `tab.open`'s `visible` carries the task's own intent, not a look at the page:
-`true` for a task on the visible profile, so the app shows the pane and its
-window for it; absent otherwise.
+`true` for a task on the visible profile or the automatic profile resolving
+visible (an explicit headless override aside), so the app shows the pane and
+its window for it; absent for a task that runs unseen.
 
 | `type` | Fields | Result | Notes |
 |---|---|---|---|
-| `tab.open` | `task_id`, `url`, `observe`, `download_dir`, `task_tab_cap`, `tab_cap`; `snapshot?`, `visible?` | `tab_id`, `url`, `title`; `page?` | Opens a tab owned by `task_id`. Refused with `cap_reached` past either cap. `visible: true` for a task on the visible profile, so the app shows the pane and its window for it. |
+| `tab.open` | `task_id`, `url`, `observe`, `download_dir`, `task_tab_cap`, `tab_cap`; `snapshot?`, `visible?` | `tab_id`, `url`, `title`; `page?` | Opens a tab owned by `task_id`. Refused with `cap_reached` past either cap. `visible: true` for a task on the visible profile or the automatic profile resolving visible, so the app shows the pane and its window for it. |
 | `tab.navigate` | `tab_id`, `url`, `observe`; `snapshot?` | `tab_id`, `url`, `title`; `page?` | Navigates a tab the task already owns. |
 | `tab.list` | `task_id` | `tabs[]` | Every tab `task_id` owns, popups included. |
 | `tab.focus` | `tab_id` | `tab_id`, `url`, `title` | Refused with `not_owner` on the person's tab. |
