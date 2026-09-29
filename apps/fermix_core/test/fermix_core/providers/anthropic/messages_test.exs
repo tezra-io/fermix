@@ -493,6 +493,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
 
       for model <- [
             "claude-sonnet-4-6",
+            "claude-sonnet-5-5",
             "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
@@ -542,6 +543,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
 
       for model <- [
             "claude-opus-4-8",
+            "claude-sonnet-5-5",
             "claude-opus-5-5",
             "claude-opus-5",
             "claude-fable-5",

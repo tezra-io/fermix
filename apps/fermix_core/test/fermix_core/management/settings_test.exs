@@ -307,10 +307,12 @@ defmodule FermixCore.Management.SettingsTest do
       end
 
       assert "claude-opus-5-5" in published.("providers.anthropic")
+      assert "claude-sonnet-5-5" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
       for section <- ["providers.openai", "providers.openai_codex"] do
-        assert ["gpt-6-sol", "gpt-6-luna"] -- published.(section) == []
+        assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.(section) == []
+        refute "gpt-6-sol" in published.(section)
       end
     end
 

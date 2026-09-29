@@ -4,7 +4,7 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.12.0] - 2026-09-28
 
 ### Added
 
@@ -41,6 +41,46 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   once, with no restart: the next key you save goes to the chosen store. Keys
   already saved stay where they are; `fermix setup --migrate-secrets` moves
   them.
+- **Browser tasks can run in the Fermix app's own browser.** When the app is
+  connected and its browser pane is ready, a task on the default or the visible
+  profile runs in the pane and shows in the app's window instead of in a
+  separate Chrome. If the app is not running, Fermix opens it in the background
+  and waits a few seconds for its browser before choosing;
+  `[fermix_core.browser] launch_app` turns that off, and it is on by default
+  only for the engine inside the app. A task keeps the browser it started in:
+  if the app quits or the Mac sleeps mid-task, the task ends with the app's
+  reason instead of starting over in Chrome, and "Cancel task" on the task's
+  tab in the app ends that task alone. Background tasks and your own browser
+  tab never run in the pane. This is the engine half; the app release that
+  has the pane is not out yet.
+- **The browser has settings you own, and finds a browser without Chrome.**
+  How tasks run (automatically, in the background, or in a window you can
+  watch) and the most tabs a browser keeps open can now be set, in
+  `[fermix_core.browser]` as `default_profile` and `max_tabs`, and in a
+  Browser section the daemon serves the apps beside the private hosts the
+  browser may open. None needs a restart. With no Chrome or Chromium
+  installed, tasks now use the Chromium the meeting notetaker downloads, and
+  the Browser section can start that download. Doctor's browser row names the
+  browser tasks use, or says none is installed.
+- **The daemon serves the Mac app's chat.** A local, owner-only socket in
+  your Fermix home carries the chat the Mac app is building: replies stream
+  with their tool activity, one request can be cancelled without touching the
+  others, and the whole history pages and searches. Scheduled jobs can deliver
+  into it, and it shares one timeline with the phone channel. No released
+  Fermix app has the chat window yet.
+- **Phone pairing and the phone channel's settings are on the management
+  protocol.** The apps can turn the phone channel on, set its port, listen
+  address and network announcement, pair a phone with its six-digit code, and
+  list and forget paired phones, over the same methods `fermix pair` and
+  `fermix devices` now use. No desktop app has a Phone pane on them yet, and
+  no phone app is released.
+- **GPT-6.1 Sol and Claude Sonnet 5.5 are in the model lists.** GPT-6.1 Sol
+  takes GPT-6 Sol's place for a ChatGPT sign-in and for an OpenAI API key, and
+  Claude Sonnet 5.5 joins the Anthropic list; no provider's default changes.
+  GPT-6 Sol is no longer offered. A provider still set to it keeps working, but
+  Fermix no longer knows its context window and compacts conversations
+  earlier, and Doctor flags a sub-agent or scheduled-job model still set to it.
+  Choosing another model in Settings clears both.
 
 ### Changed
 
@@ -127,6 +167,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   inside the daemon." Error details such as a network timeout are now logged
   safely, and the sign-in fails with a sentence that names the problem and asks
   you to sign in again.
+- **A turn whose tool results outgrow the model's context keeps going.** A
+  turn or scheduled job that read more than the model could hold failed at the
+  provider, and a job delivered only the raw error name. Every tool result is
+  now kept for the run, and when the next request nears the model's window
+  the oldest results are compressed into digests of what the task needs, while
+  the latest steps stay whole. A digest names its call, and the new
+  `tool_result_recall` tool reads the original back, so nothing is dropped. If
+  the provider still refuses the request as too large, Fermix compresses more
+  and asks again, at most three times, without running any tool twice; a
+  request that still does not fit fails with a sentence saying so.
 - **A scheduled job no longer stops running for good after a badly timed
   restart.** A run finishing while the daemon stopped, or while it restarted a
   part of itself, could leave its recurring job marked running forever: it
@@ -275,6 +325,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   saying that OpenAI did not accept the API key. Any other refusal of a voice
   session, when a call starts or when it reconnects, ends the call the same way
   and names OpenAI's error code.
+- **On a GPT-Live call the pet follows the conversation, and Stop stops the
+  reply.** GPT-Live sends no turn boundaries and keeps sending silent audio
+  between replies, so the pet sat on its speaking face for the whole call,
+  never showed thinking, and after Stop the rest of the reply still played.
+  Fermix now reads the turn from the call's audio: the pet speaks while the
+  reply's voice plays and listens once it has, shows thinking a second after
+  your words stop, and Stop drops the rest of the stopped reply. Typing near
+  the microphone no longer reads as speech, and the pet's own last words,
+  heard back through the speakers, are no longer taken for yours.
 - **A background task started from the Mac chat runs once and posts its
   result.** Typed in the chat, `/bg` and `/background` left their request open
   after they started, so a restart of the daemon within a day started the same
