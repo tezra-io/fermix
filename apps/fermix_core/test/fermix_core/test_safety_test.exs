@@ -30,9 +30,16 @@ defmodule FermixCore.TestSafetyTest do
     |> Enum.reject(&String.ends_with?(&1, "test_safety_test.exs"))
   end
 
+  # A file is split into lines only when its text spells a prefix at all. No
+  # prefix holds a line break, so a line can match only where its file does, and
+  # matching every line of every test file made this the slowest test here.
   defp direct_cleanup_calls(path) do
-    path
-    |> File.read!()
+    source = File.read!(path)
+    if String.contains?(source, cleanup_prefixes()), do: cleanup_lines(path, source), else: []
+  end
+
+  defp cleanup_lines(path, source) do
+    source
     |> String.split("\n")
     |> Enum.with_index(1)
     |> Enum.filter(fn {line, _line_no} -> direct_cleanup_call?(line) end)
@@ -76,10 +83,22 @@ defmodule FermixCore.TestSafetyTest do
            """
   end
 
+  # Only a file whose text spells a writer is parsed: this is a whole-umbrella
+  # scan, and its twin in fermix_channels timed out on the slowest CI leg parsing
+  # every test file. Parsing with `unescape: false` keeps a quoted call name as
+  # its source spells it, so the AST check can match only a call the text check
+  # has already kept.
   defp async_app_env_writers(file) do
-    file
-    |> File.read!()
-    |> Code.string_to_quoted!(file: file)
+    source = File.read!(file)
+
+    if String.contains?(source, ["put_env", "delete_env"]),
+      do: app_env_writers_in(file, source),
+      else: []
+  end
+
+  defp app_env_writers_in(file, source) do
+    source
+    |> Code.string_to_quoted!(file: file, unescape: false)
     |> modules()
     |> Enum.filter(fn {_name, body} -> async_module?(body) and writes_app_env?(body) end)
     |> Enum.map(fn {name, _body} -> "#{Path.relative_to(file, umbrella_root())} (#{name})" end)
