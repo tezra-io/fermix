@@ -132,10 +132,12 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       DraftStream.push(pid, {:text_delta, "x"})
       assert_receive {:open, "x"}
 
+      # Arrival is the claim, so no bound of its own: a capped stream never
+      # writes the edit at all, and a loaded runner stalled one past 500 ms.
       for count <- 2..305 do
         text = String.duplicate("x", count)
         DraftStream.push(pid, {:text_delta, text})
-        assert_receive {:edit, :handle_1, ^text}, 500
+        assert_receive {:edit, :handle_1, ^text}
       end
 
       assert {:ok, nil} = DraftStream.seal(pid, "final")
