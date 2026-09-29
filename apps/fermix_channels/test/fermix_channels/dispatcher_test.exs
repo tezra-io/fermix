@@ -9,6 +9,7 @@ defmodule FermixChannels.DispatcherTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.OwnerInboxApproval
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Scope
@@ -269,6 +270,7 @@ defmodule FermixChannels.DispatcherTest do
     assert_receive {:agent_message, agent_message}
     assert agent_message.source_trust == :guest
     refute Map.has_key?(agent_message, :approval_fn)
+    refute Map.has_key?(agent_message, :owner_inbox_approval_fn)
   end
 
   # A channel the registry marks `commands?: false` has no `/confirm` path, so a
@@ -296,6 +298,56 @@ defmodule FermixChannels.DispatcherTest do
     assert agent_message.source_trust == :operator
     refute ChannelRegistry.commands?("acp")
     refute Map.has_key?(agent_message, :approval_fn)
+  end
+
+  # The exact complement of `approval_fn`: an operator turn on a channel without
+  # slash commands gets the owner-inbox seam, so an access-sensitive command can
+  # ask the owner in their own chat (Capabilities.AccessGate). The in-chat
+  # approval flow stays absent there (M29 §11).
+  test "an operator turn from a command-less channel carries the owner-inbox seam only" do
+    message = %Message{
+      id: "ga-4",
+      content: "unlock the car",
+      sender: "acp-client",
+      channel: "acp",
+      chat_id: "acp-session-2",
+      reply_target: "acp-session-2",
+      metadata: %{source: :acp, user_id: "acp", chat_type: "private"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.owner_inbox_approval_fn == (&OwnerInboxApproval.request/1)
+    refute Map.has_key?(agent_message, :approval_fn)
+  end
+
+  test "a chat operator turn carries approval_fn and no owner-inbox seam" do
+    message = %Message{
+      id: "ga-5",
+      content: "unlock the car",
+      sender: "alice",
+      channel: "telegram",
+      chat_id: "123",
+      reply_target: "123",
+      metadata: %{user_id: "test-sender"}
+    }
+
+    assert :ok =
+             Dispatcher.dispatch([message],
+               channel: ReplyChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert is_function(agent_message.approval_fn, 1)
+    refute Map.has_key?(agent_message, :owner_inbox_approval_fn)
   end
 
   test "routes normalized inbound messages into the configured agent with reply runtime" do
@@ -1173,6 +1225,20 @@ defmodule FermixChannels.DispatcherTest do
     def discard_draft(%Message{}, _handle), do: :ok
   end
 
+  # Draft-capable with its own pacing: the gateway hands it to the engine.
+  defmodule PacedDraftChannel do
+    def build_text_reply(%Message{}), do: fn _text -> :ok end
+    def build_media_reply(%Message{}), do: fn _media_part -> {:error, :media_unsupported} end
+
+    def stream_capability, do: :draft_edit
+    def draft_pacing, do: %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
+
+    def open_draft(%Message{}, _text), do: {:ok, 1}
+    def edit_draft(%Message{}, _handle, _text), do: :ok
+    def seal_draft(%Message{}, _handle, _text), do: {:ok, nil}
+    def discard_draft(%Message{}, _handle), do: :ok
+  end
+
   # Draft-capable but with no rotation callback: proves the gateway wires
   # rotation only when the channel exports it.
   defmodule PlainDraftChannel do
@@ -1254,6 +1320,17 @@ defmodule FermixChannels.DispatcherTest do
       assert %FermixChannels.Gateway.DraftStream.Spec{mode: :draft} = agent_message.stream_spec
       assert agent_message.stream_spec.rotate_at == nil
       assert agent_message.stream_spec.measure == nil
+      # D8: and it keeps the engine's own pacing, byte for byte.
+      assert agent_message.stream_spec.pacing == nil
+    end
+
+    test "a channel that declares its draft pacing hands it to the engine" do
+      assert :ok = dispatch_for_streaming(PacedDraftChannel)
+
+      assert_receive {:agent_message, agent_message}
+
+      assert agent_message.stream_spec.pacing ==
+               %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
     end
 
     test "no stream_spec when streaming is explicitly off" do

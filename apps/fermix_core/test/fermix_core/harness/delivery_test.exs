@@ -385,6 +385,16 @@ defmodule FermixCore.Harness.DeliveryTest do
       assert message =~ "Automatic follow-up stopped here"
     end
 
+    # GAP3-1: derived from the row, so a delivery retried later says it too.
+    test "a run that changed vendor config names the files in its message" do
+      change = %{"before" => nil, "after" => "sha256:bb", "commit_clears" => true}
+      row = completed_row(%{vendor_config_changes: %{"/repo" => %{".mcp.json" => change}}})
+      message = Delivery.compose(row, "All tests pass.")
+
+      assert message =~ "All tests pass."
+      assert message =~ "/repo/.mcp.json"
+    end
+
     test "a run inside the cap and a scheduled origin carry no cap note" do
       inside = completed_row(%{origin_kind: "chat", continuation_depth: 1})
       scheduled = completed_row(%{origin_kind: "scheduled", continuation_depth: 9})

@@ -17,10 +17,11 @@ defmodule FermixCore.Providers.RoutingOverrides do
   config > inherit. All three are stamped onto an `AgentDefinition`
   (`model`/`provider`/`reasoning_effort`) and resolved by `RouteResolver`.
 
-  Validation is the boundary (Code Rule #6): an unknown provider or effort
-  raises `ArgumentError` naming the offending key + value. `apply_effort/2`
-  overlays a chosen thinking level onto already-resolved routes (clamped per
-  provider) so lowering the effort never changes the model or drops failover.
+  Validation is the boundary (Code Rule #6): an unknown provider or effort, or
+  a model slug carrying a control character, raises `ArgumentError` naming the
+  offending key + value. `apply_effort/2` overlays a chosen thinking level onto
+  already-resolved routes (clamped per provider) so lowering the effort never
+  changes the model or drops failover.
 
   See `docs/design/SUBAGENT_MODEL_SELECTION.md`.
   """
@@ -56,7 +57,7 @@ defmodule FermixCore.Providers.RoutingOverrides do
   @spec parse(keyword(), :subagent | :cron | :meeting) :: override()
   def parse(routing, prefix) when is_list(routing) and prefix in [:subagent, :cron, :meeting] do
     provider = validate_provider(get(routing, prefix, :provider), label(prefix, :provider))
-    model = normalize_model(get(routing, prefix, :model))
+    model = normalize_model(get(routing, prefix, :model), label(prefix, :model))
     validate_pairing(provider, model, label(prefix, :model))
 
     %{
@@ -76,7 +77,7 @@ defmodule FermixCore.Providers.RoutingOverrides do
   @spec parse_tool_args(map()) :: override()
   def parse_tool_args(args) when is_map(args) do
     provider = validate_provider(Map.get(args, "provider"), ~s(subagents argument "provider"))
-    model = normalize_model(Map.get(args, "model"))
+    model = normalize_model(Map.get(args, "model"), ~s(subagents argument "model"))
     validate_pairing(provider, model, ~s(subagents argument "model"))
 
     %{
@@ -191,12 +192,26 @@ defmodule FermixCore.Providers.RoutingOverrides do
     end
   end
 
-  defp normalize_model(nil), do: nil
+  defp normalize_model(nil, _label), do: nil
 
-  defp normalize_model(value) when is_binary(value) do
-    case String.trim(value) do
-      "" -> nil
-      trimmed -> trimmed
+  # A slug is one line. The ends a paste carries are trimmed; a control
+  # character left inside (a line break, a tab) is in no model id a provider
+  # ships, and on its way into `config.toml` it was a way to write lines of its
+  # own (MGMT-1), so it is refused by name.
+  defp normalize_model(value, label) when is_binary(value) do
+    trimmed = String.trim(value)
+
+    cond do
+      trimmed == "" ->
+        nil
+
+      String.match?(trimmed, ~r/[\x00-\x1F\x7F]/) ->
+        raise ArgumentError,
+              "#{label} = #{inspect(value)} is not a model slug: it contains a control " <>
+                "character such as a line break or a tab"
+
+      true ->
+        trimmed
     end
   end
 

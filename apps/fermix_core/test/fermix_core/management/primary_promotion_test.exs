@@ -51,10 +51,8 @@ defmodule FermixCore.Management.PrimaryPromotionTest do
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :agent, [])
 
-    # Personalization is left unset on purpose: it is the OTHER gating
-    # component, and leaving it failing keeps the write tail out of prompt-file
-    # seeding, which needs the memory repo. Every assertion here is about the
-    # provider gate, which is the one an operator can clear by connecting.
+    # Personalization is left unset on purpose: every assertion here is about
+    # the provider gate, which is the one an operator can clear by connecting.
     Application.put_env(:fermix_core, :personalization, [])
     :ok = RestartState.record_persisted_baseline()
 

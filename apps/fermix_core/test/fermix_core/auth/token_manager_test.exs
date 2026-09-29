@@ -1,6 +1,9 @@
 defmodule FermixCore.Auth.TokenManagerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
+  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
 
@@ -773,6 +776,117 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
+  end
+
+  # TOKEN-2 (tla/specs/token_refresh, check 09): `fermix doctor`, `fermix
+  # setup` and the Codex image backend refresh through `CodexToken`, outside the
+  # manager. One that reads the entry while the manager's own refresh is in
+  # flight presents the refresh token the manager is consuming, and Codex
+  # revokes the session. Under the profile lock it waits, re-reads the
+  # manager's rotation, finds it fresh and sends nothing.
+  describe "a second refresher of the Codex profile" do
+    test "waits for the manager's refresh in flight, then serves its rotation" do
+      dir = tmp_dir()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+      path =
+        write_auth_file(dir, "auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "at_0", "refresh_token" => "rt_0"},
+              "expires_at" => future_iso8601(5)
+            }
+          }
+        })
+
+      test_pid = self()
+
+      manager_plug = fn conn ->
+        send(test_pid, {:in_flight, self()})
+
+        receive do
+          :release -> :ok
+        end
+
+        rotated(conn, "at_1", "rt_1")
+      end
+
+      cli_plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:cli_sent, body})
+        Plug.Conn.send_resp(conn, 400, ~s({"error":{"code":"refresh_token_reused"}}))
+      end
+
+      name = start_manager(fermix_auth_path: path, req_options: [plug: manager_plug])
+      manager = Task.async(fn -> TokenManager.refresh(name) end)
+      assert_receive {:in_flight, plug_pid}
+
+      cli =
+        Task.async(fn ->
+          CodexToken.get_token(fermix_auth_path: path, refresh_req_options: [plug: cli_plug])
+        end)
+
+      refute_receive {:cli_sent, _body}, 300
+
+      send(plug_pid, :release)
+      assert {:ok, "at_1"} = Task.await(manager)
+      assert {:ok, "at_1"} = Task.await(cli)
+      refute_received {:cli_sent, _body}
+    end
+  end
+
+  # TOKEN-5 (check 14): a manager's tokens only ever come from disk (init and
+  # reload), so an entry that is gone was signed out, for example by a CLI
+  # logout that never reaches the daemon. Refreshing the in-memory copy would
+  # write the account back.
+  describe "a refresh after the entry was deleted" do
+    test "drops the tokens and refuses, sending and writing nothing" do
+      dir = tmp_dir()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+      path =
+        write_auth_file(dir, "auth.json", %{
+          "version" => 1,
+          "providers" => %{
+            "openai_codex" => %{
+              "auth_mode" => "chatgpt",
+              "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
+              "expires_at" => future_iso8601(3600)
+            }
+          }
+        })
+
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, :refresh_sent)
+        __MODULE__.refresh_plug(conn)
+      end
+
+      name = start_manager(fermix_auth_path: path, req_options: [plug: plug])
+      assert {:ok, "live_at"} = TokenManager.get_token(name)
+
+      :ok = Store.delete_provider(:openai_codex, path)
+
+      {result, log} = with_log(fn -> TokenManager.refresh(name) end)
+
+      assert {:error, :auth_invalidated} = result
+      assert log =~ "openai_codex"
+      refute_received :refresh_sent
+      assert {:error, {:provider_missing, :openai_codex}} = Store.read(:openai_codex, path)
+      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+    end
+  end
+
+  defp rotated(conn, access, refresh) do
+    conn
+    |> Plug.Conn.put_resp_content_type("application/json")
+    |> Plug.Conn.send_resp(
+      200,
+      Jason.encode!(%{"access_token" => access, "refresh_token" => refresh, "expires_in" => 3600})
+    )
   end
 
   defp eventually(fun, deadline_ms \\ 2_000) do

@@ -60,7 +60,10 @@ defmodule FermixCore.Harness.Ledger do
   @doc """
   Terminalizes a run, releasing its workspace locks. `fields` carries the
   terminal columns (`reason`, `exit_code`, `usage`, `diagnostics_tail`, …);
-  `completed_at` is set automatically unless provided.
+  `completed_at` is set automatically unless provided. The Manager also passes
+  `next_delivery_at`, its hand-off lease, so the terminal status and the lease
+  land in the same guarded UPDATE and the row is never due before the Manager's
+  inline delivery attempt has had its chance.
   """
   @spec terminalize(String.t(), String.t(), map(), keyword()) ::
           {:ok, map()}
@@ -93,6 +96,25 @@ defmodule FermixCore.Harness.Ledger do
   @spec pending_deliveries(DateTime.t(), keyword()) :: {:ok, [map()]} | {:error, term()}
   def pending_deliveries(%DateTime{} = now, opts \\ []) when is_list(opts) do
     Repo.pending_harness_deliveries(now, opts)
+  end
+
+  @doc """
+  Every run whose change to auto-executing vendor config (`Harness.VendorConfig`)
+  is recorded and not yet resolved — the rows the next admission checks.
+  """
+  @spec unresolved_vendor_config(keyword()) :: {:ok, [map()]} | {:error, term()}
+  def unresolved_vendor_config(opts \\ []) when is_list(opts) do
+    Repo.unresolved_harness_vendor_config(opts)
+  end
+
+  @doc """
+  Marks a run's vendor-config change resolved: the owner acknowledged it through
+  `/confirm`, or admission found every file reverted or committed.
+  """
+  @spec clear_vendor_config(String.t(), keyword()) ::
+          {:ok, map()} | {:error, :not_found | term()}
+  def clear_vendor_config(id, opts \\ []) when is_binary(id) and is_list(opts) do
+    Repo.update_harness_run(id, %{vendor_config_cleared_at: DateTime.utc_now()}, opts)
   end
 
   @doc """

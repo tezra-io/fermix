@@ -4,6 +4,40 @@ defmodule FermixCore.Jobs.RegistryTest do
   alias FermixCore.Jobs.Registry
   alias FermixCore.Memory.Repo
 
+  @released_at ~U[2026-05-02 14:20:00Z]
+
+  defmodule InjectBeforeWriteRepo do
+    @moduledoc false
+    # A transparent proxy in front of the real Repo. On the first request that
+    # writes the job row (a whole-row upsert or an in-place column update) it
+    # first runs `inject` against the real Repo, a concurrent writer landing
+    # between the caller's read and its write, then forwards the request. The
+    # interleaving is forced, never raced.
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(opts) do
+      {:ok, %{real: Keyword.fetch!(opts, :real), inject: Keyword.fetch!(opts, :inject)}}
+    end
+
+    @impl true
+    def handle_call(request, _from, %{real: real, inject: inject} = state) do
+      if is_function(inject, 0) and job_row_write?(request) do
+        :ok = inject.()
+        {:reply, GenServer.call(real, request), %{state | inject: nil}}
+      else
+        {:reply, GenServer.call(real, request), state}
+      end
+    end
+
+    defp job_row_write?(request) when is_tuple(request),
+      do: elem(request, 0) in [:upsert_scheduled_job, :update_scheduled_job_fields]
+
+    defp job_row_write?(_request), do: false
+  end
+
   setup do
     unique = System.unique_integer([:positive])
     db_path = Path.join(System.tmp_dir!(), "fermix-jobs-registry-#{unique}.db")
@@ -429,5 +463,99 @@ defmodule FermixCore.Jobs.RegistryTest do
 
     assert reason =~ "created_by_trust"
     assert {:ok, []} = Registry.list_jobs(repo: repo)
+  end
+
+  # An owner write lands in the middle of a run's life, and the run's release
+  # (state and last_* bookkeeping) can land between the owner's read and write.
+  # Each owner verb writes only the columns it owns, so neither write reverts
+  # the other.
+  describe "owner writes racing a run's release" do
+    test "update_job keeps a release that lands between its read and its write", %{repo: repo} do
+      job = create_frequent_job!(repo, "Edited Mid-Run")
+      _running = put_job!(repo, job, %{state: "running"})
+      proxy = start_inject_repo(repo, fn -> release_as_settle(repo, job.id) end)
+
+      assert {:ok, updated} =
+               Registry.update_job(job.id, %{task_prompt: "Edited mid-run."},
+                 repo: proxy,
+                 scheduler: nil
+               )
+
+      assert updated.task_prompt == "Edited mid-run."
+      assert updated.state == "scheduled"
+      assert updated.last_status == "ok"
+      assert updated.last_run_at == @released_at
+      assert {:ok, ^updated} = Registry.get_job(job.id, repo: repo)
+    end
+
+    test "pause writes only enabled and state, keeping a release that lands before it", %{
+      repo: repo
+    } do
+      job = create_frequent_job!(repo, "Paused Mid-Run")
+      _running = put_job!(repo, job, %{state: "running"})
+      proxy = start_inject_repo(repo, fn -> release_as_settle(repo, job.id) end)
+
+      assert {:ok, paused} = Registry.pause_job(job.id, repo: proxy, scheduler: nil)
+
+      assert paused.state == "paused"
+      assert paused.enabled? == false
+      assert paused.last_status == "ok"
+      assert paused.last_run_at == @released_at
+    end
+
+    test "resume keeps a release that lands between its read and its write", %{repo: repo} do
+      job = create_frequent_job!(repo, "Resumed Mid-Run")
+      _paused = put_job!(repo, job, %{state: "paused", enabled?: false})
+      proxy = start_inject_repo(repo, fn -> release_as_settle(repo, job.id) end)
+
+      assert {:ok, resumed} =
+               Registry.resume_job(job.id,
+                 repo: proxy,
+                 scheduler: nil,
+                 now: ~U[2026-05-02 14:25:00Z]
+               )
+
+      assert resumed.state == "scheduled"
+      assert resumed.enabled? == true
+      assert resumed.next_run_at == ~U[2026-05-02 14:40:00Z]
+      assert resumed.last_status == "ok"
+      assert resumed.last_run_at == @released_at
+    end
+  end
+
+  defp create_frequent_job!(repo, name) do
+    {:ok, job} =
+      Registry.create_job(
+        %{
+          created_by_trust: "operator",
+          name: name,
+          schedule: "every 15 minutes",
+          task_prompt: "Run."
+        },
+        repo: repo,
+        now: ~U[2026-05-02 14:00:00Z]
+      )
+
+    job
+  end
+
+  defp put_job!(repo, job, patch) do
+    {:ok, updated} = Repo.upsert_scheduled_job(Map.merge(job, patch), server: repo)
+    updated
+  end
+
+  # What a run's settle does to the job row: `running` back to `scheduled`
+  # (any other state kept) and the run's outcome in last_*.
+  defp release_as_settle(repo, job_id) do
+    {:ok, current} = Repo.get_scheduled_job(job_id, server: repo)
+    state = if current.state == "running", do: "scheduled", else: current.state
+    release = %{state: state, last_status: "ok", last_run_at: @released_at}
+    {:ok, _released} = Repo.upsert_scheduled_job(Map.merge(current, release), server: repo)
+    :ok
+  end
+
+  defp start_inject_repo(real, inject) do
+    {:ok, pid} = start_supervised({InjectBeforeWriteRepo, real: real, inject: inject})
+    pid
   end
 end

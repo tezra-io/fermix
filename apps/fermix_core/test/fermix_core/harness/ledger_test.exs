@@ -343,6 +343,36 @@ defmodule FermixCore.Harness.LedgerTest do
     assert {:ok, []} = Ledger.active_runs(server: repo)
   end
 
+  # GAP3-1: the admission fingerprint rides the admitted row, the terminal write
+  # records what changed, and an unresolved change stays listed until cleared.
+  test "vendor config fingerprint, changes and clearance round-trip", %{repo: repo} do
+    fingerprint = %{"/repo" => %{".mcp.json" => "sha256:aa"}}
+    change = %{"before" => nil, "after" => "sha256:bb", "commit_clears" => true}
+    changes = %{"/repo" => %{".claude/settings.local.json" => change}}
+
+    assert {:ok, run} = Ledger.admit(base_attrs(%{vendor_config: fingerprint}), server: repo)
+    assert run.vendor_config == fingerprint
+    assert run.vendor_config_changes == nil
+    assert {:ok, []} = Ledger.unresolved_vendor_config(server: repo)
+
+    assert {:ok, done} =
+             Ledger.terminalize(run.id, "completed", %{vendor_config_changes: changes},
+               server: repo
+             )
+
+    assert done.vendor_config_changes == changes
+    assert {:ok, [%{id: id}]} = Ledger.unresolved_vendor_config(server: repo)
+    assert id == run.id
+
+    assert {:ok, cleared} = Ledger.clear_vendor_config(run.id, server: repo)
+    assert %DateTime{} = cleared.vendor_config_cleared_at
+    assert {:ok, []} = Ledger.unresolved_vendor_config(server: repo)
+  end
+
+  test "clearing an unknown run is not_found", %{repo: repo} do
+    assert {:error, :not_found} = Ledger.clear_vendor_config("hr_000000000000", server: repo)
+  end
+
   test "list filters by an allowlisted column", %{repo: repo} do
     assert {:ok, _a} =
              Ledger.admit(base_attrs(%{lock_roots: ["/ra"], worktree_root: "/ra"}), server: repo)

@@ -98,11 +98,22 @@ defmodule FermixCore.Auth.AnthropicLogin do
     present?.() or File.exists?(credentials_path(opts))
   end
 
+  # Nothing is spent before the write, so the write alone takes the profile
+  # lock: it cannot land inside a refresh of the profile and be overwritten by
+  # it, and a profile busy past the lock's wait refuses with the typed reason.
   defp persist(entry, fermix_path) do
-    case Store.write(@auth_profile, entry, fermix_path) do
+    locked =
+      Store.with_profile_lock(@auth_profile, fermix_path, fn ->
+        Store.write(@auth_profile, entry, fermix_path)
+      end)
+
+    case locked do
       :ok ->
         Logger.info("AnthropicLogin: persisted #{entry.auth_mode} credentials to #{fermix_path}")
         {:ok, entry}
+
+      {:error, :profile_busy} ->
+        {:error, :profile_busy}
 
       {:error, reason} ->
         {:error, {:persist_failed, reason}}

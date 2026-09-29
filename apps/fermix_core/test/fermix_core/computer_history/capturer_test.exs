@@ -14,6 +14,7 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.ComputerHistory.Capturer
+  alias FermixCore.ComputerHistory.Controller
   alias FermixCore.Memory.Repo
 
   @fake Path.expand("fake_capture_sidecar.pl", __DIR__)
@@ -66,7 +67,10 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       lock_path: ctx.lock_path,
       apps: ["com.apple.Safari"],
       flush_interval_ms: 25,
-      batch_size: 50
+      batch_size: 50,
+      # The Capturer re-reads the feature's resolver at every start; these cases
+      # run the rail itself, on any host, whatever the app env says.
+      operative_fun: fn -> true end
     ]
 
     start_supervised!({Capturer, Keyword.merge(defaults, opts)}, id: id)
@@ -126,6 +130,17 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
       System.cmd("kill", ["-0", Integer.to_string(os_pid)], stderr_to_stdout: true)
 
     status == 0
+  end
+
+  # A GenServer call from `caller` waits in the suspended process's mailbox.
+  defp call_parked?(server, caller) do
+    {:messages, messages} = Process.info(server, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^caller, _tag}, _request}, &1))
+  end
+
+  # The open Ports `owner` holds: the Capturer's sidecar Port while it runs.
+  defp ports_of(owner) do
+    Enum.filter(Port.list(), &(Port.info(&1, :connected) == {:connected, owner}))
   end
 
   # --- tests -------------------------------------------------------------
@@ -678,6 +693,230 @@ defmodule FermixCore.ComputerHistory.CapturerTest do
         eventually(fn ->
           if Enum.any?(stored(ctx.repo), &(&1.source_seq == 1)), do: {:ok, :done}, else: :retry
         end)
+    end
+  end
+
+  # `/history status` is what an unconfirmed `/history off` tells the owner to
+  # check, so "not running" must mean the process is gone, never merely busy.
+  describe "status/2" do
+    test "a Capturer that does not answer in time is not reported as not running" do
+      busy = start_supervised!({Agent, fn -> :ok end}, id: :busy)
+      :ok = :sys.suspend(busy)
+
+      try do
+        assert %{mode: :not_answering} = Capturer.status(busy, 50)
+      after
+        :sys.resume(busy)
+      end
+    end
+
+    # Rule 6: a malformed timeout fails at the call, never reads as a
+    # recorder that is not running.
+    test "a malformed timeout is refused at the call" do
+      for timeout <- [-1, "5000"] do
+        error = assert_raise FunctionClauseError, fn -> Capturer.status(:absent, timeout) end
+        assert {error.module, error.function, error.arity} == {Capturer, :status, 2}
+      end
+    end
+
+    # Regression pin, not a failing-first test: a Capturer that is gone still
+    # reads as not running.
+    test "a Capturer that is gone is reported as not running" do
+      absent = :"absent_ch_capturer_#{System.unique_integer([:positive])}"
+
+      assert %{mode: :not_running} = Capturer.status(absent)
+    end
+  end
+
+  # C1: the terminate-time flush makes Repo calls, each bounded by
+  # GenServer.call's 5 s, against the DynamicSupervisor's own 5 s shutdown. A
+  # kill there skips whatever terminate/2 has not reached, so the sidecar and
+  # the machine-wide lock go first and the best-effort flush last. The Repo is
+  # held suspended, and the flush's first call parked in its mailbox is the
+  # barrier: by then the sidecar's Port is closed and the lock released. The
+  # Repo is resumed at once, so no wait races the flush's own call timeout.
+  describe "teardown ahead of a slow terminate flush (C1)" do
+    test "a flush blocked on the Repo leaves the sidecar reaped and the lock released", ctx do
+      pid_file =
+        Path.join(
+          System.tmp_dir!(),
+          "fermix-ch-pid-#{ctx.tmp}-#{System.unique_integer([:positive])}"
+        )
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(pid_file) end)
+      sup = start_supervised!({DynamicSupervisor, strategy: :one_for_one}, id: :capturer_sup)
+
+      # The flush timer is a minute away, so the acked event stays buffered
+      # until terminate/2 flushes it.
+      opts = [
+        name: :"ch_capturer_#{System.unique_integer([:positive])}",
+        repo: ctx.repo,
+        binary_path: @fake,
+        lock_path: ctx.lock_path,
+        apps: ["com.apple.Safari"],
+        flush_interval_ms: 60_000,
+        batch_size: 50,
+        operative_fun: fn -> true end,
+        sidecar_env: [
+          {~c"FAKE_EVENTS_FILE", String.to_charlist(events_file(ctx, [app_event(1)]))},
+          {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+        ]
+      ]
+
+      {:ok, pid} = DynamicSupervisor.start_child(sup, {Capturer, opts})
+      os_pid = eventually(fn -> read_pid_file(pid_file) end, 10_000)
+
+      eventually(
+        fn -> if :sys.get_state(pid).buffer == [], do: :retry, else: {:ok, :buffered} end,
+        10_000
+      )
+
+      assert File.exists?(ctx.lock_path)
+      assert [_sidecar_port] = ports_of(pid)
+
+      repo = Process.whereis(ctx.repo)
+      :ok = :sys.suspend(repo)
+      stopping = Task.async(fn -> DynamicSupervisor.terminate_child(sup, pid) end)
+
+      try do
+        eventually(fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end, 10_000)
+        refute File.exists?(ctx.lock_path)
+        assert ports_of(pid) == []
+      after
+        :sys.resume(repo)
+      end
+
+      assert :ok = Task.await(stopping, 10_000)
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
+
+      # The flush still ran, last.
+      assert Enum.any?(stored(ctx.repo), &(&1.source_seq == 1))
+    end
+  end
+
+  # C1's sibling: a degrade runs inside a callback, so a `:shutdown` that
+  # arrives during its flush waits in the mailbox, and the kill 5 s later skips
+  # whatever the degrade has not reached. That flush makes two Repo calls
+  # (Ingest's pause read, then the insert), each bounded by GenServer.call's
+  # 5 s, so the sidecar and the lock go first there too. A malformed line ahead
+  # of a mismatched ack buffers a self-authored gap, which gives the degrade's
+  # flush a row to write. The Repo is suspended before the Capturer starts (its
+  # start makes no Repo call), and the flush's first call parked in the Repo's
+  # mailbox is the barrier. The Repo is resumed at once after two in-memory
+  # assertions.
+  describe "teardown ahead of a slow degrade flush" do
+    test "a degrade flush blocked on the Repo leaves the sidecar reaped and the lock released",
+         ctx do
+      unique = System.unique_integer([:positive])
+      pid_file = Path.join(System.tmp_dir!(), "fermix-ch-pid-#{ctx.tmp}-#{unique}")
+      pre_ack = Path.join(System.tmp_dir!(), "fermix-ch-pre-#{ctx.tmp}-#{unique}.ndjson")
+
+      on_exit(fn ->
+        FermixTestSupport.SafeRm.rm(pid_file)
+        FermixTestSupport.SafeRm.rm(pre_ack)
+      end)
+
+      File.write!(pre_ack, "{ not json\n")
+      repo = Process.whereis(ctx.repo)
+      :ok = :sys.suspend(repo)
+
+      {pid, os_pid} =
+        try do
+          pid =
+            start_capturer(ctx,
+              flush_interval_ms: 60_000,
+              sidecar_env: [
+                {~c"FAKE_PROTO", ~c"#{@protocol + 1}"},
+                {~c"FAKE_PRE_ACK_FILE", String.to_charlist(pre_ack)},
+                {~c"FAKE_PID_FILE", String.to_charlist(pid_file)}
+              ]
+            )
+
+          os_pid = eventually(fn -> read_pid_file(pid_file) end, 10_000)
+
+          eventually(
+            fn -> if call_parked?(repo, pid), do: {:ok, :parked}, else: :retry end,
+            10_000
+          )
+
+          refute File.exists?(ctx.lock_path)
+          assert ports_of(pid) == []
+          {pid, os_pid}
+        after
+          :sys.resume(repo)
+        end
+
+      status =
+        eventually(
+          fn ->
+            status = Capturer.status(pid)
+            if status.mode == :degraded, do: {:ok, status}, else: :retry
+          end,
+          10_000
+        )
+
+      assert {:protocol_mismatch, %{required: @protocol}} = status.reason
+      eventually(fn -> if os_process_alive?(os_pid), do: :retry, else: {:ok, :reaped} end, 10_000)
+
+      # The flush still ran, last: the malformed line's gap is in the spool.
+      assert Enum.any?(stored(ctx.repo), &(&1.type == "observer.gap"))
+    end
+  end
+
+  # CH-4: a Capturer that crashed just as `/history off` ran was restarted by its
+  # DynamicSupervisor after the Controller's `whereis` had found nothing, and it
+  # kept capturing until the next boot. Every start now re-reads the one
+  # resolver, so a restart after the flip declines.
+  describe "a restart racing /history off (CH-4)" do
+    test "a Capturer its DynamicSupervisor restarts after the feature is off stays down", ctx do
+      operative = start_supervised!({Agent, fn -> true end}, id: :operative)
+      operative_fun = fn -> Agent.get(operative, & &1) end
+      sup = start_supervised!({DynamicSupervisor, strategy: :one_for_one}, id: :capturer_sup)
+      name = :"ch_capturer_#{System.unique_integer([:positive])}"
+
+      opts = [
+        name: name,
+        repo: ctx.repo,
+        binary_path: @fake,
+        lock_path: ctx.lock_path,
+        apps: ["com.apple.Safari"],
+        operative_fun: operative_fun
+      ]
+
+      {:ok, pid} = DynamicSupervisor.start_child(sup, {Capturer, opts})
+      ref = Process.monitor(pid)
+
+      # Hold the crashed Capturer's EXIT in the DynamicSupervisor's mailbox: the
+      # window in which the Controller's `whereis` finds no process (check 13).
+      :ok = :sys.suspend(sup)
+
+      try do
+        capture_log(fn ->
+          catch_exit(GenServer.call(pid, :crash))
+          assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+        end)
+
+        # `/history off`: the flip, then the Controller's reconcile finds nothing.
+        Agent.update(operative, fn _operative -> false end)
+
+        controller =
+          start_supervised!(
+            {Controller,
+             name: :"ch_ctrl_#{System.unique_integer([:positive])}",
+             dynamic_supervisor: sup,
+             operative_fun: operative_fun,
+             installed_fun: fn -> true end,
+             children: [%{name: name, spec: {Capturer, opts}}]}
+          )
+
+        assert :ok = Controller.reconcile(controller)
+      after
+        :sys.resume(sup)
+      end
+
+      # Queued behind the EXIT, so the restart has been decided when this answers.
+      assert %{active: 0} = DynamicSupervisor.count_children(sup)
+      assert Process.whereis(name) == nil
     end
   end
 end

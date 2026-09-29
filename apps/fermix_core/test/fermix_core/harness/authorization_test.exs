@@ -152,6 +152,24 @@ defmodule FermixCore.Harness.AuthorizationTest do
     end
   end
 
+  # The one definition of a scheduled context, shared with
+  # `Capabilities.AccessGate`, must agree with what `authorize/2` already does.
+  describe "scheduled?/1" do
+    test "a top-level cron context is scheduled" do
+      assert Authorization.scheduled?(scheduled(AllowlistedRegistry))
+    end
+
+    test "a chat turn and a worker inside a cron job are not" do
+      refute Authorization.scheduled?(attended_operator())
+
+      refute Authorization.scheduled?(%{
+               subagent_depth: 1,
+               conversation_key: @scheduled_key,
+               job_id: "job_x"
+             })
+    end
+  end
+
   # --- Helpers ------------------------------------------------------------
 
   defp attended_operator do

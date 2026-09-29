@@ -83,6 +83,21 @@ defmodule FermixCore.Realtime.LiveTranscript do
   end
 
   @doc """
+  What the operator said after `since_ms`: their fragments that ended later,
+  oldest first, concatenated verbatim. The spoken answer to a question Fermix
+  asked (`Capabilities.AccessGate`), so assistant speech is never part of it.
+  """
+  @spec user_text_since(t(), non_neg_integer()) :: String.t()
+  def user_text_since(%__MODULE__{} = transcript, since_ms)
+      when is_integer(since_ms) and since_ms >= 0 do
+    transcript
+    |> fragments()
+    |> Enum.filter(&(&1.speaker == :user and &1.end_ms > since_ms))
+    |> Enum.sort_by(& &1.start_ms)
+    |> Enum.map_join(& &1.delta)
+  end
+
+  @doc """
   True when the operator's speech reaches the delegation: some user fragment
   ends inside the `window_ms` before `offset_ms` — the same window the request
   is built from, so a delegation that has context to read is one that can be

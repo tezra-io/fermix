@@ -2,11 +2,13 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
   @moduledoc """
   Claude Code local rail: `claude -p --output-format stream-json` (design §5.2).
 
-  Renders `claude -p --output-format stream-json --verbose [params] <prompt>`,
+  Renders `claude -p --output-format stream-json --verbose [params] -- <prompt>`,
   spawned in `<cwd>`. Flag names verified against claude 2.1.216 `claude --help`
   (`--append-system-prompt` / `--append-system-prompt-file` / `--max-turns` /
   `--json-schema` are the accepted forms; `--allowed-tools` / `--disallowed-tools`
-  take comma-joined names).
+  take comma-joined names). Those two and `--add-dir` are variadic, so a prompt
+  rendered straight after one would be read as one more value: `--` ends option
+  parsing before the prompt (verified against claude 2.1.283).
 
   Schema'd params: `model`, `effort`, `permission_mode`, `allowed_tools`,
   `disallowed_tools`, `dangerously_skip_permissions`, `append_system_prompt`
@@ -14,6 +16,9 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
   `max_turns`, `json_schema`, `resume` / `continue`, `bare`. `--bare` is not
   default: it skips OAuth/keychain and reads `ANTHROPIC_API_KEY` only, so a bare
   run declares that key in its env passthrough set.
+
+  Every plan carries `--disallowed-tools`: the fixed vendor-config denials
+  below, after any tools the model asked to disallow.
 
   The result and per-model usage arrive on the terminal `result` event (there is
   no `-o` result file), so the plan carries no `:output_file` slot.
@@ -29,6 +34,15 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
 
   @effort_levels ~w(low medium high xhigh max)
   @permission_modes ~w(acceptEdits auto bypassPermissions manual dontAsk plan)
+
+  # GAP3-1: Claude refuses to auto-approve edits to its own config dirs, but not
+  # to Codex's config or the `.agents` tree Codex reads skills from, so a child in
+  # `acceptEdits` could plant config the next `codex_run` obeys unconfined. Every
+  # child is denied those edits. `Edit(...)` covers each file-editing tool, Write
+  # included, and naming a directory both at the root and at any depth is the
+  # idiom Claude Code's own subagents use. Codex has no mirror rule for `.claude`,
+  # which is what `Harness.VendorConfig` covers.
+  @vendor_config_denials ~w[Edit(.codex/**) Edit(**/.codex/**) Edit(.agents/**) Edit(**/.agents/**)]
 
   @known_params ~w(model effort permission_mode allowed_tools disallowed_tools
                    dangerously_skip_permissions append_system_prompt append_system_prompt_file
@@ -49,7 +63,7 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
       {:ok,
        %{
          binary: binary,
-         argv: @base_argv ++ opt_args ++ [:prompt],
+         argv: @base_argv ++ opt_args ++ ["--", :prompt],
          cwd: cwd,
          extra_lock_roots: lock_roots,
          resumable: true,
@@ -92,7 +106,7 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
          {:ok, effort} <- effort_args(params),
          {:ok, permission} <- permission_args(params),
          {:ok, allowed} <- tool_list_args(params, :allowed_tools, "--allowed-tools"),
-         {:ok, disallowed} <- tool_list_args(params, :disallowed_tools, "--disallowed-tools"),
+         {:ok, disallowed} <- disallowed_args(params),
          {:ok, append} <- append_prompt_args(params),
          {:ok, append_file} <- append_prompt_file_args(params, ctx),
          {:ok, add_dirs, lock_roots} <- add_dir_args(params, ctx),
@@ -133,6 +147,17 @@ defmodule FermixCore.Harness.Adapters.ClaudeHeadless do
     case Map.fetch(params, key) do
       :error -> {:ok, []}
       {:ok, tools} -> join_tools(tools, key, flag)
+    end
+  end
+
+  # One flag, so the model's list and the vendor-config denials share it.
+  defp disallowed_args(params) do
+    case Map.get(params, :disallowed_tools, []) do
+      tools when is_list(tools) ->
+        join_tools(tools ++ @vendor_config_denials, :disallowed_tools, "--disallowed-tools")
+
+      _bad ->
+        {:error, {:invalid_param, :disallowed_tools}}
     end
   end
 

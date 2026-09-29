@@ -224,22 +224,30 @@ daemon onto anything else.
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
+| `mobile.status` | none | The phone channel as it stands: whether it is enabled, whether it started, whether it was refused this boot and the class of that refusal, the listener (`status`, `reason`, `port`, `bind`, `candidates`), the local-network announcement, detected tailnet addresses, the gateway identity's presence and fingerprint, push credentials and delivery, the paired-phone count, the mobile protocol version this daemon serves, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `mobile.pair.start` | none | Opens the pairing window and answers with the pairing session view plus, once, the pairing link as `uri`. `busy` while a window is open. Minimum version `2`. |
+| `mobile.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
+| `mobile.pair.decide` | `session_id`, `approved` (boolean) | Approves or denies the phone waiting in the session and answers the terminal view. Minimum version `2`. |
+| `mobile.pair.cancel` | `session_id` | Closes the window and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
+| `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
+| `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
+| `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
-- A **Doctor session** is one of the two management operation families that are
+- A **Doctor session** is one of the three management operation families that are
   *runs*: it has its own session id, a whole-run budget (`local` 10000 ms,
   `network` 30000 ms), and cancellation. At most 2 sessions run concurrently
   (`busy` beyond that) and at most 8 finished sessions are retained, none older
   than 300000 ms.
-- A **job** is the other, and covers every long operation that is not Doctor.
+- A **job** is another, and covers every long operation that is not Doctor.
   One shape serves all of them, so a client writes one poller, one progress row
   and one failure sentence rather than one per operation. Each kind carries its
   own budget: `provider_probe` 15000 ms, `auth` 300000 ms, `auth_import`
   60000 ms, `plugin_install` 600000 ms, `plugin_check` 30000 ms,
   `plugin_workspaces_discover` 60000 ms, `plugin_workspace_select` 60000 ms,
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
-  `computer_use_grant` 120000 ms. At most 4 jobs run at once, at most one per
+  `computer_use_grant` 120000 ms, `browser_install` 900000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`.
@@ -249,7 +257,8 @@ Notes that the shapes alone do not carry:
   `verifying`; `plugin_install`: `downloading`; `plugin_check`: `probing`;
   `plugin_workspaces_discover`: `listing`; `plugin_workspace_select`: `binding`;
   `capability_install`: `sidecar_downloading`, `downloading`,
-  `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none.
+  `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none;
+  `browser_install`: `sidecar_downloading`, `downloading`.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:
@@ -263,10 +272,129 @@ Notes that the shapes alone do not carry:
   flow, together with the lifetime it is good for. A later read of the same job
   carries the job view alone. The url is never logged, never traced and never
   retained.
+- A **pairing session** is the third, and it is polled rather than a job: its
+  view grows while it runs, and the operator decides mid-run. `mobile.pair.start`
+  opens the one pairing window and answers at once, the pane reads
+  `mobile.pair.get` (every 1000 ms is the recommended cadence) until the session
+  is terminal, and `mobile.pair.decide` or `mobile.pair.cancel` ends it. One
+  session is open at a time (`busy` {`operation`: `mobile.pair`} for a second
+  start), and at most 8 finished sessions are retained, none older than
+  300000 ms; a `session_id` this daemon does not retain answers
+  `unknown_pairing_session`. There is no connection lease: an abandoned window
+  closes on the daemon's own 120000 ms window and on nothing else, so the one
+  clock is the daemon's. `ttl_ms` is relative, like `lifecycle.prepare`'s, and
+  null once the session is terminal.
+- **A pairing session's `state` is the switch.** It is one of `awaiting_scan`,
+  `awaiting_decision`, `approved`, `denied`, `expired`, `cancelled` and `failed`.
+  `request` fills in once a phone has completed the handshake and stays on the
+  terminal view, so a pane can say who was approved or denied. `outcome` is set
+  on `approved` (`device_id`) and on `denied`, `expired` and `cancelled`
+  (`reason`: `denied`, `timeout` or `cancelled`); `failure` is set on `failed`,
+  with the daemon's own sentence and a `code` of `unavailable`, `refused` or
+  `internal_error`. A start refused for a reason the operator can act on (the
+  channel is off, it could not start this boot, it was turned on and has not
+  started yet, the gateway identity is incomplete, the paired-device list could
+  not be read, the listener could not start) answers a `failed` view with a null
+  `session_id` and a null `uri`: nothing was opened and there is nothing to
+  poll.
+- **`mobile.pair.start` returns the pairing link once**, as `uri`, on the call
+  that opens the window. It carries the one-time secret the phone pairs with, so
+  it is never logged, never traced and never retained, and no later read
+  repeats it. The pane draws the QR code from it.
+- **Attestation ships in its final shape and is empty for now.** Until the
+  daemon verifies a phone's secure hardware, `platform`, `build_role` and
+  `boot_state` are null on a request and on a device, and `attestation.status`
+  is `unavailable` with the daemon's sentence.
+- **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
+  with the channel off**, so a pane can always read the state and the owner
+  can always forget a phone: while the channel is not running the paired
+  phones are read from, and forgotten in, the paired-device file. Every row
+  of the channel's settings is boot-bound: the switch reaches the daemon at
+  once but the channel starts and stops only at boot, so `enabled` is the
+  switch and `started` whether the channel runs, and the two differ until a
+  restart. Every verb goes by `started`, never by the switch: a channel
+  switched off keeps serving, pairing and revoking until the restart.
+  `refused` is true when the channel could not start this boot, and
+  `refusal` names the class: `memory_disabled` (the conversation lives in the
+  memory store, which is off), `identity`, `attachment_manifest` or
+  `trust_store`; the daemon log says what to repair. `paired_devices` counts
+  the running channel's phones and is 0 while it is not running.
+  `identity.fingerprint` is the SHA-256 of the gateway public key a phone
+  pins, lowercase hex in groups of four, null until the first pairing creates
+  it. A decide with no phone waiting and a revoke of an id no phone has are
+  `invalid_params` with the daemon's sentence. `unavailable`
+  {`capability`: `mobile`} with no `sentence` means the phone channel could
+  not answer at all: `mobile.pair.get`, `mobile.pair.decide` and
+  `mobile.pair.cancel` answer it while the channel is not running.
+- **A running channel that cannot listen stays up.** `listener.status` is
+  `unavailable` when the channel runs but cannot listen on its address, with
+  `listener.reason` one of `address_unavailable` (the address is not up yet,
+  such as a tailnet address at login), `address_in_use` (another program holds
+  the port), `permission_denied` or `listen_failed`. The channel retries on
+  its own, from one second doubling to a minute, and stops retrying after a
+  day until the next restart. `listener.reason` is null in every other state.
+- **Push connects when there is something to send.** `apns.delivery` is
+  `ready`, `degraded` while a connection to Apple is being made or when the
+  last one failed or was lost (`apns.reason`: `connecting`, `connect_failed`
+  or `connection_lost`; the next push reconnects), or `down` when no push
+  dispatcher runs: the channel is not running, push is off, or its
+  credentials did not resolve. A connect is given up after ten seconds, and
+  the status answers while one runs.
+- **Pairing and forgetting a phone are the owner's decisions.**
+  `mobile.pair.start`, `mobile.pair.decide`, `mobile.pair.cancel` and
+  `mobile.devices.revoke` answer `unavailable` {`capability`: `mobile`,
+  `sentence`: "Only the owner can pair or forget a phone; run this from your
+  own terminal."} to a process the daemon itself started (a shell command the
+  agent ran, a coding harness), to a detached process nobody is watching, and
+  to a caller the daemon cannot place, and the daemon log says so. The
+  sentence is what tells this refusal from a channel that is not running.
+  Reading a session and the status stay open to every caller.
+- **`channels.mobile` is the phone channel's settings section**: the enable
+  switch, the port, the address it listens on and the local-network
+  announcement, every row boot-bound. It is a section of its own rather than a
+  channels-inventory entry, because the phone channel has no credential.
+  `setup.state.get` carries a `mobile` channel row after the inventory
+  channels, always `configured`, with mode `listener` while it is enabled.
+- **`browser` is the managed task browser's section**, under pane `browser`,
+  published on every install. Its first row, `browser_executable`, is read-only
+  and says which browser the launcher would start for a task: `value` is that
+  browser's name (`Google Chrome`, `Chromium`, `Google Chrome Canary`, `Chrome`,
+  `Google Chrome for Testing` for the Chromium Fermix downloads, or `The
+  configured browser` for one set by path), and null when there is none, with
+  the daemon's sentence in `footer`: `No Chrome or Chromium is installed.`, or
+  the refusal of a browser configuration the launcher would not start, which a
+  download does not clear. A path never crosses the wire. The other three rows
+  are the `[fermix_core.browser]` keys a person sets. `browser_default_profile`
+  is how tasks run, and its options are the managed profile names, which is how
+  that section already spells it: `fermix` (automatically: in a window where
+  there is a display, otherwise in the background), `fermix_headless` and
+  `fermix_visible`. `browser_max_tabs` is a whole number from 1, with no
+  ceiling. `browser_allowed_hosts` replaces the whole list, and its value is the
+  list in force: the shipped default until the file names one. Every row
+  carries `restart: false`, because a call reads the section when it runs; a
+  browser already running takes a new tab cap when it next starts.
+  `settings.apply` refuses a value the browser would refuse at launch, in the
+  browser's own sentence.
+- **`browser.install.start` completes only once the launcher finds a
+  browser.** It runs the meeting notetaker's own install step (the notetaker's
+  helper, then the Chromium build that helper is pinned to, about 150 MB, and a
+  fast no-op when it is already there) and then asks the launcher which browser
+  tasks now run in. It completes with `result` {`installed`: true, `browser`:
+  that browser's name}. A machine the notetaker has no build for, a Chromium
+  step that fails, and a download the launcher still cannot find each fail the
+  job with the daemon's sentence. One download runs at a time (`busy`
+  {`operation`: `browser_install`}).
 - **A live model listing never degrades to the catalog.** The two answer
   different questions, so a live fetch that fails answers `unavailable`
   {`capability`: `model_listing`} and `source` always names where the rows on
   the wire came from.
+- **`default_model` is the model in force, never the config value alone.** A
+  provider row in `setup.state.get`, the Model row of that provider's settings
+  section and `provider.model` in `overview.get` carry the model the daemon
+  calls the provider with: the one chosen in Settings, or the catalog default
+  until one is. A sign-in that has just completed therefore names its model at
+  once, and Doctor probes the same one. Engines before this published `null`,
+  or an empty value, until a model was chosen, so a client keeps accepting both.
 - **`computer_use.permissions.get` never prompts**, and `installed` comes from
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides
@@ -277,14 +405,18 @@ Notes that the shapes alone do not carry:
   `macos_app`); `unavailable` means the check itself could not answer. A session
   `summary` carries one count per status.
 - **Readiness is split into gating and advisory.** A failure carries `gating`,
-  the `pane` that can clear it, and a closed-set `detail_key`. Provider and
-  personalization failures gate; the five channels, realtime, and allowed
+  the `pane` that can clear it, and a closed-set `detail_key`. Provider
+  failures gate; personalization, the five channels, realtime, and allowed
   sandbox environment variables the daemon cannot read (`sandbox:env_missing`,
   `sandbox:env_helper_failed`, pane `sandbox`, one failure per cause naming
   every affected variable, with `component` `sandbox:env:missing` or
   `sandbox:env:helper_failed`) are advisory. `status` is `ready` exactly
   when no gating failure remains, and every advisory failure stays in the list,
-  so a surface never needs a second definition of ready.
+  so a surface never needs a second definition of ready. Personalization is
+  advisory because the daemon's first boot seeds it from the machine (the
+  system time zone, the account's full name, a default style), so its row
+  fires only where the machine could not answer; engines before this gated on
+  it, so a client keeps reading `gating` rather than assuming it.
 - **Restart truth has one owner.** `restart.required` and `restart.reasons` come
   from the daemon's two baselines: the application environment captured at boot,
   and the parsed settings file as this daemon last saw it. The sentence for each
@@ -313,6 +445,11 @@ Notes that the shapes alone do not carry:
   off-list value is accepted wherever the key's own validator takes it, and a
   native picker may send any zone the database knows or any model the vendor
   ships. `suggestions` is `false` on every non-choice kind.
+- **A text value that names something is one line.** `settings.apply` trims the
+  ends of a text, suggestion or list value, so a pasted trailing line break
+  saves, and refuses one with a control character left inside it (`This setting
+  takes a single line of text.`). The two prose rows, the meeting announcement
+  and the communication style, take line breaks and keep them as sent.
 - **A `disabled` option is shown and cannot be chosen.** Its `hint` is never
   null and says why: show the option unselectable, with its hint inline or on
   hover, rather than hiding it. `settings.apply` refuses a disabled value with
@@ -332,8 +469,22 @@ Notes that the shapes alone do not carry:
   the one short line under the control and is always shown; `info` is a
   paragraph a client puts behind an `(i)` beside the row and reveals on demand.
   It is `null` on every row with nothing more to say, which is most of them.
-  Today one row carries it: the Venice model row, where the privacy tier in each
-  model's label is two words that mean materially different things.
+  Today two rows carry it: the Venice model row, where the privacy tier in each
+  model's label is two words that mean materially different things, and the
+  secrets section's store row, where the choice trades a keyring password for
+  a file that is not encrypted.
+- **The secrets section chooses where a new secret is kept.** Section
+  `secrets`, pane `secrets`, publishes one closed choice row, `secret_store`:
+  `keyring` (the default, and what a home that never chose reads as) or `file`,
+  one `0600` file per secret under the Fermix home's `secrets/` directory. It
+  exists for a Linux desktop that logs in with a fingerprint or automatically,
+  where the login keyring stays locked and every save asks for its password.
+  `settings.apply` records the choice in `[fermix_core] secret_store` and applies
+  it at once, so the very next `secret.set` writes to the chosen store and the
+  row carries `restart: false`. Choosing moves nothing: a secret already saved
+  stays in the store it was saved to and is read back from there, and `fermix
+  setup --migrate-secrets` is what moves them. `secret.set` refusing a locked
+  keyring (`secret_store_failed`, reason `locked`) is unchanged.
 - **The sandbox section publishes one row per environment variable name.**
   After `sandbox_env_allow` come the allowed names in allow-list order, then
   the names Fermix still stores but no longer allows, sorted. Each row's key is
@@ -527,7 +678,7 @@ Notes that the shapes alone do not carry:
 | `client_too_old` | The declared version is below the daemon's floor. |
 | `daemon_too_old` | The declared version is above the daemon's ceiling. |
 | `internal_error` | The daemon failed to complete the request. Details are always empty. |
-| `unavailable` | The named capability could not answer. `details.capability` names it. |
+| `unavailable` | The named capability could not answer. `details.capability` names it. `details.sentence`, when present, is the daemon's own sentence for this refusal. |
 | `busy` | Another operation of this kind is already running. |
 | `lease_expired` | The lifecycle lease's window elapsed and the daemon resumed. |
 | `unknown_lease` | The lease was never issued by this daemon, or was already consumed. |
@@ -537,6 +688,7 @@ Notes that the shapes alone do not carry:
 | `secret_store_failed` | The OS keyring refused the write. `details.reason` is `unavailable`, `locked` or `timeout`. |
 | `external_change` | The settings file was changed outside Fermix. `details.section` names the section the refused write targeted; `settings.reload` clears the state. |
 | `config_unreadable` | The settings file could not be read or parsed. `details.sentence` is the parser's own message, and no reload is offered for it. |
+| `unknown_pairing_session` | The pairing session is not retained by this daemon. `details.session_id` names it. |
 
 `lease_expired` and `unknown_lease` are deliberately distinct: the first lets
 the app tell the operator the transaction timed out, the second says the id was
@@ -547,16 +699,20 @@ degrades to `unknown_lease`.
 
 `message` is a fixed per-code string and never varies with the request; it names
 the CLASS of failure. The daemon's own sentence about THIS request, when it has
-one, is `details.sentence`. Two codes carry one:
+one, is `details.sentence`. Three codes carry one:
 
 - `invalid_params` — every request-path refusal that has something to say to the
   operator. `details.field` names the parameter and `details.sentence` says why:
   "This provider has no browser sign-in.", "This setting cannot be cleared.",
   "A secret cannot be empty.", "Install this plugin before using it.", "Add this
   provider's sign-in client secret first.", "This setting is a switch: send true
-  or false.", and every settings validation refusal. A refusal with nothing to
+  or false.", "No phone is waiting for a decision.", "No paired phone has that
+  id.", and every settings validation refusal. A refusal with nothing to
   add carries `field` alone.
 - `config_unreadable` — `details.sentence` is the parser's own message.
+- `unavailable` — only when the phone channel refuses a pairing or forgetting
+  decision from a caller that is not the owner: "Only the owner can pair or
+  forget a phone; run this from your own terminal."
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that
@@ -581,7 +737,9 @@ Every bound is published in the schema's `x-limits` and pinned to
 Operation-specific bounds, owned by the operation rather than the envelope: a
 `logs.query` page defaults to 200 entries and is capped at 500 entries and
 262144 encoded bytes, with a 256-character search and a 64-character subsystem;
-a `diagnostics.build` object carries at most 500 log entries.
+a `diagnostics.build` object carries at most 500 log entries; `mobile.devices.list`
+carries at most 64 devices, each string a phone sends in a pairing request is
+at most 128 bytes, and a pairing `uri` is at most 2048 bytes.
 
 ## Vendoring into `fermix-macos`
 
@@ -592,9 +750,11 @@ own client tests against the same golden frames the daemon is tested against.
 - `fixtures/requests.jsonl` — one well-formed v1 request per method, plus
   parameter variants. Each record declares the classification the daemon owes
   it.
-- `fixtures/success.jsonl` — one full success envelope per method, and for
+- `fixtures/success.jsonl` — one full success envelope per method, for
   `settings.get` one per section, because a section with no golden result is a
-  pane whose row keys nothing on the far side is held to.
+  pane whose row keys nothing on the far side is held to, for
+  `mobile.pair.get` one per session state, and for `job.get` a browser download
+  both completed and failed.
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as
@@ -603,7 +763,8 @@ own client tests against the same golden frames the daemon is tested against.
   requests, partial-marker rejects that must never fall through to v0, both
   `client_too_old` and `daemon_too_old`, an N-1 client calling a v2 method
   (`expect: refused_by_router`, answered by the router with `method_not_found`
-  and `requires`, once for a settings method and once for the plugin surface),
+  and `requires`, once for a settings method, once for the plugin surface, once
+  for the phone pairing surface and once for the browser download),
   and one golden response (`expect: response`) showing every optional field of
   a plugin row absent at once, which is the rendering a client owes a daemon
   that knows less than it does.

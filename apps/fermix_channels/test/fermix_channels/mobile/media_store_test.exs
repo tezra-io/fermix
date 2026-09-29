@@ -268,6 +268,161 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert file_mode(blob) == 0o644
   end
 
+  # SEC-6: a reservation is bytes nobody has sent yet. It is bounded by the
+  # quota but never evicts a committed blob; only committed bytes do.
+  test "announced uploads never evict a committed blob", %{store: store} do
+    kept = String.duplicate("k", 60)
+    assert {:ok, kept_ref} = MediaStore.put_bytes(store, kept, %{})
+
+    assert {:ok, :upload} = MediaStore.begin_upload(store, sized_upload("r-1", 60, "1"))
+    assert {:ok, :upload} = MediaStore.begin_upload(store, sized_upload("r-2", 60, "2"))
+
+    assert {:error, {:store_quota_exceeded, 60}} =
+             MediaStore.begin_upload(store, sized_upload("r-3", 60, "3"))
+
+    assert {:ok, %{ref: ^kept_ref}} = MediaStore.fetch(store, kept_ref)
+  end
+
+  test "a committed upload evicts the least recently used blob to fit", %{store: store} do
+    old = String.duplicate("o", 60)
+    assert {:ok, old_ref} = MediaStore.put_bytes(store, old, %{})
+    bytes = String.duplicate("n", 60)
+    assert {:ok, new_ref} = MediaStore.put_bytes(store, String.duplicate("m", 60), %{})
+    assert {:ok, %{ref: ^new_ref}} = MediaStore.fetch(store, new_ref)
+
+    digest = sha256(bytes)
+    assert {:ok, :upload} = MediaStore.begin_upload(store, upload("c-1", bytes, digest))
+    assert :ok = MediaStore.write_chunk(store, "c-1", 0, bytes)
+    assert {:ok, ^digest} = MediaStore.finish_upload(store, "c-1", digest)
+
+    assert {:error, :media_gone} = MediaStore.fetch(store, old_ref)
+    assert {:ok, %{ref: ^new_ref}} = MediaStore.fetch(store, new_ref)
+  end
+
+  test "a zero-byte upload completes at once and opens no file", %{root: root, store: store} do
+    assert {:ok, :present} = MediaStore.begin_upload(store, upload("empty-1", "", sha256("")))
+    assert Path.wildcard(Path.join([root, "uploads", "*"])) == []
+    assert {:ok, %{size_bytes: 0}} = MediaStore.attachment(store, "empty-1")
+
+    assert {:error, {:sha256_mismatch, expected: _bad, actual: _empty}} =
+             MediaStore.begin_upload(store, upload("empty-2", "", sha256("not empty")))
+
+    assert Path.wildcard(Path.join([root, "uploads", "*"])) == []
+  end
+
+  test "one connection holds at most four uploads at once", %{store: store} do
+    for index <- 1..4 do
+      assert {:ok, :upload} =
+               MediaStore.begin_upload(store, sized_upload("o-#{index}", 1, "#{index}"))
+    end
+
+    assert {:error, :upload_limit_reached} =
+             MediaStore.begin_upload(store, sized_upload("o-5", 1, "5"))
+
+    assert :ok = MediaStore.cancel_upload(store, "o-1")
+    assert {:ok, :upload} = MediaStore.begin_upload(store, sized_upload("o-6", 1, "6"))
+  end
+
+  test "the store holds at most sixteen uploads at once", %{store: store} do
+    uploaders =
+      for connection <- 1..4 do
+        uploader(
+          store,
+          for(
+            index <- 1..4,
+            do: sized_upload("g-#{connection}-#{index}", 1, "#{connection}#{index}")
+          )
+        )
+      end
+
+    assert Enum.all?(
+             uploaders,
+             &match?({_pid, [{:ok, :upload}, {:ok, :upload}, {:ok, :upload}, {:ok, :upload}]}, &1)
+           )
+
+    assert {:error, :store_upload_limit_reached} =
+             MediaStore.begin_upload(store, sized_upload("g-17", 1, "17"))
+  end
+
+  test "an uploader that goes away takes its partial uploads with it", %{root: root, store: store} do
+    {pid, [{:ok, :upload}]} = uploader(store, [sized_upload("gone-1", 4, "gone")])
+    assert [_part] = Path.wildcard(Path.join([root, "uploads", "*.part"]))
+
+    ref = Process.monitor(pid)
+    send(pid, :exit)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+
+    assert_eventually(fn -> Path.wildcard(Path.join([root, "uploads", "*.part"])) == [] end)
+    assert {:error, :unknown_upload} = MediaStore.write_chunk(store, "gone-1", 0, "data")
+  end
+
+  # SEC-7: an attach id is a handle for the message that follows its upload,
+  # not a record kept for ever: it expires, and a blob re-sent many times keeps
+  # only its newest handles.
+  test "an attach id expires after its lifetime", %{root: root} do
+    now = System.os_time(:second)
+    clock = fn -> now end
+    later = fn -> now + 48 * 3_600 + 1 end
+    dir = Path.join(root, "ttl")
+    store = start_supervised!({MediaStore, name: nil, root: dir, clock: clock}, id: :ttl_store)
+
+    assert {:ok, digest} = MediaStore.put_bytes(store, "photo", %{})
+    assert {:ok, :present} = MediaStore.begin_upload(store, upload("ttl-1", "photo", digest))
+    assert {:ok, _attachment} = MediaStore.attachment(store, "ttl-1")
+
+    assert :ok = stop_supervised(:ttl_store)
+
+    restarted =
+      start_supervised!({MediaStore, name: nil, root: dir, clock: later}, id: :ttl_store)
+
+    assert {:error, :unknown_attachment} = MediaStore.attachment(restarted, "ttl-1")
+    refute File.read!(Path.join(dir, "attachments.json")) =~ "ttl-1"
+  end
+
+  test "a blob sent again and again keeps only its eight newest attach ids", %{store: store} do
+    assert {:ok, digest} = MediaStore.put_bytes(store, "again", %{})
+
+    for index <- 1..10 do
+      assert {:ok, :present} =
+               MediaStore.begin_upload(store, upload("again-#{index}", "again", digest))
+    end
+
+    assert {:error, :unknown_attachment} = MediaStore.attachment(store, "again-1")
+    assert {:error, :unknown_attachment} = MediaStore.attachment(store, "again-2")
+    assert {:ok, _attachment} = MediaStore.attachment(store, "again-3")
+    assert {:ok, _attachment} = MediaStore.attachment(store, "again-10")
+  end
+
+  test "the manifest keeps at most its bound of attach ids, newest first", %{root: root} do
+    dir = Path.join(root, "bounded")
+
+    store =
+      start_supervised!({MediaStore, name: nil, root: dir, max_attachments: 3}, id: :bounded)
+
+    for index <- 1..4 do
+      bytes = "blob-#{index}"
+      assert {:ok, digest} = MediaStore.put_bytes(store, bytes, %{})
+      assert {:ok, :present} = MediaStore.begin_upload(store, upload("b-#{index}", bytes, digest))
+    end
+
+    assert {:error, :unknown_attachment} = MediaStore.attachment(store, "b-1")
+    assert {:ok, _attachment} = MediaStore.attachment(store, "b-4")
+  end
+
+  test "an oversized manifest is dropped and logged, never refused at boot", %{root: root} do
+    assert :ok = stop_supervised({MediaStore, root})
+    manifest = Path.join(root, "attachments.json")
+    File.write!(manifest, String.duplicate(" ", 16 * 1_024 * 1_024 + 1))
+    File.chmod!(manifest, 0o600)
+
+    assert :ok = MediaStore.manifest_admissible(root: root)
+    {restarted, log} = with_log(fn -> start_store(root) end)
+
+    assert log =~ "attachment manifest"
+    assert {:error, :unknown_attachment} = MediaStore.attachment(restarted, "anything")
+    assert File.stat!(manifest).size < 1_024
+  end
+
   test "validates identifiers, hashes, sizes, and root modes", %{root: root, store: store} do
     assert {:error, {:invalid_field, :attach_id}} =
              MediaStore.begin_upload(store, upload("", "x", sha256("x")))
@@ -291,6 +446,42 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
       sha256: digest,
       name: Keyword.get(opts, :name)
     }
+  end
+
+  # An upload of `size` bytes whose digest names `seed`, distinct per seed.
+  defp sized_upload(id, size, seed) do
+    %{upload(id, "", sha256(seed)) | size_bytes: size}
+  end
+
+  # A process that begins `uploads` and holds them until told to exit.
+  defp uploader(store, uploads) do
+    test_pid = self()
+
+    pid =
+      spawn(fn ->
+        results = Enum.map(uploads, &MediaStore.begin_upload(store, &1))
+        send(test_pid, {:began, self(), results})
+
+        receive do
+          :exit -> :ok
+        end
+      end)
+
+    on_exit(fn -> send(pid, :exit) end)
+
+    receive do
+      {:began, ^pid, results} -> {pid, results}
+    after
+      2_000 -> flunk("the uploader never began")
+    end
+  end
+
+  defp assert_eventually(check, attempts \\ 50) do
+    cond do
+      check.() -> :ok
+      attempts == 0 -> flunk("the condition never held")
+      true -> Process.sleep(10) && assert_eventually(check, attempts - 1)
+    end
   end
 
   defp sha256(bytes), do: :sha256 |> :crypto.hash(bytes) |> Base.encode16(case: :lower)

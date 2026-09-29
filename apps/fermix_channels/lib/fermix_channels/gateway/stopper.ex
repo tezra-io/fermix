@@ -3,7 +3,8 @@ defmodule FermixChannels.Gateway.Stopper do
   Emergency-stop coordinator for channel-origin execution.
 
   `stop_all/1` is the single halt surface the `/stop` command calls. It stops
-  every active foreground turn and clears all pending FIFO work through
+  every active foreground turn (a turn that already claimed its outcome is left
+  to answer with it) and clears all pending FIFO work through
   `Gateway.Queue.stop_all/1`, cancels background work through
   `Gateway.WorkRegistry.stop_all/1`, and cancels every active coding-harness run
   through `FermixCore.Harness.Manager.stop_all/1` — the three explicit
@@ -25,8 +26,9 @@ defmodule FermixChannels.Gateway.Stopper do
         }
 
   @doc """
-  Stop all active foreground turns, clear pending work, cancel background work,
-  and cancel active coding-harness runs. Options:
+  Stop all active foreground turns (a turn that already claimed its outcome is
+  left to answer with it), clear pending work, cancel background work, and
+  cancel active coding-harness runs. Options:
 
     * `:queue` — the `Gateway.Queue` server (defaults to the registered name).
     * `:work_registry` — the `Gateway.WorkRegistry` server (defaults to the

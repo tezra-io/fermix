@@ -486,8 +486,12 @@ def _available_port():
 def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path):
     daemon_socket = fermix_home / "daemon.sock"
     realtime_socket = fermix_home / "realtime.sock"
+    companion_socket = fermix_home / "companion.sock"
+    browser_host_socket = fermix_home / "browser_host.sock"
     daemon_ready = False
     realtime_ready = False
+    companion_ready = False
+    browser_host_ready = False
     health_ready = False
 
     for _attempt in range(timeouts.startup_attempts):
@@ -497,9 +501,11 @@ def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path
             raise VerificationError(f"app engine exited during startup with code {code}: {excerpt}")
         daemon_ready = _unix_socket(daemon_socket)
         realtime_ready = _unix_socket(realtime_socket)
+        companion_ready = _unix_socket(companion_socket)
+        browser_host_ready = _unix_socket(browser_host_socket)
         if not health_ready:
             health_ready = _health_live(environment, manifest, timeouts)
-        if daemon_ready and realtime_ready and health_ready:
+        if daemon_ready and realtime_ready and companion_ready and browser_host_ready and health_ready:
             return
         time.sleep(timeouts.poll_interval_seconds)
 
@@ -508,6 +514,8 @@ def _await_ready(process, fermix_home, environment, manifest, timeouts, log_path
         "app engine did not become live before the startup deadline: "
         f"daemon_socket={str(daemon_ready).lower()} "
         f"realtime_socket={str(realtime_ready).lower()} "
+        f"companion_socket={str(companion_ready).lower()} "
+        f"browser_host_socket={str(browser_host_ready).lower()} "
         f"health={str(health_ready).lower()}: {excerpt}"
     )
 
@@ -666,7 +674,7 @@ def _await_exit(process, timeouts, log_path):
 
 
 def _verify_socket_cleanup(fermix_home):
-    for name in ("daemon.sock", "realtime.sock"):
+    for name in ("daemon.sock", "realtime.sock", "companion.sock", "browser_host.sock"):
         path = fermix_home / name
         if os.path.lexists(path):
             raise VerificationError(f"{name} remained after app-engine shutdown")

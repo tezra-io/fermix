@@ -48,6 +48,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.MachineFacts
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
@@ -281,7 +282,7 @@ defmodule FermixWebWeb.SetupLive do
          )}
 
       {:error, reason} ->
-        {:noreply, flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")}
+        {:noreply, flash_error(socket, sign_in_failure("Anthropic", reason))}
     end
   end
 
@@ -1509,13 +1510,19 @@ defmodule FermixWebWeb.SetupLive do
   defp build_provider_form(snapshot),
     do: build_provider_form(snapshot, current_provider(snapshot))
 
+  defp machine_timezone do
+    case MachineFacts.timezone() do
+      {:ok, zone} -> zone
+      :error -> ""
+    end
+  end
+
   defp build_provider_form(snapshot, provider) do
     provider_block = provider_block(snapshot, provider)
 
     %{
       provider: provider,
-      default_model:
-        Keyword.get(provider_block, :default_model) || ModelCatalog.default_model_for(provider),
+      default_model: ModelCatalog.effective_model(provider, provider_block),
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
       fast: Keyword.get(provider_block, :fast, false),
@@ -1550,7 +1557,7 @@ defmodule FermixWebWeb.SetupLive do
         provider: provider,
         configured?: Selection.configured?(provider, block),
         primary?: provider == primary,
-        model: Keyword.get(block, :default_model) || ModelCatalog.default_model_for(provider)
+        model: ModelCatalog.effective_model(provider, block)
       }
     end)
   end
@@ -2205,9 +2212,10 @@ defmodule FermixWebWeb.SetupLive do
       # shows the current name; blank on save keeps it.
       bot_name: snapshot |> get_fermix_core(:agent) |> Keyword.get(:name, ""),
       user_name: Keyword.get(personalization, :user_name, ""),
-      # Default to New York so the form is never blank; the agent reads this
-      # (via Application env) to stamp each turn with the current local date.
-      timezone: Keyword.get(personalization, :timezone, "America/New_York"),
+      # The machine's own zone, the one the first boot seeds; blank where the
+      # machine cannot say. The agent reads the saved value (via Application
+      # env) to stamp each turn with the current local date.
+      timezone: Keyword.get_lazy(personalization, :timezone, &machine_timezone/0),
       communication_style: Keyword.get(personalization, :communication_style, ""),
       skill_curation_enabled:
         snapshot |> get_fermix_core(:skill_curation) |> Keyword.get(:enabled, true),
@@ -3238,8 +3246,14 @@ defmodule FermixWebWeb.SetupLive do
   defp plugin_auth_failure(_task, {:oauth_client_rejected, detail}),
     do: ClientRejection.sentence(detail)
 
-  defp plugin_auth_failure(task, reason),
-    do: "#{task.display_name} sign-in failed: #{Redaction.format(reason)}"
+  defp plugin_auth_failure(task, reason), do: sign_in_failure(task.display_name, reason)
+
+  # Another Fermix process held the account's profile lock past the wait, and
+  # nothing was spent: the flash says to retry rather than naming the reason.
+  defp sign_in_failure(_label, :profile_busy), do: Store.busy_sentence()
+
+  defp sign_in_failure(label, reason),
+    do: "#{label} sign-in failed: #{Redaction.format(reason)}"
 
   defp maybe_clear_plugin_auth_url(socket, name, url) do
     case socket.assigns.plugin_auth_url do
@@ -3554,7 +3568,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:codex_auth_tasks, tasks)
     |> assign(:codex_auth_url, nil)
-    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+    |> flash_error(sign_in_failure(task.display_name, reason))
   end
 
   # A completed OAuth connection in setup means the user chose this provider, so
@@ -3717,7 +3731,7 @@ defmodule FermixWebWeb.SetupLive do
     socket
     |> assign(:xai_auth_tasks, tasks)
     |> assign(:xai_auth_url, nil)
-    |> flash_error("#{task.display_name} sign-in failed: #{Redaction.format(reason)}")
+    |> flash_error(sign_in_failure(task.display_name, reason))
   end
 
   defp xai_auth_running?(tasks), do: map_size(tasks) > 0
@@ -3745,7 +3759,7 @@ defmodule FermixWebWeb.SetupLive do
       )
     else
       {:error, reason} ->
-        flash_error(socket, "Anthropic sign-in failed: #{Redaction.format(reason)}")
+        flash_error(socket, sign_in_failure("Anthropic", reason))
     end
   end
 

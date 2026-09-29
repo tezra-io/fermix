@@ -227,6 +227,39 @@ defmodule FermixCore.Setup.ConfigStoreTest do
            }
   end
 
+  # R5-1: the phone channel's trust store refuses to load from anything but a
+  # 0700 directory, and a boot used to create this one at the umask's 0755.
+  test "the mobile directory is created private, and an open one is repaired at the next boot" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-dir")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    mobile = Path.join(tmp_home, "mobile")
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+
+    File.chmod!(mobile, 0o755)
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(mobile) == 0o700
+  end
+
+  # The trust store refuses a symlinked directory by name; the boot leaves the
+  # directory it points at as it found it.
+  test "a symlinked mobile directory is left for the trust store to refuse" do
+    tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-mobile-link")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    elsewhere = Path.join(tmp_home, "elsewhere")
+    File.mkdir_p!(elsewhere)
+    File.chmod!(elsewhere, 0o755)
+    File.ln_s!(elsewhere, Path.join(tmp_home, "mobile"))
+
+    assert :ok = ConfigStore.ensure_workspace()
+    assert mode(elsewhere) == 0o755
+  end
+
+  defp mode(path), do: Bitwise.band(File.stat!(path).mode, 0o777)
+
   test "an empty FERMIX_HOME is treated as unset, not a cwd-relative path" do
     # An empty string is truthy in Elixir, so `get_env() || default` did NOT
     # fall back — fermix_home/0 returned "" and workspace paths became
@@ -731,6 +764,153 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     # reach it; name it here rather than leave the one section the gate walks
     # past unasserted.
     assert second.fermix_web == [port: 4555]
+  end
+
+  # MGMT-1. The parser reads the file one line at a time and a later assignment
+  # wins, so a raw line break in a string value used to write lines of its own:
+  # a provider's base_url (where its credential is sent), a key the openai block
+  # refuses (the daemon then cannot boot) or the notetaker's announce switch.
+  # Seeded with the shapes the four writers hand the store: a routing slug,
+  # personalization prose, a plugin setting (never trimmed, so its ends travel
+  # too) and the meeting announcement.
+  test "a line break in a string value round-trips and never becomes a line of its own (MGMT-1)" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    subagent_model =
+      "gpt-5.4-mini\n[fermix_core.providers.anthropic]\nbase_url = https://attacker.example/v1\n#"
+
+    style =
+      "Short answers.\n[fermix_core.providers.openai]\nbase_url = https://attacker.example\n#"
+
+    setting =
+      "Work\tcalendar\r\n[fermix_core.providers.xai]\nbase_url = https://attacker.example\n"
+
+    announcement =
+      "Hello \"team\".\nNotes go to C:\\notes\\\n[fermix_core.meetings]\nannounce = false"
+
+    snapshot = %{
+      fermix_core: [
+        providers: [
+          anthropic: [base_url: "https://api.anthropic.com/v1", default_model: "claude-opus-5"],
+          openai: [default_model: "gpt-5.4"]
+        ],
+        personalization: [communication_style: style],
+        routing: [subagent_model: subagent_model],
+        plugins: [entries: %{"google_calendar" => [{"DEFAULT_CALENDAR", setting}]}],
+        meetings: [announce_message: announcement]
+      ],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    core = loaded.fermix_core
+
+    assert core[:providers] == ConfigStore.persistable_snapshot(snapshot).fermix_core[:providers]
+    assert core[:routing][:subagent_model] == subagent_model
+    assert core[:personalization][:communication_style] == style
+    assert core[:plugins][:entries]["google_calendar"] == [{"DEFAULT_CALENDAR", setting}]
+    assert core[:meetings][:announce_message] == announcement
+    refute Keyword.has_key?(core[:meetings], :announce)
+  end
+
+  # One left-to-right pass that takes exactly one quote off each end, so a value
+  # that ends in a quote or a backslash, or that spells an escape itself, reads
+  # back as written, and no control byte reaches the file raw.
+  test "a value that spells an escape or ends in a quote or backslash reads back as written" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    settings = [
+      {"ENDS_IN_QUOTE", ~s(say "hi")},
+      {"ENDS_IN_BACKSLASH", "C:\\temp\\"},
+      {"SPELLS_ESCAPES", "a\\nb \\u0007 \\\""},
+      {"CONTROL", "bell\a nul\0 esc\e del\x7F"}
+    ]
+
+    snapshot = %{
+      fermix_core: [plugins: [entries: %{"google_calendar" => settings}]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    refute contents |> String.replace("\n", "") |> String.match?(~r/[\x00-\x1F\x7F]/)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    # A loaded section comes back sorted by key.
+    assert loaded.fermix_core[:plugins][:entries]["google_calendar"] == Enum.sort(settings)
+  end
+
+  # The only escapes the writer used to emit were `\\` and `\"`, so a file it
+  # wrote reads exactly as before, and a backslash sequence the writer never
+  # emits is kept as written, as it always was.
+  test "a settings file from the previous writer reads the same" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.personalization]
+    user_name = "Ana \\"Q\\" C:\\\\d"
+    communication_style = "keep \\d as written"
+
+    [fermix_core.computer_history]
+    apps = ["com.apple.Safari", "a\\"b\\\\","c"]
+    """)
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    personalization = loaded.fermix_core[:personalization]
+
+    assert personalization[:user_name] == ~S(Ana "Q" C:\d)
+    assert personalization[:communication_style] == ~S(keep \d as written)
+    assert loaded.fermix_core[:computer_history][:apps] == ["com.apple.Safari", "a\"b\\", "c"]
+  end
+
+  # A list used to be split on every comma, quoted or not, and a piece that was a
+  # bare word came back as an element of its own: `/tmp/a,/,b` in allowed_roots
+  # reloaded with `/` in the allowlist. A quoted element is one element, commas
+  # and escaped quotes included.
+  test "a list element holding a comma or a quote reads back as one element" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    roots = ["/tmp/a,/,b", "/tmp/plain"]
+    apps = ["com.example.a,com.example.b", "com.apple.Safari"]
+    calendars = ["Work, home", ~s("quoted", too), "C:\\a,\\"]
+
+    snapshot = %{
+      fermix_core: [
+        computer_history: [apps: apps],
+        plugins: [entries: %{"google_calendar" => [{"CALENDARS", calendars}]}]
+      ],
+      sandbox: [allowed_roots: roots],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    assert loaded.sandbox.allowed_roots == roots
+    assert loaded.fermix_core[:computer_history][:apps] == apps
+    assert loaded.fermix_core[:plugins][:entries]["google_calendar"] == [{"CALENDARS", calendars}]
   end
 
   # M38 §4.7. The listener port is a home setting, and the pitfall this file's
@@ -1882,6 +2062,60 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert loaded.fermix_core
            |> Keyword.get(:browser, [])
            |> Keyword.get(:allowed_hosts) == ["printer.local", "build.internal"]
+  end
+
+  # `launch_app` is a settable key too: whether the engine may open the Fermix
+  # app to run a new task in its browser pane. It is a boolean with no
+  # normalization, and the round trip proves the file carries it.
+  test "save/load round-trips the browser launch_app key" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    snapshot = %{
+      fermix_core: [browser: [allowed_hosts: ["build.internal"], launch_app: false]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "launch_app = false"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    browser = Keyword.get(loaded.fermix_core, :browser, [])
+    assert Keyword.get(browser, :launch_app) == false
+    assert Keyword.get(browser, :allowed_hosts) == ["build.internal"]
+  end
+
+  test "how tasks run and the tab cap round-trip through the settings file" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    snapshot = %{
+      fermix_core: [browser: [default_profile: "fermix_headless", max_tabs: 4]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(default_profile = "fermix_headless")
+    assert contents =~ "max_tabs = 4"
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    browser = Keyword.get(loaded.fermix_core, :browser, [])
+
+    assert browser[:default_profile] == "fermix_headless"
+    assert browser[:max_tabs] == 4
   end
 
   test "apply_snapshot puts browser config in Application env" do

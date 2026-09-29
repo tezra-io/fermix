@@ -32,8 +32,14 @@ defmodule FermixCore.ComputerHistory.Capturer do
       failure, or a sidecar exit each becomes a synthetic `observer.gap` (a
       distinct `boot_id` so it never collides with sidecar `(boot_id, seq)`),
       never a silent hole.
-    * **teardown** — flushes the buffer, `observe_stop`s, kills the sidecar pid
-      (`Compux.Port.kill/1`), and releases the lock, on every exit path.
+    * **teardown** — `terminate/2` and a degrade `observe_stop`, kill the
+      sidecar pid (`Compux.Port.kill/1`) and release the lock first, then
+      flush the buffer best-effort. The flush's Repo calls can outlast the
+      supervisor's shutdown timeout, and the kill that follows skips whatever
+      is still ahead. A `:kill` skips `terminate/2` altogether: the Port closes
+      with the process, the sidecar exits on stdin EOF (one wedged in a native
+      call does not, and leaks until killed), and the lock goes stale 30 s
+      after its last heartbeat; the next acquire breaks it.
 
   It never uses `CaptureHealth` — that breaker guards ScreenCaptureKit wedges,
   and capture is Accessibility-only (no screen capture); this rail's health is
@@ -46,6 +52,7 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   alias Compux.Frame
   alias Compux.Port, as: SidecarPort
+  alias FermixCore.ComputerHistory
   alias FermixCore.ComputerHistory.Config
   alias FermixCore.ComputerHistory.Ingest
   alias FermixCore.ComputerHistory.SingletonLock
@@ -81,7 +88,14 @@ defmodule FermixCore.ComputerHistory.Capturer do
   @restart_backoff_ms 1_000
 
   @type mode ::
-          :bootstrapping | :handshaking | :capturing | :restarting | :standing_down | :degraded
+          :bootstrapping
+          | :handshaking
+          | :capturing
+          | :restarting
+          | :standing_down
+          | :degraded
+          | :not_running
+          | :not_answering
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -90,20 +104,39 @@ defmodule FermixCore.ComputerHistory.Capturer do
   end
 
   @doc "Introspection for `/history status` and the doctor row."
-  @spec status(GenServer.server()) :: %{
+  @spec status(GenServer.server(), non_neg_integer()) :: %{
           mode: mode(),
           reason: term(),
           lock_holder: term(),
           stale_deadlines_ignored: non_neg_integer()
         }
-  def status(server \\ __MODULE__) do
-    GenServer.call(server, :status)
+  def status(server \\ __MODULE__, timeout \\ 5_000) when is_integer(timeout) and timeout >= 0 do
+    GenServer.call(server, :status, timeout)
   catch
-    :exit, _reason -> %{mode: :not_running, reason: nil, lock_holder: nil}
+    # A Capturer busy past the timeout (say, blocked in a flush's Repo call) is
+    # still alive, and may still be capturing: it must not read as stopped.
+    :exit, {:timeout, _call} -> %{mode: :not_answering, reason: nil, lock_holder: nil}
+    # Every other exit of the call means the process was not there, or died
+    # before it answered.
+    :exit, _gone -> %{mode: :not_running, reason: nil, lock_holder: nil}
   end
 
+  # Every start (the Controller's, and every DynamicSupervisor restart) re-reads
+  # the one resolver the Controller decides by, and declines while the feature
+  # is off. A restart that races `/history off` therefore cannot bring capture
+  # back behind the Controller's stop (CH-4). `:ignore` comes before anything is
+  # trapped or built, so a declined start leaves nothing to tear down.
   @impl true
   def init(opts) do
+    if Keyword.get(opts, :operative_fun, &ComputerHistory.operative?/0).() do
+      init_capture(opts)
+    else
+      Logger.info("computer_history capturer not started: the feature is off")
+      :ignore
+    end
+  end
+
+  defp init_capture(opts) do
     # Trap exits so `terminate/2` — the SOLE path that releases the singleton
     # lock, `observe_stop`s, kills the sidecar pgid, and does the final flush —
     # actually runs on a supervisor `:shutdown` (`/history off`'s
@@ -540,16 +573,16 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   # --- degrade + teardown -------------------------------------------------
 
-  # Degrade is terminal: flush what survived (verified events + self-gaps, so the
-  # discontinuity is recorded), stop the sidecar, and RELEASE the machine-wide
-  # lock so a healthy daemon on this Mac can take over — a degraded holder that
-  # kept heartbeating would brick capture machine-wide until an operator restart.
+  # Degrade is terminal: stop the sidecar and RELEASE the machine-wide lock so a
+  # healthy daemon on this Mac can take over, then flush what survived (verified
+  # events + self-gaps). Teardown goes first, as in terminate/2: a `:shutdown`
+  # that arrives during the flush's Repo calls is followed by a kill 5 s later.
   defp degrade(state, reason) do
     Logger.error("computer_history capturer degraded: #{inspect(reason)}")
-    flushed = flush(state)
-    stop_driver(flushed)
-    released = release_lock(flushed)
-    %{released | mode: :degraded, degraded_reason: reason, sidecar: nil, protocol_ok?: false}
+    stop_driver(state)
+    released = release_lock(state)
+    flushed = flush(released)
+    %{flushed | mode: :degraded, degraded_reason: reason, sidecar: nil, protocol_ok?: false}
   end
 
   defp release_lock(%{lock_held?: true} = state) do
@@ -561,12 +594,15 @@ defmodule FermixCore.ComputerHistory.Capturer do
 
   @impl true
   def terminate(_reason, state) do
-    # Runs on supervisor `:shutdown` because `init/1` traps exits. Flush (partition
-    # writes verified events + self-gaps, drops unverified), stop the sidecar, and
-    # release the lock — the teardown the moduledoc promises on every exit path.
-    _ = flush(state)
+    # Runs on supervisor `:shutdown` because `init/1` traps exits. Stop the
+    # sidecar and release the lock BEFORE the flush: the flush makes Repo calls
+    # that can outlast the supervisor's shutdown timeout, and the kill that
+    # follows skips whatever is still ahead. The buffer is this process's memory,
+    # so the flush (partition writes verified events + self-gaps, drops
+    # unverified) needs neither.
     stop_driver(state)
     if state.lock_held?, do: SingletonLock.release(state.lock_path)
+    _ = flush(state)
     :ok
   end
 

@@ -1,214 +1,58 @@
-# Providers — per-provider config, setup panes, retry, and transport
+# Providers: setup, config keys, effort, retries and transport
 
-The body carries how an operator picks a provider and a model. This file carries
-the per-provider wire detail, the setup surfaces, and the retry/transport
-mechanics underneath.
+## Connecting one
 
-## Per-provider blocks
+- **Mac app**: Settings > Providers. Each provider row offers what it supports: **Sign in** (browser sign-in; **Sign in with browser** in the sheet), **Import Codex sign-in** / **Import Claude Code sign-in** (a sign-in already saved on this Mac; macOS may ask for keychain access), **Add setup token** (Anthropic, from `claude setup-token`), **Add key…** > **Verify and save**. The row's **Details…** > **Use as primary** (confirm) promotes a connected provider and resets the sub-agent model to "same as main". Rows per provider: **Sign in with** (API key vs subscription), the key, **Model**, **Reasoning effort**, **Fast mode** (Codex). The **Model behavior** section holds only **Sub-agent model**. Status words: Primary, Connected, Key stored, not verified, Not connected, Reconnect needed.
+- **Browser setup (Linux, dev)**: the Provider tab shows one card per provider (`Primary`, `Fallback`, `Not configured`); pick one, fill the "Configuring …" form, **Save provider**. Saving edits that provider only. A configured, non-primary card has **Set primary**. Each card has an API key vs subscription picker: Codex and SpaceXAI sign in through the browser (**Sign in with ChatGPT**, **Sign in with Grok**), Anthropic takes a pasted `claude setup-token` or a Claude Code import. Its "Model behavior" panel holds effort and Codex `fast` and is hidden for OpenRouter, Mistral, Venice and Ollama. The Media tab edits the OpenAI/SpaceXAI key inline beside the image backend (blank keeps the stored key).
+- **CLI**: `fermix auth login` (Codex), `fermix auth login --provider anthropic` (`--setup-token`, `--import-claude-code`, or `CLAUDE_CODE_OAUTH_TOKEN`), `fermix auth login --provider xai` (Grok Build); `fermix auth status|logout` take `--provider`. CLI sign-in never changes the primary.
 
-All eight run turns. The registry behind them is
-`FermixCore.Providers.Descriptor` — one declarative entry per provider, holding
-labels, auth modes, setup fields, and config-key allowlists. Unknown TOML keys in
-any provider block, and an unknown `[fermix_core.agent] provider`, fail loud at
-config load rather than being silently dropped.
+**Primary.** The first provider configured on a home becomes primary through the Mac app, browser setup or the terminal wizard; `fermix auth login` never changes the primary. After that the primary changes by an explicit choice (**Use as primary**, **Set primary**, `fermix setup --provider`, `primary = true` in config), which keeps each provider's settings and credentials. Exception: in browser setup, completing **Sign in with ChatGPT**, **Sign in with Grok** or **Import Claude Code login** always makes that provider primary (a pasted setup token saved with **Save provider** does not). Making a provider primary is refused until it has credentials. A Realtime (voice) key stored in the OpenAI slot does not promote OpenAI. The legacy `[fermix_core.agent] provider` key is read only when no block carries `primary`.
 
-- **OpenAI** and **Codex** (`openai`, `openai_codex`) ride the OpenAI Responses
-  wire. Codex authenticates with a ChatGPT subscription OAuth connection
-  (`fermix auth login`) and carries the extra `fast` behavior knob.
-- **Anthropic** (`[fermix_core.providers.anthropic]`) supports two auth modes via
-  `auth_mode = "api_key" | "oauth"`: an API key (`api_key`), or Claude
-  subscription OAuth (profile `anthropic_oauth` in `auth.json`; connect with
-  `fermix auth login --provider anthropic` using `--setup-token`,
-  `--import-claude-code`, or `CLAUDE_CODE_OAUTH_TOKEN`). OAuth requests emulate
-  Claude Code — identity headers plus a system block, and `mcp_`-prefixed tool
-  names — and auto-refresh with one 401 retry. Every Anthropic request sends
-  prompt-cache breakpoints and requests adaptive thinking on models that support
-  it: the model decides when and how much to deliberate, `reasoning_effort`
-  calibrates it, and a model without adaptive thinking (Haiku 4.5) gets no
-  thinking parameter. Non-streaming output caps at `max_tokens` 16384, sized so
-  thinking plus the visible answer fit the buffered receive window.
-- **SpaceXAI Grok** (`[fermix_core.providers.xai]`) also supports two auth modes
-  via `auth_mode = "api_key" | "oauth"`: a bearer API key (`api_key`,
-  `XAI_API_KEY`), or Grok Build subscription OAuth (loopback PKCE, profile
-  `xai_oauth`; connect with `fermix auth login --provider xai`). A 403 means the
-  Grok plan lacks API access, not a stale token. Grok rides the OpenAI Responses
-  wire shape with efforts `none|low|medium|high|xhigh`; some Grok models reject
-  an effort field and get it omitted, and slash-containing enum values are
-  stripped from tool schemas.
-- **OpenRouter** (`[fermix_core.providers.openrouter]`: `api_key` via
-  `OPENROUTER_API_KEY`, optional `base_url`, `default_model`, `primary`) rides the
-  Chat Completions wire with vendor-prefixed model ids
-  (`anthropic/claude-sonnet-4.6`, dots not dashes) and static attribution headers
-  (`HTTP-Referer: https://fermix.sh`, `X-Title: Fermix`). It sends no
-  reasoning-effort field, so the server default applies.
-- **Mistral** (`[fermix_core.providers.mistral]`: `api_key` via
-  `MISTRAL_API_KEY`, optional `base_url`, `default_model`, `primary`) also rides
-  the Chat Completions wire, with three rolling `-latest` tiers —
-  `mistral-large-latest`, `mistral-medium-latest`, `mistral-small-latest` — a
-  plain Bearer key, no attribution headers, and no reasoning-effort field.
-  Mistral's strict validator rejects an assistant turn carrying empty-string
-  `content` alongside `tool_calls`, so the shared Chat Completions adapter omits
-  the `content` key whenever tool calls are present — a wire shape valid on every
-  Chat Completions provider.
-- **Venice** (`[fermix_core.providers.venice]`: `api_key` via `VENICE_API_KEY`,
-  optional `base_url`, `default_model`, `primary`) also rides the Chat
-  Completions wire, against `https://api.venice.ai/api/v1`, with a plain Bearer
-  key, no attribution headers, and no reasoning-effort field. Two constants, not
-  settings, ride every request: Venice is told not to prepend its own system
-  prompt, and to strip inline thinking out of the reply. Fermix does not use
-  Venice's end-to-end encrypted mode, because that mode turns off tool calling
-  and system prompts. The default model is `grok-4-6`, a private one. The doctor
-  probe asks `/api_keys/rate_limits` rather than the model list, which is public
-  and answers without a key.
-- **Ollama** (`[fermix_core.providers.ollama]`: `base_url`, whose presence is what
-  marks it configured, env `OLLAMA_BASE_URL`; `default_model`; `primary`) is
-  **keyless** — `auth_mode :none` internally, no Authorization header and no
-  secret — against the local OpenAI-compatible endpoint
-  (`http://localhost:11434/v1` by default; remote and Tailscale hosts work), with
-  a 300s receive timeout for slow local inference. Catalog windows are model
-  capability while the server may serve far less and truncate silently, so the
-  doctor probe also POSTs the native `/api/show` and **fails loud when the served
-  `num_ctx` undercuts the catalog window**; fix that with `OLLAMA_CONTEXT_LENGTH`
-  or a Modelfile `num_ctx`. A 404 from the probe means the model is not pulled
-  (`ollama pull <model>`).
+**Signing in and out.** A stored subscription token is inert until `auth_mode = "oauth"`, so signing in (web, app or CLI) sets it and `fermix auth logout` reverts it to `api_key`; the route change takes a restart, but logout also makes a running daemon drop that account's tokens at once (a daemon that cannot let go fails the logout, saying the stored sign-in is already gone). A sign-in, import or setup-token save that meets another Fermix process refreshing the same account is refused within about ten seconds with "try again shortly", before anything is spent.
 
-A Realtime API key reuses the OpenAI provider key slot but does not, on its own,
-promote OpenAI to primary — only a real provider credential or an explicit
-primary choice does. CLI OAuth login never changes primary.
+**Model lists.** OpenRouter and Venice list their live catalogs (tool-capable models; Venice labels each with its privacy tier, explained by the info control beside **Model**: `Private` (the prompt is not kept), `Anonymized` (passed to the model's maker without the account; the maker still reads the prompt), `Private (TEE)` (inside a hardware enclave)). Ollama lists only models installed on the server (`GET /api/tags`); an unreachable server shows `ollama serve` guidance and a free-form field. A live listing that fails says so and offers a free-form field; it is never answered from the built-in catalog under a live label.
+
+## Config keys
+
+Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model`, and:
+
+| Provider | Wire | Auth and extra keys |
+|---|---|---|
+| `openai_codex` | OpenAI Responses | ChatGPT subscription sign-in; `reasoning_effort`; `fast` |
+| `openai` | OpenAI Responses | `api_key`; `reasoning_effort` |
+| `anthropic` | Messages | `auth_mode = "api_key"` (`api_key`) or `"oauth"` (Claude subscription); `reasoning_effort` |
+| `xai` (SpaceXAI Grok) | OpenAI Responses shape | `auth_mode = "api_key"` (`api_key`, `XAI_API_KEY`) or `"oauth"` (Grok Build); `reasoning_effort` |
+| `openrouter` | Chat Completions | `api_key` (`OPENROUTER_API_KEY`), `base_url` |
+| `mistral` | Chat Completions | `api_key` (`MISTRAL_API_KEY`), `base_url` |
+| `venice` | Chat Completions | `api_key` (`VENICE_API_KEY`), `base_url` |
+| `ollama` | Chat Completions (local) | keyless; `base_url` (`OLLAMA_BASE_URL`, default `http://localhost:11434/v1`; remote and Tailscale hosts work) is what marks it configured |
+
+An unknown key in any provider block, or an unknown legacy provider, fails loud at config load.
+
+- **Anthropic**: subscription requests identify as Claude Code and auto-refresh with one 401 retry. Every request sends prompt-cache breakpoints and asks for adaptive thinking where the model supports it (none for Haiku 4.5). Output caps at 16,384 tokens.
+- **Grok**: a 403 means the plan lacks API access, not a stale token. Some Grok models reject an effort field and get none.
+- **OpenRouter**: vendor-prefixed ids (`anthropic/claude-sonnet-4.6`); attribution headers `HTTP-Referer: https://fermix.sh`, `X-Title: Fermix`; no effort field.
+- **Mistral**: three rolling tiers (`mistral-large-latest`, `-medium-latest`, `-small-latest`); no effort field.
+- **Venice**: `https://api.venice.ai/api/v1`; Venice's own system prompt and inline thinking are turned off on every request; its end-to-end encrypted mode is not used (it disables tools). Default model `grok-4-6`. The Doctor probe reads `/api_keys/rate_limits`.
+- **Ollama**: 300 s receive timeout. The Doctor probe also reads `/api/show` and fails when the served `num_ctx` is below the catalog window (fix: `OLLAMA_CONTEXT_LENGTH` or a Modelfile `num_ctx`); a 404 means the model is not pulled (`ollama pull <model>`).
 
 ## Reasoning effort
 
-`reasoning_effort` is accepted only for the effort-capable providers — OpenAI,
-Codex, Anthropic, and SpaceXAI. An OpenRouter, Mistral, Venice, or Ollama block
-rejects the key at config load, routing-level effort overlays skip their routes,
-and their telemetry reports `reasoning_effort: nil`.
+Only OpenAI, Codex, Anthropic and SpaceXAI take `reasoning_effort`; the other four reject the key at config load and routing overlays skip them. Vocabulary: `none|low|medium|high|xhigh|max`, per-provider subsets (Anthropic has no `none`; its API default is `high`). Models carry their own ceiling: the current OpenAI/Codex generations reach `max`, `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` stop at `xhigh`, Grok before 4.6 stops at `high`. A level above the ceiling is clamped down at route resolution. The CLI wizard and web page list only the levels the chosen model accepts; the Mac app lists the provider's whole set and relies on the clamp.
 
-Effort is one canonical vocabulary — `FermixCore.Providers.ReasoningEffort`:
-`none|low|medium|high|xhigh|max` — with per-provider subsets, mapped to each
-provider's wire field (`reasoning.effort` for OpenAI, Codex and SpaceXAI;
-`output_config.effort` for Anthropic). Anthropic has no `none`: its floor is
-`low` and the API default is `high`. A level above a provider's ceiling clamps.
+## Routing sub-agents, jobs and the notetaker
 
-On top of the provider subset a model can carry its own ceiling in the catalog.
-The current OpenAI and Codex generations (GPT-6 Astra, Sol and Luna; GPT-5.6)
-reach `max` while `gpt-5.5`, `gpt-5.4` and `gpt-5.4-mini` top out at `xhigh`, and
-every Grok before 4.6 tops out at `high`. An over-reaching config self-heals down to that model
-ceiling at route resolution instead of 400-ing at the provider. A model with no
-catalog ceiling passes through untouched, leaving Anthropic's per-model nuance to
-the provider's own 400.
+`[fermix_core.routing]`: `subagent_model|provider|reasoning_effort`, `cron_*`, `meeting_*`. Unset means the main model. A model with no provider runs on the primary; a cross-provider worker needs an explicit `subagent_provider`/`cron_provider`. A provider paired with a model the catalog knows under another provider is rejected on write (the `model_routing_config` tool validates the merged routing) and fails loud at spawn; a model slug holding a control character is refused. Set from Mac **Sub-agent model**, the primary provider's pane in browser setup (sub-agent only), `config.toml`, or `model_routing_config`. `subagents` also takes a one-shot `model`.
 
-## Setup surfaces
+## Routes, failover and retries
 
-- The web setup provider page renders per-provider cards — status `Primary`,
-  `Fallback`, or `Not configured` — as the provider selector. Picking a card
-  loads that provider into the "Configuring …" form, and saving it makes that
-  provider primary, which needs a daemon restart. A configured, non-primary card
-  also carries a "Set primary" button that flips the flag without re-entering
-  credentials. Nothing is disabled, so any provider can be selected and set up.
-- The page has an API-key vs OAuth picker per provider: SpaceXAI offers a
-  loopback "Connect Grok" like Codex, Anthropic takes a pasted
-  `claude setup-token` or a Claude Code login import. A stored token is inert
-  until `auth_mode = "oauth"`, so connecting in the web page and
-  `fermix auth login --provider xai|anthropic` both set `auth_mode = oauth` in
-  config, and `fermix auth logout` reverts it to `api_key`. The change reaches the
-  daemon on restart.
-- The Ollama pane detects the server with a single probe: the configured URL
-  either serves `GET /api/tags` or it does not. A reachable server lists **only
-  the locally installed models** in the model picker; an unreachable one shows the
-  error with `ollama serve` and install guidance plus a free-form model input.
-- The OpenRouter pane fetches the **live upstream catalog**
-  (`GET /api/v1/models`, tool-capable models only, newest first), so every
-  current model is selectable; on fetch failure it shows the error and a
-  free-form input (`FermixCore.Providers.ModelListing`). The static catalog stays
-  authoritative for defaults and context windows.
-- The Venice pane fetches Venice's **live model list** the same way (every
-  tool-calling model), ordered by model family and then newest first, and every
-  label ends with that model's privacy tier: `Private` (the prompt is not kept),
-  `Anonymized` (passed to the model's maker without the account, and the maker
-  still reads the prompt), or `Private (TEE)` for a model inside a hardware
-  enclave. An info control beside the Model row carries the same explanation, on
-  the web page and in the macOS app.
-- The "Model behavior" panel — reasoning effort and Codex `fast` — is hidden for
-  providers with no behavior knobs: OpenRouter, Mistral, Venice, and Ollama.
-- Both the CLI wizard and the web page offer effort for the effort-capable
-  providers only, and list only the levels the selected model accepts.
-- The web setup Media tab exposes an editable OpenAI/SpaceXAI key field inline
-  beside the image-backend picker. It writes the same `openai_api_key` /
-  `xai_api_key` provider secret those providers use for chat: it reads as
-  already-configured when a key is stored, blank keeps the stored key, and a
-  pasted value replaces it — so the `generate_image` key can be set without
-  opening the provider's full setup form.
+- Main-turn routes are read at boot, so a provider change takes a restart; a scheduled job with no explicit provider resolves the chain when it runs.
+- **Failover** (to the next configured provider in order `openai_codex`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `ollama`) happens only on a turn's first model call and only for transient errors: timeout, transport, 5xx, rate limit, quota, or an OAuth failure left after refresh. Never for API-key auth, context length, tool errors, mid-loop calls, or after visible streamed output. `fermix doctor` lists the fallbacks; agent status shows `primary_provider`/`fallback_providers`; each hop emits `[:fermix, :provider, :failover]`.
+- **Same-provider retry first.** The first call retries briefly on pool-checkout (`connection_unavailable`, which never fails over), transport timeout, close, network error and 5xx, so a flake does not move the turn to a weaker model. Scheduled jobs skip this retry and keep their own deadline-bounded backoff, so a job fails over on the first transient of any other kind.
+- **Continuation calls** (mid tool loop) that fail transiently are re-issued in place on the same route, replaying no tools, only when the failed attempt showed nothing: a pre-response timeout the adapter measured (Codex), `connection_unavailable`, a transport cut or network error, a provider-declared overload. Everything else surfaces at once. A rate limit whose body names a reset time becomes "usage limit, try again in ~N min".
 
-## Retry before failover
+## Transport and Codex responses
 
-Before any failover hop, the turn's initial model call gets a **bounded
-same-provider retry** with short exponential backoff on transient infrastructure
-errors: the `connection_unavailable` pool-checkout and wake-from-sleep race,
-transport timeout, close or network error, and a provider 5xx. A brief flake
-therefore self-heals on the same provider instead of surfacing or burning a
-failover hop.
+Provider and channel HTTP share one pool; idle connections older than 15 s are discarded. Codex retries a `:closed` once only before any response data.
 
-The retry budget is spent **before** any failover hop, on every route. The next
-route is a different **model**, and the loop pins the winning route for the rest
-of the tool loop, so hopping on the first transient would silently re-target the
-whole turn onto a weaker model under a `status: ok`.
-
-`connection_unavailable` is network-wide, so it retries the same route and never
-fails over at all. Scheduled jobs opt out of this inner retry entirely — the two
-retry loops never stack, and a slow provider `:timeout` cannot overrun the job's
-configured timeout — and keep their own coarser deadline-bounded backoff, which
-covers only the wake-from-sleep pool-checkout race. A cron run therefore still
-fails over on the first transient of any other kind.
-
-A **continuation** call, mid tool loop, that fails transiently is re-issued in
-place on the same route with a short bounded backoff, on every surface including
-scheduled runs. It replays no tools and never switches provider. Its retryable
-classes are explicit:
-
-- a transport timeout the adapter **measured** as pre-response (zero response
-  chunks seen — a connect-phase or first-byte stall). Only chunk-counting
-  adapters like Codex can prove this, so a buffered adapter's timeout never
-  qualifies;
-- a pool-checkout failure (`connection_unavailable`), which fires before the
-  request function runs — zero bytes on the wire, so re-issuing cannot duplicate
-  work;
-- a transport cut or network error;
-- a provider-declared unavailability or overload.
-
-Each one retries only when the failed attempt itself streamed nothing
-user-visible, because a retry after visible content would duplicate it.
-Unmeasured timeouts, rate limits, and everything else surface on the first
-failure. A genuine rate-limit or quota error whose body carries a reset time
-surfaces a friendly "usage limit — try again in ~N min" reply.
-
-## Transport and the Codex delivery gate
-
-Provider and channel HTTP share `FermixCore.Finch`. Idle keep-alive connections
-older than 15s are discarded at checkout. Codex retries `:closed` once only when
-it happens before response data; a mid-response `:closed` or `:timeout` is not
-retried at the HTTP layer.
-
-A Codex 200 whose SSE stream **delivered no text and no tool call** is never read
-as an empty answer. The gate is what the turn delivered — not whether the stream
-finished tidily, and not how many output items arrived — so a cut carrying only a
-`reasoning` item (which every Codex call asks for, making it the first frame on
-the wire) and a `completed` response whose items render nothing are both errors
-rather than silent empty turns.
-
-The two undelivered facts stay distinct. A stream that **declared** its failure
-(`response.failed` / `response.incomplete` / `error` with nothing generated)
-becomes an API-classified error: overload and server_error text classify as
-provider-unavailable, which is retryable and failover-eligible, and the server's
-own sentence is quoted verbatim in the user-facing reply, so a provider-side
-outage never reads as a Fermix defect. A stream cut with no declared reason is
-classified as a transport close — retryable on the same route, failover-eligible
-— with the reason in the log and the trace.
-
-A stream that delivered usable output but never said it finished still returns
-that output, with a warning: output items accumulate independently of the
-terminal event, discarding them would throw away a usable answer, and on a
-continuation, which never fails over, it would kill the turn outright.
-
-A `:timeout` the adapter measured as pre-response (zero chunks) is retried one
-level up, at the agent loop's continuation seam. A mid-stream or unmeasured
-`:timeout` is never retried.
+A Codex `completed` response with at least one output item is a successful turn even when it renders no text and no tool call (a tool was the deliverable). Zero items, or a stream with no terminal event that delivered nothing, is an error. A stream that declared failure (`response.failed`, `response.incomplete`, `error`) is classified from its text (overload and server_error are retryable and failover-eligible) and the server's sentence is quoted to the user; an undeclared cut counts as a transport close. A stream that delivered output but never said it finished keeps that output, with a warning.

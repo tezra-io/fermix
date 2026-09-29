@@ -188,12 +188,23 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     )
   end
 
+  # The purge mark is taken BEFORE the batch is read and travels to the write,
+  # which refuses a note that a purge issued after it reaches (§12). A purge that
+  # lands between the two reads counts as issued after the read: refused, never
+  # re-materialized.
   defp run_session(route, repo, opts, acc) do
     limit = Keyword.get(opts, :limit, @batch_limit)
 
     with {:ok, cursor} <- read_cursor(repo),
+         {:ok, purge_mark} <- Repo.computer_history_purge_mark(server: repo),
          {:ok, events} <- read_events(repo, cursor, limit) do
-      read = %{cursor: cursor, events: events, truncated?: length(events) == limit}
+      read = %{
+        cursor: cursor,
+        purge_mark: purge_mark,
+        events: events,
+        truncated?: length(events) == limit
+      }
+
       decide_session(read, route, repo, opts, acc)
     else
       {:error, _reason} = error -> {:halt, stopped(error, acc)}
@@ -203,17 +214,17 @@ defmodule FermixCore.ComputerHistory.Summarizer do
   defp decide_session(read, route, repo, opts, acc) do
     {decision, open_state} = Sessions.next_closed(read.events, now_ms(opts), read.truncated?)
     record_open_sitting(repo, open_state)
-    dispatch_session(decision, read.cursor, route, repo, opts, acc)
+    dispatch_session(decision, read, route, repo, opts, acc)
   end
 
   # Nothing closed: the trailing sitting is still going (or the spool is drained).
-  defp dispatch_session(:wait, _cursor, _route, _repo, _opts, acc), do: {:halt, {:ok, acc}}
+  defp dispatch_session(:wait, _read, _route, _repo, _opts, acc), do: {:halt, {:ok, acc}}
 
   # Sleep / lock / switch markers with no sitting around them are not activity:
   # there is nothing to summarize, and the cursor still has to pass them. A `nil`
   # status keeps the last real outcome — consuming a marker is not an outcome, and
   # it counts as neither a sitting nor an empty one.
-  defp dispatch_session({:boundaries, ids}, _cursor, _route, repo, opts, acc) do
+  defp dispatch_session({:boundaries, ids}, read, _route, repo, opts, acc) do
     last_id = Enum.max(ids)
     Logger.debug("computer_history summarizer: #{length(ids)} boundary event(s), no sitting")
 
@@ -222,6 +233,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
            nil,
            summarize_now(opts),
            nil,
+           read.purge_mark,
            server: repo
          ) do
       {:ok, _result} -> {:cont, {:ok, acc}}
@@ -229,10 +241,11 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     end
   end
 
-  defp dispatch_session({:session, session}, cursor, route, repo, opts, acc) do
+  defp dispatch_session({:session, session}, read, route, repo, opts, acc) do
     log_overtaken(session)
+    session = Map.merge(session, Map.take(read, [:cursor, :purge_mark]))
 
-    case summarize_session(route, Map.put(session, :cursor, cursor), repo, opts) do
+    case summarize_session(route, session, repo, opts) do
       # The cursor did not move (a budget cut held it back, S6): re-reading the
       # same cut inside one cycle would write the same note up to the cap, so the
       # cycle stops here and the next tick tries again.
@@ -275,6 +288,7 @@ defmodule FermixCore.ComputerHistory.Summarizer do
              nil,
              summarize_now(opts),
              "no_signal",
+             session.purge_mark,
              server: repo
            ) do
       log_no_signal(session.events, counts, Config.timezone(opts))
@@ -522,7 +536,12 @@ defmodule FermixCore.ComputerHistory.Summarizer do
     last_id = session_cursor(session, events)
 
     with {:ok, %{memory_written: written?}} <-
-           Repo.computer_history_write_cycle_result(last_id, memory, now, last_status,
+           Repo.computer_history_write_cycle_result(
+             last_id,
+             memory,
+             now,
+             last_status,
+             session.purge_mark,
              server: repo
            ),
          :ok <- clear_pause_if_ok(repo, last_status) do
@@ -589,9 +608,9 @@ defmodule FermixCore.ComputerHistory.Summarizer do
 
   defp outcome_word({:ok, _redactions}, true), do: "ok"
 
-  # A validated note the store refused: today only the purge watermark does that
-  # (§12, the read-infer-write race), and calling it `ok` would claim a note that
-  # does not exist.
+  # A validated note the store refused: today only the purge guard does that (a
+  # purge issued after the batch was read reached it: §12, the read-infer-write
+  # race), and calling it `ok` would claim a note that does not exist.
   defp outcome_word({:ok, _redactions}, false), do: "not_written"
   defp outcome_word(:abstained, _written?), do: "abstained"
   defp outcome_word(:empty, _written?), do: "empty"

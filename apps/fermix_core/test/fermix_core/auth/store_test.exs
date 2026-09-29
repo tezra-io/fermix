@@ -1,7 +1,11 @@
 defmodule FermixCore.Auth.StoreTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
+  alias FermixCore.Auth.RefreshClient
   alias FermixCore.Auth.Store
+  alias FermixTestSupport.SafeRm
 
   # `unique_integer` resets per BEAM run, so leftover files from prior test
   # runs would otherwise satisfy `read/2` and break the "missing file" tests.
@@ -221,6 +225,163 @@ defmodule FermixCore.Auth.StoreTest do
     end
   end
 
+  # A VM killed between a write's tmp and its rename leaves `auth.json.tmp.N`
+  # holding every profile's tokens, and nothing else would ever remove it. Every
+  # tmp writer holds the store lock, so the next locked write or delete removes
+  # the leftovers, and only those: regular files in the auth file's directory
+  # named exactly `<auth file>.tmp.<digits>`.
+  describe "a tmp a killed writer left" do
+    # The directory and the link have all-digit names a write's own tmp can
+    # never take (`unique_integer([:positive])` is never 0 and never renders a
+    # leading zero), so they reach the type check without ever colliding with
+    # the tmp the write itself makes. Returns the link's target, a file outside
+    # the auth directory.
+    defp seed_leftovers(path) do
+      dir = Path.dirname(path)
+      File.write!(path <> ".tmp.999", ~s({"tokens": "leftover"}))
+      File.write!(path <> ".tmp.keep-me", "not a tmp this module writes")
+      File.mkdir_p!(path <> ".tmp.0")
+      File.write!(Path.join(dir, "other.json.tmp.5"), "another file's tmp")
+      File.write!(path <> ".broken.123", "a recovery copy")
+
+      outside = SafeRm.make_tmp_dir!("auth-store-link-target")
+      ExUnit.Callbacks.on_exit(fn -> SafeRm.rm_rf!(outside) end)
+      target = Path.join(outside, "target.json")
+      File.write!(target, "a file a link names")
+      :ok = File.ln_s(target, path <> ".tmp.00")
+      target
+    end
+
+    defp assert_only_leftover_removed(path, target) do
+      dir = Path.dirname(path)
+      refute File.exists?(path <> ".tmp.999")
+      assert File.exists?(path <> ".tmp.keep-me")
+      assert File.dir?(path <> ".tmp.0")
+      assert {:ok, %File.Stat{type: :symlink}} = File.lstat(path <> ".tmp.00")
+      assert File.read!(target) == "a file a link names"
+      assert File.exists?(Path.join(dir, "other.json.tmp.5"))
+      assert File.exists?(path <> ".broken.123")
+    end
+
+    test "is removed by the next write" do
+      path = locked_home()
+      target = seed_leftovers(path)
+
+      {result, log} = with_log(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+
+      assert result == :ok
+      assert_only_leftover_removed(path, target)
+      assert log =~ "removed #{path}.tmp.999"
+      assert {:ok, %{tokens: %{access_token: "a_at"}}} = Store.read("a:primary", path)
+    end
+
+    test "is removed by the next delete" do
+      path = locked_home()
+      :ok = Store.write("a:primary", plain_entry("a_at"), path)
+      target = seed_leftovers(path)
+
+      assert :ok = Store.delete_provider("a:primary", path)
+      assert_only_leftover_removed(path, target)
+    end
+  end
+
+  # The token document must never sit in a file another account can read, not
+  # even between a write and a chmod: the tmp a write renames over the auth file,
+  # and the `.broken` copy a refused write keeps, are made private before any
+  # byte lands, and the bytes go through the descriptor that created the file. A
+  # write that reopened it by path would re-create, with default permissions, a
+  # tmp a sweep removed after the chmod, and the rename would then publish it. A
+  # traced writer records the order of its own `File.open/3`, `File.chmod/2`,
+  # `IO.binwrite/2` and `File.write/3` calls, in a trace session of its own, so
+  # no other test's tracing meets it.
+  describe "private before any byte lands" do
+    defp traced_file_calls(fun) do
+      parent = self()
+      session = :trace.session_create(:auth_store_file_order, parent, [])
+
+      writer =
+        spawn(fn ->
+          receive do
+            :go -> send(parent, {:written, fun.()})
+          end
+        end)
+
+      1 = :trace.process(session, writer, true, [:call])
+      1 = :trace.function(session, {File, :open, 3}, true, [])
+      1 = :trace.function(session, {File, :chmod, 2}, true, [])
+      1 = :trace.function(session, {IO, :binwrite, 2}, true, [])
+      1 = :trace.function(session, {File, :write, 3}, true, [])
+      send(writer, :go)
+      assert_receive {:written, result}, 5_000
+      delivered = :trace.delivered(session, writer)
+      assert_receive {:trace_delivered, ^writer, ^delivered}, 5_000
+      true = :trace.session_destroy(session)
+      {result, collected_calls(writer, nil, [])}
+    end
+
+    # Bounded by the trace messages already delivered. `File.open/3` runs its
+    # function in the writer, so a descriptor write lands in the file the writer
+    # opened last.
+    defp collected_calls(writer, opened, acc) do
+      receive do
+        {:trace, ^writer, :call, {File, :open, [file, _modes, _fun]}} ->
+          collected_calls(writer, file, acc)
+
+        {:trace, ^writer, :call, {IO, :binwrite, [_device, _bytes]}} ->
+          collected_calls(writer, opened, [{:bytes, opened, :descriptor} | acc])
+
+        {:trace, ^writer, :call, {File, :write, [file, _bytes, _modes]}} ->
+          collected_calls(writer, opened, [{:bytes, file, :path} | acc])
+
+        {:trace, ^writer, :call, {File, :chmod, [file, mode]}} ->
+          collected_calls(writer, opened, [{:chmod, file, mode} | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    defp assert_private_before_bytes(calls, prefix) do
+      writes =
+        for {{:bytes, file, via}, at} <- Enum.with_index(calls),
+            is_binary(file) and String.starts_with?(file, prefix),
+            do: {file, via, at}
+
+      assert writes != [], "no write to a #{prefix}* file was traced: #{inspect(calls)}"
+
+      for {file, via, at} <- writes do
+        assert {:chmod, file, 0o600} in Enum.take(calls, at),
+               "#{file} got its bytes before it was private: #{inspect(calls)}"
+
+        assert via == :descriptor,
+               "#{file} was reopened by path for its bytes: #{inspect(calls)}"
+      end
+    end
+
+    test "the tmp a write renames over the auth file" do
+      path = locked_home()
+
+      {result, calls} =
+        traced_file_calls(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+
+      assert result == :ok
+      assert_private_before_bytes(calls, path <> ".tmp.")
+    end
+
+    test "the .broken copy a refused write keeps" do
+      path = locked_home()
+      File.write!(path, "{ not json ")
+
+      {{result, _log}, calls} =
+        traced_file_calls(fn ->
+          with_log(fn -> Store.write("a:primary", plain_entry("a_at"), path) end)
+        end)
+
+      assert {:error, {:malformed_auth_file, ^path, backup, {:invalid_json, _at}}} = result
+      assert File.read!(backup) == "{ not json "
+      assert_private_before_bytes(calls, path <> ".broken.")
+    end
+  end
+
   describe "validate_permissions/1" do
     test "passes when auth file is missing" do
       assert :ok = Store.validate_permissions(tmp_path())
@@ -358,6 +519,73 @@ defmodule FermixCore.Auth.StoreTest do
     end
   end
 
+  # A JSON parse error carries the whole input it failed on, and auth.json holds
+  # every profile's tokens. None of them may ride the error into a log line, a
+  # trace, `fermix doctor` or the diagnostics bundle: the error says where the
+  # file broke, and the `.broken` copy a refused write keeps is the recovery path.
+  describe "a malformed auth file" do
+    @access_token "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTYifQ.c2lnbmF0dXJlMTIz"
+    @refresh_token "rt_TESTSECRET123456"
+
+    # Truncated mid-document, the way an interrupted copy leaves it. The dir
+    # also holds the lockfiles and the `.broken` copy, so one removal cleans up.
+    setup do
+      dir = SafeRm.make_tmp_dir!("auth-store-malformed")
+      on_exit(fn -> SafeRm.rm_rf(dir) end)
+
+      raw =
+        ~s({"version": 2, "providers": {"openai_codex": {"auth_mode": "chatgpt", ) <>
+          ~s("tokens": {"access_token": "#{@access_token}", "refresh_token": "#{@refresh_token}"}})
+
+      path = Path.join(dir, "auth.json")
+      File.write!(path, raw)
+      %{path: path, raw: raw, size: byte_size(raw)}
+    end
+
+    defp refute_tokens(text) do
+      refute text =~ @access_token
+      refute text =~ @refresh_token
+    end
+
+    test "read/2 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} = result = Store.read(:openai_codex, ctx.path)
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "list_profiles/1 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} = result = Store.list_profiles(ctx.path)
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "delete_provider/2 reports the byte the parse stopped at and none of the file", ctx do
+      assert {:error, {:invalid_json, position}} =
+               result = Store.delete_provider(:openai_codex, ctx.path)
+
+      assert position == ctx.size
+      refute_tokens(inspect(result))
+    end
+
+    test "a refused write logs and returns none of the file; the backup keeps all of it", ctx do
+      entry = %{
+        auth_mode: "chatgpt",
+        tokens: %{access_token: "at", refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil
+      }
+
+      {result, log} = with_log(fn -> Store.write(:openai, entry, ctx.path) end)
+
+      assert {:error, {:malformed_auth_file, _path, backup, {:invalid_json, position}}} = result
+      assert position == ctx.size
+      assert log =~ "refusing to overwrite"
+      refute_tokens(log)
+      refute_tokens(inspect(result))
+      assert File.read!(backup) == ctx.raw
+    end
+  end
+
   # A regional provider (Tesla) records which Fleet API region its grant was
   # minted for, because the refresh path and the plugin's HTTP host both need it
   # and neither can re-derive it from the tokens.
@@ -462,6 +690,155 @@ defmodule FermixCore.Auth.StoreTest do
       assert read.region == "na"
       assert read.region_actual == "eu"
       assert read.tokens.access_token == "AT2"
+    end
+  end
+
+  # One directory per test, so a lockfile a test leaves behind (or holds on
+  # purpose) can never meet another test's.
+  defp locked_home do
+    dir = SafeRm.make_tmp_dir!("auth-store-lock")
+    ExUnit.Callbacks.on_exit(fn -> SafeRm.rm_rf!(dir) end)
+    Path.join(dir, "auth.json")
+  end
+
+  defp plain_entry(access) do
+    %{
+      auth_mode: "oauth2",
+      tokens: %{access_token: access, refresh_token: "rt"},
+      expires_at: nil,
+      last_refresh: nil
+    }
+  end
+
+  # A lockfile another VM holds: its mtime is now, so it is not stale.
+  defp hold_lock!(lock), do: File.write!(lock, "0 another-vm\n")
+
+  defp listed_names(path) do
+    {:ok, listed} = Store.list_profiles(path)
+    listed |> Enum.map(&elem(&1, 0)) |> Enum.sort()
+  end
+
+  # TOKEN-1 (tla/specs/token_refresh): every profile's manager, CLI VMs,
+  # sign-ins and logouts write this one file, so without a cross-VM lock one
+  # writer's rename can land between another's read and rename and drop it.
+  describe "the store lock" do
+    test "a write waits while another VM holds the store lock, then merges" do
+      path = locked_home()
+      :ok = Store.write("a:primary", plain_entry("a_at"), path)
+      lock = Store.store_lock_path(path)
+      hold_lock!(lock)
+
+      writer = Task.async(fn -> Store.write("b:primary", plain_entry("b_at"), path) end)
+      assert Task.yield(writer, 300) == nil
+
+      SafeRm.rm!(lock)
+      assert Task.await(writer) == :ok
+      assert listed_names(path) == ["a:primary", "b:primary"]
+    end
+
+    test "a delete waits while another VM holds the store lock" do
+      path = locked_home()
+      :ok = Store.write("a:primary", plain_entry("a_at"), path)
+      :ok = Store.write("b:primary", plain_entry("b_at"), path)
+      lock = Store.store_lock_path(path)
+      hold_lock!(lock)
+
+      deleter = Task.async(fn -> Store.delete_provider("b:primary", path) end)
+      assert Task.yield(deleter, 300) == nil
+
+      SafeRm.rm!(lock)
+      assert Task.await(deleter) == :ok
+      assert listed_names(path) == ["a:primary"]
+    end
+
+    # A VM that died holding the lock leaves its file behind. Past the stale
+    # threshold it is a dead holder's, and one wait breaks it.
+    test "a lockfile a dead holder left is broken, and the write goes through" do
+      path = locked_home()
+      lock = Store.store_lock_path(path)
+      hold_lock!(lock)
+      File.touch!(lock, System.os_time(:second) - 60)
+
+      assert :ok = Store.write("a:primary", plain_entry("a_at"), path)
+      refute File.exists?(lock)
+      assert {:ok, %{tokens: %{access_token: "a_at"}}} = Store.read("a:primary", path)
+    end
+
+    # Regression guard, not a fail-first reproduction: without the lock this
+    # loses entries only when two renames happen to interleave. Waiters poll in
+    # lockstep, one winner per 100 ms round, so the last of 16 waits 15 rounds,
+    # well inside the 80-attempt budget.
+    test "concurrent writers of distinct profiles keep every entry (regression guard)" do
+      path = locked_home()
+      profiles = for n <- 1..16, do: "p#{n}:primary"
+
+      profiles
+      |> Task.async_stream(&Store.write(&1, plain_entry(&1), path),
+        max_concurrency: 16,
+        timeout: 30_000
+      )
+      |> Enum.each(fn result -> assert result == {:ok, :ok} end)
+
+      assert listed_names(path) == Enum.sort(profiles)
+    end
+  end
+
+  describe "the profile lock" do
+    # Every taker (a refresh, a sign-in, an import, a logout) waits the same
+    # bounded time, then gives up with one typed answer and runs nothing, so a
+    # sign-in refuses before it spends a code or another tool's refresh token.
+    test "a lock another holder keeps past the wait is :profile_busy, and nothing runs" do
+      path = locked_home()
+      hold_lock!(Store.profile_lock_path("github:primary", path))
+      parent = self()
+
+      assert {:error, :profile_busy} =
+               Store.with_profile_lock("github:primary", path, fn -> send(parent, :ran) end)
+
+      refute_received :ran
+    end
+  end
+
+  # A lockfile's age is judged from its whole-second mtime, so it can read up
+  # to a second older or younger than it is. Each bound below keeps that
+  # second of margin.
+  describe "lock bounds" do
+    defp wait_ms(opts), do: Keyword.fetch!(opts, :attempts) * Keyword.fetch!(opts, :delay_ms)
+
+    # The profile lock is broken once it looks older than its stale threshold,
+    # so a live refresh must always finish first: every attempt at its full
+    # timeouts, the sleeps between them, and two store-lock waits.
+    test "a live refresh finishes inside the profile lock's stale threshold" do
+      section_ms = RefreshClient.worst_case_ms() + 2 * wait_ms(Store.lock_opts(:store))
+
+      assert section_ms + 1_000 < Keyword.fetch!(Store.lock_opts(:profile), :stale_after_ms)
+    end
+
+    # A sign-in holds the profile lock from before it spends anything to its
+    # write: at most three requests (the code exchange, the account lookup and
+    # a region probe), each one bounded attempt, then one store-lock wait. The
+    # Codex import's section is one refresh and one write, inside the bound
+    # above.
+    test "a sign-in finishes inside the profile lock's stale threshold" do
+      bounds = RefreshClient.request_bounds()
+      assert Keyword.fetch!(bounds, :retry) == false
+
+      request_ms =
+        Keyword.fetch!(bounds, :pool_timeout) +
+          Keyword.fetch!(Keyword.fetch!(bounds, :connect_options), :timeout) +
+          Keyword.fetch!(bounds, :receive_timeout)
+
+      section_ms = 3 * request_ms + wait_ms(Store.lock_opts(:store))
+
+      assert section_ms + 1_000 < Keyword.fetch!(Store.lock_opts(:profile), :stale_after_ms)
+    end
+
+    # A store writer never gives up on a dead holder's lockfile: it waits
+    # longer than it takes to go stale. A profile-lock taker gives up first
+    # (`:profile_busy`) and is retried by its caller.
+    test "a store writer outwaits a dead holder" do
+      opts = Store.lock_opts(:store)
+      assert wait_ms(opts) > Keyword.fetch!(opts, :stale_after_ms) + 1_000
     end
   end
 end

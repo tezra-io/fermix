@@ -9,10 +9,14 @@ defmodule FermixCore.Browser.ProfileManager do
   blocks another. This GenServer is consulted only on the rare paths — starting
   a new profile (enforcing the live-instance cap with LRU eviction) and the
   periodic idle sweep that reclaims unused Chrome instances.
+
+  Each profile's registry value is `{last_used, backend}`: when it was last
+  asked for something, and which backend it was started on (`backend/3`).
   """
 
   use GenServer
 
+  alias FermixCore.Browser.Backend
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileServer
@@ -77,6 +81,23 @@ defmodule FermixCore.Browser.ProfileManager do
     GenServer.cast(server, {:stop_owner, owner})
   end
 
+  @doc """
+  The backend a live profile was started on, or `nil` when none is running.
+
+  A lock-free `Registry` read, like the dispatch's own lookup: the decision it
+  returns was recorded when the profile started and never changes after.
+  """
+  @spec backend(String.t(), String.t(), keyword()) :: Backend.label() | nil
+  def backend(owner, profile_name, opts \\ [])
+      when is_binary(owner) and is_binary(profile_name) do
+    registry = Keyword.get(opts, :registry, @registry)
+
+    case Registry.lookup(registry, {owner, profile_name}) do
+      [{pid, {_last_used, backend}}] -> if Process.alive?(pid), do: backend, else: nil
+      [] -> nil
+    end
+  end
+
   @spec status(String.t(), String.t(), keyword()) :: map()
   def status(owner, profile_name, opts \\ []) do
     registry = Keyword.get(opts, :registry, @registry)
@@ -113,7 +134,7 @@ defmodule FermixCore.Browser.ProfileManager do
 
     state.registry
     |> entries()
-    |> Enum.each(fn {{entry_owner, _profile_name}, pid, _last_used} ->
+    |> Enum.each(fn {{entry_owner, _profile_name}, pid, _value} ->
       if entry_owner == owner and Process.alive?(pid), do: async_stop(pid, config)
     end)
 
@@ -196,11 +217,12 @@ defmodule FermixCore.Browser.ProfileManager do
   # still queued — `stop_owner/2` is a cast and teardown takes seconds, so the
   # lookup keeps handing out a pid that is on its way out. Both are provably
   # "never ran", and the proof is three properties of `ProfileServer`: it traps
-  # exits (profile_server.ex `init/1`), its `handle_call/3` NEVER returns
-  # `:stop` (the only `:stop` is `handle_info(:idle_timeout, _)`), and a nested
-  # CDP call blocks in a selective receive, so a parent EXIT is processed only
-  # between callbacks. A `{:stop, ...}` added to `handle_call/3` would break
-  # that and put a half-run mutation in this branch.
+  # exits (profile_server.ex `init/1`), its `handle_call/3` returns `:stop` only
+  # WITH the reply (a backend's `:reap`), so the request it was handling is
+  # answered and only one still queued sees the exit, and a nested CDP call
+  # blocks in a selective receive, so a parent EXIT is processed only between
+  # callbacks. A `{:stop, ...}` without a reply added to `handle_call/3` would
+  # break that and put a half-run mutation in this branch.
   #
   # Everything else — `:killed` from a supervisor out of patience, a crash —
   # means the server died holding the request, and only the page knows how far
@@ -322,10 +344,10 @@ defmodule FermixCore.Browser.ProfileManager do
 
     state.registry
     |> entries()
-    |> Enum.filter(fn {_key, pid, last_used} ->
+    |> Enum.filter(fn {_key, pid, {last_used, _backend}} ->
       Process.alive?(pid) and now - last_used >= config.idle_profile_ttl_ms
     end)
-    |> Enum.each(fn {key, pid, _last_used} ->
+    |> Enum.each(fn {key, pid, _value} ->
       Logger.debug("browser: reclaiming idle profile #{inspect(key)}")
       async_stop(pid, config)
     end)
@@ -357,10 +379,10 @@ defmodule FermixCore.Browser.ProfileManager do
     registry
     |> entries()
     |> Enum.filter(fn {_key, pid, _value} -> Process.alive?(pid) end)
-    |> Enum.min_by(fn {_key, _pid, last_used} -> last_used end, fn -> nil end)
+    |> Enum.min_by(fn {_key, _pid, {last_used, _backend}} -> last_used end, fn -> nil end)
     |> case do
       nil -> nil
-      {_key, pid, _last_used} -> pid
+      {_key, pid, _value} -> pid
     end
   end
 

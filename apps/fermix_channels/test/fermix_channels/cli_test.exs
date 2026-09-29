@@ -6,6 +6,7 @@ defmodule FermixChannels.CLITest do
   alias FermixChannels.CLI
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
+  alias FermixCore.Agents.TurnRunner
 
   defmodule TestAgent do
     def handle_message(message, test_pid) do
@@ -64,6 +65,12 @@ defmodule FermixChannels.CLITest do
 
     test "rejects blank input" do
       assert {:error, :empty_input} = CLI.parse_input("  ")
+    end
+
+    test "refuses a caller it does not know" do
+      assert_raise ArgumentError, ~r/caller/, fn ->
+        CLI.parse_input("hello", caller: :someone)
+      end
     end
 
     test "carries media_parts onto the message (fermix ask --attach)" do
@@ -186,6 +193,51 @@ defmodule FermixChannels.CLITest do
       assert message.channel == "cli"
       assert message.chat_id == "scenario-1"
       assert message.metadata == %{source: :cli, user_id: "cli", chat_type: "private"}
+    end
+
+    # The daemon reads who sent a `fermix ask` off the control socket's peer and
+    # passes it as `caller:`. The pair below pins that the message the agent is
+    # handed carries it into the turn's attended-origin label.
+    test "a prompt from a process the daemon started reaches the agent unattended" do
+      assert {:ok, _reply} =
+               CLI.dispatch_input_sync("take a screenshot",
+                 caller: :daemon_descendant,
+                 timeout_ms: 1_000,
+                 agent: ReplyAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:sync_agent_message, message}
+      assert message.metadata.caller == :daemon_descendant
+      assert TurnRunner.computer_use_origin(message) == :unattended
+    end
+
+    test "a prompt from a detached process reaches the agent unattended" do
+      assert {:ok, _reply} =
+               CLI.dispatch_input_sync("take a screenshot",
+                 caller: :detached,
+                 timeout_ms: 1_000,
+                 agent: ReplyAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:sync_agent_message, message}
+      assert message.metadata.caller == :detached
+      assert TurnRunner.computer_use_origin(message) == :unattended
+    end
+
+    test "a prompt a person sent stays an attended turn" do
+      assert {:ok, _reply} =
+               CLI.dispatch_input_sync("take a screenshot",
+                 caller: :independent,
+                 timeout_ms: 1_000,
+                 agent: ReplyAgent,
+                 agent_server: self()
+               )
+
+      assert_receive {:sync_agent_message, message}
+      assert message.metadata.caller == :independent
+      assert TurnRunner.computer_use_origin(message) == :interactive
     end
 
     test "returns parser and timeout errors" do

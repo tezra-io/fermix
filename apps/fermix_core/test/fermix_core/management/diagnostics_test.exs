@@ -49,7 +49,18 @@ defmodule FermixCore.Management.DiagnosticsTest do
     {"non-bearer authorization header",
      ~s(headers: [{"authorization", "Basic ZnJlZDpzZWNyZXRwYXNz"}]), "ZnJlZDpzZWNyZXRwYXNz"},
     {"tuple api key header", ~s(headers: [{"x-api-key", "fc-9f8e7d6c5b4a11223344"}]),
-     "fc-9f8e7d6c5b4a11223344"}
+     "fc-9f8e7d6c5b4a11223344"},
+    # `inspect/1` of a string escapes its quotes, so JSON a log line quotes
+    # (a parse error's input, a response body) reads `\"key\": \"value\"`.
+    {"inspected json refresh token",
+     "auth store: " <> inspect(~s({"refresh_token": "rt_ESCAPEDREFRESHVALUE123"})),
+     "rt_ESCAPEDREFRESHVALUE123"},
+    {"inspected json authorization header",
+     "request: " <> inspect(~s({"authorization": "Basic ZnJlZDplc2NhcGVkcGFzcw"})),
+     "ZnJlZDplc2NhcGVkcGFzcw"},
+    {"inspected json api key",
+     "config: " <> inspect(~s({"api_key": "grok-escaped-9f8e7d6c5b4a"})),
+     "grok-escaped-9f8e7d6c5b4a"}
   ]
 
   test "builds only the allowlisted core diagnostic object" do

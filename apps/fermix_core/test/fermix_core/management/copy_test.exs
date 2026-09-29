@@ -16,6 +16,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Management.Copy
   alias FermixCore.Management.Doctor.Remediation
+  alias FermixCore.Management.Mobile
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
@@ -185,6 +186,15 @@ defmodule FermixCore.Management.CopyTest do
     test "every readiness action obeys the rules" do
       for {detail_key, action} <- Readiness.published_actions() do
         assert_clean(action, :prose, [], "readiness action #{detail_key}")
+      end
+    end
+
+    # A pairing refusal is only produced by the failure it names, so the adapter
+    # publishes the whole set rather than leaving it to a live call to reach.
+    test "every phone pairing sentence obeys the rules" do
+      for sentence <- Mobile.sentences() do
+        assert_clean(sentence, :prose, [], "mobile sentence")
+        assert internal_terms(sentence) == []
       end
     end
 

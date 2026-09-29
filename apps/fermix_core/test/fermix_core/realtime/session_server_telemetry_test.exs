@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
+  alias FermixTestSupport.RealtimeSocket
 
   @session_scope "session:test-#{System.unique_integer([:positive])}"
 
@@ -106,10 +107,11 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
 
   test "a disconnect emits the realtime reconnect event", %{server: server} do
     assert :ok = SessionServer.call_start(server)
-    send(server, {:openai_realtime_disconnect, :network})
+    :ok = RealtimeSocket.finish_close(SessionServer.openai_pid(server), {:remote, :closed})
 
-    assert_receive {:tele, [:fermix, :realtime, :reconnect], _m, meta}
-    assert meta.session_id == @session_scope
+    assert_receive {:tele, [:fermix, :realtime, :reconnect], _m,
+                    %{session_id: @session_scope} = meta}
+
     assert meta.attempt == 0
   end
 
@@ -222,7 +224,10 @@ defmodule FermixCore.Realtime.SessionServerTelemetryTest do
     assert :ok = SessionServer.handle_provider_event(server, {:response_created, %{}})
 
     assert :ok =
-             SessionServer.handle_provider_event(server, {:user_transcript_done, "hello there"})
+             SessionServer.handle_provider_event(
+               server,
+               {:user_transcript_done, "item-1", "hello there"}
+             )
 
     assert :ok =
              SessionServer.handle_provider_event(server, {:assistant_transcript_done, "hi back"})

@@ -260,6 +260,16 @@ class PackageAppEngineTest(unittest.TestCase):
                     "minimum_version": 1,
                     "maximum_version": 1,
                 },
+                "companion": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
+                "browser_host": {
+                    "current_version": 1,
+                    "minimum_version": 1,
+                    "maximum_version": 1,
+                },
             },
             "provenance": {
                 "oidc_issuer": "https://token.actions.githubusercontent.com",

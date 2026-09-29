@@ -652,7 +652,14 @@ defmodule FermixCore.Tools.ComputerUse do
 
   defp unavailable_message({:host_start_refused, origin}) do
     "computer-use host control needs an attended session (interactive chat or voice); " <>
-      "this origin (#{origin}) cannot start one"
+      "this origin (#{origin}) cannot start or drive one"
+  end
+
+  # A Buzz channel is one other people can post in, so a request there is not
+  # proof the owner asked; the sentence names where the owner can ask instead.
+  defp unavailable_message(:shared_channel) do
+    "Desktop control isn't available from a Buzz channel, where other people can send " <>
+      "messages. Ask from the Fermix app, your own chat, or by voice."
   end
 
   defp unavailable_message({:sidecar_unavailable, _reason}) do

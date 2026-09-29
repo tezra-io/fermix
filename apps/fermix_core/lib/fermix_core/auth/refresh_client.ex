@@ -3,6 +3,24 @@ defmodule FermixCore.Auth.RefreshClient do
   Bare HTTP refresh against OAuth token endpoints.
 
   Keeps OpenAI Codex and plugin-provider refresh requests in one place.
+
+  **Time bound.** A refresh runs under its profile's lock
+  (`FermixCore.Auth.Store.with_profile_lock/3`), which another refresher breaks
+  once its mtime is 120 s old by the wall clock, so a live refresh must finish
+  sooner (a sleep or clock step mid-refresh can still make it look stale). Each
+  request sets its own bounds instead of Mint's 30 s connect default: pool 5 s,
+  connect 10 s, receive 15 s, and no Req retry (`request_bounds/0`). Three 30 s
+  attempts, the 350 ms and 700 ms sleeps and two 8 s store-lock waits come to
+  about 107 s (`worst_case_ms/0`, held below the threshold by a test). The
+  receive wait bounds each socket read; a token response is one small body. It
+  stays at Req's 15 s default: a shorter wait would abandon slow successes, and
+  an abandoned success loses a rotation. A sign-in's requests under the same
+  lock (the code exchange, the account lookup, a region probe) set the same
+  bounds.
+
+  `req_options` are merged into each request, except `:retry_sleep`: a test
+  seam, a one-argument function that replaces `Process.sleep/1` between
+  attempts, so a test of the retries does not wait them out.
   """
 
   require Logger
@@ -17,6 +35,29 @@ defmodule FermixCore.Auth.RefreshClient do
   @max_attempts 3
   @retry_base_ms 350
 
+  @pool_timeout_ms 5_000
+  @connect_timeout_ms 10_000
+  @receive_timeout_ms 15_000
+
+  # A 4xx is the OAuth server's verdict on the grant (invalid_grant,
+  # refresh_token_reused, …), and retrying the same dead refresh token can
+  # never succeed, except 408 and 429: the endpoint did not act on the request
+  # (it timed the request out, or is rate-limiting), so those take the bounded
+  # retries a 5xx takes. One classifier for both request paths.
+  defguardp permanent_status(status)
+            when status >= 400 and status < 500 and status not in [408, 429]
+
+  # The longest one refresh can take: every attempt at its full timeouts, plus
+  # the sleeps between them. Public so a test can hold it under the profile
+  # lock's stale threshold.
+  @doc false
+  @spec worst_case_ms() :: pos_integer()
+  def worst_case_ms do
+    attempt_ms = @pool_timeout_ms + @connect_timeout_ms + @receive_timeout_ms
+    sleeps_ms = Enum.sum(for attempt <- 1..(@max_attempts - 1), do: @retry_base_ms * attempt)
+    @max_attempts * attempt_ms + sleeps_ms
+  end
+
   @type tokens :: %{
           access_token: String.t(),
           refresh_token: String.t() | nil,
@@ -25,16 +66,32 @@ defmodule FermixCore.Auth.RefreshClient do
 
   @spec refresh(String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
   def refresh(refresh_token, req_options \\ []) when is_binary(refresh_token) do
-    do_refresh(refresh_token, req_options, 1)
+    {sleep, req_options} = pop_retry_sleep(req_options)
+    do_refresh(refresh_token, req_options, sleep, 1)
   end
 
   @spec refresh(OAuthProvider.t(), String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
   def refresh(%OAuthProvider{} = provider, refresh_token, req_options)
       when is_binary(refresh_token) and is_list(req_options) do
-    do_refresh(provider, refresh_token, req_options, 1)
+    {sleep, req_options} = pop_retry_sleep(req_options)
+    do_refresh(provider, refresh_token, req_options, sleep, 1)
   end
 
-  defp do_refresh(refresh_token, req_options, attempt) do
+  # The `:retry_sleep` seam leaves the options before any Req merge. One that
+  # is not a one-argument function is refused here, not at the first retry
+  # under the profile lock.
+  defp pop_retry_sleep(req_options) do
+    case Keyword.pop(req_options, :retry_sleep, &Process.sleep/1) do
+      {sleep, rest} when is_function(sleep, 1) ->
+        {sleep, rest}
+
+      {other, _rest} ->
+        raise ArgumentError,
+              ":retry_sleep must be a one-argument function, got: #{inspect(other)}"
+    end
+  end
+
+  defp do_refresh(refresh_token, req_options, sleep, attempt) do
     body =
       URI.encode_query(%{
         "grant_type" => "refresh_token",
@@ -44,41 +101,40 @@ defmodule FermixCore.Auth.RefreshClient do
 
     request =
       Req.new(
-        url: @token_url,
-        method: :post,
-        body: body,
-        headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        [
+          url: @token_url,
+          method: :post,
+          body: body,
+          headers: [{"content-type", "application/x-www-form-urlencoded"}]
+        ] ++ request_bounds()
       )
 
     case request |> Req.merge(req_options) |> Req.request() do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 
-      # 4xx is permanent — the OAuth server told us exactly what's wrong
-      # (refresh_token_reused, invalid_grant, etc.). Retrying with the
-      # same dead refresh token can never succeed.
-      {:ok, %{status: status, body: body}} when status >= 400 and status < 500 ->
+      {:ok, %{status: status, body: body}} when permanent_status(status) ->
         {:error, {:permanent, status, body}}
 
       {:ok, %{status: status}} when attempt < @max_attempts ->
         Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} got #{status}")
-        Process.sleep(@retry_base_ms * attempt)
-        do_refresh(refresh_token, req_options, attempt + 1)
+        sleep.(@retry_base_ms * attempt)
+        do_refresh(refresh_token, req_options, sleep, attempt + 1)
 
       {:ok, %{status: status, body: body}} ->
         {:error, "Refresh failed (#{status}): #{Redaction.format(body)}"}
 
       {:error, _reason} when attempt < @max_attempts ->
         Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} failed")
-        Process.sleep(@retry_base_ms * attempt)
-        do_refresh(refresh_token, req_options, attempt + 1)
+        sleep.(@retry_base_ms * attempt)
+        do_refresh(refresh_token, req_options, sleep, attempt + 1)
 
       {:error, reason} ->
         {:error, reason}
     end
   end
 
-  defp do_refresh(%OAuthProvider{} = provider, refresh_token, req_options, attempt) do
+  defp do_refresh(%OAuthProvider{} = provider, refresh_token, req_options, sleep, attempt) do
     body =
       %{
         "grant_type" => "refresh_token",
@@ -89,16 +145,18 @@ defmodule FermixCore.Auth.RefreshClient do
 
     request =
       Req.new(
-        url: provider.token_url,
-        method: :post,
-        body: body,
-        headers: OAuthProvider.token_request_headers(provider)
+        [
+          url: provider.token_url,
+          method: :post,
+          body: body,
+          headers: OAuthProvider.token_request_headers(provider)
+        ] ++ request_bounds()
       )
 
     response = request |> Req.merge(req_options) |> Req.request()
 
     case client_rejection(provider, response) do
-      nil -> refresh_response(provider, refresh_token, req_options, attempt, response)
+      nil -> refresh_response(provider, refresh_token, req_options, sleep, attempt, response)
       rejection -> {:error, rejection}
     end
   end
@@ -112,30 +170,47 @@ defmodule FermixCore.Auth.RefreshClient do
 
   defp client_rejection(_provider, _response), do: nil
 
-  defp refresh_response(provider, refresh_token, req_options, attempt, response) do
+  defp refresh_response(provider, refresh_token, req_options, sleep, attempt, response) do
     case response do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 
-      {:ok, %{status: status, body: body}} when status >= 400 and status < 500 ->
+      {:ok, %{status: status, body: body}} when permanent_status(status) ->
         {:error, {:permanent, status, body}}
 
       {:ok, %{status: status}} when attempt < @max_attempts ->
         Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} got #{status}")
-        Process.sleep(@retry_base_ms * attempt)
-        do_refresh(provider, refresh_token, req_options, attempt + 1)
+        sleep.(@retry_base_ms * attempt)
+        do_refresh(provider, refresh_token, req_options, sleep, attempt + 1)
 
       {:ok, %{status: status, body: body}} ->
         {:error, "Refresh failed (#{status}): #{Redaction.format(body)}"}
 
       {:error, _reason} when attempt < @max_attempts ->
         Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} failed")
-        Process.sleep(@retry_base_ms * attempt)
-        do_refresh(provider, refresh_token, req_options, attempt + 1)
+        sleep.(@retry_base_ms * attempt)
+        do_refresh(provider, refresh_token, req_options, sleep, attempt + 1)
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  @doc """
+  The bounds every request made under a profile lock sets: pool 5 s, connect
+  10 s, receive 15 s, and no Req retry, so each request is one attempt of at
+  most 30 s. Req retries a GET on a transient failure up to three more times
+  and honours a `Retry-After` of any length, which no lock's stale threshold
+  could bound. A refresh does its own bounded retries.
+  """
+  @spec request_bounds() :: keyword()
+  def request_bounds do
+    [
+      retry: false,
+      pool_timeout: @pool_timeout_ms,
+      connect_options: [timeout: @connect_timeout_ms],
+      receive_timeout: @receive_timeout_ms
+    ]
   end
 
   defp parse_token_response(%{"access_token" => access} = body) when is_binary(access) do

@@ -116,7 +116,8 @@ defmodule FermixChannels.Voice.Bridge do
   session — so there is exactly one place a delegation is answered from.
 
   A cancel that races an enqueue the queue has not processed yet finds nothing
-  to stop; the turn then completes normally and answers with its result. That is
+  to stop; the turn then completes normally and answers with its result. A turn
+  that already claimed its outcome is likewise left to answer with it. That is
   the truth of what happened, so it is reported rather than papered over.
   """
   @impl true

@@ -24,7 +24,9 @@ defmodule FermixChannels.Gateway.Queue do
   `turn_result_fn` (invoked exactly once per turn with `{:completed}`,
   `{:failed, raw_reason}` or `{:cancelled}`).
 
-  Started :permanent by `FermixChannels.Application`.
+  Started :permanent by `FermixChannels.Gateway.QueueSupervisor`, which runs
+  the turn tasks under a sibling `Task.Supervisor` (the required
+  `:task_supervisor` option), so no turn outlives the Queue that started it.
   """
 
   use GenServer, restart: :permanent
@@ -74,6 +76,19 @@ defmodule FermixChannels.Gateway.Queue do
         }
 
   # --- Client API ---
+  #
+  # The stop calls below, and a turn's own calls to its Queue (the claim,
+  # `fresh?/1`, `mark_final_reply_delivered/1`), wait with no timeout, because
+  # every Queue callback is bounded. A callback waits on two things only, once
+  # per turn it stops or clears:
+  #   * the turn task's end (`terminate_active/2`): `Task.Supervisor` kills a
+  #     task still running 5 s after its `:shutdown`;
+  #   * the stopped-marker write (`mark_stopped_turn/3`): the store call keeps
+  #     its 5 s default, and its exit is caught and logged.
+  # So a busy Queue delays its callers instead of failing them: a timed-out stop
+  # crashed its caller, and a timed-out turn call read as "Queue gone" and
+  # dropped a finished reply. The call still monitors the Queue, so a dead
+  # Queue still ends the wait.
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -97,38 +112,79 @@ defmodule FermixChannels.Gateway.Queue do
   end
 
   @doc """
-  Emergency stop: terminate every active turn and clear every pending FIFO
-  queue across all conversations. Returns `%{active_stopped, pending_cleared}`.
+  Emergency stop across all conversations. Returns
+  `%{active_stopped, pending_cleared}`. Per conversation:
+
+    * Every waiting message is dropped, and its `turn_result_fn`, if any, gets
+      `{:cancelled}`.
+    * An active turn that has not claimed its outcome yet is killed, its
+      `turn_result_fn` gets `{:cancelled}`, and its user message is closed with
+      the stopped-turn marker.
+    * An active turn that has already claimed its outcome (it committed its
+      reply and finished any post-reply compaction, or closed its own failed
+      turn) is past the stop: it is left to invoke that outcome and exit, and
+      is not counted. A message sent meanwhile waits behind it.
 
   Stale-delivery suppression is the active turn's identity (its task pid): a
   stopped turn's pid is no longer the conversation's active pid, so its
-  freshness check (run before delivering/committing) fails and it neither
+  freshness check (run once, before final delivery) fails and it neither
   delivers a reply nor commits. This is the single freshness authority a future
-  superseding turn would also invalidate — no separate "stopped" flag.
+  superseding turn would also invalidate — no separate "stopped" flag. A stop
+  after that check and before the claim still kills the turn although the user
+  has the reply; the channel gets `{:cancelled}`. Before the commit, history
+  gets the marker; during post-reply compaction, the reply stays in history.
   """
   @spec stop_all(GenServer.server()) ::
           %{active_stopped: non_neg_integer(), pending_cleared: non_neg_integer()}
   def stop_all(server \\ __MODULE__) do
-    GenServer.call(server, :stop_all)
+    GenServer.call(server, :stop_all, :infinity)
   end
 
   @doc """
-  Stop ONE conversation: terminate its active turn, hand that turn's channel a
-  `{:cancelled}` outcome, append the stopped-turn marker, and clear its pending
-  FIFO. Every other conversation keeps running.
+  Stop ONE conversation; every other conversation keeps running.
 
-  The per-key half of `stop_all/1` (same helpers, same suppression rule — the
-  killed turn's pid is no longer the conversation's active pid, so its freshness
-  check fails and it neither delivers nor commits). Built for the ACP surface's
-  `session/cancel` (MILESTONE_29_ACP_AGENT_SURFACE.md §8.5).
+  The per-key half of `stop_all/1`, through the same per-conversation path and
+  with the same rules: waiting messages are dropped with `{:cancelled}`; an
+  active turn that has not claimed its outcome is killed, gets `{:cancelled}`
+  and the stopped-turn marker; one that has claimed it is left to finish.
+  Built for the ACP surface's `session/cancel`
+  (MILESTONE_29_ACP_AGENT_SURFACE.md §8.5).
 
-  `{:ok, :not_found}` when the conversation has nothing active or pending.
+  `{:ok, :not_found}` when the conversation has nothing active or pending. A
+  conversation whose only work is a turn that already claimed its outcome
+  returns `{:ok, %{active_stopped: 0, pending_cleared: 0}}`: nothing was stopped.
   """
   @spec stop_conversation(ConversationKey.t(), GenServer.server()) ::
           {:ok, %{active_stopped: 0 | 1, pending_cleared: non_neg_integer()}} | {:ok, :not_found}
   def stop_conversation(conversation_key, server \\ __MODULE__)
       when is_tuple(conversation_key) do
-    GenServer.call(server, {:stop_conversation, conversation_key})
+    GenServer.call(server, {:stop_conversation, conversation_key}, :infinity)
+  end
+
+  @doc """
+  Stop ONE turn of a conversation, named by the `id` of the message that asked
+  for it; every other turn keeps running or waiting.
+
+  Built for a conversation more than one client shares (the companion chat
+  socket's `cancel`): one client's stop must never end another's turn, and a
+  stop that arrives after its turn already ended must never reach the turn
+  that started next. The rules are `stop_conversation/2`'s, applied to one
+  message:
+
+    * The named turn is active and has not claimed its outcome: it is killed,
+      gets `{:cancelled}` and the stopped-turn marker, and the next waiting
+      message starts. `{:ok, :stopped}`.
+    * The named turn is active and has claimed its outcome: it is past the
+      stop and is left to invoke it. `{:ok, :claimed}`.
+    * The named message is waiting: it alone is dropped with `{:cancelled}`.
+      `{:ok, :dequeued}`.
+    * Otherwise (it already ended, or never arrived): `{:ok, :not_found}`.
+  """
+  @spec stop_turn(ConversationKey.t(), String.t(), GenServer.server()) ::
+          {:ok, :stopped | :claimed | :dequeued | :not_found}
+  def stop_turn(conversation_key, message_id, server \\ __MODULE__)
+      when is_tuple(conversation_key) and is_binary(message_id) do
+    GenServer.call(server, {:stop_turn, conversation_key, message_id}, :infinity)
   end
 
   # --- GenServer Callbacks ---
@@ -138,7 +194,9 @@ defmodule FermixChannels.Gateway.Queue do
     state = %{
       main_agent: Keyword.get(opts, :main_agent, MainAgent),
       turn_runner: Keyword.get(opts, :turn_runner, TurnRunner),
-      task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
+      # Required, never defaulted: a turn task must run under a supervisor that
+      # dies with this Queue (`QueueSupervisor`), or it outlives a restart.
+      task_supervisor: Keyword.fetch!(opts, :task_supervisor),
       conversation_store: Keyword.get(opts, :conversation_store, ConversationStore),
       conversations: %{},
       task_refs: %{}
@@ -178,15 +236,21 @@ defmodule FermixChannels.Gateway.Queue do
     {:reply, result, state}
   end
 
+  def handle_call({:stop_turn, conversation_key, message_id}, _from, state) do
+    {state, result} = stop_named_turn(state, conversation_key, message_id)
+    {:reply, {:ok, result}, state}
+  end
+
   # The single claim point that makes `turn_result_fn` fire exactly once: the
   # queue process serializes a turn task's terminal claim against a concurrent
-  # stop (which takes the closure with the whole conversation) and against the
-  # task's own abnormal `:DOWN`. The first claimant gets the closure; every
-  # later one gets nil and invokes nothing.
+  # stop and against the task's own abnormal `:DOWN`. The active turn gets its
+  # closure (nil when the channel attached none) and is marked claimed: from
+  # here on it owns its outcome, and a stop leaves it running to invoke it. A
+  # later claim, or one from a turn that is no longer active, gets nil.
   def handle_call({:claim_turn_result, conversation_key, pid}, _from, state) do
     case Map.get(state.conversations, conversation_key) do
-      %{active: %{pid: ^pid, turn_result_fn: fun}} when is_function(fun, 1) ->
-        {:reply, fun, clear_turn_result_fn(state, conversation_key, pid)}
+      %{active: %{pid: ^pid, turn_result_fn: fun}} ->
+        {:reply, fun, claim_active_turn(state, conversation_key, pid)}
 
       _conversation ->
         {:reply, nil, state}
@@ -528,10 +592,14 @@ defmodule FermixChannels.Gateway.Queue do
     outcome
   end
 
-  defp claim_turn_result(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:claim_turn_result, conversation_key, self()})
+  # No timeout (see the client API note): a busy Queue delays the claim, and
+  # an exit means the Queue is gone.
+  defp claim_turn_result(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:claim_turn_result, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> nil
+    :exit, reason ->
+      log_queue_gone(turn, :claim_turn_result, reason)
+      nil
   end
 
   # A one-shot (loopback) conversation — CLI `ask`, daemon — will not send a
@@ -606,17 +674,30 @@ defmodule FermixChannels.Gateway.Queue do
 
   # Is this turn still the conversation's active turn? Asked once, before final
   # delivery/commit. A dead queue (or a `/stop` that cleared this turn) means
-  # not fresh — suppress.
-  defp fresh?(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:fresh?, conversation_key, self()})
+  # not fresh — suppress. A busy one is waited for (see the client API note).
+  defp fresh?(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:fresh?, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> false
+    :exit, reason ->
+      log_queue_gone(turn, :fresh?, reason)
+      false
   end
 
-  defp mark_final_reply_delivered(%{owner: owner, conversation_key: conversation_key}) do
-    GenServer.call(owner, {:final_reply_delivered, conversation_key, self()})
+  defp mark_final_reply_delivered(%{owner: owner, conversation_key: conversation_key} = turn) do
+    GenServer.call(owner, {:final_reply_delivered, conversation_key, self()}, :infinity)
   catch
-    :exit, _reason -> :ok
+    :exit, reason ->
+      log_queue_gone(turn, :final_reply_delivered, reason)
+      :ok
+  end
+
+  # A call with no timeout exits only when the Queue is gone (its supervisor
+  # ends this task next), so each catch above means that and only that.
+  defp log_queue_gone(turn, call, reason) do
+    Logger.warning(
+      "Turn #{turn.request_id} for #{format_conversation_key(turn.conversation_key)} could " <>
+        "not make its #{call} call: its Queue is gone (#{inspect(reason)})"
+    )
   end
 
   # Wrap the raw channel reply closure so each SUCCESSFULLY-delivered mid-turn
@@ -750,6 +831,8 @@ defmodule FermixChannels.Gateway.Queue do
           monitor_ref: monitor_ref,
           started_at_us: System.monotonic_time(:microsecond),
           final_reply_delivered?: false,
+          # Set by the claim handler: the turn owns its outcome and is past /stop.
+          claimed?: false,
           # The channel's optional per-turn outcome callback, held HERE rather
           # than in the task so the queue is the one place that decides who
           # invokes it — see the claim handler.
@@ -780,6 +863,7 @@ defmodule FermixChannels.Gateway.Queue do
           %{reason: completion_reason(reason)}
         )
 
+        maybe_close_crashed_turn(state, conversation_key, conversation, reason)
         maybe_reply_on_crash(active, reason)
         maybe_fail_turn_result(active, reason)
         put_conversation_runtime(state, conversation_key, %{conversation | active: nil})
@@ -787,6 +871,18 @@ defmodule FermixChannels.Gateway.Queue do
       _conversation ->
         state
     end
+  end
+
+  # A crashed turn is a failed turn: it committed no reply, so the user message
+  # its runner persisted would be left dangling (see `deliver_turn_error/2`).
+  # Closed here, synchronously, before the caller starts the next message:
+  # written any later, the marker could close the NEXT turn's user message.
+  defp maybe_close_crashed_turn(state, conversation_key, conversation, reason) do
+    if completion_reason(reason) == :crashed do
+      mark_stopped_turn(state, conversation_key, conversation)
+    end
+
+    :ok
   end
 
   # A crashed turn can die before its own `reply_fn` runs, so the sender would
@@ -821,9 +917,10 @@ defmodule FermixChannels.Gateway.Queue do
   defp completion_reason(:normal), do: :normal
   defp completion_reason(_other), do: :crashed
 
-  # Crash-isolated, nil-safe: a raising channel callback must take down neither
-  # the turn task nor the queue (same posture as the loop's stream/activity
-  # callbacks).
+  # Crash-isolated, nil-safe: a channel callback that raises, exits or throws
+  # must take down neither the turn task nor the queue (same posture as the
+  # loop's stream/activity callbacks). It has run once, so nothing fires again;
+  # the failure is logged.
   defp invoke_turn_result(nil, _outcome), do: :ok
 
   defp invoke_turn_result(fun, outcome) when is_function(fun, 1) do
@@ -832,6 +929,14 @@ defmodule FermixChannels.Gateway.Queue do
   rescue
     error ->
       Logger.warning("Turn result callback raised: #{Exception.message(error)}")
+      :ok
+  catch
+    :exit, reason ->
+      Logger.warning("Turn result callback exited: #{inspect(reason)}")
+      :ok
+
+    :throw, value ->
+      Logger.warning("Turn result callback threw: #{inspect(value)}")
       :ok
   end
 
@@ -882,10 +987,7 @@ defmodule FermixChannels.Gateway.Queue do
   defp terminal_error_owner?(%{msg: %{terminal_error_owner?: true}}), do: true
   defp terminal_error_owner?(_turn), do: false
 
-  # Terminate every active turn task and drop all conversation runtime. Pending
-  # DOWNs from the killed tasks become no-ops (task_refs cleared); a stopped
-  # turn's freshness check fails because its conversation no longer holds its
-  # pid, so it cannot deliver or commit after this returns.
+  # Stop every conversation (`stop_conversation_runtime/3`) and sum the counts.
   #
   # Subagent workers parented to a killed coordinator are reaped via AgentServer's
   # parent-down monitor — prompt and eventual, but NOT synchronous: this returns
@@ -894,39 +996,111 @@ defmodule FermixChannels.Gateway.Queue do
   # guarantee (a synchronous AgentSupervisor.terminate_for/1 sweep) is deferred to
   # the /ultra phase (§17.5), where fan-out makes it worth the plumbing.
   defp stop_all_conversations(state) do
-    counts =
-      Enum.reduce(state.conversations, %{active_stopped: 0, pending_cleared: 0}, fn
-        {key, runtime}, counts ->
-          stop_conversation_runtime(state, key, runtime)
-          tally_stopped(runtime, counts)
-      end)
-
-    {%{state | conversations: %{}, task_refs: %{}}, counts}
+    Enum.reduce(state.conversations, {state, %{active_stopped: 0, pending_cleared: 0}}, fn
+      {key, runtime}, {state, totals} ->
+        {state, counts} = stop_conversation_runtime(state, key, runtime)
+        {state, Map.merge(totals, counts, fn _key, total, count -> total + count end)}
+    end)
   end
 
-  # The per-key half of the same stop: one conversation's runtime is dropped
-  # (with its monitor ref, so the killed task's `:DOWN` is a no-op exactly as in
-  # `stop_all`), every other conversation is untouched.
+  # The per-key half of the same stop; every other conversation is untouched.
   defp stop_one_conversation(state, conversation_key) do
     case Map.get(state.conversations, conversation_key) do
       nil ->
         {state, {:ok, :not_found}}
 
       runtime ->
-        stop_conversation_runtime(state, conversation_key, runtime)
-        counts = tally_stopped(runtime, %{active_stopped: 0, pending_cleared: 0})
-        {drop_conversation(state, conversation_key, runtime), {:ok, counts}}
+        {state, counts} = stop_conversation_runtime(state, conversation_key, runtime)
+        {state, {:ok, counts}}
     end
   end
 
-  # Kill the active turn task, hand its channel the `{:cancelled}` outcome (the
-  # killed task can never claim its own), then close the orphaned user message.
-  # `terminate_child` is synchronous, so the task is already dead when the
-  # callback fires and when the marker is written.
+  # One conversation's stop, the single path behind `stop_all` and
+  # `stop_conversation`: stop the active turn, then cancel every waiting message.
   defp stop_conversation_runtime(state, key, runtime) do
+    {state, active_stopped} = stop_active_turn(state, key, runtime)
+    pending_cleared = cancel_pending(runtime.pending)
+    {state, %{active_stopped: active_stopped, pending_cleared: pending_cleared}}
+  end
+
+  # The per-message stop: the named turn only, by the same rules as a
+  # conversation stop. The id is the one the Gateway's message carried.
+  defp stop_named_turn(state, conversation_key, message_id) do
+    case Map.get(state.conversations, conversation_key) do
+      nil -> {state, :not_found}
+      runtime -> stop_named_in(state, conversation_key, runtime, message_id)
+    end
+  end
+
+  defp stop_named_in(
+         state,
+         _key,
+         %{active: %{claimed?: true, message: %{id: message_id}}},
+         message_id
+       ),
+       do: {state, :claimed}
+
+  # Killed exactly as a conversation stop kills its active turn, but the
+  # conversation stays: the next waiting message starts in this callback.
+  defp stop_named_in(state, key, %{active: %{message: %{id: message_id}}} = runtime, message_id) do
     terminate_active(state.task_supervisor, runtime)
     invoke_turn_result_async(active_turn_result_fn(runtime), {:cancelled})
     mark_stopped_turn(state, key, runtime)
+
+    state =
+      %{state | task_refs: drop_monitor_ref(state.task_refs, runtime)}
+      |> put_conversation_runtime(key, %{runtime | active: nil})
+      |> maybe_start_next_request(key)
+
+    {state, :stopped}
+  end
+
+  defp stop_named_in(state, key, runtime, message_id) do
+    case Enum.split_with(
+           :queue.to_list(runtime.pending),
+           &(Map.get(&1.message, :id) == message_id)
+         ) do
+      {[], _rest} ->
+        {state, :not_found}
+
+      {named, rest} ->
+        cancel_pending(:queue.from_list(named))
+
+        {put_conversation_runtime(state, key, %{runtime | pending: :queue.from_list(rest)}),
+         :dequeued}
+    end
+  end
+
+  # A turn that has claimed its outcome is past the stop: it has committed its
+  # reply (or closed its own failed turn) and holds the closure it is about to
+  # invoke. Killing it would lose that outcome, so it keeps its slot and its
+  # monitor; its `:DOWN` clears the slot and starts whatever is sent meanwhile.
+  defp stop_active_turn(state, key, %{active: %{claimed?: true}} = runtime) do
+    {put_conversation_runtime(state, key, %{runtime | pending: :queue.new()}), 0}
+  end
+
+  # Otherwise kill the task, hand its channel the `{:cancelled}` outcome (the
+  # killed task can never claim its own), close the orphaned user message, and
+  # drop the conversation with its monitor ref, so the killed task's `:DOWN` is
+  # a no-op and its freshness check fails if it had not passed it yet.
+  # `terminate_child` is synchronous, so the task is already dead when the
+  # callback fires and when the marker is written.
+  defp stop_active_turn(state, key, runtime) do
+    terminate_active(state.task_supervisor, runtime)
+    invoke_turn_result_async(active_turn_result_fn(runtime), {:cancelled})
+    mark_stopped_turn(state, key, runtime)
+    {drop_conversation(state, key, runtime), if(runtime.active, do: 1, else: 0)}
+  end
+
+  # Waiting messages never started, so nothing of theirs was persisted and no
+  # marker is needed. Their channels are told `{:cancelled}`, off-process like
+  # every Queue-side outcome, so no turn-result consumer is left waiting.
+  defp cancel_pending(pending) do
+    for %{message: msg} <- :queue.to_list(pending) do
+      invoke_turn_result_async(Map.get(msg, :turn_result_fn), {:cancelled})
+    end
+
+    :queue.len(pending)
   end
 
   defp active_turn_result_fn(%{active: %{turn_result_fn: fun}}) when is_function(fun, 1), do: fun
@@ -943,8 +1117,10 @@ defmodule FermixChannels.Gateway.Queue do
   defp drop_monitor_ref(task_refs, %{active: %{monitor_ref: ref}}), do: Map.delete(task_refs, ref)
   defp drop_monitor_ref(task_refs, _runtime), do: task_refs
 
-  defp clear_turn_result_fn(state, conversation_key, pid) do
-    update_active_request(state, conversation_key, pid, &Map.put(&1, :turn_result_fn, nil))
+  defp claim_active_turn(state, conversation_key, pid) do
+    update_active_request(state, conversation_key, pid, fn active ->
+      %{active | claimed?: true, turn_result_fn: nil}
+    end)
   end
 
   defp terminate_active(task_supervisor, %{active: %{pid: pid}}) when is_pid(pid) do
@@ -953,11 +1129,12 @@ defmodule FermixChannels.Gateway.Queue do
 
   defp terminate_active(_task_supervisor, _runtime), do: :ok
 
-  # A stopped active turn already persisted its user message but never committed
-  # a reply. Append a marker (after the task is dead, so it can't write more) so
-  # the next turn keeps the request in history without re-answering it. The
-  # ConversationStore guard no-ops if the user message was never persisted (turn
-  # killed before it stored). Best-effort: a down store must not crash the stop.
+  # A stopped or crashed active turn already persisted its user message but
+  # never committed a reply. Append a marker (after the task is dead, so it can't
+  # write more) so the next turn keeps the request in history without
+  # re-answering it. The ConversationStore guard no-ops if the user message was
+  # never persisted (turn killed before it stored). Best-effort: a down store
+  # must not crash the stop or the DOWN handler, but it is logged.
   defp mark_stopped_turn(_state, _key, %{active: nil}), do: :skipped
 
   defp mark_stopped_turn(state, key, %{active: %{message: msg}}) do
@@ -965,15 +1142,12 @@ defmodule FermixChannels.Gateway.Queue do
       server: marker_store(state.conversation_store, msg)
     )
   catch
-    :exit, _reason -> :skipped
-  end
+    :exit, reason ->
+      Logger.warning(
+        "Stopped-turn marker not written for #{format_conversation_key(key)}: #{inspect(reason)}"
+      )
 
-  defp tally_stopped(runtime, counts) do
-    pending_count = :queue.len(Map.get(runtime, :pending, :queue.new()))
-
-    counts
-    |> increment_if(:active_stopped, Map.get(runtime, :active) != nil)
-    |> Map.update!(:pending_cleared, &(&1 + pending_count))
+      :skipped
   end
 
   defp format_conversation_key({channel, chat_id, :root}), do: "#{channel}/#{chat_id}"

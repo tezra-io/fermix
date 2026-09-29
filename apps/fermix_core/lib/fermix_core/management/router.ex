@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
   alias FermixCore.Management.Meetings
+  alias FermixCore.Management.Mobile
   alias FermixCore.Management.Plugins
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Providers
@@ -33,7 +34,8 @@ defmodule FermixCore.Management.Router do
   @no_param_methods ~w(
     hello overview.get setup.session.create lifecycle.prepare diagnostics.build setup.state.get
     settings.sections settings.reload job.list plugins.list meetings.signin.start
-    computer_use.grant.start computer_use.permissions.get
+    computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
+    mobile.devices.list browser.install.start
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -53,6 +55,9 @@ defmodule FermixCore.Management.Router do
   @plugin_setting_params ~w(name key value)
   @oauth_client_params ~w(provider client_id redirect_port region)
   @workspace_select_params ~w(name profile workspace_id label)
+  @mobile_session_params ~w(session_id)
+  @mobile_decide_params ~w(session_id approved)
+  @mobile_device_params ~w(device_id)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
@@ -165,6 +170,14 @@ defmodule FermixCore.Management.Router do
   defp route_known("meetings.signin.start", %{}, opts), do: meetings_signin(opts)
   defp route_known("computer_use.grant.start", %{}, opts), do: computer_use_grant(opts)
   defp route_known("computer_use.permissions.get", %{}, opts), do: computer_use_permissions(opts)
+  defp route_known("mobile.status", %{}, opts), do: mobile(&Mobile.status/1, opts)
+  defp route_known("mobile.pair.start", %{}, opts), do: mobile(&Mobile.pair_start/1, opts)
+  defp route_known("mobile.pair.get", params, opts), do: mobile_session(:get, params, opts)
+  defp route_known("mobile.pair.decide", params, opts), do: mobile_decide(params, opts)
+  defp route_known("mobile.pair.cancel", params, opts), do: mobile_session(:cancel, params, opts)
+  defp route_known("mobile.devices.list", %{}, opts), do: mobile(&Mobile.devices_list/1, opts)
+  defp route_known("mobile.devices.revoke", params, opts), do: mobile_revoke(params, opts)
+  defp route_known("browser.install.start", %{}, opts), do: browser_install(opts)
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -329,11 +342,49 @@ defmodule FermixCore.Management.Router do
 
   defp meetings_signin(opts), do: operation_result(Meetings.signin_start(operation_opts(opts)))
 
+  defp browser_install(opts),
+    do: operation_result(Capabilities.browser_install_start(operation_opts(opts)))
+
   defp computer_use_grant(opts),
     do: operation_result(ComputerUse.grant_start(operation_opts(opts)))
 
   defp computer_use_permissions(opts),
     do: operation_result(ComputerUse.permissions(operation_opts(opts)))
+
+  defp mobile(verb, opts) when is_function(verb, 1),
+    do: operation_result(verb.(mobile_opts(opts)))
+
+  defp mobile_session(action, params, opts) do
+    with {:ok, session_id} <- fetch_string(params, "session_id", @mobile_session_params) do
+      result =
+        case action do
+          :get -> Mobile.pair_get(session_id, mobile_opts(opts))
+          :cancel -> Mobile.pair_cancel(session_id, mobile_opts(opts))
+        end
+
+      operation_result(result)
+    end
+  end
+
+  defp mobile_decide(params, opts) do
+    with {:ok, session_id} <- fetch_string(params, "session_id", @mobile_decide_params),
+         {:ok, approved} <- fetch_boolean(params, "approved") do
+      operation_result(Mobile.pair_decide(session_id, approved, mobile_opts(opts)))
+    end
+  end
+
+  defp mobile_revoke(params, opts) do
+    with {:ok, device_id} <- fetch_string(params, "device_id", @mobile_device_params) do
+      operation_result(Mobile.devices_revoke(device_id, mobile_opts(opts)))
+    end
+  end
+
+  defp fetch_boolean(params, field) do
+    case Map.get(params, field) do
+      value when is_boolean(value) -> {:ok, value}
+      _invalid -> invalid_params(field)
+    end
+  end
 
   defp fetch_targets(params) do
     targets = Map.get(params, "targets")
@@ -351,6 +402,7 @@ defmodule FermixCore.Management.Router do
   # per operation.
   defp operation_opts(opts), do: Keyword.get(opts, :operation_opts, [])
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
+  defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
 
   defp settings_sections(opts) do
     inventory = Keyword.get(opts, :settings_sections, &Settings.sections/0)
@@ -433,6 +485,9 @@ defmodule FermixCore.Management.Router do
 
   defp operation_result({:error, {:secret_store_failed, id, reason}}),
     do: {:error, :secret_store_failed, %{"id" => id, "reason" => reason}}
+
+  defp operation_result({:error, {:unknown_pairing_session, session_id}}),
+    do: {:error, :unknown_pairing_session, %{"session_id" => session_id}}
 
   defp fetch_section(params, allowed) do
     with :ok <- reject_unknown_params(params, allowed) do

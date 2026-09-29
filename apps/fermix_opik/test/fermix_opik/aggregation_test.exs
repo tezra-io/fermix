@@ -87,6 +87,79 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  # The daemon runs a confirmed access-sensitive command when the owner taps,
+  # usually after the turn that parked it has shipped. It carries that turn's
+  # session_id (so it pairs with the held call by `access_intent`) and must still
+  # ship rather than be dropped at the closed-session tombstone.
+  describe "a confirmed access-sensitive run" do
+    @held %{
+      tool: "tesla_unlock_doors",
+      success: false,
+      session_id: "main-1",
+      access_gate: "held_this_chat",
+      access_intent: "intent-1"
+    }
+
+    @confirmed %{
+      tool: "tesla_unlock_doors",
+      success: true,
+      session_id: "main-1",
+      access_gate: "confirmed",
+      access_intent: "intent-1"
+    }
+
+    @turn_close {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+                 %{
+                   channel: :telegram,
+                   chat_id: "c1",
+                   sender: "u1",
+                   session_id: "main-1",
+                   agent: "main"
+                 }}
+
+    test "after its turn shipped, it ships as its own trace carrying the tool span" do
+      {state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 0}, @held},
+          @turn_close,
+          {[:fermix, :tool, :exec], %{duration_ms: 900}, @confirmed}
+        ])
+
+      assert [%{trace: turn}, %{trace: late, spans: [span]}] = closed
+      assert turn.name == "agent:main"
+      assert late.name == "access_gate:confirmed"
+      assert late.metadata.session_id == "main-1"
+      assert late.metadata.access_intent == "intent-1"
+      assert span.trace_id == late.id
+      assert span.name == "tesla_unlock_doors"
+      assert span.metadata.access_gate == "confirmed"
+      assert span.metadata.access_intent == "intent-1"
+      assert state.dropped_after_close == 0
+      assert state.traces == %{}
+    end
+
+    test "while its turn is still open, it nests under that turn like any tool span" do
+      {_state, closed} =
+        run([
+          {[:fermix, :tool, :exec], %{duration_ms: 0}, @held},
+          {[:fermix, :tool, :exec], %{duration_ms: 900}, @confirmed},
+          @turn_close
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "agent:main"
+      assert length(spans_of_type(spans, "tool")) == 2
+    end
+
+    test "any other late tool span is still dropped at the tombstone" do
+      {state, closed} =
+        run([@turn_close, {[:fermix, :tool, :exec], %{duration_ms: 1}, @held}])
+
+      assert length(closed) == 1
+      assert state.dropped_after_close == 1
+    end
+  end
+
   test "draft-stream phases nest as child spans under the turn trace, never as roots" do
     {_state, closed} =
       run([
@@ -187,6 +260,100 @@ defmodule FermixOpik.AggregationTest do
     assert timeout.error_info.exception_type == "Timeout"
   end
 
+  @compaction_event [:fermix, :agent_loop, :context_compaction]
+  @recovery_event [:fermix, :agent_loop, :context_recovery]
+
+  describe "in-loop context compaction" do
+    test "the reporter subscribes to both events" do
+      assert @compaction_event in FermixOpik.Reporter.events()
+      assert @recovery_event in FermixOpik.Reporter.events()
+    end
+
+    test "a compaction and a recovery round nest as point spans under the turn" do
+      {_state, closed} =
+        run([
+          {@compaction_event, %{count: 1, results: 3, bytes_before: 350_000, bytes_after: 12_000},
+           %{session_id: "main-1", agent: "main", iteration: 4, level: 1, trigger: :recovery}},
+          {@recovery_event, %{count: 1},
+           %{session_id: "main-1", agent: "main", iteration: 4, round: 1, outcome: :recovered}},
+          {[:fermix, :agent, :message], %{iterations: 5, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      wrapper = span_named(spans, "agent:main")
+      compaction = span_named(spans, "context_compaction")
+      recovery = span_named(spans, "context_recovery")
+
+      assert compaction.type == "general"
+      assert compaction.parent_span_id == wrapper.id
+      assert compaction.trace_id == trace.id
+
+      assert compaction.metadata == %{
+               agent: "main",
+               iteration: 4,
+               level: 1,
+               trigger: "recovery",
+               results: 3,
+               bytes_before: 350_000,
+               bytes_after: 12_000
+             }
+
+      assert recovery.type == "general"
+      assert recovery.parent_span_id == wrapper.id
+      assert recovery.trace_id == trace.id
+
+      assert recovery.metadata == %{
+               agent: "main",
+               iteration: 4,
+               round: 1,
+               outcome: "recovered"
+             }
+    end
+
+    test "a subagent's compaction hangs off the subagent's wrapper, not the turn's" do
+      {_state, closed} =
+        run([
+          {[:fermix, :provider, :call], %{duration_ms: 900},
+           %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :start], %{},
+           %{name: "coder", role: "worker", session_id: "sub-abc", parent_session: "main-1"}},
+          {@compaction_event, %{count: 1, results: 2, bytes_before: 90_000, bytes_after: 4_000},
+           %{
+             session_id: "sub-abc",
+             parent_session: "main-1",
+             agent: "coder",
+             iteration: 2,
+             level: 1,
+             trigger: :budget
+           }},
+          {[:fermix, :agent, :task_complete], %{duration_ms: 800, iterations: 2},
+           %{name: "coder", role: "worker", session_id: "sub-abc", parent_session: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 3, total_tokens: 37},
+           %{channel: :telegram, chat_id: "c1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      sub_wrap = span_named(spans, "subagent:coder")
+      compaction = span_named(spans, "context_compaction")
+
+      assert compaction.parent_span_id == sub_wrap.id
+      assert compaction.trace_id == trace.id
+    end
+
+    test "an event without a session_id opens no trace" do
+      {state, closed} =
+        run([
+          {@recovery_event, %{count: 1},
+           %{agent: "main", iteration: 1, round: 2, outcome: :nothing_left}}
+        ])
+
+      assert closed == []
+      assert map_size(state.sessions) == 0
+      assert map_size(state.traces) == 0
+    end
+  end
+
   test "a main turn becomes one trace with nested llm and tool spans" do
     {_state, closed} =
       run([
@@ -249,6 +416,32 @@ defmodule FermixOpik.AggregationTest do
 
     stream = span_named(spans, "stream:open")
     assert stream.metadata.channel == :mobile
+  end
+
+  # The companion socket streams raw deltas, so its turn has no draft-stream
+  # span; it is the operator's own turn with no sender id, threaded like any
+  # other chat by channel and profile.
+  test "a companion turn is a main run threaded as companion:<profile>" do
+    {_state, closed} =
+      run([
+        {[:fermix, :provider, :call], %{duration_ms: 180},
+         %{provider: :openai, model: "gpt-5", status: :ok, session_id: "main-27"}},
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 9},
+         %{
+           channel: :companion,
+           chat_id: "main",
+           sender: nil,
+           session_id: "main-27",
+           agent: "main"
+         }}
+      ])
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "agent:main"
+    assert trace.thread_id == "companion:main"
+    assert trace.metadata.channel == "companion"
+    assert [_llm] = spans_of_type(spans, "llm")
+    refute Enum.any?(spans, &String.starts_with?(&1.name, "stream:"))
   end
 
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the

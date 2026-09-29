@@ -136,9 +136,9 @@ defmodule Fermix.CLI do
       fermix capabilities [--kind KIND] [--json]  Show registered capabilities
       fermix skills [list|view NAME|reload] [--json]  Inspect and reload installed skills
       fermix plugins [list|catalog|enable NAME|disable NAME|auth ...] [--json]
-      fermix pair                                  Pair an iOS companion device
-      fermix devices list                          List paired mobile devices
-      fermix devices revoke DEVICE_ID              Revoke a paired mobile device
+      fermix pair                                  Pair a phone companion device
+      fermix devices list                          List paired phones
+      fermix devices revoke DEVICE_ID              Revoke a paired phone
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file

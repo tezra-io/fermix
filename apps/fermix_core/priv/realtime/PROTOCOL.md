@@ -133,6 +133,28 @@ and `CompanionState.swift` (pet) together.
 | `call_stop` | — | Ends the active call and closes the session. |
 | `task_cancel` | `delegation_id` (non-empty string, required) | **v2.** Cancels one backend delegation of a Live call. Under the Realtime engine it is refused with `error: unsupported_by_engine` and the connection closes. |
 
+## Client audio
+
+`audio_chunk` carries the microphone as the provider will hear it: the daemon
+relays it untouched. A client streams 24 kHz mono PCM16 in 100 ms chunks from
+`listening` to the end of the call, silence included, and before sending it:
+
+- **cancels echo and suppresses noise.** GPT-Live's session takes no noise,
+  echo or voice-detection settings, and Realtime's server-side noise reduction
+  runs after the pet's own voice is already in the microphone. The macOS app
+  uses Apple's voice processing (`AVAudioInputNode.setVoiceProcessingEnabled`);
+  a Linux client needs the same from its audio stack, such as PipeWire's
+  echo-cancel module, with the pet's playback routed through it as the echo
+  reference.
+- **reads the processed channel.** With voice processing on, macOS delivers
+  several channels (six from a two-channel USB microphone) and the processed
+  voice is channel 0; a converter left to mix them to mono produces digital
+  silence.
+
+Echo cancellation can still fail on a route: display speakers over HDMI play
+about 90 ms later than they report. So under `openai_live` the daemon takes no
+words heard during a reply, or for 2 s after it, as the operator's turn.
+
 ## Server events (daemon → pet)
 
 | `type` | Fields | Notes |
@@ -156,6 +178,15 @@ Under `openai_live` the daemon speaks to the pet in this order. Every frame
 except `call_ready` is optional and may repeat; there is no spoken-response
 completion event, so nothing here waits for one.
 
+Live publishes no turn boundaries either, so the daemon reads the turn from the
+audio and words it relays: `thinking` once Live's recognition has stopped
+sending the operator's words for a moment and no reply has started (words heard
+during a reply or just after it do not count: they are its echo), and `listening` once the voice
+of a reply has had time to play out. They drive only the pet's presentation. Live's output
+never stops: between replies `audio_delta` carries digital silence, one chunk
+every 100 ms, so a pet must read speaking from the daemon's `state` and from
+the voice in the audio, never from audio merely arriving.
+
 ```
 pet  -> daemon:  call_start
                  daemon opens the provider session and the backend bridge
@@ -163,7 +194,9 @@ daemon -> pet:   call_ready { engine: "openai_live", call_id, provider_session_i
 daemon -> pet:   state { state: "listening" }
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
+daemon -> pet:   state { state: "thinking" }       (the operator has stopped speaking)
 daemon -> pet:   audio_delta … / state { speaking }
+daemon -> pet:   state { state: "listening" }      (the reply has had time to play out)
 daemon -> pet:   task { delegation_id, revision, status: "running" }      (backend work started)
 pet  -> daemon:  task_cancel { delegation_id }                            (optional)
 daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary? }
@@ -173,6 +206,10 @@ pet  -> daemon:  call_stop
 daemon -> pet:   state { state: "idle" }
 daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
 ```
+
+Live cannot cancel a reply, so an `interrupt` stops it at the relay: the daemon
+answers `playback_stop` and `state: "listening"`, and forwards none of the rest
+of that reply. Audio after its stream has been quiet for a moment is a new reply.
 
 The final `usage` is the settled bill for the call: `accounting: "incomplete"`
 says the provider never reported a terminal duration, and an incomplete total is

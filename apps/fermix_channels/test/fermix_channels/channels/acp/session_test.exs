@@ -157,4 +157,25 @@ defmodule FermixChannels.Channels.Acp.SessionTest do
       assert Session.effects(session) == 0
     end
   end
+
+  describe "the Queue watch" do
+    test "a turn carries the Queue it was handed to and the monitor on it until it closes" do
+      session = Session.new("/tmp", nil)
+      assert Session.queue_ref(session) == nil
+      assert Session.queue(session) == nil
+
+      {session, _seq} = Session.start_turn(session, 1)
+      assert Session.queue_ref(session) == nil
+      assert Session.queue(session) == nil
+
+      ref = make_ref()
+      session = Session.put_queue_ref(session, self(), ref)
+      assert Session.queue_ref(session) == ref
+      assert Session.queue(session) == self()
+
+      closed = Session.clear_turn(session)
+      assert Session.queue_ref(closed) == nil
+      assert Session.queue(closed) == nil
+    end
+  end
 end

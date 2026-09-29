@@ -3,9 +3,13 @@ defmodule Fermix.CLI.DaemonTest do
 
   alias Fermix.CLI.Daemon
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.SocketPath
+  alias FermixTestSupport.ParentProcess
 
   defmodule TestPluginsRuntime do
     def apply_persisted do
@@ -44,6 +48,19 @@ defmodule Fermix.CLI.DaemonTest do
          },
          realtime: :skipped
        }}
+    end
+  end
+
+  defmodule TestTokenSupervisor do
+    # One profile whose forget never finishes, the way a manager wedged behind
+    # a lock wait exits its caller's GenServer.call.
+    def forget_signed_out("wedged:primary"),
+      do: exit({:timeout, {GenServer, :call, [:manager, :forget, 5_000]}})
+
+    def forget_signed_out(profile) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:forget_signed_out, profile})
+      :ok
     end
   end
 
@@ -86,6 +103,13 @@ defmodule Fermix.CLI.DaemonTest do
     def list_devices, do: call(:list_devices, [])
     def revoke_device(device_id), do: call(:revoke_device, [device_id])
     def status, do: call(:status, [])
+
+    # The v1 provider functions the owner-decision gate stands in front of.
+    def pair_start(_opts), do: call(:pair_start, [])
+    def pair_get(session_id, _opts), do: call(:pair_get, [session_id])
+    def pair_decide(session_id, approved, _opts), do: call(:pair_decide, [session_id, approved])
+    def pair_cancel(session_id, _opts), do: call(:pair_cancel, [session_id])
+    def devices_revoke(device_id, _opts), do: call(:devices_revoke, [device_id])
 
     defp call(operation, args) do
       test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
@@ -139,6 +163,11 @@ defmodule Fermix.CLI.DaemonTest do
            name: "Sujeeth"
          }},
       cancel_pairing: {:ok, %{cancelled: true}},
+      pair_start: {:error, :pairing_active},
+      pair_get: {:error, :unknown_pairing_session},
+      pair_decide: {:error, :unknown_pairing_session},
+      pair_cancel: {:error, :unknown_pairing_session},
+      devices_revoke: {:error, :device_not_found},
       list_devices: {:ok, %{devices: []}},
       revoke_device: {:ok, %{device_id: "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}},
       status: {:ok, %{enabled: true, listener: :ready, paired_devices: 1}}
@@ -761,6 +790,141 @@ defmodule Fermix.CLI.DaemonTest do
     assert Keyword.get(opts, :timeout_ms) == 1_000
   end
 
+  test "agent_message from a process the daemon did not start reaches the bridge as independent",
+       %{socket_path: socket_path} do
+    assert {:ok, %{"status" => "ok"}} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :caller) == :independent
+  end
+
+  # SIDE-V1: an agent's shell command running `fermix ask` is the agent, not a
+  # person at a terminal. This VM stands in for that command: the daemon below is
+  # told its own process is this VM's parent, so the kernel's peer pid and the real
+  # process table must place the client beneath it.
+  test "agent_message from a process the daemon started reaches the bridge as its descendant" do
+    socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+    assert {:ok, %{"status" => "ok"}} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert_receive {:bridge_call, "hello", opts}
+    assert Keyword.get(opts, :caller) == :daemon_descendant
+  end
+
+  test "agent_message from a process the daemon cannot place is refused before the bridge" do
+    socket_path = start_peer_daemon(os: {:win32, :nt})
+
+    assert {:ok, reply} =
+             Client.agent_message(%{"content" => "hello"},
+               socket_path: socket_path,
+               timeout: 5_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] =~ "could not identify the process that sent this prompt"
+    refute_received {:bridge_call, _, _}
+  end
+
+  # SEC-5: opening a pairing window returns the link that carries the pairing
+  # secret, and approving or forgetting a phone is the owner's decision. A
+  # process the daemon started (a shell tool's command, a coding harness) is
+  # the agent, so an injected prompt could otherwise mint itself a phone.
+  describe "owner decisions on the phone channel" do
+    @owner_v1 [
+      {"mobile.pair.start", %{}, :pair_start},
+      {"mobile.pair.decide", %{"session_id" => "pair-1", "approved" => true}, :pair_decide},
+      {"mobile.pair.cancel", %{"session_id" => "pair-1"}, :pair_cancel},
+      {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"},
+       :devices_revoke}
+    ]
+    @owner_v0 [
+      {"mobile_pair_begin", %{}, :begin_pairing},
+      {"mobile_pair_decide", %{"session_id" => "pair-1", "approved" => true}, :decide_pairing},
+      {"mobile_pair_cancel", %{"session_id" => "pair-1"}, :cancel_pairing},
+      {"mobile_device_revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"},
+       :revoke_device}
+    ]
+
+    test "a process the daemon started is refused before the provider" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+      assert_owner_decisions_refused(socket_path)
+    end
+
+    test "a caller the daemon cannot place is refused before the provider" do
+      socket_path = start_peer_daemon(os: {:win32, :nt})
+      assert_owner_decisions_refused(socket_path)
+    end
+
+    # Placing the caller runs `ps` on macOS, bounded at five seconds in the
+    # daemon, so the reply gets the budget every other placed call here gets.
+    test "a process the daemon did not start reaches the provider", %{socket_path: socket_path} do
+      for {method, params, operation} <- @owner_v1 do
+        assert {:error, {:management_error, _code, _message, _details}} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+
+        assert_received {:mobile_provider_call, ^operation, _args}
+      end
+    end
+
+    test "reading a session or the status stays open to every caller" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      assert {:error, {:management_error, "unknown_pairing_session", _message, _details}} =
+               Client.request_v1("mobile.pair.get", %{"session_id" => "pair-1"},
+                 socket_path: socket_path,
+                 timeout: 1_000
+               )
+
+      assert_received {:mobile_provider_call, :pair_get, ["pair-1"]}
+    end
+
+    # R2-2: the refusal carries its own sentence, which `fermix pair` and
+    # `fermix devices` print instead of "the phone channel is not running",
+    # and it is the published golden refusal.
+    defp assert_owner_decisions_refused(socket_path) do
+      sentence = "Only the owner can pair or forget a phone; run this from your own terminal."
+      golden = golden_error_details("unavailable_owner_decision")
+      assert golden == %{"capability" => "mobile", "sentence" => sentence}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _operation} <- @owner_v1 do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+          end
+
+          for {method, params, _operation} <- @owner_v0 do
+            assert {:ok, %{"status" => "error", "reason" => "owner_decision_refused"}} =
+                     Client.request(method,
+                       params: params,
+                       socket_path: socket_path,
+                       timeout: 5_000
+                     )
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:mobile_provider_call, _operation, _args}
+    end
+
+    defp golden_error_details(name) do
+      :fermix_core
+      |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+      |> File.stream!()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["name"] == name))
+      |> get_in(["response", "error", "details"])
+    end
+  end
+
   test "agent_message decodes the request cwd param and forwards it to the bridge", %{
     socket_path: socket_path
   } do
@@ -877,6 +1041,134 @@ defmodule Fermix.CLI.DaemonTest do
     assert error =~ "broken"
     assert_receive :plugins_apply_called
   end
+
+  # TOKEN-6: a CLI logout deletes the entry in its own VM, then asks the
+  # daemon to let go of the tokens it still holds for that profile.
+  describe "auth_forget" do
+    setup do
+      socket_dir = mkdir!()
+      socket_path = Path.join(socket_dir, "forget.sock")
+      sup = :"#{__MODULE__}.ForgetSup#{System.unique_integer([:positive])}"
+      {:ok, _sup} = Task.Supervisor.start_link(name: sup)
+
+      {:ok, daemon} =
+        Daemon.start_link(
+          name: :"forget_daemon_#{System.unique_integer([:positive, :monotonic])}",
+          socket_path: socket_path,
+          task_supervisor: sup,
+          token_supervisor: TestTokenSupervisor
+        )
+
+      on_exit(fn ->
+        await_process_exit(daemon)
+        FermixTestSupport.SafeRm.rm_rf(socket_dir)
+      end)
+
+      %{forget_socket: socket_path}
+    end
+
+    test "has the daemon let go of the profile a CLI logout signed out of", ctx do
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("auth_forget",
+                 params: %{"profile" => "github:primary"},
+                 socket_path: ctx.forget_socket,
+                 timeout: 1_000
+               )
+
+      assert_receive {:forget_signed_out, "github:primary"}
+    end
+
+    test "refuses a profile it cannot name, and lets go of nothing", ctx do
+      oversized = String.duplicate("p", 257)
+
+      for params <- [%{}, %{"profile" => ""}, %{"profile" => 7}, %{"profile" => oversized}] do
+        assert {:ok, %{"status" => "error", "reason" => "invalid profile"}} =
+                 Client.request("auth_forget",
+                   params: params,
+                   socket_path: ctx.forget_socket,
+                   timeout: 1_000
+                 )
+      end
+
+      refute_received {:forget_signed_out, _profile}
+    end
+
+    test "reports a forget that did not finish instead of answering ok", ctx do
+      {reply, log} =
+        ExUnit.CaptureLog.with_log(fn ->
+          Client.request("auth_forget",
+            params: %{"profile" => "wedged:primary"},
+            socket_path: ctx.forget_socket,
+            timeout: 1_000
+          )
+        end)
+
+      assert {:ok, %{"status" => "error", "reason" => reason}} = reply
+      assert reason =~ "timeout"
+      assert log =~ "Daemon kept the wedged:primary tokens after a CLI logout"
+    end
+
+    # The daemon's own default, not the stand-in: a real manager holding a
+    # plugin child's token file lets go of both once the CLI deleted the entry.
+    test "drops a live manager's tokens and token file through the real supervisor" do
+      home = mkdir!()
+      previous_home = System.get_env("FERMIX_HOME")
+      System.put_env("FERMIX_HOME", home)
+      root = FermixTestSupport.SafeRm.make_tmp_dir!("daemon-forget-store")
+      DistStore.ensure!(root)
+      profile = "google_calendar:daemon-forget-#{System.unique_integer([:positive])}"
+      socket_path = Path.join(home, "real.sock")
+      sup = :"#{__MODULE__}.RealForgetSup#{System.unique_integer([:positive])}"
+      {:ok, _sup} = Task.Supervisor.start_link(name: sup)
+
+      {:ok, daemon} =
+        Daemon.start_link(
+          name: :"real_forget_daemon_#{System.unique_integer([:positive, :monotonic])}",
+          socket_path: socket_path,
+          task_supervisor: sup
+        )
+
+      on_exit(fn ->
+        await_process_exit(daemon)
+        TokenSupervisor.stop_profile(profile)
+        restore_env("FERMIX_HOME", previous_home)
+        FermixTestSupport.SafeRm.rm_rf!(root)
+        FermixTestSupport.SafeRm.rm_rf(home)
+      end)
+
+      :ok = Store.write(profile, google_entry())
+      token_file = DistStore.token_file(root, profile)
+      assert :ok = TokenSupervisor.enable_token_file(profile, token_file)
+      [{manager, _value}] = Registry.lookup(FermixCore.Auth.TokenRegistry, profile)
+      down = Process.monitor(manager)
+      :ok = Store.delete_provider(profile)
+
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("auth_forget",
+                 params: %{"profile" => profile},
+                 socket_path: socket_path,
+                 timeout: 5_000
+               )
+
+      refute File.exists?(token_file)
+      assert_receive {:DOWN, ^down, :process, ^manager, _reason}
+    end
+  end
+
+  defp google_entry do
+    %{
+      auth_mode: "oauth2",
+      provider: "google",
+      granted_scopes: [],
+      tokens: %{access_token: "at", refresh_token: "rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
+
+  defp restore_env(key, nil), do: System.delete_env(key)
+  defp restore_env(key, value), do: System.put_env(key, value)
 
   # M27 §7.8: the remote-MCP status table lives in the daemon's memory, so a
   # one-shot CLI VM (`fermix doctor`) can only read it over this socket op.
@@ -1233,6 +1525,30 @@ defmodule Fermix.CLI.DaemonTest do
 
     File.mkdir_p!(path)
     path
+  end
+
+  # A daemon of its own on a fresh socket, for a test that changes how it places
+  # an `agent_message` sender (`FermixCore.SocketPeer`).
+  defp start_peer_daemon(peer_opts) do
+    socket_dir = mkdir!()
+    socket_path = Path.join(socket_dir, "peer.sock")
+
+    {:ok, daemon} =
+      [
+        name: unique_name(:peer_daemon),
+        socket_path: socket_path,
+        task_supervisor: __MODULE__.TaskSup,
+        management_opts: management_opts()
+      ]
+      |> Keyword.merge(peer_opts)
+      |> Daemon.start_link()
+
+    on_exit(fn ->
+      await_process_exit(daemon)
+      FermixTestSupport.SafeRm.rm_rf(socket_dir)
+    end)
+
+    socket_path
   end
 
   defp restore_app_env(key, nil), do: Application.delete_env(:fermix_core, key)

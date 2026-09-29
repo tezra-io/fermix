@@ -117,7 +117,8 @@ defmodule FermixOpik.MapperTest do
       profile: "default",
       url: "https://example.com/page",
       target_ref: "ref-7",
-      selector: "#submit"
+      selector: "#submit",
+      backend: "fermix_app"
     }
 
     span =
@@ -133,7 +134,8 @@ defmodule FermixOpik.MapperTest do
              profile: "default",
              url: "https://example.com/page",
              target_ref: "ref-7",
-             selector: "#submit"
+             selector: "#submit",
+             backend: "fermix_app"
            }
   end
 
@@ -544,6 +546,36 @@ defmodule FermixOpik.MapperTest do
     assert span.metadata == %{cu_session: "cua_ab12", outcome: :refused, courtesy: :yielded}
   end
 
+  # How the access gate settled an access-sensitive call (a closed enum) and the
+  # parked intent that pairs a held call with its confirmed run (an opaque id):
+  # no content, so both ride outside the content-capture gate.
+  test "tool_span keeps the access-gate label and intent" do
+    metadata = %{
+      tool: "tesla_unlock_doors",
+      success: false,
+      access_gate: "held_this_chat",
+      access_intent: "9f2c1a7b3e4d5f60",
+      policy_enforcement: %{source: "access_gate", decision: "confirm", phase: "pre_execution"}
+    }
+
+    span =
+      Mapper.tool_span(metadata, %{duration_ms: 0},
+        trace_id: "t",
+        project_name: "fermix",
+        ended: @ended
+      )
+
+    assert span.metadata == %{
+             access_gate: "held_this_chat",
+             access_intent: "9f2c1a7b3e4d5f60",
+             policy_enforcement: %{
+               source: "access_gate",
+               decision: "confirm",
+               phase: "pre_execution"
+             }
+           }
+  end
+
   test "tool_span keeps the outbound MCP server identity" do
     metadata = %{tool: "acme_get_note_markdown", success: true, mcp_server: "acme"}
 
@@ -797,6 +829,111 @@ defmodule FermixOpik.MapperTest do
       refute String.contains?(inspect(span), "4111")
       refute String.contains?(inspect(span), "book the flight")
       refute String.contains?(inspect(span), "live voice companion")
+    end
+  end
+
+  describe "context_compaction_span/3" do
+    test "builds a general point span carrying the reduction's size change" do
+      metadata = %{
+        session_id: "main-1",
+        parent_session: nil,
+        agent: "main",
+        iteration: 4,
+        level: 1,
+        trigger: :budget
+      }
+
+      measurements = %{count: 1, results: 3, bytes_before: 350_000, bytes_after: 12_000}
+
+      span =
+        Mapper.context_compaction_span(metadata, measurements,
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.name == "context_compaction"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.project_name == "fermix"
+      assert span.start_time == "2026-06-02T12:00:03.200Z"
+      assert span.end_time == span.start_time
+
+      # session_id rides the span's placement, not its metadata; `count` is
+      # always 1 and says nothing.
+      assert span.metadata == %{
+               agent: "main",
+               iteration: 4,
+               level: 1,
+               trigger: "budget",
+               results: 3,
+               bytes_before: 350_000,
+               bytes_after: 12_000
+             }
+    end
+
+    test "an unlisted metadata key never exports" do
+      span =
+        Mapper.context_compaction_span(
+          %{agent: "main", iteration: 1, level: 1, trigger: :recovery, digest: "planted fact"},
+          %{count: 1, results: 1, bytes_before: 10, bytes_after: 5},
+          trace_id: "t",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      refute Map.has_key?(span, :parent_span_id)
+      assert span.metadata.trigger == "recovery"
+      refute String.contains?(inspect(span), "planted fact")
+    end
+  end
+
+  describe "context_recovery_span/3" do
+    test "builds a general point span naming the round and its outcome" do
+      metadata = %{
+        session_id: "sub-abc",
+        parent_session: "main-1",
+        agent: "coder",
+        iteration: 2,
+        round: 3,
+        outcome: :refused_again
+      }
+
+      span =
+        Mapper.context_recovery_span(metadata, %{count: 1},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.name == "context_recovery"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.project_name == "fermix"
+      assert span.start_time == "2026-06-02T12:00:03.200Z"
+      assert span.end_time == span.start_time
+
+      assert span.metadata == %{
+               agent: "coder",
+               iteration: 2,
+               round: 3,
+               outcome: "refused_again"
+             }
+    end
+
+    test "drops absent keys" do
+      span =
+        Mapper.context_recovery_span(%{iteration: 1, round: 1, outcome: :recovered}, %{count: 1},
+          trace_id: "t",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.metadata == %{iteration: 1, round: 1, outcome: "recovered"}
     end
   end
 end

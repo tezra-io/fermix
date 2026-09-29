@@ -206,7 +206,7 @@ defmodule FermixCore.Sandbox.ConfigMutation do
       ["/", System.user_home!(), config.os_home, ConfigStore.fermix_home(), config.home]
 
     if root in Enum.map(protected_roots, &PathPolicy.canonical_path/1) or
-         Enum.any?(PathPolicy.protected_paths(config), &inside_or_equal?(root, &1)) do
+         PathPolicy.protected?(root, PathPolicy.protected_paths(config)) do
       {:error, {:unsafe_root, root}}
     else
       :ok
@@ -271,6 +271,4 @@ defmodule FermixCore.Sandbox.ConfigMutation do
       :ok
     end
   end
-
-  defp inside_or_equal?(path, root), do: path == root or String.starts_with?(path, root <> "/")
 end

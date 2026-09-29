@@ -5,9 +5,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
   Runtime callers use the supervised GenServer facade. Explicit `root:` calls
   are the hermetic test/one-shot seam and never consult the host's real
   `FERMIX_HOME`.
+
+  The supervised store keeps the parsed file in memory and answers from it
+  while the file's inode, size, mtime and mode are unchanged, so the per-frame
+  authorization check costs two `lstat`s rather than a TOML parse. Its own
+  writes drop the copy; a file replaced or edited outside the daemon is seen on
+  the next call. Reads never create the mobile directory.
   """
 
   use GenServer
+
+  require Logger
 
   defmodule Device do
     @moduledoc "A paired device authenticated by its Noise static public key."
@@ -35,6 +43,9 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @required_fields [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
   @optional_fields [:push_token, :last_seen]
   @update_fields [:name, :model, :push_token, :last_seen]
+  # last_seen is informational, and every hello records it: a newer value
+  # inside this window is not worth a durable, fsync'd rewrite of the store.
+  @last_seen_granularity_s 300
   @uuid_regex ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
   @doc "Start the serialized store for one Fermix home."
@@ -85,6 +96,23 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @spec add(server(), map()) :: result(Device.t())
   def add(server, attrs) when is_map(attrs), do: GenServer.call(server, {:add, attrs})
 
+  @doc """
+  Add a device the owner just approved. An earlier approval of the same phone
+  (same Noise key) that never completed a `hello` is replaced: that phone never
+  received its device id, so the row is an orphan nothing else can reach. A
+  phone that has connected is still refused as a duplicate identity.
+  """
+  @spec add_approved(map(), keyword()) :: result(Device.t())
+  def add_approved(attrs, opts) when is_map(attrs) and is_list(opts) do
+    with {:ok, device} <- validate_new(attrs) do
+      with_root(opts, &approve_at_root(&1, device))
+    end
+  end
+
+  @spec add_approved(server(), map()) :: result(Device.t())
+  def add_approved(server, attrs) when is_map(attrs),
+    do: GenServer.call(server, {:add_approved, attrs})
+
   @doc "Update mutable device metadata. Identity and creation time are immutable."
   @spec update(String.t(), map()) :: result(Device.t())
   def update(device_id, attrs) when is_binary(device_id) and is_map(attrs) do
@@ -134,33 +162,94 @@ defmodule FermixChannels.Mobile.DeviceStore do
   def init(opts) do
     with {:ok, root} <- resolve_root(opts),
          {:ok, _devices} <- read_devices(root) do
-      {:ok, root}
+      {:ok, %{root: root, cache: nil}}
     else
       {:error, reason} -> {:stop, reason}
     end
   end
 
   @impl true
-  def handle_call(:list, _from, root), do: {:reply, read_devices(root), root}
+  def handle_call(:list, _from, state) do
+    {reply, state} = cached_devices(state)
+    {:reply, reply, state}
+  end
 
-  def handle_call({:fetch, id}, _from, root),
-    do: {:reply, fetch_from_root(root, id), root}
+  def handle_call({:fetch, id}, _from, state),
+    do: reply_found(state, validate_device_id(id), &find_device(&1, id))
 
-  def handle_call({:add, attrs}, _from, root),
-    do: {:reply, add_validated(root, attrs), root}
+  def handle_call({:find_by_noise_pk, key}, _from, state),
+    do: reply_found(state, validate_binary32(:noise_pk, key), &find_noise(&1, key))
 
-  def handle_call({:update, id, attrs}, _from, root),
-    do: {:reply, update_at_root(root, id, attrs), root}
+  def handle_call({:add, attrs}, _from, state),
+    do: write_reply(state, add_validated(state.root, attrs, &add_to_root/2))
 
-  def handle_call({:delete, id}, _from, root),
-    do: {:reply, delete_at_root(root, id), root}
+  def handle_call({:add_approved, attrs}, _from, state),
+    do: write_reply(state, add_validated(state.root, attrs, &approve_at_root/2))
 
-  def handle_call({:find_by_noise_pk, key}, _from, root),
-    do: {:reply, find_noise_at_root(root, key), root}
+  def handle_call({:update, id, attrs}, _from, state),
+    do: write_reply(state, update_at_root(state.root, id, attrs))
 
-  defp add_validated(root, attrs) do
+  def handle_call({:delete, id}, _from, state),
+    do: write_reply(state, delete_at_root(state.root, id))
+
+  # Any write, even a refused one, may have replaced the file, so the next
+  # read parses it again rather than trusting a copy taken before the call.
+  defp write_reply(state, reply), do: {:reply, reply, %{state | cache: nil}}
+
+  defp reply_found(state, {:error, _reason} = invalid, _find), do: {:reply, invalid, state}
+
+  defp reply_found(state, :ok, find) do
+    case cached_devices(state) do
+      {{:ok, devices}, state} -> {:reply, find.(devices), state}
+      {error, state} -> {:reply, error, state}
+    end
+  end
+
+  defp cached_devices(state) do
+    path = store_path(state.root)
+
+    with :ok <- inspect_mobile_dir(state.root),
+         {:ok, stat} <- store_stat(path) do
+      cached_or_read(state, path, stat)
+    else
+      :absent -> {{:ok, []}, %{state | cache: nil}}
+      {:error, _reason} = error -> {error, %{state | cache: nil}}
+    end
+  end
+
+  defp cached_or_read(state, path, stat) do
+    key = stat_key(stat)
+
+    case state.cache do
+      %{key: ^key, devices: devices} -> {{:ok, devices}, state}
+      _stale -> read_and_cache(state, path, stat.mode, key)
+    end
+  end
+
+  defp read_and_cache(state, path, mode, key) do
+    case decode_store(path, mode) do
+      {:ok, devices} -> {{:ok, devices}, %{state | cache: %{key: key, devices: devices}}}
+      {:error, _reason} = error -> {error, %{state | cache: nil}}
+    end
+  end
+
+  defp store_stat(path) do
+    case File.lstat(path, time: :posix) do
+      {:error, :enoent} -> :absent
+      {:ok, %{type: :regular} = stat} -> {:ok, stat}
+      {:ok, %{type: type}} -> {:error, {:unsafe_file_type, path, type, :regular}}
+      {:error, reason} -> {:error, {:devices_unreadable, path, reason}}
+    end
+  end
+
+  # The mode is part of the key so a permission change is validated again.
+  # mtime has one-second resolution: an in-place edit that keeps the size and
+  # lands in the same second as the last read is the one change it misses.
+  defp stat_key(stat), do: {stat.inode, stat.size, stat.mtime, stat.mode}
+
+  defp add_validated(root, attrs, add) do
     with {:ok, device} <- validate_new(attrs) do
-      add_to_root(root, device)
+      add.(root, device)
     end
   end
 
@@ -173,13 +262,48 @@ defmodule FermixChannels.Mobile.DeviceStore do
     end
   end
 
+  defp approve_at_root(root, device) do
+    with {:ok, devices} <- read_devices(root),
+         :ok <- reject_duplicate_id(devices, device),
+         {:ok, kept} <- drop_orphan(devices, device),
+         :ok <- reject_duplicate_noise(kept, device),
+         :ok <- write_devices(root, [device | kept]) do
+      {:ok, device}
+    end
+  end
+
+  defp drop_orphan(devices, device) do
+    case Enum.split_with(devices, &orphan_of?(&1, device)) do
+      {[], kept} ->
+        {:ok, kept}
+
+      {[orphan], kept} ->
+        Logger.warning(
+          "mobile pairing replaced device #{orphan.device_id}: the same phone was approved " <>
+            "before and never connected with that id"
+        )
+
+        {:ok, kept}
+    end
+  end
+
+  defp orphan_of?(existing, device),
+    do: existing.noise_pk == device.noise_pk and is_nil(existing.last_seen)
+
   defp update_at_root(root, device_id, attrs) do
     with :ok <- validate_device_id(device_id),
          {:ok, updates} <- validate_updates(attrs),
          {:ok, devices} <- read_devices(root),
          {:ok, existing} <- find_device(devices, device_id),
-         {:ok, updated} <- apply_updates(existing, updates),
-         :ok <- write_devices(root, replace_device(devices, updated)) do
+         {:ok, updated} <- apply_updates(existing, updates) do
+      persist_update(root, devices, existing, updated)
+    end
+  end
+
+  defp persist_update(_root, _devices, existing, existing), do: {:ok, existing}
+
+  defp persist_update(root, devices, _existing, updated) do
+    with :ok <- write_devices(root, replace_device(devices, updated)) do
       {:ok, updated}
     end
   end
@@ -203,25 +327,30 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp find_noise_at_root(root, noise_pk) do
     with :ok <- validate_binary32(:noise_pk, noise_pk),
          {:ok, devices} <- read_devices(root) do
-      case Enum.find(devices, &(&1.noise_pk == noise_pk)) do
-        %Device{} = device -> {:ok, device}
-        nil -> {:error, {:noise_identity_not_found, Base.encode64(noise_pk)}}
-      end
+      find_noise(devices, noise_pk)
+    end
+  end
+
+  defp find_noise(devices, noise_pk) do
+    case Enum.find(devices, &(&1.noise_pk == noise_pk)) do
+      %Device{} = device -> {:ok, device}
+      nil -> {:error, {:noise_identity_not_found, Base.encode64(noise_pk)}}
     end
   end
 
   defp read_devices(root) do
-    with :ok <- ensure_mobile_dir(root) do
-      read_store(store_path(root))
+    case inspect_mobile_dir(root) do
+      :ok -> read_store(store_path(root))
+      :absent -> {:ok, []}
+      {:error, _reason} = error -> error
     end
   end
 
   defp read_store(path) do
-    case File.lstat(path) do
-      {:error, :enoent} -> {:ok, []}
-      {:ok, %{type: :regular, mode: mode}} -> decode_store(path, mode)
-      {:ok, %{type: type}} -> {:error, {:unsafe_file_type, path, type, :regular}}
-      {:error, reason} -> {:error, {:devices_unreadable, path, reason}}
+    case store_stat(path) do
+      {:ok, stat} -> decode_store(path, stat.mode)
+      :absent -> {:ok, []}
+      {:error, _reason} = error -> error
     end
   end
 
@@ -234,8 +363,12 @@ defmodule FermixChannels.Mobile.DeviceStore do
     end
   end
 
+  # An encoded store is never empty (no devices is `devices = []`), so zero
+  # bytes is what a crash between an unsynced write and its rename leaves, and
+  # reading it as "no paired devices" would silently unpair every phone.
   defp read_file(path) do
     case File.read(path) do
+      {:ok, ""} -> {:error, {:devices_store_empty, path}}
       {:ok, contents} -> {:ok, contents}
       {:error, reason} -> {:error, {:devices_unreadable, path, reason}}
     end
@@ -382,9 +515,10 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp validate_optional_datetime(field, value), do: validate_datetime(field, value)
 
   defp apply_updates(device, updates) do
-    with :ok <- validate_last_seen_progress(device.last_seen, updates),
-         updated = struct!(device, updates),
-         :ok <- validate_text(:name, updated.name),
+    updates = settle_last_seen(device.last_seen, updates)
+    updated = struct!(device, updates)
+
+    with :ok <- validate_text(:name, updated.name),
          :ok <- validate_text(:model, updated.model),
          :ok <- validate_optional_text(:push_token, updated.push_token),
          :ok <- validate_optional_datetime(:last_seen, updated.last_seen) do
@@ -392,19 +526,32 @@ defmodule FermixChannels.Mobile.DeviceStore do
     end
   end
 
-  defp validate_last_seen_progress(_existing, updates) when not is_map_key(updates, :last_seen),
-    do: :ok
+  # last_seen never moves backwards and never refuses an update: a wall clock
+  # that stepped back keeps the later time, and a hello that records it must
+  # not fail over an informational field. A newer value inside the granularity
+  # keeps the stored one, so an unchanged device is not written at all.
+  defp settle_last_seen(nil, updates), do: updates
+  defp settle_last_seen(_existing, updates) when not is_map_key(updates, :last_seen), do: updates
 
-  defp validate_last_seen_progress(nil, _updates), do: :ok
-
-  defp validate_last_seen_progress(%DateTime{} = existing, %{last_seen: %DateTime{} = attempted}) do
-    if DateTime.compare(attempted, existing) in [:eq, :gt],
-      do: :ok,
-      else: {:error, {:last_seen_regression, existing, attempted}}
+  defp settle_last_seen(existing, %{last_seen: %DateTime{} = attempted} = updates) do
+    if DateTime.diff(attempted, existing) >= @last_seen_granularity_s,
+      do: updates,
+      else: keep_last_seen(existing, attempted, updates)
   end
 
-  defp validate_last_seen_progress(%DateTime{} = existing, %{last_seen: attempted}),
-    do: {:error, {:last_seen_regression, existing, attempted}}
+  defp settle_last_seen(existing, %{last_seen: nil} = updates),
+    do: keep_last_seen(existing, nil, updates)
+
+  defp keep_last_seen(existing, attempted, updates) do
+    if is_nil(attempted) or DateTime.compare(attempted, existing) == :lt do
+      Logger.warning(
+        "mobile device last_seen went backwards (#{inspect(attempted)} before " <>
+          "#{DateTime.to_iso8601(existing)}); keeping the later time"
+      )
+    end
+
+    Map.put(updates, :last_seen, existing)
+  end
 
   defp reject_duplicate_id(devices, device) do
     if Enum.any?(devices, &(&1.device_id == device.device_id)),
@@ -490,12 +637,36 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp maybe_put(map, _key, nil), do: map
   defp maybe_put(map, key, value), do: Map.put(map, key, value)
 
+  # The bytes are synced before the rename publishes them: a rename that
+  # reaches the disk ahead of its data is how a power loss leaves an empty
+  # store. The BEAM cannot open a directory to sync the rename itself, so after
+  # a crash the store is the old version or the new one, never neither.
   defp write_temp(path, temp, encoded) do
-    with :ok <- File.write(temp, encoded, [:binary, :exclusive]),
+    with :ok <- write_synced(temp, encoded),
          :ok <- File.chmod(temp, @file_mode) do
       :ok
     else
       {:error, reason} -> {:error, {:devices_write_failed, path, reason}}
+    end
+  end
+
+  defp write_synced(temp, encoded) do
+    case File.open(temp, [:write, :binary, :exclusive]) do
+      {:ok, io} -> write_and_close(io, encoded)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp write_and_close(io, encoded) do
+    result =
+      with :ok <- IO.binwrite(io, encoded) do
+        :file.sync(io)
+      end
+
+    case {result, File.close(io)} do
+      {:ok, :ok} -> :ok
+      {:ok, {:error, reason}} -> {:error, reason}
+      {{:error, reason}, _close} -> {:error, reason}
     end
   end
 
@@ -520,10 +691,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
   end
 
   defp ensure_mobile_dir(root) do
+    case inspect_mobile_dir(root) do
+      :absent -> create_mobile_dir(mobile_dir(root))
+      result -> result
+    end
+  end
+
+  defp inspect_mobile_dir(root) do
     dir = mobile_dir(root)
 
     case File.lstat(dir) do
-      {:error, :enoent} -> create_mobile_dir(dir)
+      {:error, :enoent} -> :absent
       {:ok, %{type: :directory, mode: mode}} -> validate_mode(dir, mode, @dir_mode)
       {:ok, %{type: type}} -> {:error, {:unsafe_file_type, dir, type, :directory}}
       {:error, reason} -> {:error, {:devices_dir_unwritable, dir, reason}}

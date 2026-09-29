@@ -58,6 +58,45 @@ The fields are three fixed strings with no user content, so `Mapper.tool_span/3`
 exports them outside the content-capture gate — a blocked-before-execution claim
 must stay provable in a content-free export.
 
+A second source stamps the marker: `Capabilities.AccessGate`, the one gate in
+`Capability.execute/3` for plugin tools whose manifest marks them
+`access_sensitive`. It derives the map from `AccessGate.pre_execution_marker/1`
+(`source: "access_gate"`, `decision: "confirm"` when it held the call for the
+owner's confirmation, `"deny"` when it refused it, `phase: "pre_execution"`),
+and only on the held and refused branches, where the executor was never called.
+Because the executor never ran, the gate itself emits that model call's single
+`[:fermix, :tool, :exec]` event through `Tools.Telemetry.exec/5`, under the
+capability's name and with `success: false`.
+
+### Access-gate labels
+
+Every access-sensitive call also carries `access_gate`, a closed enum of how the
+gate settled it: `direct` (the owner's clean, attended request), `scheduled` (a
+job whose `allowed_tools` names it), `confirmed`, or one of `held_this_chat`,
+`held_owner_inbox`, `held_voice`, `already_confirmed`, `refused_worker`,
+`refused_unattended`, `refused_not_allowlisted`, `refused_no_surface`,
+`refused_full`, `refused_confirm_mismatch`. A held call also carries
+`access_intent`, the opaque id of the parked record. `refused_waiting` is the
+one label on a call to any tool, flagged or not: the turn (or Realtime call)
+that made it has a parked call still waiting on the owner, so the gate refused
+it (`:access_waiting` on the context) with the same `deny` marker. The gate stamps a
+dispatched call's label on the context it hands the executor, and `exec/5`
+copies `access_gate` and `access_intent` from the context into the executor's
+own event, so no executor knows the gate exists and the context wins over a
+caller's `:metadata`.
+
+The run the owner confirmed is not a model call. The daemon runs it later (a
+tap, `/confirm`, a spoken yes), with the parking turn's `session_id` and
+`parent_session` from the recorded snapshot, and its exec event carries
+`access_gate: "confirmed"` and the same `access_intent` as the held one: that id
+pairs "held" with "ran". Both keys are exported outside the content-capture
+gate (a closed enum and an opaque id). When the parking turn's trace has
+already shipped, `Aggregation` ships the confirmed exec as its own
+self-closing `access_gate:confirmed` trace instead of dropping it at the
+closed-session tombstone. Park, confirm, decline, expiry, a changed plugin and
+an unreachable owner inbox are one `Logger` line each (tool, intent id,
+reason; never argument values or transcript text).
+
 ### An allowed variable the sandbox could not pass
 
 The opposite claim, kept distinct on purpose. When an allow-listed environment
@@ -164,6 +203,26 @@ A subagent or scheduled job is a *run*. New run kinds (anything that calls
    ships via the exporter's TTL sweep.
 3. route those events into the JSONL trace stream via
    `FermixCore.Trace.TelemetryHandler` (`event_definitions/0`).
+
+## In-loop context compaction
+
+When a turn's tool results near or exceed the model's context window, the agent
+loop compresses older results into digests and retries the provider call. Each
+reduction applied emits `[:fermix, :agent_loop, :context_compaction]`
+(measurements `%{count: 1, results, bytes_before, bytes_after}`; metadata
+`session_id`, optional `parent_session`, `agent`, `iteration`, `level`,
+`trigger` in `:budget | :recovery`). Each recovery round after a provider
+refused a request as too large emits `[:fermix, :agent_loop, :context_recovery]`
+(measurements `%{count: 1}`; metadata `session_id`, optional `parent_session`,
+`agent`, `iteration`, `round` 1..3, `outcome` in `:recovered | :refused_again |
+:nothing_left | :digest_failed`). Both are point events. `FermixOpik` renders
+them via `Mapper.context_compaction_span` / `Mapper.context_recovery_span` as
+`general` spans named `context_compaction` / `context_recovery`, nested under
+the compacting run by `session_id`; the span metadata is `agent`, `iteration`
+and the event's own keys (`level`, `trigger`, `results`, `bytes_before`,
+`bytes_after`, or `round`, `outcome`), with atoms as strings. A digest call is
+an ordinary provider call carrying `agent: "tool_result_digest"` and needs nothing
+here.
 
 ## Plugin distribution ops
 
@@ -414,23 +473,44 @@ replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
 them in lockstep with the exporter's clauses, or a `call_stop` arriving without
 its opener reads as a `:subagent` phantom root.
 
-## Sessionless channel points (pairing, push, transport posture)
+## Sessionless channel points (pairing, push, render, transport posture)
 
 Pairing decisions and push deliveries are **point events with no agent
 session** (like plugin dist): a pairing resolves in `PairManager` and a push
 fires after the turn already closed. Both go through `FermixChannels.Telemetry`
 — `emit_pair(channel, status, duration_us)` with
-`status ∈ approved | denied | expired | rate_limited`, and
+`status ∈ approved | denied | expired | cancelled | device_disconnected`
+(`cancelled`: the window closed before a decision, by an owner's cancel, a
+dropped `fermix pair` connection or a failed setup; `device_disconnected`: the
+phone was gone when the owner approved), and
 `emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
-(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). Never
-hand-roll the event, and never attach device names, tokens, or preview bodies —
-the payloads are ciphertext by design and the trace must not be the plaintext
-side channel. `Trace.TelemetryHandler` maps both to `agent_event` rows; the
-Opik exporter deliberately does **not** subscribe (no session to nest under),
-so a missing pair/push trace in Opik is expected, not a bug.
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only).
+`expired` is the window's own end, which the phone and the management wire
+both call `timeout`. Failed handshakes refuse only the address they came from
+and never end a window, so they have no pair status. Never hand-roll the
+event, and never attach device names, tokens, or preview bodies — the payloads
+are ciphertext by design and the trace must not be the plaintext side channel.
+`Trace.TelemetryHandler` maps both to `agent_event` rows; the Opik exporter
+deliberately does **not** subscribe (no session to nest under), so a missing
+pair/push trace in Opik is expected, not a bug.
 
-A channel **transport** crossing into or out of a degraded posture is the third
+A channel **render** is a point of the same family:
+`emit_render(channel, result, duration_us)` emits `[:fermix, :channel,
+:render]` (`duration_us`; `channel`/`status` metadata, atoms only, `:ok` or the
+error's class). Telegram emits it per rendered reply (`:ok`, or
+`:plain_fallback` when a chunk is resent as raw Markdown). The mobile socket
+emits it only when it drops a fan-out event it cannot encode for one phone
+(`FermixChannels.Mobile.SocketHandler`, `drop_event/4`): `status` is the
+reason's leading atom (`event_too_large`, `null_field`, `invalid_payload`,
+…, or `encode_failed`), never the event, and the session stays open, because
+an outbound encode failure is the daemon's fault, not the phone's. A waiting
+approval card it cannot encode when a phone says hello is dropped the same way.
+The daemon log carries the event type and a bounded reason. No handler turns a
+render into a trace row, and Opik does not subscribe; the benchmark runner
+reads it as `channel_render`.
+
+A channel **transport** crossing into or out of a degraded posture is another
 event of this family: `emit_transport(channel, status, consecutive_failures,
 error_class)` with `status ∈ degraded | recovered`, emitting
 `[:fermix, :channel, :transport]` (`count: 1` + `consecutive_failures`;

@@ -3,12 +3,19 @@
 // frames this extension sends. Kept separate from background.js so `node --test`
 // can drive them without a browser.
 
-export const PROTOCOL = 1;
+// 2 is the protocol that sends `Network.enable`, which this extension on 1
+// refused.
+export const PROTOCOL = 2;
 
 // The domains the daemon is allowed to send. The daemon refuses anything else
 // before it transmits; this is the same list on the near side, so a frame that
 // should never have arrived is refused rather than handed to chrome.debugger.
 const ALLOWED_DOMAINS = ['Page', 'Runtime', 'DOM', 'Input', 'Accessibility'];
+
+// Single methods of a domain that is otherwise refused, the same list as the
+// daemon's. `Network.enable` turns on the report of which address served the
+// tab's document; every other Network method — the cookie reads — stays out.
+const ALLOWED_METHODS = ['Network.enable'];
 
 export function helloFrame(version) {
   return { type: 'hello', protocol: PROTOCOL, browser: 'chromium', extension_version: version };
@@ -32,6 +39,22 @@ export function errorFrame(id, message) {
 
 export function eventFrame(tabId, method, params) {
   return { type: 'event', tab_id: tabId, method, params: params ?? {} };
+}
+
+// What of a debugger event leaves the browser, or null for nothing. Network is
+// enabled only so the daemon learns which address served a document, so of that
+// domain only a document's response is relayed, and only its frame, its url and
+// that address: no headers, no cookies, nothing about any other request the page
+// made. Every other domain is relayed as the browser sent it.
+export function relayedEvent(method, params) {
+  if (!method.startsWith('Network.')) return params ?? {};
+  if (method !== 'Network.responseReceived' || params?.type !== 'Document') return null;
+  const response = params.response ?? {};
+  return {
+    type: 'Document',
+    frameId: params.frameId,
+    response: { url: response.url, remoteIPAddress: response.remoteIPAddress },
+  };
 }
 
 // One shape in, one verdict out. Every unknown or malformed frame is `invalid`
@@ -79,7 +102,7 @@ function classifyCommand(message) {
 
 function allowedMethod(method) {
   const domain = method.split('.')[0];
-  return method.includes('.') && ALLOWED_DOMAINS.includes(domain);
+  return method.includes('.') && (ALLOWED_DOMAINS.includes(domain) || ALLOWED_METHODS.includes(method));
 }
 
 // Chrome's own words for why a debugger went away, in the daemon's vocabulary.

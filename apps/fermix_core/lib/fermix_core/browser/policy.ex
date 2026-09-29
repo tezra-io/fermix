@@ -3,6 +3,7 @@ defmodule FermixCore.Browser.Policy do
 
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
+  alias FermixCore.Net.Guard
 
   @unsafe_schemes ~w(file ftp data javascript)
 
@@ -11,6 +12,11 @@ defmodule FermixCore.Browser.Policy do
   # making URL validation depend on a resolver, which would make this suite
   # host-dependent and turn a DNS-less runner red. An operator who genuinely
   # needs one of these names lists it in `allowed_hosts`, which is matched first.
+  #
+  # Where a name POINTS is judged here too (`answers_verdict/3`,
+  # `read_answers_verdict/3`), but the addresses are the caller's to fetch — a
+  # lookup, or what the browser reported — so this module stays pure and its
+  # suite hermetic.
   @internal_suffixes ~w(.internal .local .localhost)
 
   # Canonical or refused — there is no third answer. Fermix vets the host
@@ -126,6 +132,92 @@ defmodule FermixCore.Browser.Policy do
       %URI{scheme: scheme} ->
         read_origin_blocked(scheme)
     end
+  end
+
+  # The name a navigation must look up before Chrome is sent to it, and a read
+  # before a page is returned, or `:none` when the address rules have nothing
+  # more to say: an address literal (judged as an address already), and every
+  # host `address_exempt?/2` leaves alone.
+  @spec resolution_host(URI.t(), Config.t()) :: {:ok, String.t()} | :none
+  def resolution_host(%URI{host: host}, %Config{} = config) when is_binary(host) do
+    case canonical_host(host) do
+      {:ok, canonical} -> resolvable_name(canonical, config)
+      :error -> :none
+    end
+  end
+
+  def resolution_host(%URI{}, %Config{}), do: :none
+
+  # Where a name points, from its lookup answers. ANY answer that is link-local,
+  # metadata or unspecified refuses it: a mixed set is a name that can hand
+  # Chrome the private answer on its own lookup. The operator's own network —
+  # RFC 1918, ULA, CGNAT — is left alone: intranet, homelab and tailnet names
+  # resolve there by design, and no answers at all is a lookup that failed,
+  # which Chrome then resolves or fails on its own.
+  @spec answers_verdict(String.t(), [:inet.ip_address()], Config.t()) ::
+          :ok | {:error, Error.t()}
+  def answers_verdict(host, answers, %Config{} = config)
+      when is_binary(host) and is_list(answers) do
+    case refused_answer(host, answers, config) do
+      nil -> :ok
+      address -> link_local_answer(host, address)
+    end
+  end
+
+  # The read-side half, on every answer there is for a document's name: the
+  # address the browser reports it loaded the document from, and the lookup's.
+  # The first is what a rebinding name cannot pass — it resolved one way for the
+  # lookup and another for Chrome, and this is Chrome's answer. The second is
+  # all a document nobody watched arrive has.
+  @spec read_answers_verdict(String.t(), [:inet.ip_address()], Config.t()) ::
+          :ok | {:error, Error.t()}
+  def read_answers_verdict(url, answers, %Config{} = config)
+      when is_binary(url) and is_list(answers) do
+    host = URI.parse(url).host || ""
+
+    case answers_verdict(host, answers, config) do
+      :ok -> :ok
+      {:error, %Error{} = error} -> read_blocked(host, error)
+    end
+  end
+
+  defp resolvable_name(host, config) do
+    if parse_ip(host) == :error and not address_exempt?(host, config),
+      do: {:ok, host},
+      else: :none
+  end
+
+  defp refused_answer(host, answers, config) do
+    if address_exempt?(host, config),
+      do: nil,
+      else: Enum.find(answers, &(&1 |> fold_embedded_ipv4() |> Guard.metadata_or_link_local?()))
+  end
+
+  # Who the address checks leave alone: the operator's own `allowed_hosts`
+  # entry — the documented recovery for every host refusal — and `localhost`,
+  # exactly as the host rules do, and every host once the private network is
+  # allowed outright.
+  defp address_exempt?(_host, %Config{allow_private_network: true}), do: true
+
+  defp address_exempt?(host, %Config{} = config) do
+    case canonical_host(host) do
+      {:ok, canonical} -> canonical == "localhost" or canonical in canonical_allowed_hosts(config)
+      :error -> false
+    end
+  end
+
+  defp link_local_answer(host, address) do
+    shown = address |> :inet.ntoa() |> to_string()
+
+    {:error,
+     Error.new(
+       "navigation_blocked",
+       "Blocked #{host} by browser policy: it points at #{shown}, a link-local or " <>
+         "cloud-metadata address that no web page is served from. The operator can allow " <>
+         "this exact host by adding it to allowed_hosts under [fermix_core.browser] in " <>
+         "config.toml.",
+       %{"value" => host, "address" => shown, "reason" => "link_local_address"}
+     )}
   end
 
   defp read_host(host, %Config{} = config) when is_binary(host) and host != "" do

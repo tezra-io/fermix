@@ -1,26 +1,34 @@
 defmodule FermixChannels.Mobile.RequestCoordinator do
   @moduledoc """
-  Serializes durable mobile-request ownership for one daemon boot.
+  Serializes durable request ownership for one daemon boot, for one transport:
+  the mobile supervisor runs one for the phone and the companion supervisor one
+  for `companion.sock`, sharing the boot's epoch. Each recovers only the
+  requests its transport claimed (`store_opts[:transport]`).
 
-  The random boot epoch is persisted by `FermixCore.Mobile.Store` when work is
+  The random boot epoch is persisted by `FermixCore.Companion.Timeline` when work is
   started. On restart, accepted work and work owned by an older epoch is
   recovered from its stored authenticated request envelope. Requests already
   running in this epoch are never started twice.
 
   A started attempt is also fenced on the liveness of whichever process owns its
   settlement: the acquiring socket process until `Gateway.ingest` returns, then
-  the queue that owns the turn (`handoff/5`). If that owner dies without
-  settling, the attempt is abandoned so a resend — or the next boot's recovery
-  scan — runs a new attempt, instead of a `running` row nobody will ever settle
-  answering every resend as an already-running duplicate.
+  `Companion.Turns`, which settles every turn from its outcome (`handoff/5`). If
+  that owner dies without settling, the attempt is abandoned so a resend — or
+  the next boot's recovery scan — runs a new attempt, instead of a `running` row
+  nobody will ever settle answering every resend as an already-running
+  duplicate.
+
+  A phone's request is recovered only while its device is still paired: one
+  whose device was revoked is failed (`device_revoked`), never run again.
   """
 
   use GenServer
 
   require Logger
 
+  alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.EventRouter
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
 
   @default_recovery_limit 200
   @default_max_recovery_batches 100
@@ -68,13 +76,15 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   def init(opts) do
     state = %{
       epoch: boot_epoch(opts),
-      store: Keyword.get(opts, :store, Store),
+      store: Keyword.get(opts, :store, Timeline),
       store_opts: Keyword.get(opts, :store_opts, []),
       recovery_limit: recovery_limit(opts),
       max_recovery_batches: max_recovery_batches(opts),
       recovery_launcher: Keyword.get(opts, :recovery_launcher, &launch_recovery/1),
       recover_request: Keyword.get(opts, :recover_request, &EventRouter.recover_request/3),
       recover?: Keyword.get(opts, :recover?, true),
+      device_store: Keyword.get(opts, :device_store, DeviceStore),
+      authorize_device: Keyword.get(opts, :authorize_device, &DeviceStore.fetch/2),
       fence_ttl_ms: fence_ttl_ms(opts),
       fences: %{},
       fence_refs: %{},
@@ -100,10 +110,10 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
         :ok
 
       {:error, reason} ->
-        Logger.error("mobile request recovery launch failed: #{inspect(reason)}")
+        Logger.error("request recovery launch failed: #{inspect(reason)}")
 
       other ->
-        Logger.error("mobile request recovery launcher returned: #{inspect(other)}")
+        Logger.error("request recovery launcher returned: #{inspect(other)}")
     end
 
     {:noreply, state}
@@ -152,7 +162,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
   end
 
   def handle_info(message, state) do
-    Logger.debug("mobile request coordinator ignored message: #{inspect(message)}")
+    Logger.debug("request coordinator ignored message: #{inspect(message)}")
     {:noreply, state}
   end
 
@@ -204,7 +214,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
          ) do
       {:ok, _request} ->
         Logger.warning(
-          "mobile request runner for #{inspect({profile_id, client_msg_id})} died " <>
+          "request runner for #{inspect({profile_id, client_msg_id})} died " <>
             "(#{inspect(reason)}); attempt #{attempt} released for a new attempt"
         )
 
@@ -212,13 +222,13 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
       # end of a turn: there is nothing left to fence.
       {:error, :stale_attempt} ->
         Logger.debug(
-          "mobile request #{inspect({profile_id, client_msg_id})} attempt #{attempt} " <>
+          "request #{inspect({profile_id, client_msg_id})} attempt #{attempt} " <>
             "was already settled when its runner exited"
         )
 
       {:error, abandon_reason} ->
         Logger.error(
-          "mobile request attempt could not be released for " <>
+          "request attempt could not be released for " <>
             "#{inspect({profile_id, client_msg_id})}: #{inspect(abandon_reason)}"
         )
     end
@@ -245,16 +255,16 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
           else: :ok
 
       {:error, reason} ->
-        Logger.error("mobile request recovery scan failed: #{inspect(reason)}")
+        Logger.error("request recovery scan failed: #{inspect(reason)}")
     end
   end
 
   defp recover_batches(state, _batch) do
-    Logger.error("mobile request recovery exceeded #{state.max_recovery_batches} bounded batches")
+    Logger.error("request recovery exceeded #{state.max_recovery_batches} bounded batches")
   end
 
   defp recover_row(row, state) do
-    with {:ok, context} <- recovery_context(row),
+    with {:ok, context} <- recovery_context(row, state),
          :ok <-
            state.recover_request.(row, context,
              request_coordinator: state.server,
@@ -266,18 +276,25 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
       {:error, reason} ->
         terminalize_unrecoverable(row, reason, state)
 
-        Logger.error(
-          "mobile request recovery failed for #{request_label(row)}: #{inspect(reason)}"
-        )
+        Logger.error("request recovery failed for #{request_label(row)}: #{inspect(reason)}")
     end
   end
 
-  defp recovery_context(%{authenticated_device_id: device_id})
+  # The row names its transport, so the context its recovery runs under is the
+  # one its claim was made under: the companion socket's, or the phone's device
+  # while the trust store still holds it.
+  defp recovery_context(%{transport: "companion"}, _state), do: {:ok, %{transport: :companion}}
+
+  defp recovery_context(%{authenticated_device_id: device_id}, state)
        when is_binary(device_id) and device_id != "" do
-    {:ok, %{transport: :mobile, authenticated_device_id: device_id}}
+    case state.authorize_device.(state.device_store, device_id) do
+      {:ok, _device} -> {:ok, %{transport: :mobile, authenticated_device_id: device_id}}
+      {:error, {:device_not_found, ^device_id}} -> {:error, :device_revoked}
+      {:error, reason} -> {:error, {:device_unconfirmed, reason}}
+    end
   end
 
-  defp recovery_context(_row), do: {:error, :missing_authenticated_device}
+  defp recovery_context(_row, _state), do: {:error, :missing_authenticated_device}
 
   defp terminalize_unrecoverable(row, reason, state) do
     profile = Map.get(row, :profile_id)
@@ -297,7 +314,7 @@ defmodule FermixChannels.Mobile.RequestCoordinator do
         :ok
 
       {:error, start_reason} ->
-        Logger.error("mobile unrecoverable request could not be fenced: #{inspect(start_reason)}")
+        Logger.error("unrecoverable request could not be fenced: #{inspect(start_reason)}")
     end
   end
 

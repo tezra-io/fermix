@@ -9,7 +9,8 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
         {DeviceRegistry,
          name: :"mobile_registry_#{System.unique_integer([:positive])}",
          authorize_device: fn _store, device_id -> {:ok, %{device_id: device_id}} end,
-         delete_device: fn _store, _device_id -> :ok end}
+         delete_device: fn _store, _device_id -> :ok end,
+         revoke_requests: fn _device_id -> :ok end}
       )
 
     %{registry: registry}
@@ -71,20 +72,57 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
     assert {:error, :not_connected} =
              DeviceRegistry.send_device_event(registry, "missing", event)
 
-    assert 1 = DeviceRegistry.send_profile_event(registry, "main", event)
+    assert :ok = DeviceRegistry.broadcast(registry, "main", event)
     assert_receive {:socket_message, ^first, {:mobile_event, ^event}}
     refute_receive {:socket_message, ^second, {:mobile_event, ^event}}
 
     event = %{type: "text_done", text: "done"}
     assert :ok = DeviceRegistry.send_device_event(registry, "a", event)
     assert_receive {:socket_message, ^first, {:mobile_event, ^event}}
-    assert 1 = DeviceRegistry.send_profile_event(registry, "other", event)
+    assert :ok = DeviceRegistry.broadcast(registry, "other", event)
     assert_receive {:socket_message, ^second, {:mobile_event, ^event}}
 
     assert :ok = DeviceRegistry.revoke(registry, "a")
     assert_receive {:socket_message, ^first, {:mobile_revoked, "a"}}
     assert {:error, :not_connected} = DeviceRegistry.lookup(registry, "a")
     assert :ok = DeviceRegistry.revoke(registry, "offline")
+  end
+
+  # The companion socket announces to every phone of a profile whether or not
+  # the mobile subtree runs: with no registry, there is simply nobody to reach.
+  test "a broadcast to a registry that is not running reaches nobody and never fails" do
+    assert :ok =
+             DeviceRegistry.broadcast(:"absent_registry_#{System.unique_integer()}", "main", %{})
+  end
+
+  # Revocation stops what the device already asked for, after the trust store
+  # no longer holds it, whether its socket is connected or not.
+  test "revocation stops the requests the device already submitted" do
+    test_pid = self()
+
+    registry =
+      start_supervised!(
+        {DeviceRegistry,
+         name: :"stopping_registry_#{System.unique_integer([:positive])}",
+         device_store: :store,
+         authorize_device: fn :store, id -> {:ok, %{device_id: id}} end,
+         delete_device: fn :store, id ->
+           send(test_pid, {:deleted, id})
+           if id == "gone", do: {:error, {:device_not_found, id}}, else: :ok
+         end,
+         revoke_requests: fn id ->
+           send(test_pid, {:requests_revoked, id})
+           :ok
+         end},
+        id: make_ref()
+      )
+
+    assert :ok = DeviceRegistry.revoke(registry, "offline")
+    assert_received {:deleted, "offline"}
+    assert_received {:requests_revoked, "offline"}
+
+    assert {:error, {:device_not_found, "gone"}} = DeviceRegistry.revoke(registry, "gone")
+    assert_received {:requests_revoked, "gone"}
   end
 
   test "refuses a dead socket and one socket claiming two device identities", %{
@@ -140,7 +178,8 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
          delete_device: fn :store, "device" ->
            send(test_pid, :device_deleted)
            :ok
-         end},
+         end,
+         revoke_requests: fn _id -> :ok end},
         id: make_ref()
       )
 
@@ -159,7 +198,8 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
          name: :"retry_registry_#{System.unique_integer([:positive])}",
          device_store: :store,
          authorize_device: fn :store, id -> {:ok, %{device_id: id}} end,
-         delete_device: fn :store, id -> {:error, {:device_not_found, id}} end},
+         delete_device: fn :store, id -> {:error, {:device_not_found, id}} end,
+         revoke_requests: fn _id -> :ok end},
         id: make_ref()
       )
 
@@ -190,7 +230,8 @@ defmodule FermixChannels.Mobile.DeviceRegistryTest do
              1 -> {:error, {:device_not_found, id}}
            end
          end,
-         delete_device: fn :store, _id -> :ok end},
+         delete_device: fn :store, _id -> :ok end,
+         revoke_requests: fn _id -> :ok end},
         id: make_ref()
       )
 

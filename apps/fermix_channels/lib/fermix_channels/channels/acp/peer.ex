@@ -42,6 +42,16 @@ defmodule FermixChannels.Channels.Acp.Peer do
   id and the identity-less rebuild only — the signing key itself lives in the
   store, and is read for the turn that needs it.
 
+  ## Who is on the other end (SIDE-V1)
+
+  When the socket is handed over, before any line is read, the Peer places the
+  process that connected (`FermixCore.SocketPeer`, the same resolver the daemon
+  control socket uses) and stamps the answer on every turn it starts as
+  `metadata.caller`. A `fermix acp` that the daemon's own shell command started is
+  the agent, not a person's editor, so its turns are unattended, as are a
+  detached one's. A connection that cannot be placed is refused, in the bridge's
+  own language.
+
   ## The wire fence
 
   Every turn carries a monotonically increasing sequence (`Session`), stamped on
@@ -50,6 +60,21 @@ defmodule FermixChannels.Channels.Acp.Peer do
   is cleared and late events are dropped-and-logged (§8.5). Terminal responses
   are therefore exactly one per prompt: the response clears the fence that would
   admit a second one.
+
+  ## The Queue fence
+
+  A prompt is handed to one `Gateway.Queue` process, the one its name resolves
+  to at that moment, and the Peer monitors that process until the prompt is
+  answered, as mobile's `RequestCoordinator` fences a request on the Queue that
+  owns it. If the Queue dies first, its turn tasks die with it
+  (`Gateway.QueueSupervisor`) and nothing would ever send the turn's result, so
+  the `:DOWN` answers the prompt as a failed turn, through the same path as any
+  failed turn, and the session accepts its next prompt. Closing a turn drops
+  its monitor (flushing a `:DOWN` already queued), and the wire fence drops a
+  result that arrives after the `:DOWN` answered: one answer per prompt still.
+  A prompt that finds no Queue running is refused at once. A cancel goes to the
+  same process; one that finds it gone answers a `session/cancel` as
+  `cancelled` and closes the turn, so its `:DOWN` answers nothing more.
   """
 
   use GenServer, restart: :temporary
@@ -68,6 +93,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Nostr.Key
+  alias FermixCore.SocketPeer
   alias FermixCore.Telemetry
   alias FermixCore.Timeouts
 
@@ -127,12 +153,23 @@ defmodule FermixChannels.Channels.Acp.Peer do
        # `{:bound, id, identity_less}` or a `%Identity{id: nil}` — see the
        # moduledoc. Set once at hello; only ever narrowed, never widened.
        identity: nil,
+       # Placed once at handover, before any line is read (moduledoc); the
+       # daemon's process and platform are seams a test stands in for.
+       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
+       os: Keyword.get(opts, :os, :os.type()),
+       caller: nil,
        sessions: %{}
      }}
   end
 
   @impl true
-  def handle_info(:socket_handover, state), do: rearm(state)
+  def handle_info(:socket_handover, state) do
+    case SocketPeer.classify(state.socket, state.daemon_os_pid, state.os) do
+      {:ok, caller} -> rearm(%{state | caller: caller})
+      {:error, :peer_closed} -> hung_up(state)
+      {:error, reason} -> refuse_unplaced(state, reason)
+    end
+  end
 
   def handle_info({:tcp, socket, bytes}, %{socket: socket} = state) do
     case drain(%{state | buffer: state.buffer <> bytes}) do
@@ -165,6 +202,10 @@ defmodule FermixChannels.Channels.Acp.Peer do
     {:noreply, route_event(session_id, seq, payload, state)}
   end
 
+  def handle_info({:DOWN, ref, :process, _queue, reason}, state) do
+    {:noreply, settle_queue_down(ref, reason, state)}
+  end
+
   @impl true
   def terminate(_reason, state) do
     _ = :gen_tcp.close(state.socket)
@@ -172,6 +213,21 @@ defmodule FermixChannels.Channels.Acp.Peer do
   end
 
   # --- Socket plumbing ---
+
+  # Nobody is left to read a refusal, as when `rearm/1` finds the socket gone.
+  defp hung_up(state) do
+    Logger.debug("ACP peer: the client hung up before it could be placed")
+    {:stop, :normal, state}
+  end
+
+  defp refuse_unplaced(state, reason) do
+    message = "the daemon could not identify the process on this connection: #{inspect(reason)}"
+    Logger.warning("ACP peer refusing a connection: " <> message)
+
+    state
+    |> write(refusal_line(message))
+    |> then(&{:stop, :normal, &1})
+  end
 
   defp rearm(state) do
     case :inet.setopts(state.socket, [{:active, :once}]) do
@@ -512,16 +568,17 @@ defmodule FermixChannels.Channels.Acp.Peer do
   defp start_prompt(session, request_id, content, state) do
     {session, seq} = Session.start_turn(session, request_id)
     {session_env, state} = resolve_session_env(state)
-    message = build_message(session, seq, content, session_env)
+    message = build_message(session, seq, content, session_env, state.caller)
     state = put_session(state, session)
 
-    {result, duration_us} = Telemetry.timed_us(fn -> ingest(message, state) end)
+    {result, duration_us} = Telemetry.timed_us(fn -> hand_off(message, state) end)
     ChannelTelemetry.emit_message(:acp, :inbound, 1, duration_us)
 
     handle_ingest(result, session, request_id, state)
   end
 
-  defp handle_ingest(:ok, _session, _request_id, state), do: state
+  defp handle_ingest({:ok, queue, queue_ref}, session, _request_id, state),
+    do: put_session(state, Session.put_queue_ref(session, queue, queue_ref))
 
   # The turn will never run, so nothing else can answer this request: close it
   # here rather than leave the client waiting on its idle timer.
@@ -529,21 +586,31 @@ defmodule FermixChannels.Channels.Acp.Peer do
     Logger.error("ACP prompt was not accepted for #{session.id}: #{inspect(reason)}")
 
     state
-    |> put_session(Session.clear_turn(session))
+    |> close_turn(session)
     |> write(Wire.encode_error(request_id, Wire.internal_error("the prompt could not be queued")))
   end
 
-  defp ingest(message, state) do
-    Gateway.ingest([message],
-      channel: Acp,
-      agent: state.agent,
-      agent_server: state.agent_server
-    )
+  # The Queue fence (moduledoc): the prompt goes to the process the Queue's name
+  # resolves to now, and the Peer watches that same process, so the monitor is
+  # on the Queue that holds the prompt. A monitor set after that Queue died still
+  # delivers its `:DOWN`.
+  defp hand_off(message, state) do
+    case GenServer.whereis(state.agent_server) do
+      queue when is_pid(queue) -> watch_queue(ingest(message, queue, state), queue)
+      nil -> {:error, {:queue_unavailable, state.agent_server}}
+    end
   end
 
-  defp build_message(session, seq, content, session_env) do
+  defp watch_queue(:ok, queue), do: {:ok, queue, Process.monitor(queue)}
+  defp watch_queue({:error, _reason} = error, _queue), do: error
+
+  defp ingest(message, queue, state) do
+    Gateway.ingest([message], channel: Acp, agent: state.agent, agent_server: queue)
+  end
+
+  defp build_message(session, seq, content, session_env, caller) do
     metadata =
-      %{source: :acp, user_id: "acp", chat_type: "private"}
+      %{source: :acp, user_id: "acp", chat_type: "private", caller: caller}
       |> Map.put(Acp.turn_opt(), seq)
 
     Message.new!(%{
@@ -622,8 +689,18 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   defp cancel_session(session_id, state) do
     case Map.get(state.sessions, session_id) do
-      %Session{turn: turn} = session when is_map(turn) -> stop_turn(session, state)
+      %Session{turn: turn} = session when is_map(turn) -> cancel_turn(session, state)
       _idle_or_unknown -> log_idle_cancel(session_id, state)
+    end
+  end
+
+  # A Queue that is gone took the turn with it, so nothing will send its
+  # result: the prompt the client cancelled is answered `cancelled` here, and
+  # closing the turn flushes that Queue's `:DOWN`, so it is answered once.
+  defp cancel_turn(session, state) do
+    case stop_turn(session) do
+      :stopped -> state
+      :queue_gone -> apply_turn_result(session, {:cancelled}, state)
     end
   end
 
@@ -632,17 +709,28 @@ defmodule FermixChannels.Channels.Acp.Peer do
     state
   end
 
-  # Stops the conversation and returns: the Queue answers with `{:cancelled}`
-  # through the turn-result callback, and THAT writes the terminal response, so
-  # there is exactly one place a prompt is answered from.
+  # Stops the conversation in the Queue the turn was handed to and returns: the
+  # Queue answers with `{:cancelled}` through the turn-result callback, and THAT
+  # writes the terminal response, so there is exactly one place a prompt is
+  # answered from.
   #
   # A cancel that races an enqueue the Queue has not processed yet finds nothing
-  # to stop; the turn then completes normally and answers `end_turn`. That is the
-  # truth of what happened, so it is left alone rather than papered over.
-  defp stop_turn(%Session{} = session, state) do
+  # to stop; the turn then completes normally and answers `end_turn`. A turn
+  # that already claimed its outcome is likewise left to answer with it. That is
+  # the truth of what happened, so it is left alone rather than papered over.
+  #
+  # The stop waits for the Queue's answer, however busy it is: the Queue's
+  # callbacks are bounded. A Queue that is already gone (`:noproc`) took the
+  # turn with it, and its `:DOWN` is in this mailbox: `:queue_gone`, and the
+  # caller decides what, if anything, answers the prompt.
+  defp stop_turn(%Session{} = session) do
     Logger.info("ACP cancelling the turn in flight for #{session.id}")
-    _ = Queue.stop_conversation(conversation_key(session.id), state.agent_server)
-    state
+    _ = Queue.stop_conversation(conversation_key(session.id), Session.queue(session))
+    :stopped
+  catch
+    :exit, {:noproc, _call} ->
+      Logger.warning("ACP cancel for #{session.id}: the Queue that held its turn is gone")
+      :queue_gone
   end
 
   # Only a `session/prompt` can be outstanding: every other request is answered
@@ -656,9 +744,10 @@ defmodule FermixChannels.Channels.Acp.Peer do
   end
 
   defp cancel_prompt_request(session, request_id, state) do
-    session
-    |> stop_turn(state)
-    |> put_session(Session.clear_turn(session))
+    _ = stop_turn(session)
+
+    state
+    |> close_turn(session)
     |> write(Wire.encode_error(request_id, Wire.request_cancelled()))
   end
 
@@ -788,7 +877,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
     request_id = Session.request_id(session)
 
     state
-    |> put_session(Session.clear_turn(session))
+    |> close_turn(session)
     |> write(terminal_frame(request_id, outcome, session))
   end
 
@@ -841,9 +930,55 @@ defmodule FermixChannels.Channels.Acp.Peer do
 
   @auth_markers ["401", "unauthorized", "invalid api key", "expired credentials"]
 
+  # A dead Queue's exit reason is a process failure, never a provider's
+  # credential refusal: the Queue calls no provider (its turns run in unlinked
+  # tasks). Its stack frames and exception text must not read as one.
+  defp auth_failure?({:queue_down, _exit_reason}), do: false
+
+  # So is a crashed turn's: its task raised or exited. A provider's credential
+  # refusal is never raised; it comes back as a typed error the turn returns,
+  # so a crash whose reason happens to contain "401" (a line, a pid) is not one.
+  defp auth_failure?({:crashed, _exit_reason}), do: false
+
   defp auth_failure?(reason) do
     text = reason |> inspect() |> String.downcase()
     Enum.any?(@auth_markers, &String.contains?(text, &1))
+  end
+
+  # --- The Queue fence (moduledoc) ---
+
+  # The Queue this prompt was handed to died before the turn's result arrived,
+  # and took the turn with it: answered here as the failed turn it is. A result
+  # that arrived first closed the turn and flushed this `:DOWN`, so every
+  # `:DOWN` that reaches this point belongs to an open turn.
+  defp settle_queue_down(ref, reason, state) do
+    case Enum.find(Map.values(state.sessions), &(Session.queue_ref(&1) == ref)) do
+      %Session{} = session -> apply_turn_result(session, {:failed, {:queue_down, reason}}, state)
+      nil -> log_unowned_down(ref, reason, state)
+    end
+  end
+
+  defp log_unowned_down(ref, reason, state) do
+    Logger.warning(
+      "ACP peer got a :DOWN (#{inspect(reason)}) for #{inspect(ref)}, which no open turn " <>
+        "watches; closing a turn should have flushed it"
+    )
+
+    state
+  end
+
+  # Every answer closes the turn here: the wire fence shuts, and the monitor on
+  # the turn's Queue goes with any `:DOWN` it already queued.
+  defp close_turn(state, session) do
+    demonitor_queue(Session.queue_ref(session))
+    put_session(state, Session.clear_turn(session))
+  end
+
+  defp demonitor_queue(nil), do: :ok
+
+  defp demonitor_queue(ref) when is_reference(ref) do
+    Process.demonitor(ref, [:flush])
+    :ok
   end
 
   # --- Frames ---
@@ -907,14 +1042,14 @@ defmodule FermixChannels.Channels.Acp.Peer do
   # client-owned session is gone, so nothing could receive their replies.
   # Registry entries deregister automatically when this process exits.
   defp teardown(state) do
-    Enum.each(state.sessions, fn {_id, session} -> stop_open_turn(session, state) end)
+    Enum.each(state.sessions, fn {_id, session} -> stop_open_turn(session) end)
     state
   end
 
-  defp stop_open_turn(%Session{turn: turn} = session, state) when is_map(turn) do
-    _ = stop_turn(session, state)
+  defp stop_open_turn(%Session{turn: turn} = session) when is_map(turn) do
+    _ = stop_turn(session)
     :ok
   end
 
-  defp stop_open_turn(%Session{}, _state), do: :ok
+  defp stop_open_turn(%Session{}), do: :ok
 end

@@ -3,6 +3,7 @@ defmodule Fermix.CLI.ServiceTest do
 
   alias Fermix.CLI.Service
   alias Fermix.CLI.Service.Binding
+  alias Fermix.CLI.Service.Templates
 
   @vendor_unit "/usr/lib/systemd/user/fermix.service"
 
@@ -14,6 +15,16 @@ defmodule Fermix.CLI.ServiceTest do
   defmodule PackagedBuildInfo do
     def app_engine?, do: false
     def linux_package?, do: true
+  end
+
+  defmodule StandaloneBuildInfo do
+    def app_engine?, do: false
+    def linux_package?, do: false
+  end
+
+  # Stands in for systemd, so an install writes its unit and goes no further.
+  defmodule InertBackend do
+    def install(_spec), do: :ok
   end
 
   describe "app-managed mutation guard" do
@@ -43,6 +54,207 @@ defmodule Fermix.CLI.ServiceTest do
       {:ok, spec} = Service.spec(:system, fixture_opts(:linux, tmp))
 
       assert spec.unit_path == "/etc/systemd/system/fermix.service"
+    end
+  end
+
+  # The account a system unit runs the daemon as. `sudo` exports the invoking
+  # account as SUDO_USER/SUDO_UID; tests inject them through `:env`, and
+  # `system_opts/2` makes the offer `fermix service install` makes. Only the
+  # paths that render a unit resolve the account, so it is read off that unit.
+  describe "system-scope account (linux)" do
+    test "a new system unit runs as the sudo invoker when the home it serves is theirs" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", invoker_uid!(tmp)))
+
+      {:ok, unit} = Service.render_unit(:system, opts)
+
+      assert unit_lines(unit, "User=") == ["User=ada"]
+      assert unit =~ ~s(Environment="FERMIX_HOME=#{tmp}")
+    end
+
+    # A setup run under sudo has just configured the home as root, so its
+    # secrets are root's; a daemon dropped to the invoker could not read them.
+    test "a new system unit nobody offered to the invoker stays root" do
+      tmp = mkdir!()
+      opts = Keyword.delete(system_opts(tmp, sudo_env("ada", owner_uid(tmp))), :account)
+
+      assert account_lines(:system, opts) == []
+    end
+
+    # `sudo` resets HOME to root's on most hosts, so the home the unit would
+    # serve is root's: a daemon dropped to the invoker could not even open it.
+    test "a home that is not the invoker's keeps the root shape" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", owner_uid(tmp) + 1))
+
+      assert account_lines(:system, opts) == []
+    end
+
+    test "a home whose state is the invoker's runs as the invoker" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", invoker_uid!(tmp, home_state!(tmp))))
+
+      assert account_lines(:system, opts) == ["User=ada"]
+    end
+
+    # A root daemon that served the home, or a setup run under `sudo -E`, leaves
+    # root-owned files in a directory that is still the invoker's: the database's
+    # WAL, a rotated log, a secret. A daemon dropped to the invoker could neither
+    # write nor read them. Each entry is followed to a file root owns, as the
+    # daemon would open it.
+    test "a home holding state that is not the invoker's keeps the root shape" do
+      for entry <- ["memory.db-wal", "logs/fermix.log.1", "secrets/openai_api_key"] do
+        tmp = mkdir!()
+        uid = invoker_uid!(tmp, home_state!(tmp))
+        File.ln_s!("/etc/hosts", Path.join(tmp, entry))
+
+        assert account_lines(:system, system_opts(tmp, sudo_env("ada", uid))) == [], entry
+      end
+    end
+
+    test "a home that does not exist yet keeps the root shape" do
+      tmp = mkdir!()
+
+      opts =
+        tmp
+        |> system_opts(sudo_env("ada", owner_uid(tmp)))
+        |> Keyword.put(:fermix_home, Path.join(tmp, "not-yet"))
+
+      assert account_lines(:system, opts) == []
+    end
+
+    test "without sudo, or under sudo from root, the system unit names no account" do
+      tmp = mkdir!()
+
+      for env <- [%{}, sudo_env("root", 0), %{"SUDO_USER" => "ada"}] do
+        assert account_lines(:system, system_opts(tmp, env)) == []
+      end
+    end
+
+    # `sudo` exports whatever the account database calls the account. A name a
+    # `User=` line cannot carry literally keeps the root unit every system
+    # install wrote before accounts existed, instead of crashing the install.
+    test "an invoker name a unit file cannot carry keeps the root shape" do
+      tmp = mkdir!()
+      uid = invoker_uid!(tmp)
+
+      for name <- ["a da", "ada%i"] do
+        assert account_lines(:system, system_opts(tmp, sudo_env(name, uid))) == []
+      end
+    end
+
+    test "a user unit never names an account" do
+      tmp = mkdir!()
+      opts = Keyword.put(fixture_opts(:linux, tmp), :env, sudo_env("ada", owner_uid(tmp)))
+
+      assert account_lines(:user, opts) == []
+    end
+
+    # A root daemon has been writing root-owned files into its home; moving it
+    # to another account on a rewrite would lock it out of them.
+    test "an installed system unit keeps the account it names" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", owner_uid(tmp)))
+      unit_path = Keyword.fetch!(opts, :unit_path)
+
+      File.write!(unit_path, installed_unit([home_line(tmp)]))
+      assert account_lines(:system, opts) == []
+
+      File.write!(unit_path, installed_unit(["User=bob", home_line(tmp)]))
+      assert account_lines(:system, opts) == ["User=bob"]
+    end
+
+    # The account and the home it serves are one pair. `sudo` resets HOME on
+    # most hosts, so a later `sudo fermix setup --system` resolves root's home;
+    # rewriting ada's unit for it would start a daemon that cannot open its own
+    # home and restarts forever.
+    test "an installed account is never rewritten for a home its unit does not name" do
+      tmp = mkdir!()
+      installed_home = Path.join(tmp, "ada")
+      opts = system_opts(tmp, %{})
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      installed = installed_unit(["User=ada", home_line(installed_home)])
+      File.write!(unit_path, installed)
+
+      mismatch = {:account_home_mismatch, "ada", installed_home, tmp}
+
+      assert {:error, ^mismatch} = Service.render_unit(:system, opts)
+      assert Service.drifted?(:system, opts)
+      assert {:error, ^mismatch} = Service.install(:system, opts)
+      assert File.read!(unit_path) == installed
+    end
+
+    test "an installed account whose unit names no home is refused, not guessed" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, %{})
+      File.write!(Keyword.fetch!(opts, :unit_path), installed_unit(["User=ada"]))
+
+      assert {:error, {:account_home_mismatch, "ada", nil, ^tmp}} =
+               Service.render_unit(:system, opts)
+    end
+
+    # A hand-edited `User=` that no unit file can carry is refused by name
+    # rather than raised out of the render in the middle of setup.
+    test "an installed account a unit file cannot carry is an error, not a crash" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, %{})
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      File.write!(unit_path, installed_unit(["User=a b", home_line(tmp)]))
+
+      assert {:error, {:invalid_account, ^unit_path, "a b"}} =
+               Service.render_unit(:system, opts)
+
+      assert Service.drifted?(:system, opts)
+    end
+
+    test "reconciling a drifted root unit rewrites it as root" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", owner_uid(tmp)))
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      File.write!(unit_path, "[Service]\nExecStart=/old/fermix run\n")
+
+      assert Service.drifted?(:system, opts)
+
+      {:ok, rewritten} = Service.render_unit(:system, opts)
+      File.write!(unit_path, rewritten)
+
+      refute rewritten =~ "User="
+      assert rewritten =~ "IPAddressDeny="
+      refute Service.drifted?(:system, opts)
+    end
+
+    test "an installed unit that cannot be read is an error, not a guess" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, %{})
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      File.mkdir_p!(unit_path)
+
+      assert {:error, {:unit_unreadable, ^unit_path, :eisdir}} =
+               Service.render_unit(:system, opts)
+    end
+
+    # systemd's own mode for a unit, whatever the installer's umask: the account
+    # a unit names, and that account's CLI, read it back.
+    test "a system unit is written 0644, whatever mode the file had" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, %{})
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      File.write!(unit_path, installed_unit([home_line(tmp)]))
+      File.chmod!(unit_path, 0o600)
+
+      assert :ok = Service.install(:system, opts)
+      assert Bitwise.band(File.stat!(unit_path).mode, 0o777) == 0o644
+    end
+
+    # The daemon creates its log directory at boot, as the account it runs as.
+    # Made by the installer it would be root's, and the daemon could not log.
+    test "a unit that runs as an account leaves its log directory to the daemon" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, sudo_env("ada", invoker_uid!(tmp)))
+
+      assert :ok = Service.install(:system, opts)
+      assert unit_lines(File.read!(Keyword.fetch!(opts, :unit_path)), "User=") == ["User=ada"]
+      refute File.exists?(Path.join(tmp, "logs"))
     end
   end
 
@@ -243,6 +455,22 @@ defmodule Fermix.CLI.ServiceTest do
 
       assert Service.installed?(:user, opts)
     end
+
+    # Installed means the file exists, not that this caller can read it. A daemon
+    # running as the unit's account, and that account's CLI, ask this of a
+    # root-owned system unit; answering false refuses their restart and reports
+    # no service at all.
+    test "true for an installed system unit the caller cannot read" do
+      tmp = mkdir!()
+      opts = system_opts(tmp, %{})
+      unit_path = Keyword.fetch!(opts, :unit_path)
+      File.write!(unit_path, installed_unit(["User=ada", home_line(tmp)]))
+      File.chmod!(unit_path, 0o000)
+      on_exit(fn -> File.chmod(unit_path, 0o644) end)
+
+      assert Service.installed?(:system, opts)
+      assert {:ok, %{unit_path: ^unit_path}} = Service.spec(:system, opts)
+    end
   end
 
   describe "drifted?/2" do
@@ -416,6 +644,55 @@ defmodule Fermix.CLI.ServiceTest do
       env: %{}
     ]
   end
+
+  # A system unit in the fixture directory, installed through `InertBackend` so
+  # no case reaches the host's service manager.
+  defp system_opts(tmp, env) do
+    fixture_opts(:linux, tmp)
+    |> Keyword.put(:unit_path, Path.join(tmp, "fermix.service"))
+    |> Keyword.put(:env, env)
+    |> Keyword.put(:account, :sudo_invoker)
+    |> Keyword.put(:build_info, StandaloneBuildInfo)
+    |> Keyword.put(:backend, InertBackend)
+  end
+
+  defp sudo_env(user, uid), do: %{"SUDO_USER" => user, "SUDO_UID" => Integer.to_string(uid)}
+
+  defp owner_uid(path), do: File.stat!(path).uid
+
+  # The uid of an invoker who owns `home` and the fixture `paths` made in it.
+  # `sudo` from root names no account, so on a root runner, whose fixtures are
+  # root's, they go to `nobody` first. Only regular files and directories: a
+  # chown follows a symlink.
+  defp invoker_uid!(home, paths \\ []) do
+    if owner_uid(home) == 0, do: Enum.each([home | paths], &File.chown!(&1, 65_534))
+    owner_uid(home)
+  end
+
+  # The state a daemon keeps in its home, made by the runner; returns its paths.
+  defp home_state!(home) do
+    dirs = ["logs", "secrets"]
+    files = ["memory.db", "config.toml", "logs/fermix.log", "secrets/telegram_bot_token"]
+    Enum.each(dirs, &File.mkdir_p!(Path.join(home, &1)))
+    Enum.each(files, &File.write!(Path.join(home, &1), ""))
+    Enum.map(dirs ++ files, &Path.join(home, &1))
+  end
+
+  defp account_lines(scope, opts) do
+    {:ok, unit} = Service.render_unit(scope, opts)
+    unit_lines(unit, "User=")
+  end
+
+  defp unit_lines(unit, prefix) do
+    unit |> String.split("\n") |> Enum.filter(&String.starts_with?(&1, prefix))
+  end
+
+  # A system unit as an earlier install left it, stale enough to be rewritten.
+  defp installed_unit(lines) do
+    Enum.join(["[Service]" | lines] ++ ["ExecStart=/old/fermix run", ""], "\n")
+  end
+
+  defp home_line(home), do: Templates.systemd_environment("FERMIX_HOME", home)
 
   defp mkdir! do
     path =

@@ -16,7 +16,11 @@ defmodule FermixCore.Tools.BrowserTest do
       key = Keyword.fetch!(opts, :key)
       now = System.monotonic_time(:millisecond)
       registry = FermixCore.Browser.Registry
-      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, now}})
+      backend = Keyword.get(opts, :backend, :cdp)
+
+      GenServer.start_link(__MODULE__, opts,
+        name: {:via, Registry, {registry, key, {now, backend}}}
+      )
     end
 
     @impl true
@@ -137,7 +141,7 @@ defmodule FermixCore.Tools.BrowserTest do
       tags = Enum.map(Browser.failure_modes(), & &1.tag)
 
       for tag <- ~w(outcome_unknown webmcp_unavailable webmcp_unknown_tool webmcp_tool_threw
-                    webmcp_timeout) do
+                    webmcp_timeout navigation_failed) do
         assert tag in tags, "`#{tag}` is returnable but undocumented"
       end
     end
@@ -387,8 +391,29 @@ defmodule FermixCore.Tools.BrowserTest do
       assert metadata.tool == "browser"
       assert metadata.agent == "test_agent"
       assert metadata.success == false
+      # Refused before any profile was reached: no backend served it.
+      refute Map.has_key?(metadata, :backend)
 
       :telemetry.detach(handler_id)
+    end
+
+    # The backend is decided when the task's browser starts and recorded on its
+    # profile, so every call the profile serves carries the same label.
+    test "labels each call with the backend its profile was started on" do
+      for backend <- [:cdp, :fermix_app] do
+        session = "backend-#{backend}-#{System.unique_integer([:positive])}"
+        conversation = {"cli", "chat-#{session}", :root}
+        stub_profile!(conversation, backend)
+        handler_id = attach_telemetry(session)
+
+        context = %{agent_name: "test_agent", conversation_key: conversation, session_id: session}
+        assert {:ok, %{success: true}} = Browser.execute(%{"action" => "tabs"}, context)
+
+        assert_receive {:telemetry, [:fermix, :tool, :exec], _measurements, metadata}
+        assert metadata.backend == Atom.to_string(backend)
+
+        :telemetry.detach(handler_id)
+      end
     end
 
     test "records the action so per-verb latency is traceable" do
@@ -613,9 +638,12 @@ defmodule FermixCore.Tools.BrowserTest do
 
   # Its own conversation, so the registration cannot be the `status` test's
   # profile — or any other module's — seen as running.
-  defp stub_profile!(conversation_key) do
+  defp stub_profile!(conversation_key, backend \\ :cdp) do
     {:ok, owner} = Scope.owner_key(%{conversation_key: conversation_key})
-    start_supervised!({StubProfileServer, key: {owner, "fermix"}}, id: {:stub_profile, owner})
+
+    start_supervised!({StubProfileServer, key: {owner, "fermix"}, backend: backend},
+      id: {:stub_profile, owner}
+    )
   end
 
   defp attach_telemetry, do: attach_telemetry(nil)

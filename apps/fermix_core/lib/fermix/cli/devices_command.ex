@@ -1,6 +1,7 @@
 defmodule Fermix.CLI.DevicesCommand do
   @moduledoc """
-  Lists and revokes daemon-owned mobile device pairings.
+  Lists and revokes the phones paired with the running daemon, over the
+  management protocol (`mobile.devices.list`, `mobile.devices.revoke`).
 
   Both operations require the running daemon so persistence and live socket
   revocation have one authority.
@@ -10,43 +11,45 @@ defmodule Fermix.CLI.DevicesCommand do
 
   @call_timeout_ms 5_000
   @uuid_pattern ~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
+  @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
 
-  @type request_fun :: (String.t(), map(), pos_integer() ->
-                          {:ok, map()} | {:error, term()})
+  @type client :: (String.t(), map(), keyword() -> {:ok, map()} | {:error, term()})
 
   @spec run([String.t()], keyword()) :: non_neg_integer()
   def run(argv, opts \\ []) when is_list(argv) and is_list(opts) do
     io = io_devices(opts)
-    request = request_fun(opts)
+    client = Keyword.get(opts, :client, &Client.request_v1/3)
 
     case argv do
-      ["list"] -> list_devices(request, io)
-      ["revoke", device_id] -> revoke_device(device_id, request, io)
+      ["list"] -> list_devices(client, io)
+      ["revoke", device_id] -> revoke_device(device_id, client, io)
       _ -> usage(io)
     end
   end
 
-  defp list_devices(request, io) do
-    case rpc(request, "mobile_devices_list", %{}) do
+  defp list_devices(client, io) do
+    case client.("mobile.devices.list", %{}, timeout: @call_timeout_ms) do
       {:ok, %{"devices" => devices}} when is_list(devices) -> print_devices(devices, io)
       {:ok, _other} -> fail(io, "fermix devices: invalid device-list reply")
       {:error, :not_running} -> daemon_not_running(io)
-      {:error, reason} -> fail(io, "fermix devices list: #{format_reason(reason)}")
+      {:error, reason} -> fail(io, "fermix devices list: #{describe(reason)}")
     end
   end
 
-  defp revoke_device(device_id, request, io) do
+  defp revoke_device(device_id, client, io) do
     if Regex.match?(@uuid_pattern, device_id) do
-      revoke_valid_device(String.downcase(device_id), request, io)
+      revoke_valid_device(String.downcase(device_id), client, io)
     else
       invalid_id(io)
     end
   end
 
-  defp revoke_valid_device(device_id, request, io) do
-    case rpc(request, "mobile_device_revoke", %{"device_id" => device_id}) do
-      {:ok, %{"device_id" => ^device_id}} ->
-        IO.puts(io.stdout, "revoked mobile device #{device_id}")
+  defp revoke_valid_device(device_id, client, io) do
+    params = %{"device_id" => device_id}
+
+    case client.("mobile.devices.revoke", params, timeout: @call_timeout_ms) do
+      {:ok, %{"device_id" => ^device_id, "revoked" => true}} ->
+        IO.puts(io.stdout, "revoked phone #{device_id}")
         0
 
       {:ok, _other} ->
@@ -56,12 +59,12 @@ defmodule Fermix.CLI.DevicesCommand do
         daemon_not_running(io)
 
       {:error, reason} ->
-        fail(io, "fermix devices revoke: #{format_reason(reason)}")
+        fail(io, "fermix devices revoke: #{describe(reason)}")
     end
   end
 
   defp print_devices([], io) do
-    IO.puts(io.stdout, "no paired mobile devices")
+    IO.puts(io.stdout, "no paired phones")
     0
   end
 
@@ -78,7 +81,7 @@ defmodule Fermix.CLI.DevicesCommand do
 
       0
     else
-      {:error, reason} -> fail(io, "fermix devices list: #{format_reason(reason)}")
+      {:error, :invalid_device_row} -> fail(io, "fermix devices list: invalid device row")
     end
   end
 
@@ -95,6 +98,8 @@ defmodule Fermix.CLI.DevicesCommand do
     end
   end
 
+  # The wire's `mobileDevice` carries more than these four fields; the table
+  # prints only the ones an operator needs to pick a phone to revoke.
   defp device_row(device) when is_map(device) do
     with {:ok, device_id} <- valid_device_id(Map.get(device, "device_id")),
          name when is_binary(name) and name != "" <- Map.get(device, "name"),
@@ -125,26 +130,19 @@ defmodule Fermix.CLI.DevicesCommand do
 
   # C1 (U+0080–U+009F) belongs in the class alongside C0 and DEL: U+009B is a
   # single-codepoint CSI that a terminal honours exactly like ESC-[.
-  defp safe_field(value) do
-    value
-    |> String.replace(~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u, " ")
-    |> String.slice(0, 128)
-  end
+  defp safe_field(value), do: value |> scrub() |> String.slice(0, 128)
+  defp scrub(value), do: String.replace(value, @control_chars, " ")
 
-  defp rpc(request, method, params) do
-    case request.(method, params, @call_timeout_ms) do
-      {:ok, %{"status" => "ok", "result" => result}} when is_map(result) -> {:ok, result}
-      {:ok, %{"status" => "error", "reason" => reason}} -> {:error, reason}
-      {:ok, other} -> {:error, {:unexpected_daemon_reply, other}}
-      {:error, reason} -> {:error, reason}
-    end
-  end
+  # A management refusal that carries the daemon's own sentence says more than
+  # its code does, so the sentence is what the operator reads.
+  defp describe({:management_error, _code, _message, %{"sentence" => sentence}})
+       when is_binary(sentence),
+       do: scrub(sentence)
 
-  defp request_fun(opts) do
-    Keyword.get(opts, :request, fn method, params, timeout ->
-      Client.request(method, params: params, timeout: timeout)
-    end)
-  end
+  defp describe({:management_error, "unavailable", _message, %{"capability" => "mobile"}}),
+    do: "the phone channel is not running; `fermix doctor` says why"
+
+  defp describe(reason), do: reason |> Client.describe_error() |> scrub()
 
   defp io_devices(opts) do
     %{
@@ -172,19 +170,4 @@ defmodule Fermix.CLI.DevicesCommand do
     IO.puts(io.stderr, message)
     1
   end
-
-  # The mobile channel is feature-flagged and has no setup surface — neither
-  # `fermix setup` nor the web setup can turn it on — so the refusal names the
-  # one thing that does.
-  defp format_reason("mobile_disabled") do
-    "the mobile channel is off — set `enabled = true` under `[fermix_channels.mobile]` " <>
-      "in config.toml, then run `fermix restart`"
-  end
-
-  defp format_reason("device_not_found"),
-    do: "no paired device with that id — see `fermix devices list`"
-
-  defp format_reason(reason) when is_binary(reason), do: reason
-  defp format_reason(reason) when is_atom(reason), do: Atom.to_string(reason)
-  defp format_reason(reason), do: inspect(reason)
 end

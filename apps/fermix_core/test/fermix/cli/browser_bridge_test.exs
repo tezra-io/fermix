@@ -354,7 +354,7 @@ defmodule Fermix.CLI.BrowserBridgeTest do
 
     HeldOpenIO.write(
       stdin,
-      native(Jason.encode!(%{type: "hello", protocol: 1, browser: "chrome"}))
+      native(Jason.encode!(%{type: "hello", protocol: 2, browser: "chrome"}))
     )
 
     HeldOpenIO.write(
@@ -367,7 +367,7 @@ defmodule Fermix.CLI.BrowserBridgeTest do
     assert eventually(fn -> Grants.summary(grants) == %{extensions: 1, tabs: 1} end),
            "the real peer did not read the pump's frames: #{inspect(Grants.summary(grants))}"
 
-    expected = native(Jason.encode!(%{type: "hello_ack", protocol: 1}))
+    expected = native(Jason.encode!(%{type: "hello_ack", protocol: 2}))
 
     assert eventually(fn -> elem(StringIO.contents(stdout), 1) == expected end),
            "the ack did not come back in native framing: #{inspect(StringIO.contents(stdout))}"

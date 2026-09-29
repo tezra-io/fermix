@@ -55,6 +55,10 @@ defmodule FermixCore.Agents.TurnRunner do
   # URL, PATH, git config — is addressing, not credentials.
   @redact_env_keys ~w(BUZZ_PRIVATE_KEY NOSTR_PRIVATE_KEY)
 
+  # The closing advice of a scheduled job's overflow reply: a job overflow is
+  # fixed by a smaller job, never by a chat command.
+  @job_scope_advice "Narrow the task or split it into smaller jobs."
+
   @doc """
   Run one agent turn and return its response. Persists the USER message (the
   turn was accepted) but NOT the assistant message — the gateway commits that
@@ -91,9 +95,19 @@ defmodule FermixCore.Agents.TurnRunner do
 
   A detached `/background` run (`BackgroundRun.run/1`, channel `"background"`) has
   no live owner surface to observe or abort a host action, so it is `:unattended`
-  and fails closed. A Live voice delegation (M41 §5.1) is `:voice` — an attended
-  surface whose owner is speaking and can interrupt. Every other turn reaching
-  `run/3` is a foreground interaction — a human in a chat or `fermix ask` — and is
+  and fails closed. So is a prompt on one of the daemon's local sockets
+  (`fermix ask`, `fermix acp`, the Mac app's chat socket) sent by a process the
+  daemon itself started (an agent's shell command, a coding harness's running
+  command) or by a detached one (a job such a command left behind with no
+  terminal): the daemon read that off the socket's peer (`FermixCore.SocketPeer`),
+  and no person is at that terminal, so the prompt cannot lift a scheduled or
+  background run into an attended one. So, too, is a coding-run notice re-ingested
+  into an ACP conversation (MILESTONE_29 §17.6(c)): the turn is detached from any
+  client session, so no client can watch or cancel it. A continuation that
+  re-enters an owner's chat stays `:interactive`, because `/stop` still reaches it
+  there. A Live voice delegation (M41 §5.1) is `:voice` — an attended surface whose
+  owner is speaking and can interrupt. Every other turn reaching `run/3` is a
+  foreground interaction — a human in a chat or `fermix ask` — and is
   `:interactive`. Scheduled jobs bypass `run/3` and default to `:unattended`.
 
   Derived here rather than read off the message, so the three readers in this
@@ -102,6 +116,18 @@ defmodule FermixCore.Agents.TurnRunner do
   """
   @spec computer_use_origin(map()) :: :interactive | :unattended | :voice
   def computer_use_origin(%{channel: "background"}), do: :unattended
+
+  # The sender a channel stamps from the daemon's peer read (`FermixChannels.CLI`,
+  # the ACP Peer, the companion adapter), matched as a plain metadata value on any
+  # channel because core cannot compile-depend on the channels.
+  def computer_use_origin(%{metadata: %{caller: caller}})
+      when caller in [:daemon_descendant, :detached],
+      do: :unattended
+
+  # The sentinel `FermixChannels.Channels.Acp.detached_turn/0` stamps on a
+  # re-ingested coding-run notice, read as a plain metadata value for the same
+  # reason. The dispatcher's test pins the pair.
+  def computer_use_origin(%{metadata: %{acp_turn: :detached}}), do: :unattended
 
   def computer_use_origin(msg) when is_map(msg), do: chat_origin(VoiceCall.from_message(msg))
 
@@ -230,27 +256,69 @@ defmodule FermixCore.Agents.TurnRunner do
     )
   end
 
-  @doc "Map an agent-loop error reason to the user-facing reply text."
+  @typedoc """
+  Where the reply is read. `:chat` (the default) answers a conversation turn;
+  `:job` is a scheduled run's delivered failure text, which has no "message" and
+  no chat to type `/new` or `/compact` into.
+  """
+  @type reply_surface :: :chat | :job
+
+  @doc """
+  Map an agent-loop error reason to the user-facing reply text.
+
+  One mapping from reason to sentence; `surface:` (`t:reply_surface/0`, default
+  `:chat`) only picks the variant whose advice fits where the reply is read. A
+  `{:context_recovery_failed, reason}` (the in-loop compression call failed)
+  prefixes the inner reason's own reply, so a provider sentence rides along.
+  Raises `ArgumentError` on an unknown option or surface.
+  """
   @spec error_reply(term()) :: String.t()
-  def error_reply({:all_routes_failed, [{_provider, _reason} | _rest] = attempted}) do
+  @spec error_reply(term(), [{:surface, reply_surface()}]) :: String.t()
+  def error_reply(reason, opts \\ []) when is_list(opts) do
+    reply_for(reason, reply_surface!(opts))
+  end
+
+  defp reply_surface!(opts) do
+    case Keyword.validate!(opts, surface: :chat)[:surface] do
+      surface when surface in [:chat, :job] ->
+        surface
+
+      other ->
+        raise ArgumentError, "error_reply surface must be :chat or :job, got: #{inspect(other)}"
+    end
+  end
+
+  defp reply_for({:all_routes_failed, [{_provider, _reason} | _rest] = attempted}, surface) do
     providers = Enum.map_join(attempted, ", ", fn {provider, _reason} -> to_string(provider) end)
     {_last_provider, last_reason} = List.last(attempted)
 
     "All configured providers failed (tried: #{providers}). Last error: " <>
-      error_reply(last_reason)
+      reply_for(last_reason, surface)
   end
 
-  def error_reply({:image_unsupported, provider, model}) do
+  defp reply_for({:image_unsupported, provider, model}, _surface) do
     "That message includes an image, but the current model (#{provider}/#{model}) can't accept " <>
       "images. Switch to a vision-capable model, or send text only."
   end
 
-  def error_reply(reason) do
+  # The summarizer's own refusals are atoms (`:empty_summary`, `:too_deep`)
+  # with no sentence of their own; a provider reason gets its reply.
+  defp reply_for({:context_recovery_failed, reason}, _surface) when is_atom(reason) do
+    "The context filled and I couldn't compress earlier results " <>
+      "(the summarizer returned nothing usable: #{reason})."
+  end
+
+  defp reply_for({:context_recovery_failed, reason}, surface) do
+    "The context filled and I couldn't compress earlier results: " <> reply_for(reason, surface)
+  end
+
+  defp reply_for(:context_overflow_after_compaction, surface),
+    do: overflow_after_compaction_reply(surface)
+
+  defp reply_for(reason, surface) do
     cond do
       context_length_error?(reason) ->
-        "This conversation has grown larger than the model's context window, so I couldn't " <>
-          "process that turn. Send /new to start a fresh session (your long-term memory is kept), " <>
-          "or /compact to summarize this one, then resend."
+        context_length_reply(surface)
 
       auth_error?(reason) ->
         auth_reply(reason)
@@ -263,9 +331,34 @@ defmodule FermixCore.Agents.TurnRunner do
         reply
 
       true ->
-        "Sorry, I encountered an error processing your message."
+        generic_reply(surface)
     end
   end
+
+  defp context_length_reply(:chat) do
+    "This conversation has grown larger than the model's context window, so I couldn't " <>
+      "process that turn. Send /new to start a fresh session (your long-term memory is kept), " <>
+      "or /compact to summarize this one, then resend."
+  end
+
+  defp context_length_reply(:job) do
+    "This run's conversation grew larger than the model's context window. " <> @job_scope_advice
+  end
+
+  # The overflow happened inside one turn, after in-loop compaction: resending,
+  # /new or /compact would repeat it, so the advice is to shrink the request.
+  defp overflow_after_compaction_reply(:chat) do
+    "That request produced more tool output than the model's context window can hold, " <>
+      "even after I compressed earlier results. Ask for a narrower slice, or split the request."
+  end
+
+  defp overflow_after_compaction_reply(:job) do
+    "The run's tool results grew larger than the model's context window, even after earlier " <>
+      "results were compressed. " <> @job_scope_advice
+  end
+
+  defp generic_reply(:chat), do: "Sorry, I encountered an error processing your message."
+  defp generic_reply(:job), do: "The run failed with an error."
 
   # The adapters return :context_length_exceeded for OpenAI-family overflow; the
   # binary fallback catches other providers that only surface a message string.
@@ -422,6 +515,14 @@ defmodule FermixCore.Agents.TurnRunner do
       # can bind a pending grant to the owner's conversation. Absent (nil) on
       # unattended/cron/guest turns, where the tool fails closed.
       approval_fn: Map.get(msg, :approval_fn),
+      # The owner-inbox seam for a channel without slash commands (ACP): the
+      # gateway's closure that sends an access-sensitive confirmation to the
+      # owner's own chat (`Capabilities.AccessGate`). Absent (nil) elsewhere.
+      owner_inbox_approval_fn: Map.get(msg, :owner_inbox_approval_fn),
+      # The Live call a delegation belongs to, so an access-sensitive command
+      # parks on that call and the owner's spoken yes can answer it. `nil` on
+      # every non-voice turn (a forged `voice_call` never clears `VoiceCall`).
+      voice_call_id: voice_call_id(voice_call),
       channel: msg.channel,
       # Chat context (private DM vs shared group), from the inbound message
       # metadata. `request_directory_access` reads it to keep the tap-to-copy
@@ -518,6 +619,9 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp parent_session({:ok, %{call_id: call_id}}), do: call_id
   defp parent_session(:none), do: nil
+
+  defp voice_call_id({:ok, %{call_id: call_id}}), do: call_id
+  defp voice_call_id(:none), do: nil
 
   defp request_cwd_for(:operator, msg), do: Map.get(msg, :request_cwd)
   defp request_cwd_for(_trust, _msg), do: nil
@@ -675,7 +779,7 @@ defmodule FermixCore.Agents.TurnRunner do
   defp maybe_put_turn_output(metadata, response),
     do: Map.put(metadata, :output, Telemetry.preview(response))
 
-  # See `error_reply/1` for the auth-vs-generic mapping these patterns drive.
+  # See `error_reply/2` for the auth-vs-generic mapping these patterns drive.
   # (The Codex `{:auth_invalidated, _}`/`{:refresh_failed, _}` tuples are gone —
   # the adapter now returns structured `{:provider_error, %{kind: :auth}}`.)
   defp auth_error?(:no_auth_file), do: true

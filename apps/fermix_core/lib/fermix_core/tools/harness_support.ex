@@ -12,6 +12,7 @@ defmodule FermixCore.Tools.HarnessSupport do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Consent
+  alias FermixCore.Harness.VendorConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -43,8 +44,12 @@ defmodule FermixCore.Tools.HarnessSupport do
   # ADAPTER vocabulary intact: an owner-set posture is a different thing from a
   # model-set one, and M25's server-side Code-mode posture (§7.2) needs the
   # adapters to still express it. Omitting the param entirely remains the
-  # default, which inherits the operator's own `~/.claude/settings.json` or
-  # `~/.codex/config.toml` — so autonomy is unchanged by this gate.
+  # default, so autonomy is unchanged by this gate. What an omitted param
+  # inherits is whatever posture the vendor CLI resolves for itself: the
+  # operator's user config and, in a repo the operator trusts, that repo's
+  # project and local config (`.claude/settings*.json`, `.codex/config.toml`).
+  # A run's own child can write those files for the other vendor to obey, which
+  # is what `Harness.VendorConfig` watches.
   @boundary_removing %{
     sandbox: ["danger-full-access"],
     permission_mode: ["bypassPermissions"]
@@ -415,6 +420,10 @@ defmodule FermixCore.Tools.HarnessSupport do
   # error, not a second code path).
   defp format_error(:consent_required),
     do: Consent.scheduled_guidance() <> " " <> @proceed_directly
+
+  # Reached only where no `/confirm` prompt could be raised (`Tools.HarnessRun`),
+  # so it names the files and both ways the owner clears them.
+  defp format_error({:vendor_config_changed, change}), do: VendorConfig.guidance(change)
 
   defp format_error(:missing_session),
     do: "This turn has no session id, so a coding run cannot be correlated."

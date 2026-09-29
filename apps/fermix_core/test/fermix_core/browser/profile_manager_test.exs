@@ -17,7 +17,7 @@ defmodule FermixCore.Browser.ProfileManagerTest do
       registry = Keyword.fetch!(opts, :registry)
       key = Keyword.fetch!(opts, :key)
       now = System.monotonic_time(:millisecond)
-      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, now}})
+      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, {now, :cdp}}})
     end
 
     @impl true
@@ -48,7 +48,7 @@ defmodule FermixCore.Browser.ProfileManagerTest do
       registry = Keyword.fetch!(opts, :registry)
       key = Keyword.fetch!(opts, :key)
       now = System.monotonic_time(:millisecond)
-      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, now}})
+      GenServer.start_link(__MODULE__, opts, name: {:via, Registry, {registry, key, {now, :cdp}}})
     end
 
     @impl true
@@ -247,6 +247,19 @@ defmodule FermixCore.Browser.ProfileManagerTest do
 
     assert live_keys(ctx.registry) == [{"owner-d", "fermix"}]
     assert %{"running" => true} = ProfileManager.status("owner-d", "fermix", opts)
+  end
+
+  test "backend/3 answers what a live profile started on, and nothing once it is gone", ctx do
+    opts = [registry: ctx.registry]
+    assert ProfileManager.backend("owner-e", "fermix", opts) == nil
+
+    assert {:ok, pid} = start(ctx.manager, "owner-e", "fermix", ctx.config)
+    assert ProfileManager.backend("owner-e", "fermix", opts) == :cdp
+
+    ref = Process.monitor(pid)
+    GenServer.stop(pid)
+    assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
+    assert ProfileManager.backend("owner-e", "fermix", opts) == nil
   end
 
   # ── no blind replay of mutations (M47 §3.4) ────────────────────────────────

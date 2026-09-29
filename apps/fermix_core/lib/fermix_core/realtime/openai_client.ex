@@ -5,6 +5,12 @@ defmodule FermixCore.Realtime.OpenAIClient do
   The peer is verified against the OS trust store via `FermixCore.Net.Tls` — the
   account's bearer token travels in the handshake headers, so an unverified
   socket would hand it to whoever answered.
+
+  Every event and error this process sends its parent names the socket
+  (`self()`), because a session outlives its sockets and must tell the current
+  one from one it closed or replaced. A socket's death reaches the parent only as
+  its `EXIT`, through the link `start_link/1` makes: there is no disconnect
+  notice, so one death is one signal.
   """
 
   use WebSockex
@@ -356,12 +362,16 @@ defmodule FermixCore.Realtime.OpenAIClient do
     {:ok, {:assistant_transcript_done, transcript}}
   end
 
-  def decode_server_event(%{
-        "type" => "conversation.item.input_audio_transcription.completed",
-        "transcript" => transcript
-      })
+  # The item id binds a spoken answer to the committed input item it transcribes
+  # (`Capabilities.AccessGate`'s spoken yes).
+  def decode_server_event(
+        %{
+          "type" => "conversation.item.input_audio_transcription.completed",
+          "transcript" => transcript
+        } = event
+      )
       when is_binary(transcript) do
-    {:ok, {:user_transcript_done, transcript}}
+    {:ok, {:user_transcript_done, Map.get(event, "item_id"), transcript}}
   end
 
   def decode_server_event(%{"type" => "input_audio_buffer.committed"} = event) do
@@ -426,6 +436,9 @@ defmodule FermixCore.Realtime.OpenAIClient do
     }
   end
 
+  # Valid JSON that is not an object is reported, never matched away: a
+  # CaseClauseError here killed the socket, and the call reconnected into a fresh
+  # conversation. Only a bounded description travels to the session.
   @impl true
   def handle_frame({:text, payload}, state) when is_binary(payload) do
     case Jason.decode(payload) do
@@ -433,8 +446,21 @@ defmodule FermixCore.Realtime.OpenAIClient do
         notify_parent(state.parent, event)
         {:ok, state}
 
+      {:ok, other} ->
+        send(
+          state.parent,
+          {:openai_realtime_error, self(),
+           {:invalid_server_event, inspect(other, limit: 5, printable_limit: 120)}}
+        )
+
+        {:ok, state}
+
       {:error, reason} ->
-        send(state.parent, {:openai_realtime_error, {:decode_failed, Exception.message(reason)}})
+        send(
+          state.parent,
+          {:openai_realtime_error, self(), {:decode_failed, Exception.message(reason)}}
+        )
+
         {:ok, state}
     end
   end
@@ -446,16 +472,10 @@ defmodule FermixCore.Realtime.OpenAIClient do
 
   def handle_cast(:close, state), do: {:close, state}
 
-  @impl true
-  def handle_disconnect(status, state) do
-    send(state.parent, {:openai_realtime_disconnect, status})
-    {:ok, state}
-  end
-
   defp notify_parent(parent, event) do
     case decode_server_event(event) do
-      {:ok, decoded} -> send(parent, {:openai_realtime_event, decoded})
-      {:error, reason} -> send(parent, {:openai_realtime_error, reason})
+      {:ok, decoded} -> send(parent, {:openai_realtime_event, self(), decoded})
+      {:error, reason} -> send(parent, {:openai_realtime_error, self(), reason})
     end
   end
 end

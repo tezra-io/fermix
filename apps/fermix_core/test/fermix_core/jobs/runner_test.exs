@@ -5,11 +5,13 @@ defmodule FermixCore.Jobs.RunnerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Agents.AgentDefinition
+  alias FermixCore.Agents.TurnRunner
   alias FermixCore.Capabilities.Builtin, as: BuiltinCapability
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Jobs.Registry
   alias FermixCore.Jobs.Runner
+  alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
 
   defmodule RecordingAdapter do
@@ -251,6 +253,31 @@ defmodule FermixCore.Jobs.RunnerTest do
          provider_state: %{rest: []}
        }}
     end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, "no continue expected"}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  defmodule RaisingAdapter do
+    @moduledoc false
+    # The model call raises: nothing between the adapter and AgentLoop.run
+    # rescues it, so the whole loop process crashes.
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, _opts), do: raise("adapter exploded")
 
     @impl true
     def continue(_provider_state, _tool_results, _opts), do: {:error, "no continue expected"}
@@ -1280,6 +1307,82 @@ defmodule FermixCore.Jobs.RunnerTest do
     assert Runner.run_id(pid) == nil
   end
 
+  # JOB-8: a :rest_for_one restart of any core child started before the job
+  # subtree shuts every runner down mid-run. The restarted Scheduler reaps the
+  # run and may claim the job again, so a loop left running would execute the
+  # job a second time beside the new run.
+  test "a runner shut down mid-loop takes its AgentLoop with it", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Shut Down Mid Loop", task_prompt: "Park, then go.")
+
+    supervisor = start_supervised!({RunnerSupervisor, name: :"jobs_runner_sup_#{run.id}"})
+
+    {:ok, runner} =
+      RunnerSupervisor.start_run(supervisor,
+        repo: repo,
+        job: job,
+        run: run,
+        capability_registry: capability_registry,
+        adapter: HeldAdapter,
+        adapter_opts: [test_pid: self()],
+        output_base_dir: output_base_dir,
+        network_readiness_enabled: false
+      )
+
+    # The provider call runs inside the loop process, so the held pid is the loop.
+    assert_receive {:held, loop}
+    refute loop == runner
+    loop_ref = Process.monitor(loop)
+
+    :ok = DynamicSupervisor.terminate_child(supervisor, runner)
+
+    # HeldAdapter gives up after 2 s on its own and the loop then ends :normal,
+    # so only a loop that died with its runner reports the runner's :shutdown.
+    assert_receive {:DOWN, ^loop_ref, :process, ^loop, reason}, 5_000
+    assert reason == :shutdown
+  end
+
+  # The loop is linked to its runner, so a loop that crashes must report the
+  # crash as a value: the runner then fails the run itself (error row, failure
+  # text) and exits :normal instead of dying with the loop.
+  test "an AgentLoop crash fails the run and the runner still exits normally", %{
+    repo: repo,
+    capability_registry: capability_registry,
+    output_base_dir: output_base_dir
+  } do
+    assert {:ok, {job, run}} =
+             create_claimed_job(repo, name: "Crashing Loop", task_prompt: "Explode.")
+
+    Process.flag(:trap_exit, true)
+
+    log =
+      capture_log(fn ->
+        {:ok, pid} =
+          Runner.start_link(
+            repo: repo,
+            job: job,
+            run: run,
+            notify: self(),
+            capability_registry: capability_registry,
+            adapter: RaisingAdapter,
+            output_base_dir: output_base_dir,
+            network_readiness_enabled: false
+          )
+
+        assert_receive {:EXIT, ^pid, :normal}, 5_000
+      end)
+
+    assert log =~ "Scheduled job #{job.id} AgentLoop crashed"
+    assert {:ok, failed} = Repo.get_job_run(run.id, server: repo)
+    assert failed.status == "error"
+    assert failed.error =~ "agent_loop_exit"
+    assert failed.error =~ "adapter exploded"
+  end
+
   # The `Keyword.get(opts, :timeout_ms)` shape below is load-bearing: it mirrors
   # Jobs.Scheduler, which always passes these keys and lets the value be nil when
   # unset. Do not "clean it up" into conditional puts — that would stop exercising
@@ -2260,7 +2363,9 @@ defmodule FermixCore.Jobs.RunnerTest do
         Keyword.take(opts, [
           :max_transient_attempts,
           :transient_backoff_ms,
-          :max_transient_retry_ms
+          :max_transient_retry_ms,
+          :delivery_adapter,
+          :delivery_opts
         ])
 
       # Own the exit observation from the spawn: see assert_runner_exits_normally.
@@ -2268,6 +2373,107 @@ defmodule FermixCore.Jobs.RunnerTest do
 
       {:ok, pid} = Runner.start_link(base ++ overrides)
       assert_receive {:EXIT, ^pid, :normal}, 2_000
+    end
+  end
+
+  # A failed run's delivered text leads with a sentence the owner can act on;
+  # the raw reason follows as detail, and the ledger keeps the machine-readable
+  # reason exactly as before.
+  describe "failure delivery text" do
+    test "an error run leads with the job sentence and keeps the raw reason as detail", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      {:ok, counter} = Agent.start_link(fn -> 0 end)
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Overflow Check",
+                 task_prompt: "Read every log.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      run_transient_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        adapter_opts: [counter: counter, fail_with: :context_overflow_after_compaction]
+      )
+
+      sentence = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :job)
+      assert sentence =~ "smaller jobs"
+
+      assert_receive {:delivery_send, "123", text, _opts}
+
+      assert text ==
+               """
+               Scheduled job "Overflow Check" finished with error.
+               #{sentence}
+
+               Run ID: #{run.id}
+               Detail: :context_overflow_after_compaction
+               """
+               |> String.trim()
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "error"
+      assert stored_run.error == ":context_overflow_after_compaction"
+      assert stored_run.delivery_status == "sent"
+
+      assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
+      assert updated_job.last_error == ":context_overflow_after_compaction"
+
+      artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
+      assert artifact =~ "## Error\n\n#{sentence}\n\nDetail: :context_overflow_after_compaction\n"
+    end
+
+    test "a timeout run's delivered text is unchanged", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo,
+                 name: "Timeout Delivery Check",
+                 task_prompt: "This adapter will stop responding.",
+                 delivery_mode: "channel",
+                 delivery_target: %{"platform" => "telegram", "chat_id" => "123"}
+               )
+
+      assert_runner_exits_normally(
+        job,
+        run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        inactivity_timeout_ms: 20,
+        adapter_opts: [sleep_ms: 200],
+        delivery_adapter: RecordingDelivery,
+        delivery_opts: [test_pid: self()],
+        script: [%{content: "too late"}]
+      )
+
+      assert_receive {:delivery_send, "123", text, _opts}
+
+      assert text ==
+               """
+               Scheduled job "Timeout Delivery Check" finished with timeout.
+
+               Run ID: #{run.id}
+               Error: inactivity timeout after 20ms
+               """
+               |> String.trim()
+
+      assert {:ok, stored_run} = Repo.get_job_run(run.id, server: repo)
+      assert stored_run.status == "timeout"
+      assert stored_run.error == "inactivity timeout after 20ms"
+
+      artifact = File.read!(Path.join(output_base_dir, stored_run.output_ref))
+      assert artifact =~ "## Error\n\ninactivity timeout after 20ms\n"
     end
   end
 

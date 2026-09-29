@@ -28,9 +28,11 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Providers.ToolResultRetention
   alias FermixCore.Telemetry
 
   require Logger
@@ -69,8 +71,16 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
     tool_messages = Enum.map(tool_results, &tool_result_message/1)
     image_turns = tool_results |> Enum.filter(&has_images?/1) |> Enum.map(&image_user_message/1)
 
+    history =
+      ToolResultRetention.substitute(
+        prior,
+        Keyword.get(opts, :tool_result_substitutions, %{}),
+        &tool_message_id/1,
+        &replace_tool_message_content/2
+      )
+
     next_messages =
-      (prior ++ [assistant] ++ tool_messages ++ image_turns)
+      (history ++ [assistant] ++ tool_messages ++ image_turns)
       |> ScreenshotRetention.keep_last(
         Keyword.get(opts, :max_retained_screenshots),
         &screenshot_message?/1,
@@ -79,6 +89,14 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
 
     request(next_messages, capabilities, opts)
   end
+
+  # In-loop compaction (IN_LOOP_CONTEXT_OVERFLOW.md §3.3): a replayed `tool`
+  # message whose `tool_call_id` has an entry carries that text instead. History
+  # only: the tool messages this call appends are the loop's to substitute.
+  defp tool_message_id(%{role: "tool", tool_call_id: call_id}), do: call_id
+  defp tool_message_id(_message), do: nil
+
+  defp replace_tool_message_content(message, text), do: %{message | content: text}
 
   # A screenshot carrier is the dedicated follow-up user turn (labelled, carrying
   # `image_parts`) emitted after the tool messages — NOT an inbound user image
@@ -259,8 +277,12 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
          _prior,
          _caps
        ) do
-    Logger.error("#{provider} Chat Completions error: #{status} - #{inspect(body)}")
-    {:error, ProviderError.api(provider, :chat_completions, status, body)}
+    if ResponsesShared.context_length_error?(body) do
+      {:error, :context_length_exceeded}
+    else
+      Logger.error("#{provider} Chat Completions error: #{status} - #{inspect(body)}")
+      {:error, ProviderError.api(provider, :chat_completions, status, body)}
+    end
   end
 
   defp handle_response(

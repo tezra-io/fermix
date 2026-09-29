@@ -873,7 +873,9 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       :ok
     end
 
-    test "reports :ok when enabled with an OpenAI key present" do
+    # Offline, the row can only say the key is saved; whether OpenAI accepts it
+    # is the network row's answer, and this one says where to find it.
+    test "reports :ok when enabled with an OpenAI key saved" do
       Application.put_env(:fermix_core, :realtime, enabled: true)
       Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
 
@@ -881,7 +883,8 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.name == "realtime voice"
       assert result.status == :ok
-      assert result.detail =~ "key present"
+      assert result.detail =~ "key saved"
+      assert result.detail =~ "network checks test it"
       assert result.detail =~ "engine openai_realtime"
       assert result.detail =~ "model gpt-realtime-2"
     end
@@ -923,6 +926,103 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "disabled"
+    end
+  end
+
+  describe "realtime_key/1" do
+    setup do
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      providers = Application.get_env(:fermix_core, :providers, [])
+
+      on_exit(fn ->
+        Application.put_env(:fermix_core, :realtime, realtime)
+        Application.put_env(:fermix_core, :providers, providers)
+      end)
+
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      :ok
+    end
+
+    test "is not applicable while voice is off, and asks OpenAI nothing" do
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+      adapter = fn _req -> flunk("a disabled voice reached the network") end
+
+      assert Checks.realtime_key(req_options: [adapter: adapter]) == nil
+    end
+
+    test "passes when OpenAI accepts the key" do
+      result = Checks.realtime_key(req_options: [plug: answer(200, ~s({"data":[]}))])
+
+      assert result.name == "realtime voice key"
+      assert result.status == :ok
+      assert result.detail =~ "OpenAI accepted the API key"
+    end
+
+    # The same sentence a refused call shows, so Doctor and the call agree.
+    test "fails with the call's own sentence when OpenAI refuses the key" do
+      error = %{"message" => "Incorrect API key provided: sk-te**", "code" => "invalid_api_key"}
+      body = Jason.encode!(%{"error" => error})
+
+      result = Checks.realtime_key(req_options: [plug: answer(401, body)])
+
+      assert result.status == :fail
+      assert result.detail == "OpenAI did not accept the API key (invalid_api_key)."
+    end
+
+    # A restricted key can be refused the model list and still hold a voice call,
+    # so only a refusal of the key itself is a failure.
+    test "warns when a valid key is refused this request" do
+      body = ~s({"error":{"message":"insufficient permissions","code":null}})
+
+      result = Checks.realtime_key(req_options: [plug: answer(403, body)])
+
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 403"
+      assert result.detail =~ "restricted"
+    end
+
+    test "names the code of a refusal that is not a bad key" do
+      body = ~s({"error":{"code":"insufficient_quota"}})
+
+      result = Checks.realtime_key(req_options: [plug: answer(403, body)])
+
+      assert result.status == :warn
+      assert result.detail =~ "insufficient_quota"
+    end
+
+    test "warns when OpenAI answers with a server error" do
+      result = Checks.realtime_key(req_options: [plug: answer(503, "{}")])
+
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 503"
+    end
+
+    test "warns when OpenAI cannot be reached" do
+      adapter = fn req -> {req, %Req.TransportError{reason: :nxdomain}} end
+
+      result = Checks.realtime_key(req_options: [adapter: adapter])
+
+      assert result.status == :warn
+      assert result.detail =~ "could not reach OpenAI"
+    end
+
+    test "warns when voice is on and no key is saved" do
+      Application.put_env(:fermix_core, :providers, [])
+      adapter = fn _req -> flunk("a probe with no key reached the network") end
+
+      result = Checks.realtime_key(req_options: [adapter: adapter])
+
+      assert result.status == :warn
+      assert result.detail =~ "no OpenAI API key"
+    end
+
+    defp answer(status, body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_content_type("application/json")
+        |> Plug.Conn.send_resp(status, body)
+      end
     end
   end
 
@@ -1807,6 +1907,27 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "signal=owner set"
     end
 
+    # An owner who allow-listed only their own id and set no owner_user_id is a
+    # guest to the gateway: no file access, no attachments. Doctor must say so
+    # instead of reporting the sole allow-listed id as a set owner.
+    test "warns that a sole allow-listed id without an owner chats at guest trust" do
+      for channel <- [:telegram, :discord, :slack, :signal, :mobile] do
+        Application.put_env(:fermix_channels, channel, enabled: false)
+      end
+
+      Application.put_env(:fermix_channels, :whatsapp,
+        enabled: true,
+        allowed_sender_ids: ["+15550001111"]
+      )
+
+      result = Checks.command_owner_config()
+
+      assert result.status == :warn
+      assert result.detail =~ "owner_user_id not set for enabled channels: whatsapp;"
+      assert result.detail =~ "guest trust (no file access or attachments)"
+      assert result.detail =~ "whatsapp=owner missing (sole allowed id runs as guest)"
+    end
+
     test "treats paired-device mobile ingress as its own command authority" do
       for channel <- [:telegram, :whatsapp, :discord, :slack, :signal] do
         Application.put_env(:fermix_channels, channel, enabled: false)
@@ -1818,7 +1939,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :ok
       assert result.detail =~ "mobile=paired-device authority"
-      refute result.detail =~ "missing command owner for enabled channels: mobile"
+      refute result.detail =~ "owner_user_id not set for enabled channels: mobile"
     end
   end
 

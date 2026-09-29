@@ -161,6 +161,12 @@ defmodule FermixOpik.Mapper do
             :target_ref,
             :selector,
             :policy_enforcement,
+            # How `Capabilities.AccessGate` settled an access-sensitive call (a
+            # closed enum) and the parked intent that pairs a held call with its
+            # confirmed run (an opaque id). No content, so both ride outside the
+            # capture_content gate like the marker above.
+            :access_gate,
+            :access_intent,
             # Allowed sandbox variables the shell tool could not pass: names
             # only, operator configuration rather than user content, so what a
             # command ran without stays visible in a content-free export.
@@ -182,7 +188,9 @@ defmodule FermixOpik.Mapper do
             # provider name only — never a query, a place record, or a
             # coordinate. `:location_mode` is the sole record of WHICH anchor a
             # place search used (query_only / named / explicit_coordinates), so
-            # dropping it erases the privacy evidence itself.
+            # dropping it erases the privacy evidence itself. The browser tool
+            # stamps `:backend` too: which implementation served the call
+            # (`cdp` or `fermix_app`), decided when its task started.
             :backend,
             :result_count,
             :has_media_count,
@@ -474,6 +482,71 @@ defmodule FermixOpik.Mapper do
       end_time: iso(ended),
       metadata: drop_nil(%{ms: ms, context: Map.get(metadata, :context)}),
       error_info: %{exception_type: "Timeout", message: "#{name} after #{ms}ms"}
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a point span from a `[:fermix, :agent_loop, :context_compaction]` event
+  — one reduction the agent loop applied to a turn's tool results (older results
+  folded into digests). The byte pair is the reduction's effect; `count` is
+  always 1 and is dropped. `session_id`/`parent_session` place the span and are
+  not repeated in its metadata.
+  """
+  @spec context_compaction_span(map(), map(), keyword()) :: map()
+  def context_compaction_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "context_compaction",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          agent: Map.get(metadata, :agent),
+          iteration: Map.get(metadata, :iteration),
+          level: Map.get(metadata, :level),
+          trigger: stringify(Map.get(metadata, :trigger)),
+          results: Map.get(measurements, :results),
+          bytes_before: Map.get(measurements, :bytes_before),
+          bytes_after: Map.get(measurements, :bytes_after)
+        })
+    }
+    |> drop_nil()
+  end
+
+  @doc """
+  Build a point span from a `[:fermix, :agent_loop, :context_recovery]` event —
+  one recovery round after a provider refused a request as too large. `outcome`
+  names how the round ended; the event's only measurement is `count: 1`.
+  """
+  @spec context_recovery_span(map(), map(), keyword()) :: map()
+  def context_recovery_span(metadata, _measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, 0)
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "context_recovery",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        drop_nil(%{
+          agent: Map.get(metadata, :agent),
+          iteration: Map.get(metadata, :iteration),
+          round: Map.get(metadata, :round),
+          outcome: stringify(Map.get(metadata, :outcome))
+        })
     }
     |> drop_nil()
   end

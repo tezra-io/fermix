@@ -11,6 +11,7 @@ defmodule FermixChannels.Gateway.PolicyTest do
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Mobile.DeviceStore
 
   defmodule MobileChannel do
     def build_text_reply(%Message{}), do: fn _text -> :ok end
@@ -312,7 +313,7 @@ defmodule FermixChannels.Gateway.PolicyTest do
     test "authenticated device is operator and receives draft/activity/terminal closures" do
       ingress_context = %{
         transport: :mobile,
-        authenticated_device_id: "device-1"
+        authenticated_device_id: pair_device!()
       }
 
       message =
@@ -459,5 +460,32 @@ defmodule FermixChannels.Gateway.PolicyTest do
       })
 
     struct!(Message, attrs)
+  end
+
+  # A device paired in a throwaway trust store, run under the name the
+  # authorizer asks: a paired device is authorized only while the store holds it.
+  defp pair_device! do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("paired-device")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(root) end)
+    start_supervised!({DeviceStore, root: root, name: DeviceStore})
+    <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
+
+    id =
+      [{a, 8}, {b, 4}, {c, 4}, {d, 4}, {e, 12}]
+      |> Enum.map_join("-", fn {part, width} ->
+        part |> Integer.to_string(16) |> String.pad_leading(width, "0") |> String.downcase()
+      end)
+
+    {:ok, _device} =
+      DeviceStore.add(DeviceStore, %{
+        device_id: id,
+        name: "iPhone",
+        model: "iPhone17,1",
+        noise_pk: :crypto.strong_rand_bytes(32),
+        created_at: ~U[2026-09-27 09:00:00Z],
+        apns_key_salt: :crypto.strong_rand_bytes(32)
+      })
+
+    id
   end
 end

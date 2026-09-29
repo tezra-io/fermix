@@ -12,6 +12,7 @@ import {
   eventFrame,
   grantFrame,
   helloFrame,
+  relayedEvent,
   resultFrame,
   revokeFrame,
 } from './protocol.js';
@@ -59,7 +60,8 @@ chrome.action.onClicked.addListener((tab) => {
 
 chrome.debugger.onEvent.addListener((source, method, params) => {
   if (!granted.has(source.tabId)) return;
-  send(eventFrame(source.tabId, method, params));
+  const relayed = relayedEvent(method, params);
+  if (relayed) send(eventFrame(source.tabId, method, relayed));
 });
 
 chrome.debugger.onDetach.addListener((source, reason) => {

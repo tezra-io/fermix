@@ -55,26 +55,29 @@ restart grants cleanly instead of failing on an attachment nothing is driving.
 
 The extension holds no page content. It relays commands from the daemon to
 Chrome's debugger and relays the answers back; the only thing it keeps is the
-set of tab ids you granted. It requests three permissions — `debugger`,
-`nativeMessaging` and `tabs` — and no host permissions at all, so it has no
-access to any site except through a debugger you attached yourself. There are no
-content scripts, no remote code and no `eval`.
+set of tab ids you granted. Of the `Network` domain it relays only which address
+served each document (its frame, url and remote address), the fact the daemon's
+read policy judges, and never headers, cookies or any other request. It requests
+three permissions — `debugger`, `nativeMessaging` and `tabs` — and no host
+permissions at all, so it has no access to any site except through a debugger you
+attached yourself. There are no content scripts, no remote code and no `eval`.
 
 ## The wire
 
 One JSON object per message, native messaging in both directions. The extension
 sends `hello`, `grant`, `revoke`, `cdp_result`, `cdp_error` and `event`; the
 daemon sends `hello_ack`, `refused`, `cdp` and `release`. The protocol number is
-`1` and a mismatch is refused on both sides rather than negotiated, so the
-extension and the daemon move together.
+`2` and a mismatch is refused on both sides rather than negotiated, so the
+extension and the daemon move together: after updating Fermix, press the reload
+button on the extension.
 
 The daemon also answers a `status` frame on the same socket, which is how
 `fermix browser bridge status` counts connections; nothing in the extension
 sends it.
 
 Commands are limited to the `Page`, `Runtime`, `DOM`, `Input` and
-`Accessibility` domains, refused by the daemon before it transmits and by
-`protocol.js` before anything reaches `chrome.debugger`.
+`Accessibility` domains plus `Network.enable`, refused by the daemon before it
+transmits and by `protocol.js` before anything reaches `chrome.debugger`.
 
 ## Developing
 

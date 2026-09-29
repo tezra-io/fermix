@@ -18,6 +18,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.BootReport
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.MachineFacts
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
@@ -95,6 +96,10 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_enabled, boolean() | String.t()}
           | {:signal_enabled, boolean() | String.t()}
           | {:acp_enabled, boolean() | String.t()}
+          | {:mobile_enabled, boolean() | String.t()}
+          | {:mobile_port, pos_integer()}
+          | {:mobile_bind, String.t()}
+          | {:mobile_advertise_mdns, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -600,13 +605,7 @@ defmodule FermixCore.Setup.Wizard do
         label: "Your name",
         required?: missing_component?(state, "personalization")
       },
-      %{
-        key: :timezone,
-        label: "Your timezone (e.g. America/Los_Angeles; blank = America/New_York)",
-        # Keep in sync with the web setup default in FermixWebWeb.SetupLive.
-        default: "America/New_York",
-        required?: missing_component?(state, "personalization")
-      },
+      timezone_prompt(state),
       %{
         key: :communication_style,
         label: "Preferred communication style (e.g. concise and direct)",
@@ -788,13 +787,17 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_enabled(answers)
       |> put_acp_config(answers)
+      |> put_mobile_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
       |> put_bot_name(answers)
       |> ensure_sandbox_env_sources(answers)
 
-    commit_snapshot(snapshot)
+    with {:ok, report} <- commit_snapshot(snapshot) do
+      refresh_user_document(answers)
+      {:ok, report}
+    end
   end
 
   @type sandbox_mode :: :strict | :standard | :open
@@ -1071,7 +1074,7 @@ defmodule FermixCore.Setup.Wizard do
     with :ok <- RestartState.writable(),
          :ok <- ConfigStore.save_snapshot(snapshot, supervised),
          :ok <- ConfigStore.apply_snapshot(snapshot, supervised),
-         {:ok, seeding_results} <- maybe_seed_prompt_files(snapshot) do
+         {:ok, seeding_results} <- seed_prompt_files(snapshot) do
       {:ok, BootReport.refresh_if_started(seeding_results) || report(seeding_results)}
     end
   end
@@ -1207,14 +1210,14 @@ defmodule FermixCore.Setup.Wizard do
   @doc """
   Re-runs prompt-file seeding against the current persisted snapshot.
 
-  Used by the CLI re-run path: when setup is already ready and the operator
-  re-runs `mix fermix.setup` (e.g., after deleting `SOUL.md`), this recreates
-  any missing files without requiring new answers. Idempotent — files that
-  already exist are skipped by `SetupSeeder`.
+  Used by the CLI re-run path: when the operator re-runs `mix fermix.setup`
+  (e.g., after deleting `SOUL.md`), this recreates any missing files without
+  requiring new answers. Idempotent — files that already exist are skipped by
+  `SetupSeeder`.
   """
   @spec seed_now() :: {:ok, [seeding_result()]} | {:error, term()}
   def seed_now do
-    maybe_seed_prompt_files(ConfigStore.current_snapshot())
+    seed_prompt_files(ConfigStore.current_snapshot())
   end
 
   defp build_state(snapshot, readiness) do
@@ -1225,6 +1228,28 @@ defmodule FermixCore.Setup.Wizard do
       validation_errors: readiness.failures,
       dirty?: false
     }
+  end
+
+  @personalization_keys [:user_name, :timezone, :communication_style]
+
+  # The machine's own zone is the default, the same answer the first boot
+  # seeds (`Setup.MachineFacts`); a machine that cannot say offers none, and
+  # the question stands as it is.
+  defp timezone_prompt(state) do
+    required? = missing_component?(state, "personalization")
+
+    case MachineFacts.timezone() do
+      {:ok, zone} ->
+        %{
+          key: :timezone,
+          label: "Your timezone (e.g. America/Los_Angeles; blank = #{zone})",
+          default: zone,
+          required?: required?
+        }
+
+      :error ->
+        %{key: :timezone, label: "Your timezone (e.g. America/Los_Angeles)", required?: required?}
+    end
   end
 
   @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
@@ -1645,14 +1670,13 @@ defmodule FermixCore.Setup.Wizard do
   defp active_provider_default_model(snapshot) do
     provider = active_provider(snapshot)
 
-    configured =
+    block =
       snapshot
       |> Map.get(:fermix_core, [])
       |> Keyword.get(:providers, [])
       |> Keyword.get(provider, [])
-      |> Keyword.get(:default_model)
 
-    configured || ModelCatalog.default_model_for(provider)
+    ModelCatalog.effective_model(provider, block)
   end
 
   defp put_routing_key(snapshot, key, value) do
@@ -2437,6 +2461,50 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # The phone channel's four operator settings (M51 management pairing §6). Each
+  # answer is one key merged into `[fermix_channels.mobile]`, so the keys no
+  # pane writes (`push`, `streaming`, the media bounds) survive the write, and
+  # an absent answer changes nothing. The two refusals are the sentences a pane
+  # shows under the control, so they are written for the operator.
+  defp put_mobile_config(snapshot, answers) do
+    [
+      enabled: normalize_realtime_bool(Keyword.get(answers, :mobile_enabled), :mobile_enabled),
+      port: normalize_mobile_port(Keyword.get(answers, :mobile_port)),
+      bind: normalize_mobile_bind(Keyword.get(answers, :mobile_bind)),
+      advertise_mdns:
+        normalize_realtime_bool(
+          Keyword.get(answers, :mobile_advertise_mdns),
+          :mobile_advertise_mdns
+        )
+    ]
+    |> Enum.reject(fn {_key, value} -> is_nil(value) end)
+    |> Enum.reduce(snapshot, fn {key, value}, acc -> put_channel_key(acc, :mobile, key, value) end)
+  end
+
+  defp normalize_mobile_port(nil), do: nil
+  defp normalize_mobile_port(port) when is_integer(port) and port in 1_024..65_535, do: port
+
+  defp normalize_mobile_port(_port),
+    do: raise(ArgumentError, "Port must be a whole number between 1024 and 65535.")
+
+  # Strict, as the settings file's own reader is: the short forms a lenient
+  # parse accepts would bind an address the operator never wrote.
+  defp normalize_mobile_bind(nil), do: nil
+
+  defp normalize_mobile_bind(bind) when is_binary(bind) do
+    trimmed = String.trim(bind)
+
+    case :inet.parse_strict_address(String.to_charlist(trimmed)) do
+      {:ok, _address} -> trimmed
+      {:error, _reason} -> refuse_mobile_bind()
+    end
+  end
+
+  defp normalize_mobile_bind(_bind), do: refuse_mobile_bind()
+
+  defp refuse_mobile_bind,
+    do: raise(ArgumentError, "Listen on must be an IP address, such as `0.0.0.0`.")
+
   # A real enable switch, and it runs AFTER the credential writers on purpose:
   # `put_channel_config/4` turns a channel on whenever a credential arrives, so
   # an explicit answer has to be the last word or "save my token but leave this
@@ -2551,32 +2619,47 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp maybe_seed_prompt_files(snapshot) do
-    if seeding_ready?() do
-      personalization = personalization_map(snapshot)
+  # Every save seeds, and the first boot seeds before any save
+  # (`Setup.HomeSeeder`): the seeder is per-file idempotent and never
+  # overwrites, so a later save can only add back a file someone deleted.
+  # Until 2026-09-27 the seed waited for readiness to gate on nothing, which
+  # tied the prompt files to the last screen of setup and left every home that
+  # never reached it on in-memory placeholders.
+  defp seed_prompt_files(snapshot) do
+    case prompt_seeder().seed(personalization_map(snapshot)) do
+      {:ok, results} ->
+        {:ok, results}
 
-      case SetupSeeder.seed(personalization) do
-        {:ok, results} ->
-          {:ok, results}
-
-        {:error, reason} = error ->
-          Logger.warning("setup wizard prompt seed failed: #{inspect(reason)}")
-          error
-      end
-    else
-      {:ok, []}
+      {:error, reason} = error ->
+        Logger.warning("setup wizard prompt seed failed: #{inspect(reason)}")
+        error
     end
   end
 
-  # Keyed on the GATING predicate, not on `status`. The seeder's only inputs are
-  # the personalization values, which are a gating component; a half-configured
-  # channel has nothing to do with prompt files, and gating a seed on it would
-  # withhold them from every home that ships `telegram: [enabled: true]`.
-  # `SetupSeeder.seed/1` is per-file idempotent and never overwrites, so running
-  # it on more saves is safe by construction.
-  defp seeding_ready? do
-    Readiness.report().failures |> Readiness.gating_failures() |> Enum.empty?()
+  # `SetupSeeder` never rewrites a `USER.md` that exists, and the first boot
+  # seeds one from the machine's facts, so the person's own answers would never
+  # reach the file the model reads. The seed has upserted them as memory rows;
+  # the rebuild renders the file from those rows.
+  defp refresh_user_document(answers) do
+    if Enum.any?(@personalization_keys, &answered?(answers, &1)) do
+      case prompt_seeder().rebuild_user_document([]) do
+        {:ok, _rendered} ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning(
+            "USER.md was not rebuilt after a personalization save: #{inspect(reason)}"
+          )
+      end
+    end
+
+    :ok
   end
+
+  # The prompt seeder needs the resource registry and the memory repo, which a
+  # test that saves a setting has no reason to run; `config/test.exs` pins a
+  # stub here and the seeding tests put the real one back.
+  defp prompt_seeder, do: Application.get_env(:fermix_core, :prompt_seeder, SetupSeeder)
 
   defp personalization_map(snapshot) do
     snapshot

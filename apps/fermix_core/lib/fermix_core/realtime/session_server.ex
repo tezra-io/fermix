@@ -7,8 +7,11 @@ defmodule FermixCore.Realtime.SessionServer do
 
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Advertisement
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.ComputerUse.Probe, as: ComputerUseProbe
   alias FermixCore.ComputerUse.SessionManager, as: ComputerUseSessionManager
   alias FermixCore.Memory.Config, as: MemoryConfig
@@ -27,6 +30,10 @@ defmodule FermixCore.Realtime.SessionServer do
 
   @pcm16_bytes_per_ms 48
   @minute_ms 60_000
+
+  # Fermix's own words to the model when the owner does not say yes to a parked
+  # access-sensitive command (`Capabilities.AccessGate`).
+  @access_declined "The owner did not say yes, so the command was not sent."
 
   # Screen-feed frames are cheap context, not a record: keep only the newest few
   # in the provider conversation and evict the rest, or every retained frame is
@@ -126,6 +133,9 @@ defmodule FermixCore.Realtime.SessionServer do
       # tags `:interactive` in TurnRunner. `:voice` is already whitelisted in
       # `ComputerUse.Safety`. put_new so a test can override.
       |> Map.put_new(:computer_use_origin, :voice)
+      # The call an access-sensitive command parks on, so the owner's spoken
+      # yes in this call can answer it (`Capabilities.AccessGate`).
+      |> Map.put_new(:voice_call_id, to_string(session_scope))
 
     prompt_loader = Keyword.get(opts, :prompt_loader)
 
@@ -192,16 +202,32 @@ defmodule FermixCore.Realtime.SessionServer do
            screen_frame_items: [],
            tool_image_items: [],
            # `response_active?` mirrors the provider's response lifecycle
-           # (response_created → response.done); `needs_response?` records tool
-           # outputs appended while a trigger could not be sent. Together they
-           # make "exactly one response.create per answered batch" hold under
-           # EVERY interleaving of dispatches, completions, and response.done.
+           # (response_created → response.done); `needs_response?` records a
+           # trigger that is owed: tool outputs appended while a trigger could not
+           # be sent, or a trigger OpenAI rejected because of a server-VAD response
+           # the session had not heard of yet. Together they give every answered
+           # batch a response that starts after its outputs: one trigger per
+           # batch, plus one re-send per such rejection.
            response_active?: false,
            needs_response?: false,
            screen_share_resume?: false,
            screen_feed_module: Keyword.get(opts, :screen_feed_module, ScreenFeed),
            screen_feed_opts: Keyword.get(opts, :screen_feed_opts, []),
-           screen_probe: Keyword.get(opts, :screen_probe, &ComputerUseProbe.run/0)
+           screen_probe: Keyword.get(opts, :screen_probe, &ComputerUseProbe.run/0),
+           # Content someone else could have written that this call has read
+           # (`UntrustedContent.outside_source/1`, plus a shared screen). Never
+           # reset: the provider keeps every tool output for the whole call, so
+           # a page read at minute one can still steer a command at minute five.
+           outside_sources: MapSet.new(),
+           # `{intent_id, item_id}`: the first input item committed after an
+           # access-sensitive command parked, whose transcript is the owner's
+           # answer. `access_dispatches` are the confirmed runs in flight
+           # (task ref -> {intent id, tool}). `held_outcomes` are their outcomes
+           # that landed while the call was not live, oldest first, spoken once
+           # OpenAI confirms the next socket: at most one per confirmed run.
+           access_answer: nil,
+           access_dispatches: %{},
+           held_outcomes: []
          }}
 
       {:error, reason} ->
@@ -211,8 +237,8 @@ defmodule FermixCore.Realtime.SessionServer do
 
   @impl true
   def handle_call(:call_start, _from, %{session_update_event: nil} = state) do
-    with {:ok, openai_pid, state} <- open_openai_session(state),
-         {:ok, event} <- build_session_update_event(state) do
+    with {:ok, event} <- build_session_update_event(state),
+         {:ok, openai_pid, state} <- open_openai_session(state) do
       case send_provider_event(state.openai_client, openai_pid, event) do
         :ok ->
           RealtimeTelemetry.call_start(telemetry_meta(state))
@@ -379,8 +405,26 @@ defmodule FermixCore.Realtime.SessionServer do
     end
   end
 
+  # OpenAI answered the call's socket with an error before its `session.updated`:
+  # this socket will never configure the call. `session.update` is the first event
+  # the session sends on every socket (`call_start`, `resume_provider_session`), and
+  # OpenAI answers a socket's events in order (tla/specs/realtime_session assumes
+  # the same), so an error that arrives first is about that `session.update` or
+  # the connection itself; a refused key (`invalid_api_key`) is the common one. It
+  # is never one of the hiccups a live call forgives below: those answer later
+  # events, which OpenAI reads after it has sent `session.updated`. So ANY error
+  # here ends the call, not a list of codes: a code the list missed would be the
+  # old dead end, a call that waits for a `listening` that never comes until the
+  # companion gives up on its own start deadline and blames a slow start.
   @impl true
-  def handle_info({:openai_realtime_event, event}, state) do
+  def handle_info(
+        {:openai_realtime_event, pid, {:error, error}},
+        %{openai_pid: pid, provider_ready?: false} = state
+      ) do
+    refuse_call(state, error)
+  end
+
+  def handle_info({:openai_realtime_event, pid, event}, %{openai_pid: pid} = state) do
     {:noreply, handle_provider_event_internal(event, state)}
   end
 
@@ -392,7 +436,29 @@ defmodule FermixCore.Realtime.SessionServer do
       when is_reference(ref) and is_map_key(pending, ref) do
     Process.demonitor(ref, [:flush])
     {{_task, call}, remaining} = Map.pop(pending, ref)
-    {:noreply, apply_tool_result(result, call, %{state | pending_tool_calls: remaining})}
+    state = record_outside_source(%{state | pending_tool_calls: remaining}, call)
+    {:noreply, apply_tool_result(result, call, state)}
+  end
+
+  # A confirmed access-sensitive command finished. The model is told through
+  # Fermix's status item, and one response is owed so it can tell the owner, in
+  # this conversation or, when the call is not live, the next one OpenAI
+  # confirms. The outcome carries the helper's own words, so they reach the
+  # model framed as data, like the tool results it reads.
+  def handle_info({ref, {status, outcome}}, %{access_dispatches: dispatches} = state)
+      when is_reference(ref) and is_map_key(dispatches, ref) and status in [:ok, :error] and
+             is_binary(outcome) do
+    Process.demonitor(ref, [:flush])
+    text = "The owner said yes. " <> UntrustedContent.frame("access_gate", outcome)
+    {:noreply, access_dispatched(state, ref, text)}
+  end
+
+  # It crashed: whether the command reached the helper is unknown, and the model
+  # must not guess it did not.
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{access_dispatches: dispatches} = state)
+      when is_map_key(dispatches, ref) do
+    Logger.error("realtime: a confirmed access-sensitive command crashed: #{inspect(reason)}")
+    {:noreply, access_dispatched(state, ref, AccessGate.outcome_unknown_text())}
   end
 
   # A tool task crashed. OpenAI is still waiting for this call's output, so
@@ -415,28 +481,23 @@ defmodule FermixCore.Realtime.SessionServer do
     {:noreply, note_screen_feed_stopped(state, reason, measurements)}
   end
 
-  def handle_info({:openai_realtime_disconnect, _reason}, %{session_update_event: nil} = state) do
-    {:noreply, state}
-  end
-
-  def handle_info({:openai_realtime_disconnect, _reason}, state) do
-    case schedule_reconnect(state) do
-      {:ok, state} ->
-        {:noreply, state}
-
-      :exhausted ->
-        end_call(state, :provider_disconnected)
-    end
-  end
-
   # NOT forwarded to the companion: the pet treats an `error` frame as terminal
   # (mic down, call over), which is the wrong response to a non-terminal provider
   # hiccup on a call that is still live — a benign truncate/delete race was killing
   # the pet's side mid-game while the daemon session played on. A genuinely
   # terminal failure reaches the pet through `end_call`/reconnect-exhausted.
-  def handle_info({:openai_realtime_error, reason}, state) do
+  def handle_info({:openai_realtime_error, pid, reason}, %{openai_pid: pid} = state) do
     Logger.warning("realtime: provider transport error: #{reason_to_string(reason)}")
     RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(reason))
+    {:noreply, state}
+  end
+
+  # A socket this session closed, replaced or abandoned. Its conversation is not the
+  # call's, so nothing it reports is acted on: only `openai_pid`'s messages match the
+  # event and error clauses above, as only its death matches the EXIT clause.
+  def handle_info({tag, pid, _message}, state)
+      when tag in [:openai_realtime_event, :openai_realtime_error] and is_pid(pid) do
+    Logger.debug("realtime: dropped #{tag} from #{inspect(pid)}, not the call's socket")
     {:noreply, state}
   end
 
@@ -462,12 +523,12 @@ defmodule FermixCore.Realtime.SessionServer do
   def handle_info(:reconnect_attempt, state) do
     case attempt_reconnect(state) do
       {:ok, openai_pid, state} ->
+        # Not back yet: only this socket's session.updated resets reconnect_attempts.
         {:noreply,
          %{
            state
            | openai_pid: openai_pid,
              provider_ready?: false,
-             reconnect_attempts: 0,
              reconnect_timer: nil
          }}
 
@@ -505,6 +566,7 @@ defmodule FermixCore.Realtime.SessionServer do
     # place and cannot be skipped by whichever exit fired. All of it is idempotent.
     cancel_pending_tool_calls(state)
     cancel_timers(state)
+    warn_unspoken_outcomes(state)
     # Graceful, not link-propagated: the feed traps exits, and only its own
     # `terminate/2` releases the capture sidecar (Port close alone leaves the OS
     # process alive, which is how a leaked client wedges capture system-wide).
@@ -617,10 +679,6 @@ defmodule FermixCore.Realtime.SessionServer do
             speech_active?: false
         }
 
-        # A socket death can produce BOTH a disconnect notice and an EXIT, so
-        # cancel any timer already armed rather than stack a second attempt on top
-        # of the first.
-        if is_reference(state.reconnect_timer), do: Process.cancel_timer(state.reconnect_timer)
         timer = Process.send_after(self(), :reconnect_attempt, delay)
 
         {:ok,
@@ -644,8 +702,9 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   # A socket that opened but could not be configured is CLOSED before the next
-  # attempt: leaving it open leaks a billed upstream connection per retry, and its
-  # later EXIT would race the attempt that replaced it.
+  # attempt: leaving it open leaks an upstream connection per retry. It never
+  # became openai_pid, so what it sends before it dies, and its EXIT once its close
+  # finishes, are dropped: they cannot pass for the socket that replaced it.
   defp resume_provider_session(state, openai_pid) do
     case send_provider_event(state.openai_client, openai_pid, state.session_update_event) do
       :ok ->
@@ -668,11 +727,41 @@ defmodule FermixCore.Realtime.SessionServer do
   # call then streamed audio into a void indefinitely while the companion sat on
   # its last frame (observed: 43 s, ended only by the operator). The fix is not to
   # detect that state — it is to make it unrepresentable.
-  defp end_call(state, reason) when is_atom(reason) do
-    notify(state.companion, %{type: "error", reason: Atom.to_string(reason)})
+  defp end_call(state, reason, detail \\ nil) when is_atom(reason) do
+    notify(state.companion, terminal_error(reason, detail))
     RealtimeTelemetry.call_stop(telemetry_meta(state), usage_measurements(state.usage), reason)
     {:stop, {:shutdown, reason}, state}
   end
+
+  # A refusal carries the published `kind` and a `detail` sentence, as a Live
+  # call's does (PROTOCOL.md); every other ending keeps the frame it always had.
+  defp terminal_error(reason, nil), do: %{type: "error", reason: Atom.to_string(reason)}
+
+  defp terminal_error(:provider_refused, detail) when is_binary(detail),
+    do: %{type: "error", reason: "provider_refused", kind: "provider_refused", detail: detail}
+
+  # OpenAI refused the call's session. Reported like every provider error, then
+  # ended: `terminate/2` closes the refused socket.
+  defp refuse_call(state, error) do
+    Logger.warning("realtime: OpenAI refused the session: #{refusal_log(error)}")
+    RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
+    end_call(state, :provider_refused, refusal_detail(error))
+  end
+
+  # The companion puts `detail` on screen, so it is Fermix's sentence, never
+  # OpenAI's message: for a refused key that message quotes the key back, masked
+  # but with its last characters. OpenAI's `code` is a fixed identifier, safe to
+  # show and what a reader searches for, so it is named when it looks like one.
+  defp refusal_detail(%{"code" => "invalid_api_key"}),
+    do: "OpenAI did not accept the API key (invalid_api_key)."
+
+  defp refusal_detail(%{"code" => code}) when is_binary(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code),
+      do: "OpenAI refused the voice session (#{code}).",
+      else: "OpenAI refused the voice session."
+  end
+
+  defp refusal_detail(_error), do: "OpenAI refused the voice session."
 
   # A tool task belongs to the provider connection whose call it answers. When
   # that connection is lost — teardown (drop_session), reconnect (a fresh
@@ -811,9 +900,9 @@ defmodule FermixCore.Realtime.SessionServer do
     %{state | assistant_transcript: state.assistant_transcript <> text}
   end
 
-  defp handle_provider_event_internal({:user_transcript_done, text}, state) do
+  defp handle_provider_event_internal({:user_transcript_done, item_id, text}, state) do
     notify(state.companion, %{type: "transcript_delta", role: "user", text: text})
-    %{state | user_transcript: text}
+    answer_access(%{state | user_transcript: text}, item_id, text)
   end
 
   defp handle_provider_event_internal({:session_created, _event}, state) do
@@ -831,10 +920,11 @@ defmodule FermixCore.Realtime.SessionServer do
     RealtimeTelemetry.session_updated(telemetry_meta(state))
 
     state
-    |> Map.put(:provider_ready?, true)
+    |> Map.merge(%{provider_ready?: true, reconnect_attempts: 0})
     |> start_timers()
     |> notify_listening_state()
     |> resume_screen_feed()
+    |> speak_held_outcomes()
   end
 
   # The provider COMMITTED the operator's speech as a turn — the conversation has
@@ -848,9 +938,9 @@ defmodule FermixCore.Realtime.SessionServer do
   # end and only afterwards answered what had been said over it (observed live).
   # A commit is the provider's own decision, so acting on it cannot cut a reply off
   # for a noise the way `speech_started` would.
-  defp handle_provider_event_internal({:input_audio_committed, _event}, state) do
+  defp handle_provider_event_internal({:input_audio_committed, event}, state) do
     notify(state.companion, %{type: "playback_stop"})
-    state
+    bind_access_answer(state, event)
   end
 
   # Speech boundaries drive the feed's cadence: tighten it while the operator is
@@ -910,9 +1000,11 @@ defmodule FermixCore.Realtime.SessionServer do
       handle_active_response_race(error, state)
     else
       # Reported, not fatal. If the error is genuinely terminal OpenAI closes the
-      # socket and the disconnect/EXIT clauses handle it as the one reconnect path;
+      # socket and its EXIT clause handles that as the one reconnect path;
       # tearing down here instead disarmed that path. No companion `error` frame:
-      # the pet reads that as terminal and shuts its side down mid-call.
+      # the pet reads that as terminal and shuts its side down mid-call. On the
+      # socket, an error before `session.updated` ends the call instead
+      # (`refuse_call/2`): there is no configured session to keep.
       Logger.warning("OpenAI Realtime error: #{inspect(error)}")
       RealtimeTelemetry.provider_error(telemetry_meta(state), reason_to_string(error))
       state
@@ -931,7 +1023,7 @@ defmodule FermixCore.Realtime.SessionServer do
   # starving `audio_chunk`/`interrupt` and wedging the whole call. The result
   # comes back as `{ref, result}` (or `:DOWN` on crash) and is answered there.
   defp dispatch_tool_call(call, state) do
-    bridge = state.tool_bridge
+    bridge = %{state.tool_bridge | context: tool_call_context(state)}
 
     task =
       Task.Supervisor.async_nolink(state.task_supervisor, fn ->
@@ -1022,6 +1114,8 @@ defmodule FermixCore.Realtime.SessionServer do
     case state.screen_feed_module.start_link(opts) do
       {:ok, pid} ->
         RealtimeTelemetry.screen_feed_start(telemetry_meta(state), display)
+        # What is on a shared screen is outside content like a fetched page.
+        state = add_outside_source(state, {:tool, ScreenShare.tool_name()})
         # Deliberately NO companion `state` frame. The wire's state vocabulary is
         # closed and the companion maps anything it does not know to `idle`, so a
         # "sharing_screen" state made the pet look like the call had ENDED the
@@ -1064,7 +1158,7 @@ defmodule FermixCore.Realtime.SessionServer do
 
       {:error, reason} ->
         Logger.warning("realtime: screen feed did not resume after reconnect: #{inspect(reason)}")
-        inject_screen_notice(state, ScreenShare.stopped_text({:capture_unavailable, reason}))
+        inject_status_notice(state, ScreenShare.stopped_text({:capture_unavailable, reason}))
     end
   end
 
@@ -1151,20 +1245,146 @@ defmodule FermixCore.Realtime.SessionServer do
     # otherwise it keeps narrating a screen it can no longer see.
     if reason == :requested,
       do: state,
-      else: inject_screen_notice(state, ScreenShare.stopped_text(reason))
+      else: inject_status_notice(state, ScreenShare.stopped_text(reason))
   end
 
   # Fermix's own status text, injected as passive context (no `response.create`):
   # the model picks it up on its next turn instead of interrupting the operator.
-  defp inject_screen_notice(state, text) do
+  defp inject_status_notice(state, text) do
     case send_openai_seq(state, [OpenAIClient.status_item_event(text)]) do
       :ok ->
         state
 
       {:error, reason} ->
-        Logger.debug("realtime: could not inject screen notice: #{inspect(reason)}")
+        Logger.debug("realtime: could not inject status notice: #{inspect(reason)}")
         state
     end
+  end
+
+  # --- Access-sensitive commands (`Capabilities.AccessGate`) ----------------
+
+  defp record_outside_source(state, call) do
+    case Map.fetch(state.tool_bridge.capabilities, tool_name(call)) do
+      {:ok, capability} -> add_outside_source(state, UntrustedContent.outside_source(capability))
+      :error -> state
+    end
+  end
+
+  # What the gate reads for one call: what the call has read from outside, and
+  # whether a command it parked still waits on the owner's answer. While one
+  # waits nothing else runs, so the model cannot supply that yes itself (a shell
+  # `say yes` the mic would pick up). A call that has read nothing from outside
+  # cannot have parked one, so it never asks the store.
+  defp tool_call_context(state) do
+    context = Map.put(state.tool_bridge.context, :outside_sources, state.outside_sources)
+
+    if MapSet.size(state.outside_sources) > 0 and AccessGate.waiting?(context),
+      do: Map.put(context, :access_waiting, true),
+      else: context
+  end
+
+  defp add_outside_source(state, nil), do: state
+
+  defp add_outside_source(state, source),
+    do: %{state | outside_sources: MapSet.put(state.outside_sources, source)}
+
+  # The owner's answer is the first input item committed after the command
+  # parked, bound by item id: a late transcript of earlier speech can never
+  # answer it. A call that has read nothing from outside cannot have parked one.
+  defp bind_access_answer(state, event) do
+    if MapSet.size(state.outside_sources) == 0 do
+      state
+    else
+      state.tool_context
+      |> Map.fetch!(:voice_call_id)
+      |> AccessPending.voice_pending()
+      |> bind_answer(state, Map.get(event, "item_id"))
+    end
+  end
+
+  defp bind_answer({:ok, intent_id}, %{access_answer: {intent_id, _item}} = state, _item_id),
+    do: state
+
+  defp bind_answer({:ok, intent_id}, state, item_id) when is_binary(item_id),
+    do: %{state | access_answer: {intent_id, item_id}}
+
+  defp bind_answer(_none_or_no_item, state, _item_id), do: %{state | access_answer: nil}
+
+  defp answer_access(%{access_answer: {intent_id, item_id}} = state, item_id, text)
+       when is_binary(text) do
+    state = %{state | access_answer: nil}
+
+    case AccessGate.answer_spoken(intent_id, text) do
+      {:confirmed, ^intent_id} -> start_access_dispatch(state, intent_id)
+      :declined -> inject_status_notice(state, @access_declined)
+    end
+  end
+
+  defp answer_access(state, _item_id, _text), do: state
+
+  # Off the session loop, like a tool call: the helper can take seconds. The
+  # tool is read now, while the record waits, for the warning an unspoken
+  # outcome needs (`warn_unspoken_outcomes/1`); nil once the record expired,
+  # when the run finds nothing to do either.
+  defp start_access_dispatch(state, intent_id) do
+    tool =
+      case AccessPending.tool(intent_id) do
+        {:ok, tool} -> tool
+        :error -> nil
+      end
+
+    task =
+      Task.Supervisor.async_nolink(state.task_supervisor, fn -> AccessGate.confirm(intent_id) end)
+
+    dispatch = {intent_id, tool}
+    %{state | access_dispatches: Map.put(state.access_dispatches, task.ref, dispatch)}
+  end
+
+  defp access_dispatched(state, ref, text) do
+    {{intent_id, tool}, dispatches} = Map.pop!(state.access_dispatches, ref)
+    speak_outcome(%{state | access_dispatches: dispatches}, {intent_id, tool, text})
+  end
+
+  # A reconnect leaves a confirmed run going (a car command must not be cut off
+  # mid-flight), so its outcome can land while the call is not live: before the
+  # next socket's session.updated, or on a socket that died with its EXIT still
+  # queued, when the status item's send fails. Either way it is held and spoken
+  # by `speak_held_outcomes/1` once OpenAI confirms the next socket, through
+  # this same status item and `finish_tool_turn/1`.
+  defp speak_outcome(%{provider_ready?: false} = state, outcome), do: hold_outcome(state, outcome)
+
+  defp speak_outcome(state, {_intent_id, _tool, text} = outcome) do
+    case send_openai_seq(state, [OpenAIClient.status_item_event(text)]) do
+      :ok ->
+        finish_tool_turn(state)
+
+      {:error, reason} ->
+        Logger.info(
+          "realtime: a confirmed command's outcome waits for the reconnect: " <>
+            reason_to_string(reason)
+        )
+
+        hold_outcome(state, outcome)
+    end
+  end
+
+  defp hold_outcome(state, outcome),
+    do: %{state | held_outcomes: state.held_outcomes ++ [outcome]}
+
+  # Oldest first. One that cannot be sent is held again, for the next socket.
+  defp speak_held_outcomes(%{held_outcomes: held} = state),
+    do: Enum.reduce(held, %{state | held_outcomes: []}, &speak_outcome(&2, &1))
+
+  # The call ended before it was live again: nothing will speak these. The
+  # owner said yes and cannot hear how it went, so the operator is told which
+  # command to check. Never the arguments.
+  defp warn_unspoken_outcomes(state) do
+    Enum.each(state.held_outcomes, fn {intent_id, tool, _text} ->
+      Logger.warning(
+        "realtime: the call ended before a confirmed command's outcome was spoken " <>
+          "(intent #{intent_id}, tool #{inspect(tool)})"
+      )
+    end)
   end
 
   defp set_screen_feed_speaking(%{screen_feed: pid} = state, speaking?) when is_pid(pid) do
@@ -1262,8 +1482,10 @@ defmodule FermixCore.Realtime.SessionServer do
   # again. The trigger is therefore deferred while other calls are still in
   # flight OR while the provider's own response is still active (the calls were
   # emitted by it; a trigger sent before its response.done is the race itself);
-  # `flush_deferred_response/1` sends it on response.done. The end of the batch
-  # also ends the feed's acting pause: the model is about to look again.
+  # `flush_deferred_response/1` sends it on response.done. The deferral avoids
+  # every rejection the session can foresee; `handle_active_response_race/2`
+  # re-arms the ones it cannot. The end of the batch also ends the feed's acting
+  # pause: the model is about to look again.
   defp finish_tool_turn(%{pending_tool_calls: pending} = state) when map_size(pending) > 0 do
     %{state | needs_response?: true}
   end
@@ -1290,9 +1512,26 @@ defmodule FermixCore.Realtime.SessionServer do
     "item_ti" <> Base.encode32(:crypto.strong_rand_bytes(10), case: :lower, padding: false)
   end
 
+  # OpenAI rejected our response.create because a response the session had not
+  # heard of yet was running: server VAD starts one on the operator's speech, and
+  # its response.created was still on the wire. That response may have begun
+  # before our outputs joined, and nothing the session receives says which, so the
+  # trigger is owed again: re-armed here, and sent by `flush_deferred_response/1`
+  # on that response's response.done once no call is pending. Never sent from
+  # here: until that response ends, a re-send would only be rejected again.
+  # Bounded: each re-send needs another response the server started.
+  #
+  # Relies on the error arriving before the rejecting response's response.done
+  # (not documented, but that response is still running when OpenAI reads our
+  # create). Cost: when the rejecting response began after the outputs joined, it
+  # has read them, and the re-send asks for one reply the model did not need.
   defp handle_active_response_race(error, state) do
-    Logger.debug("Ignoring OpenAI Realtime active-response race: #{inspect(error)}")
-    state
+    Logger.info(
+      "realtime: response.create rejected by an active response, trigger re-armed " <>
+        "(#{reason_to_string(error)})"
+    )
+
+    %{state | needs_response?: true}
   end
 
   defp close_openai(%{openai_pid: pid, openai_client: client}) when is_pid(pid),
@@ -1332,11 +1571,11 @@ defmodule FermixCore.Realtime.SessionServer do
   defp send_openai(_state, _event), do: {:error, :provider_not_connected}
 
   # A send that fails is REPORTED, never fatal. Connection liveness has exactly one
-  # owner — the socket's disconnect/EXIT clauses — and this used to be a second,
-  # contradictory one: a failed send tore the session down, nilling the very fields
-  # those clauses match on, so the reconnect that should have followed was
-  # swallowed. If the socket really is gone its own signal arrives and reconnects;
-  # if the payload was bad, ending the call would not have helped.
+  # owner — the socket's EXIT clause — and this used to be a second, contradictory
+  # one: a failed send tore the session down, nilling the very fields that clause
+  # matches on, so the reconnect that should have followed was swallowed. If the
+  # socket really is gone its own EXIT arrives and reconnects; if the payload was
+  # bad, ending the call would not have helped.
   defp send_openai_events(state, events) do
     case send_openai_seq(state, events) do
       :ok -> state
@@ -1642,4 +1881,9 @@ defmodule FermixCore.Realtime.SessionServer do
   defp tool_name(_call), do: "unknown"
 
   defp call_id(call), do: Map.get(call, "call_id") || Map.get(call, :call_id) || ""
+
+  # What `refuse_call/2` logs: what OpenAI refused, without its message, for the
+  # reason `detail` leaves it out: a refused key's message quotes the key's tail.
+  defp refusal_log(%{} = error), do: inspect(Map.take(error, ["type", "code", "param"]))
+  defp refusal_log(error), do: inspect(error)
 end

@@ -83,28 +83,72 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
-  # The channel is feature-flagged with no setup surface, so the runtime
-  # self-reference must name the one enable path (the config flag) and must not
-  # point an owner at surfaces that no longer exist. The refutations name
-  # concrete withdrawn artifacts rather than a phrasing allowlist, so a true
-  # sentence that happens to mention setup (e.g. `--migrate-secrets`) stays
-  # legal while a re-added mobile step or flag fails here.
-  test "documents mobile as a config-flag-only channel, never a setup step" do
+  # The channel's surface is the management protocol: a settings section and
+  # the `mobile.*` methods a desktop Phone pane would be built on, with the
+  # config flag the route on a host with no pane. The self-reference must
+  # name both, must say pairing on an app-managed Mac is the app's, and must not
+  # point an owner at surfaces that do not exist. The refutations name concrete
+  # withdrawn artifacts rather than a phrasing allowlist, so a true sentence
+  # that happens to mention setup (e.g. `--migrate-secrets`) stays legal while a
+  # re-added mobile setup step or flag, or the withdrawn "no setup surface"
+  # claim, fails here.
+  test "documents mobile's management surface and the config route, never a setup step" do
     reference = File.read!(mobile_reference_path())
     paragraph = mobile_paragraph()
 
     for text <- [reference, paragraph] do
       assert text =~ "[fermix_channels.mobile]"
       assert text =~ "enabled = true"
+      assert text =~ "channels.mobile"
+      assert text =~ "mobile.*"
+      assert text =~ "fermix pair"
+      assert text =~ "never the CLI"
       refute text =~ "Channels page"
       refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"
       refute text =~ "--mobile-push"
+      refute text =~ "no setup surface"
     end
 
     assert reference =~ "config.toml"
     assert reference =~ "restart"
-    assert reference =~ "no setup surface"
+
+    for word <- ~w(awaiting_scan awaiting_decision cancelled device_disconnected) do
+      assert reference =~ word, "the mobile reference does not describe #{word}"
+    end
+  end
+
+  # The companion socket has no setting, so the runtime self-reference must not
+  # invent one, and it must say the app half has not shipped: an owner is never
+  # walked to a chat window that is not there.
+  test "documents the companion chat socket, its boundaries and its reads" do
+    paragraph = companion_paragraph()
+    # The reference is hard-wrapped; a phrase may span a line break.
+    reference = companion_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert paragraph =~ ~s(file: "companion")
+
+    for text <- [paragraph, reference] do
+      assert text =~ "companion.sock"
+      assert text =~ "0600"
+      assert text =~ "client message id"
+      assert text =~ ~s(delivery_mode: "origin")
+      assert text =~ "No released Fermix.app" or text =~ "no released Fermix.app"
+      refute text =~ "[fermix_channels.companion]"
+    end
+
+    for required <- [
+          "still waiting behind another turn, or not yet queued",
+          "/stop",
+          "forward",
+          "backward",
+          "Full-text search",
+          "whether or not the app is connected",
+          "Attachments do not travel",
+          "companion:main"
+        ] do
+      assert reference =~ required, "companion self-knowledge does not mention #{required}"
+    end
   end
 
   # M34 §4 changes what a whole family of CLI verbs does on an app-managed
@@ -159,6 +203,89 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
              reference =~ "ever deletes a Fermix home"
   end
 
+  # Production Fermix on a Mac is the app, which ships no `fermix` command, so
+  # an owner asking "how do I set up / update you?" must get the app's own
+  # labels. Each label below is a control a correct answer cannot do without.
+  # The refutation names a withdrawn artifact: no desktop package ships.
+  test "answers a Mac app owner with the app's own controls" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(macos_app_reference_path())
+
+    assert body =~ "Check for Updates…"
+
+    for label <- [
+          "Set up Fermix",
+          "Open Login Items settings",
+          "Connect your AI",
+          "Verify and save",
+          "Use as primary",
+          "Restart Fermix…",
+          "Check for Updates…",
+          "Reload settings from disk"
+        ] do
+      assert reference =~ label, "macos_app reference does not name #{label}"
+    end
+
+    for text <- [body, reference, File.read!(service_unit_reference_path())] do
+      refute text =~ "fermix-desktop"
+    end
+  end
+
+  # Voice, computer use, the notetaker and the sandbox are settings panes on a
+  # Mac, so "how do I turn it on?" needs the pane. The refutation names a
+  # withdrawn artifact: the voice companion ships inside the Fermix app, not
+  # as a separate FermixPet app.
+  test "sends a Mac app owner to the pane for each desktop feature" do
+    body = File.read!(self_knowledge_path())
+
+    for pane <- [
+          "Settings > Voice",
+          "Settings > Computer",
+          "Settings > Meetings",
+          "Settings > Sandbox"
+        ] do
+      assert body =~ pane, "self-knowledge body does not name #{pane}"
+    end
+
+    for text <- [
+          body,
+          File.read!(reference_path("voice")),
+          File.read!(reference_path("computer_use"))
+        ] do
+      refute text =~ "FermixPet"
+    end
+  end
+
+  # GPT-Live has no noise or echo settings, so "why does it hear my keyboard or
+  # its own voice?" is answered by the Mac's voice processing and the daemon's
+  # echo window, and a Linux client has to bring its own.
+  test "documents where a call's noise and echo are handled" do
+    reference = File.read!(reference_path("voice"))
+
+    for required <- [
+          "GPT-Live takes no noise, echo or voice-detection settings",
+          "echo cancellation, noise suppression",
+          "in the 2 s after it",
+          "Headphones avoid echo",
+          "A Linux client must cancel echo"
+        ] do
+      assert reference =~ required, "the voice reference does not say #{required}"
+    end
+  end
+
+  # After the first provider, the primary moves only by an explicit action; a
+  # self-reference that says saving a provider promotes it sends an owner to
+  # the wrong control.
+  test "names the explicit action that changes the primary provider" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(providers_reference_path())
+
+    for text <- [body, reference] do
+      assert text =~ "Use as primary"
+      assert text =~ "Set primary"
+    end
+  end
+
   # No repository serves the packages, so the family commands `fermix upgrade`
   # prints find nothing. An agent asked "how do I update you?" on a packaged
   # host must not stop at `apt upgrade`.
@@ -184,12 +311,78 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # "How do I connect Telegram?" needs the values, where each comes from, where
+  # it is entered and what to send first; the always-loaded body keeps the
+  # roster, the owner rule and one loader, and the reference carries the rest.
+  # Each required string is a vendor step or a Fermix key a correct answer
+  # cannot do without, not a phrasing.
+  test "documents how to connect each chat channel, from its values to the first message" do
+    paragraph = channels_paragraph()
+    reference = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert paragraph != "", "self-knowledge never lists the chat channels"
+    assert paragraph =~ ~s(file: "channel_setup")
+    assert paragraph =~ "owner_user_id"
+
+    for required <- [
+          # Telegram
+          "@BotFather",
+          "/newbot",
+          "@userinfobot",
+          "/start",
+          # Discord
+          "Message Content Intent",
+          "Interactions Endpoint URL",
+          "Copy User ID",
+          # Slack
+          "xoxb-",
+          "Signing Secret",
+          "/webhook/slack",
+          "app_mention",
+          "message.im",
+          # WhatsApp
+          "/webhook/whatsapp",
+          "Verify and save",
+          "Phone number ID",
+          # Signal
+          "signal-cli",
+          # Where the values go and who may talk
+          "Settings > Channels",
+          "Restart to apply",
+          "Apply & restart",
+          "--telegram-owner-user-id",
+          "owner_user_id",
+          "allowed_user_ids",
+          "allowed_sender_ids",
+          "command_allowlist",
+          "/whoami"
+        ] do
+      assert reference =~ required, "channel_setup reference does not mention #{required}"
+    end
+  end
+
+  defp channels_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.starts_with?(&1, "Channels:"))
+    |> Enum.join("\n\n")
+  end
+
+  defp channel_setup_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/channel_setup.md", __DIR__)
+  end
+
   defp service_paragraph do
     self_knowledge_path()
     |> File.read!()
     |> String.split("\n")
     |> Enum.filter(&String.starts_with?(&1, "- Service:"))
     |> Enum.join("\n")
+  end
+
+  defp providers_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/providers.md", __DIR__)
   end
 
   defp service_unit_reference_path do
@@ -228,8 +421,24 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   defp self_knowledge_path,
     do: Path.expand("../../../priv/skills/self_knowledge/SKILL.md", __DIR__)
 
+  defp companion_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "Companion chat socket"))
+    |> Enum.join("\n\n")
+  end
+
+  defp companion_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/companion.md", __DIR__)
+  end
+
   defp mobile_reference_path do
     Path.expand("../../../priv/skills/self_knowledge/references/mobile.md", __DIR__)
+  end
+
+  defp reference_path(name) do
+    Path.expand("../../../priv/skills/self_knowledge/references/#{name}.md", __DIR__)
   end
 
   test "stays decomposed: main body has headroom, references are bounded, pointers resolve" do
@@ -289,7 +498,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
 
     # Each externalized feature keeps a stub + loader in the main body.
-    for name <- ~w(coding_harness computer_use mobile plugins voice) do
+    for name <- ~w(coding_harness companion computer_use mobile plugins voice) do
       assert body =~ ~s(file: "#{name}"), "missing stub loader for #{name}"
     end
 

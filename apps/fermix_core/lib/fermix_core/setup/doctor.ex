@@ -77,6 +77,7 @@ defmodule FermixCore.Setup.Doctor do
           channel: atom(),
           enabled: boolean(),
           owner_user_id: String.t() | nil,
+          sole_allowed_id?: boolean(),
           command_allowlist: [String.t()]
         }
   @type web_search_report :: %{
@@ -132,8 +133,15 @@ defmodule FermixCore.Setup.Doctor do
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
           | {:server_error, status :: pos_integer(), body :: term()}
           | {:network, reason :: term()}
+  @type key_probe_error ::
+          :no_key
+          | {:refused, status :: 401 | 403, code :: String.t() | nil}
+          | {:server_error, status :: pos_integer()}
+          | {:network, reason :: term()}
 
   @openai_default_url "https://api.openai.com/v1/responses"
+  # The host both voice engines dial. Listing models is free and sends no prompt.
+  @openai_models_url "https://api.openai.com/v1/models"
   @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   # xAI base_url is a ROOT (the adapter appends /responses); the probe must
@@ -208,6 +216,52 @@ defmodule FermixCore.Setup.Doctor do
     provider = active_provider()
     probe_provider(provider, opts)
   end
+
+  @doc """
+  Whether OpenAI accepts the `openai` provider key, the one a voice call dials
+  with whatever the primary provider is. One GET of the model list: free, no
+  prompt, and no model named, so any key OpenAI would accept passes.
+
+  A refusal carries its status and OpenAI's error code, never the message or the
+  body: for a refused key OpenAI's message quotes the key's tail.
+  """
+  @spec probe_openai_key(keyword()) ::
+          {:ok, %{latency_ms: non_neg_integer()}} | {:error, key_probe_error()}
+  def probe_openai_key(opts \\ []) when is_list(opts) do
+    case FermixCore.Config.provider_api_key(:openai) do
+      {:ok, key} -> request_openai_models(key, opts)
+      {:error, :not_configured} -> {:error, :no_key}
+    end
+  end
+
+  defp request_openai_models(key, opts) do
+    start = System.monotonic_time(:millisecond)
+
+    Req.new(url: @openai_models_url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
+    |> Req.merge(probe_req_options(opts))
+    |> Req.request()
+    |> classify_key_probe(start)
+  end
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, start) when status in 200..299,
+    do: {:ok, %{latency_ms: elapsed_ms(start)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, _start)
+       when status in [401, 403],
+       do: {:error, {:refused, status, openai_error_code(body)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _start),
+    do: {:error, {:server_error, status}}
+
+  defp classify_key_probe({:error, reason}, _start), do: {:error, {:network, reason}}
+
+  # OpenAI's `code` is a fixed identifier such as `invalid_api_key`; anything
+  # else in that field is dropped rather than repeated.
+  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
+  end
+
+  defp openai_error_code(_body), do: nil
 
   @doc """
   Offline freshness sweep over the auth store: the sorted profile names whose
@@ -346,7 +400,7 @@ defmodule FermixCore.Setup.Doctor do
     config = Application.get_env(:fermix_core, :compaction, []) |> CompactionConfig.normalize()
     provider = active_provider()
     config_for_provider = provider_config(provider)
-    model = effective_model(config_for_provider, provider)
+    model = ModelCatalog.effective_model(provider, config_for_provider)
     context_window = ModelCatalog.context_window_for(provider, model)
     threshold = CompactionConfig.threshold(config)
 
@@ -361,19 +415,33 @@ defmodule FermixCore.Setup.Doctor do
     }
   end
 
+  @doc """
+  Per-channel command-owner configuration. `owner_user_id` is the owner the
+  gateway trusts (`Config.channel_explicit_owner_user_id/1`), so a channel
+  without one runs every allow-listed sender at guest trust. `sole_allowed_id?`
+  marks such a channel that allow-lists exactly one id — most likely the owner's
+  own, which the gateway still treats as a guest.
+  """
   @spec command_owner_report() :: [command_owner_report()]
   def command_owner_report do
     Enum.map(@command_channels, fn channel ->
       config = Application.get_env(:fermix_channels, channel, [])
+      owner = FermixCore.Config.channel_explicit_owner_user_id(channel)
 
       %{
         channel: channel,
         enabled: Keyword.get(config, :enabled, false) == true,
-        owner_user_id: FermixCore.Config.channel_command_owner_user_id(channel),
+        owner_user_id: owner,
+        sole_allowed_id?: sole_allowed_id?(channel, owner),
         command_allowlist: FermixCore.Config.channel_command_allowlist(channel)
       }
     end)
   end
+
+  defp sole_allowed_id?(_channel, owner) when is_binary(owner), do: false
+
+  defp sole_allowed_id?(channel, nil),
+    do: is_binary(FermixCore.Config.channel_command_owner_user_id(channel))
 
   @type streaming_report :: %{
           channel: atom(),
@@ -835,7 +903,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = base_url(config, :openai, @openai_default_url)
-        model = effective_model(config, :openai)
+        model = ModelCatalog.effective_model(:openai, config)
 
         body = %{
           model: model,
@@ -872,7 +940,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, token} ->
         url = base_url(config, :openai_codex, @codex_default_url)
-        model = effective_model(config, :openai_codex)
+        model = ModelCatalog.effective_model(:openai_codex, config)
 
         body = %{
           model: model,
@@ -919,7 +987,7 @@ defmodule FermixCore.Setup.Doctor do
 
   defp probe_xai_bearer(config, {:ok, bearer}, surface, opts) do
     url = "#{base_url(config, :xai, @xai_default_base_url)}/responses"
-    model = effective_model(config, :xai)
+    model = ModelCatalog.effective_model(:xai, config)
 
     body = %{
       model: model,
@@ -959,7 +1027,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :openrouter, @openrouter_default_base_url)}/chat/completions"
-        model = effective_model(config, :openrouter)
+        model = ModelCatalog.effective_model(:openrouter, config)
 
         body = %{
           model: model,
@@ -990,7 +1058,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :mistral, @mistral_default_base_url)}/chat/completions"
-        model = effective_model(config, :mistral)
+        model = ModelCatalog.effective_model(:mistral, config)
 
         body = %{
           model: model,
@@ -1023,7 +1091,7 @@ defmodule FermixCore.Setup.Doctor do
 
       {:ok, bearer} ->
         url = "#{base_url(config, :venice, @venice_default_base_url)}/api_keys/rate_limits"
-        model = effective_model(config, :venice)
+        model = ModelCatalog.effective_model(:venice, config)
 
         headers = [
           {"authorization", "Bearer #{bearer}"},
@@ -1050,7 +1118,7 @@ defmodule FermixCore.Setup.Doctor do
           "ollama provider has no base_url configured; set [fermix_core.providers.ollama] base_url"}}
 
       base_url ->
-        model = effective_model(config, :ollama)
+        model = ModelCatalog.effective_model(:ollama, config)
         probe_ollama_chat(base_url, model, opts)
     end
   end
@@ -1218,7 +1286,7 @@ defmodule FermixCore.Setup.Doctor do
 
   defp post_anthropic_probe(config, body_extra, headers, surface, opts) do
     url = base_url(config, :anthropic, @anthropic_default_url)
-    model = effective_model(config, :anthropic)
+    model = ModelCatalog.effective_model(:anthropic, config)
 
     body =
       Map.merge(
@@ -1368,10 +1436,6 @@ defmodule FermixCore.Setup.Doctor do
 
   defp provider_config(provider) do
     Application.get_env(:fermix_core, :providers, []) |> Keyword.get(provider, [])
-  end
-
-  defp effective_model(config, provider) do
-    Keyword.get(config, :default_model) || ModelCatalog.default_model_for(provider)
   end
 
   defp catalog_windows do

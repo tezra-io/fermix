@@ -146,7 +146,14 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
     if attended_operator?(context), do: :ok, else: {:error, @unattended_error}
   end
 
-  defp attended_operator?(context) do
+  @doc """
+  Whether this turn can raise an owner approval on the sandbox `/confirm` flow:
+  operator trust, a live `reply_fn` and the gateway's `approval_fn` seam. The
+  one predicate for that surface; the coding harness's vendor-config
+  acknowledgment (`Tools.HarnessRun`) asks it too.
+  """
+  @spec attended_operator?(map()) :: boolean()
+  def attended_operator?(context) when is_map(context) do
     Map.get(context, :source_trust) == :operator and
       is_function(Map.get(context, :reply_fn), 1) and
       is_function(Map.get(context, :approval_fn), 1)
@@ -212,25 +219,15 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
   # one-tap approve affordance (Telegram: an inline button carrying the token in
   # its private callback_data). The token still rides the tuple's third element
   # for that button; whether the *visible text* also carries the tap-to-copy
-  # `/confirm <token>` line depends on the chat context (see `owner_prompt/6`).
+  # `/confirm <token>` line depends on the chat context (see `approval_line/2`).
   defp deliver_prompt(context, canonical, reason, diff, token) do
     reply_fn = Map.fetch!(context, :reply_fn)
-    chat_type = Map.get(context, :chat_type)
-    private_button? = Map.get(context, :private_approval_button?, false)
-    prompt = owner_prompt(canonical, reason, diff, token, chat_type, private_button?)
+    prompt = owner_prompt(canonical, reason, diff, approval_line(token, context))
     reply_fn.({:approval_prompt, prompt, token})
     :ok
   end
 
-  # Omit the raw `/confirm <token>` from the text ONLY when the delivering channel
-  # carries the token privately via a one-tap button (Telegram) AND the chat is
-  # shared — there the button, not the text, hands the owner the token, so the
-  # text stays clean of it. Everywhere else the token IS the approval affordance
-  # (a private DM, the CLI, or any channel without a button), so it must remain in
-  # the text or the owner could not confirm at all. Replay is independently blocked
-  # (operator-only confirm + same-origin binding), so this is info-disclosure
-  # hardening, not a bypass fix.
-  defp owner_prompt(canonical, reason, diff, token, chat_type, private_button?) do
+  defp owner_prompt(canonical, reason, diff, approval_line) do
     """
     I need access to a directory outside the current sandbox roots:
 
@@ -239,17 +236,41 @@ defmodule FermixCore.Tools.RequestDirectoryAccess do
 
     #{diff}
 
-    #{approval_line(token, chat_type, private_button?)}
+    #{approval_line}
     """
     |> String.trim()
   end
 
-  defp approval_line(token, chat_type, private_button?) do
+  @resume_note "Once you confirm, I'll resume automatically."
+
+  @doc """
+  The line an owner-approval prompt on the sandbox `/confirm` flow ends with.
+  One home for the token-visibility rule: the coding harness's vendor-config
+  acknowledgment (`Tools.HarnessRun`) ends its prompt with it too.
+
+  The raw `/confirm <token>` is omitted from the text ONLY when the delivering
+  channel carries the token privately via a one-tap button (Telegram) AND the
+  chat is shared — there the button, not the text, hands the owner the token, so
+  the text stays clean of it. Everywhere else the token IS the approval
+  affordance (a private DM, the CLI, or any channel without a button), so it must
+  remain in the text or the owner could not confirm at all. Replay is
+  independently blocked (operator-only confirm + same-origin binding), so this is
+  info-disclosure hardening, not a bypass fix.
+
+  `after_confirm` says what happens once the owner confirms: a resumed request
+  here, or the daemon running the command itself (`Capabilities.AccessGate`).
+  """
+  @spec approval_line(String.t(), map(), String.t()) :: String.t()
+  def approval_line(token, context, after_confirm \\ @resume_note)
+      when is_binary(token) and is_map(context) and is_binary(after_confirm) do
+    chat_type = Map.get(context, :chat_type)
+    private_button? = Map.get(context, :private_approval_button?, false)
+
     if omit_token?(chat_type, private_button?) do
       "Approve with the button below, or privately via `/confirm` in a DM or the CLI " <>
-        "(expires in 60s). Once you confirm, I'll resume automatically."
+        "(expires in 60s). " <> after_confirm
     else
-      "Approve with `/confirm #{token}` (expires in 60s). Once you confirm, I'll resume automatically."
+      "Approve with `/confirm #{token}` (expires in 60s). " <> after_confirm
     end
   end
 

@@ -340,6 +340,67 @@ defmodule FermixCore.Tools.CodexRunTest do
     end
   end
 
+  # --- Vendor-config acknowledgment (GAP3-1) --------------------------------
+
+  # A previous run changed config a coding CLI runs at launch, so the Manager
+  # refuses the next launch in that root. On a surface with the sandbox `/confirm`
+  # flow the tool asks the owner once and the request resumes on its own; without
+  # one the refusal names the files and how to clear them.
+  describe "vendor-config acknowledgment (GAP3-1)" do
+    @change %{
+      run_id: "hr_planted0001",
+      changes: %{
+        "/repo" => %{
+          ".claude/settings.local.json" => %{
+            "before" => nil,
+            "after" => "sha256:bb",
+            "commit_clears" => false
+          }
+        }
+      }
+    }
+
+    test "an attended turn asks the owner once through the /confirm approval flow", ctx do
+      manager = stub_manager(start_run_reply: {:error, {:vendor_config_changed, @change}})
+      context = approval_context(ctx.cwd, manager, {:ok, "TOKEN123", :new})
+
+      assert {:ok, %{success: true, output: output}} =
+               CodexRun.execute(run_args(ctx.cwd), context)
+
+      assert %{"status" => "awaiting_acknowledgment", "detail" => detail} = Jason.decode!(output)
+      assert detail =~ "resumes"
+      refute output =~ "TOKEN123"
+
+      assert_received {:approval, %{acknowledge_vendor_config: "hr_planted0001"}}
+      assert_received {:reply, {:approval_prompt, prompt, "TOKEN123"}}
+      assert prompt =~ "/repo/.claude/settings.local.json"
+      assert prompt =~ "/confirm TOKEN123"
+    end
+
+    test "an already-pending acknowledgment is not prompted twice", ctx do
+      manager = stub_manager(start_run_reply: {:error, {:vendor_config_changed, @change}})
+      context = approval_context(ctx.cwd, manager, {:ok, "TOKEN123", :existing})
+
+      assert {:ok, %{success: true, output: output}} =
+               CodexRun.execute(run_args(ctx.cwd), context)
+
+      assert %{"status" => "awaiting_acknowledgment"} = Jason.decode!(output)
+      refute_received {:reply, _part}
+    end
+
+    test "a turn with no approval surface is refused with the files and how to clear them",
+         ctx do
+      manager = stub_manager(start_run_reply: {:error, {:vendor_config_changed, @change}})
+      context = attended_context(ctx.cwd, manager)
+
+      assert {:ok, %{success: false, error: error}} = CodexRun.execute(run_args(ctx.cwd), context)
+      assert error =~ "/repo/.claude/settings.local.json"
+      assert error =~ "ask Fermix in a chat to start the coding run there"
+      assert error =~ "revert or commit"
+      refute error =~ "{:"
+    end
+  end
+
   # --- First-use consent gate (design §23.3) -------------------------------
 
   describe "first-use consent gate" do
@@ -522,6 +583,27 @@ defmodule FermixCore.Tools.CodexRunTest do
       sandbox_config: %{mode: :open, workspace_root: cwd, allowed_roots: [cwd]},
       harness_manager: manager
     }
+  end
+
+  # An attended turn on a channel with the sandbox `/confirm` flow: the gateway's
+  # `approval_fn` seam answers `approval_reply` and reports the request, and the
+  # reply surface reports every part it is handed.
+  defp approval_context(cwd, manager, approval_reply) do
+    test_pid = self()
+
+    cwd
+    |> attended_context(manager)
+    |> Map.merge(%{
+      chat_type: "private",
+      approval_fn: fn request ->
+        send(test_pid, {:approval, request})
+        approval_reply
+      end,
+      reply_fn: fn part ->
+        send(test_pid, {:reply, part})
+        :ok
+      end
+    })
   end
 
   defp guest_context(cwd, manager) do

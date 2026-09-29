@@ -186,6 +186,38 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     assert Keyword.get(plugins, :enabled) == ["google_calendar"]
   end
 
+  # The in-daemon plugin logout (the app's Disconnect, the management
+  # `plugins.disconnect`, the setup page) lets go of the account the way a CLI
+  # logout's notice does: the manager drops its tokens and deletes the plugin
+  # helper's access-token file before it is stopped, so no live token is left
+  # on disk until the next boot sweep.
+  test "a logout deletes the plugin helper's access-token file" do
+    profile = "google_calendar:primary"
+    root = Path.join(System.fetch_env!("FERMIX_HOME"), "plugins")
+    DistStore.ensure!(root)
+    token_file = DistStore.token_file(root, profile)
+
+    :ok =
+      Store.write(profile, %{
+        auth_mode: "oauth2",
+        provider: "google",
+        granted_scopes: [],
+        tokens: %{access_token: "google_at", refresh_token: "google_rt"},
+        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+        last_refresh: nil,
+        status: "ready"
+      })
+
+    assert :ok = TokenSupervisor.enable_token_file(profile, token_file)
+    assert %{"access_token" => "google_at"} = token_file |> File.read!() |> Jason.decode!()
+
+    assert :ok = Auth.logout("google_calendar")
+
+    refute File.exists?(token_file)
+    assert Registry.lookup(FermixCore.Auth.TokenRegistry, profile) == []
+    assert {:error, {:provider_missing, ^profile}} = Store.read(profile)
+  end
+
   test "missing Google client config returns needs_client_config" do
     Application.put_env(:fermix_core, :oauth, %{})
 
@@ -360,7 +392,10 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
              Auth.login("google_calendar")
   end
 
-  test "userinfo failure does not discard minted OAuth tokens" do
+  # The account lookup runs while the sign-in holds the profile lock, so it is
+  # one bounded attempt: a transient failure is not retried (Req would retry a
+  # GET three more times, and honour a Retry-After of any length).
+  test "userinfo failure does not discard minted OAuth tokens, and is asked once" do
     port = pick_free_port()
     parent = self()
 
@@ -379,6 +414,8 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     end
 
     userinfo_plug = fn conn ->
+      send(parent, :userinfo_asked)
+
       conn
       |> Plug.Conn.put_resp_content_type("application/json")
       |> Plug.Conn.send_resp(500, Jason.encode!(%{"error" => "temporary"}))
@@ -410,6 +447,8 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
     assert {:ok, stored} = Store.read("google_calendar:primary")
     assert stored.tokens.access_token == "google_at"
     assert_received :opened
+    assert_received :userinfo_asked
+    refute_received :userinfo_asked
   end
 
   test "Google OAuth prints the URL and still waits when browser launch fails" do
@@ -750,6 +789,16 @@ defmodule FermixCore.Plugins.OAuthLoginTest do
         assert log =~ "region"
         refute log =~ "tesla_at"
       end
+    end
+
+    # The probe runs while the sign-in holds the profile lock, so it is one
+    # bounded attempt: a transient failure is not retried.
+    test "asks the region once when the probe fails" do
+      assert {:ok, entry} = tesla_login(region_plug(503, %{"error" => "unavailable"}))
+
+      assert entry.status == "ready"
+      assert_received {:region_probe, "/api/1/users/region", _authorization}
+      refute_received {:region_probe, _path, _authorization}
     end
 
     # A sign-in under the region the account is actually in clears the marker a

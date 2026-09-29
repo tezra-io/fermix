@@ -226,6 +226,59 @@ defmodule FermixChannels.Mobile.PushTest do
              )
   end
 
+  # FEAT-2: an approval waits for a phone that is not connected; the push that
+  # says so carries no content, the way an oversized preview already does.
+  test "an approval push is content-free and goes only to an away profile" do
+    {_gateway_public, gateway_private} = keypair(30)
+    {device_public, device_private} = keypair(31)
+    device = device("device-a", device_public, :binary.copy(<<32>>, 32), "token-a")
+    test_pid = self()
+
+    dispatcher = fn notifications, _config ->
+      send(test_pid, {:dispatched, notifications})
+      {:ok, Enum.map(notifications, &%{&1 | response: :success})}
+    end
+
+    assert {:ok, %{status: :sent, sent: 1}} =
+             Push.notify_approval("main",
+               config: valid_config(),
+               profile_connected: fn "main" -> {:ok, false} end,
+               read_frontier: fn _ -> flunk("an approval is no timeline row") end,
+               list_devices: fn -> {:ok, [device]} end,
+               load_identity: fn -> {:ok, %{gateway_private_key: gateway_private}} end,
+               dispatcher: dispatcher,
+               nonce_fun: fn 12 -> @nonce end
+             )
+
+    assert_receive {:dispatched, [notification]}
+
+    assert get_in(notification.payload, ["aps", "alert"]) ==
+             %{"title" => "Fermix", "body" => "Approval needed"}
+
+    assert {:ok, key} =
+             Push.derive_key(device_private, device_public(gateway_private), device.apns_key_salt)
+
+    assert %{"profile_id" => "main", "preview_text" => nil} =
+             decrypt_preview(
+               key,
+               get_in(notification.payload, ["fx", "n"]),
+               get_in(notification.payload, ["fx", "c"])
+             )
+
+    assert {:ok, %{status: :suppressed, reason: :connected, sent: 0}} =
+             Push.notify_approval("main",
+               config: valid_config(),
+               profile_connected: fn "main" -> {:ok, true} end,
+               list_devices: fn -> flunk("a connected profile listed devices") end
+             )
+
+    assert {:ok, %{status: :disabled, sent: 0}} =
+             Push.notify_approval("main",
+               config: [enabled: false],
+               profile_connected: fn _ -> flunk("disabled push checked presence") end
+             )
+  end
+
   test "returns invalid configuration errors without consulting runtime dependencies" do
     assert {:error, {:invalid_push_config, :topic, :missing}} =
              Push.notify("main", 1, "preview",

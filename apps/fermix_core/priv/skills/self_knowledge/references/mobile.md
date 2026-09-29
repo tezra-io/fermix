@@ -1,147 +1,72 @@
-# iPhone mobile companion
+# Mobile companion (phone channel)
 
-The mobile companion is a first-party, owner-only channel from an iPhone to the
-operator's own Fermix daemon. The app lives in its own repository; Fermix is the
-source of truth for the versioned wire contract. It is not a hosted chat service:
-messages stay between the phone and the host, and a paired device enters the
-gateway with operator role and trust.
+An owner-only channel from the owner's phone to their own Fermix daemon. It is not a hosted chat service: messages stay between the phone and the host, and a paired device enters the gateway as the operator. Fermix owns the versioned wire contract; the phone apps live in their own repositories.
 
-**Availability: the iPhone app has not been released.** Everything below is the
-daemon half, which ships first so the app can be built against a fixed wire.
-There is nothing to install on a phone yet, so pairing has no counterpart and
-becomes usable when the app ships in its own release. Tell an owner asking to use
-Fermix from their phone exactly that, and point them at the channels that work
-today; never walk them through installing or scanning.
+**No phone app is released.** The iPhone app has not shipped and an Android app is in design. What exists is the daemon half, so there is nothing to install or scan yet. Tell an owner who asks exactly that, point them at the chat channels that work today, and never walk them through installing an app or pairing.
 
-**The channel is feature-flagged off and has no setup surface.** It is not
-offered anywhere in setup — no wizard step, no CLI flag, no tab in the web
-setup — and an absent `[fermix_channels.mobile]` section means disabled, not
-unconfigured. The only way to turn it on is to hand-edit `config.toml`:
+## Turning it on
+
+Off by default: an absent `[fermix_channels.mobile]` section means disabled, not unconfigured. The daemon publishes two management surfaces:
+
+- the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns`. A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
+- the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
+
+No desktop app draws a Phone pane on them yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host:
 
 ```toml
 [fermix_channels.mobile]
 enabled = true
 ```
 
-then restart the daemon (`fermix restart`). Never tell an owner to enable it
-through setup; that switch does not exist there.
+then `fermix restart`, and pair with `fermix pair`. The terminal wizard and browser setup have no mobile step or flag.
+
+**Only the owner pairs or forgets a phone.** Starting, deciding or cancelling a pairing and revoking a phone are taken only from a process the daemon places as the owner's own (the app, or a command typed in a terminal). One Fermix started itself (an agent's shell command, a coding run, a scheduled job), a detached one, or one it cannot place is refused with "Only the owner can pair or forget a phone; run this from your own terminal." So never run `fermix pair` or `fermix devices revoke` through `shell`; tell the owner to. Reading the status, the session and the phone list stays open.
+
+Hand-edit only: `streaming` (draft streaming is the default) and `max_media_bytes`. `media_store_max_bytes` sets the media retention budget (2 GiB by default).
 
 ## Reachability and security
 
-The v1 app connects to the dedicated mobile listener over LAN/Bonjour or any
-network shared by the phone and host, commonly a Tailscale tailnet. The default
-listener is `wss://HOST:4031/ws`; `/healthz` is its only other HTTP route. The
-regular setup endpoint and LiveView remain loopback-only.
+- The phone connects to a dedicated listener, `wss://HOST:4031/ws` by default (`/healthz` is its only other route), over the LAN (Bonjour) or any shared network such as a Tailscale tailnet. Binding to `0.0.0.0` exposes only this listener; setup and the web UI stay loopback-only.
+- TLS satisfies the phone platform; trust comes from an end-to-end Noise session between device and gateway keys. The pairing QR carries the pinned certificate fingerprint and gateway public key. No bearer token, port forwarding, public funnel or hosted relay is involved.
+- The listener bounds a peer that never finishes: 64 connections at once, 10 seconds for TLS, 15 seconds to the WebSocket upgrade, 10 seconds for the Noise hello, 64 KiB per client frame. An app built for a protocol version the daemon does not speak is refused with an error naming which side must update.
+- A listener that cannot bind (`address_unavailable`, `address_in_use`, `permission_denied`) never stops the daemon: `mobile.status` reads it `unavailable` with that reason, and it retries (one second doubling to a minute) for up to a day, then waits for the next restart.
+- Host material lives in `$FERMIX_HOME/mobile/` (`0700`): `gateway_key`, `tls.crt`, `tls.key`, `devices.toml` and the `media/` store; keys and the device list must stay `0600`.
 
-TLS satisfies iOS transport requirements, but trust comes from an end-to-end
-Noise session between device and gateway keys. A pinned certificate fingerprint
-and gateway public key arrive through the pairing QR. There is no bearer token,
-port-forwarding workflow, public Funnel, or hosted relay in the v1 message path.
-The planned iroh sidecar is a v1.x fast-follow, not part of the v1 setup or a
-second runtime fallback.
+## Pairing
 
-## Enable and pair
-
-Every knob is a hand edit of `config.toml` under `[fermix_channels.mobile]`:
-`enabled`, `port`, `bind`, `advertise_mdns`, `streaming`, and
-`max_media_bytes`. Changes reach the listener only after a daemon restart. The
-separate `media_store_max_bytes` setting controls the content-addressed
-retention budget (2 GiB by default). Draft streaming is the seeded mobile
-default. Binding to `0.0.0.0` exposes only the dedicated mobile listener, not
-the loopback setup endpoint. `bind` must be a literal IP address; a value that
-is not one is refused when the configuration is written or loaded, by name,
-instead of failing later at listener startup.
-
-Run `fermix pair` on the host and scan the displayed QR in the app — the host
-side works now, the scanning side arrives with the app. The window lasts 120
-seconds. The phone and terminal show the same six-digit SAS derived
-from the Noise handshake; compare it before approving. Approval persists the
-device public key in `$FERMIX_HOME/mobile/devices.toml`. The QR secret is
-single-use and expires with the pairing window. The device name and model shown
-in the prompt are bounded, printable text — the daemon refuses control
-characters and anything over 128 bytes before the owner is asked. If the phone
-disconnects while the owner is deciding, approval is refused rather than
-persisted, and `fermix pair` says so and must be re-run.
-
-Host material stays under `$FERMIX_HOME/mobile/`: `gateway_key`, `tls.crt`,
-`tls.key`, `devices.toml`, and the durable `media/` store. Private keys and the
-pairing registry must retain `0600` permissions.
-
-Manage trust from the host:
-
-- `fermix devices list` shows paired device ids, names, creation time, and last
-  seen time.
-- `fermix devices revoke DEVICE_ID` removes that key and terminates its live
-  socket immediately.
-- App-side Unpair deletes the phone's local keys and requests removal, but host
-  revocation remains authoritative for a lost or unavailable phone.
+- `mobile.pair.start` opens the one pairing window (120 seconds; a second start while it is open is refused as busy) and returns the pairing link once, on that call only, with up to 16 host addresses, best first; the link's single-use secret is never logged or repeated and expires with the window. A refused start answers `failed` with the daemon's sentence: the channel is off, could not start this boot, was turned on but not yet restarted, identity files are incomplete, the device list is unreadable, or the listener could not start.
+- Session `state`: `awaiting_scan` (window open, `ttl_ms` left); `awaiting_decision` (a phone completed the Noise handshake; `request` carries its name, model, app version and the six-digit SAS, and an attestation line that always reads "This phone sent no secure-hardware proof."); terminal `approved` (with the new device id), `denied`, `expired` (`timeout`) or `cancelled`; or `failed` (`device_disconnected` before a decision, so nothing is saved). A finished session stays readable for a few minutes (at most eight kept).
+- Failed handshakes never close the window: an address that fails five times is refused for the rest of that window and no other address is, and nothing is counted while a phone waits for the owner's decision. The same phone asking again replaces its own waiting request.
+- `fermix pair` drives this session: it prints the QR, time left and manual link, polls every second, shows the attestation line and the device with its SAS, and approves only on an explicit `y` (blank or closed input denies). Compare the SAS on phone and terminal first. It cancels the window if anything fails. Approval stores the device key in `devices.toml`. Device names and models over 128 bytes or with control characters are refused before the owner is asked.
+- `fermix devices list` (`mobile.devices.list`): paired ids, names, created and last-seen times, oldest first; with the channel off it reads `devices.toml`. `fermix devices revoke DEVICE_ID` (`mobile.devices.revoke`) removes the key, drops its live socket at once, and cancels every unfinished request from that phone so none runs again at the next boot; with the channel off it edits `devices.toml` the same way. An unknown id answers "No paired phone has that id." Unpairing on the phone requests removal, but host revocation is authoritative for a lost phone.
 
 ## Chat behavior
 
-Every paired device shares the `main` profile conversation, so reconnects and a
-second phone see the same durable host history. The phone queues messages while
-offline and resends them by client message id; the host deduplicates them and
-resynchronizes with a monotonic history cursor. Read state is also monotonic and
-shared across the owner's devices.
+- All paired phones share the `main` conversation, and the Mac app's chat reads the same timeline, so reconnects, a second phone and the Mac see the same history; every row is announced live to each connected device. The phone queues offline messages and resends them by client message id; the host deduplicates and resynchronizes with a monotonic cursor. Read state is shared and never passes the newest row.
+- Text, tool activity, photos and documents both ways, voice notes, slash commands and the command palette, link previews (stored with their row), reactions, and approve/deny cards (including an access-sensitive plugin command, run once approved). Voice notes use the configured transcription backend; this is not realtime voice, and phone calls are not supported.
+- A reply streams into a live draft only on a streaming provider route (Codex today); otherwise it arrives whole when the turn ends.
+- An event over one frame arrives in parts, up to 1 MiB; a longer reply is cut there and marked truncated on the phone while the stored row keeps it whole. A history page holds at most 256 KiB and its cursor pulls the rest.
+- The phone's Stop cancels one request by its client message id (running, waiting or not yet queued); `/stop` still stops everything.
+- Reactions reach only a connected phone; they are not stored.
+- An approval card goes only to the chat whose turn raised it (a phone's never shows on the Mac, and the reverse). A card still waiting is sent again when a phone reconnects, with the time it has left.
+- A failed message or command comes back by its client message id with its own code (`store_quota_exceeded`, `media_too_large`, `attachment_unavailable`) or `request_failed`.
+- Uploads are capped by `max_media_bytes` (20 MiB by default), four in flight per phone and sixteen in all, and never evict stored media; an attach id is valid for two days. The phone strips image location data; the host keeps content-addressed media under `mobile/media/` so another phone can fetch attachments from history.
 
-The v1 surface includes text and draft streaming, tool-activity indicators,
-photos and documents in both directions, voice notes, slash commands and the
-host-supplied command palette, reactions, and approve/deny cards. Voice notes
-use the configured Fermix transcription backend. They are not realtime voice:
-full-duplex phone calls belong to the later mobile realtime milestone.
+## Push (APNs)
 
-Mobile uploads are capped by `max_media_bytes` (20 MiB by default). The phone
-strips image location metadata before upload, and the host keeps durable,
-content-addressed media under `$FERMIX_HOME/mobile/media/` so another paired
-device can fetch attachments from history.
+When no device socket is connected and no other device has read the new content, Fermix sends one direct APNs notification per registered device; scheduled and background deliveries follow the same rule. An approval raised on the phone while no device is connected pushes a content-free "Approval needed". The payload carries a per-device encrypted preview, never plaintext, but no phone can decrypt it yet, so the alert reads only "New message". Configure `[fermix_channels.mobile.push]` by hand: `enabled`, `team_id`, `key_id`, `topic`, `environment` (`development` or `production`). The `.p8` key follows the normal secret path: `FERMIX_APNS_KEY`, or write it into `config.toml` once and move it to the keychain with `fermix setup --migrate-secrets`; never leave it in plain TOML. Fermix connects to Apple on the first push, never at boot; while connecting or unreachable, push reads `degraded` and the daemon keeps running.
 
-## Direct APNs push
+## Troubleshooting
 
-When no device socket is connected and another device has not already read the
-new content, Fermix can send one direct APNs notification per registered device.
-Connected devices receive socket events only, preventing double notification.
-Scheduled and background channel deliveries use the same rule.
+`fermix doctor` checks gateway keys and TLS files (`0600`), listener reachability on advertised addresses, mDNS, tailnet detection, APNs credentials and delivery, and the paired-device count. An enabled but never-paired channel is a warning with the `fermix pair` hint; an incomplete identity or wrong permissions fails, because Fermix refuses such files rather than regenerating them. "mobile surface refused this boot; see the daemon log" and "mobile channel not started; restart the daemon" replace the per-probe rows; a listener that cannot bind reads "listener unavailable (reason); it keeps retrying". `mobile.status` publishes the same facts (`enabled` and `started` separately, any `refusal` class, listener, APNs, mDNS, tailnet, device count, the gateway key fingerprint and the pairing in flight).
 
-Configure `[fermix_channels.mobile.push]` by hand with `enabled`, `team_id`,
-`key_id`, `topic`, and `environment` (`development` or `production`). The `.p8`
-key uses the normal Fermix secret path: provide `FERMIX_APNS_KEY`, or write it
-into `config.toml` once and move it to the OS keychain with
-`fermix setup --migrate-secrets` (the generic secret migration, not a mobile
-step); never leave it in ordinary TOML. The payload carries a
-per-device encrypted preview, not plaintext chat content. This direct-key model
-is for the owner-operated/TestFlight v1; a public App Store push relay is a
-separate future milestone.
+- Phone and host share no reachable LAN or tailnet address.
+- The bind address or port is unavailable (the listener keeps retrying).
+- The daemon was not restarted after a mobile config change.
+- mDNS is off or blocked, so the phone needs a reachable address from the QR.
+- APNs `topic` or `environment` does not match the app build, or `FERMIX_APNS_KEY` cannot be read (a locked keychain): mobile starts without push, logs it, and `fermix doctor` reports APNs credentials missing.
+- The phone was revoked or reinstalled: pair again.
+- Memory is off (`[fermix_core.memory] enabled = false`): the phone channel keeps its timeline there, so it is refused for that boot as `memory_disabled` (every other channel keeps running).
+- `devices.toml` is unreadable, corrupt, empty or not `0600`: the mobile surface refuses to start for that boot (every other channel keeps running). Repair or remove the file, then restart.
 
-## Troubleshooting and observability
-
-Run `fermix doctor` after enabling the flag and restarting. Its mobile checks
-cover gateway keys and TLS
-files with `0600` permissions, listener reachability on advertised candidates,
-mDNS advertising, tailnet detection, APNs credential resolution, and paired
-device count. An enabled channel that has never been paired is a warning with
-the `fermix pair` hint, not a failure — the identity is created by that command.
-An identity that exists but is incomplete or no longer `0600` is a failure,
-because Fermix refuses such files rather than regenerating them. Common failures
-are:
-
-- phone and host share no reachable LAN/tailnet candidate;
-- the configured bind address or port is unavailable;
-- the daemon was not restarted after changing mobile configuration;
-- mDNS is disabled or blocked, requiring a reachable candidate from the QR;
-- the APNs topic/environment does not match the app build, or
-  `FERMIX_APNS_KEY` cannot be resolved: a locked or unreadable OS keychain
-  leaves the key unresolved, so mobile starts without push, logs that loudly,
-  and `fermix doctor` reports APNs credentials missing;
-- the device was revoked or reinstalled and must pair again;
-- `devices.toml` is unreadable, corrupt, or no longer `0600`: the mobile surface
-  refuses to start for that boot and says so in the daemon log and in
-  `fermix doctor`, while every other channel keeps running. Fermix never
-  rebuilds a trust store — repair or remove the file, then restart.
-
-Normal turns retain the standard `main-*` trace session and group in Opik under
-the `mobile:main` conversation thread. Pairing emits terminal
-`channel_pair` events (`approved`, `denied`, `expired`, or `rate_limited`) and
-APNs attempts emit `channel_push` (`sent` or `failed`) in `agent_event.jsonl`.
-Those operational events contain counts, duration, channel, and status only, never
-message text, pairing secret, key material, SAS, device name, APNs token, or
-provider response body.
+Turns keep the `main-*` trace session and group in Opik under the `mobile:main` thread.

@@ -10,8 +10,11 @@ defmodule FermixCore.Tools.CodexRun do
   scheduled one.
 
   Posture is the operator's, not the model's. Omitting `sandbox` emits no `-s` at
-  all, so the run inherits `~/.codex/config.toml` — that is the default and the
-  reason harness runs are autonomous without the model asking for anything. Note
+  all, so the run inherits the posture codex resolves for itself:
+  `~/.codex/config.toml` and, in a repo the operator trusts, that repo's
+  `.codex/config.toml` (which `Harness.VendorConfig` watches, since a run's own
+  child can write it) — that is the default and the reason harness runs are
+  autonomous without the model asking for anything. Note
   what that inherits when the operator has configured nothing: codex's own default
   for `exec` is `read-only` (verified against codex-cli 0.145.0 by reading the
   recorded `turn_context.sandbox_policy`), so an unconfigured host runs read-only
@@ -137,6 +140,12 @@ defmodule FermixCore.Tools.CodexRun do
       },
       %{tag: "cwd_denied", description: "the working directory is outside the sandbox roots"},
       %{tag: "cli_unavailable", description: "the codex CLI is not installed or not on PATH"},
+      %{
+        tag: "vendor_config_changed",
+        description:
+          "an earlier run changed coding-agent config in this repo; it waits for the " <>
+            "owner's one-time acknowledgment, or for the change to be reverted or committed"
+      },
       %{tag: "max_active", description: "the concurrent-run limit is reached"}
     ]
   end

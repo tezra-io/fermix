@@ -252,7 +252,9 @@ defmodule FermixCore.Release.AppEngineManifestTest do
   defp protocols do
     %{
       management: %{current_version: 1, minimum_version: 1, maximum_version: 1},
-      realtime: %{current_version: 1, minimum_version: 1, maximum_version: 1}
+      realtime: %{current_version: 1, minimum_version: 1, maximum_version: 1},
+      companion: %{current_version: 1, minimum_version: 1, maximum_version: 1},
+      browser_host: %{current_version: 1, minimum_version: 1, maximum_version: 1}
     }
   end
 

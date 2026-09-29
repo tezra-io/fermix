@@ -517,7 +517,7 @@ defmodule FermixCore.Setup.ConfigStore do
   def ensure_workspace do
     with :ok <- File.mkdir_p(fermix_home()) do
       _ = restrict_home_permissions()
-      mkdir_workspace_paths()
+      with :ok <- mkdir_workspace_paths(), do: restrict_mobile_dir()
     end
   end
 
@@ -528,6 +528,34 @@ defmodule FermixCore.Setup.ConfigStore do
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
+  end
+
+  # `mobile/` holds the phone channel's trust store, which reads only a 0700
+  # directory, so it is created that way, and one an earlier boot left at the
+  # umask's mode is repaired. Best-effort like the home's own mode: a failure
+  # is logged, and the trust store names what it refuses. A symlink is left as
+  # it is: the trust store refuses it, and the directory it points at is not
+  # this boot's to change.
+  defp restrict_mobile_dir do
+    dir = workspace_paths().mobile
+
+    case File.lstat(dir) do
+      {:ok, %File.Stat{type: :directory}} -> restrict_dir(dir)
+      {:ok, %File.Stat{}} -> :ok
+      {:error, reason} -> log_unrestricted(dir, reason)
+    end
+  end
+
+  defp restrict_dir(dir) do
+    case File.chmod(dir, 0o700) do
+      :ok -> :ok
+      {:error, reason} -> log_unrestricted(dir, reason)
+    end
+  end
+
+  defp log_unrestricted(dir, reason) do
+    Logger.error("could not restrict #{dir} to 0700: #{inspect(reason)}")
+    :ok
   end
 
   @doc """
@@ -1195,14 +1223,12 @@ defmodule FermixCore.Setup.ConfigStore do
     end)
   end
 
-  defp encode_value(value) when is_binary(value) do
-    escaped =
-      value
-      |> String.replace("\\", "\\\\")
-      |> String.replace("\"", "\\\"")
-
-    "\"#{escaped}\""
-  end
+  # A TOML basic string: the backslash, the quote and every control character
+  # (C0 and DEL) are escaped, so a value is always exactly one line. The parser
+  # reads the file line by line and a later assignment wins, so a raw line break
+  # in any value used to write lines of its own (MGMT-1).
+  defp encode_value(value) when is_binary(value),
+    do: "\"" <> Regex.replace(~r/[\\"\x00-\x1F\x7F]/, value, &escape_char/1) <> "\""
 
   defp encode_value(value) when is_boolean(value), do: to_string(value)
   defp encode_value(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
@@ -1212,6 +1238,13 @@ defmodule FermixCore.Setup.ConfigStore do
   defp encode_value(value) when is_list(value) do
     "[#{value |> Enum.map(&encode_value/1) |> Enum.join(", ")}]"
   end
+
+  defp escape_char("\\"), do: "\\\\"
+  defp escape_char("\""), do: "\\\""
+  defp escape_char("\n"), do: "\\n"
+  defp escape_char("\t"), do: "\\t"
+  defp escape_char("\r"), do: "\\r"
+  defp escape_char(<<byte>>), do: "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0")
 
   defp parse_document(contents) do
     document =
@@ -1321,20 +1354,41 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  defp parse_quoted_value(value) do
-    value
-    |> String.trim_leading("\"")
-    |> String.trim_trailing("\"")
-    |> String.replace("\\\"", "\"")
-    |> String.replace("\\\\", "\\")
+  # Exactly one quote off each end: trimming every trailing quote also dropped
+  # the escaped one a value ending in `"` carries before its closing quote.
+  defp parse_quoted_value(value) when byte_size(value) >= 2,
+    do: value |> binary_part(1, byte_size(value) - 2) |> unescape_string()
+
+  defp parse_quoted_value(_lone_quote), do: ""
+
+  # The one reader of what `encode_value/1` writes, in a single left-to-right
+  # pass, so an escaped backslash never starts a second escape. A backslash
+  # sequence the writer never emits is kept as written, which is how this parser
+  # has always read it, so a hand-edited file reads the same.
+  defp unescape_string(value) do
+    Regex.replace(~r/\\(u00[01][0-9A-Fa-f]|u007[Ff]|[\\"ntr])/, value, fn _escape, code ->
+      unescape_char(code)
+    end)
   end
 
+  defp unescape_char("\\"), do: "\\"
+  defp unescape_char("\""), do: "\""
+  defp unescape_char("n"), do: "\n"
+  defp unescape_char("t"), do: "\t"
+  defp unescape_char("r"), do: "\r"
+  defp unescape_char("u" <> hex), do: <<String.to_integer(hex, 16)>>
+
+  # An element is a quoted string, with any comma or escaped quote inside it, or
+  # a bare piece up to the next comma. Splitting on every comma read the quoted
+  # `/tmp/a,/,b` as three elements, one of them `/`.
   defp parse_list_value(value) do
-    value
-    |> String.trim_leading("[")
-    |> String.trim_trailing("]")
-    |> String.split(",", trim: true)
-    |> Enum.map(&parse_value(String.trim(&1)))
+    elements =
+      value
+      |> String.trim_leading("[")
+      |> String.trim_trailing("]")
+
+    for [element] <- Regex.scan(~r/(?:"(?:[^"\\]|\\.)*"|[^,"]|")+/, elements),
+        do: parse_value(String.trim(element))
   end
 
   defp parse_float_value(value) do
@@ -2157,17 +2211,19 @@ defmodule FermixCore.Setup.ConfigStore do
     end
   end
 
-  # `[fermix_core.browser]`. Only `allowed_hosts` is settable — it is the
-  # documented recovery for a host the browser policy refuses, so the refusals
-  # need it reachable. Every other field of `Browser.Config` is a timeout, a cap
-  # or a buffer size: tuning, which stays an internal constant.
+  # `[fermix_core.browser]`. Four keys are settable (`BrowserConfig.config_keys/0`):
+  # `allowed_hosts`, the documented recovery for a host the browser policy
+  # refuses, `default_profile`, how tasks run, `max_tabs`, and `launch_app`,
+  # whether the engine may open the Fermix app for its browser pane. Every
+  # other field of `Browser.Config` is a timeout, a buffer size or a profile
+  # shape: tuning, which stays an internal constant.
   #
   # Unknown keys are rejected here at the parse boundary rather than dropped. The
-  # keys an operator most plausibly writes (`action_timeout_ms`, `max_tabs`) are
-  # REAL struct fields, so a silent drop would leave a config.toml line that
-  # reads as if it were in force and is not — the failure this whole section
-  # exists to end. Value validation lives in `Config.validate_allowed_hosts/1`,
-  # which runs on every read and is surfaced by `fermix doctor`.
+  # keys an operator most plausibly writes (`action_timeout_ms`) are REAL struct
+  # fields, so a silent drop would leave a config.toml line that reads as if it
+  # were in force and is not — the failure this whole section exists to end.
+  # Value validation lives in `Config.current/1`, which runs on every read, is
+  # surfaced by `fermix doctor`, and refuses a management write before it lands.
   defp normalize_browser(config) do
     validate_browser_section_keys!(config)
     BrowserConfig.normalize(config)
@@ -2191,7 +2247,7 @@ defmodule FermixCore.Setup.ConfigStore do
       config.toml [fermix_core.browser] has unknown key(s): #{Enum.join(unknown, ", ")}.
 
       Allowed keys: #{Enum.map_join(BrowserConfig.config_keys(), ", ", &Atom.to_string/1)}.
-      Browser timeouts, caps and buffer sizes are internal constants, not config.
+      Browser timeouts, buffer sizes and the other caps are internal constants, not config.
       Remove or fix the key(s); the daemon will not boot until this is fixed.
       """
     end

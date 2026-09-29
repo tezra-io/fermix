@@ -1,7 +1,9 @@
 defmodule FermixCore.BuildInfoTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.BrowserHost.Protocol, as: BrowserHostProtocol
   alias FermixCore.BuildInfo
+  alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Realtime.Protocol, as: RealtimeProtocol
 
@@ -86,10 +88,12 @@ defmodule FermixCore.BuildInfoTest do
     assert output |> String.split() |> List.last() == "standalone"
   end
 
-  test "publishes management and Realtime protocol ranges from their authorities" do
+  test "publishes management, Realtime, companion and browser host protocol ranges from their authorities" do
     assert BuildInfo.protocols() == %{
              management: protocol_metadata(ManagementProtocol),
-             realtime: protocol_metadata(RealtimeProtocol)
+             realtime: protocol_metadata(RealtimeProtocol),
+             companion: protocol_metadata(CompanionProtocol),
+             browser_host: protocol_metadata(BrowserHostProtocol)
            }
   end
 

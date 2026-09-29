@@ -139,12 +139,78 @@ defmodule FermixCore.Browser.ConfigTest do
     assert "NAS.local." in config.allowed_hosts
   end
 
+  # How tasks run, how many tabs they keep, which private hosts they reach and
+  # whether the engine may open the Fermix app are the person's; every other
+  # field stays tuning.
+  test "a person sets exactly four keys from the settings file" do
+    assert Config.config_keys() == [:allowed_hosts, :default_profile, :max_tabs, :launch_app]
+
+    assert Config.normalize(%{
+             "default_profile" => "fermix_headless",
+             "max_tabs" => 4,
+             "allowed_hosts" => ["nas.local"],
+             "action_timeout_ms" => 1
+           }) == [max_tabs: 4, default_profile: "fermix_headless", allowed_hosts: ["nas.local"]]
+  end
+
+  test "each managed profile is a default tasks can run in" do
+    for name <- ["fermix", "fermix_headless", "fermix_visible"] do
+      Application.put_env(:fermix_core, :browser, default_profile: name)
+
+      assert {:ok, config} = Config.current()
+      assert {:ok, _profile, ^name} = Config.profile(config, nil)
+    end
+  end
+
+  # The person's own tab is used only on a turn they attend, so as the default it
+  # would refuse every scheduled, delegated and guest run; a name no profile
+  # carries would refuse every run at all. Both are refused when read.
+  test "the person's own tab and an unknown name are refused as the default" do
+    for name <- ["selected_tab", "nope"] do
+      Application.put_env(:fermix_core, :browser, default_profile: name)
+
+      assert {:error, error} = Config.current()
+      assert error.code == "invalid_config"
+
+      assert error.message ==
+               "default_profile #{inspect(name)} is not a browser profile tasks can run in"
+    end
+  end
+
   test "honors overridden system timeouts" do
     Application.put_env(:fermix_core, :browser, action_timeout_ms: 1234, wait_max_ms: 9999)
 
     assert {:ok, config} = Config.current()
     assert config.action_timeout_ms == 1234
     assert config.wait_max_ms == 9999
+  end
+
+  # The default follows the build, never runtime detection: on for the engine
+  # inside the app's bundle (only macOS builds are that), off for every other.
+  test "launch_app defaults to on for the app's own engine and off otherwise" do
+    assert {:ok, %{launch_app: true}} = Config.current(%{}, app_engine?: true)
+    assert {:ok, %{launch_app: false}} = Config.current(%{}, app_engine?: false)
+  end
+
+  test "an explicit launch_app wins over the build's default" do
+    assert {:ok, %{launch_app: false}} = Config.current(%{launch_app: false}, app_engine?: true)
+    assert {:ok, %{launch_app: true}} = Config.current(%{launch_app: true}, app_engine?: false)
+  end
+
+  test "launch_app must be true or false" do
+    assert {:error, error} = Config.current(%{launch_app: "yes"})
+    assert error.code == "invalid_config"
+    assert error.message =~ "launch_app"
+  end
+
+  test "launch_app is settable from config.toml, and the launch deadline is not" do
+    assert :launch_app in Config.config_keys()
+    refute :host_launch_timeout_ms in Config.config_keys()
+
+    assert Config.normalize(%{"launch_app" => false, "host_launch_timeout_ms" => 9}) ==
+             [launch_app: false]
+
+    assert {:ok, %{host_launch_timeout_ms: 3_000}} = Config.current(%{})
   end
 
   defp restore(nil), do: Application.delete_env(:fermix_core, :browser)

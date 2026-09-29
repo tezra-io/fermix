@@ -34,6 +34,11 @@ defmodule FermixCore.Browser.CDP.ExtensionTransport do
   # resolve and act on its nodes, and read its accessibility tree. Nothing that
   # addresses the browser rather than the tab.
   @allowed_domains ~w(Page Runtime DOM Input Accessibility)
+  # Single methods of a domain that is otherwise refused. `Network.enable` turns
+  # on, for this tab only, the report of which address served its document — the
+  # read gate's served-from check. Every other `Network` method, the cookie
+  # reads above all, stays refused.
+  @allowed_methods ~w(Network.enable)
   # Chrome's own ceiling on a native-messaging message in this direction.
   @max_command_bytes 1_048_576
 
@@ -179,6 +184,7 @@ defmodule FermixCore.Browser.CDP.ExtensionTransport do
   defp allowed_method(method) do
     case String.split(method, ".", parts: 2) do
       [domain, _rest] when domain in @allowed_domains -> :ok
+      _other when method in @allowed_methods -> :ok
       _other -> {:error, Error.new("unsupported_in_attached_tab", @unsupported_method)}
     end
   end

@@ -25,9 +25,11 @@ defmodule FermixCore.Harness.Delivery do
   line (vendor · cwd tail · duration), and — on a non-completing run — the
   vendor's own error text (when it reported one), the reason, a diagnostics tail,
   and the vendor resume hint (or an explicit "not resumable (ephemeral)" line).
-  A chat-origin run whose continuation chain hit its cap closes with
-  `Harness.Continuation.note/0`, so the owner is told the automatic follow-up
-  stopped (§23.2) rather than wondering why nothing happened.
+  A run that changed auto-executing vendor config names those files
+  (`Harness.VendorConfig.note/1`). A chat-origin run whose continuation chain
+  hit its cap closes with `Harness.Continuation.note/0`, so the owner is told
+  the automatic follow-up stopped (§23.2) rather than wondering why nothing
+  happened.
   """
 
   require Logger
@@ -38,6 +40,7 @@ defmodule FermixCore.Harness.Delivery do
   alias FermixCore.Harness.Adapters.CodexExec
   alias FermixCore.Harness.Artifacts
   alias FermixCore.Harness.Continuation
+  alias FermixCore.Harness.VendorConfig
   alias FermixCore.Jobs.Registry, as: JobsRegistry
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -92,6 +95,22 @@ defmodule FermixCore.Harness.Delivery do
   end
 
   @doc """
+  The watchdog bound on one `deliver/2` channel send (unless `opts[:timeout_ms]`
+  overrides it). The Manager's hand-off lease is sized against it.
+  """
+  @spec deliver_timeout_ms() :: pos_integer()
+  def deliver_timeout_ms, do: @deliver_timeout_ms
+
+  @doc """
+  Whether `row`'s origin is owned by a client (M29 §17.6(d)): the frozen origin
+  snapshot the launch wrote carries a client origin (§17.4). Such an origin has
+  no framework text path. The one source the Manager and the DeliveryWorker
+  both read; never a channel-name list.
+  """
+  @spec client_owned?(map()) :: boolean()
+  def client_owned?(row) when is_map(row), do: is_map(Map.get(row, :client_origin))
+
+  @doc """
   Makes ONE bounded send attempt for `row`, returning `{:ok, :sent | :skipped}`
   or `{:error, reason}` for the caller (Manager inline / DeliveryWorker) to
   record. Mode `none` → `:skipped`; `local` → `:sent` without a channel send.
@@ -126,7 +145,7 @@ defmodule FermixCore.Harness.Delivery do
   """
   @spec compose(map(), String.t() | nil) :: String.t()
   def compose(row, result_text) when is_map(row) do
-    [header_line(row), body(row, result_text), cap_note(row)]
+    [header_line(row), body(row, result_text), VendorConfig.note(row), cap_note(row)]
     |> Enum.reject(&(&1 == ""))
     |> Enum.join("\n")
   end
@@ -272,7 +291,7 @@ defmodule FermixCore.Harness.Delivery do
 
   defp deliver_to_channel(row, opts) do
     text = compose(row, result_text_for(row))
-    timeout_ms = Keyword.get(opts, :timeout_ms, @deliver_timeout_ms)
+    timeout_ms = Keyword.get(opts, :timeout_ms, deliver_timeout_ms())
 
     result =
       ChannelSend.with_timeout(timeout_ms, fn ->

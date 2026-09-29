@@ -200,6 +200,45 @@ defmodule FermixCore.Sandbox.ConfigMutationTest do
     FermixTestSupport.SafeRm.rm_rf!(os_home)
   end
 
+  # `request_directory_access` dry-runs this grant, so a refusal here is what
+  # keeps the owner from ever being prompted with a path that only looks safe.
+  test "refuses a grant of a Unicode case-fold variant of a protected dir" do
+    os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mutation-fold")
+    File.mkdir_p!(Path.join(os_home, ".ssh"))
+
+    config =
+      Config.normalize(
+        mode: :standard,
+        os_home: os_home,
+        workspace_root: Path.join(os_home, "workspace")
+      )
+
+    assert {:error, {:unsafe_root, _root}} =
+             ConfigMutation.add_allowed_root(config, Path.join(os_home, ".\u017Fsh"))
+
+    FermixTestSupport.SafeRm.rm_rf!(os_home)
+  end
+
+  test "refuses a grant of the fermix home's secret store" do
+    fermix_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-mutation-secrets")
+    previous_home = System.get_env("FERMIX_HOME")
+    System.put_env("FERMIX_HOME", fermix_home)
+
+    on_exit(fn ->
+      case previous_home do
+        nil -> System.delete_env("FERMIX_HOME")
+        value -> System.put_env("FERMIX_HOME", value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(fermix_home)
+    end)
+
+    config = Config.normalize(mode: :strict, workspace_root: Path.join(fermix_home, "workspace"))
+
+    assert {:error, {:unsafe_root, _root}} =
+             ConfigMutation.add_allowed_root(config, Path.join(fermix_home, "secrets"))
+  end
+
   test "enables and disables command capabilities with confirmation diff signal" do
     config = Config.normalize(commands: [profile: :bare])
 

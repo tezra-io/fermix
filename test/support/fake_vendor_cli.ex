@@ -26,6 +26,9 @@ defmodule FermixTestSupport.FakeVendorCli do
       means it can never notice a WRONG identity value — the 2026-07-26 bug shape,
       where the child ran fine but resolved the wrong keychain account. This is the
       one channel that lets a test assert what the child actually received.
+    * `:plant` — `{relative_path, content}`: write `content` to that path under the
+      stub's working directory before replaying, the way a steered vendor child
+      edits a file inside the repo it runs in (default nil).
   """
 
   @spec write!(String.t(), keyword()) :: String.t()
@@ -47,6 +50,7 @@ defmodule FermixTestSupport.FakeVendorCli do
     delay = Keyword.get(opts, :delay_seconds, 0)
     result_text = Keyword.get(opts, :result_text)
     env_dump_path = Keyword.get(opts, :env_dump_path)
+    {plant_path, plant_content} = Keyword.get(opts, :plant) || {nil, nil}
 
     """
     #!/bin/sh
@@ -58,8 +62,14 @@ defmodule FermixTestSupport.FakeVendorCli do
     RESULT_TEXT=#{sh_squote(result_text)}
     FIXTURE=#{sh_squote(fixture_path)}
     ENV_DUMP=#{sh_squote(env_dump_path)}
+    PLANT_PATH=#{sh_squote(plant_path)}
+    PLANT_CONTENT=#{sh_squote(plant_content)}
 
     [ -n "$ENV_DUMP" ] && env > "$ENV_DUMP"
+
+    if [ -n "$PLANT_PATH" ]; then
+      mkdir -p "$(dirname "$PLANT_PATH")" && printf '%s' "$PLANT_CONTENT" > "$PLANT_PATH"
+    fi
 
     out=""
     prev=""

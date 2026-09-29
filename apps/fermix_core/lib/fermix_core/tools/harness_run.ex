@@ -8,15 +8,19 @@ defmodule FermixCore.Tools.HarnessRun do
   # `Manager.start_run` → return the run id immediately. Runs are background-only
   # (design §23.1): there is no inline path and no wait window, so the launch
   # result tells the model to end its turn and never poll. All GenServer reach is
-  # context-injectable (`:harness_manager`) so tool tests stub the manager.
+  # context-injectable (`:harness_manager`) so tool tests stub the manager. The
+  # one refusal the owner can clear from chat, an unresolved vendor-config change
+  # (GAP3-1), becomes a `/confirm` prompt instead of an error.
 
   alias FermixCore.Harness.Authorization
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Consent
   alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.Manager
+  alias FermixCore.Harness.VendorConfig
   alias FermixCore.Sandbox
   alias FermixCore.Tools.HarnessSupport, as: Support
+  alias FermixCore.Tools.RequestDirectoryAccess
 
   @reserved ~w(prompt cwd timeout_minutes progress)
   @progress_table %{"quiet" => :quiet, "milestones" => :milestones}
@@ -50,8 +54,53 @@ defmodule FermixCore.Tools.HarnessRun do
            start_run(spec, prompt, cwd, params, opts, snapshot, session_id, context) do
       Support.success_json(launched_map(run_id, Map.get(snapshot, :origin_kind)))
     else
+      {:error, {:vendor_config_changed, change}} -> request_acknowledgment(change, context)
       {:error, reason} -> Support.error(reason)
     end
+  end
+
+  # --- Vendor-config acknowledgment (GAP3-1) -------------------------------
+
+  # An earlier run changed config a coding CLI runs on its own at launch, so the
+  # Manager refused this launch until the owner acknowledges it. Where the turn
+  # has the sandbox `/confirm` flow, that is one prompt through the same injected
+  # `approval_fn` `request_directory_access` uses: confirming records the
+  # acknowledgment and re-ingests this request, which then launches. A turn with
+  # none (a scheduled job, a client-owned surface such as ACP) gets the refusal,
+  # which names the files and how to clear them.
+  defp request_acknowledgment(change, context) do
+    if RequestDirectoryAccess.attended_operator?(context) do
+      ask_owner(change, context)
+    else
+      Support.error({:vendor_config_changed, change})
+    end
+  end
+
+  defp ask_owner(change, context) do
+    case context.approval_fn.(%{acknowledge_vendor_config: change.run_id}) do
+      {:ok, _token, :existing} ->
+        Support.success_json(awaiting_map())
+
+      {:ok, token, :new} ->
+        context.reply_fn.({:approval_prompt, owner_prompt(change, token, context), token})
+        Support.success_json(awaiting_map())
+    end
+  end
+
+  defp owner_prompt(change, token, context) do
+    VendorConfig.acknowledgment_prompt(change) <>
+      "\n\n" <> RequestDirectoryAccess.approval_line(token, context)
+  end
+
+  defp awaiting_map do
+    %{
+      status: "awaiting_acknowledgment",
+      detail:
+        "Nothing launched: a previous coding run changed coding-agent config that runs on " <>
+          "its own when a coding agent starts, and the owner has been asked to acknowledge " <>
+          "it. This request resumes on its own once they confirm — end your turn now and " <>
+          "do not retry this tool."
+    }
   end
 
   # --- First-use consent --------------------------------------------------

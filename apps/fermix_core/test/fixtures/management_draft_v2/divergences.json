@@ -737,6 +737,282 @@
       "field": "plugin.settings[].kind",
       "kind": "engine_only",
       "why": "The same field on the row this write answers with, for the same reason: the app redraws the control from the row it is handed, so a kind present in the listing and absent here would make the field change shape on save."
+    },
+    {
+      "method": "(errors)",
+      "field": "unknown_pairing_session:session_id",
+      "kind": "engine_only",
+      "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
+    },
+    {
+      "method": "(errors)",
+      "field": "unavailable:capability,sentence",
+      "kind": "engine_only",
+      "why": "unavailable is illustrated twice: once with details {capability} for a capability that could not answer, and once with details {capability, sentence} for the phone channel refusing a pairing or forgetting decision from a caller that is not the owner. The sentence is what tells that refusal from a channel that is not running; without it the CLI sent the operator to doctor, which reported the channel healthy. The draft predates the phone pairing surface and drew only the {capability} case."
+    },
+    {
+      "method": "(schema)",
+      "field": "error_codes:unknown_pairing_session",
+      "kind": "engine_only",
+      "why": "M51 adds the error code unknown_pairing_session, with details {session_id}, for a pairing session this daemon does not retain, in the same shape as unknown_session and unknown_job. The draft predates the phone pairing surface, so its error catalog has no such code."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.devices.list",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.devices.revoke",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.cancel",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.decide",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.get",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.pair.start",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mobile.status",
+      "kind": "engine_only",
+      "why": "M51 adds the phone pairing surface after the draft was written, so the draft publishes no mobile.* method. The seven methods are minimum version 2 and additive: a client built against the draft never calls them, and the app re-vendors this export before it draws the Phone pane."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.devices.list=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.devices.revoke=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.cancel=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.decide=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.get=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.pair.start=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mobile.status=2",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.devices.list",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.devices.revoke",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.cancel",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.decide",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.get",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.pair.start",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mobile.status",
+      "kind": "engine_only",
+      "why": "M51: every mobile.* method is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates the phone pairing surface, so its table has no entry for it; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "mobile.devices.revoke",
+      "field": "params:device_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.cancel",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.decide",
+      "field": "params:approved",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.decide",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "mobile.pair.get",
+      "field": "params:session_id",
+      "kind": "engine_only",
+      "why": "M51: a parameter of one of the phone pairing methods the draft predates. session_id names a polled pairing session, approved is the operator's boolean decision, and device_id names a paired phone; each is refused by field when it is missing or of the wrong type."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_advertise_mdns",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_bind",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_enabled",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_port",
+      "kind": "engine_only",
+      "why": "M51 gives the phone channel its own settings section, channels.mobile, with four boot-bound rows: the enable switch, the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:browser_install",
+      "kind": "engine_only",
+      "why": "The browser download is its own job kind, browser_install, because its result names the browser tasks now run in. The draft predates it; one jobView shape still covers it, so a client that has not re-vendored decodes it as an unknown kind rather than failing."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:browser.install.start",
+      "kind": "engine_only",
+      "why": "The browser download (browser.install.start) postdates the draft: it runs the meeting notetaker's own install step for a machine with no Chrome or Chromium, and is added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls it."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:browser.install.start=2",
+      "kind": "engine_only",
+      "why": "browser.install.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.browser.install.start",
+      "kind": "engine_only",
+      "why": "browser.install.start is published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates it, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "job.get",
+      "field": "failure.code",
+      "kind": "engine_only",
+      "why": "The export now illustrates a failed job.get view (a browser download whose Chromium step failed), so jobFailure's code and sentence appear on job.get; the draft illustrates only a completed one. The shape is the published jobFailure, unchanged."
+    },
+    {
+      "method": "job.get",
+      "field": "failure.sentence",
+      "kind": "engine_only",
+      "why": "The export now illustrates a failed job.get view (a browser download whose Chromium step failed), so jobFailure's code and sentence appear on job.get; the draft illustrates only a completed one. The shape is the published jobFailure, unchanged."
+    },
+    {
+      "method": "job.get",
+      "field": "result.browser",
+      "kind": "engine_only",
+      "why": "A finished browser download's result is {installed, browser}: the launcher's answer after the download, carried as flat scalars like every job result. The draft illustrates only a provider probe's result, and the field is an open object in both."
+    },
+    {
+      "method": "job.get",
+      "field": "result.installed",
+      "kind": "engine_only",
+      "why": "A finished browser download's result is {installed, browser}: the launcher's answer after the download, carried as flat scalars like every job result. The draft illustrates only a provider probe's result, and the field is an open object in both."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_allowed_hosts",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_default_profile",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_executable",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:browser",
+      "field": "rows:browser_max_tabs",
+      "kind": "engine_only",
+      "why": "The browser section postdates the draft: the managed task browser's pane, with the read-only browser tasks run in, how tasks run (default_profile), the tab cap and the allowed private hosts. The draft draws no such section; the rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:secrets",
+      "field": "rows:secret_store",
+      "kind": "engine_only",
+      "why": "The secrets section, under a secrets pane the draft predates, chooses the store a new secret is written to: the keyring or a private file in the Fermix home, for a Linux desktop whose login keyring stays locked after a fingerprint login. Its one row is an ordinary closed choice; an app that does not know the pane decodes it as unrecognised and draws no section for it."
     }
   ]
 }

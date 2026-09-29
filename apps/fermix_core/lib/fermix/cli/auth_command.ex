@@ -9,12 +9,14 @@ defmodule Fermix.CLI.AuthCommand do
       `auth.openai.com`. Anthropic: `--setup-token TOKEN`,
       `--import-claude-code`, or the `CLAUDE_CODE_OAUTH_TOKEN` env var.
     * `status` — prints what is currently stored.
-    * `logout` — removes the stored credentials.
+    * `logout` — removes the stored credentials, then tells a running daemon
+      to drop the tokens it still holds for them.
 
-  After `login` (or any change), restart the daemon so the running
-  `TokenManager` reloads the new token state.
+  After `login`, restart the daemon so the running `TokenManager` reloads the
+  new token state.
   """
 
+  alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Store
@@ -70,7 +72,7 @@ defmodule Fermix.CLI.AuthCommand do
 
     case CodexLogin.login(login_opts) do
       {:ok, tokens} -> persist(tokens)
-      {:error, reason} -> error("login failed: #{inspect(reason)}")
+      {:error, reason} -> error("login failed: #{reason_text(reason)}")
     end
   end
 
@@ -110,7 +112,7 @@ defmodule Fermix.CLI.AuthCommand do
   end
 
   defp anthropic_result({:error, reason}),
-    do: error("anthropic login failed: #{inspect(reason)}")
+    do: error("anthropic login failed: #{reason_text(reason)}")
 
   defp xai_login(opts) do
     login_opts =
@@ -136,7 +138,7 @@ defmodule Fermix.CLI.AuthCommand do
         end
 
       {:error, reason} ->
-        error("xai login failed: #{inspect(reason)}")
+        error("xai login failed: #{reason_text(reason)}")
     end
   end
 
@@ -155,7 +157,7 @@ defmodule Fermix.CLI.AuthCommand do
 
   defp revert_route(@anthropic_profile), do: select_route(:anthropic, :api_key)
   defp revert_route(@xai_profile), do: select_route(:xai, :api_key)
-  defp revert_route(_profile), do: :ok
+  defp revert_route(_profile), do: :no_route
 
   defp timeout_ms(nil), do: nil
   defp timeout_ms(seconds) when is_integer(seconds) and seconds > 0, do: seconds * 1_000
@@ -213,22 +215,19 @@ defmodule Fermix.CLI.AuthCommand do
 
   defp do_logout({:error, message}), do: error(message)
 
+  # The logout is the same whether or not a daemon runs: the entry is deleted
+  # here. A running daemon still holds the account's tokens in memory, so it is
+  # then told to let go of them, the way the plugin verbs ask it to re-apply
+  # their config. With no daemon there is nothing to tell and nothing more is
+  # printed.
   defp do_logout({:ok, profile}) do
     path = Store.path()
 
     case Store.delete_provider(profile, path) do
       :ok ->
-        case revert_route(profile) do
-          :ok ->
-            IO.puts("Logged out. Removed #{profile} entry from #{path}.")
-            IO.puts("Restart the daemon: `fermix restart`.")
-            0
-
-          {:error, reason} ->
-            error(
-              "removed credentials, but failed to revert auth_mode to api_key: #{inspect(reason)}"
-            )
-        end
+        profile
+        |> logged_out(path)
+        |> tell_daemon(profile, "removed the #{profile} entry from #{path}")
 
       {:error, :no_auth_file} ->
         already_logged_out(profile, path)
@@ -237,7 +236,49 @@ defmodule Fermix.CLI.AuthCommand do
         already_logged_out(profile, path)
 
       {:error, reason} ->
-        error("logout failed: #{inspect(reason)}")
+        error("logout failed: #{reason_text(reason)}")
+    end
+  end
+
+  # Only anthropic and xai have an auth-mode route to revert, and that config
+  # change is read by the daemon at start, so only they mention a restart. The
+  # daemon's live tokens are dropped by the notice that follows, not by it.
+  defp logged_out(profile, path) do
+    case revert_route(profile) do
+      :ok ->
+        IO.puts("Logged out. Removed #{profile} entry from #{path}.")
+        IO.puts("The auth_mode change reaches the daemon on its next restart.")
+        0
+
+      :no_route ->
+        IO.puts("Logged out. Removed #{profile} entry from #{path}.")
+        0
+
+      {:error, reason} ->
+        error(
+          "removed credentials, but failed to revert auth_mode to api_key: #{inspect(reason)}"
+        )
+    end
+  end
+
+  # `status` is the local logout's own exit status; the daemon's answer can only
+  # make it worse. A daemon that cannot let go is a failed logout, because it
+  # keeps calling as the account until it restarts.
+  defp tell_daemon(status, profile, local) do
+    case DaemonClient.forget_auth_profile(to_string(profile)) do
+      :ok ->
+        IO.puts(:stderr, "The running daemon dropped any tokens it held for #{profile}.")
+        status
+
+      :not_running ->
+        status
+
+      {:error, reason} ->
+        error(
+          "#{local}, but the running daemon could not drop its #{profile} tokens: #{reason}. " <>
+            "Restart the daemon (from the Fermix app, or `fermix restart` for a daemon you " <>
+            "run yourself)."
+        )
     end
   end
 
@@ -249,13 +290,20 @@ defmodule Fermix.CLI.AuthCommand do
   defp profile_for(other),
     do: {:error, "unknown provider #{inspect(other)}; expected codex, anthropic, or xai"}
 
+  # Still tells a running daemon: a logout whose notice failed leaves the entry
+  # gone and the tokens live, and running it again is how the operator retries.
   defp already_logged_out(profile, path) do
     IO.puts("Already logged out (no #{profile} entry in #{path}).")
-    0
+    tell_daemon(0, profile, "no #{profile} entry was stored in #{path}")
   end
 
   defp maybe_put(opts, _key, nil), do: opts
   defp maybe_put(opts, key, value), do: Keyword.put(opts, key, value)
+
+  # Another Fermix process held the account's profile lock past the wait, and
+  # nothing was spent or removed: the one reason with a sentence of its own.
+  defp reason_text(:profile_busy), do: Store.busy_sentence()
+  defp reason_text(reason), do: inspect(reason)
 
   defp format_dt(nil), do: "n/a"
   defp format_dt(%DateTime{} = dt), do: DateTime.to_iso8601(dt)

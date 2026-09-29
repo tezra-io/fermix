@@ -19,11 +19,13 @@ defmodule Fermix.CLI.Service do
   alias Fermix.CLI.LauncherPath
   alias Fermix.CLI.Service.Launchd
   alias Fermix.CLI.Service.Packaged
+  alias Fermix.CLI.Service.Status
   alias Fermix.CLI.Service.Systemd
   alias Fermix.CLI.Service.Templates
   alias FermixCore.Boot.PathBaseline
   alias FermixCore.BuildInfo
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.SecretWriter
 
   @label "io.tezra.fermix"
   @linux_unit "fermix.service"
@@ -40,6 +42,10 @@ defmodule Fermix.CLI.Service do
     FERMIX_OPIK_PROJECT
     FERMIX_TRACE_CONTENT
   )
+
+  # The account `sudo` was invoked from. Read to choose who a new system unit
+  # runs as; never written into a unit.
+  @sudo_env ~w(SUDO_USER SUDO_UID)
 
   @type scope :: :user | :system
   @type os :: :darwin | :linux
@@ -132,15 +138,15 @@ defmodule Fermix.CLI.Service do
 
   defp legacy_install(scope, opts) do
     with :ok <- legacy_mutation(opts),
-         {:ok, spec} <- spec(scope, opts),
+         {:ok, spec} <- render_spec(scope, opts),
          # `--port` reaches both distributions' installers, so a standalone
          # install writes the setting rather than accepting the flag and
          # dropping it.
          :ok <- persist_port(spec.fermix_home, Keyword.get(opts, :port)),
          :ok <- File.mkdir_p(Path.dirname(spec.unit_path)),
-         :ok <- File.mkdir_p(Path.dirname(spec.log_path)),
+         :ok <- make_log_dir(spec),
          :ok <- write_unit(spec),
-         :ok <- backend(spec).install(spec) do
+         :ok <- backend(spec, opts).install(spec) do
       :ok
     end
   end
@@ -148,7 +154,7 @@ defmodule Fermix.CLI.Service do
   defp legacy_uninstall(scope, opts) do
     with :ok <- legacy_mutation(opts),
          {:ok, spec} <- spec(scope, opts),
-         :ok <- backend(spec).uninstall(spec),
+         :ok <- backend(spec, opts).uninstall(spec),
          :ok <- remove_unit(spec) do
       :ok
     end
@@ -305,7 +311,7 @@ defmodule Fermix.CLI.Service do
   """
   @spec render_unit(scope(), keyword()) :: {:ok, String.t()} | {:error, term()}
   def render_unit(scope, opts \\ []) when scope in [:user, :system] do
-    with {:ok, spec} <- spec(scope, opts), do: {:ok, render(spec)}
+    with {:ok, spec} <- render_spec(scope, opts), do: {:ok, render(spec)}
   end
 
   @doc """
@@ -317,7 +323,8 @@ defmodule Fermix.CLI.Service do
   False when the on-disk unit matches. An unreadable/absent unit counts as
   drift: rewriting it is the safe convergent action (callers gate on
   `installed?/2`, so this is the file-vanished/unreadable edge, not the steady
-  state).
+  state). So does a unit the rewrite would refuse, such as an account whose unit
+  names another home: the rewrite is what reports the refusal.
 
   A packaged engine renders no unit at all, so there is nothing to compare and
   nothing to reconcile: it is never drifted. Answering true there would send
@@ -329,7 +336,7 @@ defmodule Fermix.CLI.Service do
   end
 
   defp legacy_drifted?(scope, opts) do
-    with {:ok, spec} <- spec(scope, opts),
+    with {:ok, spec} <- render_spec(scope, opts),
          {:ok, on_disk} <- File.read(spec.unit_path) do
       on_disk != render(spec)
     else
@@ -348,11 +355,11 @@ defmodule Fermix.CLI.Service do
   end
 
   defp do_start(scope, opts) do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).start(spec)
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec, opts).start(spec)
   end
 
   defp do_stop(scope, opts) do
-    with {:ok, spec} <- spec(scope, opts), do: backend(spec).stop(spec)
+    with {:ok, spec} <- spec(scope, opts), do: backend(spec, opts).stop(spec)
   end
 
   defp build_spec(os, scope, opts) do
@@ -371,6 +378,118 @@ defmodule Fermix.CLI.Service do
       linux_unit: @linux_unit
     }
   end
+
+  # The spec a unit is rendered from: `spec/2` plus `run_as`, the account a
+  # Linux system unit runs the daemon as. Only the paths that write or compare a
+  # unit resolve it, because it reads the installed unit, and asking where the
+  # unit is (installed?, start, stop, uninstall) must not depend on reading it.
+  defp render_spec(scope, opts) do
+    with {:ok, spec} <- spec(scope, opts),
+         {:ok, run_as} <- run_as(spec, opts) do
+      {:ok, Map.put(spec, :run_as, run_as)}
+    end
+  end
+
+  # `nil` writes no `User=`, which systemd reads as root. A user unit is always
+  # its own account's.
+  #
+  # Decided once, when the unit is first written: a unit already on disk keeps
+  # the account it names, because a root daemon has been writing root-owned
+  # files into its home, and a drift rewrite that moved it to another account
+  # would lock it out of them.
+  defp run_as(%{os: :linux, scope: :system, unit_path: path} = spec, opts) do
+    case File.read(path) do
+      {:ok, unit} -> installed_account(unit, spec)
+      {:error, :enoent} -> {:ok, new_unit_account(spec, opts)}
+      {:error, reason} -> {:error, {:unit_unreadable, path, reason}}
+    end
+  end
+
+  defp run_as(_spec, _opts), do: {:ok, nil}
+
+  # An installed account is kept only together with the home its unit names:
+  # the two are one pair. `sudo` resets HOME on most hosts, so a later `sudo
+  # fermix setup --system` resolves root's home, and rewriting the account's
+  # unit for it would start a daemon that cannot open its own home and restarts
+  # forever. Root opens any home, so a root unit carries no such pair.
+  defp installed_account(unit, spec) do
+    account = Templates.unit_run_as(unit)
+
+    cond do
+      is_nil(account) ->
+        {:ok, nil}
+
+      not Templates.unit_account?(account) ->
+        {:error, {:invalid_account, spec.unit_path, account}}
+
+      true ->
+        paired_account(account, Status.legacy_home(unit), spec.fermix_home)
+    end
+  end
+
+  defp paired_account(account, {:ok, home}, home), do: {:ok, account}
+
+  defp paired_account(account, {:ok, installed}, home),
+    do: {:error, {:account_home_mismatch, account, installed, home}}
+
+  defp paired_account(account, :error, home),
+    do: {:error, {:account_home_mismatch, account, nil, home}}
+
+  # A new unit runs as root unless its caller offers it to the account that ran
+  # `sudo` (`account: :sudo_invoker`). `fermix service install` does, because it
+  # configures nothing. A setup run under sudo does not: it has just configured
+  # the home as root, its secrets are root's, and only a root daemon reads them.
+  defp new_unit_account(spec, opts) do
+    case Keyword.get(opts, :account, :root) do
+      :root -> nil
+      :sudo_invoker -> sudo_invoker_owning(spec, opts)
+    end
+  end
+
+  # The invoker's account, so an operator's own Fermix keeps that account's
+  # permissions at boot instead of root's. Only when a unit file can name it and
+  # the home it serves is provably that account's: `sudo` resets HOME to root's
+  # on most hosts, and a daemon dropped to the invoker could not open root's
+  # home. Anything short of that keeps the root unit every system install has
+  # written so far.
+  defp sudo_invoker_owning(spec, opts) do
+    env = install_env(opts)
+
+    with name when is_binary(name) <- env["SUDO_USER"],
+         true <- Templates.unit_account?(name),
+         {uid, ""} when uid > 0 <- Integer.parse(env["SUDO_UID"] || ""),
+         true <- owns_home_state?(spec, uid) do
+      name
+    else
+      _not_the_invokers_home -> nil
+    end
+  end
+
+  # A home is the account's only when the state a daemon opens in it is too. A
+  # root daemon that served it, or a setup run under `sudo -E`, left root-owned
+  # files (the database and its WAL, 0600 secrets, config.toml, the log) in a
+  # directory that is still the account's, and a daemon dropped to the account
+  # could neither write its database nor read its secrets. So the home, what is
+  # directly in it, and what is in its log and secret directories must be the
+  # account's, each followed as the daemon opens it. Those two levels, never a
+  # walk: they hold what a daemon cannot start without, and deeper down (the
+  # workspace, traces by date) a root-owned file costs one write, not the start.
+  defp owns_home_state?(%{fermix_home: home, log_path: log_path}, uid) do
+    state_dirs = [home, Path.dirname(log_path), SecretWriter.File.directory(home: home)]
+
+    owned_by?(home, uid) and Enum.all?(state_dirs, &entries_owned_by?(&1, uid))
+  end
+
+  # An absent directory holds nothing; one that cannot be listed proves nothing.
+  defp entries_owned_by?(dir, uid) do
+    case File.ls(dir) do
+      {:ok, names} -> Enum.all?(names, &owned_by?(Path.join(dir, &1), uid))
+      {:error, :enoent} -> true
+      {:error, _unlistable} -> false
+    end
+  end
+
+  defp owned_by?(path, uid), do: match?({:ok, %File.Stat{uid: ^uid}}, File.stat(path))
 
   defp unit_path(:darwin, :user, opts) do
     Keyword.get(opts, :unit_path) ||
@@ -413,9 +532,8 @@ defmodule Fermix.CLI.Service do
   # reinstall. PATH is *computed* (see `service_path/2`), never copied from the
   # source env — the install-time shell PATH is irrelevant to the daemon.
   defp service_env(opts, fermix_home, service_path) do
-    source = Keyword.get(opts, :env) || system_observability_env()
-
-    source
+    opts
+    |> install_env()
     |> Map.take(@observability_env)
     |> Map.reject(fn {_key, value} -> blank?(value) end)
     |> Map.put("FERMIX_HOME", fermix_home)
@@ -437,8 +555,10 @@ defmodule Fermix.CLI.Service do
     |> Enum.join(":")
   end
 
-  defp system_observability_env do
-    Map.new(@observability_env, fn key -> {key, System.get_env(key)} end)
+  defp install_env(opts), do: Keyword.get(opts, :env) || system_install_env()
+
+  defp system_install_env do
+    Map.new(@observability_env ++ @sudo_env, fn key -> {key, System.get_env(key)} end)
   end
 
   defp blank?(nil), do: true
@@ -454,11 +574,27 @@ defmodule Fermix.CLI.Service do
       end
   end
 
-  defp backend(%{os: :darwin}), do: Launchd
-  defp backend(%{os: :linux}), do: Systemd
+  # The service manager a unit is handed to. `opts[:backend]` stands in for it,
+  # so a test exercises an install without reaching the host's.
+  defp backend(spec, opts), do: Keyword.get(opts, :backend, os_backend(spec))
+
+  defp os_backend(%{os: :darwin}), do: Launchd
+  defp os_backend(%{os: :linux}), do: Systemd
 
   defp render(%{os: :darwin} = spec), do: Templates.render_darwin_plist(spec)
   defp render(%{os: :linux} = spec), do: Templates.render_linux_unit(spec)
+
+  # The installer makes the log directory, as it always has, except for a unit
+  # that runs as an account: the daemon makes it at boot as that account, and
+  # made here it would be root's and the daemon could not write its log.
+  defp make_log_dir(%{run_as: nil} = spec), do: File.mkdir_p(Path.dirname(spec.log_path))
+  defp make_log_dir(_spec_with_account), do: :ok
+
+  # systemd's own mode for a system unit, whatever the installer's umask: the
+  # account the unit names, and that account's CLI, read it back.
+  defp write_unit(%{os: :linux, scope: :system} = spec) do
+    with :ok <- File.write(spec.unit_path, render(spec)), do: File.chmod(spec.unit_path, 0o644)
+  end
 
   defp write_unit(spec), do: File.write(spec.unit_path, render(spec))
 

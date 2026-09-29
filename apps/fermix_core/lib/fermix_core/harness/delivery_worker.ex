@@ -4,9 +4,9 @@ defmodule FermixCore.Harness.DeliveryWorker do
 
   Every tick (default 30s, self-rearming) it pulls up to `@max_rows_per_tick` due
   pending deliveries from `Ledger.pending_deliveries/2` (already excludes active
-  rows and rows whose `next_delivery_at` is in the future), makes ONE bounded
-  send attempt each through `Harness.Delivery.deliver/2`, and records the outcome
-  durably:
+  rows and rows whose `next_delivery_at` is in the future: a backoff, or the
+  Manager's hand-off lease), makes ONE bounded send attempt each through
+  `Harness.Delivery.deliver/2`, and records the outcome durably:
 
     * success (`:sent` / `:skipped`) → `delivered`;
     * failure → `delivery_attempts + 1`, exponential-backoff `next_delivery_at`
@@ -15,11 +15,19 @@ defmodule FermixCore.Harness.DeliveryWorker do
     * at `delivery_max_attempts` or past `delivery_max_age_hours` → `dead_letter`
       (surfaced by doctor and `list_coding_runs`).
 
-  The immediate first attempt happens inline on terminalization (Manager); this
-  worker owns every subsequent attempt — it naturally sees a row only because the
-  Manager marks `delivered` only on success. A failing tick (e.g. the query
-  itself errors) re-arms no sooner than `@min_rearm_ms` so the worker never
-  hot-loops.
+  The immediate first attempt happens inline on terminalization (Manager), and
+  the terminal write leases the row to it (`next_delivery_at`,
+  `Manager.handoff_lease_ms/0`): this worker sees the row only after that lease
+  ends, so while the wall clock runs normally it does not race the inline
+  attempt (a sleep or clock jump past the lease mid-hand-off is the designed
+  at-least-once duplicate), and it owns every subsequent attempt. A successful
+  hand-off marks the row `delivered` and a failed client-owned one dead-letters
+  it, so the worker takes over only a failed attempt or one whose Manager died.
+  A client-owned origin (M29 §17.6(d)) has no text path, so a client-owned row
+  it finds is a hand-off that recorded no outcome: it dead-letters that row on
+  its first due tick as `:handoff_unrecorded` and sends nothing.
+  A failing tick (e.g. the query itself errors) re-arms no sooner than
+  `@min_rearm_ms` so the worker never hot-loops.
 
   Draining is **unconditional** (spec §5): the outbox is finished in-flight work,
   not a new admission, so `Config.enabled?` does NOT gate it — flipping the
@@ -110,7 +118,28 @@ defmodule FermixCore.Harness.DeliveryWorker do
     state
   end
 
+  # A client-owned row has no wire here: a send would only be refused, and
+  # re-dispatching its continuation would break at-most-once execution (§23.2).
+  # The Manager's hand-off continued it or dead-lettered it by name, so one still
+  # pending is a hand-off that recorded no outcome, and that is its name.
   defp process_row(row, state, now) do
+    if Delivery.client_owned?(row) do
+      dead_letter_unrecorded(row, state)
+    else
+      send_row(row, state, now)
+    end
+  end
+
+  defp dead_letter_unrecorded(row, state) do
+    Logger.warning(
+      "harness run #{Map.get(row, :id)} dead-lettered: :handoff_unrecorded; " <>
+        "its client-owned hand-off recorded no outcome"
+    )
+
+    dead_letter(row, state, :handoff_unrecorded)
+  end
+
+  defp send_row(row, state, now) do
     case Delivery.deliver(row, state.delivery_opts) do
       {:ok, _sent_or_skipped} -> mark_delivered(row, state, now)
       {:error, reason} -> handle_failure(row, state, now, reason)

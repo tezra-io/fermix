@@ -5,12 +5,15 @@ defmodule FermixCore.Plugins.Dist.Lock do
   CLI process) cannot interleave a mutating pipeline. A GenServer mailbox only
   serializes within one VM; this is the layer that crosses processes.
 
+  `FermixCore.Auth.Store` takes the same lock around `auth.json`, with its own
+  waits and stale thresholds and its own stale-threshold invariant.
+
   Implemented as an `O_EXCL` lockfile (atomic create-or-fail on the same
-  filesystem). Acquisition is **bounded** — a fixed number of attempts with a
-  delay, then fail loud (`{:error, :lock_unavailable}`), never an indefinite
-  block. A lockfile older than the stale threshold is assumed to belong to a
-  crashed holder and is broken once, so a dead process cannot brick plugin
-  management forever.
+  filesystem). Acquisition is **bounded** — tries a delay apart until
+  `attempts × delay_ms` have passed on the monotonic clock, then fail loud
+  (`{:error, :lock_unavailable}`), never an indefinite block. A lockfile older
+  than the stale threshold is assumed to belong to a crashed holder and is
+  broken once, so a dead process cannot brick plugin management forever.
 
   The lockfile is created and removed by `FermixCore.Plugins.Dist.Lock.Owner`,
   a process linked to the holder, rather than by a `try/after` in the holder
@@ -63,7 +66,7 @@ end
 
 defmodule FermixCore.Plugins.Dist.Lock.Owner do
   @moduledoc """
-  The process that owns one plugin-store lockfile for the length of one
+  The process that owns one lockfile for the length of one
   critical section.
 
   It is linked to the holder and traps exits, so the holder's death — a crash,
@@ -88,8 +91,8 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
   # gone. All `terminate/2` does is one `File.rm`, so anything slower than this
   # is a wedged filesystem and exits loud rather than waiting on it.
   @stop_timeout_ms 5_000
-  # Acquisition sleeps `attempts × delay_ms` at most; the slack covers the
-  # filesystem calls around that loop.
+  # Acquisition starts no try once `attempts × delay_ms` have passed; the slack
+  # covers the last try's filesystem calls and its sleep.
   @acquire_slack_ms 5_000
 
   @spec start_link(Path.t(), pid()) :: GenServer.on_start()
@@ -121,8 +124,9 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
     attempts = Keyword.get(opts, :attempts, @default_attempts)
     delay = Keyword.get(opts, :delay_ms, @default_delay_ms)
     stale = Keyword.get(opts, :stale_after_ms, @default_stale_after_ms)
+    deadline = System.monotonic_time(:millisecond) + attempts * delay
 
-    case do_acquire(state.lock_path, attempts, delay, stale) do
+    case do_acquire(state.lock_path, deadline, delay, stale) do
       :ok -> {:reply, :ok, %{state | held?: true}}
       {:error, _reason} = error -> {:reply, error, state}
     end
@@ -137,7 +141,7 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
   @impl true
   def handle_info({:EXIT, holder, reason}, %{holder: holder} = state) do
     Logger.warning(
-      "plugin store lock #{state.lock_path} released: holder #{inspect(holder)} exited " <>
+      "lock #{state.lock_path} released: holder #{inspect(holder)} exited " <>
         inspect(reason)
     )
 
@@ -153,14 +157,15 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
         :ok
 
       {:error, reason} ->
-        Logger.error("plugin store lock #{lock_path} could not be removed: #{inspect(reason)}")
+        Logger.error("lock #{lock_path} could not be removed: #{inspect(reason)}")
     end
   end
 
-  defp do_acquire(_lock_path, attempts, _delay, _stale) when attempts <= 0,
-    do: {:error, :lock_unavailable}
-
-  defp do_acquire(lock_path, attempts, delay, stale) do
+  # The retries end on the clock the caller's timeout is measured on, not after
+  # a count of tries: each try's own file calls take time a count does not see,
+  # and on a loaded machine enough of them outlast the slack while the owner is
+  # still retrying, which exits the caller instead of answering it.
+  defp do_acquire(lock_path, deadline, delay, stale) do
     case File.open(lock_path, [:write, :exclusive]) do
       {:ok, io} ->
         IO.write(io, marker())
@@ -170,11 +175,17 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
       {:error, :eexist} ->
         maybe_break_stale(lock_path, stale)
         Process.sleep(delay)
-        do_acquire(lock_path, attempts - 1, delay, stale)
+        retry(lock_path, deadline, delay, stale)
 
       {:error, reason} ->
         {:error, {:lock_open_failed, reason}}
     end
+  end
+
+  defp retry(lock_path, deadline, delay, stale) do
+    if System.monotonic_time(:millisecond) < deadline,
+      do: do_acquire(lock_path, deadline, delay, stale),
+      else: {:error, :lock_unavailable}
   end
 
   defp maybe_break_stale(lock_path, stale_after_ms) do
@@ -189,7 +200,7 @@ defmodule FermixCore.Plugins.Dist.Lock.Owner do
   end
 
   # The call has to outlast the acquisition budget it carries, so the one bound
-  # that decides the answer stays the attempt budget.
+  # that decides the answer stays the attempt budget's deadline.
   defp acquire_timeout(opts) do
     attempts = Keyword.get(opts, :attempts, @default_attempts)
     delay = Keyword.get(opts, :delay_ms, @default_delay_ms)

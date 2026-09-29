@@ -524,6 +524,16 @@ defmodule FermixCore.Plugins.RegistryApi3Test do
                Registry.decode_manifest(manifest, @path)
     end
 
+    # The access-sensitive gate is local-rail only in this wave: a hosted tool's
+    # fields are a closed set, so the flag is refused rather than ignored.
+    test "refuses access_sensitive on a remote tool" do
+      manifest = replace_tool(remote_manifest(), put(search_tool(), "access_sensitive", true))
+
+      assert {:error,
+              {:invalid_remote_tool, "acme_search", {:unknown_fields, ["access_sensitive"]}}} =
+               Registry.decode_manifest(manifest, @path)
+    end
+
     test "rejects unknown and missing tool fields" do
       manifest = replace_tool(remote_manifest(), put(search_tool(), "request", %{}))
 

@@ -79,7 +79,9 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
          store_opts: [test_pid: self(), recoverable: recoverable],
          recovery_limit: 2,
          recovery_launcher: fn task -> task.() end,
-         recover_request: recover}
+         recover_request: recover,
+         device_store: :store,
+         authorize_device: fn :store, "device-a" -> {:ok, %{device_id: "device-a"}} end}
       )
 
     epoch = RequestCoordinator.epoch(server)
@@ -87,6 +89,43 @@ defmodule FermixChannels.Mobile.RequestCoordinatorTest do
 
     assert_received {:recovered, "offline",
                      %{transport: :mobile, authenticated_device_id: "device-a"}, ^server}
+  end
+
+  # A revoked device's accepted work is failed at boot, never run again as the
+  # operator.
+  test "a request from a revoked device is failed at recovery, never re-ingested" do
+    test_pid = self()
+
+    row = %{
+      profile_id: "main",
+      client_msg_id: "from-revoked",
+      request_type: "msg",
+      payload: %{"client_msg_id" => "from-revoked", "profile_id" => "main", "text" => "go"},
+      authenticated_device_id: "device-gone"
+    }
+
+    recover = fn _row, _context, _opts ->
+      send(test_pid, :unexpected_recovery)
+      :ok
+    end
+
+    server =
+      start_supervised!(
+        {RequestCoordinator,
+         store: StoreStub,
+         boot_epoch: random_epoch(),
+         store_opts: [test_pid: test_pid, recoverable: [row]],
+         recovery_launcher: fn task -> task.() end,
+         recover_request: recover,
+         device_store: :store,
+         authorize_device: fn :store, id -> {:error, {:device_not_found, id}} end}
+      )
+
+    assert is_binary(RequestCoordinator.epoch(server))
+    refute_received :unexpected_recovery
+
+    assert_received {:recovery_failed, "main", "from-revoked", 1,
+                     %{error: %{type: "recovery", reason: ":device_revoked"}}}
   end
 
   test "invalid legacy recovery rows are observable and never dispatched" do

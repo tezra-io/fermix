@@ -110,6 +110,46 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     end
   end
 
+  # D8: a channel's own pacing, read once at start in place of the constants.
+  describe "channel pacing" do
+    @paced %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
+
+    test "a paced channel opens on its first character and edits at its own interval" do
+      pid = DraftStream.start_link(spec(self(), pacing: @paced))
+
+      DraftStream.push(pid, {:text_delta, "a"})
+      assert_receive {:open, "a"}, 500
+
+      DraftStream.push(pid, {:text_delta, "ab"})
+      assert_receive {:edit, :handle_1, "ab"}, 500
+
+      assert {:ok, nil} = DraftStream.seal(pid, "final")
+    end
+
+    test "a channel with no edit cap keeps writing past the default cap" do
+      pid = DraftStream.start_link(spec(self(), pacing: @paced), edit_interval_ms: 1)
+
+      DraftStream.push(pid, {:text_delta, "x"})
+      assert_receive {:open, "x"}
+
+      # Arrival is the claim, so no bound of its own: a capped stream never
+      # writes the edit at all, and a loaded runner stalled one past 500 ms.
+      for count <- 2..305 do
+        text = String.duplicate("x", count)
+        DraftStream.push(pid, {:text_delta, text})
+        assert_receive {:edit, :handle_1, ^text}
+      end
+
+      assert {:ok, nil} = DraftStream.seal(pid, "final")
+    end
+
+    test "a half-wired pacing is refused where the spec is started" do
+      assert_raise ArgumentError, ~r/pacing/, fn ->
+        DraftStream.start_link(spec(self(), pacing: %{edit_interval_ms: 100}))
+      end
+    end
+  end
+
   describe "draft opening" do
     test "(b) no draft below the min-chars threshold" do
       pid = DraftStream.start_link(spec(self()), edit_interval_ms: 1)

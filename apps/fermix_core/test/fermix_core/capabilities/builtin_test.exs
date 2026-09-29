@@ -183,6 +183,9 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                # On-device computer-history recall is owner data (MILESTONE_32 §11.2).
                "recall_activity",
                "reminder_snooze",
+               # `send_attachment` uploads any file under the owner's sandbox
+               # roots into the chat: the bytes `file_read` returns.
+               "send_attachment",
                # `view_image` returns the owner's own image files, exactly as
                # `file_read` returns their text (M46 §5.1).
                "view_image"

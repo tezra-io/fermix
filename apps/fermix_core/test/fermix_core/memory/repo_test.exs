@@ -70,7 +70,14 @@ defmodule FermixCore.Memory.RepoTest do
               26,
               27,
               28,
-              29
+              29,
+              30,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36
             ]} =
              Repo.migration_versions(server: repo)
   end
@@ -116,7 +123,14 @@ defmodule FermixCore.Memory.RepoTest do
               26,
               27,
               28,
-              29
+              29,
+              30,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36
             ]} =
              Repo.migration_versions(server: repo)
 
@@ -152,7 +166,14 @@ defmodule FermixCore.Memory.RepoTest do
               26,
               27,
               28,
-              29
+              29,
+              30,
+              31,
+              32,
+              33,
+              34,
+              35,
+              36
             ]} =
              Repo.migration_versions(server: repo)
   end
@@ -419,8 +440,9 @@ defmodule FermixCore.Memory.RepoTest do
   # into the CREATE TABLE body. `harness_runs` is read positionally (`SELECT *`),
   # so a mid-body column would give a freshly created database a different column
   # order than a migrated one — a silent positional-read corruption on exactly the
-  # rows a continuation depends on.
-  test "client-origin migration appends its column after continuation_depth", %{
+  # rows a continuation depends on. The vendor-config columns (GAP3-1) follow the
+  # same rule, appended after it by their own migration.
+  test "client-origin and vendor-config migrations append their columns in order", %{
     db_path: db_path,
     repo: repo
   } do
@@ -430,7 +452,14 @@ defmodule FermixCore.Memory.RepoTest do
 
     try do
       assert {:ok, fresh} = sqlite_column_names(conn, "harness_runs")
-      assert Enum.take(fresh, -2) == ["continuation_depth", "client_origin_json"]
+
+      assert Enum.take(fresh, -5) == [
+               "continuation_depth",
+               "client_origin_json",
+               "vendor_config_json",
+               "vendor_config_changes_json",
+               "vendor_config_cleared_at"
+             ]
     after
       Sqlite3.close(conn)
     end
@@ -446,12 +475,16 @@ defmodule FermixCore.Memory.RepoTest do
     assert :ok = Repo.migrate(server: repo)
     assert {:ok, fresh} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
 
-    # Rewind to the pre-v14 shape and re-migrate: the column is re-added by the
-    # same ALTER an existing operator database takes.
+    # Rewind to the pre-v14 shape and re-migrate: the columns are re-added by the
+    # same ALTERs an existing operator database takes. A pre-v14 database predates
+    # the v35 vendor-config columns too, so the rewind removes those as well.
+    assert :ok = with_raw_conn(db_path, &drop_vendor_config_columns/1)
+    drop_migration_version(db_path, 35)
     assert :ok = with_raw_conn(db_path, &drop_client_origin_column/1)
     drop_migration_version(db_path, 14)
     assert {:ok, rewound} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
     refute "client_origin_json" in rewound
+    refute "vendor_config_json" in rewound
 
     assert :ok = Repo.migrate(server: repo)
     assert {:ok, migrated} = with_raw_conn(db_path, &sqlite_column_names(&1, "harness_runs"))
@@ -1260,6 +1293,14 @@ defmodule FermixCore.Memory.RepoTest do
 
   defp drop_client_origin_column(conn) do
     Sqlite3.execute(conn, "ALTER TABLE harness_runs DROP COLUMN client_origin_json;")
+  end
+
+  defp drop_vendor_config_columns(conn) do
+    Sqlite3.execute(conn, """
+    ALTER TABLE harness_runs DROP COLUMN vendor_config_json;
+    ALTER TABLE harness_runs DROP COLUMN vendor_config_changes_json;
+    ALTER TABLE harness_runs DROP COLUMN vendor_config_cleared_at;
+    """)
   end
 
   defp drop_migration_version(db_path, version) do

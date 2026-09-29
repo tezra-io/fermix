@@ -12,6 +12,7 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.TurnRunner
   alias FermixTestSupport.SafeRm
 
   # Published NIP-19 test vectors (see `nostr/key_test.exs`) — never live keys.
@@ -145,6 +146,15 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
       assert message.request_cwd == nil
       refute Map.has_key?(message.metadata, Acp.turn_opt())
     end
+
+    # The owner's chat is still a live surface where `/stop` reaches the turn, so
+    # its continuation keeps host computer use.
+    test "an owner-chat continuation stays an attended computer-use origin", ctx do
+      assert :ok = ContinuationDispatcher.dispatch(notice(), opts(ctx))
+
+      assert_receive {:ingested, [message], _opts}
+      assert TurnRunner.computer_use_origin(message) == :interactive
+    end
   end
 
   # M29 §17.6(c) — the ACP session that launched the run is long gone; the turn
@@ -238,6 +248,18 @@ defmodule FermixChannels.Harness.ContinuationDispatcherTest do
         end)
 
       refute log =~ "[error]"
+    end
+
+    # Core reads the detached sentinel as a plain metadata value (it cannot
+    # compile-depend on this app), so the cross-app contract is pinned here, on
+    # the message the dispatcher really builds: nobody can watch or cancel the
+    # turn, so it must fail the computer-use host gate.
+    test "the detached turn is an unattended computer-use origin", ctx do
+      persist_identity()
+
+      assert :ok = ContinuationDispatcher.dispatch(acp_notice(), opts(ctx))
+      assert_receive {:ingested, [message], _opts}
+      assert TurnRunner.computer_use_origin(message) == :unattended
     end
   end
 

@@ -23,11 +23,40 @@ defmodule FermixChannels.Gateway.Commands.Authorization do
   the `command_allowlist` guest branch: a trusted collaborator allowed
   to run `/new` must not thereby gain sandbox-mutation authority.
 
+  The approval family also asks who sent the message, through
+  `in_person/1`. A local socket's transport trust makes every same-user
+  peer an operator, so the daemon reads the peer instead
+  (`FermixCore.SocketPeer`) and the CLI and companion channels stamp it as
+  `metadata.caller`. A process the daemon started (the agent's own shell
+  command, a coding run) or one no terminal is attached to is not the
+  owner in person, so an approval-family command refuses it as
+  `{:error, :unattended}` (SIDE-V1): otherwise the agent could answer its
+  own `/confirm` prompt or approve a change it proposed itself. Every
+  other owner command answers by role alone, for any caller.
+
   This is `MESSAGE_GATEWAY_ARCHITECTURE.md` stage 4: command
   authorization and agent tool trust now share one decision.
   """
 
   alias FermixChannels.Gateway.Authorization
+
+  @typedoc "Why a gate refused: not the owner, or not a person at all."
+  @type refusal :: :unauthorized | :unattended
+
+  # The `SocketPeer` callers no person is behind.
+  @unattended_callers [:daemon_descendant, :detached]
+
+  @doc """
+  Whether a person sent this message. The approval family calls it before
+  its role gate: `/confirm`, `/deny`, `/grant`, `/revoke` and the rest of
+  `/sandbox`, `/soul` and `/skills`, which answer the owner's approval
+  prompts or approve a change the agent itself proposed. Refuses a caller
+  no person is behind; a message with no caller was not read off a local
+  socket (a remote chat, an in-process call) and passes.
+  """
+  @spec in_person(map()) :: :ok | {:error, :unattended}
+  def in_person(%{caller: caller}) when caller in @unattended_callers, do: {:error, :unattended}
+  def in_person(metadata) when is_map(metadata), do: :ok
 
   @spec owner_only(FermixChannels.Gateway.Message.t(), map(), map()) ::
           :ok | {:error, :unauthorized}

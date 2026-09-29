@@ -43,6 +43,13 @@ defmodule FermixCore.Memory.Repo do
   @computer_history_access_migration_version 27
   @computer_history_sessions_migration_version 28
   @job_run_tool_failures_migration_version 29
+  @job_runs_pending_delivery_migration_version 30
+  @release_wedged_jobs_migration_version 31
+  @computer_history_purges_migration_version 32
+  @companion_migration_version 33
+  @companion_cancel_migration_version 34
+  @harness_vendor_config_migration_version 35
+  @mobile_media_index_migration_version 36
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -298,6 +305,35 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE job_runs ADD COLUMN tool_failures INTEGER;
   """
 
+  # The Scheduler's reconcile pass reads every run whose delivery is still
+  # pending, at boot and every 60 s, and job_runs is never pruned. A partial
+  # index keeps that read to the pending rows instead of the whole run history.
+  @job_runs_pending_delivery_schema_sql """
+  CREATE INDEX IF NOT EXISTS idx_job_runs_pending_delivery
+    ON job_runs(created_at) WHERE delivery_status = 'pending';
+  """
+
+  # One-time repair of the wedge `settle_job_run/2` closes. Before it, a run's
+  # final write and its job's release were separate writes, and a crash between
+  # them left the job `running` with no active run: no due scan, timer or
+  # reconcile pass ever touched it again. Each is released as its settle would:
+  # a one-off its claim consumed (next_run_at cleared) is `completed` and
+  # disabled, any other job goes back to `scheduled`. A job whose run is still
+  # queued/running keeps its claim; the boot reconcile settles that run.
+  @release_wedged_jobs_sql """
+  UPDATE scheduled_jobs
+  SET state = CASE WHEN schedule_kind = 'once' AND next_run_at IS NULL THEN 'completed'
+                   ELSE 'scheduled' END,
+      enabled = CASE WHEN schedule_kind = 'once' AND next_run_at IS NULL THEN 0 ELSE enabled END,
+      updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+  WHERE state = 'running'
+    AND NOT EXISTS (
+      SELECT 1 FROM job_runs
+      WHERE job_runs.job_id = scheduled_jobs.id
+        AND job_runs.status IN ('queued', 'running')
+    );
+  """
+
   # Prompt-resource rename: the agent operating-rules file moved from
   # `AGENTS.md` to `FERMIX.md` to avoid collision with the workspace
   # `AGENTS.md` convention. Existing resource rows and revision history are
@@ -509,6 +545,17 @@ defmodule FermixCore.Memory.Repo do
   ALTER TABLE harness_runs ADD COLUMN client_origin_json TEXT;
   """
 
+  # The repo-local vendor config a coding CLI runs at launch (GAP3-1,
+  # `Harness.VendorConfig`): the fingerprint admission takes before the child
+  # spawns, what the terminal pass found changed, and when that change was
+  # resolved (acknowledged, reverted or committed). Appended by ALTER for the
+  # positional-read reason `client_origin_json` was.
+  @harness_vendor_config_schema_sql """
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_json TEXT;
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_changes_json TEXT;
+  ALTER TABLE harness_runs ADD COLUMN vendor_config_cleared_at TEXT;
+  """
+
   # Durable counts-only skill-usage counters (MILESTONE_26_SKILL_CURATION §6.9):
   # one row per skill, upserted on skill_view/skill_run, bounded by the skill
   # inventory by construction. No content is stored — staleness is a counter
@@ -597,7 +644,8 @@ defmodule FermixCore.Memory.Repo do
     :delivered_at,
     :next_delivery_at,
     :next_poll_at,
-    :poll_deadline
+    :poll_deadline,
+    :vendor_config_cleared_at
   ]
   @harness_run_bool_cols [:resumable, :artifact_truncated]
   # `:status` is deliberately absent: the only legitimate status writer is
@@ -648,9 +696,23 @@ defmodule FermixCore.Memory.Repo do
           required(:profile_id) => String.t()
         }
 
-  @type mobile_owner_selector :: %{
+  @type mobile_transport_selector :: %{
           required(:agent_id) => String.t(),
-          required(:owner_id) => String.t()
+          required(:owner_id) => String.t(),
+          required(:transport) => String.t()
+        }
+
+  @type mobile_search_page :: %{
+          hits: [
+            %{
+              server_seq: pos_integer(),
+              role: String.t(),
+              created_at: DateTime.t(),
+              excerpt: String.t(),
+              ranges: [%{start: non_neg_integer(), length: non_neg_integer()}]
+            }
+          ],
+          next_before_seq: pos_integer() | nil
         }
 
   @type mobile_timeline_attrs :: %{
@@ -684,6 +746,7 @@ defmodule FermixCore.Memory.Repo do
           request_client_msg_id: String.t() | nil,
           request_attempt: non_neg_integer() | nil,
           output_key: String.t() | nil,
+          link_previews: [map()],
           created_at: DateTime.t()
         }
 
@@ -707,6 +770,8 @@ defmodule FermixCore.Memory.Repo do
           authenticated_device_id: String.t() | nil,
           runner_epoch: String.t() | nil,
           attempt: non_neg_integer(),
+          transport: String.t(),
+          cancelled_at: DateTime.t() | nil,
           claimed_at: DateTime.t(),
           expires_at: DateTime.t(),
           updated_at: DateTime.t()
@@ -1118,6 +1183,14 @@ defmodule FermixCore.Memory.Repo do
     call({:delete_messages, selector}, opts)
   end
 
+  # SQLite integers are signed 64-bit, and Exqlite raises on a wider bind
+  # inside this process, which takes every child after it down with it. Each
+  # mobile integer is checked here, in the caller, so a bad value fails there.
+  @max_sqlite_integer 9_223_372_036_854_775_807
+
+  defguardp is_sqlite_seq(value)
+            when is_integer(value) and value >= 0 and value <= @max_sqlite_integer
+
   @spec append_mobile_timeline(mobile_timeline_attrs(), keyword()) ::
           {:ok, mobile_timeline_row()} | {:error, term()}
   def append_mobile_timeline(attrs, opts \\ []) when is_map(attrs) do
@@ -1143,9 +1216,31 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, map()} | {:error, term()}
   def get_mobile_history(selector, after_seq, limit, opts \\ [])
-      when is_map(selector) and is_integer(after_seq) and after_seq >= 0 and
+      when is_map(selector) and is_sqlite_seq(after_seq) and
              is_integer(limit) and limit > 0 and limit <= 200 do
     call({:get_mobile_history, selector, after_seq, limit}, opts)
+  end
+
+  @spec get_mobile_history_before(mobile_profile_selector(), pos_integer(), 1..200, keyword()) ::
+          {:ok, map()} | {:error, term()}
+  def get_mobile_history_before(selector, before_seq, limit, opts \\ [])
+      when is_map(selector) and is_sqlite_seq(before_seq) and before_seq > 0 and
+             is_integer(limit) and limit > 0 and limit <= 200 do
+    call({:get_mobile_history_before, selector, before_seq, limit}, opts)
+  end
+
+  @spec search_mobile_timeline(
+          mobile_profile_selector(),
+          String.t(),
+          pos_integer() | nil,
+          pos_integer(),
+          keyword()
+        ) :: {:ok, mobile_search_page()} | {:error, term()}
+  def search_mobile_timeline(selector, query, before_seq, limit, opts \\ [])
+      when is_map(selector) and is_binary(query) and
+             (is_nil(before_seq) or (is_sqlite_seq(before_seq) and before_seq > 0)) and
+             is_integer(limit) and limit > 0 do
+    call({:search_mobile_timeline, selector, query, before_seq, limit}, opts)
   end
 
   @spec mobile_history_head(mobile_profile_selector(), keyword()) ::
@@ -1162,15 +1257,16 @@ defmodule FermixCore.Memory.Repo do
     call({:get_mobile_media_descriptor, selector, ref}, opts)
   end
 
-  @spec attach_mobile_timeline_media(
+  @spec attach_mobile_link_preview(
           mobile_profile_selector(),
           pos_integer(),
           map(),
           keyword()
         ) :: {:ok, mobile_timeline_row()} | {:error, term()}
-  def attach_mobile_timeline_media(selector, server_seq, media_ref, opts \\ [])
-      when is_map(selector) and is_integer(server_seq) and server_seq > 0 and is_map(media_ref) do
-    call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, opts)
+  def attach_mobile_link_preview(selector, server_seq, preview, opts \\ [])
+      when is_map(selector) and is_sqlite_seq(server_seq) and server_seq > 0 and
+             is_map(preview) do
+    call({:attach_mobile_link_preview, selector, server_seq, preview}, opts)
   end
 
   @spec advance_mobile_read_frontier(
@@ -1180,7 +1276,7 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, non_neg_integer()} | {:error, term()}
   def advance_mobile_read_frontier(selector, reported_seq, %DateTime{} = now, opts \\ [])
-      when is_map(selector) and is_integer(reported_seq) and reported_seq >= 0 do
+      when is_map(selector) and is_sqlite_seq(reported_seq) do
     call({:advance_mobile_read_frontier, selector, reported_seq, now}, opts)
   end
 
@@ -1205,6 +1301,34 @@ defmodule FermixCore.Memory.Repo do
     call({:get_mobile_client_request, selector, client_msg_id}, opts)
   end
 
+  @doc """
+  Record a cancel on an unsettled request (`MobileSql.cancel_request/4`):
+  `:marked` when the mark is on it now, `:settled` when it already ended.
+  """
+  @spec cancel_mobile_client_request(
+          mobile_profile_selector(),
+          String.t(),
+          DateTime.t(),
+          keyword()
+        ) ::
+          {:ok, {:marked | :settled, mobile_client_request_row()}}
+          | {:error, :not_found | term()}
+  def cancel_mobile_client_request(selector, client_msg_id, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_binary(client_msg_id) do
+    call({:cancel_mobile_client_request, selector, client_msg_id, now}, opts)
+  end
+
+  @doc """
+  Record a cancel on every unsettled request one device claimed
+  (`MobileSql.cancel_device_requests/4`), answering the requests it marked.
+  """
+  @spec cancel_mobile_device_requests(map(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, [mobile_client_request_row()]} | {:error, term()}
+  def cancel_mobile_device_requests(selector, device_id, %DateTime{} = now, opts \\ [])
+      when is_map(selector) and is_binary(device_id) and device_id != "" do
+    call({:cancel_mobile_device_requests, selector, device_id, now}, opts)
+  end
+
   @spec start_mobile_client_request(
           mobile_profile_selector(),
           String.t(),
@@ -1226,7 +1350,7 @@ defmodule FermixCore.Memory.Repo do
   end
 
   @spec get_recoverable_mobile_client_requests(
-          mobile_owner_selector(),
+          mobile_transport_selector(),
           String.t(),
           1..200,
           DateTime.t(),
@@ -1278,7 +1402,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 do
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) do
     call({:abandon_mobile_client_request, selector, client_msg_id, attempt, now}, opts)
   end
 
@@ -1300,7 +1424,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_binary(output_key) and is_map(attrs) do
     call(
       {:append_mobile_client_output, selector, client_msg_id, attempt, output_key, attrs, now},
@@ -1324,7 +1448,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(fields) do
     call({:complete_mobile_client_request, selector, client_msg_id, attempt, fields, now}, opts)
   end
@@ -1345,7 +1469,7 @@ defmodule FermixCore.Memory.Repo do
         %DateTime{} = now,
         opts \\ []
       )
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(attrs) do
     call({:append_mobile_client_response, selector, client_msg_id, attempt, attrs, now}, opts)
   end
@@ -1358,7 +1482,7 @@ defmodule FermixCore.Memory.Repo do
           keyword()
         ) :: {:ok, mobile_timeline_row()} | {:error, term()}
   def update_mobile_client_message(selector, client_msg_id, attempt, attrs, opts \\ [])
-      when is_map(selector) and is_binary(client_msg_id) and is_integer(attempt) and attempt >= 0 and
+      when is_map(selector) and is_binary(client_msg_id) and is_sqlite_seq(attempt) and
              is_map(attrs) do
     call({:update_mobile_client_message, selector, client_msg_id, attempt, attrs}, opts)
   end
@@ -1768,9 +1892,15 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Write one roll-up: supersede the current threads, insert the new set, stamp the
-  mark — dropping any thread the purge watermark caught mid-call (§24.3, §12).
+  mark — or write nothing when a purge issued after `read.purge_mark` reaches the
+  `read.from_ts..read.to_ts` window the roll-up read (§24.3, §12).
   """
-  @spec computer_history_write_rollup([map()], integer(), keyword()) ::
+  @spec computer_history_write_rollup(
+          [map()],
+          integer(),
+          %{purge_mark: non_neg_integer(), from_ts: integer(), to_ts: integer()},
+          keyword()
+        ) ::
           {:ok,
            %{
              written: non_neg_integer(),
@@ -1779,9 +1909,15 @@ defmodule FermixCore.Memory.Repo do
              subjects: [String.t()]
            }}
           | {:error, term()}
-  def computer_history_write_rollup(threads, now_ts, opts \\ [])
-      when is_list(threads) and is_integer(now_ts) do
-    call({:computer_history_write_rollup, threads, now_ts}, opts)
+  def computer_history_write_rollup(
+        threads,
+        now_ts,
+        %{purge_mark: mark, from_ts: from_ts, to_ts: to_ts} = read,
+        opts \\ []
+      )
+      when is_list(threads) and is_integer(now_ts) and is_integer(mark) and mark >= 0 and
+             is_integer(from_ts) and is_integer(to_ts) do
+    call({:computer_history_write_rollup, threads, now_ts, read}, opts)
   end
 
   @doc "Record that a roll-up call was made at `ts`, whatever it returned (the daily bound)."
@@ -1806,12 +1942,25 @@ defmodule FermixCore.Memory.Repo do
     call({:computer_history_recent_event_texts, limit}, opts)
   end
 
-  @doc "Purge the [from_ts, to_ts] window: events + intersecting memories + watermark."
-  @spec computer_history_purge_window(integer(), integer(), keyword()) ::
+  @doc """
+  Purge the [from_ts, to_ts] window: events + intersecting memories + access rows,
+  and record the interval, issued at `issued_at` (§12).
+  """
+  @spec computer_history_purge_window(integer(), integer(), integer(), keyword()) ::
           {:ok, %{events: non_neg_integer(), memories: non_neg_integer()}} | {:error, term()}
-  def computer_history_purge_window(from_ts, to_ts, opts \\ [])
-      when is_integer(from_ts) and is_integer(to_ts) do
-    call({:computer_history_purge_window, from_ts, to_ts}, opts)
+  def computer_history_purge_window(from_ts, to_ts, issued_at, opts \\ [])
+      when is_integer(from_ts) and is_integer(to_ts) and from_ts <= to_ts and
+             is_integer(issued_at) do
+    call({:computer_history_purge_window, from_ts, to_ts, issued_at}, opts)
+  end
+
+  @doc """
+  The purge mark: the id of the latest recorded purge (0 if none). Taken before a
+  batch is read and handed to its write (§12).
+  """
+  @spec computer_history_purge_mark(keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def computer_history_purge_mark(opts \\ []) when is_list(opts) do
+    call(:computer_history_purge_mark, opts)
   end
 
   @doc "Ensure the summarizer singleton state row exists, then return it."
@@ -1836,13 +1985,15 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Write a summarizer sitting result (insert under the purge guard, advance cursor).
-  A `nil` `last_status` advances the cursor and keeps the recorded outcome.
+  `purge_mark` is the one taken before the batch was read. A `nil` `last_status`
+  advances the cursor and keeps the recorded outcome.
   """
   @spec computer_history_write_cycle_result(
           non_neg_integer(),
           map() | nil,
           DateTime.t(),
           String.t() | nil,
+          non_neg_integer(),
           keyword()
         ) :: {:ok, %{memory_written: boolean()}} | {:error, term()}
   def computer_history_write_cycle_result(
@@ -1850,11 +2001,16 @@ defmodule FermixCore.Memory.Repo do
         memory,
         %DateTime{} = now,
         last_status,
+        purge_mark,
         opts \\ []
       )
       when is_integer(last_id) and (is_map(memory) or is_nil(memory)) and
-             (is_binary(last_status) or is_nil(last_status)) do
-    call({:computer_history_write_cycle_result, last_id, memory, now, last_status}, opts)
+             (is_binary(last_status) or is_nil(last_status)) and is_integer(purge_mark) and
+             purge_mark >= 0 do
+    call(
+      {:computer_history_write_cycle_result, last_id, memory, now, last_status, purge_mark},
+      opts
+    )
   end
 
   @doc "Record the summarizer's paused reason (surfaced to status)."
@@ -2127,6 +2283,23 @@ defmodule FermixCore.Memory.Repo do
     call({:upsert_scheduled_job, attrs}, opts)
   end
 
+  @doc """
+  Writes only the given columns of one scheduled job, in place, and returns
+  the row.
+
+  The owner's pause, resume and edits go through it, so an owner write never
+  carries back a stale copy of a column it does not own: a run's release
+  (`state` from `running`, `last_*`) can land between the owner's read and its
+  write. Only owner-editable fields are accepted; any other key raises in the
+  caller.
+  """
+  @spec update_scheduled_job_fields(String.t(), map(), keyword()) ::
+          {:ok, scheduled_job_row()} | {:error, :not_found | term()}
+  def update_scheduled_job_fields(id, fields, opts \\ [])
+      when is_binary(id) and is_map(fields) and map_size(fields) > 0 do
+    call({:update_scheduled_job_fields, id, scheduled_job_field_assignments!(fields)}, opts)
+  end
+
   @spec get_scheduled_job(String.t(), keyword()) ::
           {:ok, scheduled_job_row()} | {:error, :not_found | term()}
   def get_scheduled_job(id, opts \\ []) when is_binary(id) do
@@ -2163,18 +2336,74 @@ defmodule FermixCore.Memory.Repo do
     call({:list_job_runs, selector, Keyword.get(opts, :limit, 20)}, opts)
   end
 
-  @doc """
-  Job runs across every job that still hold an active slot, oldest first.
+  @final_job_run_statuses ["ok", "error", "timeout"]
 
-  "Active" is the same `queued`/`running` set `ensure_no_active_job_run` refuses
-  a claim on, so this is the exact set that can wedge a job when its runner is
-  gone. The scheduler's crash reconciliation reads it to decide which rows still
-  have a live process behind them.
+  @doc """
+  Settles a claimed run: writes its final row and releases its job in one
+  `BEGIN IMMEDIATE` transaction, the mirror of the claim that took the job.
+
+  Refuses with `{:error, :run_not_active}` unless the run row is still
+  `queued`/`running`, so only the run that holds the job can release it. The
+  release is one column-targeted `UPDATE`: `running` becomes `scheduled`, any
+  other state (a pause or resume that landed mid-run) is kept, and a `once` job
+  becomes `completed` and disabled with no next run. The job's `last_run_at`,
+  `last_status` and `last_error` are the run's `completed_at`, `status` and
+  `error`.
   """
-  @spec active_job_runs(keyword()) :: {:ok, [job_run_row()]} | {:error, term()}
-  def active_job_runs(opts \\ []) when is_list(opts) do
-    call({:active_job_runs, Keyword.get(opts, :limit, 50)}, opts)
+  @spec settle_job_run(job_run_attrs(), keyword()) ::
+          {:ok, {job_run_row(), scheduled_job_row()}} | {:error, :run_not_active | term()}
+  def settle_job_run(%{id: id, status: status, completed_at: %DateTime{}} = attrs, opts \\ [])
+      when is_binary(id) and status in @final_job_run_statuses do
+    call({:settle_job_run, attrs}, opts)
   end
+
+  # Two index reads, each bounded by the limit: the active rows through
+  # idx_job_runs_status_created, the pending deliveries through the partial
+  # idx_job_runs_pending_delivery. The outer sort orders at most twice the
+  # limit, active rows first, so a pass never reads the run history.
+  @unsettled_job_runs_sql """
+  SELECT *
+  FROM (
+    SELECT * FROM (
+      SELECT * FROM job_runs
+      WHERE status IN ('queued', 'running')
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    )
+    UNION ALL
+    SELECT * FROM (
+      SELECT * FROM job_runs
+      WHERE delivery_status = 'pending'
+      ORDER BY created_at ASC, id ASC
+      LIMIT ?
+    )
+  )
+  ORDER BY CASE WHEN status IN ('queued', 'running') THEN 0 ELSE 1 END, created_at ASC, id ASC
+  LIMIT ?
+  """
+
+  @doc """
+  Job runs whose runner still owes a write, oldest first within each group:
+  every `queued`/`running` row (it still holds its job), then every row whose
+  delivery is still `pending`. An active row carries delivery `none`, so the
+  groups never overlap. The Scheduler's reconciliation reads it to adopt the
+  runs a live runner still holds and to settle the rest.
+
+  The claim guard (`ensure_no_active_job_run`) keeps to the active group: a
+  slow send never blocks the job's next run.
+  """
+  @spec unsettled_job_runs(keyword()) :: {:ok, [job_run_row()]} | {:error, term()}
+  def unsettled_job_runs(opts \\ []) when is_list(opts) do
+    call({:unsettled_job_runs, Keyword.get(opts, :limit, 50)}, opts)
+  end
+
+  @doc """
+  The SQL behind `unsettled_job_runs/1`; its three `?` all take the limit.
+  Public so a test can `EXPLAIN QUERY PLAN` it: the pass runs every 60 s over a
+  table that is never pruned, so it must stay an index read.
+  """
+  @spec unsettled_job_runs_sql() :: String.t()
+  def unsettled_job_runs_sql, do: @unsettled_job_runs_sql
 
   @doc """
   Atomically admits a coding-harness run.
@@ -2262,6 +2491,16 @@ defmodule FermixCore.Memory.Repo do
           {:ok, [harness_run_row()]} | {:error, term()}
   def pending_harness_deliveries(%DateTime{} = now, opts \\ []) do
     call({:pending_harness_deliveries, now}, opts)
+  end
+
+  @doc """
+  Runs whose vendor-config change (GAP3-1) is recorded and not yet resolved,
+  oldest first.
+  """
+  @spec unresolved_harness_vendor_config(keyword()) ::
+          {:ok, [harness_run_row()]} | {:error, term()}
+  def unresolved_harness_vendor_config(opts \\ []) do
+    call(:unresolved_harness_vendor_config, opts)
   end
 
   @spec upsert_memory_source(memory_source_attrs(), keyword()) ::
@@ -2692,6 +2931,17 @@ defmodule FermixCore.Memory.Repo do
   @spec base_schema_sql() :: String.t()
   def base_schema_sql, do: @base_schema_sql
 
+  @doc """
+  The `harness_runs` table as a store holds it from migration 14 on. Public for
+  the same reason as `base_schema_sql/0`: a later migration alters this table
+  (35 appends the vendor-config columns).
+  """
+  @spec harness_runs_schema_sql() :: String.t()
+  def harness_runs_schema_sql do
+    @harness_runs_schema_sql <>
+      @harness_continuation_schema_sql <> @harness_client_origin_schema_sql
+  end
+
   @spec journal_mode(keyword()) :: {:ok, String.t()} | {:error, term()}
   def journal_mode(opts \\ []) do
     call(:journal_mode, opts)
@@ -2878,6 +3128,16 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:get_mobile_history_before, selector, before_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.history_before(&1, selector, before_seq, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:search_mobile_timeline, selector, query, before_seq, limit}, _from, state) do
+    reply = with_connection(state, &MobileSql.search(&1, selector, query, before_seq, limit))
+    {:reply, reply, state}
+  end
+
   def handle_call({:mobile_history_head, selector}, _from, state) do
     reply = with_connection(state, &MobileSql.history_head(&1, selector))
     {:reply, reply, state}
@@ -2888,11 +3148,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:attach_mobile_timeline_media, selector, server_seq, media_ref}, _from, state) do
+  def handle_call({:attach_mobile_link_preview, selector, server_seq, preview}, _from, state) do
     reply =
       with_connection(
         state,
-        &MobileSql.attach_timeline_media(&1, selector, server_seq, media_ref)
+        &MobileSql.attach_link_preview(&1, selector, server_seq, preview)
       )
 
     {:reply, reply, state}
@@ -2917,6 +3177,18 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:get_mobile_client_request, selector, client_msg_id}, _from, state) do
     reply = with_connection(state, &MobileSql.get_request(&1, selector, client_msg_id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:cancel_mobile_client_request, selector, client_msg_id, now}, _from, state) do
+    reply = with_connection(state, &MobileSql.cancel_request(&1, selector, client_msg_id, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:cancel_mobile_device_requests, selector, device_id, now}, _from, state) do
+    reply =
+      with_connection(state, &MobileSql.cancel_device_requests(&1, selector, device_id, now))
+
     {:reply, reply, state}
   end
 
@@ -3273,8 +3545,8 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_write_rollup, threads, now_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.write_rollup(&1, threads, now_ts))
+  def handle_call({:computer_history_write_rollup, threads, now_ts, read}, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.write_rollup(&1, threads, now_ts, read))
     {:reply, reply, state}
   end
 
@@ -3293,8 +3565,15 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:computer_history_purge_window, from_ts, to_ts}, _from, state) do
-    reply = with_connection(state, &ComputerHistorySql.purge_window(&1, from_ts, to_ts))
+  def handle_call({:computer_history_purge_window, from_ts, to_ts, issued_at}, _from, state) do
+    reply =
+      with_connection(state, &ComputerHistorySql.purge_window(&1, from_ts, to_ts, issued_at))
+
+    {:reply, reply, state}
+  end
+
+  def handle_call(:computer_history_purge_mark, _from, state) do
+    reply = with_connection(state, &ComputerHistorySql.purge_mark/1)
     {:reply, reply, state}
   end
 
@@ -3314,14 +3593,14 @@ defmodule FermixCore.Memory.Repo do
   end
 
   def handle_call(
-        {:computer_history_write_cycle_result, last_id, memory, now, last_status},
+        {:computer_history_write_cycle_result, last_id, memory, now, last_status, purge_mark},
         _from,
         state
       ) do
     reply =
       with_connection(
         state,
-        &ComputerHistorySql.write_cycle_result(&1, last_id, memory, now, last_status)
+        &ComputerHistorySql.write_cycle_result(&1, last_id, memory, now, last_status, purge_mark)
       )
 
     {:reply, reply, state}
@@ -3495,6 +3774,11 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:update_scheduled_job_fields, id, assignments}, _from, state) do
+    reply = with_connection(state, &update_scheduled_job_fields_row(&1, id, assignments))
+    {:reply, reply, state}
+  end
+
   def handle_call({:get_scheduled_job, id}, _from, state) do
     reply = with_connection(state, &fetch_scheduled_job(&1, id))
     {:reply, reply, state}
@@ -3530,8 +3814,13 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
-  def handle_call({:active_job_runs, limit}, _from, state) do
-    reply = with_connection(state, &fetch_active_job_runs(&1, limit))
+  def handle_call({:settle_job_run, attrs}, _from, state) do
+    reply = with_connection(state, &settle_job_run_tx(&1, attrs))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:unsettled_job_runs, limit}, _from, state) do
+    reply = with_connection(state, &fetch_unsettled_job_runs(&1, limit))
     {:reply, reply, state}
   end
 
@@ -3577,6 +3866,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:pending_harness_deliveries, now}, _from, state) do
     reply = with_connection(state, &fetch_pending_harness_deliveries(&1, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:unresolved_harness_vendor_config, _from, state) do
+    reply = with_connection(state, &fetch_unresolved_harness_vendor_config/1)
     {:reply, reply, state}
   end
 
@@ -3690,8 +3984,134 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_meetings_migration(conn, versions),
          :ok <- apply_computer_history_access_migration(conn, versions),
          :ok <- apply_computer_history_sessions_migration(conn, versions),
-         :ok <- apply_job_run_tool_failures_migration(conn, versions) do
+         :ok <- apply_job_run_tool_failures_migration(conn, versions),
+         :ok <- apply_job_runs_pending_delivery_migration(conn, versions),
+         :ok <- apply_release_wedged_jobs_migration(conn, versions),
+         :ok <- apply_computer_history_purges_migration(conn, versions),
+         :ok <- apply_companion_migration(conn, versions),
+         :ok <- apply_companion_cancel_migration(conn, versions),
+         :ok <- apply_harness_vendor_config_migration(conn, versions),
+         :ok <- apply_mobile_media_index_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The media-ref index and link-preview tables beside the timeline, with the
+  # backfill of every row already written, in one transaction with its version.
+  defp apply_mobile_media_index_migration(conn, versions) do
+    if Enum.member?(versions, @mobile_media_index_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.media_index_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@mobile_media_index_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_companion_cancel_migration(conn, versions) do
+    if Enum.member?(versions, @companion_cancel_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.cancel_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@companion_cancel_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_companion_migration(conn, versions) do
+    if Enum.member?(versions, @companion_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{MobileSql.companion_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@companion_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_job_runs_pending_delivery_migration(conn, versions) do
+    if Enum.member?(versions, @job_runs_pending_delivery_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@job_runs_pending_delivery_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@job_runs_pending_delivery_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_release_wedged_jobs_migration(conn, versions) do
+    if Enum.member?(versions, @release_wedged_jobs_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@release_wedged_jobs_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@release_wedged_jobs_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # MILESTONE_32 §12: recorded purge intervals replace the purge watermark. A
+  # stored watermark is carried over as one interval issued now (the migration's
+  # clock); its column stays, unread, so an upgrade rollback still opens the store.
+  defp apply_computer_history_purges_migration(conn, versions) do
+    if Enum.member?(versions, @computer_history_purges_migration_version) do
+      :ok
+    else
+      migrated_at = System.system_time(:millisecond)
+
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ComputerHistorySql.purges_schema_sql(migrated_at)}
+        INSERT INTO schema_migrations(version) VALUES (#{@computer_history_purges_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  defp apply_harness_vendor_config_migration(conn, versions) do
+    if Enum.member?(versions, @harness_vendor_config_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@harness_vendor_config_schema_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@harness_vendor_config_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -5642,6 +6062,81 @@ defmodule FermixCore.Memory.Repo do
     {:error, reason}
   end
 
+  # A run's final write and its job's release in one BEGIN IMMEDIATE
+  # transaction, as `claim_in_tx/5` took the job and inserted the run together.
+  # A BEGIN that fails (`:busy`) never opened the transaction, so it returns as
+  # is; every failure inside it rolls both writes back.
+  defp settle_job_run_tx(conn, attrs) do
+    with :ok <- execute(conn, "BEGIN IMMEDIATE", []) do
+      conn
+      |> settle_job_run_in_tx(attrs)
+      |> finish_job_settle(conn)
+    end
+  end
+
+  defp settle_job_run_in_tx(conn, attrs) do
+    with :ok <- ensure_job_run_active(conn, attrs.id),
+         {:ok, run} <- upsert_job_run_row(conn, attrs),
+         :ok <- release_settled_job(conn, run),
+         {:ok, job} <- fetch_scheduled_job(conn, run.job_id) do
+      {:ok, {run, job}}
+    end
+  end
+
+  defp ensure_job_run_active(conn, id) do
+    with {:ok, rows} <- query_all(conn, "SELECT status FROM job_runs WHERE id = ? LIMIT 1", [id]) do
+      case rows do
+        [[status]] when status in ["queued", "running"] -> :ok
+        _settled_or_missing -> {:error, :run_not_active}
+      end
+    end
+  end
+
+  # Column-targeted, never a whole row from an earlier read: `running` goes
+  # back to `scheduled`, any other state is kept, and the run's outcome goes in
+  # last_*. A one-off is done only if its claim consumed it (next_run_at
+  # cleared) and no edit made mid-run has set a new instant since.
+  defp release_settled_job(conn, run) do
+    execute(
+      conn,
+      """
+      UPDATE scheduled_jobs
+      SET state = CASE
+            WHEN schedule_kind = 'once' AND next_run_at IS NULL THEN 'completed'
+            WHEN state = 'running' THEN 'scheduled'
+            ELSE state
+          END,
+          enabled = CASE WHEN schedule_kind = 'once' AND next_run_at IS NULL THEN 0 ELSE enabled END,
+          last_run_at = ?,
+          last_status = ?,
+          last_error = ?,
+          updated_at = ?
+      WHERE id = ?
+      """,
+      [
+        timestamp_string(run.completed_at),
+        run.status,
+        run.error,
+        timestamp_string(run.updated_at),
+        run.job_id
+      ]
+    )
+  end
+
+  defp finish_job_settle({:ok, _settled} = result, conn) do
+    case execute(conn, "COMMIT", []) do
+      :ok -> result
+      {:error, reason} -> rollback_job_settle(conn, reason)
+    end
+  end
+
+  defp finish_job_settle({:error, reason}, conn), do: rollback_job_settle(conn, reason)
+
+  defp rollback_job_settle(conn, reason) do
+    _rollback_result = execute(conn, "ROLLBACK", [])
+    {:error, reason}
+  end
+
   defp delete_scheduled_job_if_idle_tx(conn, id) do
     with :ok <- execute(conn, "BEGIN IMMEDIATE", []),
          result <- delete_scheduled_job_if_idle_in_tx(conn, id),
@@ -5783,6 +6278,15 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  defp update_scheduled_job_fields_row(conn, id, assignments) do
+    {columns, values} = Enum.unzip(assignments)
+    set_sql = Enum.map_join(columns, ", ", &"#{&1} = ?")
+
+    with :ok <- execute(conn, "UPDATE scheduled_jobs SET #{set_sql} WHERE id = ?", values ++ [id]) do
+      fetch_scheduled_job(conn, id)
+    end
+  end
+
   defp fetch_scheduled_jobs(conn, selector) do
     {where_sql, params} = scheduled_job_where_clause(selector)
 
@@ -5895,21 +6399,11 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
-  # Oldest first: the longest-abandoned run is the one blocking its job, so a
-  # backlog larger than the caller's bound drains in the order it wedged.
-  defp fetch_active_job_runs(conn, limit) do
-    with {:ok, rows} <-
-           query_all(
-             conn,
-             """
-             SELECT *
-             FROM job_runs
-             WHERE status IN ('queued', 'running')
-             ORDER BY created_at ASC, id ASC
-             LIMIT ?
-             """,
-             [limit]
-           ) do
+  # Oldest first within each group: the longest-abandoned run is the one
+  # blocking its job, so a backlog larger than the caller's bound drains in the
+  # order it wedged, active rows ahead of pending deliveries.
+  defp fetch_unsettled_job_runs(conn, limit) do
+    with {:ok, rows} <- query_all(conn, @unsettled_job_runs_sql, [limit, limit, limit]) do
       {:ok, Enum.map(rows, &job_run_row/1)}
     end
   end
@@ -6020,9 +6514,10 @@ defmodule FermixCore.Memory.Repo do
                completed_at,
                delivered_at,
                continuation_depth,
-               client_origin_json
+               client_origin_json,
+               vendor_config_json
              )
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              """,
              harness_run_insert_params(run)
            ),
@@ -6178,6 +6673,23 @@ defmodule FermixCore.Memory.Repo do
              ORDER BY created_at ASC, id ASC
              """,
              [timestamp_string(now)]
+           ) do
+      {:ok, Enum.map(rows, &harness_run_row/1)}
+    end
+  end
+
+  defp fetch_unresolved_harness_vendor_config(conn) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT *
+             FROM harness_runs
+             WHERE vendor_config_changes_json IS NOT NULL
+               AND vendor_config_cleared_at IS NULL
+             ORDER BY created_at ASC, id ASC
+             """,
+             []
            ) do
       {:ok, Enum.map(rows, &harness_run_row/1)}
     end
@@ -6477,6 +6989,7 @@ defmodule FermixCore.Memory.Repo do
       origin_session_id: fetch_string!(attrs, :origin_session_id),
       continuation_depth: non_negative_integer_with_default!(attrs, :continuation_depth, 0),
       client_origin: Map.get(attrs, :client_origin),
+      vendor_config: Map.get(attrs, :vendor_config),
       parent_job_id: optional_string!(attrs, :parent_job_id),
       delivery_mode: fetch_string!(attrs, :delivery_mode),
       platform: optional_string!(attrs, :platform),
@@ -6668,6 +7181,49 @@ defmodule FermixCore.Memory.Repo do
     ]
   end
 
+  # The columns an owner write may set in place, each stored as the upsert
+  # stores it. Run bookkeeping (last_*) and identity columns are absent on
+  # purpose: no owner write may carry them.
+  @owner_text_fields [
+    :task_prompt,
+    :description,
+    :skill_name,
+    :provider,
+    :model,
+    :delivery_mode,
+    :schedule_kind,
+    :schedule_expr,
+    :state
+  ]
+
+  defp scheduled_job_field_assignments!(fields) do
+    fields
+    |> Enum.sort_by(fn {key, _value} -> key end)
+    |> Enum.map(&scheduled_job_field_assignment!/1)
+  end
+
+  defp scheduled_job_field_assignment!({:enabled?, value}) when is_boolean(value),
+    do: {"enabled", bool_to_int(value)}
+
+  defp scheduled_job_field_assignment!({:next_run_at, value}),
+    do: {"next_run_at", optional_timestamp_string(value)}
+
+  defp scheduled_job_field_assignment!({:updated_at, %DateTime{} = value}),
+    do: {"updated_at", timestamp_string(value)}
+
+  defp scheduled_job_field_assignment!({:delivery_target, value})
+       when is_map(value) or is_nil(value),
+       do: {"delivery_target_json", encode_metadata(value)}
+
+  defp scheduled_job_field_assignment!({key, value})
+       when key in @owner_text_fields and (is_binary(value) or is_nil(value)),
+       do: {Atom.to_string(key), value}
+
+  defp scheduled_job_field_assignment!({key, value}) do
+    raise ArgumentError,
+          "not an owner-editable scheduled job field: #{inspect(key)} = #{inspect(value)}"
+  end
+
   defp scheduled_job_upsert_params(job) do
     [
       job.id,
@@ -6777,7 +7333,8 @@ defmodule FermixCore.Memory.Repo do
       run.completed_at,
       run.delivered_at,
       run.continuation_depth,
-      encode_metadata(run.client_origin)
+      encode_metadata(run.client_origin),
+      encode_metadata(run.vendor_config)
     ]
   end
 
@@ -6803,6 +7360,10 @@ defmodule FermixCore.Memory.Repo do
 
   defp harness_run_set_entry({:usage, value}) do
     {"usage_json = ?", encode_metadata(value)}
+  end
+
+  defp harness_run_set_entry({:vendor_config_changes, value}) do
+    {"vendor_config_changes_json = ?", encode_metadata(value)}
   end
 
   defp harness_run_set_entry({key, value}) when key in @harness_run_plain_cols do
@@ -7610,7 +8171,10 @@ defmodule FermixCore.Memory.Repo do
          completed_at,
          delivered_at,
          continuation_depth,
-         client_origin_json
+         client_origin_json,
+         vendor_config_json,
+         vendor_config_changes_json,
+         vendor_config_cleared_at
        ]) do
     %{
       id: id,
@@ -7633,6 +8197,9 @@ defmodule FermixCore.Memory.Repo do
       origin_session_id: origin_session_id,
       continuation_depth: continuation_depth,
       client_origin: decode_metadata(client_origin_json),
+      vendor_config: decode_metadata(vendor_config_json),
+      vendor_config_changes: decode_metadata(vendor_config_changes_json),
+      vendor_config_cleared_at: parse_optional_timestamp(vendor_config_cleared_at),
       parent_job_id: parent_job_id,
       delivery_mode: delivery_mode,
       platform: platform,

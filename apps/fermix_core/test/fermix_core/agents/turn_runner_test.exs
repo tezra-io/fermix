@@ -1,9 +1,11 @@
 defmodule FermixCore.Agents.TurnRunnerTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
@@ -11,6 +13,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Temporal.Access
+  alias FermixCore.Tools.SendAttachment
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -373,6 +377,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # Asks for the file at `:path` through `send_attachment` by name, then hands
+  # the tool result back to the test and finishes — so a driven turn shows
+  # whether the call reached the tool or was refused at dispatch.
+  defmodule SendAttachmentAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      arguments = Jason.encode!(%{"path" => Keyword.fetch!(opts, :path)})
+      reply("", [%{id: "c1", call_id: "c1", name: "send_attachment", arguments: arguments}])
+    end
+
+    @impl true
+    def continue(_provider_state, tool_results, opts) do
+      send(Keyword.fetch!(opts, :test_pid), {:tool_results, tool_results})
+      reply("done", [])
+    end
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+
+    defp reply(content, tool_calls) do
+      {:ok,
+       %{
+         content: content,
+         tool_calls: tool_calls,
+         provider_state: %{},
+         usage: %{prompt_tokens: 1, completion_tokens: 1, total_tokens: 2},
+         model: "mock-model"
+       }}
+    end
+  end
+
   setup do
     compaction = Application.get_env(:fermix_core, :compaction, [])
     telemetry = Application.get_env(:fermix_core, :telemetry, [])
@@ -401,6 +447,27 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       end
     end
 
+    test "a prompt sent by a process the daemon started is unattended on any channel" do
+      # An agent's shell command running `fermix ask` or `fermix acp` must not
+      # turn a scheduled or background run into an attended one (SIDE-V1).
+      for {channel, source} <- [{"cli", :cli}, {"acp", :acp}] do
+        from_agent = %{channel: channel, metadata: %{source: source, caller: :daemon_descendant}}
+        from_person = %{channel: channel, metadata: %{source: source, caller: :independent}}
+
+        assert TurnRunner.computer_use_origin(from_agent) == :unattended
+        refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(from_agent))
+        assert TurnRunner.computer_use_origin(from_person) == :interactive
+      end
+    end
+
+    test "a prompt sent by a detached process is unattended" do
+      # Neither the daemon's descendant nor at a terminal: nobody is watching it.
+      detached = %{channel: "cli", metadata: %{source: :cli, caller: :detached}}
+
+      assert TurnRunner.computer_use_origin(detached) == :unattended
+      refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(detached))
+    end
+
     test "a Live voice delegation is :voice and passes the host gate" do
       msg = voice_msg("open my calendar")
 
@@ -414,6 +481,36 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       forged = %{voice_msg("open my calendar") | channel: "telegram"}
 
       assert TurnRunner.computer_use_origin(forged) == :interactive
+    end
+
+    test "a coding-run notice re-entering an ended ACP session is unattended" do
+      # The dispatcher re-ingests the notice after the client session that
+      # launched the run is gone, so nobody can watch or cancel the turn.
+      msg = %{
+        channel: "acp",
+        metadata: %{
+          acp_turn: :detached,
+          harness_continuation: true,
+          harness_continuation_depth: 1
+        }
+      }
+
+      assert TurnRunner.computer_use_origin(msg) == :unattended
+      refute Safety.host_start_allowed?(TurnRunner.computer_use_origin(msg))
+    end
+
+    test "a live ACP turn and an owner-chat coding continuation stay interactive" do
+      live_acp = %{channel: "acp", metadata: %{acp_turn: 3}}
+
+      chat_continuation = %{
+        channel: "telegram",
+        metadata: %{harness_continuation: true, harness_continuation_depth: 1}
+      }
+
+      for msg <- [live_acp, chat_continuation] do
+        assert TurnRunner.computer_use_origin(msg) == :interactive
+        assert Safety.host_start_allowed?(TurnRunner.computer_use_origin(msg))
+      end
     end
   end
 
@@ -769,6 +866,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert context.approval_fn == nil
     end
 
+    # The owner-inbox seam `Capabilities.AccessGate` uses on a channel without
+    # slash commands (ACP): threaded like `approval_fn`, absent when not given.
+    test "surfaces the message's owner_inbox_approval_fn in the tool-execution context" do
+      Process.put(:record_cwd_step, 0)
+      inbox_fn = fn _request -> {:ok, "TKN"} end
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-inbox", %{owner_inbox_approval_fn: inbox_fn})
+
+      assert context.owner_inbox_approval_fn == inbox_fn
+    end
+
+    test "leaves owner_inbox_approval_fn nil when the message carries none" do
+      Process.put(:record_cwd_step, 0)
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-no-inbox")
+
+      assert context.owner_inbox_approval_fn == nil
+    end
+
+    # A spoken yes binds to the call the daemon parked on, so only a trusted voice
+    # turn carries the call id; a forged `voice_call` on a chat message does not.
+    test "voice_call_id is the call id on a trusted voice turn" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-voice", %{
+          channel: "voice",
+          metadata: %{source: :voice, user_id: "voice", voice_call: voice_call()}
+        })
+
+      assert context.voice_call_id == "voice_live_42"
+    end
+
+    test "voice_call_id is nil on a chat turn carrying a forged voice_call" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-forged", %{metadata: forged_voice_call()})
+
+      assert context.voice_call_id == nil
+    end
+
     # CODING_HARNESS_ORCHESTRATION §23.2: a coding run launched from a
     # continuation turn must inherit depth+1, which only works if the notice's
     # metadata depth reaches the tool-execution context. A reset to 0 here would
@@ -832,6 +971,49 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert Map.has_key?(context, :session_env)
       assert context.session_env == nil
       assert context.redact_values == []
+    end
+
+    # The Buzz rule (owner decision, MOB-1) is enforced where it bites — computer
+    # use's `SessionManager` precheck, the browser's signed-in tab and the access
+    # gate — never by relabelling the turn's origin: every other attended feature
+    # (reminders, meetings, Recent Activity) keeps working from Buzz unchanged.
+    test "a Buzz ACP turn keeps its interactive origin and stays an attended owner turn" do
+      Process.put(:record_cwd_step, 0)
+
+      # A Buzz harness with an identity: relay, signing key and PATH.
+      session_env = %{
+        "BUZZ_RELAY_URL" => "wss://relay.example",
+        "BUZZ_PRIVATE_KEY" => "nsec1fakebuzzkeyvalue",
+        "PATH" => "/fake/bin"
+      }
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-buzz-turn", %{
+          channel: "acp",
+          session_env: session_env,
+          metadata: %{source: :acp, user_id: "acp", caller: :independent, acp_turn: 3}
+        })
+
+      assert Identity.multi_principal?(context.session_env)
+      assert context.computer_use_origin == :interactive
+      assert Access.attended_operator_turn?(context)
+    end
+
+    # A guest turn replies into the guest's own chat, while `send_attachment`
+    # resolves its path against the OWNER's sandbox roots. So a guest naming the
+    # tool must reach no tool at all, and no file may leave through the reply.
+    test "a guest turn cannot dispatch send_attachment by name" do
+      [result] = run_send_attachment_turn(:guest)
+
+      assert result.output == "Error: Tool 'send_attachment' not found"
+      refute_received {:delivered, {:media, _part}}
+    end
+
+    test "an operator turn still sends the file into its own chat" do
+      [result] = run_send_attachment_turn(:operator)
+
+      assert result.output =~ "Sent attachment: owner-notes.txt"
+      assert_received {:delivered, {:media, %{filename: "owner-notes.txt"}}}
     end
 
     test "run/4 threads the stream callback into adapter_opts; run/3 stays callback-free" do
@@ -1486,6 +1668,100 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # In-loop compaction: an overflow inside a turn is not fixed by /new or
+  # /compact (resending repeats it), and a scheduled job has no "message" and no
+  # chat to type a command into, so the surface picks the advice.
+  describe "error_reply/2" do
+    test "a summarizer refusal inside a failed compression names it instead of the generic reply" do
+      reply = TurnRunner.error_reply({:context_recovery_failed, :empty_summary}, surface: :job)
+      assert reply =~ "couldn't compress earlier results"
+      assert reply =~ "empty_summary"
+      refute reply =~ "The run failed with an error"
+    end
+
+    test "the chat surface is the default" do
+      assert TurnRunner.error_reply(:context_length_exceeded, surface: :chat) ==
+               TurnRunner.error_reply(:context_length_exceeded)
+
+      assert TurnRunner.error_reply(:context_length_exceeded, []) ==
+               TurnRunner.error_reply(:context_length_exceeded)
+    end
+
+    test "an overflow after compaction on chat asks for a narrower slice, not /new" do
+      reply = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :chat)
+
+      assert reply ==
+               "That request produced more tool output than the model's context window can " <>
+                 "hold, even after I compressed earlier results. Ask for a narrower slice, " <>
+                 "or split the request."
+
+      refute reply =~ "/new"
+      refute reply =~ "/compact"
+    end
+
+    test "an overflow after compaction on a job asks to narrow or split the job" do
+      reply = TurnRunner.error_reply(:context_overflow_after_compaction, surface: :job)
+
+      assert reply ==
+               "The run's tool results grew larger than the model's context window, even " <>
+                 "after earlier results were compressed. Narrow the task or split it into " <>
+                 "smaller jobs."
+    end
+
+    test "a context-length overflow on a job carries job advice, not chat commands" do
+      reply = TurnRunner.error_reply(:context_length_exceeded, surface: :job)
+
+      assert reply ==
+               "This run's conversation grew larger than the model's context window. " <>
+                 "Narrow the task or split it into smaller jobs."
+
+      assert TurnRunner.error_reply("maximum context length exceeded", surface: :job) == reply
+    end
+
+    test "the generic fallback on a job names the run, not a message" do
+      assert TurnRunner.error_reply("some unexpected failure", surface: :job) ==
+               "The run failed with an error."
+
+      assert TurnRunner.error_reply("some unexpected failure", surface: :chat) ==
+               "Sorry, I encountered an error processing your message."
+    end
+
+    test "a failed compression carries the provider's own sentence on both surfaces" do
+      inner =
+        ProviderError.api(:openai, :openai, 429, %{"error" => %{"message" => "slow down"}})
+
+      for surface <- [:chat, :job] do
+        reply = TurnRunner.error_reply({:context_recovery_failed, inner}, surface: surface)
+
+        assert reply ==
+                 "The context filled and I couldn't compress earlier results: " <>
+                   TurnRunner.error_reply(inner, surface: surface)
+
+        assert reply =~ "rate-limited"
+      end
+    end
+
+    test "a failed compression threads the surface into the inner reason" do
+      assert TurnRunner.error_reply({:context_recovery_failed, "boom"}, surface: :job) ==
+               "The context filled and I couldn't compress earlier results: " <>
+                 "The run failed with an error."
+
+      assert TurnRunner.error_reply({:context_recovery_failed, "boom"}) ==
+               "The context filled and I couldn't compress earlier results: " <>
+                 "Sorry, I encountered an error processing your message."
+    end
+
+    test "an unknown surface or option fails loudly" do
+      assert_raise ArgumentError, fn ->
+        TurnRunner.error_reply(:context_length_exceeded, surface: :voice)
+      end
+
+      assert_raise ArgumentError, fn ->
+        TurnRunner.error_reply(:context_length_exceeded, channel: :job)
+      end
+    end
+  end
+
   # CHANNEL_LONGFORM_PRESENTATION §7: the presentation note rides the same
   # per-turn seam as the date note, spliced ahead of it.
   describe "channel presentation note" do
@@ -2013,6 +2289,12 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     start_supervised!({CapabilityRegistry, name: registry_name})
 
+    # A voice turn builds its own profile from the registry (the voice capability
+    # boundary), so the recorder must be registered there to be called at all.
+    if Map.get(extra_msg, :channel) == "voice" do
+      :ok = CapabilityRegistry.register(registry_name, record_cwd_capability(self()))
+    end
+
     store =
       start_supervised!({ConversationStore, name: store_name, max_messages: :infinity, repo: nil})
 
@@ -2041,6 +2323,67 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
     assert_receive {:tool_context, context}
     %{context: context}
+  end
+
+  # Drives a real turn at `trust` whose model asks for a file by name. The
+  # sandbox is rooted at a private directory holding that file — the owner's
+  # workspace in miniature — and both profiles are built by the real builder
+  # over the shipped `send_attachment` declaration. Returns the tool results the
+  # model received; every reply part lands in the mailbox as `{:delivered, _}`.
+  defp run_send_attachment_turn(trust) do
+    root = FermixTestSupport.SafeRm.make_tmp_dir!("tr-send-attachment")
+    path = Path.join(root, "owner-notes.txt")
+    File.write!(path, "the owner's notes")
+    use_strict_sandbox(root)
+
+    registry = :"tr_attach_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+    :ok = CapabilityRegistry.register(registry, Builtin.from_tool_module(SendAttachment))
+
+    test_pid = self()
+
+    msg = %{
+      channel: "telegram",
+      chat_id: "attach_#{trust}",
+      sender: "user123",
+      content: "send me owner-notes.txt",
+      source_trust: trust
+    }
+
+    turn_state =
+      turn_state(
+        adapter: SendAttachmentAdapter,
+        adapter_opts: [model: "mock-model", test_pid: test_pid, path: path],
+        capability_registry: registry,
+        conversation_store: start_voice_store(),
+        runtime_context: boundary_runtime_context(registry)
+      )
+
+    deliver = fn part ->
+      send(test_pid, {:delivered, part})
+      :ok
+    end
+
+    assert {:ok, "done", _tokens} = TurnRunner.run(msg, turn_state, deliver)
+    assert_receive {:tool_results, tool_results}, 5_000
+    tool_results
+  end
+
+  # A chat turn carries no `:sandbox_config`, so its tools read the global
+  # sandbox: point it at `root` for this test, and restore it (and remove
+  # `root`) on exit.
+  defp use_strict_sandbox(root) do
+    previous = Application.get_env(:fermix_core, :sandbox)
+    Application.put_env(:fermix_core, :sandbox, %{mode: :strict, workspace_root: root})
+
+    on_exit(fn ->
+      case previous do
+        nil -> Application.delete_env(:fermix_core, :sandbox)
+        value -> Application.put_env(:fermix_core, :sandbox, value)
+      end
+
+      FermixTestSupport.SafeRm.rm_rf!(root)
+    end)
   end
 
   # A runtime context whose operator and guest profiles both advertise (and

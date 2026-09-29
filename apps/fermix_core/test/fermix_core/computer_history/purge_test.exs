@@ -2,6 +2,7 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
   @moduledoc "MILESTONE_32 §12 — owner purge (inv. 9)."
   use ExUnit.Case, async: true
 
+  alias Exqlite.Sqlite3
   alias FermixCore.ComputerHistory.Purge
   alias FermixCore.Memory.Repo
 
@@ -16,7 +17,22 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
       Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
     end)
 
-    %{repo: repo_name}
+    %{repo: repo_name, db_path: db_path}
+  end
+
+  # The recorded purge intervals, read straight from the store: `[from, to, issued_at]`.
+  defp intervals(db_path) do
+    {:ok, conn} = Sqlite3.open(db_path, mode: :readonly)
+
+    try do
+      sql = "SELECT from_ts, to_ts, issued_at FROM computer_history_purges ORDER BY id"
+      {:ok, stmt} = Sqlite3.prepare(conn, sql)
+      {:ok, rows} = Sqlite3.fetch_all(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+      rows
+    after
+      Sqlite3.close(conn)
+    end
   end
 
   defp event(seq, ts), do: %{boot_id: "b1", source_seq: seq, ts: ts, type: "app.activated"}
@@ -48,8 +64,8 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
   end
 
   describe "purge/2" do
-    test "removes in-window events + intersecting memories, keeps the rest, sets the watermark",
-         %{repo: repo} do
+    test "removes in-window events + intersecting memories, keeps the rest, records the interval",
+         %{repo: repo, db_path: db_path} do
       assert {:ok, 2} =
                Repo.computer_history_insert_events([event(1, 1_000), event(2, 5_000)],
                  server: repo
@@ -66,8 +82,7 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
       assert {:ok, 5_000} = Repo.computer_history_oldest_event_ts(server: repo)
       assert {:ok, 1} = Repo.computer_history_count_memories(server: repo)
 
-      {:ok, state} = Repo.computer_history_fetch_state(server: repo)
-      assert state.purge_watermark_ts == 2_000
+      assert intervals(db_path) == [[0, 2_000, 2_000]]
     end
 
     test "purge all clears everything", %{repo: repo} do
@@ -82,6 +97,44 @@ defmodule FermixCore.ComputerHistory.PurgeTest do
       assert {:ok, %{events: 3, memories: 1}} = Purge.purge(:all, now: 10_000, repo: repo)
       assert {:ok, 0} = Repo.computer_history_count_events(server: repo)
       assert {:ok, 0} = Repo.computer_history_count_memories(server: repo)
+    end
+
+    # CH-5: `all` ends at now. A far-future ceiling would fence every later event
+    # and refuse every later note for good.
+    test "purge all records [0, now] and later capture is still stored",
+         %{repo: repo, db_path: db_path} do
+      assert {:ok, %{from_ts: 0, to_ts: 10_000}} = Purge.purge(:all, now: 10_000, repo: repo)
+      assert intervals(db_path) == [[0, 10_000, 10_000]]
+
+      assert {:ok, 1} = Repo.computer_history_insert_events([event(1, 10_001)], server: repo)
+    end
+  end
+
+  # CH-2: a row stamped inside a purged window can reach the insert after the purge
+  # committed (a batch in flight, or still buffered). The insert refuses it.
+  describe "the spool fence" do
+    test "a row stamped inside a purged window that lands after the purge stays out",
+         %{repo: repo} do
+      assert {:ok, %{events: 0}} = Purge.purge({:last, 2_000}, now: 2_000, repo: repo)
+
+      # Both bounds are inside the window, as in the purge's own DELETE.
+      late = [event(1, 1_500), event(2, 0), event(3, 2_000), event(4, 2_001)]
+      assert {:ok, 1} = Repo.computer_history_insert_events(late, server: repo)
+
+      assert {:ok, 1} = Repo.computer_history_count_events(server: repo)
+      assert {:ok, 2_001} = Repo.computer_history_oldest_event_ts(server: repo)
+    end
+
+    test "every recorded window fences, not only the latest", %{repo: repo} do
+      assert {:ok, _first} = Purge.purge({:last, 1_000}, now: 2_000, repo: repo)
+      assert {:ok, _second} = Purge.purge({:last, 1_000}, now: 9_000, repo: repo)
+
+      assert {:ok, 1} =
+               Repo.computer_history_insert_events([event(1, 1_500), event(2, 5_000)],
+                 server: repo
+               )
+
+      assert {:ok, 5_000} = Repo.computer_history_oldest_event_ts(server: repo)
     end
   end
 end

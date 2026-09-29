@@ -5,16 +5,18 @@ defmodule FermixCore.ComputerUse.SessionManager do
   per turn) and reused across actions in the same conversation.
 
   `ensure/3` is keyed by `conversation_key`; it resolves the session's origin from
-  the call context and **fails closed** for an unattended host-mode origin (§7.6)
-  before any process or sidecar is started. It also refuses while the global
-  `CaptureHealth` breaker is open, so a wedged capture host stops being handed
-  fresh sidecars (`WATCH_HARDENING.md` §3). The driver defaults to `PortDriver`
-  (the real sidecar) in production; tests inject a stub driver, so the manager is
-  fully exercised without the binary.
+  the call context and **fails closed** for an unattended host-mode origin (§7.6),
+  and for a turn from a shared Buzz channel (`Acp.Identity.multi_principal?/1`),
+  before any process or sidecar is started or a running session is handed back.
+  It also refuses while the global `CaptureHealth` breaker is open, so a wedged
+  capture host stops being handed fresh sidecars (`WATCH_HARDENING.md` §3). The
+  driver defaults to `PortDriver` (the real sidecar) in production; tests inject a
+  stub driver, so the manager is fully exercised without the binary.
   """
 
   require Logger
 
+  alias FermixCore.Acp.Identity
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.CaptureHealth
   alias FermixCore.ComputerUse.Config
@@ -25,13 +27,16 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   @doc """
   Find or start the computer-use session for `context`'s conversation. Returns the
-  session pid, or fails closed for an unattended host origin.
+  session pid, or fails closed for an unattended host origin or a shared Buzz
+  channel — also when a session is already running for the conversation.
   """
   @spec ensure(Config.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
   def ensure(%Config{} = config, context, opts \\ []) when is_map(context) do
     key = conversation_key(context)
 
-    with :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
+    with :ok <- precheck_host_origin(config, origin(context)),
+         :ok <- precheck_shared_channel(context),
+         :ok <- OperatorStop.check(key, Map.get(context, :session_id)) do
       case Registry.lookup(CuSupervisor.registry(), key) do
         [{pid, _}] -> {:ok, pid}
         [] -> start_session(key, config, context, opts)
@@ -180,8 +185,7 @@ defmodule FermixCore.ComputerUse.SessionManager do
   defp start_session(key, config, context, opts) do
     origin = origin(context)
 
-    with :ok <- precheck_host_origin(config, origin),
-         :ok <- CaptureHealth.status(),
+    with :ok <- CaptureHealth.status(),
          {:ok, driver} <- resolve_driver(opts) do
       child = {Session, session_opts(key, config, context, origin, driver)}
 
@@ -217,18 +221,32 @@ defmodule FermixCore.ComputerUse.SessionManager do
 
   # The Session re-checks the origin gate in init; prechecking here returns a clean
   # `{:error, _}` instead of a supervisor `{:stop, _}` for the common refusal.
-  # Computer-use is host-desktop control only, so the gate applies uniformly.
+  # Computer-use is host-desktop control only, so the gate applies uniformly. It
+  # runs before the Stop hold and the registry lookup: a session outlives the turn
+  # that opened it, so an origin that may not start one must neither drive the one
+  # an attended turn left open nor lift that conversation's Stop hold.
   defp precheck_host_origin(%Config{}, origin) do
     if Safety.host_start_allowed?(origin),
       do: :ok,
       else: {:error, {:host_start_refused, origin}}
   end
 
+  # A Buzz-wired ACP session is a channel other people can post in, so its turn is
+  # not proof the owner is present (owner decision, MOB-1), even though the turn is
+  # attended by every other measure. Checked here, beside the origin gate and for
+  # the same reasons, rather than by relabelling the origin: every other attended
+  # feature but the owner's own browser tab (`Browser`) keeps working from Buzz.
+  defp precheck_shared_channel(context) do
+    if Identity.multi_principal?(Map.get(context, :session_env)),
+      do: {:error, :shared_channel},
+      else: :ok
+  end
+
   defp default_driver, do: ComputerUse.driver_spec()
 
   # Fail closed by default: a turn must EXPLICITLY declare an attended origin
-  # (`:interactive`/`:voice`) to start a host session. Anything that never set
-  # `:computer_use_origin` — a scheduled job, an unforeseen call path — is treated as
+  # (`:interactive`/`:voice`) to start or drive a host session. Anything that never
+  # set `:computer_use_origin` — a scheduled job, an unforeseen call path — is treated as
   # `:unattended` and refused in host mode (§7.6), never silently granted control.
   defp origin(context), do: Map.get(context, :computer_use_origin, :unattended)
 

@@ -78,7 +78,15 @@ defmodule FermixCore.Management.Protocol do
     {"capabilities.install.start", 2},
     {"meetings.signin.start", 2},
     {"computer_use.grant.start", 2},
-    {"computer_use.permissions.get", 2}
+    {"computer_use.permissions.get", 2},
+    {"mobile.status", 2},
+    {"mobile.pair.start", 2},
+    {"mobile.pair.get", 2},
+    {"mobile.pair.decide", 2},
+    {"mobile.pair.cancel", 2},
+    {"mobile.devices.list", 2},
+    {"mobile.devices.revoke", 2},
+    {"browser.install.start", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)
@@ -105,7 +113,8 @@ defmodule FermixCore.Management.Protocol do
     secret_store_failed: "The secret could not be stored.",
     unknown_job: "The job is not retained by this daemon.",
     external_change: "The settings file changed outside Fermix.",
-    config_unreadable: "The settings file could not be read."
+    config_unreadable: "The settings file could not be read.",
+    unknown_pairing_session: "The pairing session is not retained by this daemon."
   ]
   @error_messages Map.new(@errors)
 

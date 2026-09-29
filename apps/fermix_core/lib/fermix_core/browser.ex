@@ -1,11 +1,15 @@
 defmodule FermixCore.Browser do
   @moduledoc false
 
+  alias FermixCore.Acp.Identity
+  alias FermixCore.Browser.Backend
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.ProfileManager
+  alias FermixCore.Browser.Routing
   alias FermixCore.Browser.Scope
+  alias FermixCore.Browser.TurnMarker
   alias FermixCore.Temporal.Access
 
   @actions ~w(doctor status start stop open navigate snapshot tabs focus close screenshot act pdf
@@ -62,7 +66,14 @@ defmodule FermixCore.Browser do
     end
   end
 
-  @spec execute(map(), map()) :: {:ok, String.t()} | {:error, Error.t()}
+  @doc """
+  Run one `browser` tool call, and say which backend served it: the one the
+  profile was started on, the pane for a call its turn's lost pane refuses, or
+  `nil` when the call never reached a profile (a refusal before dispatch,
+  `doctor`, `status`).
+  """
+  @spec execute(map(), map()) ::
+          {{:ok, String.t()} | {:error, Error.t()}, Backend.label() | nil}
   def execute(args, context) when is_map(args) and is_map(context) do
     with {:ok, action} <- action(args),
          {:ok, config} <- Config.current(),
@@ -71,39 +82,65 @@ defmodule FermixCore.Browser do
          :ok <- allowed_turn(profile, context),
          :ok <- validate_args(action, args) do
       dispatch(action, args, context, owner_key, profile_name, profile, config)
+    else
+      {:error, %Error{} = error} -> {{:error, error}, nil}
     end
   end
 
   # A granted tab is the person's own browser, signed in as them, so it is used
   # only on a turn they are present for. `Temporal.Access` already answers
   # "attended, top-level, the owner's" for every other surface with that rule;
-  # the sentence is this feature's because the next move is.
+  # the sentence is this feature's because the next move is. A turn from a shared
+  # Buzz channel is attended by every other measure, but other people can post
+  # there, so it is not proof the owner is present (owner decision, MOB-1): the
+  # same predicate and order as `ComputerUse.SessionManager`'s precheck.
   defp allowed_turn(%{mode: :attached_tab}, context) do
-    if Access.attended_operator_turn?(context) do
-      :ok
-    else
-      {:error,
-       Error.new(
-         "attached_tab_not_allowed",
-         "Your own browser tab is used only on a turn you are present for. Guest, " <>
-           "scheduled, background, delegated and coding-continuation runs use the managed " <>
-           "browser profile instead."
-       )}
+    cond do
+      not Access.attended_operator_turn?(context) ->
+        {:error,
+         Error.new(
+           "attached_tab_not_allowed",
+           "Your own browser tab is used only on a turn you are present for. Guest, " <>
+             "scheduled, background, delegated and coding-continuation runs use the managed " <>
+             "browser profile instead."
+         )}
+
+      Identity.multi_principal?(Map.get(context, :session_env)) ->
+        {:error,
+         Error.new(
+           "attached_tab_not_allowed",
+           "Your own browser tab isn't available from a Buzz channel, where other people " <>
+             "can send messages. Ask from the Fermix app, your own chat, or by voice; the " <>
+             "managed browser profile works here."
+         )}
+
+      true ->
+        :ok
     end
   end
 
   defp allowed_turn(_profile, _context), do: :ok
 
   defp dispatch("doctor", _args, _context, _owner, _profile_name, _profile, config) do
-    {:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}
+    {{:ok, encode(%{"ok" => true, "chrome" => chrome_diagnostics(config)})}, nil}
   end
 
   defp dispatch("status", _args, _context, owner, profile_name, _profile, _config) do
-    {:ok, encode(ProfileManager.status(owner, profile_name))}
+    {{:ok, encode(ProfileManager.status(owner, profile_name))}, nil}
   end
 
+  # A turn whose pane task lost the Fermix app's browser answers every later
+  # browser call with that same sentence (`TurnMarker`), before anything is
+  # routed: the task is never redone in Chrome, and the next turn decides fresh.
   defp dispatch(action, args, context, owner, profile_name, profile, config)
        when action in @profile_actions do
+    case TurnMarker.lookup(owner, self()) do
+      %Error{} = lost -> {{:error, lost}, :fermix_app}
+      nil -> dispatch_profile(action, args, context, owner, profile_name, profile, config)
+    end
+  end
+
+  defp dispatch_profile(action, args, context, owner, profile_name, profile, config) do
     request = %{
       action: action,
       args: args,
@@ -111,9 +148,11 @@ defmodule FermixCore.Browser do
       mutating: mutating?(action, args)
     }
 
+    {profile, backend} = Routing.for_request(owner, profile_name, profile, config, context)
+
     case ProfileManager.dispatch(owner, profile_name, profile, config, request) do
-      {:ok, result} -> {:ok, encode(result)}
-      {:error, %Error{} = error} -> {:error, error}
+      {:ok, result} -> {{:ok, encode(result)}, backend}
+      {:error, %Error{} = error} -> {{:error, error}, backend}
     end
   end
 
@@ -368,8 +407,8 @@ defmodule FermixCore.Browser do
   end
 
   defp chrome_diagnostics(config) do
-    case ChromeLauncher.find_executable(config, nil) do
-      {:ok, path} -> %{"ok" => true, "path" => path}
+    case ChromeLauncher.resolve(config, nil) do
+      {:ok, %{path: path}} -> %{"ok" => true, "path" => path}
       {:error, %Error{} = error} -> %{"ok" => false, "error" => Error.to_map(error)}
     end
   end

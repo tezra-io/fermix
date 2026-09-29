@@ -9,8 +9,8 @@ defmodule FermixCore.ComputerHistory.Scrubber do
   It reuses the **single maintained secret-pattern corpus** — the same list the
   log `RedactingFormatter` maintains (`RedactingFormatter.redact/1`) — rather
   than hand-rolling a second regex pile that rots out of step (the
-  adversarial-audit lesson). On top of that maintained corpus it layers the
-  ingest-specific heuristics §13.1 calls for: JWTs, `password=`/`token=`/`key=`
+  adversarial-audit lesson), JWTs included. On top of that maintained corpus it
+  layers the ingest-specific heuristics §13.1 calls for: `password=`/`token=`/`key=`
   URL query-param values (value stripped, host+path kept), payment-card numbers
   (Luhn-checked), IBANs (ISO 13616 registry + ISO 7064 mod-97), OTP digit runs
   near a "code"/"verification" keyword, and high-entropy base64/hex runs above a
@@ -57,10 +57,6 @@ defmodule FermixCore.ComputerHistory.Scrubber do
   alias FermixCore.Log.RedactingFormatter
 
   @marker "«redacted»"
-
-  # JWT: three base64url segments, the first two starting `eyJ` (the `{"` of a
-  # JSON header/payload).
-  @jwt ~r/\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/
 
   # Sensitive URL query-param VALUES — keep the key and the rest of the URL.
   @url_param ~r/([?&](?:password|passwd|pwd|token|access_token|refresh_token|api[_-]?key|key|secret|client_secret|code)=)[^&#\s]+/i
@@ -208,14 +204,13 @@ defmodule FermixCore.ComputerHistory.Scrubber do
   def scrub_url(value) when is_binary(value), do: structured_secrets(value)
 
   # The secrets recognised by a prefix, a structure or a checksum — the maintained
-  # corpus, JWTs, query-param values, cards, IBANs, keyword-anchored OTPs. These
+  # corpus (JWTs included), query-param values, cards, IBANs, keyword-anchored OTPs. These
   # never fire on a path segment that is not actually one of those shapes, so they
   # are safe on a URL; the opaque-run heuristics that recognise a secret only by
   # length and class mix are what `scrub/1` layers on top for free-form text.
   defp structured_secrets(value) do
     value
     |> RedactingFormatter.redact()
-    |> replace(@jwt, @marker)
     |> replace_url_params()
     |> replace_cards()
     |> replace_ibans()

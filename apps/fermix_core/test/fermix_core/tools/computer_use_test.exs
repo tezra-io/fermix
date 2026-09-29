@@ -475,7 +475,14 @@ defmodule FermixCore.Tools.ComputerUseTest do
          ]}
       )
 
-      context = %{agent_name: "main", conversation_key: key, computer_use_config: config}
+      # The origin a `fermix ask` turn carries; an unattended one may not use the
+      # session either (SessionManagerTest).
+      context = %{
+        agent_name: "main",
+        conversation_key: key,
+        computer_use_config: config,
+        computer_use_origin: :interactive
+      }
 
       assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
       assert result.success == true
@@ -498,6 +505,72 @@ defmodule FermixCore.Tools.ComputerUseTest do
       assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
       assert result.success == false
       assert result.error =~ "attended session"
+    end
+
+    # The whole door, end to end: an attended turn left a session open under this
+    # conversation, and a later unattended turn (a coding-run notice re-entering an
+    # ACP session that has ended) reaches the tool. It is refused, and the live
+    # session never sees the action.
+    test "an unattended turn cannot drive a session an attended turn left open" do
+      key = {"acp", "acp-session-left-open", :root}
+      config = Config.normalize(enabled: true)
+
+      start_supervised!(
+        {Session,
+         [
+           name: {:via, Registry, {CuSupervisor.registry(), key}},
+           config: config,
+           driver: {StubDriver, [test_pid: self()]},
+           origin: :interactive,
+           session_id: "cua_left_open_test"
+         ]}
+      )
+
+      context = %{
+        agent_name: "main",
+        conversation_key: key,
+        computer_use_config: config,
+        computer_use_origin: :unattended
+      }
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == false
+      assert result.error =~ "attended session"
+      refute_received {:driver_execute, %{"action" => "screenshot"}}
+    end
+
+    # A Buzz channel is one other people can post in, so even the owner's own
+    # request there is refused, and the sentence names where to ask instead.
+    test "a Buzz-wired turn is refused, naming the Fermix app, own chat and voice" do
+      key = {"acp", "acp-buzz-session", :root}
+      config = Config.normalize(enabled: true)
+
+      start_supervised!(
+        {Session,
+         [
+           name: {:via, Registry, {CuSupervisor.registry(), key}},
+           config: config,
+           driver: {StubDriver, [test_pid: self()]},
+           origin: :interactive,
+           session_id: "cua_buzz_test"
+         ]}
+      )
+
+      context = %{
+        agent_name: "main",
+        conversation_key: key,
+        computer_use_config: config,
+        computer_use_origin: :interactive,
+        session_env: %{"BUZZ_RELAY_URL" => "wss://relay.example.test"}
+      }
+
+      assert {:ok, result} = ComputerUse.execute(%{"action" => "screenshot"}, context)
+      assert result.success == false
+      assert result.error =~ "Buzz channel"
+      assert result.error =~ "Fermix app"
+      assert result.error =~ "your own chat"
+      assert result.error =~ "voice"
+      refute_received {:driver_execute, %{"action" => "screenshot"}}
     end
   end
 
@@ -534,6 +607,7 @@ defmodule FermixCore.Tools.ComputerUseTest do
         agent_name: "main",
         conversation_key: key,
         computer_use_config: config,
+        computer_use_origin: :interactive,
         session_id: turn
       }
 

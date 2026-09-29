@@ -166,5 +166,70 @@ defmodule FermixCore.Delivery.ChannelSendTest do
       assert {:error, {:delivery_crashed, _reason}} =
                ChannelSend.with_timeout(1_000, fn -> raise "boom" end)
     end
+
+    # A caller killed mid-send (a supervisor shutdown, a `:rest_for_one`
+    # restart) must take its send with it: an orphaned send has no watchdog
+    # left and can land after its caller's state was reset (REMIND-2).
+    test "the send process dies with its caller" do
+      test_pid = self()
+
+      caller =
+        spawn(fn ->
+          ChannelSend.with_timeout(60_000, fn ->
+            send(test_pid, {:send_pid, self()})
+            Process.sleep(:infinity)
+          end)
+        end)
+
+      assert_receive {:send_pid, send_pid}
+      on_exit(fn -> Process.exit(send_pid, :kill) end)
+      ref = Process.monitor(send_pid)
+
+      Process.exit(caller, :shutdown)
+
+      assert_receive {:DOWN, ^ref, :process, ^send_pid, :shutdown}
+    end
+
+    # Regression test: the watchdog used to kill the send and flush with a
+    # zero timeout, so the killed send's :DOWN usually arrived afterwards and
+    # sat in the caller's mailbox. A caller that traps exits must also never
+    # keep the link's {:EXIT, ...} message. The test waits for the timed-out
+    # send to be dead before the caller reads its mailbox.
+    test "regression: nothing of a finished send is left in a trapping caller's mailbox" do
+      test_pid = self()
+
+      caller =
+        spawn(fn ->
+          Process.flag(:trap_exit, true)
+          returned = ChannelSend.with_timeout(1_000, fn -> :ok end)
+
+          timed_out =
+            ChannelSend.with_timeout(500, fn ->
+              send(test_pid, {:send_pid, self()})
+              Process.sleep(:infinity)
+            end)
+
+          receive do
+            :continue -> :ok
+          end
+
+          crashed = ChannelSend.with_timeout(1_000, fn -> raise "boom" end)
+          {:messages, left} = Process.info(self(), :messages)
+          send(test_pid, {:results, [returned, timed_out, crashed], left})
+        end)
+
+      on_exit(fn -> Process.exit(caller, :kill) end)
+
+      assert_receive {:send_pid, send_pid}
+      ref = Process.monitor(send_pid)
+      assert_receive {:DOWN, ^ref, :process, ^send_pid, _reason}
+      send(caller, :continue)
+
+      assert_receive {:results, [returned, timed_out, crashed], left}
+      assert returned == :ok
+      assert timed_out == {:error, :delivery_timeout}
+      assert {:error, {:delivery_crashed, _reason}} = crashed
+      assert left == []
+    end
   end
 end

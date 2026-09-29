@@ -9,6 +9,7 @@ import {
   eventFrame,
   grantFrame,
   helloFrame,
+  relayedEvent,
   resultFrame,
   revokeFrame,
 } from './protocol.js';
@@ -24,10 +25,18 @@ test('hello carries the one protocol number this extension speaks', () => {
 
 test('an ack for another protocol is invalid, never assumed compatible', () => {
   assert.deepEqual(classify({ type: 'hello_ack', protocol: PROTOCOL }), { kind: 'hello_ack' });
-  assert.deepEqual(classify({ type: 'hello_ack', protocol: 2 }), {
-    kind: 'invalid',
-    reason: 'unsupported_protocol',
-  });
+  for (const protocol of [PROTOCOL - 1, PROTOCOL + 1]) {
+    assert.deepEqual(classify({ type: 'hello_ack', protocol }), {
+      kind: 'invalid',
+      reason: 'unsupported_protocol',
+    });
+  }
+});
+
+// Protocol 2 is the one that sends Network.enable; a daemon still on 1 does not
+// judge the addresses this extension would relay.
+test('this extension speaks protocol 2', () => {
+  assert.equal(PROTOCOL, 2);
 });
 
 test('a command outside the allowed domains is refused on this side too', () => {
@@ -43,6 +52,46 @@ test('a command outside the allowed domains is refused on this side too', () => 
       id: 1,
     });
   }
+});
+
+// Network.enable turns on the report of which address served the tab's
+// document. It is the one Network method that runs; the cookie reads do not.
+test('Network.enable is the one Network command allowed', () => {
+  const allowed = classify({ type: 'cdp', id: 5, tab_id: 7, method: 'Network.enable' });
+  assert.equal(allowed.kind, 'cdp');
+  assert.equal(allowed.method, 'Network.enable');
+
+  for (const method of ['Network.getCookies', 'Network.clearBrowserCookies', 'Network.setCookie']) {
+    assert.equal(classify({ type: 'cdp', id: 5, tab_id: 7, method }).kind, 'invalid', method);
+  }
+});
+
+// Of the Network domain only a document's response leaves the browser, and
+// only the three fields the daemon judges: no headers, no cookies, nothing
+// about any other request the page made.
+test('only where a document came from is relayed of the Network domain', () => {
+  const response = {
+    url: 'http://rebind.example/latest/',
+    remoteIPAddress: '169.254.169.254',
+    headers: { 'set-cookie': 'sid=SECRET' },
+    status: 200,
+  };
+
+  assert.deepEqual(relayedEvent('Network.responseReceived', { type: 'Document', frameId: 'F1', response }), {
+    type: 'Document',
+    frameId: 'F1',
+    response: { url: 'http://rebind.example/latest/', remoteIPAddress: '169.254.169.254' },
+  });
+
+  assert.equal(relayedEvent('Network.responseReceived', { type: 'Script', frameId: 'F1', response }), null);
+  assert.equal(relayedEvent('Network.requestWillBeSentExtraInfo', { headers: { cookie: 'sid=SECRET' } }), null);
+  assert.equal(relayedEvent('Network.dataReceived', { dataLength: 10 }), null);
+});
+
+test('every other domain is relayed as the browser sent it', () => {
+  const params = { args: [{ type: 'string', value: 'hi' }] };
+  assert.equal(relayedEvent('Runtime.consoleAPICalled', params), params);
+  assert.deepEqual(relayedEvent('Page.loadEventFired', undefined), {});
 });
 
 // The refusal carries the id so the daemon's caller is answered instead of

@@ -342,9 +342,7 @@ defmodule FermixCore.Management.Settings.Voice do
   # The model the route would actually use: the operator's own pin, else the
   # catalog default the resolver falls back to, never a blank.
   defp backend_model(snapshot, provider) do
-    snapshot
-    |> Source.provider(provider)
-    |> Source.string(:default_model, ModelCatalog.default_model_for(provider))
+    ModelCatalog.effective_model(provider, Source.provider(snapshot, provider))
   end
 
   defp backend_names do

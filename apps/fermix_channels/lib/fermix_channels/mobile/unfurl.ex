@@ -17,12 +17,15 @@ defmodule FermixChannels.Mobile.Unfurl do
   @url_regex ~r{https?://[^\s<>"']+}iu
   @trailing_punctuation ~r/[),.;!?\]}]+\z/u
 
+  @typedoc "A stored thumbnail: its content ref, image type and size."
+  @type image :: %{ref: String.t(), mime: String.t(), size_bytes: non_neg_integer()}
+
   @type preview :: %{
           required(:url) => String.t(),
           required(:site) => String.t(),
           required(:title) => String.t(),
           required(:description) => String.t() | nil,
-          required(:image_ref) => String.t() | nil
+          required(:image) => image() | nil
         }
 
   @spec resolve(String.t(), keyword()) ::
@@ -93,7 +96,7 @@ defmodule FermixChannels.Mobile.Unfurl do
   defp build_preview(url, %{body: body}, opts) when is_binary(body) do
     with {:ok, document} <- Floki.parse_document(valid_utf8(body)),
          {:ok, title} <- preview_title(document),
-         {:ok, image_ref, warnings} <- preview_image(document, url, opts) do
+         {:ok, image, warnings} <- preview_image(document, url, opts) do
       site = meta(document, "og:site_name") || URI.parse(url).host || ""
 
       {:ok,
@@ -102,7 +105,7 @@ defmodule FermixChannels.Mobile.Unfurl do
          site: site,
          title: title,
          description: meta(document, "og:description"),
-         image_ref: image_ref
+         image: image
        }, warnings}
     else
       {:error, reason} -> {:error, reason}
@@ -202,9 +205,14 @@ defmodule FermixChannels.Mobile.Unfurl do
 
   defp do_store_thumbnail(store, url, body, mime) do
     case store.(body, mime) do
-      {:ok, ref} when is_binary(ref) -> {:ok, ref, []}
-      {:error, reason} -> {:ok, nil, [{url, {:store_failed, reason}}]}
-      other -> {:ok, nil, [{url, {:invalid_store_result, other}}]}
+      {:ok, ref} when is_binary(ref) ->
+        {:ok, %{ref: ref, mime: mime, size_bytes: byte_size(body)}, []}
+
+      {:error, reason} ->
+        {:ok, nil, [{url, {:store_failed, reason}}]}
+
+      other ->
+        {:ok, nil, [{url, {:invalid_store_result, other}}]}
     end
   end
 

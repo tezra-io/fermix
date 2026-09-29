@@ -22,6 +22,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   # same bound the schema declares on a list value.
   @max_list_items 200
   @meetings_prefix "meetings_"
+  @browser_prefix "browser_"
 
   # The one writer that takes positional arguments rather than an answer list,
   # so its three keys are named here rather than resolved from the row key.
@@ -31,7 +32,16 @@ defmodule FermixCore.Management.Settings.AnswerMap do
     "sandbox_env_allow" => :sandbox_env_allow
   }
 
-  @type writer :: :wizard | :sandbox | :meetings
+  # The two rows that are prose. An announcement and a communication style are
+  # sentences, and a pasted multi-line one is kept as written: the settings file
+  # escapes it. Every other text value names something (an ID, a name, an
+  # address, a model, a time zone, an app, a variable) and is taken as its one
+  # trimmed line, so the line break a paste carries at the end still saves, and
+  # a control character left inside is refused here, under the control that
+  # sent it, rather than landing and failing somewhere later (MGMT-1).
+  @prose_keys ~w(meetings_announce_message communication_style)
+
+  @type writer :: :wizard | :sandbox | :meetings | :browser
   @type answer :: {atom(), term()}
 
   @doc """
@@ -44,6 +54,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   @spec writer(String.t()) :: writer()
   def writer("sandbox"), do: :sandbox
   def writer("meetings"), do: :meetings
+  def writer("browser"), do: :browser
   def writer(section) when is_binary(section), do: :wizard
 
   @doc """
@@ -61,7 +72,8 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   Translates one published row and its new value into an answer.
 
   Refuses a secret row (secrets cross the socket in exactly one method), a
-  read-only row, and a value whose type does not match the row's kind.
+  read-only row, a value whose type does not match the row's kind, and a
+  control character inside a text value that is not prose.
   """
   @spec answer(String.t(), Row.t(), term()) :: {:ok, answer()} | {:error, String.t()}
   def answer(section, row, value) when is_binary(section) and is_map(row) do
@@ -88,7 +100,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   defp coerce(%{"kind" => "toggle"}, value) when is_boolean(value), do: {:ok, value}
   defp coerce(%{"kind" => "number"}, value) when is_number(value), do: {:ok, value}
 
-  defp coerce(%{"kind" => "text"}, value) when is_binary(value), do: {:ok, value}
+  defp coerce(%{"kind" => "text"} = row, value) when is_binary(value), do: text_value(row, value)
 
   # A choice row's `options` are its value space unless it declares them
   # suggestions. Accepting any string for every choice row is what let an
@@ -98,8 +110,8 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   # control the operator had just used — and an off-list word that happened to
   # be an existing atom reached a guard instead and surfaced as
   # `internal_error`.
-  defp coerce(%{"kind" => "choice", "suggestions" => true}, value) when is_binary(value),
-    do: {:ok, value}
+  defp coerce(%{"kind" => "choice", "suggestions" => true} = row, value) when is_binary(value),
+    do: text_value(row, value)
 
   # A disabled option is published so a pane can say why it cannot be chosen,
   # and refused here in that same sentence: a client that draws every option as
@@ -118,15 +130,34 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   defp coerce(%{"kind" => "list"}, value) when is_list(value) and length(value) > @max_list_items,
     do: {:error, "This setting takes at most #{@max_list_items} values."}
 
-  defp coerce(%{"kind" => "list"}, value) when is_list(value) do
+  defp coerce(%{"kind" => "list"} = row, value) when is_list(value) do
     if Enum.all?(value, &is_binary/1) do
-      {:ok, value}
+      list_values(row, value)
     else
       {:error, "This setting takes a list of text values."}
     end
   end
 
   defp coerce(%{"kind" => kind}, _value), do: {:error, "This setting takes #{expected(kind)}."}
+
+  defp text_value(%{"key" => key}, value) when key in @prose_keys, do: {:ok, value}
+
+  defp text_value(_row, value) do
+    line = String.trim(value)
+
+    if String.match?(line, ~r/[\x00-\x1F\x7F]/),
+      do: {:error, "This setting takes a single line of text."},
+      else: {:ok, line}
+  end
+
+  defp list_values(row, values) do
+    lines = Enum.map(values, &text_value(row, &1))
+
+    case Enum.find(lines, &match?({:error, _sentence}, &1)) do
+      nil -> {:ok, Enum.map(lines, fn {:ok, line} -> line end)}
+      refusal -> refusal
+    end
+  end
 
   defp expected("toggle"), do: "true or false"
   defp expected("number"), do: "a number"
@@ -143,6 +174,7 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   end
 
   defp answer_key("meetings", @meetings_prefix <> key), do: String.to_existing_atom(key)
+  defp answer_key("browser", @browser_prefix <> key), do: String.to_existing_atom(key)
   defp answer_key("sandbox", key), do: Map.fetch!(@sandbox_answers, key)
   defp answer_key(_section, key), do: String.to_existing_atom(key)
 end

@@ -153,8 +153,9 @@ defmodule FermixWebWeb.SetupLiveTest do
     System.put_env("FERMIX_HOME", tmp_home)
     FermixTestSupport.SecretWriterStub.reset()
 
-    # Force readiness to :setup_required so commit_snapshot/1 skips
-    # prompt-file seeding; these tests do not exercise the memory repo.
+    # No provider: readiness starts at :setup_required, the state these
+    # screens are looked at on. The suite's seeder stub keeps prompt-file
+    # seeding out of these tests, which run no memory repo.
     Application.put_env(:fermix_core, :providers, [])
     Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
     Application.delete_env(:fermix_channels, :telegram)
@@ -3865,6 +3866,37 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert {:ok, entry} = Store.read(:openai_codex)
       assert entry.auth_mode == "chatgpt"
       assert entry.tokens.access_token == "codex_access_token"
+    end
+
+    # A sign-in that meets another Fermix process refreshing or signing in the
+    # same account refuses before it spends anything; the flash says to retry
+    # rather than showing the reason's atom.
+    test "a Codex sign-in refused by a busy profile says to try again", %{conn: conn} do
+      Application.put_env(:fermix_web, :codex_login_runner, fn _opts ->
+        {:error, :profile_busy}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> form("form[phx-submit=\"save_provider\"]",
+        provider_form: %{
+          provider: "openai_codex",
+          default_model: "gpt-5.5",
+          reasoning_effort: "high"
+        }
+      )
+      |> render_change()
+
+      view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
+
+      html = render_until(view, "Try again shortly.")
+
+      assert html =~
+               "Another Fermix process is refreshing or signing in to this account. " <>
+                 "Try again shortly."
+
+      refute html =~ "profile_busy"
     end
 
     test "Codex OAuth completion marks it primary without an explicit save", %{

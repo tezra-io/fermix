@@ -80,6 +80,23 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.failover_span(meta, meas, &1))
   end
 
+  # A confirmed access-sensitive run (`Capabilities.AccessGate`) is not a model
+  # call: the daemon runs it when the owner confirms, usually after the turn that
+  # parked it has shipped. It carries that turn's session_id so it pairs with the
+  # held call by `access_intent`; past the turn's close that id is tombstoned, so
+  # the run ships as its own self-closing trace holding its one tool span instead
+  # of being dropped. While the turn is still open it nests like any tool span.
+  def apply_event(
+        state,
+        [:fermix, :tool, :exec],
+        meas,
+        %{access_gate: "confirmed", session_id: session_id} = meta,
+        at
+      )
+      when is_map_key(state.closed_sessions, session_id) do
+    {state, [confirmed_access_trace(state, meas, meta, at)]}
+  end
+
   def apply_event(state, [:fermix, :tool, :exec], meas, meta, at) do
     add_child_span(state, meta, at, &Mapper.tool_span(meta, meas, &1))
   end
@@ -731,6 +748,19 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
   end
 
+  # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
+  # the recovery rounds after a provider refused a request as too large
+  # ([:fermix, :agent_loop, :context_recovery]): point spans under the run that
+  # was compacting, via the shared session_id (parent_session nests a subagent's
+  # under its delegating turn). session_id nil → place_under no-ops.
+  def apply_event(state, [:fermix, :agent_loop, :context_compaction], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.context_compaction_span(meta, meas, &1))
+  end
+
+  def apply_event(state, [:fermix, :agent_loop, :context_recovery], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.context_recovery_span(meta, meas, &1))
+  end
+
   # Proactive reminder lifecycle ([:fermix, :reminder, :lifecycle]). A reminder
   # delivery is not an agent run — no provider call, no turn, and by design no
   # session_id (M30 §6.4) — so every phase is a point event that becomes its own
@@ -1091,6 +1121,32 @@ defmodule FermixOpik.Aggregation do
   end
 
   # --- internals ---
+
+  defp confirmed_access_trace(state, meas, meta, at) do
+    trace_id = Mapper.new_id(Mapper.start_of(at.at, Map.get(meas, :duration_ms, 0)))
+
+    span =
+      Mapper.tool_span(meta, meas, trace_id: trace_id, project_name: state.project, ended: at.at)
+
+    trace =
+      Mapper.drop_nil(%{
+        id: trace_id,
+        project_name: state.project,
+        name: "access_gate:confirmed",
+        start_time: span.start_time,
+        end_time: span.end_time,
+        metadata:
+          compact(%{
+            session_id: Map.get(meta, :session_id),
+            parent_session: Map.get(meta, :parent_session),
+            access_intent: Map.get(meta, :access_intent),
+            tool: Map.get(meta, :tool)
+          }),
+        tags: ["access_gate"]
+      })
+
+    %{trace: trace, spans: [span]}
+  end
 
   defp add_child_span(state, meta, at, span_fun) do
     place_under(state, Map.get(meta, :session_id), meta, at, span_fun)

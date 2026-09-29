@@ -149,6 +149,7 @@ defmodule Fermix.CLI.Doctor do
           Checks.binary_integrity(),
           Checks.upgrade_available?(),
           Checks.auth_probe(),
+          Checks.realtime_key(),
           Checks.channel_health(),
           Checks.place_probe()
         ],

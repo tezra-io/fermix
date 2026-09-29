@@ -565,3 +565,55 @@ scenarios:
         rubric: >
           Computes 45 without opening a browser — a plain arithmetic question is
           not a reason to launch Chrome.
+
+  - id: games_discovery
+    # host_readonly: the games index is a public JSON document on fermix.ai and
+    # both questions are answered from it. Nothing on the game service is
+    # created; a case that starts a game would be `external_write`.
+    risk: host_readonly
+    title: "Find Fermix's own games without being handed a link"
+    severity: normal
+    # Reaches the live site, and the knowledge of where the games are comes
+    # from the optional `games` plugin: the index must be deployed and the
+    # plugin installed and enabled in the daemon's home for these to pass.
+    tags: [browser, web, webmcp, games]
+    cases:
+      - id: which_games
+        # No address in the prompt. The point is that the agent knows where its
+        # games are (the games plugin's skill names the index) and reads the
+        # list from the site instead of asking for a link or guessing one.
+        query: "Which games can you play with me, and how do we start one?"
+        expect:
+          # THE labelled route-sanity assertion for this scenario: the games
+          # index on fermix.ai was read (by `web_fetch` or the browser), which
+          # is the only place the list lives. It reads tool inputs, so it needs
+          # `capture_content` like the other input gates in this suite.
+          tool_inputs_match_all: ['fermix\.ai/games']
+          # Material floor, not wording: chess is the game's name on the index.
+          reply_matches: "(?i)chess"
+          reply_not_matches: "(?i)(send|give|paste|share) me (the|a|your) (link|url|address)"
+          reply_urls_in_evidence: true
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Names chess as a game it can play with the person on fermix.ai and
+          says how a game starts: it can set one up itself and hand over a link
+          or join code, or join with a code the person gives it. It must not ask
+          the person for the site's address or a link, and must not claim to
+          have started a game. Naming more games than chess is correct only if
+          the index it read lists them.
+      - id: play_chess_where
+        query: "Before we play: where does a chess game with you happen, and what do you need from me?"
+        expect:
+          tool_inputs_match_all: ['fermix\.ai/games']
+          reply_matches: "(?i)chess"
+          reply_not_matches: "(?i)(send|give|paste|share) me (the|a|your) (link|url|address)"
+          reply_urls_in_evidence: true
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Says the game is played on the chess table at fermix.ai, which it can
+          open itself, and that it needs nothing more than the person's choice
+          of side, or a join code if the person already started a game. It must
+          not ask for a link or an address and must not claim a game is already
+          running.

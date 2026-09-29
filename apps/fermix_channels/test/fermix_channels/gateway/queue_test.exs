@@ -5,6 +5,7 @@ defmodule FermixChannels.Gateway.QueueTest do
 
   alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Gateway.QueueSupervisor
   alias FermixCore.Memory.ConversationStore
 
   # Stands in for `FermixCore.Agents.MainAgent.checkout_turn_state/2`. The turn
@@ -179,23 +180,57 @@ defmodule FermixChannels.Gateway.QueueTest do
     end
   end
 
+  # Stands in for a ConversationStore stalled on a busy Repo: every marker
+  # write waits, unanswered, until the test opens the gate, so the Queue
+  # callback that writes it stays blocked for as long as the test holds it.
+  defmodule GatedStore do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, %{test_pid: test_pid, open?: false, waiting: []}}
+
+    @impl true
+    def handle_call({:append_stopped_marker, _key, _content, _opts}, _from, %{open?: true} = s),
+      do: {:reply, :marked, s}
+
+    def handle_call({:append_stopped_marker, key, _content, _opts}, from, state) do
+      send(state.test_pid, {:marker_waiting, key})
+      {:noreply, %{state | waiting: [from | state.waiting]}}
+    end
+
+    @impl true
+    def handle_info(:open, state) do
+      Enum.each(state.waiting, &GenServer.reply(&1, :marked))
+      {:noreply, %{state | open?: true, waiting: []}}
+    end
+  end
+
   setup do
     task_supervisor = start_supervised!({Task.Supervisor, []})
     {:ok, %{test_pid: self(), task_supervisor: task_supervisor}}
   end
 
+  # The Queue writes the stopped-turn marker on stop, crash and error paths, so
+  # every test Queue gets its own store unless the test passes one: none of
+  # them may write into, or depend on, the app-global ConversationStore.
   defp start_queue(ctx, opts \\ []) do
     agent_opts = Keyword.merge([test_pid: ctx.test_pid], Keyword.take(opts, [:error]))
     agent = start_supervised!({StubAgent, agent_opts}, id: :stub_agent)
 
-    queue_opts =
-      [
-        name: :"queue_#{System.unique_integer([:positive])}",
-        main_agent: Keyword.get(opts, :main_agent, agent),
-        turn_runner: Keyword.get(opts, :turn_runner, FakeRunner),
-        task_supervisor: Keyword.get(opts, :task_supervisor, ctx.task_supervisor)
-      ]
-      |> Keyword.merge(Keyword.take(opts, [:conversation_store]))
+    conversation_store =
+      Keyword.get_lazy(opts, :conversation_store, fn ->
+        start_marker_store(:default_queue_store)
+      end)
+
+    queue_opts = [
+      name: :"queue_#{System.unique_integer([:positive])}",
+      main_agent: Keyword.get(opts, :main_agent, agent),
+      turn_runner: Keyword.get(opts, :turn_runner, FakeRunner),
+      task_supervisor: Keyword.get(opts, :task_supervisor, ctx.task_supervisor),
+      conversation_store: conversation_store
+    ]
 
     start_supervised!({Queue, queue_opts}, id: :gateway_queue)
   end
@@ -493,6 +528,294 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:marker_appended, marker}, 5_000
       assert marker =~ "stopped before I finished it"
       refute_receive {:marker_appended, _second}, 300
+    end
+
+    test "a crashed turn is closed with the stopped-turn marker", ctx do
+      store = start_supervised!({StubStore, %{test_pid: ctx.test_pid}}, id: :stub_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      capture_log(fn ->
+        Queue.enqueue(queue, make_msg("boom", "ccrash", ctx.test_pid))
+        assert_receive {:turn_started, "boom", turn_pid}, 5_000
+        send(turn_pid, {:proceed, :crash})
+
+        assert_receive {:marker_appended, marker}, 5_000
+        assert marker =~ "stopped before I finished it"
+        refute_receive {:marker_appended, _second}, 300
+      end)
+    end
+
+    test "a crashed turn's marker lands before the next queued turn starts", ctx do
+      store = start_marker_store(:crash_marker_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      # The real TurnRunner persists the user message at turn start; the fake
+      # runner does not, so stand in for that persisted-but-unanswered turn.
+      ConversationStore.add_message(key("ccrash"), "user", "crash me",
+        server: store,
+        sender: "user"
+      )
+
+      capture_log(fn ->
+        Queue.enqueue(queue, make_msg("crash me", "ccrash", ctx.test_pid))
+        assert_receive {:turn_started, "crash me", crash_pid}, 5_000
+        Queue.enqueue(queue, make_msg("next", "ccrash", ctx.test_pid))
+        send(crash_pid, {:proceed, :crash})
+
+        # The crash's DOWN handler writes the marker before it starts "next".
+        assert_receive {:turn_started, "next", _next_pid}, 5_000
+      end)
+
+      assert [%{role: "user", content: "crash me"}, %{role: "assistant", content: marker}] =
+               ConversationStore.get_history(key("ccrash"), server: store)
+
+      assert marker =~ "stopped before I finished it"
+    end
+  end
+
+  # A turn task must not outlive the Queue that started it: a restarted Queue
+  # starts from empty state, so a surviving turn would run, deliver and commit
+  # beside the new Queue's turn for the same conversation, out of `/stop`'s
+  # reach. `QueueSupervisor` runs the Queue and its turn tasks' supervisor
+  # `:one_for_all`.
+  describe "a Queue restart" do
+    test "ends the dead Queue's turns before the new Queue starts one", ctx do
+      agent = start_supervised!({StubAgent, test_pid: ctx.test_pid}, id: :stub_agent)
+      queue_name = :"queue_#{System.unique_integer([:positive])}"
+
+      sup =
+        start_supervised!(
+          {QueueSupervisor,
+           name: :"queue_sup_#{System.unique_integer([:positive])}",
+           turn_tasks: :"turn_tasks_#{System.unique_integer([:positive])}",
+           queue: [name: queue_name, main_agent: agent, turn_runner: FakeRunner]}
+        )
+
+      Queue.enqueue(queue_name, make_msg("a", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      ref_a = Process.monitor(pid_a)
+      old_queue = queue_child(sup)
+
+      Process.exit(old_queue, :kill)
+      assert_receive {:DOWN, ^ref_a, :process, ^pid_a, _reason}, 5_000
+
+      # Served only after the supervisor finished the restart it was running
+      # when it killed pid_a.
+      new_queue = queue_child(sup)
+      assert is_pid(new_queue) and new_queue != old_queue
+
+      Queue.enqueue(new_queue, make_msg("b", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+      send(pid_b, {:proceed, :reply})
+      assert_receive {:reply, "reply:b"}, 5_000
+      refute_received {:reply, "reply:a"}
+    end
+
+    test "a Queue started without its turn-task supervisor refuses to start", ctx do
+      agent = start_supervised!({StubAgent, test_pid: ctx.test_pid}, id: :stub_agent)
+
+      assert {:error, {{%KeyError{key: :task_supervisor}, _stacktrace}, _child}} =
+               start_supervised(
+                 {Queue, name: :"queue_#{System.unique_integer([:positive])}", main_agent: agent}
+               )
+    end
+  end
+
+  defp queue_child(sup) do
+    Enum.find_value(Supervisor.which_children(sup), fn
+      {Queue, pid, :worker, _modules} when is_pid(pid) -> pid
+      _child -> nil
+    end)
+  end
+
+  # A Queue callback can wait on the ConversationStore: a crashed or stopped
+  # turn's stopped marker is written inside it (QUEUE-4), and the store can
+  # stall on a busy Repo. A turn that asks its Queue anything meanwhile waits
+  # for the answer; a busy Queue must never read as a gone one, which made a
+  # finished turn drop its reply unseen. The gate stays shut only until the
+  # turn is seen waiting: no test waits out a production call budget. What
+  # tells a wait with no budget from one with a budget it has not used up yet
+  # is the call itself, so each test traces the waiting calls and reads the
+  # timeout they carry.
+  describe "a Queue busy in a slow store call" do
+    test "a finished turn waits for its Queue and delivers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+      test_pid = ctx.test_pid
+
+      result_fn = fn outcome -> send(test_pid, {:turn_result, outcome}) end
+      Queue.enqueue(queue, make_msg("crash one", "c1", test_pid))
+      Queue.enqueue(queue, make_msg("crash two", "c2", test_pid))
+      Queue.enqueue(queue, Map.put(make_msg("b", "c3", test_pid), :turn_result_fn, result_fn))
+      assert_receive {:turn_started, "crash one", crash_one}, 5_000
+      assert_receive {:turn_started, "crash two", crash_two}, 5_000
+      assert_receive {:turn_started, "b", turn_b}, 5_000
+      trace_calls(call_trace(), turn_b)
+
+      capture_log(fn ->
+        # Two crashed turns: the Queue writes one marker in each :DOWN, so it
+        # stays busy past any single store call's own timeout.
+        send(crash_one, {:proceed, :crash})
+        send(crash_two, {:proceed, :crash})
+        assert_receive {:marker_waiting, _key}, 5_000
+
+        send(turn_b, {:proceed, :reply})
+        assert eventually(fn -> queued_call?(queue, turn_b, :fresh?) end, 250)
+        send(store, :open)
+
+        assert_receive {:reply, "reply:b"}, 5_000
+        assert_receive {:turn_result, {:completed}}, 5_000
+      end)
+
+      assert call_timeout(turn_b, :fresh?) == :infinity
+      assert call_timeout(turn_b, :final_reply_delivered) == :infinity
+      assert call_timeout(turn_b, :claim_turn_result) == :infinity
+    end
+
+    # `/stop` (`Stopper`) asks the Queue to stop everything: one marker write
+    # per stopped turn, inside one callback.
+    test "a stop waits for its marker writes and answers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("one", "c1", ctx.test_pid))
+      Queue.enqueue(queue, make_msg("two", "c2", ctx.test_pid))
+      assert_receive {:turn_started, "one", _one}, 5_000
+      assert_receive {:turn_started, "two", _two}, 5_000
+
+      stop = traced_task(call_trace(), fn -> Queue.stop_all(queue) end)
+      assert_receive {:marker_waiting, _key}, 5_000
+      send(store, :open)
+
+      assert %{active_stopped: 2, pending_cleared: 0} = Task.await(stop)
+      assert call_timeout(stop.pid, :stop_all) == :infinity
+    end
+
+    # An ACP or voice cancel stops one conversation: one marker write.
+    test "a conversation stop waits for its marker write and answers", ctx do
+      store = start_supervised!({GatedStore, ctx.test_pid}, id: :gated_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, make_msg("one", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "one", _one}, 5_000
+
+      stop = traced_task(call_trace(), fn -> Queue.stop_conversation(key("c1"), queue) end)
+      assert_receive {:marker_waiting, _key}, 5_000
+      send(store, :open)
+
+      assert {:ok, %{active_stopped: 1, pending_cleared: 0}} = Task.await(stop)
+      assert call_timeout(stop.pid, :stop_conversation) == :infinity
+    end
+  end
+
+  # `pid`'s `tag` call is in the Queue's mailbox, waiting for the callback that
+  # is running to finish.
+  defp queued_call?(queue, pid, tag) do
+    {:messages, messages} = Process.info(queue, :messages)
+    Enum.any?(messages, &match?({:"$gen_call", {^pid, _}, {^tag, _key, ^pid}}, &1))
+  end
+
+  # A trace session of this test's own on `GenServer.call/3`, local calls
+  # included, so `call/2`'s default timeout shows too. No other tracer sees
+  # it, and it ends with the test.
+  defp call_trace do
+    session = :trace.session_create(:queue_test_calls, self(), [])
+    on_exit(fn -> :trace.session_destroy(session) end)
+    1 = :trace.function(session, {GenServer, :call, 3}, true, [:local])
+    session
+  end
+
+  defp trace_calls(session, pid), do: 1 = :trace.process(session, pid, true, [:call])
+
+  # Runs `fun` in a task that starts only once its calls are traced.
+  defp traced_task(session, fun) do
+    task =
+      Task.async(fn ->
+        receive do
+          :traced -> fun.()
+        after
+          5_000 -> :never_traced
+        end
+      end)
+
+    trace_calls(session, task.pid)
+    send(task.pid, :traced)
+    task
+  end
+
+  # The timeout `pid`'s traced call carried, for the request `tag` or tagged
+  # `tag`.
+  defp call_timeout(pid, tag) do
+    receive do
+      {:trace, ^pid, :call, {GenServer, :call, [_server, request, timeout]}}
+      when request == tag or (is_tuple(request) and elem(request, 0) == tag) ->
+        timeout
+    after
+      5_000 -> flunk("#{inspect(pid)} made no traced #{inspect(tag)} call")
+    end
+  end
+
+  # A turn task outlives its Queue only for the moment QueueSupervisor takes to
+  # kill it; here it runs under the test's own Task.Supervisor, so it stays.
+  describe "a turn whose Queue is gone" do
+    test "logs that it could not ask whether it is still active, and delivers nothing", ctx do
+      queue = start_queue(ctx)
+      Queue.enqueue(queue, make_msg("orphan", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "orphan", turn_pid}, 5_000
+      ref = Process.monitor(turn_pid)
+      :ok = stop_supervised(:gateway_queue)
+      refute Process.alive?(queue)
+
+      log =
+        capture_log(fn ->
+          send(turn_pid, {:proceed, :reply})
+          assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+        end)
+
+      assert log =~ "could not make its fresh? call"
+      assert log =~ "its Queue is gone"
+      refute_received {:reply, _text}
+      refute_received {:committed, _response}
+    end
+
+    test "logs each call it could not make after it delivered", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      reply_fn = fn {:text, text} ->
+        send(test_pid, {:delivering, text, self()})
+
+        receive do
+          :delivered -> :ok
+        after
+          5_000 -> :ok
+        end
+      end
+
+      msg =
+        make_msg("late", "c1", test_pid)
+        |> Map.put(:reply_fn, reply_fn)
+        |> Map.put(:turn_result_fn, fn outcome -> send(test_pid, {:turn_result, outcome}) end)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "late", turn_pid}, 5_000
+      ref = Process.monitor(turn_pid)
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:delivering, "reply:late", ^turn_pid}, 5_000
+      :ok = stop_supervised(:gateway_queue)
+      refute Process.alive?(queue)
+
+      log =
+        capture_log(fn ->
+          send(turn_pid, :delivered)
+          assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+        end)
+
+      assert log =~ "could not make its final_reply_delivered call"
+      assert log =~ "could not make its claim_turn_result call"
+      # It committed (it had passed fresh?), but no Queue handed it its outcome.
+      assert_received {:committed, "reply:late"}
+      refute_received {:turn_result, _outcome}
     end
   end
 
@@ -939,6 +1262,82 @@ defmodule FermixChannels.Gateway.QueueTest do
 
   defp key(chat_id), do: {"telegram", chat_id, :root}
 
+  # A message with the identity a named stop matches on, in conversation c1,
+  # whose outcome is reported tagged with its content.
+  defp named_msg(content, test_pid) do
+    content
+    |> make_msg("c1", test_pid)
+    |> Map.put(:id, content)
+    |> tagged_turn_result(test_pid)
+  end
+
+  # Tags each outcome with its message, since a stop fires several at once from
+  # separate processes, in no fixed order.
+  defp tagged_turn_result(msg, test_pid) do
+    Map.put(msg, :turn_result_fn, fn outcome ->
+      send(test_pid, {:turn_result, msg.content, outcome})
+    end)
+  end
+
+  # Parks the turn inside its claimed callback, before the callback has had any
+  # effect, with one tagged message waiting behind it. `stop` then runs; the
+  # turn must survive it, keep its slot, and fire its own outcome on release.
+  defp assert_stop_spares_claimed_turn(ctx, stop) do
+    queue = start_queue(ctx)
+    test_pid = ctx.test_pid
+
+    msg =
+      Map.put(make_msg("hello", "c1", test_pid), :turn_result_fn, fn outcome ->
+        send(test_pid, {:claimed, self()})
+
+        receive do
+          :release -> send(test_pid, {:turn_result, outcome})
+        end
+      end)
+
+    Queue.enqueue(queue, msg)
+    assert_receive {:turn_started, "hello", turn_pid}, 5_000
+    send(turn_pid, {:proceed, :reply})
+    assert_receive {:claimed, ^turn_pid}, 5_000
+    ref = Process.monitor(turn_pid)
+
+    Queue.enqueue(queue, tagged_turn_result(make_msg("waiting", "c1", test_pid), test_pid))
+    stop.(queue)
+    assert_receive {:turn_result, "waiting", {:cancelled}}, 5_000
+
+    # The spared turn still holds the conversation: a new message waits. The
+    # status call is served after the enqueue cast, so it sees where it went.
+    Queue.enqueue(queue, make_msg("next", "c1", test_pid))
+    assert %{active_requests: 1, pending_requests: 1} = Queue.status(queue)
+
+    send(turn_pid, :release)
+    assert_receive {:turn_result, {:completed}}, 5_000
+    assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+    assert_receive {:turn_started, "next", _next_pid}, 5_000
+    refute_received {:turn_started, "waiting", _pid}
+    refute_received {:turn_result, _outcome}
+  end
+
+  # The callback's failure is logged; the turn task still exits :normal and the
+  # conversation keeps scheduling. Returns the captured log.
+  defp assert_callback_failure_isolated(ctx, turn_result_fn) do
+    queue = start_queue(ctx)
+    msg = Map.put(make_msg("hello", "c1", ctx.test_pid), :turn_result_fn, turn_result_fn)
+
+    capture_log(fn ->
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      ref = Process.monitor(turn_pid)
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+
+      Queue.enqueue(queue, make_msg("next", "c1", ctx.test_pid))
+      assert_receive {:turn_started, "next", next_pid}, 5_000
+      send(next_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:next"}, 5_000
+    end)
+  end
+
   describe "stop_conversation/2" do
     test "stops only the target conversation; a sibling turn keeps running", ctx do
       queue = start_queue(ctx)
@@ -1012,6 +1411,96 @@ defmodule FermixChannels.Gateway.QueueTest do
     test "returns :not_found for a conversation with nothing active or pending", ctx do
       queue = start_queue(ctx)
       assert {:ok, :not_found} = Queue.stop_conversation(key("never_seen"), queue)
+    end
+  end
+
+  # A stop that names one message: two clients sharing one conversation must
+  # never stop each other's turn, and a stop that arrives after its turn ended
+  # must never reach the turn that started next.
+  describe "stop_turn/3" do
+    test "stops the named active turn and starts the one waiting behind it", ctx do
+      store = start_supervised!({StubStore, test_pid: ctx.test_pid}, id: :stop_turn_store)
+      queue = start_queue(ctx, conversation_store: store)
+
+      Queue.enqueue(queue, named_msg("a", ctx.test_pid))
+      Queue.enqueue(queue, named_msg("b", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      ref_a = Process.monitor(pid_a)
+
+      assert {:ok, :stopped} = Queue.stop_turn(key("c1"), "a", queue)
+
+      assert_receive {:DOWN, ^ref_a, :process, ^pid_a, _reason}, 5_000
+      assert_receive {:turn_result, "a", {:cancelled}}, 5_000
+      assert_receive {:marker_appended, marker}, 5_000
+      assert marker =~ "stopped"
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+
+      send(pid_b, {:proceed, :reply})
+      assert_receive {:turn_result, "b", {:completed}}, 5_000
+      refute_receive {:turn_result, _content, _outcome}, 300
+    end
+
+    test "drops only the named waiting message", ctx do
+      queue = start_queue(ctx)
+
+      for content <- ["a", "b", "c"], do: Queue.enqueue(queue, named_msg(content, ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      assert eventually(fn -> Queue.status(queue).pending_requests == 2 end)
+
+      assert {:ok, :dequeued} = Queue.stop_turn(key("c1"), "b", queue)
+      assert_receive {:turn_result, "b", {:cancelled}}, 5_000
+      assert Process.alive?(pid_a)
+
+      send(pid_a, {:proceed, :reply})
+      assert_receive {:turn_result, "a", {:completed}}, 5_000
+      assert_receive {:turn_started, "c", pid_c}, 5_000
+      send(pid_c, {:proceed, :reply})
+      assert_receive {:turn_result, "c", {:completed}}, 5_000
+      refute_received {:turn_started, "b", _pid}
+    end
+
+    test "a turn that claimed its outcome is past the named stop", ctx do
+      queue = start_queue(ctx)
+      test_pid = ctx.test_pid
+
+      msg =
+        "hello"
+        |> named_msg(test_pid)
+        |> Map.put(:turn_result_fn, fn outcome ->
+          send(test_pid, {:claimed, self()})
+
+          receive do
+            :release -> send(test_pid, {:turn_result, "hello", outcome})
+          end
+        end)
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "hello", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:claimed, ^turn_pid}, 5_000
+
+      assert {:ok, :claimed} = Queue.stop_turn(key("c1"), "hello", queue)
+
+      send(turn_pid, :release)
+      assert_receive {:turn_result, "hello", {:completed}}, 5_000
+      refute_receive {:turn_result, "hello", {:cancelled}}, 300
+    end
+
+    test "a stop for a turn that already ended leaves the next turn alone", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, named_msg("a", ctx.test_pid))
+      Queue.enqueue(queue, named_msg("b", ctx.test_pid))
+      assert_receive {:turn_started, "a", pid_a}, 5_000
+      send(pid_a, {:proceed, :reply})
+      assert_receive {:turn_result, "a", {:completed}}, 5_000
+      assert_receive {:turn_started, "b", pid_b}, 5_000
+
+      assert {:ok, :not_found} = Queue.stop_turn(key("c1"), "a", queue)
+      assert {:ok, :not_found} = Queue.stop_turn(key("never_seen"), "a", queue)
+
+      assert Process.alive?(pid_b)
+      refute_receive {:turn_result, "b", {:cancelled}}, 300
     end
   end
 
@@ -1102,8 +1591,9 @@ defmodule FermixChannels.Gateway.QueueTest do
 
     # Race pin, direction 1: the turn reaches its own terminal invocation first
     # (it is parked INSIDE the callback, so its conversation is still active),
-    # and a stop lands on top. Deterministic — the stop cannot run until the
-    # test issues it.
+    # and a stop lands on top. The turn already claimed its outcome, so it is
+    # past the stop: not killed, and nothing fires a second time.
+    # Deterministic — the stop cannot run until the test issues it.
     test "a stop landing after the turn already fired does not fire again", ctx do
       queue = start_queue(ctx)
       test_pid = ctx.test_pid
@@ -1124,8 +1614,66 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert_receive {:reply, "reply:hello"}, 5_000
       assert_receive {:turn_result, {:completed}}, 5_000
 
-      assert {:ok, %{active_stopped: 1}} = Queue.stop_conversation(key("c1"), queue)
+      assert {:ok, %{active_stopped: 0, pending_cleared: 0}} =
+               Queue.stop_conversation(key("c1"), queue)
+
       refute_receive {:turn_result, _outcome}, 300
+
+      ref = Process.monitor(turn_pid)
+      send(turn_pid, :release)
+      assert_receive {:DOWN, ^ref, :process, ^turn_pid, :normal}, 5_000
+    end
+
+    # A turn that has claimed its outcome is past /stop, through either stop
+    # surface: the stop only cancels the messages waiting behind it, and the
+    # turn keeps its slot until it has invoked the outcome it holds.
+    test "stop_conversation after the claim lets the turn fire its own outcome", ctx do
+      assert_stop_spares_claimed_turn(ctx, fn queue ->
+        assert {:ok, %{active_stopped: 0, pending_cleared: 1}} =
+                 Queue.stop_conversation(key("c1"), queue)
+      end)
+    end
+
+    test "stop_all after the claim lets the turn fire its own outcome", ctx do
+      assert_stop_spares_claimed_turn(ctx, fn queue ->
+        assert %{active_stopped: 0, pending_cleared: 1} = Queue.stop_all(queue)
+      end)
+    end
+
+    test "stop_conversation fires {:cancelled} for every queued message it drops", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, tagged_turn_result(make_msg("a", "c1", ctx.test_pid), ctx.test_pid))
+      Queue.enqueue(queue, tagged_turn_result(make_msg("b", "c1", ctx.test_pid), ctx.test_pid))
+      assert_receive {:turn_started, "a", _pid_a}, 5_000
+
+      assert {:ok, %{active_stopped: 1, pending_cleared: 1}} =
+               Queue.stop_conversation(key("c1"), queue)
+
+      assert_receive {:turn_result, "a", {:cancelled}}, 5_000
+      assert_receive {:turn_result, "b", {:cancelled}}, 5_000
+      refute_receive {:turn_result, _content, _outcome}, 300
+      refute_received {:turn_started, "b", _pid}
+    end
+
+    test "stop_all fires {:cancelled} for every queued message in every conversation", ctx do
+      queue = start_queue(ctx)
+
+      for {content, chat_id} <- [{"a", "c1"}, {"a2", "c1"}, {"b", "c2"}, {"b2", "c2"}] do
+        msg = tagged_turn_result(make_msg(content, chat_id, ctx.test_pid), ctx.test_pid)
+        Queue.enqueue(queue, msg)
+      end
+
+      assert_receive {:turn_started, "a", _pid_a}, 5_000
+      assert_receive {:turn_started, "b", _pid_b}, 5_000
+
+      assert %{active_stopped: 2, pending_cleared: 2} = Queue.stop_all(queue)
+
+      for content <- ["a", "a2", "b", "b2"] do
+        assert_receive {:turn_result, ^content, {:cancelled}}, 5_000
+      end
+
+      refute_receive {:turn_result, _content, _outcome}, 300
     end
 
     # Race pin, direction 2: the stop lands while the turn is parked in its
@@ -1180,6 +1728,18 @@ defmodule FermixChannels.Gateway.QueueTest do
 
       assert log =~ "Turn result callback raised"
       assert log =~ "callback boom"
+    end
+
+    test "an exiting callback takes down neither the turn task nor the queue", ctx do
+      log = assert_callback_failure_isolated(ctx, fn _outcome -> exit(:callback_exit) end)
+      assert log =~ "Turn result callback exited"
+      assert log =~ "callback_exit"
+    end
+
+    test "a throwing callback takes down neither the turn task nor the queue", ctx do
+      log = assert_callback_failure_isolated(ctx, fn _outcome -> throw(:callback_throw) end)
+      assert log =~ "Turn result callback threw"
+      assert log =~ "callback_throw"
     end
 
     test "fires {:failed, reason} once when the turn-state checkout fails", ctx do

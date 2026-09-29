@@ -13,6 +13,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :provider, :call],
     [:fermix, :provider, :failover],
     [:fermix, :tool, :exec],
+    [:fermix, :agent_loop, :context_compaction],
+    [:fermix, :agent_loop, :context_recovery],
     [:fermix, :memory, :write],
     [:fermix, :memory, :review],
     [:fermix, :agent, :start],

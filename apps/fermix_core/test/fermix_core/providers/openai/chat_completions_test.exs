@@ -558,6 +558,64 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
     end
   end
 
+  # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: OpenRouter, Ollama, Venice and Hugging
+  # Face routes ride this adapter, so it has to name an overflow the way the
+  # Responses surfaces do for the loop's recovery to fire on every route.
+  describe "chat/3 — context overflow" do
+    defp overflow_chat(respond) do
+      Req.Test.stub(__MODULE__, respond)
+
+      ChatCompletions.chat([%{role: "user", content: "x"}], [],
+        api_key: "sk-test",
+        provider: :openrouter,
+        model: "anthropic/claude-sonnet-4.6",
+        base_url: "https://openrouter.ai/api/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      )
+    end
+
+    test "a context_length_exceeded error code returns bare :context_length_exceeded" do
+      body = %{
+        "error" => %{"code" => "context_length_exceeded", "message" => "Input is too long."}
+      }
+
+      assert {:error, :context_length_exceeded} =
+               overflow_chat(fn conn ->
+                 conn |> Plug.Conn.put_status(400) |> Req.Test.json(body)
+               end)
+    end
+
+    test "a 400 whose message names the maximum context length returns the same" do
+      body = %{
+        "error" => %{
+          "message" =>
+            "This model's maximum context length is 128000 tokens. " <>
+              "However, you requested 190000 tokens."
+        }
+      }
+
+      assert {:error, :context_length_exceeded} =
+               overflow_chat(fn conn -> Plug.Conn.send_resp(conn, 400, Jason.encode!(body)) end)
+    end
+
+    test "an unrelated 400 stays a structured provider error" do
+      body = %{
+        "error" => %{"code" => "invalid_request_error", "message" => "tools[0] is malformed"}
+      }
+
+      assert {:error, {:provider_error, error}} =
+               overflow_chat(fn conn ->
+                 conn |> Plug.Conn.put_status(400) |> Req.Test.json(body)
+               end)
+
+      assert error.provider == :openrouter
+      assert error.adapter == :chat_completions
+      assert error.status == 400
+      assert error.code == "invalid_request_error"
+      assert error.message == "tools[0] is malformed"
+    end
+  end
+
   describe "continue/3 screenshot retention" do
     @screenshot_label "Image returned by the preceding tool call:"
     @screenshot_elided "[the image the preceding tool result describes was dropped to bound context: it is a record of a past look, not a current view, and no coordinate or id in it can be used]"
@@ -787,6 +845,97 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
       assert image_part["type"] == "image_url"
       assert image_part["image_url"]["url"] == "data:image/png;base64," <> Base.encode64(png)
+    end
+
+    # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: the loop's `call_id => digest` map
+    # rewrites replayed history only; this step's tool messages are the loop's own.
+    test "replayed tool messages carry their substitution; this step's do not" do
+      baseline = substitution_continue_messages([])
+
+      substituted =
+        substitution_continue_messages(
+          tool_result_substitutions: %{"call_a" => "digest a", "call_new" => "digest new"}
+        )
+
+      # History, this step's assistant turn, its tool message: nothing added or dropped.
+      assert length(substituted) == length(substitution_prior_messages()) + 2
+      assert substituted == List.update_at(baseline, 2, &Map.put(&1, "content", "digest a"))
+      assert Enum.at(substituted, 3)["content"] == "raw b"
+
+      assert Enum.map(substituted, & &1["tool_call_id"]) ==
+               [nil, nil, "call_a", "call_b", nil, "call_new"]
+
+      assert List.last(substituted) == %{
+               "role" => "tool",
+               "tool_call_id" => "call_new",
+               "content" => "fresh"
+             }
+    end
+
+    test "an absent or empty substitution map leaves the replayed messages as they are today" do
+      baseline = substitution_continue_messages([])
+
+      assert substitution_continue_messages(tool_result_substitutions: %{}) == baseline
+      assert Enum.map(Enum.slice(baseline, 2, 2), & &1["content"]) == ["raw a", "raw b"]
+    end
+
+    defp raw_tool_call(id) do
+      %{
+        "id" => id,
+        "type" => "function",
+        "function" => %{"name" => "echo", "arguments" => "{}"}
+      }
+    end
+
+    defp substitution_prior_messages do
+      [
+        %{role: "user", content: "go"},
+        %{
+          role: "assistant",
+          content: "",
+          tool_calls: [raw_tool_call("call_a"), raw_tool_call("call_b")]
+        },
+        %{role: "tool", tool_call_id: "call_a", content: "raw a"},
+        %{role: "tool", tool_call_id: "call_b", content: "raw b"}
+      ]
+    end
+
+    defp substitution_continue_messages(extra_opts) do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_messages, Jason.decode!(body)["messages"]})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      provider_state = %{
+        messages: substitution_prior_messages(),
+        assistant: %{role: "assistant", content: "", tool_calls: [raw_tool_call("call_new")]},
+        capabilities: [capability()]
+      }
+
+      opts =
+        Keyword.merge(
+          [
+            api_key: "sk-test",
+            provider: :openai,
+            model: "gpt-5.4-mini",
+            base_url: "https://api.openai.com/v1",
+            req_options: [plug: {Req.Test, __MODULE__}]
+          ],
+          extra_opts
+        )
+
+      {:ok, _turn} =
+        ChatCompletions.continue(
+          provider_state,
+          [%{call_id: "call_new", output: "fresh"}],
+          opts
+        )
+
+      assert_receive {:request_messages, messages}
+      messages
     end
   end
 

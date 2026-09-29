@@ -16,7 +16,13 @@ defmodule FermixChannels.Gateway.Channel do
           parse_mode: String.t(),
           message_thread_id: String.t() | integer(),
           thread_ts: String.t(),
-          reply_markup: map()
+          reply_markup: map(),
+          turn_id: String.t() | nil,
+          in_reply_to: String.t() | nil,
+          attempt: non_neg_integer() | nil,
+          request_type: String.t() | nil,
+          proactive_key: String.t(),
+          proactive_part_id: String.t()
         ]
 
   @type media_part :: Reply.media_part()
@@ -169,6 +175,24 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback rotation_spec() :: rotation_spec()
 
+  @typedoc """
+  A draft-capable channel's own streaming throttle: the least time between two
+  writes, the characters a draft needs before it opens, and the most writes a
+  draft may take (`:infinity` for a transport with no edit budget).
+  """
+  @type draft_pacing :: %{
+          edit_interval_ms: pos_integer(),
+          min_draft_chars: pos_integer(),
+          max_edits: pos_integer() | :infinity
+        }
+
+  @doc """
+  The throttle `DraftStream` runs this channel's drafts at, read once when a
+  turn's engine starts. A channel without it gets the engine's constants,
+  tuned for chat platforms' edit-rate limits.
+  """
+  @callback draft_pacing() :: draft_pacing()
+
   @doc """
   Classify an inbound message for album coalescing (`Gateway.AlbumBuffer`).
 
@@ -275,6 +299,7 @@ defmodule FermixChannels.Gateway.Channel do
     seal_draft: 3,
     discard_draft: 2,
     rotation_spec: 0,
+    draft_pacing: 0,
     album_classify: 1,
     react: 2,
     reaction_capability: 0,

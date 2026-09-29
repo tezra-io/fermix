@@ -308,6 +308,57 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
     end
   end
 
+  describe "substitute_tool_results/2" do
+    defp replayed_items do
+      [
+        %{role: "user", content: [%{type: "input_text", text: "Hi"}]},
+        %{"type" => "function_call", "call_id" => "a", "name" => "echo", "arguments" => "{}"},
+        %{type: "function_call_output", call_id: "a", output: "raw a"},
+        %{"type" => "function_call", "call_id" => "b", "name" => "echo", "arguments" => "{}"},
+        %{type: "function_call_output", call_id: "b", output: "raw b"}
+      ]
+    end
+
+    test "replaces the output of the mapped function_call_output items only" do
+      result = ResponsesShared.substitute_tool_results(replayed_items(), %{"a" => "digest a"})
+
+      assert result ==
+               List.replace_at(replayed_items(), 2, %{
+                 type: "function_call_output",
+                 call_id: "a",
+                 output: "digest a"
+               })
+    end
+
+    test "function_call items sharing a mapped call_id are left untouched" do
+      result =
+        ResponsesShared.substitute_tool_results(replayed_items(), %{
+          "a" => "digest a",
+          "b" => "digest b"
+        })
+
+      assert Enum.at(result, 1) == Enum.at(replayed_items(), 1)
+      assert Enum.at(result, 3) == Enum.at(replayed_items(), 3)
+      assert Enum.at(result, 4).output == "digest b"
+    end
+
+    test "preserves length and order; an unmatched id changes nothing" do
+      result = ResponsesShared.substitute_tool_results(replayed_items(), %{"zzz" => "digest"})
+
+      assert result == replayed_items()
+    end
+
+    test "an empty map is the identity" do
+      assert ResponsesShared.substitute_tool_results(replayed_items(), %{}) == replayed_items()
+    end
+
+    test "a non-map substitution set fails loud" do
+      assert_raise FunctionClauseError, fn ->
+        ResponsesShared.substitute_tool_results(replayed_items(), nil)
+      end
+    end
+  end
+
   describe "maybe_reasoning_field/2" do
     test "returns nil for nil, :none, and \"none\" — caller omits the body field" do
       assert ResponsesShared.maybe_reasoning_field(nil, :openai) == nil

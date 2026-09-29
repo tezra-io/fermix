@@ -203,6 +203,12 @@ options for WebSockets, and `Net.Guard` the public-URL checks.
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
 
+Architecture Invariant: `auth.json` has two lockfiles beside it, shared by every
+VM on the host. Every read-modify-write of the file holds the store lock, and a
+refresh, sign-in, import or logout of a profile first holds that profile's lock.
+The order is always profile, then store; neither lock is reentrant, and no
+locked section calls a `TokenManager`.
+
 ### `FermixCore.Capabilities` and Tools
 
 A `Capabilities.Capability` is a struct, not a behaviour: a kind (`:builtin`,
@@ -211,6 +217,20 @@ A `Capabilities.Capability` is a struct, not a behaviour: a kind (`:builtin`,
 the `Capabilities.Builtin.Tool` behaviour (name, description, parameters, usage
 guidance, `execute/2`), with optional `advertise?/1` and `dynamic_parameters/1`
 hooks that decide per turn whether and how a tool is offered.
+
+Architecture Invariant: `Capability.execute/3` is the one invoke boundary (the
+agent loop, the realtime voice bridge, inbound MCP), and it asks
+`Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
+manifest marks it `access_sensitive` runs there only on an attended owner turn,
+not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
+outside content (`:outside_sources`, folded by the agent loop from
+`UntrustedContent.outside_source/1`), or on a scheduled run whose job names it;
+otherwise the call is parked in `AccessGate.Pending` for one owner
+confirmation, or refused. While a parked call waits, the turn (or Realtime
+call) that parked it runs nothing else: the loop stamps `:access_waiting` from
+the held result itself (the rest of that step included), the Realtime session
+from `AccessGate.waiting?/1`, and the gate refuses every call under it. Every
+other capability returns on one map lookup.
 
 `Capabilities.Registry` is a GenServer over a protected ETS table. Trust decides
 what a caller sees: an operator gets every capability; a guest, or a caller with
@@ -263,7 +283,7 @@ Memory has two layers:
 
 The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
-skill usage and curation, mobile timelines, and computer-history rows.
+skill usage and curation, the companion timeline, and computer-history rows.
 
 `Memory.Reviewer` writes durable memory. It is a time-gated background review
 (daily by default) of the owner's recent messages that applies add, replace,
@@ -324,8 +344,9 @@ second resource-store process to coordinate.
 
 `Setup.ConfigStore` owns `FERMIX_HOME`, the persisted `config.toml`, and the
 standard workspace paths (workspace, grants, bootstrap, skills, plugins,
-browser, journals, realtime, mobile, traces, logs, and `memory.db`). Secrets
-live in the OS keychain, named by profile rather than by home.
+browser, journals, realtime, mobile, traces, logs, and `memory.db`); it keeps
+`mobile` at 0700, the only mode the phone's trust store reads. Secrets live in
+the OS keychain, named by profile rather than by home.
 
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's
@@ -369,7 +390,13 @@ never compile-depends on channels, and `OwnerInbox` is the one resolver for the
 owner's inbox.
 
 Architecture Invariant: a delivery destination is resolved once, at acceptance,
-and stored on the row; send time resolves only the adapter.
+and stored on the row; send time resolves only the adapter. A send watched by
+`ChannelSend.with_timeout` is linked to its caller, so it never outlives it.
+
+Architecture Invariant: a job is `running` only while one of its runs is queued
+or running. The claim takes the job and inserts the run in one transaction, and
+`Repo.settle_job_run` writes the run's final row and releases the job in
+another; owner edits write only the columns they own.
 
 ### Sandbox and Command Execution
 
@@ -435,7 +462,9 @@ and Linux x86_64). `ready?/0` (enabled and sidecar installed) is the one gate fo
 both the `computer_use` tool and `ComputerUse.Supervisor`. `SidecarInstaller`
 fetches a sha256-pinned binary into `FERMIX_HOME/plugins/compux/`, and `Safety`
 refuses state-changing actions under strict access and host sessions outside an
-attended chat or voice turn.
+attended chat or voice turn. `SessionManager.ensure/3`, the one door a session
+opens through, also refuses a turn from a shared Buzz channel
+(`Acp.Identity.multi_principal?/1`) before the Stop hold and the registry lookup.
 
 `ComputerHistory` is an opt-in, macOS-only recorder. It captures interaction
 events through the same sidecar and summarizes them on the device into memories
@@ -444,9 +473,12 @@ flow, and `MainAgent` snapshots it per turn.
 
 `Browser` runs the `browser` tool: managed Chrome over the DevTools protocol,
 without compux. `Browser.Supervisor` holds a `ProfileManager`, which caps live
-Chrome instances, and one `ProfileServer` per owner and profile, which launches
-Chrome lazily and shuts it down on every exit path. On macOS, Chrome launches
-only through the `disclaim` shim from `fermix_nif`.
+Chrome instances, and one `ProfileServer` per owner and profile. The server is
+the backend-neutral half (lazy lifetime, idle reaping, one request at a time,
+the mode's capability refusals); everything that talks to a browser sits behind
+the `Browser.Backend` behaviour, whose CDP implementation (`CDP.Backend`)
+launches Chrome lazily and shuts it down on every exit path. On macOS, Chrome
+launches only through the `disclaim` shim from `fermix_nif`.
 
 Architecture Invariant: the computer-use tool is registered only when `ready?/0`
 holds, as a GUI-control capability that guests never get. Computer history
@@ -481,7 +513,7 @@ them only after `/soul apply <token>`.
 Architecture Invariant: neither curator changes a skill or `SOUL.md` without an
 explicit owner action.
 
-### Companion Protocols: `Management` and `Realtime`
+### Companion Protocols: `Management`, `Realtime`, and `Companion`
 
 The native companion apps (`tezra-io/fermix-macos`, `tezra-io/fermix-linux`)
 never read config, secrets, or state themselves. `Fermix.CLI.Daemon` serves
@@ -501,6 +533,17 @@ fixtures).
 `ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
 Live, which executes no tools and delegates every task to an agent turn through
 the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`.
+
+`Companion.Protocol` owns the chat vocabulary, served to the Mac app on
+`FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
+handshake, exported in `priv/companion/`) by `FermixChannels.Companion`; the
+mobile wire validates the chat events it shares through the same module.
+`Companion.Timeline` is the durable timeline the phone and the Mac share
+(profile `main`), paged in both directions and searched through an FTS5 index
+its own writes maintain. Its media index and link previews live in side
+tables beside `mobile_timeline` (the index kept by SQLite triggers, so every
+writer keeps it), and that table's columns stay the ones every released
+engine decodes, so an older release still reads a newer database.
 
 Architecture Invariant: each wire is defined once, in its protocol module, and
 exported; `protocol_contract_test.exs` fails when the management export drifts,
@@ -567,10 +610,74 @@ Current channels:
   `FERMIX_HOME/acp.sock` (`Acp.Endpoint`, one `Acp.Peer` per connection);
   `fermix acp` pipes stdio to that socket. Client identities are kept by
   `FermixCore.Acp.Identity`.
+- `Companion` serves the Mac app's chat on `FERMIX_HOME/companion.sock`
+  whenever the daemon runs (`Companion.Endpoint`, one `Companion.Connection` per
+  client). Its trust is the 0600 socket, so it runs as the local operator.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
-  `FermixCore.Mobile.Store` keeps each profile's synced timeline apart from
-  conversation history.
+  `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
+  conversation history. `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
+  the device store and registry, `PairManager`, `MediaStore`, the bounded
+  link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
+  dispatcher when push is configured (it connects on the first push, never at
+  boot, and a push waits for that connect only until its deadline), the
+  transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
+  addresses a phone can reach), the `Listener` and the mDNS advertiser. The
+  `Listener` binds through `Mobile.TlsTransport`, ThousandIsland's TLS
+  transport with a bounded handshake and with every read before the WebSocket
+  upgrade bounded by one upgrade deadline; before that upgrade a connection
+  gets one HTTP/1.1 request with bounded headers. A bind that fails leaves the
+  `Listener` `unavailable` and retrying rather than stopping the subtree.
+  Admission refuses the whole subtree for the boot, with a named class, when
+  memory is off or the identity, attachment manifest or trust store cannot be
+  read. Whether the channel runs has one answer, `Mobile.Supervisor.running?/1`
+  (the supervisor's name is registered): the management verbs and a delivered
+  row's push and link previews read it, so a job delivered while the channel
+  is off is only a row of the shared timeline.
+- The two companion transports share one request path (`Companion.Requests`:
+  the durable `client_msg_id` claim, the attempt fence, ingest, history, search,
+  read state and cancel) and one set of turn outputs (`Companion.Output`); each
+  transport's `Mobile.RequestCoordinator` instance reruns only its own
+  unfinished requests at boot. `Companion.Turns` is the Gateway agent and
+  settlement owner of both transports and runs on every real boot, whether or
+  not this boot serves `companion.sock`. A request's hand-off reaches it as a
+  cast; once ingest returns, the request's worker moves the coordinator's
+  fence onto it and casts the request's settlement behind the hand-off, and
+  `Turns` completes a request no turn was handed off for (a slash command
+  answered inline), in mailbox order. A turn it tracks settles from the
+  Queue's outcome: a companion turn's replies are held and written, with
+  `text_done`, only on `{:completed}`, while a phone turn streams and writes
+  its own rows and is only settled. A `cancel` from either transport
+  (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
+  `Turns`, which owns the hand-off to the queue, reads that mark as it enqueues
+  and sends any `Queue.stop_turn/3` itself, so a cancel is never lost between
+  claim and queue and boot recovery never reruns a cancelled request; a
+  revoked phone's requests are marked the same way, by `Turns`, so the device
+  registry that revoked it never waits on the store. A store call inside
+  `Turns` that exits (a Repo timeout or restart) is logged as that request's
+  error, a stop waits on its queue however busy it is and leaves a queue that
+  is gone to its `:DOWN`, and a settlement that fails, in the store or by a
+  raise in the request path's settle code, fails the request and sends its
+  client `request_failed`, so none of these crashes `Turns`; a raise in its
+  own code or store calls is a defect and crashes it to `Companion.Supervisor`.
+- `Companion.Fanout` is the one way a logical chat event reaches everyone
+  watching a profile: the `companion.sock` connections and, while the mobile
+  subtree runs, every connected phone, each wire getting only the events in
+  its own catalog. Every timeline row, whichever transport or job writes it,
+  and every `read_state` reach both transports (a row built once, by
+  `Companion.Output.row/2`, in the phone's history-message shape, and
+  projected to the Mac's `row` fields); a turn's stream and ending stay with
+  the transport that ran it, and the other one learns the reply as a `row`.
+- `Companion.Approvals` keeps the approval cards still waiting for the owner,
+  each for the transport whose turn raised it, the only one its token resolves
+  from. It announces each card and, when it resolves or expires, its
+  `approval_resolved`, through one announce, to the connections open then; it
+  re-sends the cards after a phone's `hello_ack` and a Mac client's
+  `server_hello` with the time each has left, and holds at most 64.
+  A card that ended while a client was away is never withdrawn, so both wires'
+  clients drop every card they show at that handshake and keep only the ones
+  sent after it. It runs on every boot, after the registry and `Turns` in
+  `Companion.Supervisor`.
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`).
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
@@ -605,7 +712,8 @@ under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
 the duplicate record. `HealthController` reports from `FermixCore.Health`.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
-(`daemon.sock`, `realtime.sock`, `acp.sock`) live in core and channels.
+(`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and
+channels.
 
 Architecture Invariant: Phoenix does not contain agent business logic. It is an
 HTTP and UI boundary over core APIs.
@@ -646,7 +754,7 @@ Milestone design documents live in `docs/design/`. Most are machine-local
 Tracked contracts and runbooks include `docs/TELEMETRY_CONTRACT.md`,
 `docs/RELEASING.md`, and `docs/DEVELOPMENT.md`. `docs/lessons.md` holds the
 incident write-ups behind the one-line rules in `AGENTS.md`; the wire contracts are exported
-under `apps/fermix_core/priv/{management,realtime}/`. When a milestone is
+under `apps/fermix_core/priv/{management,realtime,companion,mobile}/`. When a milestone is
 implemented, update this map only for durable boundaries and invariants, not for
 every implementation detail.
 
@@ -662,10 +770,20 @@ the real agent path: behavioral suites (`benchmark/suites/*.yaml`,
 Fermix relies on OTP supervision, not service boundaries. The core supervisor
 uses `:rest_for_one` because later runtime processes depend on earlier command
 hosting, registry, memory, and trace processes. Channel and web apps run their
-own `:one_for_one` trees.
+own top-level `:one_for_one` trees. Inside the channels tree,
+`Gateway.QueueSupervisor` is `:one_for_all`: it pairs `Gateway.Queue` with the `Task.Supervisor` its
+turn tasks run under, so a Queue that dies takes its turns with it and the
+restarted Queue never runs a turn beside a survivor. Nothing then sends those
+turns' results, so `Acp.Peer` watches the Queue process it handed each prompt
+to and answers the prompt as a failed turn. `Companion.Turns` watches the
+Queue it handed each turn of either companion transport to, ends the turn as
+`interrupted` when that Queue dies, and holds the request's fence itself, so
+the request is failed once rather than released for a rerun. Voice does not
+watch (accepted: a call is bounded and the operator can cancel it).
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
-dedicated supervised process, and external commands run in a `CommandHost`.
+dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s
+`Gateway.TurnTasks`), and external commands run in a `CommandHost`.
 GenServer callbacks should enqueue, delegate, or update state, not perform slow
 provider or network work inline.
 

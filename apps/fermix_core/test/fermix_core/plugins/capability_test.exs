@@ -219,6 +219,33 @@ defmodule FermixCore.Plugins.CapabilityTest do
     end
   end
 
+  # The manifest flag reaches the capability as metadata, which is the only thing
+  # `Capabilities.AccessGate` reads.
+  test "an http tool's access_sensitive flag reaches its metadata", %{registry: registry} do
+    checkout = FermixTestSupport.SafeRm.make_tmp_dir!("plugin-caps-access")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(checkout) end)
+
+    dir = Path.join(checkout, "gatekit")
+    File.mkdir_p!(dir)
+
+    manifest =
+      update_in(gated_manifest(), ["tools"], fn tools ->
+        Enum.map(tools, &flag_writes/1)
+      end)
+
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(manifest))
+    enable_gatekit(checkout, ALLOW_WAKE: "true")
+
+    assert {:ok, _result} = Capabilities.reload(registry)
+    assert {:ok, wake} = CapabilityRegistry.find(registry, "gatekit_wake")
+    assert {:ok, read} = CapabilityRegistry.find(registry, "gatekit_read")
+    assert wake.metadata.access_sensitive? == true
+    assert read.metadata.access_sensitive? == false
+  end
+
+  defp flag_writes(%{"read_only" => false} = tool), do: Map.put(tool, "access_sensitive", true)
+  defp flag_writes(tool), do: tool
+
   defp enable_gatekit(checkout, entries) do
     Application.put_env(:fermix_core, :plugins,
       enabled: ["gatekit"],

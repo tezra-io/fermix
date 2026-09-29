@@ -10,39 +10,54 @@ defmodule FermixChannels.Mobile.Protocol do
 
   The canonical cross-repository export lives under `fermix_core/priv/mobile/`.
   The iOS repository vendors those files pinned by checksum.
+
+  The chat events this wire shares verbatim with the companion socket
+  (`FermixCore.Companion.Protocol.shared_client_events/0` and
+  `shared_server_events/0`) are validated by that module, the chat
+  vocabulary's one owner; this module validates the mobile transport's own
+  events (hello, pairing, attachments and media, push, ack, keepalive) and the
+  `history_pull`/`history_page` pair, whose mobile shape has no backward cursor.
+
+  A logical server event whose header would exceed the 4 KiB cap travels as one
+  contiguous run of `event_part` frames: each raw tail is a slice of the
+  event's JSON object (with `t`, without `v` and `seq`), and the client
+  concatenates them in index order. `event_part` is server-only.
   """
+
+  alias FermixCore.Companion.Protocol, as: ChatProtocol
+  alias FermixCore.Text
 
   @protocol_version 1
   @min_supported_version max(1, @protocol_version - 1)
   @max_header_bytes 4_096
   @max_raw_chunk_bytes 60 * 1_024
   @max_plaintext_bytes 65_535 - 16
+  @max_event_bytes 1_048_576
+  @max_event_parts div(@max_event_bytes + @max_raw_chunk_bytes - 1, @max_raw_chunk_bytes)
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
-  @max_approval_command_length 1_024
 
   @client_events ~w(
-    hello msg attach_begin attach_chunk attach_end command history_pull media_fetch
+    hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
     push_register ack read_state pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done
-    media_begin media_chunk media_end turn_error reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong
+    media_begin media_chunk media_end turn_error row reaction approval approval_resolved
+    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
   )
+  @raw_client_events ~w(attach_chunk)
+  @raw_server_events ~w(media_chunk event_part)
 
   @client_required %{
     "hello" => ~w(device_id app_version last_server_seq protocol_v),
-    "msg" => ~w(client_msg_id profile_id text attach_ids),
     "attach_begin" => ~w(attach_id kind mime size_bytes sha256),
     "attach_chunk" => ~w(attach_id index),
     "attach_end" => ~w(attach_id sha256),
-    "command" => ~w(client_msg_id profile_id name),
     "history_pull" => ~w(profile_id after_seq limit),
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "ack" => ~w(server_seq),
-    "read_state" => ~w(profile_id read_up_to_seq),
     "pair_request" => ~w(device_name model app_version),
     "unpair" => [],
     "ping" => []
@@ -51,27 +66,19 @@ defmodule FermixChannels.Mobile.Protocol do
   @server_required %{
     "hello_ack" =>
       ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
-    "accepted" => ~w(client_msg_id duplicate),
     "attach_status" => ~w(attach_id status),
-    "turn_started" => ~w(profile_id turn_id in_reply_to),
-    "text_delta" => ~w(turn_id text),
-    "tool_event" => ~w(turn_id tool phase),
-    "text_done" => ~w(turn_id server_seq text),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
     "media_chunk" => ~w(ref index),
     "media_end" => ~w(ref sha256),
-    "turn_error" => ~w(turn_id code message),
     "reaction" => ~w(in_reply_to emoji),
-    "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
-    "approval_resolved" => ~w(approval_id outcome),
     "link_preview" => ~w(in_reply_to url site title),
-    "read_state" => ~w(profile_id read_up_to_seq),
     "history_page" => ~w(profile_id messages),
     "notice" => ~w(kind text),
     "pair_approved" => ~w(device_id candidates profiles),
     "pair_denied" => ~w(reason),
     "error" => ~w(code message),
-    "pong" => []
+    "pong" => [],
+    "event_part" => ~w(index count)
   }
 
   @type decoded_event :: %{
@@ -110,6 +117,10 @@ defmodule FermixChannels.Mobile.Protocol do
   @spec max_plaintext_bytes() :: pos_integer()
   def max_plaintext_bytes, do: @max_plaintext_bytes
 
+  @doc "Maximum JSON size of one logical server event carried as `event_part` frames (1 MiB)."
+  @spec max_event_bytes() :: pos_integer()
+  def max_event_bytes, do: @max_event_bytes
+
   @doc "Negotiate a client version against the daemon's inclusive N/N-1 window."
   @spec negotiate(integer()) :: :ok | {:error, :client_too_old | :client_too_new}
   def negotiate(version) when is_integer(version) do
@@ -130,10 +141,8 @@ defmodule FermixChannels.Mobile.Protocol do
     with :ok <- validate_media_cap(max_media_bytes),
          {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, @client_events),
-         :ok <- require_fields(envelope.type, envelope.payload, @client_required),
-         :ok <- validate_envelope_payload(envelope.type, envelope.payload, envelope.version),
-         :ok <- validate_client_payload(envelope.type, envelope.payload, max_media_bytes),
-         :ok <- validate_binary(envelope.type, bytes, "attach_chunk") do
+         :ok <- validate_client_event(envelope, max_media_bytes),
+         :ok <- validate_binary(envelope.type, bytes, @raw_client_events) do
       {:ok, Map.put(envelope, :bytes, bytes)}
     end
   end
@@ -154,16 +163,65 @@ defmodule FermixChannels.Mobile.Protocol do
              is_list(opts) do
     version = Keyword.get(opts, :version, @protocol_version)
 
+    with {:ok, payload} <- validate_server_frame(type, payload, seq, bytes, version) do
+      encode_frame(type, payload, seq, bytes, version)
+    end
+  end
+
+  @doc """
+  Encode one logical server event as the frames it needs, sequenced from
+  `seq`: one frame, or, when its header would exceed the 4 KiB cap, a run of
+  two or more `event_part` frames. A `text_done` or `row` text, or the content
+  of a one-row `history_page`, that would push the event past 1 MiB is cut on a
+  UTF-8 boundary and marked `"truncated": true`; any other event that large
+  is refused.
+  """
+  @spec encode_server_event(String.t(), map(), pos_integer(), binary(), keyword()) ::
+          {:ok, [binary(), ...]} | {:error, term()}
+  def encode_server_event(type, payload, seq, bytes, opts)
+      when is_binary(type) and is_map(payload) and is_integer(seq) and is_binary(bytes) and
+             is_list(opts) do
+    version = Keyword.get(opts, :version, @protocol_version)
+
+    with :ok <- logical_type(type),
+         {:ok, payload} <- validate_server_frame(type, payload, seq, bytes, version) do
+      event_frames(type, payload, seq, bytes, version)
+    end
+  end
+
+  defp validate_server_frame(type, payload, seq, bytes, version) do
     with :ok <- known_type(type, @server_events),
          :ok <- negotiate(version),
          :ok <- valid_seq(seq),
          {:ok, payload} <- stringify_top_level(payload),
          :ok <- reject_reserved(payload),
-         :ok <- require_fields(type, payload, @server_required),
-         :ok <- validate_server_payload(type, payload),
-         :ok <- validate_binary(type, bytes, "media_chunk"),
-         {:ok, frame} <- encode_frame(type, payload, seq, bytes, version) do
-      {:ok, frame}
+         :ok <- validate_server_event(type, payload),
+         :ok <- validate_binary(type, bytes, @raw_server_events) do
+      {:ok, payload}
+    end
+  end
+
+  defp logical_type("event_part"), do: {:error, :nested_event_part}
+  defp logical_type(_type), do: :ok
+
+  defp validate_client_event(%{type: type, payload: payload, version: version}, max_media_bytes) do
+    if type in ChatProtocol.shared_client_events() do
+      ChatProtocol.validate_client_payload(type, payload)
+    else
+      with :ok <- require_fields(type, payload, @client_required),
+           :ok <- validate_envelope_payload(type, payload, version) do
+        validate_client_payload(type, payload, max_media_bytes)
+      end
+    end
+  end
+
+  defp validate_server_event(type, payload) do
+    if type in ChatProtocol.shared_server_events() do
+      ChatProtocol.validate_server_payload(type, payload)
+    else
+      with :ok <- require_fields(type, payload, @server_required) do
+        validate_server_payload(type, payload)
+      end
     end
   end
 
@@ -189,7 +247,7 @@ defmodule FermixChannels.Mobile.Protocol do
   defp decode_envelope(header, known_events) do
     with {:ok, decoded} <- decode_json_object(header),
          {:ok, version} <- fetch_integer(decoded, "v"),
-         :ok <- negotiate(version),
+         :ok <- supported_version(version),
          {:ok, type} <- fetch_nonempty(decoded, "t"),
          :ok <- known_type(type, known_events),
          {:ok, seq} <- fetch_integer(decoded, "seq"),
@@ -204,6 +262,15 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
+  # A client outside the window must learn which side has to update, so the
+  # refusal carries the direction and the version it sent.
+  defp supported_version(version) do
+    case negotiate(version) do
+      :ok -> :ok
+      {:error, direction} -> {:error, {:unsupported_protocol_version, direction, version}}
+    end
+  end
+
   defp decode_json_object(header) do
     case Jason.decode(header) do
       {:ok, %{} = decoded} -> {:ok, decoded}
@@ -215,8 +282,127 @@ defmodule FermixChannels.Mobile.Protocol do
   defp encode_frame(type, payload, seq, bytes, version) do
     header = Map.merge(payload, %{"v" => version, "t" => type, "seq" => seq})
 
-    case Jason.encode(header) do
-      {:ok, json} -> pack_frame(json, bytes)
+    with {:ok, json} <- encode_json(header) do
+      pack_frame(json, bytes)
+    end
+  end
+
+  # Only an event without a raw tail is ever split: `media_chunk` bounds its
+  # own header, and its bytes already fill a frame.
+  defp event_frames(type, payload, seq, <<>>, version) do
+    header = Map.merge(payload, %{"v" => version, "t" => type, "seq" => seq})
+
+    with {:ok, json} <- encode_json(header) do
+      header_frames(json, Map.put(payload, "t", type), seq, version)
+    end
+  end
+
+  defp event_frames(type, payload, seq, bytes, version) do
+    with {:ok, frame} <- encode_frame(type, payload, seq, bytes, version), do: {:ok, [frame]}
+  end
+
+  defp header_frames(json, _logical, _seq, _version) when byte_size(json) <= @max_header_bytes,
+    do: {:ok, [<<byte_size(json)::unsigned-big-32, json::binary>>]}
+
+  defp header_frames(_json, logical, seq, version), do: event_parts(logical, seq, version)
+
+  defp event_parts(logical, seq, version) do
+    with {:ok, json} <- encode_json(logical),
+         {:ok, json} <- fit_event(logical, json),
+         slices = event_slices(json),
+         :ok <- valid_seq(seq + length(slices) - 1) do
+      encode_parts(slices, seq, version)
+    end
+  end
+
+  defp encode_parts(slices, seq, version) do
+    count = length(slices)
+
+    slices
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {slice, index}, {:ok, frames} ->
+      part = %{"index" => index, "count" => count}
+
+      case encode_frame("event_part", part, seq + index, slice, version) do
+        {:ok, frame} -> {:cont, {:ok, [frame | frames]}}
+        {:error, _reason} = error -> {:halt, error}
+      end
+    end)
+    |> then(fn
+      {:ok, frames} -> {:ok, Enum.reverse(frames)}
+      {:error, _reason} = error -> error
+    end)
+  end
+
+  # Equal slices, the last possibly shorter, never fewer than two: an event
+  # that fits one frame is sent as one. Bounded by the 1 MiB event cap.
+  defp event_slices(json) do
+    size = byte_size(json)
+    count = max(2, div(size + @max_raw_chunk_bytes - 1, @max_raw_chunk_bytes))
+    slices(json, div(size + count - 1, count), [])
+  end
+
+  defp slices(json, slice_bytes, acc) when byte_size(json) <= slice_bytes,
+    do: Enum.reverse([json | acc])
+
+  defp slices(json, slice_bytes, acc) do
+    <<slice::binary-size(slice_bytes), rest::binary>> = json
+    slices(rest, slice_bytes, [slice | acc])
+  end
+
+  # A reply, an announced row, or the one row of a history page, too long for
+  # one logical event ships cut and marked; the stored row stays whole. Nothing
+  # else is cut.
+  defp fit_event(_logical, json) when byte_size(json) <= @max_event_bytes, do: {:ok, json}
+
+  defp fit_event(%{"t" => type, "text" => text} = event, _json)
+       when type in ["text_done", "row"] and is_binary(text) do
+    cut_text(text, &(event |> Map.put("text", &1) |> Map.put("truncated", true)))
+  end
+
+  defp fit_event(
+         %{"t" => "history_page", "messages" => [%{"content" => content} = row]} = event,
+         _json
+       )
+       when is_binary(content) do
+    cut_text(content, fn cut ->
+      Map.put(event, "messages", [row |> Map.put("content", cut) |> Map.put("truncated", true)])
+    end)
+  end
+
+  defp fit_event(_logical, json), do: within_event_cap(json)
+
+  # `rebuild` puts a cut of the text back into its event.
+  defp cut_text(text, rebuild) do
+    with {:ok, skeleton} <- encode_json(rebuild.("")),
+         cut = escaped_prefix(text, max(@max_event_bytes - byte_size(skeleton), 0)),
+         {:ok, json} <- encode_json(rebuild.(cut)) do
+      within_event_cap(json)
+    end
+  end
+
+  # JSON escaping only ever lengthens text, so one cut to the budget and one
+  # more by whatever escaping added always lands within it.
+  defp escaped_prefix(text, budget) do
+    first = Text.truncate_utf8(text, budget)
+    excess = escaped_bytes(first) - budget
+
+    if excess > 0,
+      do: Text.truncate_utf8(first, max(byte_size(first) - excess, 0)),
+      else: first
+  end
+
+  # The whole event already encoded, so this text is valid UTF-8.
+  defp escaped_bytes(text), do: byte_size(Jason.encode!(text)) - 2
+
+  defp within_event_cap(json) when byte_size(json) <= @max_event_bytes, do: {:ok, json}
+
+  defp within_event_cap(json),
+    do: {:error, {:event_too_large, byte_size(json), @max_event_bytes}}
+
+  defp encode_json(value) do
+    case Jason.encode(value) do
+      {:ok, json} -> {:ok, json}
       {:error, reason} -> {:error, {:invalid_payload, reason}}
     end
   end
@@ -249,10 +435,19 @@ defmodule FermixChannels.Mobile.Protocol do
   defp stringify_key(key) when is_atom(key), do: {:ok, Atom.to_string(key)}
   defp stringify_key(key), do: {:error, {:invalid_field_name, key}}
 
+  # The envelope fields are this module's to write, and an absent optional
+  # field is an absent key, never an explicit null, as on the companion wire.
   defp reject_reserved(payload) do
     case Enum.find(~w(v t seq), &Map.has_key?(payload, &1)) do
-      nil -> :ok
+      nil -> reject_null(payload)
       field -> {:error, {:reserved_field, field}}
+    end
+  end
+
+  defp reject_null(payload) do
+    case Enum.find(payload, fn {_field, value} -> is_nil(value) end) do
+      nil -> :ok
+      {field, nil} -> {:error, {:null_field, field}}
     end
   end
 
@@ -262,19 +457,16 @@ defmodule FermixChannels.Mobile.Protocol do
   end
 
   defp validate_client_payload("hello", payload, _max), do: validate_hello(payload)
-  defp validate_client_payload("msg", payload, _max), do: validate_message(payload)
 
   defp validate_client_payload("attach_begin", payload, max),
     do: validate_transfer_begin(payload, max)
 
   defp validate_client_payload("attach_chunk", payload, _max), do: validate_chunk(payload)
   defp validate_client_payload("attach_end", payload, _max), do: validate_transfer_end(payload)
-  defp validate_client_payload("command", payload, _max), do: validate_command(payload)
   defp validate_client_payload("history_pull", payload, _max), do: validate_history_pull(payload)
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
-  defp validate_client_payload("read_state", payload, _max), do: validate_read_state(payload)
   defp validate_client_payload("pair_request", payload, _max), do: validate_pair_request(payload)
   defp validate_client_payload(type, _payload, _max) when type in ~w(unpair ping), do: :ok
 
@@ -284,19 +476,6 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v") do
       :ok
-    end
-  end
-
-  defp validate_message(payload) do
-    with :ok <- nonempty(payload, "client_msg_id"),
-         :ok <- nonempty(payload, "profile_id"),
-         :ok <- binary_field(payload, "text"),
-         :ok <- string_list(payload, "attach_ids") do
-      has_text = String.trim(payload["text"]) != ""
-
-      if has_text or payload["attach_ids"] != [],
-        do: :ok,
-        else: {:error, {:missing_field, "content"}}
     end
   end
 
@@ -322,14 +501,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_command(payload) do
-    with :ok <- nonempty(payload, "client_msg_id"),
-         :ok <- nonempty(payload, "profile_id"),
-         :ok <- nonempty(payload, "name") do
-      optional_binary(payload, "args")
-    end
-  end
-
   defp validate_history_pull(payload) do
     with :ok <- nonempty(payload, "profile_id"),
          :ok <- nonnegative_u64(payload, "after_seq") do
@@ -343,12 +514,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_read_state(payload) do
-    with :ok <- nonempty(payload, "profile_id") do
-      nonnegative_u64(payload, "read_up_to_seq")
-    end
-  end
-
   defp validate_pair_request(payload) do
     with :ok <- nonempty(payload, "device_name"),
          :ok <- nonempty(payload, "model") do
@@ -357,33 +522,27 @@ defmodule FermixChannels.Mobile.Protocol do
   end
 
   defp validate_server_payload("hello_ack", payload), do: validate_hello_ack(payload)
-  defp validate_server_payload("accepted", payload), do: validate_accepted(payload)
   defp validate_server_payload("attach_status", payload), do: validate_attach_status(payload)
 
-  defp validate_server_payload("turn_started", payload),
-    do: strings(payload, ~w(profile_id turn_id in_reply_to))
-
-  defp validate_server_payload("text_delta", payload), do: text_event(payload)
-  defp validate_server_payload("tool_event", payload), do: validate_tool_event(payload)
-  defp validate_server_payload("text_done", payload), do: validate_text_done(payload)
   defp validate_server_payload("media_begin", payload), do: validate_media_begin(payload)
   defp validate_server_payload("media_chunk", payload), do: validate_media_chunk(payload)
   defp validate_server_payload("media_end", payload), do: validate_media_end(payload)
 
-  defp validate_server_payload("turn_error", payload),
-    do: strings(payload, ~w(turn_id code message))
-
   defp validate_server_payload("reaction", payload), do: strings(payload, ~w(in_reply_to emoji))
-  defp validate_server_payload("approval", payload), do: validate_approval(payload)
-  defp validate_server_payload("approval_resolved", payload), do: validate_resolution(payload)
   defp validate_server_payload("link_preview", payload), do: validate_link_preview(payload)
-  defp validate_server_payload("read_state", payload), do: validate_read_state(payload)
   defp validate_server_payload("history_page", payload), do: validate_history_page(payload)
   defp validate_server_payload("notice", payload), do: strings(payload, ~w(kind text))
   defp validate_server_payload("pair_approved", payload), do: validate_pair_approved(payload)
   defp validate_server_payload("pair_denied", payload), do: nonempty(payload, "reason")
-  defp validate_server_payload("error", payload), do: strings(payload, ~w(code message))
+  # A request's failure names the request it ends (`client_msg_id`).
+  defp validate_server_payload("error", payload) do
+    with :ok <- strings(payload, ~w(code message)) do
+      optional_nonempty(payload, "client_msg_id")
+    end
+  end
+
   defp validate_server_payload("pong", _payload), do: :ok
+  defp validate_server_payload("event_part", payload), do: validate_event_part(payload)
 
   defp validate_hello_ack(payload) do
     with :ok <- nonempty(payload, "session_id"),
@@ -406,34 +565,9 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp valid_version_range(_payload), do: {:error, {:invalid_field, "version_range"}}
 
-  defp validate_accepted(payload) do
-    with :ok <- nonempty(payload, "client_msg_id") do
-      boolean_field(payload, "duplicate")
-    end
-  end
-
   defp validate_attach_status(payload) do
     with :ok <- nonempty(payload, "attach_id") do
       enum(payload, "status", ~w(upload present))
-    end
-  end
-
-  defp text_event(payload) do
-    with :ok <- nonempty(payload, "turn_id") do
-      binary_field(payload, "text")
-    end
-  end
-
-  defp validate_tool_event(payload) do
-    with :ok <- nonempty(payload, "turn_id"),
-         :ok <- nonempty(payload, "tool") do
-      enum(payload, "phase", ~w(start stop))
-    end
-  end
-
-  defp validate_text_done(payload) do
-    with :ok <- text_event(payload) do
-      positive_u64(payload, "server_seq")
     end
   end
 
@@ -460,21 +594,6 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_approval(payload) do
-    with :ok <- strings(payload, ~w(approval_id kind text token)),
-         :ok <- positive_integer(payload, "ttl_s"),
-         :ok <- bounded_nonempty(payload, "approve_command", @max_approval_command_length),
-         :ok <- bounded_nonempty(payload, "deny_command", @max_approval_command_length) do
-      optional_binary(payload, "detail")
-    end
-  end
-
-  defp validate_resolution(payload) do
-    with :ok <- nonempty(payload, "approval_id") do
-      enum(payload, "outcome", ~w(approved denied expired))
-    end
-  end
-
   defp validate_link_preview(payload) do
     with :ok <- nonnegative_u64(payload, "in_reply_to"),
          :ok <- strings(payload, ~w(url site title)),
@@ -497,7 +616,17 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_binary(type, bytes, allowed_type) when type == allowed_type do
+  defp validate_event_part(payload) do
+    with :ok <- integer_range(payload, "count", 2, @max_event_parts) do
+      integer_range(payload, "index", 0, payload["count"] - 1)
+    end
+  end
+
+  defp validate_binary(type, bytes, raw_types) do
+    if type in raw_types, do: validate_raw_tail(bytes), else: validate_no_tail(type, bytes)
+  end
+
+  defp validate_raw_tail(bytes) do
     size = byte_size(bytes)
 
     cond do
@@ -507,8 +636,8 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp validate_binary(_type, <<>>, _allowed_type), do: :ok
-  defp validate_binary(type, _bytes, _allowed_type), do: {:error, {:unexpected_binary, type}}
+  defp validate_no_tail(_type, <<>>), do: :ok
+  defp validate_no_tail(type, _bytes), do: {:error, {:unexpected_binary, type}}
 
   defp validate_envelope_payload("hello", %{"protocol_v" => version}, version), do: :ok
 
@@ -562,45 +691,9 @@ defmodule FermixChannels.Mobile.Protocol do
     end
   end
 
-  defp bounded_nonempty(payload, field, max_length) do
-    case Map.get(payload, field) do
-      value when is_binary(value) and value != "" ->
-        if bounded_utf8?(value, max_length),
-          do: :ok,
-          else: {:error, {:invalid_field, field}}
-
-      _value ->
-        {:error, {:invalid_field, field}}
-    end
-  end
-
-  defp bounded_utf8?(value, max_length) do
-    byte_size(value) <= max_length * 4 and
-      String.valid?(value) and
-      codepoint_length(value) <= max_length
-  end
-
-  defp codepoint_length(value), do: value |> String.codepoints() |> length()
-
-  defp binary_field(payload, field) do
-    if is_binary(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
   defp optional_binary(payload, field) do
     value = Map.get(payload, field)
     if is_nil(value) or is_binary(value), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
-  defp string_list(payload, field) do
-    case Map.get(payload, field) do
-      values when is_list(values) ->
-        if Enum.all?(values, &(is_binary(&1) and &1 != "")),
-          do: :ok,
-          else: {:error, {:invalid_field, field}}
-
-      _value ->
-        {:error, {:invalid_field, field}}
-    end
   end
 
   defp list_field(payload, field) do
@@ -609,10 +702,6 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp map_field(payload, field) do
     if is_map(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
-  end
-
-  defp boolean_field(payload, field) do
-    if is_boolean(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}
   end
 
   defp positive_integer(payload, field), do: integer_range(payload, field, 1, @max_u64)

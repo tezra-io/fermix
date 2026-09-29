@@ -56,19 +56,21 @@ defmodule FermixCore.ComputerHistory do
   end
 
   @doc """
-  Reconcile the runtime capture children to the current config, live (an
-  enable/disable act on a running daemon). Delegates to the `Controller`, which
-  re-reads `operative?/0` and starts or stops the `Capturer` + summarizer. A safe
-  no-op when the controller is not running — off macOS the supervisor is absent,
-  and a config-only surface (e.g. the setup CLI) has no daemon tree — so the
-  caller never needs to know whether a daemon is up.
+  Reconcile the runtime capture children to the current config, live (`/history
+  off` on a running daemon). Delegates to the `Controller`, which re-reads
+  `operative?/0`, starts or stops the `Capturer` + summarizer, and answers `:ok`
+  once every stop is done and every start attempted. Any exit of the call (no
+  controller, a crash mid-call, a timeout) is returned as `{:error,
+  {:reconcile_failed, reason}}`, never as `:ok`: the caller must not report a
+  stop nobody confirmed. Off macOS there is no rail, so nothing to reconcile.
   """
-  @spec reconcile_runtime() :: :ok
-  def reconcile_runtime do
-    Controller.reconcile()
+  @spec reconcile_runtime(GenServer.server()) :: :ok | {:error, {:reconcile_failed, term()}}
+  def reconcile_runtime(server \\ Controller)
+      when is_pid(server) or is_atom(server) or is_tuple(server) do
+    Controller.reconcile(server)
   catch
-    :exit, _reason ->
-      Logger.debug("computer_history reconcile_runtime: no controller running (no-op)")
-      :ok
+    :exit, reason ->
+      Logger.error("computer_history reconcile_runtime failed: #{inspect(reason)}")
+      {:error, {:reconcile_failed, reason}}
   end
 end

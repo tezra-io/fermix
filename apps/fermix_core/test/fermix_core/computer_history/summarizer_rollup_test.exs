@@ -42,8 +42,10 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
     # call is in flight, so the reply describes notes the store no longer holds.
     defp purge_mid_call(nil), do: :ok
 
-    defp purge_mid_call({repo, to_ts}) do
-      {:ok, _counts} = Repo.computer_history_purge_window(0, to_ts, server: repo)
+    defp purge_mid_call({repo, to_ts}), do: purge_mid_call({repo, 0, to_ts})
+
+    defp purge_mid_call({repo, from_ts, to_ts}) do
+      {:ok, _counts} = Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: repo)
       :ok
     end
 
@@ -67,6 +69,38 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
         model: model
       }
     end
+  end
+
+  # Stands in for the Repo: forwards every call to the real one, and purges
+  # `window` once, right after it has served the first `read` request and before
+  # it replies. That is a purge landing exactly between the roll-up's notes read
+  # and whatever it asks next, the one gap the purge mark's placement (taken
+  # BEFORE the read) decides. `read` is the Repo request's tag.
+  defmodule PurgeAfterRead do
+    use GenServer
+
+    alias FermixCore.Memory.Repo
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, Map.new(opts))
+
+    @impl true
+    def init(state), do: {:ok, state}
+
+    @impl true
+    def handle_call(request, _from, state) do
+      reply = GenServer.call(state.repo, request)
+      {:reply, reply, purge_once(request, state)}
+    end
+
+    defp purge_once(request, %{read: read, window: {from_ts, to_ts}} = state)
+         when is_tuple(request) and elem(request, 0) == read do
+      {:ok, _counts} =
+        Repo.computer_history_purge_window(from_ts, to_ts, to_ts, server: state.repo)
+
+      %{state | window: nil}
+    end
+
+    defp purge_once(_request, state), do: state
   end
 
   @now ~U[2026-09-10 18:00:00Z]
@@ -324,8 +358,10 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
 
       # The owner purges that day. The thread still cites the note; the store does
       # not hold it any more, so re-emitting it must not resurrect it.
+      purged_to = ms(~U[2026-09-08 23:00:00Z])
+
       assert {:ok, _purged} =
-               Repo.computer_history_purge_window(0, ms(~U[2026-09-08 23:00:00Z]), server: repo)
+               Repo.computer_history_purge_window(0, purged_to, purged_to, server: repo)
 
       new_note =
         note(repo, %{
@@ -677,10 +713,92 @@ defmodule FermixCore.ComputerHistory.Summarizer.RollupTest do
       log = capture_log([level: :info], fn -> assert {:ok, _cycle} = run(repo) end)
 
       assert log =~
-               "computer_history rollup: every thread drew on a window purged during the call"
+               "computer_history rollup: a purge during the call reached the notes and threads it read"
 
       # The prior thread is outside the purged window, so it is untouched.
       assert Enum.map(threads(repo), & &1.subject) == ["Still current"]
+      assert state(repo).last_rollup_ts == nil
+    end
+
+    # The mark is taken before the notes are read, so a purge landing right after
+    # that read counts as issued after it and refuses the set. A mark taken after
+    # the read would already count that purge as seen, and write a thread citing
+    # an erased note.
+    test "a purge landing right after the notes are read refuses every thread", %{repo: repo} do
+      id = note(repo, %{summary: "chased the restore check"})
+      reply("## Apollo migration\nOpen.\nsources: #{id}")
+
+      proxy =
+        start_supervised!(
+          {PurgeAfterRead,
+           repo: repo,
+           read: :computer_history_session_notes_since,
+           window: {0, ms(~U[2026-09-10 12:00:00Z])}}
+        )
+
+      assert {:ok, _cycle} = run(proxy)
+      assert length(calls()) == 1
+      assert threads(repo) == []
+      assert state(repo).last_rollup_ts == nil
+    end
+
+    # The purge ran before the roll-up read, so its rows were already gone: a thread
+    # built from the notes written since the last roll-up around the erased window
+    # is rebuilt from what remains (the purge acknowledgement's promise), not
+    # refused.
+    test "a purge before the roll-up does not refuse a thread spanning it", %{repo: repo} do
+      morning = note(repo, %{summary: "drafted the Apollo migration plan"})
+
+      afternoon =
+        note(repo, %{
+          created_at: ms(~U[2026-09-10 14:00:00Z]),
+          provenance_from_ts: ms(~U[2026-09-10 13:00:00Z]),
+          provenance_to_ts: ms(~U[2026-09-10 14:00:00Z]),
+          summary: "chased the restore check"
+        })
+
+      purged_to = ms(~U[2026-09-10 11:00:00Z])
+
+      assert {:ok, _purged} =
+               Repo.computer_history_purge_window(
+                 ms(~U[2026-09-10 10:00:00Z]),
+                 purged_to,
+                 purged_to,
+                 server: repo
+               )
+
+      reply("## Apollo migration\nThe restore check is open.\nsources: #{morning}, #{afternoon}")
+
+      assert {:ok, _cycle} = run(repo)
+      assert Enum.map(threads(repo), & &1.subject) == ["Apollo migration"]
+      assert state(repo).last_rollup_ts == ms(@now)
+    end
+
+    # Regression pin for the batch rule: the call saw every note it read, so a purge
+    # during the call that reaches a note no proposed thread cites still refuses the
+    # set. Per-thread provenance would write this thread with the erased note's
+    # content in reach of its state.
+    test "a purge during the call that reaches any note it read refuses every thread", %{
+      repo: repo
+    } do
+      morning = note(repo, %{summary: "drafted the Apollo migration plan"})
+
+      note(repo, %{
+        created_at: ms(~U[2026-09-10 14:00:00Z]),
+        provenance_from_ts: ms(~U[2026-09-10 13:00:00Z]),
+        provenance_to_ts: ms(~U[2026-09-10 14:00:00Z]),
+        summary: "chased the restore check"
+      })
+
+      reply("## Apollo migration\nThe plan is drafted.\nsources: #{morning}")
+
+      Process.put(
+        :rollup_purge,
+        {repo, ms(~U[2026-09-10 12:00:00Z]), ms(~U[2026-09-10 15:00:00Z])}
+      )
+
+      assert {:ok, _cycle} = run(repo)
+      assert threads(repo) == []
       assert state(repo).last_rollup_ts == nil
     end
 

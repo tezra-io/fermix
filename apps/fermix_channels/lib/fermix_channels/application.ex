@@ -3,13 +3,17 @@ defmodule FermixChannels.Application do
 
   use Application
 
+  alias FermixChannels.BrowserHost
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Channels.WhatsApp
+  alias FermixChannels.Companion
   alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixCore.Readiness
 
   require Logger
+
+  @compiled_env Mix.env()
 
   @impl true
   def start(_type, _args) do
@@ -49,19 +53,28 @@ defmodule FermixChannels.Application do
     # registers itself here and is present iff this application runs.
     Application.put_env(:fermix_core, :voice_bridge, FermixChannels.Voice.Bridge)
 
-    mobile_boot_epoch = mobile_boot_epoch()
+    request_boot_epoch = request_boot_epoch()
 
     children =
       [
-        FermixChannels.Gateway.Queue,
+        # The Queue and the Task.Supervisor its turns run under, :one_for_all.
+        FermixChannels.Gateway.QueueSupervisor,
         # After the queue, deliberately: the bridge ingests through it, so a
         # delegation accepted before the queue is up has nowhere to run.
         FermixChannels.Voice.Supervisor,
+        # The companion chat socket, after the queue for the same reason. Its
+        # registry is always present, its turns' settlement runs on every real
+        # boot (the phone's requests settle there too), and the socket runs
+        # whenever the daemon does.
+        {Companion.Supervisor,
+         serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
+        # The Fermix app's browser host socket; it runs whenever the daemon does.
+        {BrowserHost.Supervisor, serve?: daemon_boot?()},
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,
         FermixChannels.Gateway.Idempotency
-      ] ++ album_buffers() ++ transport_children(readiness, mobile_boot_epoch)
+      ] ++ album_buffers() ++ transport_children(readiness, request_boot_epoch)
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
@@ -89,21 +102,36 @@ defmodule FermixChannels.Application do
     ]
   end
 
-  defp transport_children(readiness, mobile_boot_epoch) do
+  defp transport_children(readiness, request_boot_epoch) do
     readiness
     |> ChannelRegistry.transport_children()
     |> Enum.map(fn
       {FermixChannels.Mobile.Supervisor, opts} ->
-        {FermixChannels.Mobile.Supervisor, Keyword.put(opts, :boot_epoch, mobile_boot_epoch)}
+        {FermixChannels.Mobile.Supervisor, Keyword.put(opts, :boot_epoch, request_boot_epoch)}
 
       child ->
         child
     end)
   end
 
-  defp mobile_boot_epoch do
+  # One epoch per boot for every transport's request coordinator: a request
+  # running under it is this boot's and is never started twice, and one
+  # running under any other epoch was left by an earlier boot.
+  defp request_boot_epoch do
     32 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
   end
+
+  # A real daemon run (`fermix run`, `mix fermix.dev`, the app engine) turns
+  # the daemon socket on before this application starts; a test tree never
+  # serves a socket under the operator's home.
+  defp daemon_boot? do
+    @compiled_env != :test and Application.get_env(:fermix_core, :daemon_socket_enabled, false)
+  end
+
+  # Every real boot settles companion and phone turns, a `:source` boot that
+  # serves no daemon socket included; a test tree starts the settlement each
+  # test drives.
+  defp settles?, do: @compiled_env != :test
 
   @doc false
   @spec log_missing_ingress_authorization(Readiness.report()) :: :ok

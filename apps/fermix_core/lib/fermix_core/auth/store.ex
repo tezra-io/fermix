@@ -4,13 +4,49 @@ defmodule FermixCore.Auth.Store do
 
   Reads tolerate the M3-era flat shape (one provider, top-level keys)
   and normalize it to the new nested shape silently. Writes always
-  emit the new shape. Atomic via tmp+rename; perms forced to `0600`.
+  emit the new shape. Atomic via tmp+rename; the tmp is made `0600` before any
+  byte lands in it, and a tmp a killed writer left is removed by the next write
+  or delete.
 
-  No file locking — callers are serialized in-process: TokenManager
-  is a singleton GenServer, the wizard runs sequentially. The atomic
-  rename closes the multi-process race for the rare concurrent boot
-  case (e.g. setup wizard running while the daemon is alive).
+  Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order the writers.
+  Every auth profile has its own `TokenManager` process, and CLI VMs, sign-ins
+  and logouts write the same file, so no one mailbox serializes them:
+
+    * The store lock (`auth.json.lock`) makes each `write/3` and
+      `delete_provider/2` one step: nothing renames the file between its read
+      and its own rename, so no writer drops another's update. Reads take no
+      lock; the atomic rename keeps every read whole.
+    * The profile lock (`with_profile_lock/3`) covers one profile from the read
+      of its entry to the write of the result: a refresh, a delete, and a
+      sign-in or import from before it spends anything (an authorization-code
+      exchange, another tool's refresh token) to its write. Two refreshers never
+      present the same refresh token, and a logout or a sign-in never lands
+      inside a refresh.
+
+  The profile lock is always taken first, and neither lock is reentrant: a
+  locked section never enters another locked entry point or calls a
+  `TokenManager`; a reload runs after the release. Every wait is bounded, and
+  every profile-lock taker waits the same 10 s: one still busy after it is
+  `{:error, :profile_busy}`, returned before the section runs, so a sign-in
+  refuses with nothing spent. Any other lock not taken is `{:error, reason}`;
+  only a wedged filesystem, timing out the lock owner's calls, exits the caller.
+
+  Each lock's stale threshold exceeds the section it covers, so a live
+  holder's lockfile is never broken, barring a wall-clock jump. A refresh is at
+  most three attempts and two store-lock waits (about 107 s,
+  `RefreshClient.worst_case_ms/0`); a sign-in is at most three single-attempt
+  requests (the exchange, the account lookup, a region probe;
+  `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s), and
+  the Codex import one refresh and one write. The profile lock's threshold is
+  120 s, and `store_test.exs` ("lock bounds") holds these bounds.
+
+  A file that does not parse is `{:invalid_json, byte_offset}`. The parse
+  error's own `:data` is the whole file, every profile's tokens, so it never
+  leaves this module: the reason is logged, traced and shown by doctor, and a
+  refused write's `.broken` copy is what keeps the bytes for recovery.
   """
+
+  alias FermixCore.Plugins.Dist.Lock
 
   require Logger
 
@@ -39,7 +75,7 @@ defmodule FermixCore.Auth.Store do
          {:ok, entry} <- fetch_provider(providers, provider) do
       normalize(provider, entry)
     else
-      {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
       {:error, :enoent} -> {:error, :no_auth_file}
       {:error, _reason} = err -> err
     end
@@ -59,7 +95,7 @@ defmodule FermixCore.Auth.Store do
       {:ok, Enum.flat_map(providers, &normalize_listed/1)}
     else
       {:error, :enoent} -> {:ok, []}
-      {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+      {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
       {:error, _reason} = err -> err
     end
   end
@@ -71,25 +107,94 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
+  # The store lock is held across local I/O of one small file: milliseconds. Its
+  # wait outlasts its stale threshold, so a lockfile a dead VM left is broken
+  # within one wait and a live writer never fails for want of the lock.
+  @store_lock_opts [attempts: 80, delay_ms: 100, stale_after_ms: 5_000]
+  # The profile lock is held across one refresh or one sign-in, whose worst
+  # cases (see the moduledoc) are under the stale threshold in wall-clock time:
+  # a sleep or a clock step mid-section can still make a live holder's lock
+  # look stale. Every taker (a refresher, a sign-in, an import, a logout) fails
+  # loud after the same 10 s; a VM that died holding the lock blocks the
+  # profile 120 s.
+  @profile_lock_opts [attempts: 100, delay_ms: 100, stale_after_ms: 120_000]
+
   @spec write(provider(), entry(), Path.t()) :: :ok | {:error, term()}
   def write(provider, %{} = entry, path \\ default_path())
       when is_atom(provider) or is_binary(provider) do
-    with {:ok, current} <- read_for_write(path),
-         updated <- put_provider(current, provider, entry),
-         :ok <- atomic_write(path, encode(updated)) do
-      :ok
-    end
+    lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
+      merge_write(provider, entry, path)
+    end)
   end
 
+  @doc """
+  Removes one profile's entry.
+
+  Takes the profile lock, then the store lock, so it waits for a refresh of
+  that profile in flight and deletes after it, instead of being undone by that
+  refresh's write. A profile lock that stays busy past its wait fails with
+  nothing deleted.
+  """
   @spec delete_provider(provider(), Path.t()) :: :ok | {:error, term()}
   def delete_provider(provider, path \\ default_path())
       when is_atom(provider) or is_binary(provider) do
-    with {:ok, current} <- read_existing(path),
-         {:ok, updated} <- remove_provider(current, provider),
-         :ok <- atomic_write(path, encode(updated)) do
-      :ok
-    end
+    with_profile_lock(provider, path, fn ->
+      lock(store_lock_path(path), @store_lock_opts, :lock_unavailable, fn ->
+        remove_write(provider, path)
+      end)
+    end)
   end
+
+  @doc """
+  Runs `fun` holding `provider`'s profile lock, across processes and VMs.
+
+  Returns `fun`'s result, `{:error, :profile_busy}` when another holder keeps
+  the lock past the wait (a refresh, a sign-in or a logout of the profile in
+  another process or VM, or a lockfile a dead VM left), or `{:error, reason}`
+  when the lock cannot be taken at all. Either way `fun` has not run. `fun`
+  reads the entry itself, under the lock, and must not take the profile lock
+  again or call a `TokenManager`.
+
+  A sign-in or an import runs everything it cannot take back inside `fun`: the
+  authorization-code exchange or the refresh of another tool's token, then its
+  write. A busy profile then refuses before anything is spent, and no refresh
+  of the profile can write the old grant's rotation over the new one.
+  """
+  @spec with_profile_lock(provider(), Path.t(), (-> result)) :: result | {:error, term()}
+        when result: term()
+  def with_profile_lock(provider, path, fun)
+      when (is_atom(provider) or is_binary(provider)) and is_binary(path) and
+             is_function(fun, 0) do
+    lock(profile_lock_path(provider, path), profile_lock_opts(), :profile_busy, fun)
+  end
+
+  @doc """
+  The operator's sentence for `{:error, :profile_busy}`. One wording, so every
+  surface that signs in, imports or signs out says the same thing.
+  """
+  @spec busy_sentence() :: String.t()
+  def busy_sentence,
+    do: "Another Fermix process is refreshing or signing in to this account. Try again shortly."
+
+  # Public so a test can hold the lock bounds to their invariants.
+  @doc false
+  @spec lock_opts(:store | :profile) :: keyword()
+  def lock_opts(:store), do: @store_lock_opts
+  def lock_opts(:profile), do: @profile_lock_opts
+
+  @doc false
+  @spec store_lock_path(Path.t()) :: Path.t()
+  def store_lock_path(path) when is_binary(path), do: path <> ".lock"
+
+  # A profile name is operator-settable config (`Plugins.Config.auth_profile/1`),
+  # so it is encoded: no `/` or `..` in it can move the lockfile out of the
+  # auth file's directory. The name starts with the auth file's own, so two
+  # auth files in one directory never share a profile's lock.
+  @doc false
+  @spec profile_lock_path(provider(), Path.t()) :: Path.t()
+  def profile_lock_path(provider, path)
+      when (is_atom(provider) or is_binary(provider)) and is_binary(path),
+      do: "#{path}.#{Base.url_encode64(provider_key(provider), padding: false)}.lock"
 
   @spec path() :: Path.t()
   def path, do: default_path()
@@ -279,6 +384,26 @@ defmodule FermixCore.Auth.Store do
     end
   end
 
+  defp merge_write(provider, entry, path) do
+    remove_leftover_tmps(path)
+
+    with {:ok, current} <- read_for_write(path),
+         updated <- put_provider(current, provider, entry),
+         :ok <- atomic_write(path, encode(updated)) do
+      :ok
+    end
+  end
+
+  defp remove_write(provider, path) do
+    remove_leftover_tmps(path)
+
+    with {:ok, current} <- read_existing(path),
+         {:ok, updated} <- remove_provider(current, provider),
+         :ok <- atomic_write(path, encode(updated)) do
+      :ok
+    end
+  end
+
   defp read_for_write(path) do
     case File.read(path) do
       {:ok, raw} ->
@@ -303,18 +428,16 @@ defmodule FermixCore.Auth.Store do
       {:ok, _other} ->
         preserve_and_refuse(path, raw, :unknown_shape)
 
-      {:error, %Jason.DecodeError{} = err} ->
-        preserve_and_refuse(path, raw, {:invalid_json, err})
+      {:error, %Jason.DecodeError{position: at}} ->
+        preserve_and_refuse(path, raw, {:invalid_json, at})
     end
   end
 
   defp preserve_and_refuse(path, raw, reason) do
     backup = "#{path}.broken.#{System.system_time(:second)}"
 
-    case File.write(backup, raw, [:binary]) do
+    case write_private(backup, raw) do
       :ok ->
-        _ = File.chmod(backup, 0o600)
-
         Logger.error(
           "Auth.Store: refusing to overwrite #{path} (#{inspect(reason)}); preserved at #{backup}"
         )
@@ -337,7 +460,7 @@ defmodule FermixCore.Auth.Store do
           {:ok, %{"providers" => providers} = data} when is_map(providers) -> {:ok, data}
           {:ok, %{"tokens" => _} = flat} -> {:ok, legacy_codex_doc(flat)}
           {:ok, _} -> {:error, :no_providers}
-          {:error, %Jason.DecodeError{} = err} -> {:error, {:invalid_json, err}}
+          {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
         end
 
       {:error, :enoent} ->
@@ -417,13 +540,40 @@ defmodule FermixCore.Auth.Store do
 
   defp encode(doc), do: Jason.encode!(doc, pretty: true) <> "\n"
 
+  # `Lock.with_lock/3` raises when it cannot create the lock's directory, and
+  # its owner is linked to the caller. A raise inside the Codex TokenManager
+  # restarts every later child of the top-level `:rest_for_one` tree, so the
+  # directory is made here first and a lock not taken is a tuple. Only a wedged
+  # filesystem, timing out the owner's own calls, still exits the caller.
+  # `busy` is the answer when another holder keeps the lock past the wait.
+  defp lock(lock_path, opts, busy, fun) do
+    case File.mkdir_p(Path.dirname(lock_path)) do
+      :ok -> hold(lock_path, opts, busy, fun)
+      {:error, reason} -> lock_failed(lock_path, reason)
+    end
+  end
+
+  # `fun`'s result is wrapped, so an error it returns is never taken for the
+  # lock's own.
+  defp hold(lock_path, opts, busy, fun) do
+    case Lock.with_lock(lock_path, fn -> {:locked, fun.()} end, opts) do
+      {:locked, result} -> result
+      {:error, :lock_unavailable} -> lock_failed(lock_path, busy)
+      {:error, reason} -> lock_failed(lock_path, reason)
+    end
+  end
+
+  defp lock_failed(lock_path, reason) do
+    Logger.warning("Auth.Store: could not take #{lock_path}: #{inspect(reason)}")
+    {:error, reason}
+  end
+
   defp atomic_write(path, contents) do
     dir = Path.dirname(path)
     tmp = "#{path}.tmp.#{System.unique_integer([:positive, :monotonic])}"
 
     with :ok <- File.mkdir_p(dir),
-         :ok <- File.write(tmp, contents, [:binary]),
-         :ok <- File.chmod(tmp, 0o600),
+         :ok <- write_private(tmp, contents),
          :ok <- File.rename(tmp, path) do
       :ok
     else
@@ -431,6 +581,82 @@ defmodule FermixCore.Auth.Store do
         _ = File.rm(tmp)
         Logger.warning("Auth.Store: failed to persist — #{inspect(reason)}")
         {:error, reason}
+    end
+  end
+
+  # Created empty, then made private, then filled: the only order in which the
+  # tokens never land in a file another account could read (`Auth.TokenFile`
+  # uses the same order). The bytes go through the descriptor that created the
+  # file, never a reopen by path: a tmp removed after the open (a sweep by a
+  # holder that broke this writer's store lock as stale) then fails the chmod
+  # or the rename instead of being re-created world-readable. `File.open/3`
+  # closes the descriptor on every path.
+  defp write_private(file, bytes) do
+    case File.open(file, [:write, :binary], &chmod_then_write(&1, file, bytes)) do
+      {:ok, result} -> result
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp chmod_then_write(device, file, bytes) do
+    with :ok <- File.chmod(file, 0o600), do: IO.binwrite(device, bytes)
+  end
+
+  # Runs under the store lock, as every tmp writer (`atomic_write/2`) does, so
+  # a tmp seen here belongs to no live writer: a VM killed between its write
+  # and its rename left it, holding every profile's tokens, and nothing else
+  # would remove it. Only the names `atomic_write/2` makes are removed: a
+  # regular file in the auth file's own directory named `<auth file>.tmp.<n>`.
+  # A sweep that fails is logged and the write goes on, so a leftover never
+  # costs the rotation this write persists.
+  defp remove_leftover_tmps(path) do
+    dir = Path.dirname(path)
+    prefix = Path.basename(path) <> ".tmp."
+
+    case File.ls(dir) do
+      {:ok, names} ->
+        names
+        |> Enum.filter(&leftover_tmp?(&1, prefix))
+        |> Enum.each(&remove_leftover(Path.join(dir, &1)))
+
+      {:error, reason} ->
+        Logger.warning(
+          "Auth.Store: could not list #{dir} for leftover tmp files: #{inspect(reason)}"
+        )
+    end
+  end
+
+  defp leftover_tmp?(name, prefix) do
+    String.starts_with?(name, prefix) and
+      String.replace_prefix(name, prefix, "") =~ ~r/\A[0-9]+\z/
+  end
+
+  # A directory or a link of that name is not one `atomic_write/2` made, so it
+  # is left alone.
+  defp remove_leftover(file) do
+    with {:ok, %File.Stat{type: :regular}} <- File.lstat(file),
+         :ok <- File.rm(file) do
+      Logger.warning("Auth.Store: removed #{file}, a tmp file a writer stopped before renaming")
+    else
+      {:ok, %File.Stat{}} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("Auth.Store: could not remove #{file}: #{inspect(reason)}")
+    end
+  end
+
+  # Test seam: a test that proves the busy sentence sets `:auth_profile_lock_wait`
+  # to a shorter `attempts` and `delay_ms` (`FermixTestSupport.ProfileLockWait`),
+  # so it waits milliseconds, not the 10 s every taker waits. The stale
+  # threshold is never shortened. Unset outside tests.
+  defp profile_lock_opts do
+    case Application.get_env(:fermix_core, :auth_profile_lock_wait) do
+      nil ->
+        @profile_lock_opts
+
+      [attempts: attempts, delay_ms: delay_ms] ->
+        Keyword.merge(@profile_lock_opts, attempts: attempts, delay_ms: delay_ms)
     end
   end
 end

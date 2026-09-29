@@ -8,6 +8,7 @@ defmodule FermixCore.Providers.OpenAI do
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   require Logger
@@ -18,8 +19,8 @@ defmodule FermixCore.Providers.OpenAI do
   @spec default_model() :: String.t()
   def default_model do
     case FermixCore.Config.provider(:openai) do
-      {:ok, config} -> Keyword.get(config, :default_model, "gpt-4o")
-      _ -> "gpt-4o"
+      {:ok, config} -> ModelCatalog.effective_model(:openai, config)
+      {:error, :not_configured} -> ModelCatalog.effective_model(:openai, [])
     end
   end
 

@@ -90,9 +90,12 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
     end
   end
 
+  # The value is trimmed once, here, so the value validated, written and reported
+  # is one value: a reply echoing a paste's padding named a value never written.
   defp do_execute(%{"action" => "set"} = args) do
     with {:ok, key} <- fetch_allowed_key(args),
-         {:ok, value} <- Support.required_string(args, "value"),
+         {:ok, raw} <- Support.required_string(args, "value"),
+         {:ok, value} <- trimmed_value(raw),
          {:ok, snapshot} <- ConfigStore.load_runtime_config(),
          next <- put_routing(snapshot, key, value),
          :ok <- validate_routing(next),
@@ -120,6 +123,15 @@ defmodule FermixCore.Tools.ModelRoutingConfig do
 
   defp do_execute(%{"action" => action}), do: Support.error("invalid_action: #{action}")
   defp do_execute(_args), do: Support.error("Missing required parameter: action")
+
+  # Blank once trimmed is refused like an empty value: a set that reported
+  # success wrote an empty key, and clearing one is what `delete` is for.
+  defp trimmed_value(raw) do
+    case String.trim(raw) do
+      "" -> {:error, ~s(Invalid value: it is blank; use action "delete" to clear a key)}
+      value -> {:ok, value}
+    end
+  end
 
   defp fetch_allowed_key(args) do
     with {:ok, key} <- Support.required_string(args, "key"),

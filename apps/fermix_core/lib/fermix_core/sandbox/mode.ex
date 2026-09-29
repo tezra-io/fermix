@@ -83,9 +83,10 @@ defmodule FermixCore.Sandbox.Mode do
   # workspace and the skills folder. A skill package is instructions, scripts,
   # assets and its own state file, which a chat turn (after `skill_view`) and a
   # `skill_name`-bound scheduled run both operate on, so it is agent-owned in
-  # the same sense as the workspace. The rest of the home (browser profiles,
-  # tokens, the secret key base, pairing state, run artifacts) stays outside
-  # every standard root; only `open` reaches it, through `os_home`.
+  # the same sense as the workspace. The rest of the home (run artifacts,
+  # journals, and the tokens, keys, pairing state and browser profiles that
+  # `PathPolicy` protects in every mode) stays outside every standard root;
+  # only `open` reaches it, through `os_home`, minus the protected paths.
   defp mode_roots(%Config{mode: :standard} = config) do
     [config.workspace_root, skills_root(config), launch_root(config.os_home)]
     |> Enum.reject(&is_nil/1)

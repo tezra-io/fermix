@@ -140,6 +140,12 @@ defmodule FermixCore.Management.DoctorSessionTest do
       refute "place_probe" in ids
     end
 
+    # The key check asks OpenAI, so it runs only when the network is asked for.
+    test "the voice key check is a network row" do
+      assert "realtime_key" in ids(:network, [])
+      refute "realtime_key" in ids(:local, [])
+    end
+
     # The two distribution rows answer instantly and offline under `macos_app`
     # — they are `not_applicable` by construction there. Leaving them in the
     # network catalog means plain `fermix doctor` never prints them, which is

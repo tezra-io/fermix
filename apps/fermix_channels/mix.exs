@@ -4,7 +4,7 @@ defmodule FermixChannels.MixProject do
   def project do
     [
       app: :fermix_channels,
-      version: "0.11.0",
+      version: "0.12.0",
       build_path: "../../_build",
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
@@ -35,7 +35,6 @@ defmodule FermixChannels.MixProject do
       {:websock_adapter, "~> 0.5"},
       {:x509, "~> 0.9"},
       {:toml_elixir, "~> 3.0"},
-      {:qr_code, "~> 3.2"},
       {:mdns_lite, "~> 0.9", runtime: false},
       {:pigeon, "~> 2.0"}
     ]

@@ -432,9 +432,25 @@ defmodule FermixCore.Management.Auth do
 
   defp sign_in_sentence(:timeout), do: "The sign-in was not completed in time."
 
+  # Refused before the code was spent, so signing in again is the whole fix.
+  defp sign_in_sentence(:profile_busy), do: Store.busy_sentence()
+
   defp sign_in_sentence({endpoint, _url})
        when endpoint in [:insecure_token_endpoint, :untrusted_token_endpoint],
        do: "The sign-in was sent to an address this daemon does not trust."
+
+  # The browser half can finish while the request that collects the tokens
+  # after it never gets through, so the sentence names the network, not the user.
+  defp sign_in_sentence(%Req.TransportError{reason: :timeout} = reason) do
+    log("the sign-in server did not answer in time", reason)
+
+    "The provider's sign-in server did not answer in time. Check your connection and sign in again."
+  end
+
+  defp sign_in_sentence(%Req.TransportError{} = reason) do
+    log("the sign-in server could not be reached", reason)
+    "The provider's sign-in server could not be reached. Check your connection and sign in again."
+  end
 
   defp sign_in_sentence({:persist_failed, reason}) do
     log("the credentials could not be stored", reason)
@@ -457,6 +473,9 @@ defmodule FermixCore.Management.Auth do
 
   defp import_sentence(:claude_code_credentials_expired),
     do: "The sign-in on this Mac has expired, so there was nothing to adopt."
+
+  # Refused before the other tool's token was spent, so it is still signed in.
+  defp import_sentence(:profile_busy), do: Store.busy_sentence()
 
   defp import_sentence(unreadable)
        when unreadable in [

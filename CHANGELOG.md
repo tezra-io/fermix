@@ -4,6 +4,440 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.0] - 2026-09-28
+
+### Added
+
+- **A Games plugin is in the catalog.** Install it from the setup Plugins
+  page or the macOS app's Available list, with nothing to connect, and Fermix
+  knows where its games are: ask it to play chess, or which games it can
+  play, and it reads the games index on fermix.ai itself, opens the game's
+  lobby in its own browser and plays through the page's WebMCP tools. No link
+  or address needs to be pasted. The plugin is one skill and no tools, and it
+  carries the rules of play in a chat: a game is played move by move, because
+  a page's wait tool holds the conversation while it waits.
+- **Plugins can mark a command access-sensitive.** A plugin manifest may set
+  `"access_sensitive": true` on a local tool that changes something. Fermix then
+  runs that command at once when you ask for it directly, and asks you first
+  when the request follows content someone else wrote. The Tesla plugin marks
+  unlock, Sentry, trunk and window vent from its 1.2.0 release.
+- **The catalog offers Tesla 1.2.0.** Setup's Plugins page flags an installed
+  1.1.1 as withdrawn and offers the update, which the confirmation for car
+  commands needs.
+- **Doctor checks the voice key with OpenAI.** The network checks
+  (`fermix doctor --full`, and Run network checks in the app) gain a realtime
+  voice key row. It asks OpenAI whether it accepts the saved key, which is free
+  and sends no prompt, and a refused key fails with the sentence a refused call
+  shows plus a button to the Voice settings. Before, Doctor only said a key was
+  saved, and a chat on a Codex sign-in never tested the voice key at all.
+- **The apps can choose where secrets are kept.** A Secrets section in Settings
+  offers two stores: your keyring (the default) or a private file, one `0600`
+  file per secret in your Fermix home. On a Linux desktop that logs in with a
+  fingerprint the login keyring stays locked, so saving a Telegram token from
+  the app raised an unlock prompt for a password its owner may not know, and a
+  cancelled prompt refused the save with `locked`. Until now the file store
+  could only be chosen from a terminal (`fermix setup --secret-store file`, or
+  the wizard's question when the keyring refuses). The choice takes effect at
+  once, with no restart: the next key you save goes to the chosen store. Keys
+  already saved stay where they are; `fermix setup --migrate-secrets` moves
+  them.
+- **Browser tasks can run in the Fermix app's own browser.** When the app is
+  connected and its browser pane is ready, a task on the default or the visible
+  profile runs in the pane and shows in the app's window instead of in a
+  separate Chrome. If the app is not running, Fermix opens it in the background
+  and waits a few seconds for its browser before choosing;
+  `[fermix_core.browser] launch_app` turns that off, and it is on by default
+  only for the engine inside the app. A task keeps the browser it started in:
+  if the app quits or the Mac sleeps mid-task, the task ends with the app's
+  reason instead of starting over in Chrome, and "Cancel task" on the task's
+  tab in the app ends that task alone. Background tasks and your own browser
+  tab never run in the pane. This is the engine half; the app release that
+  has the pane is not out yet.
+- **The browser has settings you own, and finds a browser without Chrome.**
+  How tasks run (automatically, in the background, or in a window you can
+  watch) and the most tabs a browser keeps open can now be set, in
+  `[fermix_core.browser]` as `default_profile` and `max_tabs`, and in a
+  Browser section the daemon serves the apps beside the private hosts the
+  browser may open. None needs a restart. With no Chrome or Chromium
+  installed, tasks now use the Chromium the meeting notetaker downloads, and
+  the Browser section can start that download. Doctor's browser row names the
+  browser tasks use, or says none is installed.
+- **The daemon serves the Mac app's chat.** A local, owner-only socket in
+  your Fermix home carries the chat the Mac app is building: replies stream
+  with their tool activity, one request can be cancelled without touching the
+  others, and the whole history pages and searches. Scheduled jobs can deliver
+  into it, and it shares one timeline with the phone channel. No released
+  Fermix app has the chat window yet.
+- **Phone pairing and the phone channel's settings are on the management
+  protocol.** The apps can turn the phone channel on, set its port, listen
+  address and network announcement, pair a phone with its six-digit code, and
+  list and forget paired phones, over the same methods `fermix pair` and
+  `fermix devices` now use. No desktop app has a Phone pane on them yet, and
+  no phone app is released.
+
+### Changed
+
+- **Unlocking your car, Sentry, the trunk and venting the windows ask you
+  first when the request follows outside content.** When you ask directly,
+  they still run at once. When the same request already read something someone
+  else could have written (a web page, an email, another plugin, a game, another
+  MCP server, the screen, or the report of a sub-agent, a skill, a coding run
+  or a scheduled job), Fermix holds the command and asks you once: a tap on
+  Telegram and Discord, `/confirm` on Slack, WhatsApp, Signal and `fermix ask`,
+  or the approval card in the Mac app and on the phone. While it waits, the
+  request that asked does nothing else, so what it read cannot answer for you.
+  Fermix then runs exactly that command and replies with the outcome; the reply
+  is not added to the conversation. Tesla's own reads never count. The rule
+  covers the whole command, so turning Sentry on or closing the trunk after
+  reading a page asks too. It needs the Tesla plugin's 1.2.0 release.
+- **On a voice call, your spoken yes confirms.** When a call has read outside
+  content, these commands wait for you to say yes: Fermix itself hears the
+  answer, and only a plain yes counts. On the Realtime engine this lasts for the
+  rest of the call, a shared screen included, and no other tool runs until you
+  answer; on GPT-Live it applies per task, and only the reply that asked you
+  can be answered.
+- **An editor or other ACP client sends the confirmation to your own chat.**
+  From an ACP session, a held command sends a one-tap confirmation to your
+  Telegram, Signal or WhatsApp direct chat, and the car acts when you tap. With
+  no such chat it is refused, and the reply names the Fermix app, your chat and
+  voice.
+- **From a Buzz channel, these commands always ask you first, and computer use
+  and your own browser tab are refused.** Other people can post in a Buzz
+  channel, so a request there is not proof you asked. Unlock, Sentry, the trunk
+  and venting send their confirmation to your own chat even when the request
+  read nothing, and the car acts when you tap, with no re-ask in Buzz. Computer
+  use and the signed-in browser tab you hand over with the Fermix extension are
+  refused there, even when you are the one asking, and the reply names the
+  Fermix app, your chat and voice. Fermix's own managed browser and everything
+  else work from Buzz as before, and editors like Zed are unaffected.
+- **Delegated workers and runs with no one present cannot run these commands.**
+  Sub-agents, `/ultra` and `skill_run` workers, `/background` runs, prompts sent
+  by Fermix's own or detached processes, coding-run and reminder follow-ups and
+  inbound MCP clients are refused.
+- **A scheduled job runs these commands only when it names them.** A job needs
+  the command in its allowed tools; a job with no allowlist that tries one gets a
+  refusal in that run. Creating, changing, resuming or running now a job that
+  names one also needs your own direct request. Jobs that already name one keep running.
+- **Held and refused commands show in traces.** Each is one failed tool call
+  with a typed marker proving it never ran, and a confirmed run is an extra tool
+  call tied to it by the same intent id. The eval grader accepts the marker as
+  proof a forbidden tool never ran.
+
+### Fixed
+
+- **A fresh home is complete after the first boot.** The daemon's first boot
+  now seeds `config.toml` with what the machine already knows, the system time
+  zone, the account's full name and a default communication style, and writes
+  the prompt files from them. Until now both waited for the last screen of
+  setup, so a first run that ended early, for example by signing in from the
+  app's Settings pane, left a home with no config, no prompt files and setup
+  reported as unfinished for good. Personalization no longer gates readiness:
+  it is seeded, About you edits it, and a later edit reaches `USER.md`. The
+  CLI wizard and the web setup offer the machine's time zone as their default
+  instead of New York.
+- **A provider names its model as soon as it is signed in.** The setup row,
+  the settings Model row and Home's provider line now carry the model the
+  daemon calls the provider with: the one chosen in Settings, or the catalog
+  default until one is. A fresh install that signed in to Codex showed nothing
+  beside "Primary"; it now shows GPT-6 Astra. The OpenAI API-key route reads
+  the same resolver, so a provider with no chosen model runs on the catalog
+  default that Doctor already probed, instead of an older model the route still
+  named on its own.
+- **Only you can answer an approval.** `/confirm`, `/deny`, `/grant`, `/revoke`,
+  `/sandbox`, `/soul` and `/skills` sent through `fermix ask` or the app's chat
+  socket by a process Fermix itself started (the agent's own shell command, a
+  coding run) or by one running with no terminal are now refused, and the
+  approval keeps waiting for you. Before, the agent could approve its own
+  directory request with the token that request returned, or approve a persona
+  or skill change it proposed. Other commands such as `/new`, `/compact` and
+  `/tasks` still work from those processes. This raises the bar rather than
+  closing every path: a process that detaches itself into a new terminal session
+  can still look like you. Approving from your chat, the Fermix app or a
+  terminal you are at works as before.
+- **A sign-in that loses the network now says so.** When the provider's sign-in
+  server timed out or could not be reached after the browser step, the daemon
+  crashed while logging the error, and the app showed only "The operation failed
+  inside the daemon." Error details such as a network timeout are now logged
+  safely, and the sign-in fails with a sentence that names the problem and asks
+  you to sign in again.
+- **A turn whose tool results outgrow the model's context keeps going.** A
+  turn or scheduled job that read more than the model could hold failed at the
+  provider, and a job delivered only the raw error name. Every tool result is
+  now kept for the run, and when the next request nears the model's window
+  the oldest results are compressed into digests of what the task needs, while
+  the latest steps stay whole. A digest names its call, and the new
+  `tool_result_recall` tool reads the original back, so nothing is dropped. If
+  the provider still refuses the request as too large, Fermix compresses more
+  and asks again, at most three times, without running any tool twice; a
+  request that still does not fit fails with a sentence saying so.
+- **A scheduled job no longer stops running for good after a badly timed
+  restart.** A run finishing while the daemon stopped, or while it restarted a
+  part of itself, could leave its recurring job marked running forever: it
+  never fired again and "run now" refused it. A run's result and the job's
+  release are now written together, jobs already stuck this way are freed on
+  upgrade, and an interrupted delivery is settled instead of showing as pending
+  forever. A pause, resume or edit made while a job is running now sticks when
+  the run ends, and a job resumed while its run is still going no longer
+  busy-loops the scheduler.
+- **Refreshing an account no longer revokes it or brings a logged-out account
+  back.** Two processes refreshing the same account at once could send the
+  same refresh token twice, which ends a ChatGPT sign-in, and a refresh racing
+  a logout could write the account back. Every refresh, sign-in, import and
+  logout now takes that account's lock first. A sign-in that meets a busy lock
+  says so before anything is spent, so signing in again is enough. A logout
+  from the command line now also tells a running daemon to drop the account at
+  once.
+- **`/stop` answers the messages it cancels.** Messages still waiting behind the
+  stopped turn are now reported as cancelled to the app or client that sent
+  them, instead of being dropped silently. A turn that has already answered is
+  no longer cut off, and a turn that crashes is closed in the history so the
+  next turn does not answer it again. An ACP session no longer hangs when the
+  queue behind it restarts.
+- **Computer history keeps its promises.** A pause now covers the activity
+  recorded during it even when it is saved after the pause ends, and a purged
+  window stays purged. After `/history purge all`, session summaries are written
+  again (they had stopped for good), and a purge no longer throws away the
+  summary of the session you are in. `/history off` says so when it cannot
+  confirm the recorder stopped, and a recorder that restarts after `off` stays
+  off.
+- **A coding run's result is announced once.** A finished run could send its
+  message twice when the delivery worker ran while the result was being handed
+  over. `cancel_coding_run` now also stops a run that was left marked running
+  after a failed database write.
+- **A reminder is no longer sent by a sender that was already stopped.** A send
+  whose sender was restarted kept running on its own, so the same reminder
+  could arrive twice, or after you had changed or cancelled it.
+- **A voice call keeps one connection through a reconnect.** When a reconnect
+  had to retry, the connection it had given up on could report its close late
+  and be taken for the live one: the call dropped its healthy connection,
+  reconnected for no reason, or ended with nothing to reconnect to, and the
+  abandoned connection's audio and tool calls could still reach the call. Only
+  the call's current connection is listened to now, and a connection that fails
+  while it is being set up costs one reconnect attempt instead of two.
+- **A tool result is spoken even when you talk over it.** If you started
+  speaking just as a tool finished, the reply to your words could start before
+  the result was in, and the result then went unmentioned until you spoke
+  again. The reply to the result is now sent once the other reply ends. In the
+  rare case where that reply had already read the result, you may hear about it
+  twice.
+- **A setting with a line break in it is saved as written.** A value holding a
+  line break, such as a multi-line meeting announcement, was written to
+  `config.toml` as it was, so the next load kept only its first line and could
+  read a later line as a setting of its own, one that could even stop the
+  daemon from starting. Every value is now written with its line breaks, tabs
+  and other control characters escaped, and reads back exactly as it was saved.
+  A list entry holding a comma, such as a folder path, now reads back as one
+  entry instead of several. A `\n`, `\t` or `\r` typed by hand inside a quoted
+  value in `config.toml` now reads as a line break, tab or carriage return, as
+  TOML defines it. A sub-agent model with a line break inside it is refused,
+  and the app's single-line settings drop a pasted trailing line break and
+  refuse one inside.
+- **Only you can have Fermix send files into a chat.** A guest in a shared or
+  allow-listed chat could ask for a file from your folders to be sent into that
+  chat. Attachments are now sent on your own turns only. `fermix doctor` warns
+  when a channel has no `owner_user_id`: until it is set, everyone allow-listed
+  there, you included, chats as a guest.
+- **A damaged `auth.json` no longer copies your sign-in tokens into logs.** The
+  error now says only where the file stopped parsing, instead of repeating what
+  it holds in `fermix.log`, traces, doctor output and error messages, and access
+  tokens shaped like JWTs are redacted from log lines too. If your `auth.json`
+  was ever damaged, sign in again to replace those tokens.
+- **Fermix's file tools stay out of its own secrets in every sandbox mode.** Its
+  keys, tokens, pairing state, browser profiles, persona files and sockets, and
+  Claude Code's credential files, can no longer be read or written through file
+  tools, `open` mode included, and protected names are matched the way a Mac
+  volume matches them, Unicode look-alikes included. If `SOUL.md` is changed
+  outside `/soul`, Fermix records it as an unreviewed edit and sends you one
+  private message naming the `/soul revert` that undoes it.
+- **Desktop control stays with attended turns.** A coding run's follow-up turn
+  on the ACP surface can no longer start or drive desktop control, and no
+  unattended run can take over a desktop-control session an attended turn left
+  open.
+- **A coding run that changes a coding agent's own config asks before the next
+  one.** When a run changes files coding agents act on by themselves at start
+  (Claude Code settings, `.mcp.json`, Codex config, the `.agents` folder, VS
+  Code tasks and settings), its outcome names them, and the next coding run in
+  that repo asks you to confirm the change once, unless you revert or commit it
+  first. A scheduled job waits and tells you how to clear it. Claude Code runs
+  can no longer edit Codex's config or the `.agents` folder.
+- **The browser refuses link-local and cloud-metadata addresses.** A site whose
+  name points at one is refused, and nothing is returned from a page the
+  browser loaded from one, whatever its name looked like. Home network,
+  intranet and tailnet addresses stay reachable, and `allowed_hosts` still
+  allows a host by name. A page that fails to load now reports the browser's
+  own network error instead of a policy refusal, and a failed open leaves no
+  empty tab behind. If you use the unpacked browser extension, reload it once
+  after updating: the daemon now refuses the older bridge protocol.
+- **A prompt sent by one of Fermix's own processes runs unattended.** A prompt
+  sent through `fermix ask`, `fermix acp` or the Mac app's chat socket by a
+  process Fermix itself started, such as an agent's shell command, or by a
+  detached process with no terminal, now runs as an unattended turn: no desktop
+  control, no reminder or event changes and no recent activity. Prompts you type
+  in a terminal or an app, phones, messaging and voice are unaffected.
+- **The Linux system service runs as you and blocks cloud metadata.** Installing
+  it with `sudo fermix service install --system` now runs the daemon as your
+  own account when the Fermix home already belongs to you, and the system unit
+  blocks connections to the cloud instance-metadata addresses. On a cloud VM, a
+  cloud CLI the agent runs under a system daemon then needs the documented
+  drop-in to use the instance's role credentials.
+- **A busy moment no longer loses a reply.** When the conversation store was
+  slow, for example during a `/stop`, a turn that had already finished could
+  drop its reply without a word and leave the app or client waiting forever.
+  Replies now wait for the busy moment to pass. Cancelling from an ACP client
+  while its queue restarts answers the prompt instead of dropping the
+  connection, a crashed ACP turn is no longer reported as a sign-in problem,
+  and a voice cancel or hang-up waits for the stop instead of dropping the
+  call after 5 seconds.
+- **A scheduled job's work stops when its job does.** When part of the daemon
+  restarted during a job, the job's work could keep running tools while the
+  same job started again. It now stops with its runner. A delivery that was
+  sent is no longer recorded as failed because its status could not be saved:
+  the run names the real cause.
+- **A rate-limited token refresh no longer signs you out.** A provider that
+  answered a refresh with "too many requests" or a timeout made Fermix treat
+  the sign-in as revoked, and ChatGPT stopped answering until a restart.
+  Fermix now retries it. Signing a plugin out also deletes the access token its
+  helper was given, right away.
+- **A coding run from an ACP client whose hand-off was lost is reported at
+  once.** Instead of hours of retries ending in "unsupported delivery
+  platform", the run is marked undeliverable with a cause that says the
+  hand-off was not recorded.
+- **Computer history releases its lock when it stops.** A slow final save
+  could leave the recorder's lock behind, so the next start waited for it to
+  expire before recording again.
+- **A voice call survives an unexpected message and gives up on a connection
+  that keeps closing.** A message from OpenAI that Fermix did not expect used
+  to drop the connection, and end a GPT-Live call. A connection that keeps
+  closing while it is being set up now ends the call after three tries instead
+  of reconnecting for the rest of the session.
+- **A voice call whose OpenAI key is refused now says so.** With a wrong or
+  revoked key, OpenAI accepted the voice connection and then refused the
+  session, and Fermix only logged it: the call waited for an answer that never
+  came until the app gave up with "Fermix did not start the call in time", which
+  looked like a microphone problem. The call now ends at once with an error
+  saying that OpenAI did not accept the API key. Any other refusal of a voice
+  session, when a call starts or when it reconnects, ends the call the same way
+  and names OpenAI's error code.
+- **On a GPT-Live call the pet follows the conversation, and Stop stops the
+  reply.** GPT-Live sends no turn boundaries and keeps sending silent audio
+  between replies, so the pet sat on its speaking face for the whole call,
+  never showed thinking, and after Stop the rest of the reply still played.
+  Fermix now reads the turn from the call's audio: the pet speaks while the
+  reply's voice plays and listens once it has, shows thinking a second after
+  your words stop, and Stop drops the rest of the stopped reply. Typing near
+  the microphone no longer reads as speech, and the pet's own last words,
+  heard back through the speakers, are no longer taken for yours.
+- **A background task started from the Mac chat runs once and posts its
+  result.** Typed in the chat, `/bg` and `/background` left their request open
+  after they started, so a restart of the daemon within a day started the same
+  background work again. The result is now posted to the chat when the work
+  finishes, the request closes with it, and a restart runs nothing twice.
+- **A slash command typed in the Mac chat is answered once.** A command the
+  daemon answers at once, such as `/help`, `/status` or `/new`, stayed open
+  after its answer, and the next start of the daemon within a day ran it again
+  and wrote a second answer. It now closes with its answer. So does a message
+  answered without a turn, such as the reply sent while the daemon's queue
+  restarts. If its answer cannot be recorded, the chat now says the command
+  failed instead of running it again at the next start.
+- **`/ultra` sent as a command gets its answer.** A chat client that sent
+  `/ultra`, or any other command that becomes a turn, as a command rather than
+  as typed text had its request closed at once, so the turn's reply was thrown
+  away and no answer appeared. The request now closes with the turn's answer.
+- **`/skills approve` answers in order.** Approving a new or changed skill
+  says "Approved — drafting…" first and the drafting outcome after it, on every
+  channel; a draft that failed fast could arrive before the approval. Typed in
+  the Mac chat, an approval now closes with its outcome instead of staying open
+  to run again after a restart.
+- **Paging through a long Mac chat history keeps its place.** A page of long
+  messages is now cut to fit what one line of the chat socket carries, about
+  60 KiB, and it says where it stopped, so the next page continues from there
+  with nothing skipped, forward or back.
+- **A history request with an impossible position no longer restarts Fermix's
+  memory.** A chat client asking for history, search or read state past the
+  largest position the database can hold crashed the memory process, which
+  restarted the core of the daemon and could stop it. Such a position now reads
+  as past the newest message.
+- **The read marker never passes the newest message.** A client could report
+  that it had read messages that did not exist yet, and the messages written
+  after that counted as read, so they showed as read and sent no notification.
+  The marker is now held at the newest message, and one stored past it is
+  brought back the next time a client reports.
+- **The Mac chat keeps its connection when the memory database is slow.** The
+  process that ends every chat turn crashed when a memory write took longer
+  than five seconds or a stop reached a queue that had just restarted: every
+  Mac chat connection dropped, the turns it was tracking never ended on screen,
+  and their messages ran again at the next start. It now logs the failure and
+  still ends each turn once, and a message sent while it is busy is never
+  failed for waiting.
+- **An approval card comes back when the Mac app reconnects.** A card sent
+  while the app was closed or reconnecting was never shown, so what the turn
+  asked for could not be granted. Cards still waiting are now sent again when
+  the app connects, with the time they have left, and a card whose time runs
+  out is withdrawn as expired. A card that was answered or ran out while the
+  app was away is not sent again: the chat protocol now has the app drop every
+  card it shows when it reconnects and keep only the ones sent again. A card
+  stays with the device whose turn raised it, the only one that can answer it:
+  the Mac never shows a phone's card, and a phone never shows the Mac's.
+- **Searching a long chat history is fast.** Search went through every message
+  of the conversation to find a rare word, which took over a second on a long
+  history. It now reads the matches newest first and answers in well under a
+  millisecond, with the same results.
+- **Only you can pair or forget a phone.** Starting, deciding or cancelling a
+  pairing and revoking a phone, over the management socket, `fermix pair` or
+  `fermix devices revoke`, are now refused when the caller is a process Fermix
+  started itself (an agent's shell command, a coding run, a job) or a detached
+  one, with "Only the owner can pair or forget a phone; run this from your own
+  terminal." Reading the phone channel's status and paired phones stays open.
+- **`fermix devices` works with the phone channel off.** `fermix devices list`
+  shows the phones in `devices.toml` and `fermix devices revoke` removes one
+  whether or not the channel is running; with it off, a revoke still cancels
+  what that phone had asked for, so none of it runs later. Turning the
+  channel off in settings no longer refuses pairing and revoking before the
+  restart that applies it.
+- **The phone channel can no longer stop the daemon.** With
+  `[fermix_channels.mobile] enabled = true`, an address the phone listener
+  could not bind, or Apple's push service being unreachable, at start or
+  later, stopped the whole daemon. The listener now reports itself unavailable
+  with the reason and keeps retrying for up to a day, push connects on first
+  use and reads as degraded while Apple cannot be reached, and with memory
+  turned off the phone channel is refused for that boot by name instead of
+  starting half-working. `fermix doctor` and `mobile.status` say which. The
+  phone channel is still off by default, and no phone app is released yet:
+  this is the daemon half, shipped first so the apps can be built against it.
+- **Pairing a phone can finish, and a stranger cannot stop it.** In the daemon
+  half of the phone channel, approving a phone never saved it, so a pairing
+  could not complete. A stranger on the network could end the owner's pairing
+  window by failing handshakes, hold every connection by never finishing one, or
+  grow one connection's memory without limit; failed handshakes now refuse only
+  the address they came from, a connection gets one HTTP request and fifteen
+  seconds from connecting to reach the phone's own handshake, every step of that
+  handshake ends after ten seconds, and a connection that has not authenticated
+  is held to a small memory bound. A clock stepped back no longer locks paired
+  phones out, the paired-phone list survives a power loss, and the phone and the
+  pane use the same word for how a pairing ended.
+- **The phone and the Mac chat share one live conversation.** In the daemon
+  half of the phone channel, every message and reply, from a phone, the Mac
+  chat or a job, now reaches every connected phone and the Mac as it is
+  written, with its attachments and link previews, and read state is shared. A
+  phone can stop one of its own requests, a failed message is reported to the
+  phone that sent it even after it reconnected, a revoked phone's waiting
+  requests are cancelled instead of run, and a phone's approval cards wait for
+  it, are sent again when it connects and push a content-free "Approval needed"
+  while it is away. Long replies and history pages arrive in parts instead of
+  closing the connection, downloads stream without holding up the chat, and a
+  reply streams to the phone every tenth of a second where the model streams at
+  all. The app that uses this is not released yet.
+- **The phone channel's limits hold.** In the same daemon half, an upload can
+  no longer evict stored media or leave files open, a large attachment list can
+  no longer stop the channel at start, link previews are stored with their
+  message and fetched under a deadline and a limit, and a job delivered to the
+  phone channel while it is off is kept in the chat without fetching links or
+  sending a push. Media lookups are indexed: the first start after upgrading
+  adds that index beside the chat timeline once, on every install, whether or
+  not the phone channel is on. It changes nothing an older Fermix reads, so
+  going back to an earlier release still opens the chat, and what that release
+  writes stays indexed for when you upgrade again.
+
 ## [0.11.0] - 2026-09-23
 
 ### Added

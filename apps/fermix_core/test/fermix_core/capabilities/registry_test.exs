@@ -1,8 +1,10 @@
 defmodule FermixCore.Capabilities.RegistryTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.Tools.SendAttachment
 
   defmodule FakeMod do
     def execute(_args, _ctx, _extra \\ nil), do: {:ok, :ok}
@@ -64,6 +66,18 @@ defmodule FermixCore.Capabilities.RegistryTest do
         reg |> Registry.list(trust: :guest, policy: [:read_only]) |> Enum.map(& &1.name)
 
       assert names == ["react"]
+    end
+
+    # The shipped declaration, not a fixture: `send_attachment` uploads any file
+    # under the owner's sandbox roots into the chat the turn replies to, which
+    # on a guest turn is the guest's own chat.
+    test "a guest never gets send_attachment; the operator keeps it", %{registry: reg} do
+      :ok = Registry.register(reg, Builtin.from_tool_module(SendAttachment))
+
+      assert reg |> Registry.list(trust: :guest) |> Enum.map(& &1.name) == ["react"]
+
+      assert reg |> Registry.list(trust: :operator) |> Enum.map(& &1.name) ==
+               ["file_read", "list_jobs", "react", "send_attachment"]
     end
   end
 

@@ -1,0 +1,538 @@
+defmodule FermixCore.Companion.Timeline do
+  @moduledoc """
+  Durable, append-only timeline of a companion profile: the one conversation the
+  phone (mobile channel) and the Mac (companion socket) both show.
+
+  This timeline is intentionally separate from the mutable conversation context:
+  compaction and `/new` may rewrite prompt history, but they cannot rewrite rows
+  already synchronized to a client. The rows live in the `mobile_*` tables, whose
+  names predate the companion socket.
+  """
+
+  alias FermixCore.Memory.Config
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Plugins.CanonicalJson
+
+  @request_ttl_seconds 86_400
+  # The wire types every sequence and cursor as u64; SQLite integers are i64.
+  # No row can sit above this, so a larger cursor means the same as this one.
+  @max_sqlite_integer 9_223_372_036_854_775_807
+  @max_history_limit 200
+  @default_history_limit 50
+  @default_search_limit 20
+  @default_recovery_limit 50
+  @sha256 ~r/\A[0-9a-f]{64}\z/
+
+  @type timeline_attrs :: %{
+          required(:role) => String.t(),
+          required(:content) => String.t(),
+          optional(:kind) => String.t(),
+          optional(:client_msg_id) => String.t() | nil,
+          optional(:in_reply_to) => String.t() | nil,
+          optional(:media_refs) => [map()],
+          optional(:metadata) => map() | nil,
+          optional(:created_at) => DateTime.t()
+        }
+
+  @type request_status :: :running | :completed | :failed
+
+  @typedoc """
+  The transport that claimed a request. A `"mobile"` claim names its
+  Noise-authenticated device in `:authenticated_device_id`; a `"companion"`
+  claim names none, because the 0600 socket is its authentication.
+  """
+  @type transport :: String.t()
+
+  @spec append(String.t(), timeline_attrs(), keyword()) ::
+          {:ok, Repo.mobile_timeline_row()} | {:error, term()}
+  def append(profile_id, attrs, opts \\ []) when is_binary(profile_id) and is_map(attrs) do
+    attrs
+    |> Map.merge(profile_selector(profile_id, opts))
+    |> Repo.append_mobile_timeline(repo_opts(opts))
+  end
+
+  @spec append_client_message(String.t(), String.t(), map(), keyword()) ::
+          {:ok, {:created | :existing, Repo.mobile_timeline_row()}} | {:error, term()}
+  def append_client_message(profile_id, client_msg_id, attrs, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(attrs) do
+    attrs
+    |> Map.merge(profile_selector(profile_id, opts))
+    |> Map.put(:role, "user")
+    |> Map.put(:client_msg_id, client_msg_id)
+    |> Repo.append_mobile_client_message(repo_opts(opts))
+  end
+
+  @spec append_proactive(String.t(), String.t(), timeline_attrs(), keyword()) ::
+          {:ok, {:created | :existing, Repo.mobile_timeline_row()}} | {:error, term()}
+  def append_proactive(profile_id, dedupe_key, attrs, opts \\ [])
+      when is_binary(profile_id) and is_binary(dedupe_key) and is_map(attrs) do
+    attrs
+    |> Map.merge(profile_selector(profile_id, opts))
+    |> Map.put(:proactive_key, dedupe_key)
+    |> Repo.append_mobile_proactive(repo_opts(opts))
+  end
+
+  @doc """
+  One page of a profile's timeline, oldest first. `:after_seq` (default 0)
+  pages forward and answers `next_after_seq`; `:before_seq` pages backward
+  from it and answers `next_before_seq` only when an older row exists. The two
+  cursors exclude each other. A cursor past every row pages from the newest
+  row a timeline can hold.
+  """
+  @spec history_page(String.t(), keyword()) :: {:ok, map()} | {:error, term()}
+  def history_page(profile_id, opts \\ []) when is_binary(profile_id) do
+    limit = Keyword.get(opts, :limit, @default_history_limit)
+
+    with {:ok, cursor} <- history_cursor(opts),
+         :ok <- validate_history_limit(limit) do
+      fetch_history(profile_selector(profile_id, opts), cursor, limit, repo_opts(opts))
+    end
+  end
+
+  @doc """
+  Full-text search of a profile's timeline, newest first, below `:before_seq`
+  when given, at most `:limit` hits (default 20). The query is user text; a
+  query with no searchable word matches nothing.
+  """
+  @spec search(String.t(), String.t(), keyword()) ::
+          {:ok, Repo.mobile_search_page()} | {:error, term()}
+  def search(profile_id, query, opts \\ []) when is_binary(profile_id) and is_binary(query) do
+    before_seq = Keyword.get(opts, :before_seq)
+    limit = Keyword.get(opts, :limit, @default_search_limit)
+
+    with :ok <- validate_before_seq(before_seq),
+         :ok <- validate_history_limit(limit) do
+      Repo.search_mobile_timeline(
+        profile_selector(profile_id, opts),
+        query,
+        clamp_optional(before_seq),
+        limit,
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec history_head(String.t(), keyword()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def history_head(profile_id, opts \\ []) when is_binary(profile_id) do
+    Repo.mobile_history_head(profile_selector(profile_id, opts), repo_opts(opts))
+  end
+
+  @spec media_descriptor(String.t(), String.t(), keyword()) ::
+          {:ok, Repo.mobile_media_descriptor()}
+          | {:error, :not_found | {:invalid_media_ref, String.t()} | term()}
+  def media_descriptor(profile_id, ref, opts \\ [])
+      when is_binary(profile_id) and is_binary(ref) do
+    with :ok <- validate_media_ref(ref) do
+      Repo.get_mobile_media_descriptor(profile_selector(profile_id, opts), ref, repo_opts(opts))
+    end
+  end
+
+  @doc """
+  Store one link preview on its row (`url`, `site`, `title`, an optional
+  `description` and an optional `image` media descriptor). The row's history
+  carries it from then on, and `media_descriptor/3` serves its image.
+  """
+  @spec attach_link_preview(String.t(), pos_integer(), map(), keyword()) ::
+          {:ok, Repo.mobile_timeline_row()} | {:error, term()}
+  def attach_link_preview(profile_id, server_seq, preview, opts \\ [])
+      when is_binary(profile_id) and is_integer(server_seq) and server_seq > 0 and
+             is_map(preview) do
+    Repo.attach_mobile_link_preview(
+      profile_selector(profile_id, opts),
+      server_seq,
+      preview,
+      repo_opts(opts)
+    )
+  end
+
+  @doc """
+  Move the profile's read frontier to `reported_seq`, never backward and never
+  past the newest row: a frontier ahead of the timeline would mark every later
+  row read before it exists.
+  """
+  @spec advance_read_frontier(String.t(), non_neg_integer(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def advance_read_frontier(profile_id, reported_seq, opts \\ [])
+      when is_binary(profile_id) and is_integer(reported_seq) and reported_seq >= 0 do
+    Repo.advance_mobile_read_frontier(
+      profile_selector(profile_id, opts),
+      clamp_cursor(reported_seq),
+      now(opts),
+      repo_opts(opts)
+    )
+  end
+
+  @spec read_frontier(String.t(), keyword()) ::
+          {:ok, non_neg_integer()} | {:error, term()}
+  def read_frontier(profile_id, opts \\ []) when is_binary(profile_id) do
+    Repo.get_mobile_read_frontier(profile_selector(profile_id, opts), repo_opts(opts))
+  end
+
+  @spec claim_client_request(String.t(), String.t(), String.t(), term(), keyword()) ::
+          {:ok, {:claimed | :duplicate | :conflict, Repo.mobile_client_request_row()}}
+          | {:error, term()}
+  def claim_client_request(profile_id, client_msg_id, request_type, payload, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_binary(request_type) do
+    claimed_at = now(opts)
+
+    with {:ok, claimant} <- claimant(opts),
+         {:ok, payload_digest} <- CanonicalJson.digest(payload) do
+      Repo.claim_mobile_client_request(
+        profile_selector(profile_id, opts),
+        Map.merge(claimant, %{
+          client_msg_id: client_msg_id,
+          request_type: request_type,
+          payload: payload,
+          payload_digest: payload_digest,
+          claimed_at: claimed_at,
+          expires_at: DateTime.add(claimed_at, @request_ttl_seconds, :second)
+        }),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec get_client_request(String.t(), String.t(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, :not_found | term()}
+  def get_client_request(profile_id, client_msg_id, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    Repo.get_mobile_client_request(
+      profile_selector(profile_id, opts),
+      client_msg_id,
+      repo_opts(opts)
+    )
+  end
+
+  @doc """
+  Record a cancel on a request before it settles. `:marked` means the mark is
+  on the request: a request not yet handed to the queue never is, and boot
+  recovery ends it as cancelled instead of running it. `:settled` means it had
+  already ended, and nothing changed.
+  """
+  @spec cancel_client_request(String.t(), String.t(), keyword()) ::
+          {:ok, {:marked | :settled, Repo.mobile_client_request_row()}}
+          | {:error, :not_found | term()}
+  def cancel_client_request(profile_id, client_msg_id, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    Repo.cancel_mobile_client_request(
+      profile_selector(profile_id, opts),
+      client_msg_id,
+      now(opts),
+      repo_opts(opts)
+    )
+  end
+
+  @doc """
+  Record a cancel on every unsettled request a device claimed, as its
+  revocation does, and answer the requests it marked.
+  """
+  @spec cancel_device_requests(String.t(), keyword()) ::
+          {:ok, [Repo.mobile_client_request_row()]} | {:error, term()}
+  def cancel_device_requests(device_id, opts \\ [])
+      when is_binary(device_id) and device_id != "" do
+    Repo.cancel_mobile_device_requests(
+      owner_selector(opts),
+      device_id,
+      now(opts),
+      repo_opts(opts)
+    )
+  end
+
+  @spec start_client_request(String.t(), String.t(), String.t(), keyword()) ::
+          {:ok, {:started | :active | :completed | :failed, Repo.mobile_client_request_row()}}
+          | {:error, term()}
+  def start_client_request(profile_id, client_msg_id, runner_epoch, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_binary(runner_epoch) do
+    with :ok <- validate_nonempty(runner_epoch, :runner_epoch) do
+      Repo.start_mobile_client_request(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        runner_epoch,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @doc "Requests the named `:transport` claimed that a boot must recover."
+  @spec recoverable_client_requests(String.t(), keyword()) ::
+          {:ok, [Repo.mobile_client_request_row()]} | {:error, term()}
+  def recoverable_client_requests(runner_epoch, opts \\ []) when is_binary(runner_epoch) do
+    limit = Keyword.get(opts, :limit, @default_recovery_limit)
+
+    with :ok <- validate_nonempty(runner_epoch, :runner_epoch),
+         :ok <- validate_recovery_limit(limit),
+         {:ok, transport} <- transport_option(opts) do
+      Repo.get_recoverable_mobile_client_requests(
+        Map.put(owner_selector(opts), :transport, transport),
+        runner_epoch,
+        limit,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec settle_client_request(String.t(), String.t(), request_status(), map(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, term()}
+  def settle_client_request(profile_id, client_msg_id, status, fields, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(fields) do
+    with {:ok, normalized_status} <- normalize_request_status(status),
+         {:ok, attempt} <- required_attempt(fields) do
+      Repo.settle_mobile_client_request(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        normalized_status,
+        Map.put(fields, :attempt, attempt),
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec append_client_output(
+          String.t(),
+          String.t(),
+          non_neg_integer(),
+          String.t(),
+          map(),
+          keyword()
+        ) ::
+          {:ok, {:created | :existing, Repo.mobile_timeline_row()}} | {:error, term()}
+  def append_client_output(profile_id, client_msg_id, attempt, output_key, attrs, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(attrs) do
+    with :ok <- validate_attempt(attempt),
+         :ok <- validate_nonempty(output_key, :output_key) do
+      Repo.append_mobile_client_output(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        output_key,
+        attrs,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec complete_client_request(String.t(), String.t(), non_neg_integer(), map(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, term()}
+  def complete_client_request(profile_id, client_msg_id, attempt, fields, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(fields) do
+    with :ok <- validate_attempt(attempt) do
+      Repo.complete_mobile_client_request(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        fields,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec fail_client_request(String.t(), String.t(), non_neg_integer(), map(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, term()}
+  def fail_client_request(profile_id, client_msg_id, attempt, fields, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(fields) do
+    with :ok <- validate_attempt(attempt) do
+      settle_client_request(
+        profile_id,
+        client_msg_id,
+        :failed,
+        Map.put(fields, :attempt, attempt),
+        opts
+      )
+    end
+  end
+
+  @doc """
+  Release a running attempt whose runner died without settling it.
+
+  Returns the claim to `accepted` so a resend or the next boot's recovery scan
+  starts the next attempt, instead of a wedged `running` row that answers every
+  resend as an already-running duplicate.
+  """
+  @spec abandon_client_request(String.t(), String.t(), non_neg_integer(), keyword()) ::
+          {:ok, Repo.mobile_client_request_row()} | {:error, term()}
+  def abandon_client_request(profile_id, client_msg_id, attempt, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) do
+    with :ok <- validate_attempt(attempt) do
+      Repo.abandon_mobile_client_request(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec append_client_response(String.t(), String.t(), non_neg_integer(), map(), keyword()) ::
+          {:ok, {:created | :existing, Repo.mobile_timeline_row()}} | {:error, term()}
+  def append_client_response(profile_id, client_msg_id, attempt, attrs, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(attrs) do
+    with :ok <- validate_attempt(attempt) do
+      Repo.append_mobile_client_response(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        attrs,
+        now(opts),
+        repo_opts(opts)
+      )
+    end
+  end
+
+  @spec update_client_message(String.t(), String.t(), non_neg_integer(), map(), keyword()) ::
+          {:ok, Repo.mobile_timeline_row()} | {:error, term()}
+  def update_client_message(profile_id, client_msg_id, attempt, attrs, opts \\ [])
+      when is_binary(profile_id) and is_binary(client_msg_id) and is_map(attrs) do
+    with :ok <- validate_attempt(attempt),
+         :ok <- validate_update_attrs(attrs) do
+      Repo.update_mobile_client_message(
+        profile_selector(profile_id, opts),
+        client_msg_id,
+        attempt,
+        attrs,
+        repo_opts(opts)
+      )
+    end
+  end
+
+  defp profile_selector(profile_id, opts) do
+    Map.put(owner_selector(opts), :profile_id, profile_id)
+  end
+
+  defp owner_selector(opts) do
+    %{
+      agent_id: Config.agent_id(opts),
+      owner_id: Config.owner_id(opts)
+    }
+  end
+
+  defp repo_opts(opts), do: [server: Config.repo_server(opts)]
+  defp now(opts), do: Keyword.get(opts, :now, DateTime.utc_now())
+
+  defp validate_after_seq(value) when is_integer(value) and value >= 0, do: :ok
+  defp validate_after_seq(value), do: {:error, {:invalid_after_seq, value}}
+
+  defp validate_before_seq(nil), do: :ok
+  defp validate_before_seq(value) when is_integer(value) and value > 0, do: :ok
+  defp validate_before_seq(value), do: {:error, {:invalid_before_seq, value}}
+
+  defp history_cursor(opts) do
+    case {Keyword.fetch(opts, :after_seq), Keyword.fetch(opts, :before_seq)} do
+      {{:ok, _after}, {:ok, _before}} ->
+        {:error, :conflicting_history_cursors}
+
+      {:error, {:ok, before}} ->
+        with :ok <- validate_before_seq(before), do: {:ok, {:before, clamp_cursor(before)}}
+
+      {{:ok, after_seq}, :error} ->
+        with :ok <- validate_after_seq(after_seq), do: {:ok, {:after, after_seq}}
+
+      {:error, :error} ->
+        {:ok, {:after, 0}}
+    end
+  end
+
+  defp clamp_cursor(seq), do: min(seq, @max_sqlite_integer)
+
+  defp clamp_optional(nil), do: nil
+  defp clamp_optional(seq), do: clamp_cursor(seq)
+
+  # An empty page answers the cursor it was asked for, even one past the
+  # range a row can have.
+  defp fetch_history(selector, {:after, after_seq}, limit, repo_opts) do
+    with {:ok, page} <-
+           Repo.get_mobile_history(selector, clamp_cursor(after_seq), limit, repo_opts) do
+      {:ok, %{page | next_after_seq: max(page.next_after_seq, after_seq)}}
+    end
+  end
+
+  defp fetch_history(selector, {:before, before_seq}, limit, repo_opts),
+    do: Repo.get_mobile_history_before(selector, before_seq, limit, repo_opts)
+
+  defp claimant(opts) do
+    with {:ok, transport} <- transport_option(opts) do
+      claimant(transport, opts)
+    end
+  end
+
+  defp claimant("mobile", opts) do
+    with {:ok, device_id} <- required_option(opts, :authenticated_device_id) do
+      {:ok, %{transport: "mobile", authenticated_device_id: device_id}}
+    end
+  end
+
+  defp claimant("companion", opts) do
+    case Keyword.fetch(opts, :authenticated_device_id) do
+      :error -> {:ok, %{transport: "companion"}}
+      {:ok, device_id} -> {:error, {:invalid_option, :authenticated_device_id, device_id}}
+    end
+  end
+
+  defp transport_option(opts) do
+    case Keyword.fetch(opts, :transport) do
+      {:ok, transport} when transport in ["mobile", "companion"] -> {:ok, transport}
+      {:ok, other} -> {:error, {:invalid_option, :transport, other}}
+      :error -> {:error, {:missing_option, :transport}}
+    end
+  end
+
+  defp validate_history_limit(value)
+       when is_integer(value) and value > 0 and value <= @max_history_limit,
+       do: :ok
+
+  defp validate_history_limit(value), do: {:error, {:invalid_history_limit, value}}
+
+  defp validate_media_ref(ref) do
+    if Regex.match?(@sha256, ref), do: :ok, else: {:error, {:invalid_media_ref, ref}}
+  end
+
+  defp validate_recovery_limit(value)
+       when is_integer(value) and value > 0 and value <= @max_history_limit,
+       do: :ok
+
+  defp validate_recovery_limit(value), do: {:error, {:invalid_recovery_limit, value}}
+
+  defp validate_attempt(value) when is_integer(value) and value >= 0, do: :ok
+  defp validate_attempt(value), do: {:error, {:invalid_attempt, value}}
+
+  defp required_attempt(fields) do
+    case Map.fetch(fields, :attempt) do
+      {:ok, attempt} -> with :ok <- validate_attempt(attempt), do: {:ok, attempt}
+      :error -> {:error, {:missing_field, :attempt}}
+    end
+  end
+
+  defp required_option(opts, key) do
+    case Keyword.fetch(opts, key) do
+      {:ok, value} -> with :ok <- validate_nonempty(value, key), do: {:ok, value}
+      :error -> {:error, {:missing_option, key}}
+    end
+  end
+
+  defp validate_nonempty(value, _key) when is_binary(value) and value != "", do: :ok
+  defp validate_nonempty(value, key), do: {:error, {:invalid_field, key, value}}
+
+  defp validate_update_attrs(attrs) do
+    allowed = MapSet.new([:content, :media_refs, :metadata])
+
+    case Enum.find(Map.keys(attrs), &(not MapSet.member?(allowed, &1))) do
+      nil -> :ok
+      key -> {:error, {:invalid_update_field, key}}
+    end
+  end
+
+  defp normalize_request_status(status) when status in [:running, :completed, :failed] do
+    {:ok, Atom.to_string(status)}
+  end
+
+  defp normalize_request_status(status) when status in ["running", "completed", "failed"] do
+    {:ok, status}
+  end
+
+  defp normalize_request_status(status), do: {:error, {:invalid_request_status, status}}
+end

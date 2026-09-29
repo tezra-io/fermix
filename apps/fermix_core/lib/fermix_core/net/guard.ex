@@ -7,6 +7,11 @@ defmodule FermixCore.Net.Guard do
 
   @sensitive_headers ~w(authorization cookie set-cookie proxy-authorization x-api-key x-auth-token x-subscription-token)
 
+  # fd00:ec2::254 — inside ULA space, which is otherwise the operator's own.
+  # The Linux system unit denies the metadata endpoints themselves
+  # (`Fermix.CLI.Service.Templates`): an endpoint added here is added there too.
+  @aws_ipv6_metadata {0xFD00, 0x0EC2, 0, 0, 0, 0, 0, 0x0254}
+
   @type resolver :: (String.t() -> {:ok, [:inet.ip_address()]} | {:error, term()})
   @type opts :: [resolver: resolver()]
 
@@ -58,6 +63,50 @@ defmodule FermixCore.Net.Guard do
       end
     end
   end
+
+  @doc """
+  The A and AAAA answers for `host`: the lookup `validate/2` makes when it is
+  given no `:resolver`, for a caller that judges the answers itself. `timeout`
+  bounds each of the two queries.
+  """
+  @spec resolve(String.t(), timeout()) :: {:ok, [:inet.ip_address()]} | {:error, term()}
+  def resolve(host, timeout \\ :infinity) when is_binary(host) do
+    name = String.to_charlist(host)
+
+    addresses =
+      :inet_res.lookup(name, :in, :a, [], timeout) ++
+        :inet_res.lookup(name, :in, :aaaa, [], timeout)
+
+    {:ok, addresses}
+  rescue
+    # A host that is not UTF-8, or a name with a label `:inet_dns` cannot encode
+    # (empty, or longer than 63 bytes): a lookup that failed, for the caller to
+    # judge like any other.
+    error in [UnicodeConversionError, FunctionClauseError] -> {:error, error}
+  end
+
+  @doc """
+  Whether `ip` is an address no web server is reached at: link-local
+  (169.254.0.0/16 and fe80::/10 — the home of the 169.254.169.254 instance
+  metadata endpoint), "this host" (0.0.0.0/8 and `::`), or AWS's IPv6 metadata
+  endpoint fd00:ec2::254. An IPv4-mapped address is judged by the IPv4 address
+  it carries.
+
+  A narrower question than the public-web check `validate/2` makes, and every
+  address it answers `true` for is non-global there too: a caller that lets the
+  operator's own network through (RFC 1918, ULA, CGNAT) still refuses these.
+  """
+  @spec metadata_or_link_local?(:inet.ip_address()) :: boolean()
+  def metadata_or_link_local?({a, b, _c, _d}), do: this_host_ipv4?(a) or link_local_ipv4?(a, b)
+
+  def metadata_or_link_local?({0, 0, 0, 0, 0, 65_535, high, low}),
+    do: metadata_or_link_local?({high >>> 8, high &&& 255, low >>> 8, low &&& 255})
+
+  def metadata_or_link_local?(@aws_ipv6_metadata), do: true
+  def metadata_or_link_local?({0, 0, 0, 0, 0, 0, 0, 0}), do: true
+
+  def metadata_or_link_local?({first, _b, _c, _d, _e, _f, _g, _h}),
+    do: link_local_ipv6?(first)
 
   @spec redact_headers([{String.t(), String.t()}]) :: [{String.t(), String.t()}]
   def redact_headers(headers) when is_list(headers) do
@@ -127,7 +176,7 @@ defmodule FermixCore.Net.Guard do
         {:ok, :ip_literal}
 
       {:error, :einval} ->
-        resolver = Keyword.get(opts, :resolver) || (&default_resolver/1)
+        resolver = Keyword.get(opts, :resolver) || (&resolve/1)
 
         case resolver.(host) do
           {:ok, []} -> {:error, {:dns_resolution_failed, :nxdomain}}
@@ -147,16 +196,6 @@ defmodule FermixCore.Net.Guard do
     end
   end
 
-  defp default_resolver(host) do
-    addresses =
-      :inet_res.lookup(String.to_charlist(host), :in, :a) ++
-        :inet_res.lookup(String.to_charlist(host), :in, :aaaa)
-
-    {:ok, addresses}
-  rescue
-    error -> {:error, error}
-  end
-
   defp parse_ip(host), do: :inet.parse_address(String.to_charlist(host))
 
   defp validate_public_ip(ip, reason) do
@@ -174,11 +213,16 @@ defmodule FermixCore.Net.Guard do
   end
 
   defp private_ipv4_prefix?(a, b) do
-    a == 10 or a == 127 or a == 0 or
-      (a == 169 and b == 254) or
+    a == 10 or a == 127 or this_host_ipv4?(a) or link_local_ipv4?(a, b) or
       (a == 192 and b == 168) or
       (a == 172 and b in 16..31)
   end
+
+  # 0.0.0.0/8, "this host".
+  defp this_host_ipv4?(a), do: a == 0
+
+  # 169.254.0.0/16.
+  defp link_local_ipv4?(a, b), do: a == 169 and b == 254
 
   defp reserved_ipv4_prefix?(a), do: a in 224..239 or a >= 240
 
@@ -218,9 +262,12 @@ defmodule FermixCore.Net.Guard do
   defp ipv6_non_global?({first, _b, _c, _d, _e, _f, _g, _h}) do
     cond do
       (first &&& 0xFE00) == 0xFC00 -> true
-      (first &&& 0xFFC0) == 0xFE80 -> true
+      link_local_ipv6?(first) -> true
       (first &&& 0xFF00) == 0xFF00 -> true
       true -> false
     end
   end
+
+  # fe80::/10.
+  defp link_local_ipv6?(first), do: (first &&& 0xFFC0) == 0xFE80
 end

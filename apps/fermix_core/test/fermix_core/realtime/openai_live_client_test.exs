@@ -281,6 +281,27 @@ defmodule FermixCore.Realtime.OpenAILiveClientTest do
     end
   end
 
+  # `handle_frame/2` runs inside the socket process. Live never reconnects, so a
+  # frame that crashed the socket ended the call.
+  describe "handle_frame/2" do
+    test "JSON that is not an object is reported, and the socket carries on" do
+      for payload <- [~s([1]), ~s("text"), ~s(42), ~s(null)] do
+        assert {:ok, _state} = OpenAILiveClient.handle_frame({:text, payload}, %{parent: self()})
+        assert_received {:openai_live_error, {:invalid_server_event, shown}}
+        assert shown == payload |> Jason.decode!() |> inspect()
+      end
+    end
+
+    test "a non-object frame reaches the session as a bounded description" do
+      huge = Jason.encode!([String.duplicate("x", 10_000) | Enum.to_list(1..10_000)])
+
+      assert {:ok, _state} = OpenAILiveClient.handle_frame({:text, huge}, %{parent: self()})
+
+      assert_received {:openai_live_error, {:invalid_server_event, shown}}
+      assert byte_size(shown) < 200
+    end
+  end
+
   defp config do
     Config.normalize(enabled: true, engine: "openai_live", model: "gpt-live-1", voice: "marin")
   end

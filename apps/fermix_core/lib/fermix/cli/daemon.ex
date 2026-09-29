@@ -12,6 +12,10 @@ defmodule Fermix.CLI.Daemon do
 
       {"method":"shutdown"}  -> {"status":"shutting_down"}  then :init.stop()
 
+  and the two a sibling CLI VM sends after changing state on disk:
+  `plugins_apply` (re-read the config) and `auth_forget` (let go of the tokens
+  of a profile the CLI just signed out of).
+
   `status` and `overview` were unversioned methods until `fermix status` moved
   onto `hello` plus `overview.get`; they were deleted rather than kept, so one
   answer never has two live paths.
@@ -30,6 +34,7 @@ defmodule Fermix.CLI.Daemon do
 
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Health
@@ -37,12 +42,14 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Introspection.Capabilities
   alias FermixCore.Introspection.Wire
   alias FermixCore.Management.Lifecycle
+  alias FermixCore.Management.Mobile, as: ManagementMobile
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Text
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.SocketPath
+  alias FermixCore.SocketPeer
   alias FermixCore.Trace
 
   require Logger
@@ -61,6 +68,16 @@ defmodule Fermix.CLI.Daemon do
   @max_frame_bytes 4_194_304
   @route_failure_frames 5
   @route_failure_reason_bytes 512
+  # An auth profile is a provider's fixed name or an operator-set plugin
+  # profile; either is a short printable string.
+  @max_profile_bytes 256
+  # The owner's decisions on the phone channel, in both protocol versions:
+  # opening a pairing window (its link carries the pairing secret), deciding
+  # on the phone that asked, closing the window, and forgetting a phone.
+  @owner_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
+                         mobile.devices.revoke)
+  @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
+                         mobile_device_revoke)
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) do
@@ -137,9 +154,15 @@ defmodule Fermix.CLI.Daemon do
            socket_path: socket_path,
            task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
            plugins_runtime: Keyword.get(opts, :plugins_runtime, PluginsRuntime),
+           token_supervisor: Keyword.get(opts, :token_supervisor, TokenSupervisor),
            runtime_status: Keyword.get(opts, :runtime_status, McpRuntimeStatus),
            mobile_provider: Keyword.get(opts, :mobile_provider),
            management_opts: Keyword.get(opts, :management_opts, []),
+           # The process an `agent_message` sender is placed beneath, or not, and
+           # the platform it is placed on (`FermixCore.SocketPeer`); a test stands
+           # a different one in.
+           daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
+           os: Keyword.get(opts, :os, :os.type()),
            stopper: Keyword.get(opts, :stopper, default_stopper()),
            started_at_ms: System.monotonic_time(:millisecond)
          }}
@@ -287,7 +310,7 @@ defmodule Fermix.CLI.Daemon do
   # 0600 socket file under FERMIX_HOME. v0 `agent_message` remains a deliberate
   # operator action from `fermix ask` and can trigger LLM or tool work.
   defp handle_v0_initial_request(conn, request, state) do
-    response = dispatch_request(request, state)
+    response = dispatch_initial_request(request, conn, state)
 
     case opened_pair_session(request, response) do
       {:ok, session_id} -> handle_pair_lease(conn, response, session_id, state)
@@ -298,9 +321,44 @@ defmodule Fermix.CLI.Daemon do
   end
 
   defp handle_v1_request(conn, request, state) do
-    result = route_management_request(request, state)
+    result =
+      case owner_caller(request.method, @owner_decisions_v1, conn, state) do
+        :ok -> route_management_request(request, state)
+        {:error, _verdict} -> owner_decision_refusal()
+      end
+
     response = management_response(request.request_id, result)
     send_response(conn, response)
+  end
+
+  # M19 §6.2: pairing is the owner's interactive decision, never the agent's.
+  # The socket's trust boundary is its 0600 file, which every process of the
+  # owner's account can open, so the kernel's peer is placed (SIDE-V1): a
+  # process the daemon started is the agent or a harness, and nobody watches a
+  # detached one. Either is refused, as is a peer that cannot be placed.
+  defp owner_caller(method, decisions, conn, state) do
+    if method in decisions,
+      do: placed_owner(method, SocketPeer.classify(conn, state.daemon_os_pid, state.os)),
+      else: :ok
+  end
+
+  # The same code as a channel that cannot answer, with its own sentence: the
+  # channel is fine and doctor says so, so "not running" would send the
+  # operator after the wrong fault.
+  defp owner_decision_refusal do
+    {:error, :unavailable,
+     %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
+  end
+
+  defp placed_owner(_method, {:ok, :independent}), do: :ok
+
+  defp placed_owner(method, verdict) do
+    Logger.warning(
+      "Refused #{method}: only the owner may pair or forget a phone, " <>
+        "and the caller was placed as #{inspect(verdict)}"
+    )
+
+    {:error, verdict}
   end
 
   defp route_management_request(request, state) do
@@ -363,6 +421,23 @@ defmodule Fermix.CLI.Daemon do
       |> Keyword.put(:daemon, daemon_snapshot(state))
 
     Keyword.put(state.management_opts, :overview_opts, overview_opts)
+  end
+
+  # `agent_message` is the one method whose answer depends on the connection: a
+  # prompt is attended only when a person sent it, and the kernel, not the
+  # request, says which process did (SIDE-V1).
+  defp dispatch_initial_request(%{"method" => "agent_message"} = request, conn, state) do
+    case SocketPeer.classify(conn, state.daemon_os_pid, state.os) do
+      {:ok, caller} -> agent_message_reply(request, caller)
+      {:error, reason} -> unidentified_caller_reply(request, reason)
+    end
+  end
+
+  defp dispatch_initial_request(%{"method" => method} = request, conn, state) do
+    case owner_caller(method, @owner_decisions_v0, conn, state) do
+      :ok -> dispatch_request(request, state)
+      {:error, _verdict} -> error_reply(:owner_decision_refused)
+    end
   end
 
   defp dispatch_request(%{"method" => method} = request, state),
@@ -550,7 +625,8 @@ defmodule Fermix.CLI.Daemon do
   defp handle_method("plugins_runtime_status", _request, state),
     do: plugins_runtime_status_reply(state)
 
-  defp handle_method("agent_message", request, _state), do: agent_message_reply(request)
+  defp handle_method("auth_forget", request, state), do: auth_forget_reply(request, state)
+
   defp handle_method("observability", _request, _state), do: observability_reply()
   defp handle_method("mobile_pair_begin", _request, state), do: mobile_begin_reply(state)
   defp handle_method("mobile_pair_wait", request, state), do: mobile_wait_reply(request, state)
@@ -773,6 +849,38 @@ defmodule Fermix.CLI.Daemon do
     end
   end
 
+  # A sibling CLI VM signed a profile out (`fermix auth logout`, `fermix plugins
+  # auth logout): it deleted the stored entry itself, and this is how the
+  # daemon's manager learns it at once rather than at its next refresh. A
+  # forget that does not finish is an error the CLI reports, never an "ok".
+  defp auth_forget_reply(request, state) do
+    case forget_profile(request) do
+      {:ok, profile} -> forget_signed_out(profile, state)
+      {:error, reason} -> error_reply(reason)
+    end
+  end
+
+  defp forget_signed_out(profile, state) do
+    case safe_daemon_call(fn -> state.token_supervisor.forget_signed_out(profile) end) do
+      {:ok, :ok} ->
+        %{status: "ok"}
+
+      {:error, reason} ->
+        Logger.warning("Daemon kept the #{profile} tokens after a CLI logout: #{inspect(reason)}")
+        error_reply(reason)
+    end
+  end
+
+  defp forget_profile(request) do
+    case Map.get(request_params(request), "profile") do
+      profile when is_binary(profile) and byte_size(profile) in 1..@max_profile_bytes ->
+        if String.printable?(profile), do: {:ok, profile}, else: {:error, "invalid profile"}
+
+      _other ->
+        {:error, "invalid profile"}
+    end
+  end
+
   # The skill surfaces of the runtime summary are raw SkillRegistry reload
   # summaries whose `errors` hold tuples — Wire.json_safe raises on tuples, so
   # shape them through the same picker skills_reload uses before serializing.
@@ -819,7 +927,7 @@ defmodule Fermix.CLI.Daemon do
     end)
   end
 
-  defp agent_message_reply(request) do
+  defp agent_message_reply(request, caller) do
     params = Map.get(request, "params", %{})
     content = params |> Map.get("content", "") |> to_string() |> String.trim()
     session_id = normalize_session_id(Map.get(params, "session_id"))
@@ -839,13 +947,26 @@ defmodule Fermix.CLI.Daemon do
             session_id: session_id,
             timeout_ms: timeout_ms,
             media_parts: media_parts,
-            cwd: Map.get(params, "cwd")
+            cwd: Map.get(params, "cwd"),
+            caller: caller
           )
         end
 
       {:error, reason} ->
         %{status: "error", error: reason_to_string(reason), session_id: session_id}
     end
+  end
+
+  defp unidentified_caller_reply(request, reason) do
+    session_id =
+      request |> Map.get("params", %{}) |> Map.get("session_id") |> normalize_session_id()
+
+    %{
+      status: "error",
+      error:
+        "the daemon could not identify the process that sent this prompt: #{inspect(reason)}",
+      session_id: session_id
+    }
   end
 
   # Decode `fermix ask --attach` image payloads (mime + base64) into the neutral

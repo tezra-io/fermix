@@ -29,6 +29,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   use GenServer
 
+  alias FermixCore.Capabilities.AccessGate
+  alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Realtime.Config
@@ -40,6 +42,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.LiveTranscript
+  alias FermixCore.Realtime.LiveTurn
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.VoiceBridge
 
@@ -53,6 +56,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @close_deadline_ms 15_000
   @usage_tick_ms 5_000
   @context_wait_ms 1_000
+  # How long after its audio has had time to play a reply counts as over: the
+  # pet buffers a little before it plays.
+  @reply_margin_ms 300
 
   # How far back a delegation's request reads. Long enough for a correction and
   # a confirmation, short enough that an unrelated earlier topic cannot be
@@ -133,6 +139,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       close_deadline_ms: Keyword.get(opts, :close_deadline_ms, @close_deadline_ms),
       usage_tick_ms: Keyword.get(opts, :usage_tick_ms, @usage_tick_ms),
       context_wait_ms: Keyword.get(opts, :context_wait_ms, @context_wait_ms),
+      reply_margin_ms: Keyword.get(opts, :reply_margin_ms, @reply_margin_ms),
       provider_ready?: false,
       provider_session_id: nil,
       expires_at: nil,
@@ -140,6 +147,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       muted?: false,
       provider_muted?: false,
       speaking?: false,
+      turn: LiveTurn.new(),
       closing?: false,
       closed_report: :never,
       ledger: LiveLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
@@ -151,7 +159,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       start_timer: nil,
       max_session_timer: nil,
       usage_timer: nil,
-      context_timers: %{}
+      reply_timer: nil,
+      context_timers: %{},
+      # `{intent_id, since_ms}`: the parked access-sensitive command the last
+      # settled delegation's OWN turn asked the owner about, and when the owner
+      # had last stopped speaking as that reply was delivered. Only speech after
+      # it answers (`Capabilities.AccessGate`'s spoken yes); `nil` otherwise.
+      access_window: nil,
+      # Confirmed access-sensitive runs in flight: task ref -> delegation id.
+      access_confirms: %{}
     }
   end
 
@@ -169,7 +185,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.playback_stop())
 
     state =
-      state
+      %{state | turn: LiveTurn.interrupted(state.turn, now(state))}
+      |> cancel_reply_timer()
       |> notify_state("listening")
       |> send_append(
         OpenAILiveClient.instructions_append_event(
@@ -189,13 +206,22 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # operator's room while it waited.
   def handle_call({:mute, enabled?}, _from, state) do
     state =
-      %{state | muted?: enabled?}
+      %{state | muted?: enabled?, turn: LiveTurn.muted(state.turn)}
       |> notify_state(if(enabled?, do: "muted", else: "listening"))
       |> send_mute(enabled?)
 
     {:reply, :ok, state}
   end
 
+  # `SessionControl` waits for `cancel_task` and `call_stop` with no timeout, so
+  # both must stay bounded. A cancel is one bridge cancel (the Queue's
+  # conversation stop, however long a busy Queue takes to reach it) and then the
+  # next delegation's submit. A stop is `settle/2`: at most one bridge cancel
+  # (only the active delegation reached the bridge), the bridge close (one more
+  # stop and the call store's release), and the graceful close: one send, then
+  # at most `close_deadline_ms` waiting for `session.closed`. The stop's reply
+  # goes out after `terminate/2`, so the wait covers that too: it cancels
+  # timers, finds the bridge call already closed, and casts the socket close.
   def handle_call({:cancel_task, delegation_id}, _from, state) do
     case LiveDelegation.fetch(state.delegations, delegation_id) do
       {:ok, record} -> {:reply, :ok, start_next(cancel_delegation(state, record))}
@@ -220,7 +246,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def handle_cast({:audio_chunk, audio}, state) do
     case audio_drop_reason(state, audio) do
       nil ->
-        {:noreply, send_provider(state, OpenAILiveClient.audio_append_event(audio))}
+        state = send_provider(state, OpenAILiveClient.audio_append_event(audio))
+        {:noreply, advance_operator_turn(state)}
 
       reason ->
         Logger.debug("voice_live: dropped microphone chunk (#{reason})")
@@ -273,6 +300,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     enforce_ceiling(schedule_usage_tick(state))
   end
 
+  def handle_info({:reply_played_out, token}, %{reply_timer: {_timer, token}} = state) do
+    state = %{state | reply_timer: nil}
+    {:noreply, if(state.speaking?, do: notify_state(state, "listening"), else: state)}
+  end
+
+  def handle_info({:reply_played_out, _stale_token}, state), do: {:noreply, state}
+
   def handle_info({:context_wait_expired, delegation_id}, state) do
     state = %{state | context_timers: Map.delete(state.context_timers, delegation_id)}
 
@@ -291,6 +325,24 @@ defmodule FermixCore.Realtime.LiveSessionServer do
         Logger.debug("voice_live: dropped stale event for delegation #{delegation_id}")
         {:noreply, state}
     end
+  end
+
+  # A confirmed access-sensitive command finished: its outcome answers the task
+  # that carried the owner's yes, like any delegation result.
+  def handle_info({ref, {status, outcome}}, %{access_confirms: confirms} = state)
+      when is_reference(ref) and is_map_key(confirms, ref) and status in [:ok, :error] and
+             is_binary(outcome) do
+    Process.demonitor(ref, [:flush])
+    {delegation_id, confirms} = Map.pop(confirms, ref)
+    access_result(%{state | access_confirms: confirms}, delegation_id, spoken(status, outcome))
+  end
+
+  def handle_info({:DOWN, ref, :process, _pid, reason}, %{access_confirms: confirms} = state)
+      when is_map_key(confirms, ref) do
+    Logger.error("voice_live: a confirmed access-sensitive command crashed: #{inspect(reason)}")
+    {delegation_id, confirms} = Map.pop(confirms, ref)
+    unknown = {:error, AccessGate.outcome_unknown_text()}
+    access_result(%{state | access_confirms: confirms}, delegation_id, unknown)
   end
 
   def handle_info(message, state) do
@@ -408,9 +460,19 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp handle_live_event({:audio_delta, delta}, state) do
-    state = if state.speaking?, do: state, else: notify_state(state, "speaking")
-    notify(state, LiveFrames.audio_delta(delta))
-    {:noreply, state}
+    case LiveTurn.output(state.turn, delta, now(state)) do
+      {:voice, turn, plays_for_ms} ->
+        {:noreply, forward_reply_audio(%{state | turn: turn}, delta, plays_for_ms)}
+
+      # Live pads its output with silence between replies, and the pet plays
+      # the stream as it comes; padding is not speech.
+      {:silence, turn} ->
+        notify(state, LiveFrames.audio_delta(delta))
+        {:noreply, %{state | turn: turn}}
+
+      {:drop, turn} ->
+        {:noreply, %{state | turn: turn}}
+    end
   end
 
   defp handle_live_event({:transcript_delta, speaker, delta, start_ms, end_ms}, state) do
@@ -422,7 +484,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
 
     record_caption(state, speaker, delta, start_ms, end_ms)
-    {:noreply, resume_listening(state, speaker)}
+    {:noreply, read_operator_words(state, speaker)}
   end
 
   defp handle_live_event({:delegation_created, id, offset_ms}, state) do
@@ -535,6 +597,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp submit_delegation(state, record) do
+    case access_answer(state, record) do
+      {:confirmed, intent_id} -> confirm_access(%{state | access_window: nil}, record, intent_id)
+      :declined -> submit_to_bridge(%{state | access_window: nil}, record)
+      _no_window_or_no_answer -> submit_to_bridge(state, record)
+    end
+  end
+
+  defp submit_to_bridge(state, record) do
     turn_session_id = mint_turn_session_id()
     request = delegation_request(state, record, turn_session_id)
     state = %{state | turn_sessions: Map.put(state.turn_sessions, record.id, turn_session_id)}
@@ -552,6 +622,67 @@ defmodule FermixCore.Realtime.LiveSessionServer do
         |> send_append(commentary(record.id, @submit_failed_line), :commentary, record.id)
         |> settle_delegation(record, :failed, "submit_failed")
         |> start_next()
+    end
+  end
+
+  # A task Live raises after a delegation's reply asked the owner to confirm the
+  # command that delegation's own turn parked is read against what the owner
+  # said since (`Capabilities.AccessGate`). A whole-utterance yes runs the
+  # recorded command here, with no Fermix turn that could issue it again;
+  # anything else drops the command and the task goes to Fermix as usual. A task
+  # with no owner speech behind it (raised before the question) is no answer,
+  # and the command waits.
+  defp access_answer(%{access_window: {intent_id, since}} = state, %{offset_ms: offset_ms})
+       when offset_ms > since do
+    case LiveTranscript.user_text_since(state.transcript, since) do
+      "" -> :no_answer
+      text -> AccessGate.answer_spoken(intent_id, text)
+    end
+  end
+
+  defp access_answer(_state, _record), do: :no_window
+
+  # Every settle decides the answer window afresh. Only a delegation that
+  # completed, and whose own turn parked a command still waiting, opens one: its
+  # reply is what asked the owner. A failed or cancelled one (its reply, if any,
+  # asked nothing) and a reply from a turn that parked nothing close it, so a
+  # yes the owner said to something else can never confirm the command.
+  defp settle_access_window(state, record, :completed),
+    do: %{state | access_window: parked_by(state, record)}
+
+  defp settle_access_window(state, _record, _failed_or_cancelled),
+    do: %{state | access_window: nil}
+
+  defp parked_by(state, record) do
+    with {:ok, turn_session_id} <- Map.fetch(state.turn_sessions, record.id),
+         {:ok, intent_id} <- AccessPending.pending_from(turn_session_id),
+         since when is_integer(since) <- LiveTranscript.latest_user_end_ms(state.transcript) do
+      {intent_id, since}
+    else
+      _nothing_parked -> nil
+    end
+  end
+
+  # The same bookkeeping and bookends as a submitted task. No bridge task backs
+  # it (`bridge_ref: nil`), so cancelling it makes no bridge call.
+  defp confirm_access(state, record, intent_id) do
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        AccessGate.confirm(intent_id)
+      end)
+
+    state = %{state | access_confirms: Map.put(state.access_confirms, task.ref, record.id)}
+    run_delegation(state, record, nil)
+  end
+
+  defp spoken(:ok, outcome), do: {:ok, "The owner said yes. " <> outcome}
+  defp spoken(:error, outcome), do: {:error, outcome}
+
+  # A cancelled task is already settled; its late outcome is dropped.
+  defp access_result(state, delegation_id, result) do
+    case LiveDelegation.fetch(state.delegations, delegation_id) do
+      {:ok, record} -> delegation_event({:result, result}, record, state)
+      :error -> {:noreply, state}
     end
   end
 
@@ -708,7 +839,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           state
       end
 
-    forget_delegation(state, record.id)
+    state
+    |> settle_access_window(record, status)
+    |> forget_delegation(record.id)
   end
 
   defp terminal(delegations, id, :completed, summary),
@@ -854,8 +987,32 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     %{state | speaking?: value == "speaking"}
   end
 
-  defp resume_listening(%{speaking?: true} = state, :user), do: notify_state(state, "listening")
-  defp resume_listening(state, _speaker), do: state
+  # The reply's audio goes to the pet, and the pet hears when it has played out
+  # (Live sends no end of a reply).
+  defp forward_reply_audio(state, delta, plays_for_ms) do
+    state = if state.speaking?, do: state, else: notify_state(state, "speaking")
+    notify(state, LiveFrames.audio_delta(delta))
+    arm_reply_timer(state, plays_for_ms + state.reply_margin_ms)
+  end
+
+  # The operator's turn, from Live's recognition of their words: a fragment is
+  # them speaking, and the microphone's steady chunks are the clock that notices
+  # when the words have stopped. Live reports neither turn boundary itself.
+  defp read_operator_words(state, :user) do
+    {signal, turn} = LiveTurn.words(state.turn, now(state), state.speaking?)
+    move_turn(%{state | turn: turn}, signal)
+  end
+
+  defp read_operator_words(state, _speaker), do: state
+
+  defp advance_operator_turn(state) do
+    {signal, turn} = LiveTurn.tick(state.turn, now(state), state.speaking?)
+    move_turn(%{state | turn: turn}, signal)
+  end
+
+  defp move_turn(state, nil), do: state
+  defp move_turn(state, :thinking), do: notify_state(state, "thinking")
+  defp move_turn(state, :listening), do: notify_state(state, "listening")
 
   defp notify_call_ready(state) do
     notify(
@@ -1086,7 +1243,29 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       &cancel_timer/1
     )
 
-    %{state | start_timer: nil, max_session_timer: nil, usage_timer: nil, context_timers: %{}}
+    %{
+      cancel_reply_timer(state)
+      | start_timer: nil,
+        max_session_timer: nil,
+        usage_timer: nil,
+        context_timers: %{}
+    }
+  end
+
+  # Re-armed by every chunk of the reply, so it fires once the last of it has
+  # had time to play. The token tells a stale expiry from the current one.
+  defp arm_reply_timer(state, delay_ms) do
+    state = cancel_reply_timer(state)
+    token = make_ref()
+    timer = Process.send_after(self(), {:reply_played_out, token}, delay_ms)
+    %{state | reply_timer: {timer, token}}
+  end
+
+  defp cancel_reply_timer(%{reply_timer: nil} = state), do: state
+
+  defp cancel_reply_timer(%{reply_timer: {timer, _token}} = state) do
+    cancel_timer(timer)
+    %{state | reply_timer: nil}
   end
 
   defp cancel_timer(nil), do: true

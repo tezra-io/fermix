@@ -51,7 +51,7 @@ defmodule FermixChannels.CLI do
           chat_id: session_id,
           reply_target: session_id,
           request_cwd: request_cwd(opts),
-          metadata: %{source: :cli, user_id: "cli", chat_type: "private"},
+          metadata: put_caller(%{source: :cli, user_id: "cli", chat_type: "private"}, opts),
           media_parts: media_parts
         })
 
@@ -182,6 +182,24 @@ defmodule FermixChannels.CLI do
 
       _ ->
         nil
+    end
+  end
+
+  # Who sent the prompt, as the daemon read it off the control socket's peer
+  # (`FermixCore.SocketPeer`): a process the daemon started is the agent, and
+  # nobody watches a detached one, so `TurnRunner.computer_use_origin/1` labels
+  # either turn unattended (SIDE-V1).
+  # Set ONLY by the daemon bridge; absent on every in-process caller.
+  defp put_caller(metadata, opts) do
+    case Keyword.fetch(opts, :caller) do
+      {:ok, caller} when caller in [:daemon_descendant, :detached, :independent] ->
+        Map.put(metadata, :caller, caller)
+
+      {:ok, other} ->
+        raise ArgumentError, "unknown CLI caller #{inspect(other)}"
+
+      :error ->
+        metadata
     end
   end
 

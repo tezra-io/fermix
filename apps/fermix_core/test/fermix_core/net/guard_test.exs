@@ -148,6 +148,60 @@ defmodule FermixCore.Net.GuardTest do
              )
   end
 
+  # The narrower question a caller that lets the operator's own network through
+  # still asks: link-local (where every instance-metadata endpoint lives), the
+  # unspecified address, and AWS's IPv6 metadata endpoint. The allows are as
+  # load-bearing as the refusals — RFC 1918, ULA, CGNAT (tailnets) and loopback
+  # are the intranet, homelab and dev-server cases this question must not touch.
+  @link_local_cases [
+    {{169, 254, 169, 254}, true, "cloud instance metadata"},
+    {{169, 254, 10, 20}, true, "IPv4 link-local"},
+    {{0, 0, 0, 0}, true, "IPv4 unspecified"},
+    {{0, 1, 2, 3}, true, "0.0.0.0/8, this host"},
+    {{0, 0, 0, 0, 0, 0, 0, 0}, true, "IPv6 unspecified"},
+    {{0xFE80, 0, 0, 0, 0, 0, 0, 1}, true, "IPv6 link-local"},
+    {{0xFEBF, 0, 0, 0, 0, 0, 0, 1}, true, "top of fe80::/10"},
+    {{0xFD00, 0x0EC2, 0, 0, 0, 0, 0, 0x0254}, true, "AWS IPv6 metadata endpoint"},
+    {{0, 0, 0, 0, 0, 0xFFFF, 0xA9FE, 0xA9FE}, true, "IPv4-mapped metadata"},
+    {{10, 0, 0, 5}, false, "RFC 1918 — an intranet host or a proxy"},
+    {{192, 168, 1, 1}, false, "RFC 1918 — a home router"},
+    {{100, 64, 0, 1}, false, "CGNAT — a tailnet peer"},
+    {{127, 0, 0, 1}, false, "IPv4 loopback"},
+    {{0, 0, 0, 0, 0, 0, 0, 1}, false, "IPv6 loopback"},
+    {{0xFD12, 0x3456, 0, 0, 0, 0, 0, 1}, false, "ULA other than the metadata endpoint"},
+    {{0xFEC0, 0, 0, 0, 0, 0, 0, 1}, false, "site-local is not link-local"},
+    {{93, 184, 216, 34}, false, "public IPv4"},
+    {{0x2606, 0x4700, 0, 0, 0, 0, 0, 1}, false, "public IPv6"}
+  ]
+
+  test "metadata_or_link_local?/1 answers link-local, metadata and unspecified only" do
+    for {ip, expected, why} <- @link_local_cases do
+      assert Guard.metadata_or_link_local?(ip) == expected,
+             "#{:inet.ntoa(ip)} should be #{expected} (#{why})"
+    end
+  end
+
+  # One classifier, two questions: whatever the narrow question refuses, the
+  # public-web check refuses too.
+  test "every address metadata_or_link_local?/1 refuses is non-global to validate/2" do
+    for {ip, true, why} <- @link_local_cases do
+      resolver = fn "answer.example" -> {:ok, [ip]} end
+
+      assert {:error, {:resolved_to_private_address, ^ip}} =
+               Guard.validate("https://answer.example", resolver: resolver),
+             "validate/2 let through #{:inet.ntoa(ip)} (#{why})"
+    end
+  end
+
+  # What the lookup itself refuses — a host that is not UTF-8, a name with an
+  # empty or overlong label — is a failed lookup the caller judges, never a
+  # crash in the process that asked. Each is refused before any query is sent.
+  test "resolve/2 answers a name it cannot look up with an error" do
+    for host <- [<<0xFF, 0xFE>>, "a..example", String.duplicate("a", 64) <> ".example"] do
+      assert {:error, _reason} = Guard.resolve(host, 100), "#{inspect(host)} raised"
+    end
+  end
+
   test "redacts sensitive headers case-insensitively" do
     headers = [
       {"Authorization", "Bearer abc"},

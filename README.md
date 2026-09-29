@@ -230,7 +230,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 - **Slack** — Events API DM and `app_mention` ingress, Web API replies.
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
 - **Signal** — `signal-cli` receive loop, subprocess send path.
-- **Mobile (iOS)** — daemon-side groundwork for a first-party iPhone companion: a dedicated Noise-encrypted listener on `:4031`, advertised over Bonjour and reachable on a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync; devices are paired with `fermix pair` and revoked with `fermix devices revoke`. The companion app is not released yet — it ships in its own release, after the daemon that defines the wire — so there is nothing to pair with today. The channel therefore ships dormant behind a feature flag and is offered nowhere in setup: turning it on means hand-writing `enabled = true` under `[fermix_channels.mobile]` in `config.toml` and restarting the daemon. It gains a setup surface when the app ships.
+- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, advertised over Bonjour and reachable on a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is off by default and is managed over the management protocol: the `channels.mobile` settings section (enable, port, listen address, mDNS announcement; a change needs a restart) and the `mobile.*` pairing and paired-device methods that the desktop apps' Phone pane is built on. That pane ships with the apps; until then a dev or Linux host pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`, and hand-writing `enabled = true` under `[fermix_channels.mobile]` in `config.toml` and restarting the daemon remains a valid way to turn the channel on there. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
 - **CLI** — local stdin/stdout smoke path through the same dispatcher and `MainAgent`.
 
 ### HTTP endpoints
@@ -262,8 +262,8 @@ Telegram, Discord, and Signal use long-poll or persistent client transports and 
 | `fermix status` | Print running daemon status via the control socket (exit `3` if not running) |
 | `fermix health` | Print structured daemon readiness and runtime health |
 | `fermix voice status [--json]` | Show local Realtime voice companion status |
-| `fermix pair` | Pair an iPhone companion device — renders a QR, then approves only if the six-digit code matches the one on the phone (needs the `mobile` flag on) |
-| `fermix devices list\|revoke ID` | List paired mobile devices, or revoke one and drop its live socket (needs the `mobile` flag on) |
+| `fermix pair` | Pair a phone companion device over the management protocol — renders the daemon's QR, polls until a phone asks, then approves only if the six-digit code matches the one on the phone (needs the mobile channel running) |
+| `fermix devices list\|revoke ID` | List paired phones, or revoke one and drop its live socket (revoking needs the mobile channel running) |
 | `fermix ask` / `fermix chat` | Send one local prompt to the running daemon and print the MainAgent reply |
 | `fermix sandbox explain` | Show the effective sandbox roots, each annotated `(granted)` or `(mode)` |
 | `fermix grant path PATH` | Persist a sandbox root the agent may work in |
@@ -310,11 +310,12 @@ owner_user_id = "123456789"
 command_allowlist = ["987654321"]
 ```
 
-If `owner_user_id` is absent, Fermix can derive the command owner from a single
-configured ingress allowlist entry. Multiple allowed users still require an
-explicit `owner_user_id` or `command_allowlist`. Use `/whoami` from the target
-account to discover the id, then persist it with `fermix setup --reconfigure` or
-by editing `~/.fermix/config.toml`.
+If `owner_user_id` is absent, every allowed sender chats at guest trust, even
+when your own id is the only allowlist entry: read-only chat with no file access
+or attachments, and only the slash commands `command_allowlist` opens to
+non-owners. `fermix doctor` warns about such a channel in its `command owners`
+row. Use `/whoami` from the target account to discover the id, then persist it
+with `fermix setup --reconfigure` or by editing `~/.fermix/config.toml`.
 
 Automatic conversation compaction is controlled by:
 

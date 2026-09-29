@@ -55,6 +55,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Providers.ScreenshotRetention
   alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
+  alias FermixCore.Providers.ToolResultRetention
 
   require Logger
 
@@ -148,8 +149,11 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     invariant =
       Map.get(provider_state, :invariant_metrics) || invariant_metrics(tools, capabilities)
 
+    history =
+      substitute_tool_results(messages, Keyword.get(opts, :tool_result_substitutions, %{}))
+
     next_messages =
-      (messages ++
+      (history ++
          [
            %{role: "assistant", content: assistant_content},
            %{role: "user", content: tool_result_blocks(tool_results)}
@@ -161,6 +165,41 @@ defmodule FermixCore.Providers.Anthropic.Messages do
       )
 
     request(next_messages, system, tools, capabilities, invariant, opts)
+  end
+
+  # In-loop compaction (IN_LOOP_CONTEXT_OVERFLOW.md §3.3): a replayed
+  # `tool_result` block whose `tool_use_id` has an entry carries that text
+  # instead. History only: the results this call appends are the loop's to
+  # substitute. Blocks are never added, dropped or reordered.
+  defp substitute_tool_results(messages, substitutions) when is_map(substitutions),
+    do: Enum.map(messages, &substitute_message(&1, substitutions))
+
+  defp substitute_message(%{role: "user", content: blocks} = message, substitutions)
+       when is_list(blocks) do
+    substituted =
+      ToolResultRetention.substitute(
+        blocks,
+        substitutions,
+        &tool_result_id/1,
+        &replace_tool_result_text/2
+      )
+
+    %{message | content: substituted}
+  end
+
+  defp substitute_message(message, _substitutions), do: message
+
+  defp tool_result_id(%{type: "tool_result", tool_use_id: id}), do: id
+  defp tool_result_id(_block), do: nil
+
+  # A block-array result (text + images) keeps its non-text blocks; its text
+  # blocks collapse into one leading text block carrying the substitution.
+  defp replace_tool_result_text(%{content: content} = block, text) when is_binary(content),
+    do: %{block | content: text}
+
+  defp replace_tool_result_text(%{content: content} = block, text) when is_list(content) do
+    kept = Enum.reject(content, &match?(%{type: "text"}, &1))
+    %{block | content: [%{type: "text", text: text} | kept]}
   end
 
   # A screenshot carrier is a user message holding a `tool_result` block whose

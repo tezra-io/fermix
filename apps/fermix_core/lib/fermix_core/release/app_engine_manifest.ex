@@ -77,8 +77,17 @@ defmodule FermixCore.Release.AppEngineManifest do
   defp public_protocols(protocols) when is_map(protocols) do
     with {:ok, management} <- public_range(Map.get(protocols, :management)),
          {:ok, realtime} <- public_range(Map.get(protocols, :realtime)),
-         true <- Enum.sort(Map.keys(protocols)) == [:management, :realtime] do
-      {:ok, %{"management" => management, "realtime" => realtime}}
+         {:ok, companion} <- public_range(Map.get(protocols, :companion)),
+         {:ok, browser_host} <- public_range(Map.get(protocols, :browser_host)),
+         true <-
+           Enum.sort(Map.keys(protocols)) == [:browser_host, :companion, :management, :realtime] do
+      {:ok,
+       %{
+         "management" => management,
+         "realtime" => realtime,
+         "companion" => companion,
+         "browser_host" => browser_host
+       }}
     else
       _failure -> {:error, :invalid_protocol_metadata}
     end

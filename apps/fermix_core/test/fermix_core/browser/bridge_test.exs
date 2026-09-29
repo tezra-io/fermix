@@ -55,8 +55,8 @@ defmodule FermixCore.Browser.BridgeTest do
 
   defp hello!(ctx) do
     socket = connect!(ctx)
-    send_frame(socket, %{type: "hello", protocol: 1, browser: "chrome"})
-    assert %{"type" => "hello_ack", "protocol" => 1} = recv_frame(socket)
+    send_frame(socket, %{type: "hello", protocol: 2, browser: "chrome"})
+    assert %{"type" => "hello_ack", "protocol" => 2} = recv_frame(socket)
     socket
   end
 
@@ -101,6 +101,18 @@ defmodule FermixCore.Browser.BridgeTest do
     socket = connect!(ctx)
 
     send_frame(socket, %{type: "hello", protocol: 99})
+    assert %{"type" => "refused", "reason" => "unsupported_protocol"} = recv_frame(socket)
+    assert {:error, :closed} = :gen_tcp.recv(socket, 0, @connect_timeout)
+  end
+
+  # Protocol 2 added `Network.enable` to what a granted tab is sent. An
+  # extension that predates it would refuse that command on every attach, so it
+  # is refused here at the handshake instead, where the skew has a name.
+  test "an extension still speaking protocol 1 is refused at the handshake", ctx do
+    start_bridge(ctx)
+    socket = connect!(ctx)
+
+    send_frame(socket, %{type: "hello", protocol: 1, browser: "chrome"})
     assert %{"type" => "refused", "reason" => "unsupported_protocol"} = recv_frame(socket)
     assert {:error, :closed} = :gen_tcp.recv(socket, 0, @connect_timeout)
   end
@@ -357,6 +369,34 @@ defmodule FermixCore.Browser.BridgeTest do
 
     # Nothing was transmitted: the extension has no frame to read.
     assert {:error, :timeout} = :gen_tcp.recv(socket, 0, 200)
+  end
+
+  # The one command outside the tab domains a granted tab is sent: it turns on
+  # the report of which address served the tab's document, which the read gate
+  # judges. Every other `Network` method — cookie reads above all — stays in
+  # `@browser_wide` above.
+  test "Network.enable is transmitted to the granted tab", ctx do
+    grants = start_bridge(ctx)
+    socket = hello!(ctx)
+    send_frame(socket, %{type: "grant", tab_id: @tab_id, url: "https://e.com", title: "P"})
+    assert {:ok, _grant} = eventually_claimed(grants)
+
+    {:ok, transport} =
+      ExtensionTransport.start_link("bridge:#{@tab_id}",
+        owner: self(),
+        keepalive_ms: 30_000,
+        grants: grants,
+        grant: claim!(grants)
+      )
+
+    caller =
+      Task.async(fn ->
+        ExtensionTransport.command(transport, "Network.enable", %{}, nil, 2_000, 100)
+      end)
+
+    assert %{"type" => "cdp", "id" => id, "method" => "Network.enable"} = recv_frame(socket)
+    send_frame(socket, %{type: "cdp_result", id: id, result: %{}})
+    assert {:ok, %{}} = Task.await(caller, 3_000)
   end
 
   test "a command over the outbound ceiling is refused before transmission", ctx do

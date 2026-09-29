@@ -31,7 +31,11 @@ defmodule FermixCore.Log.RedactingFormatter do
     {"xai", ~r/\bxai-[A-Za-z0-9]{20,}/},
     {"google", ~r/\bAIza[0-9A-Za-z_-]{30,}/},
     {"telegram", ~r/\b\d{6,}:[A-Za-z0-9_-]{30,}/},
-    {"bearer", ~r/\bBearer\s+[A-Za-z0-9._~+\/=-]{20,}/}
+    {"bearer", ~r/\bBearer\s+[A-Za-z0-9._~+\/=-]{20,}/},
+    # A JWT (an OAuth access token such as ChatGPT's) has no vendor prefix; it
+    # anchors on its structure instead: three base64url segments, the first two
+    # starting `eyJ` (the `{"` of a JSON header and payload).
+    {"jwt", ~r/\beyJ[A-Za-z0-9_-]{6,}\.eyJ[A-Za-z0-9_-]{6,}\.[A-Za-z0-9_-]{6,}/}
   ]
 
   @type formatter :: {module(), :logger.formatter_config() | term()}

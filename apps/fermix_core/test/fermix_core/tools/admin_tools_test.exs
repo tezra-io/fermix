@@ -148,6 +148,64 @@ defmodule FermixCore.Tools.AdminToolsTest do
     assert mismatch.error =~ "openrouter"
   end
 
+  # MGMT-1: this tool writes config.toml with no approval step, so a slug that
+  # carries a line break is refused before anything is written.
+  test "model_routing_config refuses a slug carrying a control character and writes nothing",
+       %{home: home} do
+    assert {:ok, %{success: true}} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => "gpt-5.4-mini"},
+               @context
+             )
+
+    before = File.read!(Path.join(home, "config.toml"))
+    injected = "x\n[fermix_core.providers.anthropic]\nbase_url = https://attacker.example/v1\n#"
+
+    assert {:ok, refused} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => injected},
+               @context
+             )
+
+    assert refused.success == false
+    assert refused.error =~ "subagent_model"
+    assert refused.error =~ "control character"
+    assert File.read!(Path.join(home, "config.toml")) == before
+  end
+
+  test "model_routing_config writes and reports the slug without a paste's padding", %{home: home} do
+    assert {:ok, set_result} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => "  gpt-5.4-mini\n"},
+               @context
+             )
+
+    assert set_result.success == true
+    assert Jason.decode!(set_result.output)["value"] == "gpt-5.4-mini"
+    assert File.read!(Path.join(home, "config.toml")) =~ ~s(subagent_model = "gpt-5.4-mini"\n)
+  end
+
+  test "model_routing_config refuses a value that is blank once trimmed and writes nothing",
+       %{home: home} do
+    assert {:ok, %{success: true}} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => "gpt-5.4-mini"},
+               @context
+             )
+
+    before = File.read!(Path.join(home, "config.toml"))
+
+    assert {:ok, refused} =
+             ModelRoutingConfig.execute(
+               %{"action" => "set", "key" => "subagent_model", "value" => " \n\t"},
+               @context
+             )
+
+    assert refused.success == false
+    assert refused.error =~ "delete"
+    assert File.read!(Path.join(home, "config.toml")) == before
+  end
+
   test "model_routing_config read normalizes config load failures", %{home: home} do
     File.write!(home, "not a directory")
 

@@ -18,8 +18,8 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
   or invented id drops), unknown ids are dropped, the set is capped at
   `@max_active_threads` by last-touched, each state passes the same output contract
   as a session note (bounds plus the verbatim guard against whatever spool text is
-  still present), and the write is one transaction that re-reads the purge
-  watermark.
+  still present), and the write is one transaction that refuses the whole set when
+  a purge issued after the input was read reaches any note or thread in it.
 
   A reply with no usable block writes nothing **and does not move the write mark**:
   claiming a roll-up that never happened would be worse, and the notes it read stay
@@ -70,9 +70,10 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
 
     with {:ok, state} <- Repo.computer_history_ensure_state(server: repo),
          true <- due?(state, now_ms),
+         {:ok, purge_mark} <- Repo.computer_history_purge_mark(server: repo),
          {:ok, [_first | _rest] = notes} <- read_notes(repo, state.last_rollup_ts),
          {:ok, threads} <- Repo.computer_history_active_threads(@max_active_threads, server: repo) do
-      run(repo, opts, call_fun, notes, threads, now_ms)
+      run(repo, opts, call_fun, notes, threads, read_scope(purge_mark, notes, threads), now_ms)
     else
       false -> :skipped
       {:ok, []} -> :skipped
@@ -103,6 +104,20 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     end
   end
 
+  # What the purge guard checks the write against (§12): the purge mark, taken
+  # before the input was read, and the window spanning every note and thread the
+  # call is shown. The whole input, not each proposed thread's own provenance: the
+  # model saw all of it, so any thread's state can carry any of it.
+  defp read_scope(purge_mark, notes, threads) do
+    rows = notes ++ threads
+
+    %{
+      purge_mark: purge_mark,
+      from_ts: rows |> Enum.map(& &1.provenance_from_ts) |> Enum.min(),
+      to_ts: rows |> Enum.map(& &1.provenance_to_ts) |> Enum.max()
+    }
+  end
+
   defp log_note_bound(read, total) when read >= total, do: :ok
 
   defp log_note_bound(read, total) do
@@ -112,30 +127,30 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     )
   end
 
-  defp run(repo, opts, call_fun, notes, threads, now_ms) do
+  defp run(repo, opts, call_fun, notes, threads, scope, now_ms) do
     result = call_fun.(messages(threads, notes, Config.timezone(opts)))
 
     with :ok <- Repo.computer_history_stamp_rollup_attempt(now_ms, server: repo) do
-      settle(result, repo, opts, notes, threads, now_ms)
+      settle(result, repo, opts, notes, threads, scope, now_ms)
     end
   end
 
   # The attempt is stamped before the reply is judged, so a route-down and an
   # unusable reply are both bounded to one call a day. A failed stamp write is
   # returned, never swallowed: without it the bound does not exist.
-  defp settle({:ok, content}, repo, opts, notes, threads, now_ms),
-    do: write(repo, opts, content, notes, threads, now_ms)
+  defp settle({:ok, content}, repo, opts, notes, threads, scope, now_ms),
+    do: write(repo, opts, content, notes, threads, scope, now_ms)
 
-  defp settle({:error, reason}, _repo, _opts, _notes, _threads, _now_ms),
+  defp settle({:error, reason}, _repo, _opts, _notes, _threads, _scope, _now_ms),
     do: {:route_down, reason}
 
-  defp write(repo, opts, content, notes, previous, now_ms) do
+  defp write(repo, opts, content, notes, previous, scope, now_ms) do
     with {:ok, texts} <-
            Repo.computer_history_recent_event_texts(@guard_event_limit, server: repo),
          {:ok, prior_notes} <- prior_notes(repo, notes, previous) do
       content
       |> build_threads(notes, prior_notes, texts, opts, now_ms)
-      |> persist(repo, previous, now_ms)
+      |> persist(repo, previous, now_ms, scope)
     end
   end
 
@@ -169,7 +184,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     end
   end
 
-  defp persist([], _repo, _previous, _now_ms) do
+  defp persist([], _repo, _previous, _now_ms, _scope) do
     Logger.info(
       "computer_history rollup: no usable threads in the reply; the mark stays put and the " <>
         "next cycle retries"
@@ -178,21 +193,22 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     :skipped
   end
 
-  defp persist(threads, repo, previous, now_ms) do
-    case Repo.computer_history_write_rollup(threads, now_ms, server: repo) do
+  defp persist(threads, repo, previous, now_ms, scope) do
+    case Repo.computer_history_write_rollup(threads, now_ms, scope, server: repo) do
       {:ok, %{written: 0}} -> purged_during_call()
       {:ok, counts} -> log_written(counts, previous)
       {:error, reason} -> {:error, reason}
     end
   end
 
-  # The watermark caught every thread: the owner purged the window this roll-up
-  # was reading. Nothing was superseded and the mark did not move, so the next
-  # roll-up rebuilds from what survived.
+  # A purge issued after the input was read reached it, so every thread was
+  # dropped: the owner purged a window this roll-up was reading. Nothing was
+  # superseded and the mark did not move, so the next roll-up rebuilds from what
+  # survived.
   defp purged_during_call do
     Logger.info(
-      "computer_history rollup: every thread drew on a window purged during the call; " <>
-        "nothing written and the mark stays put"
+      "computer_history rollup: a purge during the call reached the notes and threads it " <>
+        "read; nothing written and the mark stays put"
     )
 
     :skipped
@@ -200,7 +216,7 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
 
   # Retired and new are counted over the SUBJECTS THE STORE HOLDS, not over what
   # the model proposed: the row count would call every re-emitted thread both
-  # retired and new, and a thread the watermark dropped was never written at all.
+  # retired and new.
   defp log_written(counts, previous) do
     subjects = MapSet.new(counts.subjects)
     previous_subjects = MapSet.new(previous, & &1.subject)
@@ -208,14 +224,11 @@ defmodule FermixCore.ComputerHistory.Summarizer.Rollup do
     Logger.info(
       "computer_history rollup: #{counts.written} thread(s) " <>
         "(#{difference_size(previous_subjects, subjects)} retired, " <>
-        "#{difference_size(subjects, previous_subjects)} new)" <> purged_note(counts.purged)
+        "#{difference_size(subjects, previous_subjects)} new)"
     )
 
     :ok
   end
-
-  defp purged_note(0), do: ""
-  defp purged_note(purged), do: ", #{purged} dropped by a purge during the call"
 
   defp difference_size(left, right), do: left |> MapSet.difference(right) |> MapSet.size()
 

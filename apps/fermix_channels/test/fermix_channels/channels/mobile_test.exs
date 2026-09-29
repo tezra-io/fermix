@@ -3,15 +3,32 @@ defmodule FermixChannels.Channels.MobileTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Mobile
+  alias FermixChannels.Companion.Approvals
+  alias FermixChannels.Companion.Output
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.MediaStore
+  alias FermixChannels.Mobile.Protocol, as: MobileProtocol
+  alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
+  alias FermixCore.Memory.ConversationStore
 
   defmodule StoreStub do
     def append(profile_id, attrs, _opts) do
       send(self(), {:timeline_append, profile_id, attrs})
-      row = Map.merge(attrs, %{profile_id: profile_id, server_seq: 73})
+
+      row =
+        Map.merge(attrs, %{
+          profile_id: profile_id,
+          server_seq: 73,
+          created_at: ~U[2026-09-26 09:00:00Z]
+        })
+
       Process.put({__MODULE__, :last_row}, row)
       {:ok, row}
     end
@@ -57,10 +74,70 @@ defmodule FermixChannels.Channels.MobileTest do
       {:ok, %{messages: [Process.get({__MODULE__, :last_row})], next_after_seq: nil}}
     end
 
-    def attach_timeline_media(profile, server_seq, descriptor, _opts) do
-      send(self(), {:thumbnail_attached, profile, server_seq, descriptor})
-      {:ok, %{server_seq: server_seq, media_refs: [descriptor]}}
+    def get_client_request(profile, client_id, _opts),
+      do: {:ok, %{profile_id: profile, client_msg_id: client_id, cancelled_at: nil}}
+
+    def attach_link_preview(profile, server_seq, preview, _opts) do
+      send(self(), {:preview_attached, profile, server_seq, preview})
+      {:ok, %{server_seq: server_seq, media_refs: [], link_previews: [preview]}}
     end
+  end
+
+  # Reports each request settlement to the test by name: the Queue fires a
+  # turn's outcome from a process of its own, not from the test process.
+  defmodule SettlementStore do
+    def fail_client_request(profile, client_id, attempt, fields, _opts) do
+      send(:mobile_settlement_test, {:request_failed, profile, client_id, attempt, fields})
+      {:ok, %{status: "failed", attempt: attempt, result_server_seq: 73}}
+    end
+
+    def get_client_request(profile, client_id, _opts),
+      do: {:ok, %{profile_id: profile, client_msg_id: client_id, cancelled_at: nil}}
+  end
+
+  # The queue a tracked turn is handed to: it takes the message and reports it.
+  defmodule QueueSink do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_cast({:enqueue, message}, test_pid) do
+      send(test_pid, {:enqueued, message.id})
+      {:noreply, test_pid}
+    end
+  end
+
+  # Stands in for MainAgent's turn-state checkout.
+  defmodule CheckoutStub do
+    use GenServer
+
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+
+    @impl true
+    def handle_call({:checkout_turn_state, _msg}, _from, test_pid),
+      do: {:reply, {:ok, %{test_pid: test_pid}, :hit}, test_pid}
+  end
+
+  # Announces its turn, then holds it until the test stops it.
+  defmodule HeldRunner do
+    def run(msg, turn_state, _deliver) do
+      send(turn_state.test_pid, {:turn_started, msg.content})
+
+      receive do
+        :never -> {:ok, "", 0}
+      after
+        15_000 -> {:error, :held_runner_timeout}
+      end
+    end
+
+    def error_reply(_reason), do: "error reply"
   end
 
   defmodule HealthyManagement do
@@ -83,12 +160,36 @@ defmodule FermixChannels.Channels.MobileTest do
     previous_unfurl_launcher =
       Application.fetch_env(:fermix_channels, :mobile_unfurl_launcher)
 
+    previous_approvals = Application.fetch_env(:fermix_channels, :companion_approvals)
+    previous_approval_push = Application.fetch_env(:fermix_channels, :mobile_approval_push)
+
+    approvals =
+      start_supervised!(
+        {Approvals, name: nil, schedule: fn _message, _delay -> make_ref() end},
+        id: :mobile_test_approvals
+      )
+
+    Application.put_env(:fermix_channels, :companion_approvals, approvals)
+
+    Application.put_env(:fermix_channels, :mobile_approval_push, fn profile_id ->
+      send(test_pid, {:approval_push, profile_id})
+      {:ok, %{status: :sent, sent: 1}}
+    end)
+
     Application.put_env(:fermix_channels, :mobile_event_sink, fn profile_id, event ->
       send(test_pid, {:mobile_event, profile_id, event})
       :ok
     end)
 
     Application.put_env(:fermix_channels, :mobile_store, StoreStub)
+    start_supervised!(Turns)
+    start_supervised!({DeviceRegistry, name: DeviceRegistry})
+
+    # The phone subtree runs: its supervisor's name is registered.
+    start_supervised!(%{
+      id: :phone_subtree,
+      start: {Agent, :start_link, [fn -> :phone_subtree end, [name: MobileSupervisor]]}
+    })
 
     Application.put_env(:fermix_channels, :mobile_media_resolver, fn media ->
       {:ok,
@@ -122,7 +223,7 @@ defmodule FermixChannels.Channels.MobileTest do
            site: "Example",
            title: "Example title",
            description: "Description",
-           image_ref: nil
+           image: nil
          }
        ], []}
     end)
@@ -152,9 +253,11 @@ defmodule FermixChannels.Channels.MobileTest do
       restore_env(:mobile_push_launcher, previous_push_launcher)
       restore_env(:mobile_unfurl, previous_unfurl)
       restore_env(:mobile_unfurl_launcher, previous_unfurl_launcher)
+      restore_env(:companion_approvals, previous_approvals)
+      restore_env(:mobile_approval_push, previous_approval_push)
     end)
 
-    :ok
+    {:ok, approvals: approvals}
   end
 
   describe "parse_event/1" do
@@ -232,6 +335,16 @@ defmodule FermixChannels.Channels.MobileTest do
     end
   end
 
+  # PERF-2 (D8): the phone has no platform edit budget, so its drafts stream
+  # at a tenth of a second, from the first character, with no edit cap.
+  test "the phone paces its drafts for a socket, not a chat platform" do
+    assert Mobile.draft_pacing() == %{
+             edit_interval_ms: 100,
+             min_draft_chars: 1,
+             max_edits: :infinity
+           }
+  end
+
   test "command catalog is generated from the live command registry" do
     assert Mobile.command_catalog() ==
              Enum.map(CommandRegistry.list(), fn command ->
@@ -263,9 +376,14 @@ defmodule FermixChannels.Channels.MobileTest do
                     %{"t" => "text_done", "text" => "final", "server_seq" => 73}}
 
     activity = Mobile.build_activity_callback(message)
+    assert :ok = activity.(:provider_start)
+    assert :ok = activity.(:provider_response)
+    refute_receive {:mobile_event, "main", %{"t" => "tool_event"}}
+
     assert :ok = activity.({:tool_start, "shell"})
     assert_receive {:mobile_event, "main", %{"t" => "tool_event", "phase" => "start"}}
 
+    track(message)
     terminal = Mobile.build_turn_result(message)
     assert :ok = terminal.({:failed, :timeout})
     assert_receive {:mobile_event, "main", %{"t" => "turn_error", "code" => "timeout"}}
@@ -346,6 +464,60 @@ defmodule FermixChannels.Channels.MobileTest do
     assert_receive {:push_notify, "main", 73, "Sent an image"}
   end
 
+  # FEAT-2: the phone is in the background more than not, so an approval is
+  # kept for the phone that connects later, and an away phone is told, with
+  # no content, that one waits.
+  test "an approval is kept for a phone that connects later, and an away phone is pushed", %{
+    approvals: approvals
+  } do
+    message = mobile_message()
+    assert :ok = Mobile.send_approval(message, "Allow access? /confirm TOKEN", "TOKEN")
+
+    assert_receive {:mobile_event, "main", %{"t" => "approval", "approval_id" => id}}
+
+    assert [%{"approval_id" => ^id, "token" => "TOKEN"}] =
+             Approvals.pending(approvals, "main", :mobile)
+
+    assert Approvals.pending(approvals, "main", :companion) == []
+    assert_receive {:approval_push, "main"}
+  end
+
+  # R1-2: a card raised on the Mac resolves only from the Mac, so a phone's
+  # hello is re-sent only the cards the phone raised.
+  test "a phone's hello is followed only by the approvals raised on the phone", %{
+    approvals: approvals
+  } do
+    test_pid = self()
+    mac_card = Output.approval(%{kind: :sandbox, text: "Mac?", token: "MAC-T"})
+    phone_card = Output.approval(%{kind: :sandbox, text: "Phone?", token: "PHONE-T"})
+    assert :ok = Approvals.announce(approvals, "main", mac_card, :companion)
+    assert :ok = Approvals.announce(approvals, "main", phone_card, :mobile)
+
+    {:ok, state} =
+      SocketHandler.init(
+        phone_hello_state(%{
+          encode_server: fn
+            "hello_ack", _payload, 1 ->
+              {:ok, "encoded"}
+
+            "approval", payload, 2 ->
+              send(test_pid, {:resent, payload["token"]})
+              {:ok, "approval"}
+          end,
+          encrypt: fn
+            :noise1, "encoded" -> {:ok, "hello-ack-out", :noise2}
+            :noise2, "approval" -> {:ok, "approval-out", :noise3}
+          end
+        })
+      )
+
+    assert {:push, [{:binary, "hello-ack-out"}, {:binary, "approval-out"}], _next} =
+             SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+
+    assert_received {:resent, "PHONE-T"}
+    refute_received {:resent, "MAC-T"}
+  end
+
   test "download_attachment accepts only an existing transport-resolved temp path" do
     dir = FermixTestSupport.SafeRm.make_tmp_dir!("mobile-upload")
     path = Path.join(dir, "upload.bin")
@@ -387,6 +559,48 @@ defmodule FermixChannels.Channels.MobileTest do
     assert File.read!(path) == bytes
   end
 
+  # A mobile request is `running` in the store from the moment it is accepted,
+  # even while it waits behind another turn. A stop that drops it must settle
+  # it, or it stays `running` and is re-run at the next boot.
+  test "a stop settles the queued request it drops as failed, not left running" do
+    Process.register(self(), :mobile_settlement_test)
+    Application.put_env(:fermix_channels, :mobile_store, SettlementStore)
+
+    store =
+      start_supervised!(
+        {ConversationStore, name: :"mobile_cs_#{System.unique_integer([:positive])}", repo: nil}
+      )
+
+    queue =
+      start_supervised!(
+        {Queue,
+         name: :"mobile_queue_#{System.unique_integer([:positive])}",
+         main_agent: start_supervised!({CheckoutStub, self()}),
+         turn_runner: HeldRunner,
+         task_supervisor: start_supervised!(Task.Supervisor),
+         conversation_store: store}
+      )
+
+    assert :ok = Turns.handle_message(queued_mobile_turn("client-1"), queue)
+    assert_receive {:turn_started, "client-1"}, 5_000
+    assert :ok = Turns.handle_message(queued_mobile_turn("client-2"), queue)
+    # The hand-off is sent, not awaited: once Turns has answered, the turn it
+    # handed the queue is ahead of this stop.
+    _turns = :sys.get_state(Turns)
+
+    assert {:ok, %{active_stopped: 1, pending_cleared: 1}} =
+             Queue.stop_conversation({"mobile", "main", :root}, queue)
+
+    assert_receive {:request_failed, "main", "client-1", 2, _fields}, 5_000
+    assert_receive {:request_failed, "main", "client-2", 2, _fields}, 5_000
+
+    assert_receive {:mobile_event, "main",
+                    %{"t" => "turn_error", "turn_id" => "turn-client-2", "code" => "cancelled"}},
+                   5_000
+
+    refute_received {:turn_started, "client-2"}
+  end
+
   test "multiple output parts schedule one push at terminal completion" do
     message = mobile_message()
 
@@ -401,6 +615,7 @@ defmodule FermixChannels.Channels.MobileTest do
     assert :ok = Mobile.send_message("main", "final", opts)
     refute_receive {:push_notify, _, _, _}
 
+    track(message)
     terminal = Mobile.build_turn_result(message)
     assert :ok = terminal.({:completed})
     assert_receive {:push_notify, "main", 73, "final"}
@@ -430,7 +645,10 @@ defmodule FermixChannels.Channels.MobileTest do
              )
   end
 
-  test "link preview thumbnails are durably profile-authorized before fanout" do
+  # STB-11: the preview is the row's own card, stored on the row before the
+  # phone hears of it, so a history reload rebuilds it and media_fetch serves
+  # its image through it; the thumbnail is never one of the row's attachments.
+  test "a link preview is stored on its row before it goes out, its image no attachment" do
     digest = String.duplicate("b", 64)
 
     resolver = fn text, store_thumbnail ->
@@ -444,37 +662,132 @@ defmodule FermixChannels.Channels.MobileTest do
            site: "Example",
            title: "Example title",
            description: nil,
-           image_ref: digest
+           image: %{ref: digest, mime: "image/png", size_bytes: 9}
          }
        ], []}
     end
 
-    assert :ok =
-             Mobile.schedule_unfurl("main", 73, "https://example.com",
-               unfurl: resolver,
-               unfurl_launcher: fn task ->
-                 task.()
-                 :ok
-               end,
-               thumbnail_store: fn _bytes, _mime -> {:ok, digest} end,
-               store: StoreStub,
-               event_sink: fn target, event ->
-                 send(self(), {:preview_event, target, event})
-                 :ok
-               end
+    assert :ok = schedule_preview(resolver, fn _bytes, _mime -> {:ok, digest} end)
+
+    assert_received {:preview_attached, "main", 73, stored}
+
+    assert stored == %{
+             "url" => "https://example.com",
+             "site" => "Example",
+             "title" => "Example title",
+             "image" => %{
+               "ref" => digest,
+               "sha256" => digest,
+               "kind" => "image",
+               "mime" => "image/png",
+               "size_bytes" => 9
+             }
+           }
+
+    assert_received {:preview_event, {:profile, "main"}, event}
+
+    assert event == %{
+             "t" => "link_preview",
+             "in_reply_to" => 73,
+             "url" => "https://example.com",
+             "site" => "Example",
+             "title" => "Example title",
+             "image_ref" => digest
+           }
+
+    assert {:ok, _frames} =
+             MobileProtocol.encode_server_event(
+               "link_preview",
+               Map.delete(event, "t"),
+               1,
+               <<>>,
+               []
              )
+  end
 
-    assert_received {:thumbnail_attached, "main", 73,
-                     %{
-                       "ref" => ^digest,
-                       "sha256" => ^digest,
-                       "kind" => "image",
-                       "mime" => "image/png",
-                       "size_bytes" => 9
-                     }}
+  # D7: the preview card's text is cut to its bounds on a UTF-8 boundary; a
+  # url past its bound cannot be cut into a working link, so it is not sent.
+  test "a link preview's text is cut to its bounds and an over-long url is not sent" do
+    long = fn bytes -> String.duplicate("é", div(bytes, 2)) <> "é" end
+    too_long_url = "https://example.com/" <> String.duplicate("a", 2_048)
 
-    assert_received {:preview_event, {:profile, "main"},
-                     %{"t" => "link_preview", "image_ref" => ^digest}}
+    resolver = fn _text, _store_thumbnail ->
+      {:ok,
+       [
+         %{
+           url: "https://example.com/ok",
+           site: long.(120),
+           title: long.(300),
+           description: long.(600),
+           image: nil
+         },
+         %{url: too_long_url, site: "Example", title: "Too long", description: nil, image: nil}
+       ], []}
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = schedule_preview(resolver, fn _bytes, _mime -> flunk("no thumbnail") end)
+      end)
+
+    assert_received {:preview_attached, "main", 73, stored}
+    assert byte_size(stored["site"]) <= 120 and String.valid?(stored["site"])
+    assert byte_size(stored["title"]) <= 300 and String.valid?(stored["title"])
+    assert byte_size(stored["description"]) <= 600 and String.valid?(stored["description"])
+    assert_received {:preview_event, {:profile, "main"}, %{"title" => title}}
+    assert title == stored["title"]
+
+    refute_received {:preview_attached, "main", 73, %{"title" => "Too long"}}
+    refute_received {:preview_event, {:profile, "main"}, %{"title" => "Too long"}}
+    assert log =~ "link_preview_url_too_long"
+  end
+
+  # SEC-11: a slow-drip server can hold a fetch chunk by chunk forever; the
+  # whole resolution has one hard deadline, and what it holds is killed.
+  test "an unfurl past its hard deadline is stopped and sends nothing" do
+    test_pid = self()
+
+    resolver = fn _text, _store_thumbnail ->
+      send(test_pid, {:resolver, self()})
+      Process.sleep(:infinity)
+    end
+
+    log =
+      capture_log(fn ->
+        assert :ok = schedule_preview(resolver, fn _, _ -> {:ok, "x"} end, unfurl_deadline_ms: 50)
+      end)
+
+    assert_received {:resolver, resolver_pid}
+    refute Process.alive?(resolver_pid)
+    refute_received {:preview_event, _target, _event}
+    assert log =~ "unfurl_deadline"
+  end
+
+  test "unfurls past the concurrency bound are refused, never queued without limit" do
+    # The default launcher, not the inline one the other tests share.
+    Application.delete_env(:fermix_channels, :mobile_unfurl_launcher)
+    supervisor = :"unfurl_bound_#{System.unique_integer([:positive])}"
+    start_supervised!(Mobile.unfurl_supervisor_spec(supervisor, 1))
+    test_pid = self()
+
+    blocking = fn _text, _store_thumbnail ->
+      send(test_pid, :unfurl_running)
+      Process.sleep(:infinity)
+    end
+
+    opts = [unfurl: blocking, unfurl_supervisor: supervisor]
+
+    assert :ok = Mobile.schedule_unfurl("main", 73, "https://example.com", opts)
+    assert_receive :unfurl_running
+
+    log =
+      capture_log(fn ->
+        assert :ok = Mobile.schedule_unfurl("main", 74, "https://example.com", opts)
+      end)
+
+    assert log =~ "max_children"
+    refute_receive :unfurl_running, 100
+    assert Mobile.max_concurrent_unfurls() == 4
   end
 
   test "a mis-shaped injected seam raises instead of selecting the real implementation" do
@@ -533,6 +846,31 @@ defmodule FermixChannels.Channels.MobileTest do
     refute_receive {:telemetry, [:fermix, :channel, :message], _measurements, _metadata}, 100
   end
 
+  # The phone and the Mac share one timeline: a row this channel writes is
+  # announced to the Mac's companion connections as it is written, and a row the
+  # store deduplicated is not announced again.
+  test "every row the phone channel writes reaches the companion connections" do
+    {:ok, _owner} =
+      Registry.register(Companion.registry(), "main", nil)
+
+    assert :ok = Mobile.send_message("main", "your 9am summary", [])
+
+    assert_receive {:companion_event,
+                    %{
+                      "t" => "row",
+                      "profile_id" => "main",
+                      "server_seq" => 73,
+                      "role" => "assistant",
+                      "text" => "your 9am summary"
+                    }}
+
+    proactive = [proactive_key: "job:companion-row-1"]
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+    assert_receive {:companion_event, %{"t" => "row", "text" => "daily"}}
+    assert :ok = Mobile.send_message("main", "daily", proactive)
+    refute_receive {:companion_event, %{"t" => "row"}}, 100
+  end
+
   test "health delegates to the fail-closed mobile management facade" do
     assert {:ok, %{detail: detail}} = Mobile.health_check(management: HealthyManagement)
     assert detail =~ "listener ready"
@@ -541,6 +879,34 @@ defmodule FermixChannels.Channels.MobileTest do
 
     assert {:error, {:listener_unavailable, :down}} =
              Mobile.health_check(management: DownManagement)
+  end
+
+  # R2-3: a job or reminder delivered to the phone while the phone subtree does
+  # not run is still a row of the shared timeline, and the Mac hears it; no
+  # phone effect is launched, so nothing is fetched or pushed for nobody.
+  # R4-5: the subtree runs while its supervisor does; a child that outlives it
+  # for a moment does not stand in for it.
+  test "a delivery while the phone subtree is not running launches no phone effect" do
+    test_pid = self()
+    {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
+    stop_supervised!(:phone_subtree)
+    assert is_pid(GenServer.whereis(DeviceRegistry))
+
+    Application.put_env(:fermix_channels, :mobile_push_launcher, fn _task ->
+      send(test_pid, :push_launched)
+      :ok
+    end)
+
+    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn _task ->
+      send(test_pid, :unfurl_launched)
+      :ok
+    end)
+
+    assert :ok = Mobile.send_message("main", "read https://intranet.example/report", [])
+    assert_received {:timeline_append, "main", %{content: "read https://intranet.example/report"}}
+    assert_received {:companion_event, %{"t" => "row", "server_seq" => 73}}
+    refute_received :push_launched
+    refute_received :unfurl_launched
   end
 
   test "a post-commit push failure is observable and never retries timeline persistence" do
@@ -564,6 +930,41 @@ defmodule FermixChannels.Channels.MobileTest do
     assert {:error, :unsupported_transport} = Mobile.parse_webhook(%{})
     assert {:error, :unsupported_transport} = Mobile.verify_webhook(%Plug.Conn{})
     assert Mobile.reaction_capability() == :any_emoji
+  end
+
+  # The Gateway's queue message for one accepted mobile request, carrying the
+  # channel's real turn-result closure.
+  defp queued_mobile_turn(client_id) do
+    message =
+      Message.new!(%{
+        id: client_id,
+        content: client_id,
+        sender: "iPhone",
+        channel: "mobile",
+        chat_id: "main",
+        reply_target: "main",
+        metadata: %{client_msg_id: client_id, mobile_attempt: 2, turn_id: "turn-" <> client_id}
+      })
+
+    %{
+      id: client_id,
+      content: client_id,
+      sender: "iPhone",
+      channel: "mobile",
+      chat_id: "main",
+      metadata: message.metadata,
+      reply_fn: fn _part -> :ok end,
+      turn_result_fn: Mobile.build_turn_result(message)
+    }
+  end
+
+  # Hand the message to a queue through `Companion.Turns`, as the gateway does
+  # for every mobile message that becomes a turn.
+  defp track(message) do
+    queue = start_supervised!({QueueSink, self()})
+    assert :ok = Turns.handle_message(Map.from_struct(message), queue)
+    assert_receive {:enqueued, "client-1"}
+    message
   end
 
   defp mobile_message do
@@ -595,6 +996,64 @@ defmodule FermixChannels.Channels.MobileTest do
       )
 
     handler_id
+  end
+
+  defp schedule_preview(resolver, thumbnail_store, extra \\ []) do
+    test_pid = self()
+
+    Mobile.schedule_unfurl(
+      "main",
+      73,
+      "https://example.com",
+      [
+        unfurl: resolver,
+        unfurl_launcher: fn task ->
+          task.()
+          :ok
+        end,
+        thumbnail_store: thumbnail_store,
+        store: StoreStub,
+        event_sink: fn target, event ->
+          send(test_pid, {:preview_event, target, event})
+          :ok
+        end
+      ] ++ extra
+    )
+  end
+
+  # A socket past its Noise handshake, about to read the phone's hello.
+  defp phone_hello_state(overrides) do
+    hello = %{
+      version: 1,
+      type: "hello",
+      seq: 1,
+      payload: %{
+        "device_id" => "paired-device",
+        "app_version" => "1.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 1
+      },
+      bytes: <<>>
+    }
+
+    Map.merge(
+      %{
+        phase: :await_hello,
+        authenticated_device: %{device_id: "paired-device"},
+        device_registry: :registry,
+        noise: :noise,
+        decrypt: fn :noise, "ciphertext" -> {:ok, "plaintext", :noise1} end,
+        decode_client: fn "plaintext", _opts -> {:ok, hello} end,
+        update_device: fn _store, "paired-device", %{last_seen: %DateTime{}} ->
+          {:ok, %{device_id: "paired-device"}}
+        end,
+        attach_socket: fn :registry, "paired-device", _pid, profile_id: "main" -> :ok end,
+        history_head: fn "main" -> {:ok, 0} end,
+        read_frontier: fn "main" -> {:ok, 0} end,
+        discover: fn -> {:ok, []} end
+      },
+      overrides
+    )
   end
 
   defp restore_env(key, {:ok, value}), do: Application.put_env(:fermix_channels, key, value)

@@ -108,6 +108,12 @@ config :fermix_core, :skill_curation, enabled: false
 # Manager's `:continuation_dispatcher` seam.
 config :fermix_core, :harness_continuation_dispatcher, nil
 
+# Hermetic default: the browser's address checks resolve names, and a suite
+# that reached a real nameserver would be host-dependent and stall on a DNS-less
+# runner. Every lookup answers nothing — a failed lookup, which the policy
+# allows. A test that needs answers passes the ProfileServer its own `:resolver`.
+config :fermix_core, :browser_resolver, fn _host -> {:error, :nxdomain} end
+
 # Hermetic default: `mix test` must never spawn a vendor `--version` probe or read
 # the operator's `~/.codex`/`~/.claude`. The setup harness card (`:fermix_web`) and
 # the doctor harness check (`:fermix_core`) both resolve their detector from config,
@@ -177,6 +183,16 @@ config :phoenix,
 # resolves in all three suites and, unlike the old test_helper `require_file`,
 # it also resolves during boot.
 config :fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub
+
+# Hermetic default: the prompt seeder needs the resource registry and the memory
+# repo, which a test that saves a setting has no reason to run, and a real seed
+# would write prompt files into the suite's home. Seeding tests put
+# `FermixCore.Prompt.SetupSeeder` back for their own scope.
+config :fermix_core, :prompt_seeder, FermixTestSupport.PromptSeederStub
+
+# Hermetic default: the machine facts the first boot seeds (the system time
+# zone, the account's full name) must not come from the host running the suite.
+config :fermix_core, :machine_facts, FermixTestSupport.MachineFactsStub
 
 # The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a
 # remote plugin to load must allow-list it explicitly (DistVerifierStub.allow/2),

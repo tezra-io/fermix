@@ -6,6 +6,10 @@ defmodule FermixChannels.Mobile.Push do
   and durable read state are checked before device credentials or APNs are
   touched, preventing double notification when any device already has the
   profile open or has read the emitted timeline row.
+
+  An approval waiting for the owner is announced to an away phone with no
+  content at all: the encrypted preview is null, as for an oversized one, and
+  the alert is a fixed string.
   """
 
   require Logger
@@ -17,7 +21,7 @@ defmodule FermixChannels.Mobile.Push do
   alias FermixChannels.Mobile.Push.Config
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Telemetry
-  alias FermixCore.Mobile.Store
+  alias FermixCore.Companion.Timeline
   alias Pigeon.APNS.Notification
 
   @info "fermix-push-v1"
@@ -52,8 +56,18 @@ defmodule FermixChannels.Mobile.Push do
     end
   end
 
-  @doc "Build one E2E preview notification for a registered paired device."
-  @spec build_notification(Device.t(), binary(), String.t(), String.t(), String.t(), keyword()) ::
+  @doc """
+  Build one E2E preview notification for a registered paired device;
+  `:approval` in place of the preview builds the content-free approval one.
+  """
+  @spec build_notification(
+          Device.t(),
+          binary(),
+          String.t(),
+          String.t() | :approval,
+          String.t(),
+          keyword()
+        ) ::
           {:ok, Notification.t()} | {:error, term()}
   def build_notification(device, gateway_private, profile_id, preview_text, topic, opts \\ [])
 
@@ -109,6 +123,30 @@ defmodule FermixChannels.Mobile.Push do
          :ok <- validate_preview(preview_text),
          {:ok, config} <- opts |> config_input() |> Config.new() do
       maybe_notify(config, profile_id, server_seq, preview_text, opts)
+    end
+  end
+
+  @doc """
+  Tell every registered paired device, with no content, that an approval
+  waits for the owner; nothing is sent while a device has the profile open.
+  """
+  @spec notify_approval(String.t(), keyword()) :: {:ok, delivery_status()} | {:error, term()}
+  def notify_approval(profile_id, opts \\ []) when is_list(opts) do
+    with :ok <- validate_profile(profile_id),
+         {:ok, config} <- opts |> config_input() |> Config.new() do
+      maybe_notify_approval(config, profile_id, opts)
+    end
+  end
+
+  defp maybe_notify_approval(%Config{enabled: false}, _profile, _opts),
+    do: {:ok, %{status: :disabled, sent: 0}}
+
+  defp maybe_notify_approval(config, profile_id, opts) do
+    case profile_connected(profile_id, opts) do
+      {:ok, true} -> {:ok, %{status: :suppressed, reason: :connected, sent: 0}}
+      {:ok, false} -> deliver_decision(:deliver, config, profile_id, :approval, opts)
+      {:ok, other} -> {:error, {:invalid_profile_connected_result, other}}
+      {:error, reason} -> {:error, reason}
     end
   end
 
@@ -271,6 +309,11 @@ defmodule FermixChannels.Mobile.Push do
     {:error, reason}
   end
 
+  defp choose_payload(profile_id, :approval) do
+    {:ok, %{"profile_id" => profile_id, "preview_text" => nil},
+     %{"title" => "Fermix", "body" => "Approval needed"}}
+  end
+
   defp choose_payload(profile_id, preview_text) do
     full = %{"profile_id" => profile_id, "preview_text" => preview_text}
     full_alert = %{"title" => "Fermix", "body" => "New message"}
@@ -374,7 +417,7 @@ defmodule FermixChannels.Mobile.Push do
   end
 
   defp read_frontier(profile_id, opts) do
-    callback = Keyword.get(opts, :read_frontier, &Store.read_frontier/1)
+    callback = Keyword.get(opts, :read_frontier, &Timeline.read_frontier/1)
     call_dependency(:read_frontier, callback, [profile_id])
   end
 
@@ -484,6 +527,8 @@ defmodule FermixChannels.Mobile.Push do
 
   defp validate_profile(value), do: nonempty_text(:profile_id, value, 255)
   defp validate_topic(value), do: nonempty_text(:topic, value, 255)
+
+  defp validate_preview(:approval), do: :ok
 
   defp validate_preview(value) when is_binary(value) and byte_size(value) <= @max_preview_bytes do
     if String.valid?(value), do: :ok, else: {:error, {:invalid_preview_text, :invalid_utf8}}
