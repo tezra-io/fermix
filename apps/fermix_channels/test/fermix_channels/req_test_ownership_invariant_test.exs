@@ -61,10 +61,19 @@ defmodule FermixChannels.ReqTestOwnershipInvariantTest do
     |> Enum.reject(&(&1 == Path.expand(__ENV__.file)))
   end
 
+  # Only a file whose text spells the call is parsed: parsing every test file in
+  # the umbrella timed this test out on the slowest CI leg. Parsing with
+  # `unescape: false` keeps a quoted call name as its source spells it (an
+  # escaped `"set_req_test_\x74o_shared"` stays escaped), so the AST check can
+  # match only a call the text check has already kept.
   defp offending_modules(file) do
-    file
-    |> File.read!()
-    |> Code.string_to_quoted!(file: file)
+    source = File.read!(file)
+    if String.contains?(source, @shared_call), do: offenders_in(file, source), else: []
+  end
+
+  defp offenders_in(file, source) do
+    source
+    |> Code.string_to_quoted!(file: file, unescape: false)
     |> modules()
     |> Enum.filter(fn {_name, body} -> async_module?(body) and calls_shared_mode?(body) end)
     |> Enum.map(fn {name, _body} -> "#{Path.relative_to(file, umbrella_root())} (#{name})" end)
