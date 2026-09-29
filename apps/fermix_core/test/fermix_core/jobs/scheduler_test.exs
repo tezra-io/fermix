@@ -9,6 +9,14 @@ defmodule FermixCore.Jobs.SchedulerTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Tools.RunJobNow
 
+  # How long to wait for a real run to report it finished: claim, spawn, the
+  # agent loop, the output file and the settle. It is about 3 ms idle, but the
+  # output file's mkdir goes through the VM's one file server, which every
+  # concurrent test's file calls queue on, and a loaded macos-x64 runner held a
+  # run past the 2 s default. An arrival bound: a run that never finishes still
+  # fails, and one that does returns at once.
+  @run_completes_ms 10_000
+
   defmodule TerminalAdapter do
     @behaviour FermixCore.Providers.Adapter
 
@@ -482,7 +490,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
 
     assert_receive {:job_runner, :started, run_id, ^job_id}
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     assert {:ok, [run]} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
     assert run.id == run_id
     assert run.status == "ok"
@@ -540,7 +548,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     # The suite's own bound applies: an explicit second was the last tighter
     # override in this file, and the slow CI leg spent it finalising the run.
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
   test "runner finalization preserves edits and pauses made during the run", %{
@@ -574,7 +582,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
                server: repo
              )
 
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     assert {:ok, updated_job} = Registry.get_job(job.id, repo: repo)
     assert updated_job.state == "paused"
     assert updated_job.enabled? == false
@@ -726,7 +734,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
         runner_delay_ms: 1
       )
 
-    assert_receive {:job_runner, :completed, _run_id, job_id}
+    assert_receive {:job_runner, :completed, _run_id, job_id}, @run_completes_ms
     assert job_id == job.id
 
     assert {:ok, completed_job} = Registry.get_job(job.id, repo: repo)
@@ -800,7 +808,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     # Five minutes late is inside the 1h window, so the missed occurrence runs.
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:20:00Z])
     assert_receive {:job_runner, :started, run_id, ^job_id}
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
   test "a stale job past its expiry expires rather than being skipped", %{
@@ -869,7 +877,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     # runs late instead of being silently dropped.
     assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 17:00:00Z])
     assert_receive {:job_runner, :started, run_id, ^job_id}
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
   test "run_now claims an out-of-band manual run without advancing the schedule", %{
@@ -898,7 +906,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     assert_receive {:job_runner, :started, run_id, ^job_id}
     assert run_id == run.id
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     assert {:ok, [stored]} = Repo.list_job_runs(%{job_id: job_id}, server: repo)
     assert stored.id == run_id
     assert stored.trigger == "manual"
@@ -920,7 +928,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
 
     assert {:ok, run} = Scheduler.run_now(scheduler, job_id, now: ~U[2026-05-02 14:03:00Z])
     run_id = run.id
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
 
     assert {:ok, done} = Registry.get_job(job_id, repo: repo)
     assert done.state == "completed"
@@ -951,7 +959,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert_receive {:job_runner, :started, run_id, ^job_id}
     assert {:error, :already_running} = Scheduler.run_now(scheduler, job_id)
 
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
   test "run_now rejects a paused job", %{repo: repo, runner_supervisor: runner_supervisor} do
@@ -1036,7 +1044,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
     assert payload["trigger"] == "manual"
 
     assert_receive {:job_runner, :started, run_id, ^job_id}
-    assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+    assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
   end
 
   test "run_job_now tool reports a missing job", %{
@@ -1260,12 +1268,12 @@ defmodule FermixCore.Jobs.SchedulerTest do
       # child asynchronously after that exit — so gate the second tick on the
       # supervisor actually reporting a free slot (the same occupancy source
       # at_capacity? reads), never on :completed alone.
-      assert_receive {:job_runner, :completed, ^run_id1, _job1}, 5_000
+      assert_receive {:job_runner, :completed, ^run_id1, _job1}, @run_completes_ms
       assert eventually(fn -> DynamicSupervisor.count_children(runner_supervisor).active == 0 end)
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
       assert_receive {:job_runner, :started, run_id2, _job2}, 5_000
       assert run_id2 != run_id1
-      assert_receive {:job_runner, :completed, ^run_id2, _job2}, 5_000
+      assert_receive {:job_runner, :completed, ^run_id2, _job2}, @run_completes_ms
       assert total_runs(repo, [job_a.id, job_b.id]) == 2
     end
   end
@@ -1317,7 +1325,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
       assert_receive {:job_runner, :started, run_id, ^job_id}
       assert run_id != stuck.id
-      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
     end
 
     test "a run with a surviving runner is adopted, and its later crash is still marked", %{
@@ -1453,7 +1461,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
       assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:30:00Z])
       assert_receive {:job_runner, :started, next_run_id, ^job_id}
       assert next_run_id != run_id
-      assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^next_run_id, ^job_id}, @run_completes_ms
     end
 
     test "a scheduler killed right after its reap write leaves the job claimable", %{
@@ -1537,7 +1545,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
         end)
 
       send(loop, :release)
-      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
 
       assert {:ok, current} = Registry.get_job(job_id, repo: repo)
       assert current.state == "paused"
@@ -1575,7 +1583,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
         end)
 
       send(loop, :release)
-      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
 
       assert {:ok, current} = Registry.get_job(job_id, repo: repo)
       assert current.state == "scheduled"
@@ -1603,7 +1611,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
                )
 
       send(loop, :release)
-      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
 
       assert {:ok, current} = Registry.get_job(job_id, repo: repo)
       assert current.state == "scheduled"
@@ -1631,7 +1639,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
                )
 
       send(loop, :release)
-      assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+      assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
 
       assert {:ok, current} = Registry.get_job(job_id, repo: repo)
       assert current.state == "scheduled"
@@ -1734,7 +1742,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
         capture_log(fn ->
           assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
           assert_receive {:job_runner, :started, run_id, ^job_id}
-          assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+          assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
         end)
 
       assert log =~ "Scheduled job #{job_id} memory source update failed: :injected_fault"
@@ -1756,7 +1764,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
         capture_log(fn ->
           assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
           assert_receive {:job_runner, :started, run_id, ^job_id}
-          assert_receive {:job_runner, :completed, ^run_id, ^job_id}
+          assert_receive {:job_runner, :completed, ^run_id, ^job_id}, @run_completes_ms
         end)
 
       assert log =~ "Scheduled job #{job_id} memory source lookup failed: :injected_fault"
