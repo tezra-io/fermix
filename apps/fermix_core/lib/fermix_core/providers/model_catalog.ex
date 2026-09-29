@@ -38,8 +38,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   # models_for/1). This field is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
   # see `TurnRunner`), NOT a declared capability, so neither column is a
-  # straight copy of a published number. astra = frontier (default); GPT-6
-  # sol/luna = the generation's cheaper frontier/fast pair; the gpt-5.6
+  # straight copy of a published number. astra = frontier (default); GPT-6.1
+  # sol and GPT-6 luna = the generation's cheaper frontier/fast pair; the gpt-5.6
   # sol/terra/luna = frontier/balanced/fast of the prior generation.
   #
   # Codex column: the cache's `max_context_window` — the ceiling that path
@@ -71,8 +71,9 @@ defmodule FermixCore.Providers.ModelCatalog do
   # and 1.5x output "for the full request" — a cliff rather than a ramp, so one
   # token over doubles the bill for everything before it:
   #
-  #   * astra, and GPT-6 sol/luna, 320_000 is NOT their real 1,050,000
-  #     window. 0.85 * 320_000 = 272_000 puts compaction exactly on that
+  #   * astra, GPT-6.1 sol and GPT-6 luna, 320_000 is NOT their real 1,050,000
+  #     window (6.1 sol takes the calibration of the GPT-6 sol it replaced).
+  #     0.85 * 320_000 = 272_000 puts compaction exactly on that
   #     boundary, so the standard-priced tier is used in full. Do not
   #     "correct" it upward.
   #
@@ -100,7 +101,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   # is deliberately absent from `ReasoningEffort`.
   @openai_codex [
     %Entry{id: "gpt-6-astra", label: "GPT-6 Astra (default, latest)", context_window: 872_000},
-    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 872_000},
+    %Entry{id: "gpt-6.1-sol", label: "GPT-6.1 Sol", context_window: 872_000},
     %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 872_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 872_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 872_000},
@@ -131,7 +132,7 @@ defmodule FermixCore.Providers.ModelCatalog do
       label: "GPT-6 Astra (default, recommended)",
       context_window: 320_000
     },
-    %Entry{id: "gpt-6-sol", label: "GPT-6 Sol", context_window: 320_000},
+    %Entry{id: "gpt-6.1-sol", label: "GPT-6.1 Sol", context_window: 320_000},
     %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 320_000},
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
@@ -159,7 +160,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Context windows are the API defaults the adapter actually gets (it does not
   # send the `context-1m` beta header, design doc §8) — compaction thresholds key
   # off these. The 4.6+ generation (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8,
-  # Sonnet 4.6) ships the full 1M window by default at standard pricing; only
+  # Sonnet 5.5, Sonnet 4.6) ships the full 1M window by default at standard pricing; only
   # Haiku 4.5 is 200k. (Older Sonnet 4/4.5 still need the beta for 1M, but they
   # are not in this catalog.)
   #
@@ -170,13 +171,22 @@ defmodule FermixCore.Providers.ModelCatalog do
   # gets a 400 on every request until Anthropic authorizes it, which is an
   # account setting rather than a request-shape defect. Opus 5.5 shares Fable
   # 5.1's request rules (thinking always on, no forced tool_choice); the
-  # adapter's "opus-5" substring already sends that shape.
+  # adapter's "opus-5" substring already sends that shape. Sonnet 5.5 400s on
+  # disabled thinking, forced tool_choice and sampling params; its "sonnet-5"
+  # substring sends adaptive thinking and no sampling params, and the adapter
+  # never sends tool_choice.
   @anthropic [
     %Entry{
       id: "claude-sonnet-4-6",
       label: "Claude Sonnet 4.6 (recommended)",
       context_window: 1_000_000,
       max_output_tokens: 64_000
+    },
+    %Entry{
+      id: "claude-sonnet-5-5",
+      label: "Claude Sonnet 5.5",
+      context_window: 1_000_000,
+      max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-fable-5-1",

@@ -66,12 +66,14 @@ All figures are published list prices in US dollars per MILLION tokens, standard
 2026-09-05 and re-checked against first-party vendor pricing the same day;
 Venice's was read 2026-09-19 and carries its own line below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
-read from the same first-party pages that day:
+read from the same first-party pages that day, and gpt-6.1-sol on its release
+day, 2026-09-29:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
               billed at 1.25x uncached input from GPT-5.6 onward — gpt-6-astra,
-              gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra, gpt-5.6-luna.
+              gpt-6.1-sol, gpt-6-sol, gpt-6-luna, gpt-5.6-sol, gpt-5.6-terra,
+              gpt-5.6-luna.
               Every older slug carded here predates that line and bills a
               written token as ordinary input; that is a read fact
               (`BILLS_AT_INPUT_RATE`), not a gap.
@@ -254,6 +256,10 @@ _OPENAI_RATES: dict[str, Rate] = {
     # Standard rates, and CHEAPER than their GPT-5.6 namesakes below on every
     # leg; do not price a GPT-6 tier by analogy to its predecessor.
     "gpt-6-sol": Rate(2.00, 10.00, 0.20, 2.50),
+    # Same input, output and write legs as GPT-6 Sol, and HALF its cached read:
+    # 0.10 is 0.05x input, and it is what the pricing table lists. Do not
+    # "fix" it to 0.20.
+    "gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
     "gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
     # 4.00 input is promotional through at least 2026-11-21; the write leg is
     # 1.25x whatever input is, so it becomes 6.25 if input reverts to 5.00.
@@ -310,6 +316,9 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
     # the cheaper one — so pricing a Sonnet by analogy to its predecessor
     # overstates it by 50%, the same wrong number the cancelled rise would give.
     "claude-sonnet-5": Rate(2.00, 10.00, 0.20, 2.50),
+    # Read first-party 2026-09-29, its release day: Sonnet 5's four legs
+    # exactly, on the standard 0.1x read tier.
+    "claude-sonnet-5-5": Rate(2.00, 10.00, 0.20, 2.50),
     # 0.20 cache read is 0.05x input, half the standard 0.1x, and it is correct:
     # the vendor's pricing table footnotes Opus 5.5 alone on that tier. It also
     # UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
