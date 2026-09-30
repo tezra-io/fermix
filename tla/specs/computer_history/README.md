@@ -483,7 +483,7 @@ the fixed code.
   next boot does not start it. Meanwhile `/history status` shows "Computer
   history: off" beside "Capture: running".
 - **Confidence:** it needs a Capturer crash, for example a Repo call past its
-  5 s default (`repo.ex:3777-3780`), and the windows are tiny:
+  5 s default (`repo.ex:3936-3944`), and the windows are tiny:
   - The first path needs the Controller's `whereis` to run between the old
     Capturer's exit and its restart. The DynamicSupervisor restarts the child
     in the same message that handles its EXIT, and `Capturer.init` does no
@@ -535,7 +535,7 @@ the fixed code.
 - **Fix:** `purge all` is `[0, now]` (`purge.ex:75-79`; `@max_ts` is gone).
   A row stamped in the future by a backwards clock step is therefore not
   covered; the 48 h sweep deletes it 48 h after its stamp (owner decision).
-  Migration 32 (`repo.ex:3887-3906`, `computer_history_sql.ex:275-298`)
+  Migration 32 (`repo.ex:4118-4137`, `computer_history_sql.ex:275-298`)
   carries a stored watermark W over as one interval `[0, min(W, now)]` issued
   at the migration, the sentinel included; nothing reads or writes a
   watermark any more. The old column stays, unread, because `fermix upgrade`
