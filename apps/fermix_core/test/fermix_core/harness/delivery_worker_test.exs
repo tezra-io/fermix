@@ -4,6 +4,8 @@ defmodule FermixCore.Harness.DeliveryWorkerTest do
   # (hermetic-config discipline).
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Harness.DeliveryWorker
   alias FermixCore.Harness.Ledger
   alias FermixCore.Memory.Repo
@@ -217,5 +219,47 @@ defmodule FermixCore.Harness.DeliveryWorkerTest do
 
     {:ok, updated} = Ledger.get(row.id, server: repo)
     assert updated.delivery_status == "delivered"
+  end
+
+  test "a tick whose Repo does not answer is skipped and the worker keeps running" do
+    stalled = start_supervised!(FermixTestSupport.StalledRepo)
+
+    {pid, log} =
+      with_log(fn ->
+        pid = start_worker(stalled, repo_timeout_ms: 50)
+        tick(pid)
+        pid
+      end)
+
+    assert Process.alive?(pid)
+    assert log =~ "harness delivery worker tick failed: :repo_timeout"
+  end
+
+  # The row is already sent when its outcome write stalls. The worker logs it
+  # and keeps draining. Here the proxy never forwards the write, so the row
+  # stays pending; against the real Repo the write lands, ahead of the next read.
+  test "a delivery write the Repo does not answer is logged and the worker keeps running", %{
+    repo: repo
+  } do
+    row = pending_row(repo)
+
+    stalling =
+      start_supervised!(
+        {FermixTestSupport.StalledRepo, forward_to: repo, stall: [:update_harness_run]}
+      )
+
+    {pid, log} =
+      with_log(fn ->
+        # Forwarded requests share this budget, so it leaves room for a slow
+        # but answering Repo; only the stalled write spends all of it.
+        pid = start_worker(stalling, adapter: OkAdapter, repo_timeout_ms: 1_000)
+        tick(pid)
+        pid
+      end)
+
+    assert Process.alive?(pid)
+    assert log =~ "harness delivery update failed for #{row.id}: :repo_timeout"
+    {:ok, unchanged} = Ledger.get(row.id, server: repo)
+    assert unchanged.delivery_status == "pending"
   end
 end

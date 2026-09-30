@@ -1,6 +1,8 @@
 defmodule FermixCore.SkillCuration.SchedulerTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Memory.Repo
   alias FermixCore.SkillCuration.Scheduler
 
@@ -92,6 +94,22 @@ defmodule FermixCore.SkillCuration.SchedulerTest do
     send(scheduler, :tick)
     _sync = :sys.get_state(scheduler)
 
+    refute_receive {:cycle_fired, _opts}, 100
+  end
+
+  test "a tick whose Repo does not answer is skipped and the scheduler keeps running", ctx do
+    stalled = start_supervised!(FermixTestSupport.StalledRepo)
+
+    {scheduler, log} =
+      with_log(fn ->
+        scheduler = start_scheduler!(ctx, repo: stalled, repo_timeout_ms: 50)
+        send(scheduler, :tick)
+        _sync = :sys.get_state(scheduler)
+        scheduler
+      end)
+
+    assert Process.alive?(scheduler)
+    assert log =~ "skill_curation tick could not read state: :repo_timeout"
     refute_receive {:cycle_fired, _opts}, 100
   end
 end

@@ -15,6 +15,7 @@ defmodule FermixCore.Jobs.Scheduler do
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Jobs.Schedule
   alias FermixCore.Memory.Repo
+  alias FermixCore.Timeouts
 
   @default_reconciliation_interval_ms 60_000
   @default_due_limit 20
@@ -49,8 +50,9 @@ defmodule FermixCore.Jobs.Scheduler do
 
   # Error text for a run reaped by reconciliation. It names the cause in the run
   # row itself, so an operator reading the run sees why it ended with no process
-  # behind it rather than a bare terminal status.
-  @reap_error "reaped: no live runner (daemon or scheduler restart)"
+  # behind it rather than a bare terminal status. A claim that lands after the
+  # scheduler stopped waiting for the Repo also leaves a run with no runner.
+  @reap_error "reaped: no live runner (daemon or scheduler restart, or a memory store that answered too late)"
 
   # Concurrent scheduled-run ceiling. When this many runs are already active the
   # tick claims nothing; due jobs stay "scheduled" and later ticks (armed at the
@@ -62,6 +64,7 @@ defmodule FermixCore.Jobs.Scheduler do
           enabled?: boolean(),
           timer_enabled?: boolean(),
           repo: GenServer.server(),
+          repo_opts: keyword(),
           capability_registry: GenServer.server(),
           skill_registry: GenServer.server(),
           runner_supervisor: Supervisor.supervisor(),
@@ -123,10 +126,16 @@ defmodule FermixCore.Jobs.Scheduler do
 
   @impl true
   def init(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
     state = %{
       enabled?: Keyword.get(opts, :scheduler_enabled, jobs_config(:scheduler_enabled, true)),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
-      repo: Keyword.get(opts, :repo, Repo),
+      repo: repo,
+      # Every Repo call this scheduler makes: a Repo that does not answer in time
+      # is an error each path logs and retries, not an exit (`Repo.periodic_opts/2`).
+      repo_opts:
+        Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())),
       capability_registry: Keyword.get(opts, :capability_registry, CapabilityRegistry),
       skill_registry: Keyword.get(opts, :skill_registry, SkillRegistry),
       runner_supervisor: Keyword.get(opts, :runner_supervisor, RunnerSupervisor),
@@ -231,7 +240,7 @@ defmodule FermixCore.Jobs.Scheduler do
   defp reconcile_active_runs(%{enabled?: false} = state), do: state
 
   defp reconcile_active_runs(state) do
-    case Repo.unsettled_job_runs(server: state.repo, limit: @reconcile_run_limit) do
+    case Repo.unsettled_job_runs([limit: @reconcile_run_limit] ++ state.repo_opts) do
       {:ok, runs} ->
         live = live_runner_pids(state)
         Enum.reduce(runs, state, &reconcile_active_run(&1, live, &2))
@@ -308,7 +317,7 @@ defmodule FermixCore.Jobs.Scheduler do
   defp run_due_jobs(%{enabled?: false} = state, _now), do: {:ok, state}
 
   defp run_due_jobs(state, now) do
-    case Repo.due_scheduled_jobs(now, server: state.repo, limit: state.due_limit) do
+    case Repo.due_scheduled_jobs(now, [limit: state.due_limit] ++ state.repo_opts) do
       {:ok, jobs} ->
         Enum.reduce(jobs, {:ok, state}, &reduce_due_job(&1, now, &2))
 
@@ -390,14 +399,14 @@ defmodule FermixCore.Jobs.Scheduler do
   # lands between the due scan and here is not clobbered. Only next_run_at moves;
   # last_status/last_run_at stay untouched because no run actually happened.
   defp advance_stale_job(job, next_run_at, now, state) do
-    case Repo.get_scheduled_job(job.id, server: state.repo) do
+    case Repo.get_scheduled_job(job.id, state.repo_opts) do
       {:ok, %{enabled?: true, state: "scheduled"} = current} ->
         Logger.info(
           "Scheduled job #{job.id} skipped a stale run due at " <>
             "#{DateTime.to_iso8601(job.next_run_at)}; next run at #{DateTime.to_iso8601(next_run_at)}"
         )
 
-        outcome_state(store_advanced_run_at(current, next_run_at, now, state.repo), state)
+        outcome_state(store_advanced_run_at(current, next_run_at, now, state.repo_opts), state)
 
       {:ok, _job} ->
         {:ok, state}
@@ -411,10 +420,10 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp store_advanced_run_at(job, next_run_at, now, repo) do
+  defp store_advanced_run_at(job, next_run_at, now, repo_opts) do
     job
     |> Map.merge(%{next_run_at: next_run_at, updated_at: now})
-    |> Repo.upsert_scheduled_job(server: repo)
+    |> Repo.upsert_scheduled_job(repo_opts)
     |> case do
       {:ok, _job} ->
         :ok
@@ -445,7 +454,7 @@ defmodule FermixCore.Jobs.Scheduler do
   defp claim_patched_job(job, job_patch, now, state) do
     run_attrs = run_attrs(job, now)
 
-    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, server: state.repo) do
+    case Repo.claim_due_job(job.id, job_patch, run_attrs, now, state.repo_opts) do
       {:ok, {claimed_job, run}} ->
         {:ok, start_or_mark_failed(claimed_job, run, state)}
 
@@ -469,7 +478,7 @@ defmodule FermixCore.Jobs.Scheduler do
   # consumed), and tag the run `trigger: "manual"`. The runner dispatch and
   # monitoring are the same as the timed path — no second execution path.
   defp manual_run(job_id, now, state) do
-    case Repo.get_scheduled_job(job_id, server: state.repo) do
+    case Repo.get_scheduled_job(job_id, state.repo_opts) do
       {:ok, job} -> manual_run_job(job, now, state)
       {:error, reason} -> {{:error, reason}, state}
     end
@@ -494,7 +503,7 @@ defmodule FermixCore.Jobs.Scheduler do
     run_attrs = job |> run_attrs(now) |> Map.put(:trigger, "manual")
     job_patch = manual_claim_patch(job, now)
 
-    case Repo.claim_job_now(job.id, job_patch, run_attrs, server: state.repo) do
+    case Repo.claim_job_now(job.id, job_patch, run_attrs, state.repo_opts) do
       {:ok, {claimed_job, run}} ->
         {{:ok, run}, start_or_mark_failed(claimed_job, run, state)}
 
@@ -510,9 +519,9 @@ defmodule FermixCore.Jobs.Scheduler do
   end
 
   defp expire_job(job_id, now, state) do
-    case Repo.get_scheduled_job(job_id, server: state.repo) do
+    case Repo.get_scheduled_job(job_id, state.repo_opts) do
       {:ok, %{enabled?: true, state: "scheduled"} = job} ->
-        outcome_state(expire_scheduled_job(job, now, state.repo), state)
+        outcome_state(expire_scheduled_job(job, now, state.repo_opts), state)
 
       {:ok, _job} ->
         {:ok, state}
@@ -526,7 +535,7 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp expire_scheduled_job(job, now, repo) do
+  defp expire_scheduled_job(job, now, repo_opts) do
     if expired?(job, now) do
       job
       |> Map.merge(%{
@@ -537,10 +546,10 @@ defmodule FermixCore.Jobs.Scheduler do
         last_error: nil,
         updated_at: now
       })
-      |> Repo.upsert_scheduled_job(server: repo)
+      |> Repo.upsert_scheduled_job(repo_opts)
       |> case do
         {:ok, updated_job} ->
-          _ = mark_source_expired(updated_job, now, repo)
+          _ = mark_source_expired(updated_job, now, repo_opts)
           :ok
 
         {:error, reason} ->
@@ -559,11 +568,11 @@ defmodule FermixCore.Jobs.Scheduler do
   # future tick; `resume` re-parses and fails loudly if the schedule is still
   # broken.
   defp disable_job(job, error, now, state) do
-    case Repo.get_scheduled_job(job.id, server: state.repo) do
+    case Repo.get_scheduled_job(job.id, state.repo_opts) do
       {:ok, %{enabled?: true, state: "scheduled"} = current} ->
         current
         |> Map.merge(%{state: "disabled", enabled?: false, last_error: error, updated_at: now})
-        |> Repo.upsert_scheduled_job(server: state.repo)
+        |> Repo.upsert_scheduled_job(state.repo_opts)
         |> case do
           {:ok, _updated} ->
             {:ok, state}
@@ -681,9 +690,9 @@ defmodule FermixCore.Jobs.Scheduler do
   defp mark_run_failed(run_id, job_id, error, state) when is_binary(error) do
     now = DateTime.utc_now()
 
-    case Repo.get_job_run(run_id, server: state.repo) do
+    case Repo.get_job_run(run_id, state.repo_opts) do
       {:ok, run} ->
-        mark_run_error(run, error, now, state.repo)
+        mark_run_error(run, error, now, state.repo_opts)
 
       {:error, :not_found} ->
         :ok
@@ -701,34 +710,34 @@ defmodule FermixCore.Jobs.Scheduler do
   # in the same write (`Repo.settle_job_run/2`). A settled run whose delivery
   # never finished, whatever its status, gets only its delivery marked failed:
   # its job was released by its own settle. Any other row is already final.
-  defp mark_run_error(%{status: status} = run, error, now, repo)
+  defp mark_run_error(%{status: status} = run, error, now, repo_opts)
        when status in ["queued", "running"] do
     attrs = Map.merge(run, %{status: "error", completed_at: now, error: error, updated_at: now})
 
-    case Repo.settle_job_run(attrs, server: repo) do
+    case Repo.settle_job_run(attrs, repo_opts) do
       {:ok, {_run, job}} ->
-        mark_source_error(job, now, repo)
+        mark_source_error(job, now, repo_opts)
 
       # The runner's own settle landed after all (a call that timed out still
       # runs), so what may be left is that run's delivery.
       {:error, :run_not_active} ->
-        fail_delivery_after_settle(run.id, error, now, repo)
+        fail_delivery_after_settle(run.id, error, now, repo_opts)
 
       {:error, reason} ->
         Logger.error("Scheduled job run #{run.id} crash settle failed: #{inspect(reason)}")
     end
   end
 
-  defp mark_run_error(%{delivery_status: "pending"} = run, error, now, repo) do
-    mark_pending_delivery_failed(run, error, now, repo)
+  defp mark_run_error(%{delivery_status: "pending"} = run, error, now, repo_opts) do
+    mark_pending_delivery_failed(run, error, now, repo_opts)
   end
 
   defp mark_run_error(_final_run, _error, _now, _repo), do: :ok
 
-  defp fail_delivery_after_settle(run_id, error, now, repo) do
-    case Repo.get_job_run(run_id, server: repo) do
+  defp fail_delivery_after_settle(run_id, error, now, repo_opts) do
+    case Repo.get_job_run(run_id, repo_opts) do
       {:ok, %{delivery_status: "pending"} = run} ->
-        mark_pending_delivery_failed(run, error, now, repo)
+        mark_pending_delivery_failed(run, error, now, repo_opts)
 
       {:ok, _final_run} ->
         :ok
@@ -740,10 +749,10 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp mark_pending_delivery_failed(run, error, now, repo) do
+  defp mark_pending_delivery_failed(run, error, now, repo_opts) do
     run
     |> Map.merge(%{delivery_status: "failed", delivery_error: error, updated_at: now})
-    |> Repo.upsert_job_run(server: repo)
+    |> Repo.upsert_job_run(repo_opts)
     |> case do
       {:ok, _run} ->
         :ok
@@ -755,12 +764,12 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp mark_source_error(job, now, repo) do
-    case Repo.get_memory_source(job.memory_source_id, server: repo) do
+  defp mark_source_error(job, now, repo_opts) do
+    case Repo.get_memory_source(job.memory_source_id, repo_opts) do
       {:ok, source} ->
         source
         |> Map.merge(%{last_run_at: now, last_status: "error", updated_at: now})
-        |> Repo.upsert_memory_source(server: repo)
+        |> Repo.upsert_memory_source(repo_opts)
         |> log_source_write(job, "crash")
 
       {:error, :not_found} ->
@@ -773,12 +782,12 @@ defmodule FermixCore.Jobs.Scheduler do
     end
   end
 
-  defp mark_source_expired(job, now, repo) do
-    case Repo.get_memory_source(job.memory_source_id, server: repo) do
+  defp mark_source_expired(job, now, repo_opts) do
+    case Repo.get_memory_source(job.memory_source_id, repo_opts) do
       {:ok, source} ->
         source
         |> Map.merge(%{status: "expired", last_status: "expired", updated_at: now})
-        |> Repo.upsert_memory_source(server: repo)
+        |> Repo.upsert_memory_source(repo_opts)
         |> log_source_write(job, "expiry")
 
       {:error, :not_found} ->
@@ -816,7 +825,7 @@ defmodule FermixCore.Jobs.Scheduler do
   # records the delay the scheduler chose rather than the wall clock left on the
   # reference. `{nil, nil}` when nothing is scheduled and the tick was clean.
   defp next_due_timer(state, outcome) do
-    case Repo.next_scheduled_job(server: state.repo) do
+    case Repo.next_scheduled_job(state.repo_opts) do
       {:ok, job} when is_map(job) ->
         arm_due_timer(next_wakeup_at(job), outcome)
 

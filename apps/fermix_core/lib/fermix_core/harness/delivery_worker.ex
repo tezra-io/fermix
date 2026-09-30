@@ -43,6 +43,8 @@ defmodule FermixCore.Harness.DeliveryWorker do
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Delivery
   alias FermixCore.Harness.Ledger
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Timeouts
 
   @default_interval_ms 30_000
   @min_rearm_ms 5_000
@@ -72,9 +74,16 @@ defmodule FermixCore.Harness.DeliveryWorker do
   # --- State --------------------------------------------------------------
 
   defp build_state(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
     %{
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
-      repo: Keyword.get(opts, :repo, FermixCore.Memory.Repo),
+      repo: repo,
+      # A Repo that does not answer in time is an error the tick logs, not an
+      # exit (`Repo.periodic_opts/2`): a pending read retries on the next tick,
+      # and a timed-out delivery write still lands, ahead of that next read.
+      repo_opts:
+        Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())),
       interval_ms: Keyword.get(opts, :interval_ms, @default_interval_ms),
       max_rows_per_tick: Keyword.get(opts, :max_rows_per_tick, @max_rows_per_tick),
       max_attempts: Keyword.get(opts, :max_attempts, Config.delivery_max_attempts()),
@@ -104,7 +113,7 @@ defmodule FermixCore.Harness.DeliveryWorker do
   defp run_tick(state) do
     now = state.now_fn.()
 
-    case Ledger.pending_deliveries(now, server: state.repo) do
+    case Ledger.pending_deliveries(now, state.repo_opts) do
       {:ok, rows} -> drain(rows, state, now)
       {:error, reason} -> log_tick_error(reason, state)
     end
@@ -205,7 +214,7 @@ defmodule FermixCore.Harness.DeliveryWorker do
   end
 
   defp write_delivery(row, state, fields) do
-    case Ledger.mark_delivery(Map.get(row, :id), fields, server: state.repo) do
+    case Ledger.mark_delivery(Map.get(row, :id), fields, state.repo_opts) do
       {:ok, _row} ->
         :ok
 
