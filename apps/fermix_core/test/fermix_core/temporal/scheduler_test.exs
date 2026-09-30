@@ -821,7 +821,8 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
     # The crash path runs outside any tick: the worker's :DOWN reaches the
     # scheduler on its own, and its recovery write is the Repo call that stalls.
-    # The row stays `delivering` for the monitor-invariant scan to recover.
+    # The proxy never runs it, so the row stays `delivering`; the real Repo runs
+    # it late, ahead of the scheduler's next request.
     test "a crashed worker's recovery is skipped and the scheduler keeps running", ctx do
       due = ~U[2026-09-20 17:00:00Z]
       {_event, [row]} = create!(ctx, reminder_spec("Submit the report", due))

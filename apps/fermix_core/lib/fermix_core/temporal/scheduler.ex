@@ -176,10 +176,10 @@ defmodule FermixCore.Temporal.Scheduler do
       repo: repo,
       # Every Repo call this scheduler makes, the worker-exit recoveries included:
       # a Repo that does not answer in time is an error each path logs and
-      # retries, not an exit (`Repo.periodic_opts/2`). A late-landing claim is a
-      # `delivering` row with no worker, which the monitor-invariant scan resets;
-      # a late recover is guarded on the row still being `delivering`. The
-      # scheduler-before-delivery-supervisor order holds whether or not the
+      # retries, not an exit (`Repo.periodic_opts/2`). The request still runs,
+      # ahead of anything this scheduler sends next; a late claim is a
+      # `delivering` row with no worker, which the monitor-invariant scan resets.
+      # The scheduler-before-delivery-supervisor order holds whether or not the
       # scheduler crashes, so exiting here would fence nothing, only restart.
       repo_opts:
         Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())),
@@ -521,11 +521,11 @@ defmodule FermixCore.Temporal.Scheduler do
     )
   end
 
-  # Mid-lifetime this set is always exactly the monitored workers: the boot sweep
-  # covers restarts and `:DOWN` covers crashes. One cause is expected: a claim
-  # that landed after this scheduler stopped waiting for the Repo, which started
-  # no worker. Anything else means the invariant broke. Either way it is traced
-  # loudly and reset, so a wedged row cannot sit `delivering` forever.
+  # Mid-lifetime this set is exactly the monitored workers: the boot sweep covers
+  # restarts and `:DOWN` covers crashes, unless a Repo call failed (a sweep or
+  # recovery that errored, or a claim that landed after this scheduler stopped
+  # waiting, so no worker started). Anything else means the invariant broke;
+  # either way it is traced loudly and reset, never left `delivering` forever.
   defp assert_monitor_invariant(state, now) do
     case Repo.list_temporal_reminders(%{status: ["delivering"]}, state.repo_opts) do
       {:ok, rows} ->

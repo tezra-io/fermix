@@ -15,6 +15,7 @@ defmodule FermixCore.Harness.ManagerTest do
   alias FermixCore.Harness.RunSupervisor
   alias FermixCore.Harness.VendorConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Timeouts
   alias FermixCore.Tools.HarnessSupport
   alias FermixTestSupport.FakeVendorCli
 
@@ -725,9 +726,9 @@ defmodule FermixCore.Harness.ManagerTest do
     # write is served, and it must last until the delivery mark: the terminal
     # write (one Repo call), the memory write-back (at most two), the inline
     # watchdog (a text send or a continuation dispatch), then the mark (one).
-    # Each Repo call is bounded by GenServer.call's 5 s default.
+    # Each Repo call is bounded by the Repo's call budget.
     test "the lease outlasts the longest inline hand-off" do
-      repo_call_ms = 5_000
+      repo_call_ms = Timeouts.repo_call()
       lease_ms = Manager.handoff_lease_ms()
 
       assert lease_ms >= Delivery.deliver_timeout_ms() + 4 * repo_call_ms
