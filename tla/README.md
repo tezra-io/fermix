@@ -208,6 +208,7 @@ must equal the `holds` check it covers, and the runner checks this.
 | [realtime_session](specs/realtime_session/README.md) | One voice call: how a tool result reaches the next spoken response, keeping one upstream OpenAI socket across drops and reconnects, and ending the call when OpenAI refuses to configure one |
 | [companion_session](specs/companion_session/README.md) | The companion chat socket: two clients sharing one conversation. Dedupe, the outbox and seq cursor, pages cut to their byte budget and live rows, cancel by name and before the hand-off, each request settled once whether or not it became a turn, a failed settlement included, turn endings, and approval cards kept across drops and dropped once they end |
 | [browser_host](specs/browser_host/README.md) | Design spec: browser tasks on the person's Mac through the app. Deciding host or Chrome once at a task's start, the hidden launch and its deadline, tab ownership and release, caps, idle, and the quit handshake |
+| [mobile_push](specs/mobile_push/README.md) | Design spec, ahead of the code (M51 §10): how a reply reaches the owner's phones as a notification. The decision from the acked cursor and the read frontier, retries, the push cursor and the boot step, and the phone's notified set, across frozen sockets, lost answers and a daemon crash |
 
 ## Learning TLA+
 
