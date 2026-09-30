@@ -9,13 +9,14 @@ defmodule FermixCore.Prompt.PromptComposer do
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.InjectionScan
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.Prompt.VoicePresence
 
   require Logger
 
   @type message :: %{role: String.t(), content: String.t()}
 
   @type prompt_part :: %{
-          name: :identity | :soul | :fermix | :user | :memory | :realtime | :runtime,
+          name: :identity | :soul | :fermix | :user | :memory | :realtime | :presence | :runtime,
           kind: :bootstrap | :prompt_memory | :generated,
           tier: :stable | :volatile,
           source_path: String.t() | nil,
@@ -122,10 +123,15 @@ defmodule FermixCore.Prompt.PromptComposer do
       bootstrap_part(:fermix, :bootstrap, bootstrap.fermix),
       memory_part(:user, PromptFiles.user_path(agent_id), prompt_memory.user),
       memory_part(:memory, PromptFiles.memory_path(agent_id), prompt_memory.memory),
-      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime)
+      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime),
+      presence_part(bootstrap.realtime)
     ]
     |> Enum.reject(&is_nil/1)
   end
+
+  # A voice call's own body, only where REALTIME.md makes it a voice call.
+  defp presence_part(nil), do: nil
+  defp presence_part(_realtime), do: part(:presence, :generated, nil, VoicePresence.text())
 
   defp bootstrap_part(_name, _kind, nil), do: nil
 

@@ -9,6 +9,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
   alias FermixCore.Prompt.Defaults
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.Prompt.VoicePresence
 
   setup do
     unique = System.unique_integer([:positive, :monotonic])
@@ -100,6 +101,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
              PromptComposer.compose_with_metadata(agent_id: agent_id, available_skills: [])
 
     refute Enum.any?(normal.parts, &(&1.name == :realtime))
+    refute Enum.any?(normal.parts, &(&1.name == :presence))
 
     assert {:ok, realtime} =
              PromptComposer.compose_with_metadata(
@@ -113,6 +115,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
              :fermix,
              :memory,
              :realtime,
+             :presence,
              :runtime
            ]
 
@@ -121,11 +124,12 @@ defmodule FermixCore.Prompt.PromptComposerTest do
              "identity content",
              "agents content",
              "realtime voice rules",
+             VoicePresence.text(),
              RuntimeSections.build([]),
-             Enum.at(realtime.messages, 4).content
+             Enum.at(realtime.messages, 5).content
            ]
 
-    assert Enum.at(realtime.messages, 4).content =~ "<memory-context>"
+    assert Enum.at(realtime.messages, 5).content =~ "<memory-context>"
   end
 
   # LIVE.md belongs to the Live voice frontend alone (M41 §6.1). It is loaded

@@ -23,6 +23,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.Prompt.VoicePresence
 
   # The whole prompt must stay well under the API's 16_384-token instruction
   # ceiling, and the design targets roughly 500-800 tokens for LIVE.md itself.
@@ -51,12 +52,14 @@ defmodule FermixCore.Realtime.LivePrompt do
   """
 
   @doc """
-  The Live frontend instructions: `live_md` followed by the backend tool
-  categories available on this call.
+  The Live frontend instructions: `live_md`, the pet the owner talks to
+  (`VoicePresence`), and the backend tool categories available on this call.
   """
   @spec compose(String.t(), [Capability.t()]) :: String.t()
   def compose(live_md, capabilities) when is_binary(live_md) and is_list(capabilities) do
     String.trim_trailing(live_md) <>
+      "\n\n" <>
+      VoicePresence.text() <>
       "\n\n" <> @backend_heading <> "\n" <> capability_lines(capabilities)
   end
 

@@ -6,6 +6,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
+  alias FermixCore.Prompt.VoicePresence
   alias FermixCore.Realtime.LivePrompt
 
   @title "# LIVE.md — Live Voice Companion"
@@ -28,6 +29,15 @@ defmodule FermixCore.Realtime.LivePromptTest do
   end
 
   describe "compose/2" do
+    # The owner talks to the pet on their Mac, and the model denied being it
+    # when the prompt never said so (owner, 2026-09-29).
+    test "tells the voice model the pet on the owner's Mac is itself" do
+      prompt = LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)])
+
+      assert prompt =~ "That pet is you"
+      assert prompt =~ "never deny it"
+    end
+
     test "renders LIVE.md, the backend tools heading, and one line per category" do
       prompt =
         LivePrompt.compose(Defaults.live_md(), [
@@ -67,6 +77,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
       assert prompt ==
                @title <>
+                 "\n\n" <>
+                 VoicePresence.text() <>
                  "\n\nBackend tools:\n- File & Code: read_file\n- Web: web_search\n- Memory: recall"
     end
   end
