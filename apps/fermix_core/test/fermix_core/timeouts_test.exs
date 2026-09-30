@@ -157,6 +157,14 @@ defmodule FermixCore.TimeoutsTest do
     end
   end
 
+  describe "memory store deadline" do
+    test "a Repo call waits as long as GenServer.call's own default" do
+      # Every Repo caller already waited this long before the budget had a name;
+      # changing it changes how long every caller waits, not only the opt-ins.
+      assert Timeouts.repo_call() == 5_000
+    end
+  end
+
   describe "ctx gating (FermixCore.Timeouts.Telemetry)" do
     test "correlation ids ride always-on; context is omitted when capture is off" do
       attach([:fermix, :timeout, :expired])

@@ -13,6 +13,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
   alias FermixCore.Memory.Scope
+  alias FermixCore.Timeouts
 
   @base_migration_version 1
   @fts_migration_version 2
@@ -1137,6 +1138,19 @@ defmodule FermixCore.Memory.Repo do
   def start_link(opts \\ []) do
     {name, opts} = Keyword.pop(opts, :name, __MODULE__)
     GenServer.start_link(__MODULE__, opts, name: name)
+  end
+
+  @doc """
+  The options a long-lived worker passes on every Repo call it makes from its
+  own process: a request that does not answer within `timeout_ms` comes back as
+  `{:error, :repo_timeout}` instead of exiting the worker. Every such worker
+  already logs an `{:error, reason}` and retries on its next tick; exiting
+  instead restarted it and, for the jobs and reminder schedulers, every later
+  child of the root supervisor, the daemon socket included.
+  """
+  @spec periodic_opts(GenServer.server(), pos_integer()) :: keyword()
+  def periodic_opts(server, timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0 do
+    [server: server, on_timeout: :error, timeout: timeout_ms]
   end
 
   @spec enabled?(keyword()) :: boolean()
@@ -3914,10 +3928,33 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  # Every request is served in order by this one process, so a call waits
+  # behind every request ahead of it. A timed-out call exits its caller unless
+  # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
+  # itself still runs when the Repo reaches it, and still before anything that
+  # caller sends afterwards.
   defp call(request, opts) do
     server = Keyword.get(opts, :server, __MODULE__)
-    GenServer.call(server, request)
+    timeout = Keyword.get(opts, :timeout, Timeouts.repo_call())
+
+    case Keyword.get(opts, :on_timeout, :exit) do
+      :exit -> GenServer.call(server, request, timeout)
+      :error -> call_or_timeout_error(server, request, timeout)
+    end
   end
+
+  defp call_or_timeout_error(server, request, timeout) do
+    GenServer.call(server, request, timeout)
+  catch
+    :exit, {:timeout, {GenServer, :call, _args}} ->
+      {:error, {:timeout, :repo_call, _ms}} =
+        Timeouts.expired(:repo_call, timeout, %{request: request_name(request)})
+
+      {:error, :repo_timeout}
+  end
+
+  defp request_name(request) when is_tuple(request), do: elem(request, 0)
+  defp request_name(request) when is_atom(request), do: request
 
   defp open_connection(false, _database_path), do: :disabled
 

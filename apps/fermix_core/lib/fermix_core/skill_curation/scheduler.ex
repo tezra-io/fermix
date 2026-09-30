@@ -19,6 +19,7 @@ defmodule FermixCore.SkillCuration.Scheduler do
 
   alias FermixCore.Memory.Repo
   alias FermixCore.SkillCuration
+  alias FermixCore.Timeouts
 
   @tick_interval_ms :timer.hours(6)
   # The first tick fires shortly after boot so the state row (and with it the
@@ -35,8 +36,14 @@ defmodule FermixCore.SkillCuration.Scheduler do
 
   @impl true
   def init(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
     state = %{
-      repo: Keyword.get(opts, :repo, Repo),
+      repo: repo,
+      # A Repo that does not answer in time is an error the tick logs and retries
+      # on the next tick, not an exit (`Repo.periodic_opts/2`).
+      repo_opts:
+        Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())),
       task_supervisor: Keyword.get(opts, :task_supervisor, FermixCore.TaskSupervisor),
       tick_interval_ms: Keyword.get(opts, :tick_interval_ms, @tick_interval_ms),
       run_cycle_fun: Keyword.get(opts, :run_cycle_fun, &SkillCuration.run_cycle/1),
@@ -63,7 +70,7 @@ defmodule FermixCore.SkillCuration.Scheduler do
   end
 
   defp maybe_fire(state, now) do
-    case Repo.ensure_skill_curation_state(now, server: state.repo) do
+    case Repo.ensure_skill_curation_state(now, state.repo_opts) do
       {:ok, row} ->
         if due?(row, now), do: start_cycle(state)
         :ok
