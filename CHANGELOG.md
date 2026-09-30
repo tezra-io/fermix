@@ -4,6 +4,26 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.12.1] - 2026-09-30
+
+### Fixed
+
+- **A slow memory store no longer restarts the daemon's connections.** The
+  scheduled-jobs and reminder schedulers, the coding-harness delivery worker,
+  skill curation and computer-history retention wait up to 5 seconds for the
+  memory store, and they crashed when one long operation held it longer. The
+  two schedulers start before the daemon socket and realtime voice, so their
+  restart restarted those too: the app lost its connection, a live voice call
+  dropped, and several crashes close together could stop the daemon. All five
+  now log the delay and try again on their next tick. A job run or reminder
+  claimed while the store was slow is recovered on the next reconciliation
+  pass, within a minute; a job run ended that way says "reaped: no live runner
+  (daemon or scheduler restart, or a memory store that answered too late)".
+- **The macOS app accepts the Browser settings pane.** The management schema
+  now lists the `browser` pane that the Browser settings section renders under.
+  The schema's pane list did not include it, so the export contradicted itself,
+  and an app that models its panes from the schema refused it.
+
 ## [0.12.0] - 2026-09-28
 
 ### Added

@@ -2046,7 +2046,7 @@ defmodule FermixCore.Jobs.SchedulerTest do
          runner_notify: self(),
          runner_delay_ms: Keyword.get(opts, :runner_delay_ms, 0),
          max_active_runs: Keyword.get(opts, :max_active_runs, 4)
-       ]}
+       ] ++ Keyword.take(opts, [:repo_timeout_ms])}
 
     start_supervised!(
       Supervisor.child_spec(child, restart: Keyword.get(opts, :restart, :permanent))
@@ -2078,4 +2078,85 @@ defmodule FermixCore.Jobs.SchedulerTest do
   end
 
   defp eventually(_fun, 0), do: false
+
+  # A Repo stuck behind a long operation must cost a tick, not a restart: under
+  # the root supervisor's :rest_for_one a crash here restarted every later
+  # sibling, the daemon socket included.
+  describe "a Repo that does not answer" do
+    test "boot, reconciliation and the timer lookup are skipped and the scheduler keeps running",
+         %{
+           runner_supervisor: runner_supervisor
+         } do
+      stalled = start_supervised!(FermixTestSupport.StalledRepo)
+      name = :"jobs_scheduler_stalled_#{System.unique_integer([:positive])}"
+
+      {pid, log} =
+        with_log(fn ->
+          start_supervised!(
+            {Scheduler,
+             name: name,
+             repo: stalled,
+             runner_supervisor: runner_supervisor,
+             scheduler_enabled: true,
+             timer_enabled: true,
+             repo_timeout_ms: 50},
+            id: name
+          )
+
+          pid = Process.whereis(name)
+          send(pid, :reconcile_tick)
+          _state = :sys.get_state(pid)
+          pid
+        end)
+
+      assert Process.whereis(name) == pid
+      assert log =~ "Scheduled job run reconciliation scan failed: :repo_timeout"
+      assert log =~ "Scheduled job timer lookup failed: :repo_timeout"
+    end
+
+    # The crash path runs outside any tick: the runner's :DOWN reaches the
+    # scheduler on its own, and its run lookup is the Repo call that stalls.
+    test "a crashed runner's run lookup is skipped and the scheduler keeps running", %{
+      repo: repo,
+      runner_supervisor: runner_supervisor
+    } do
+      stalling =
+        start_supervised!(
+          {FermixTestSupport.StalledRepo, forward_to: repo, stall: [:get_job_run]}
+        )
+
+      assert {:ok, job} =
+               Registry.create_job(
+                 %{
+                   created_by_trust: "operator",
+                   name: "Crashy Check",
+                   schedule: "every 15 minutes",
+                   task_prompt: "Crash during the fake runner."
+                 },
+                 repo: repo,
+                 now: ~U[2026-05-02 14:00:00Z]
+               )
+
+      {{scheduler, pid}, log} =
+        with_log(fn ->
+          # Forwarded requests share this budget, so it leaves room for a slow
+          # but answering Repo; only the stalled lookup spends all of it.
+          scheduler =
+            start_scheduler(stalling, runner_supervisor,
+              runner_module: CrashingRunner,
+              repo_timeout_ms: 1_000
+            )
+
+          pid = Process.whereis(scheduler)
+          assert :ok = Scheduler.tick(scheduler, now: ~U[2026-05-02 14:15:00Z])
+          # The monitor leaves state only once the :DOWN handler has returned.
+          assert eventually(fn -> map_size(:sys.get_state(scheduler).run_monitors) == 0 end)
+          {scheduler, pid}
+        end)
+
+      assert Process.whereis(scheduler) == pid
+      assert {:ok, [run]} = Repo.list_job_runs(%{job_id: job.id}, server: repo)
+      assert log =~ "Scheduled job #{job.id} run #{run.id} crash lookup failed: :repo_timeout"
+    end
+  end
 end

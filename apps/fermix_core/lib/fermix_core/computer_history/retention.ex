@@ -19,6 +19,7 @@ defmodule FermixCore.ComputerHistory.Retention do
   require Logger
 
   alias FermixCore.Memory.Repo
+  alias FermixCore.Timeouts
 
   @retention_window_ms :timer.hours(48)
   @tick_interval_ms :timer.hours(1)
@@ -43,13 +44,19 @@ defmodule FermixCore.ComputerHistory.Retention do
 
   @impl true
   def init(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
     state = %{
-      repo: Keyword.get(opts, :repo, Repo),
+      repo: repo,
       window_ms: Keyword.get(opts, :window_ms, @retention_window_ms),
       byte_ceiling: Keyword.get(opts, :byte_ceiling, @spool_byte_ceiling),
       access_row_cap: Keyword.get(opts, :access_row_cap, @access_row_cap),
       tick_interval_ms: Keyword.get(opts, :tick_interval_ms, @tick_interval_ms),
-      timer_enabled?: Keyword.get(opts, :timer_enabled, true)
+      timer_enabled?: Keyword.get(opts, :timer_enabled, true),
+      # A Repo that does not answer in time is an error each sweep logs; the next
+      # tick sweeps again, and every sweep is idempotent (`Repo.periodic_opts/2`).
+      repo_opts:
+        Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call()))
     }
 
     schedule_tick(state, @initial_tick_ms)
@@ -58,9 +65,10 @@ defmodule FermixCore.ComputerHistory.Retention do
 
   @impl true
   def handle_info(:tick, state) do
-    _ = sweep(state.repo, System.system_time(:millisecond), state.window_ms)
-    _ = sweep_bytes(state.repo, state.byte_ceiling)
-    _ = cap_access(state.repo, state.access_row_cap)
+    tick = state.repo_opts
+    _ = sweep(state.repo, System.system_time(:millisecond), state.window_ms, tick)
+    _ = sweep_bytes(state.repo, state.byte_ceiling, tick)
+    _ = cap_access(state.repo, state.access_row_cap, tick)
     schedule_tick(state, state.tick_interval_ms)
     {:noreply, state}
   end
@@ -70,13 +78,16 @@ defmodule FermixCore.ComputerHistory.Retention do
   test drive the same code with an injected clock; returns the deleted count or
   logs and returns the error (loud, never swallowed).
   """
-  @spec sweep(module() | pid(), integer(), non_neg_integer()) ::
+  @spec sweep(module() | pid(), integer(), non_neg_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def sweep(repo, now_ms, window_ms \\ @retention_window_ms)
-      when is_integer(now_ms) and is_integer(window_ms) do
+  def sweep(repo, now_ms, window_ms \\ @retention_window_ms, opts \\ [])
+      when is_integer(now_ms) and is_integer(window_ms) and is_list(opts) do
     cutoff_ts = now_ms - window_ms
 
-    case Repo.computer_history_sweep_expired_events(cutoff_ts, server: repo) do
+    case Repo.computer_history_sweep_expired_events(
+           cutoff_ts,
+           Keyword.merge([server: repo], opts)
+         ) do
       {:ok, 0} = ok ->
         ok
 
@@ -99,11 +110,14 @@ defmodule FermixCore.ComputerHistory.Retention do
   `ceiling_bytes` of estimated content. Firing is data loss inside the 48h
   retention promise, so a non-zero delete is a WARNING, never a debug line.
   """
-  @spec sweep_bytes(module() | pid(), pos_integer()) ::
+  @spec sweep_bytes(module() | pid(), pos_integer(), keyword()) ::
           {:ok, non_neg_integer()} | {:error, term()}
-  def sweep_bytes(repo, ceiling_bytes \\ @spool_byte_ceiling)
-      when is_integer(ceiling_bytes) and ceiling_bytes > 0 do
-    case Repo.computer_history_sweep_spool_over_bytes(ceiling_bytes, server: repo) do
+  def sweep_bytes(repo, ceiling_bytes \\ @spool_byte_ceiling, opts \\ [])
+      when is_integer(ceiling_bytes) and ceiling_bytes > 0 and is_list(opts) do
+    case Repo.computer_history_sweep_spool_over_bytes(
+           ceiling_bytes,
+           Keyword.merge([server: repo], opts)
+         ) do
       {:ok, 0} = ok ->
         ok
 
@@ -126,8 +140,8 @@ defmodule FermixCore.ComputerHistory.Retention do
 
   # Bound the access audit to its newest rows. Quiet on success — capping audit
   # depth is expected housekeeping, not data loss inside a promise.
-  defp cap_access(repo, max_rows) do
-    case Repo.computer_history_cap_access_rows(max_rows, server: repo) do
+  defp cap_access(repo, max_rows, opts) do
+    case Repo.computer_history_cap_access_rows(max_rows, Keyword.merge([server: repo], opts)) do
       {:ok, _deleted} ->
         :ok
 
