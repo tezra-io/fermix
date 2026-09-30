@@ -24,6 +24,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Readiness
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -78,15 +79,19 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert schema["x-limits"] == stringify(Protocol.limits())
   end
 
-  # The app models its panes as exactly the schema's set and refuses a section
-  # whose pane is outside it, so every pane this daemon can serve must be in the
-  # enum. The browser section shipped with a pane the schema did not list.
-  test "every section's pane is in the schema's pane enum", %{schema: schema} do
+  # The app models its panes as exactly the schema's set and refuses a pane
+  # outside it, so every pane this daemon can serve (a settings section's, or a
+  # readiness failure's) must be in the enum. The browser section shipped with
+  # a pane the schema did not list.
+  test "every pane a section or a readiness failure names is in the schema's pane enum", %{
+    schema: schema
+  } do
     enum = schema["$defs"]["settingsPane"]["enum"]
-    outside = for %{pane: pane} <- Settings.sections(), pane not in enum, uniq: true, do: pane
+    section_panes = for %{pane: pane} <- Settings.sections(), do: pane
+    outside = Enum.uniq(section_panes ++ Readiness.panes()) -- enum
 
     assert outside == [],
-           "sections render under panes the schema does not list: #{inspect(outside)}"
+           "the daemon serves panes the schema does not list: #{inspect(outside)}"
   end
 
   # The schema publishes a frame ceiling the app builds its packet-4 client
