@@ -78,6 +78,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert schema["x-limits"] == stringify(Protocol.limits())
   end
 
+  # The app models its panes as exactly the schema's set and refuses a section
+  # whose pane is outside it, so every pane this daemon can serve must be in the
+  # enum. The browser section shipped with a pane the schema did not list.
+  test "every section's pane is in the schema's pane enum", %{schema: schema} do
+    enum = schema["$defs"]["settingsPane"]["enum"]
+    outside = for %{pane: pane} <- Settings.sections(), pane not in enum, uniq: true, do: pane
+
+    assert outside == [],
+           "sections render under panes the schema does not list: #{inspect(outside)}"
+  end
+
   # The schema publishes a frame ceiling the app builds its packet-4 client
   # against. A client whose own ceiling is lower silently refuses frames the
   # contract promises; higher, and it sends frames the daemon drops.
