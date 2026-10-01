@@ -1670,6 +1670,14 @@ def test_the_release_gate_tests_run_in_the_tests_loop():
 
 # --- report: invalid never publishes, valid-but-short exits 5 ----------------
 
+@pytest.fixture(autouse=True)
+def _no_host_git(monkeypatch):
+    """`_report` re-renders the HTML board, which reads git history for runs that
+    did not record a commit; tests read an empty history, never the host repo's."""
+    monkeypatch.setattr(rc.leaderboard_html.GitHistory, "from_repo",
+                        classmethod(lambda cls, _repo, _ref="": cls([])))
+
+
 def _report_cfg(tmp_path):
     return SimpleNamespace(
         report_dir=str(tmp_path / "reports"),
@@ -1744,6 +1752,24 @@ def test_a_valid_run_writes_a_pairable_results_json(tmp_path):
     out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
     with open(os.path.join(out_dir, "results.json")) as fh:
         assert json.load(fh)["valid"] is True
+
+
+def test_a_run_records_per_task_cost_and_its_identity_for_the_html_board(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"])
+    rc._report(cfg, _report_args(), lb_path, run)
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "results.json")) as fh:
+        task = json.load(fh)["tasks"]["cap_x/c1"]
+    assert task["total_tokens"] == 10
+    assert "priced_cost_usd" in task                 # null when no route was priced
+    with open(os.path.join(out_dir, "run.json")) as fh:
+        record = json.load(fh)
+    assert record["meta"]["repo"]["sha"] == "0" * 40
+    assert record["score"]["mean_task_success"] == 1.0
+    assert record["problems"] == []
+    assert os.path.exists(os.path.join(cfg.report_dir, "capability", "leaderboard.html"))
 
 
 def test_a_valid_run_that_misses_the_bar_is_recorded_and_exits_5(tmp_path, capsys):

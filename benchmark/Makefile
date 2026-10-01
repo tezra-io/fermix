@@ -14,7 +14,7 @@ help:
 	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code aim fixture_server arms; do \
+	@for t in scoring pricing aggregate leaderboard leaderboard_html release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code aim fixture_server arms; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -51,7 +51,7 @@ capability-readonly:  ## capability score of the READ-ONLY suites vs the dev dae
 estimate:     ## print the capability turn-count/cost plan (no spend)
 	$(UV) bin/run_capability.py --trials 5 --estimate
 
-rank:         ## re-render the cross-model leaderboard
+rank:         ## re-render the cross-model leaderboard (markdown + reports/capability/leaderboard.html)
 	$(UV) bin/run_capability.py --rank-only
 
 # The claim this arm supports: the FULL Fermix system vs a raw single-call model on the

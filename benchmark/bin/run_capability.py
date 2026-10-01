@@ -62,7 +62,7 @@ SKILL_DIR = os.path.dirname(HERE)
 sys.path.insert(0, HERE)
 
 from evallib import (aggregate, checker, config as cfgmod, driver, grade, judge, leaderboard,
-                     pricing, release_gate, safe_rm, scoring, uplift)
+                     leaderboard_html, pricing, release_gate, safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
                                     ServerError, case_uses_fixture, check_state)
@@ -1298,16 +1298,20 @@ def write_results_json(path, arm, config_id, k, threshold, outcomes, valid: bool
     `valid` travels with the numbers so an arm cannot be paired without the pairing
     seeing what the run itself concluded.
 
-    Beside success, each task carries the two columns a configuration comparison
-    reports: every trial's wall clock (`durations_ms`, so the comparison pools its
-    own p50/p95 rather than re-deriving one from a summary) and the mean
-    main-model calls. Both are OPTIONAL in the format — an arm written by
-    `run_baseline.py` has neither — and `uplift.compare_arms` never reads them."""
+    Beside success, each task carries the columns a configuration comparison and the
+    HTML leaderboard report: every trial's wall clock (`durations_ms`, so the
+    comparison pools its own p50/p95 rather than re-deriving one from a summary), the
+    mean main-model calls, and the task's tokens and rate-card cost over all its
+    trials (`priced_cost_usd` is null when a route had no card entry). All are
+    OPTIONAL in the format — an arm written by `run_baseline.py` has none — and
+    `uplift.compare_arms` never reads them."""
     tasks = {f"{s}/{cid}": {"mean_success": round(o.stats.mean_success, 4),
                             "pass_hat_k": round(o.stats.pass_hat_k, 4),
                             "n": o.stats.n_trials,
                             "durations_ms": [round(ms, 1) for ms in o.stats.durations_ms],
-                            "mean_main_llm_calls": o.stats.mean_main_llm_calls}
+                            "mean_main_llm_calls": o.stats.mean_main_llm_calls,
+                            "total_tokens": o.stats.total_tokens,
+                            "priced_cost_usd": o.stats.priced_cost_usd}
              for s, cid, o in outcomes}
     uplift.write_arm(path, arm=arm, config_id=config_id,
                      suite=",".join(sorted({s for s, _c, _o in outcomes})),
@@ -1654,8 +1658,9 @@ def main(argv=None) -> int:
     lb_path = leaderboard.store_path(cfg.report_dir)
 
     if args.rank_only:
-        print(leaderboard.render_md(leaderboard.load_store(lb_path), axis=args.axis))
-        return 0
+        store = leaderboard.load_store(lb_path)
+        print(leaderboard.render_md(store, axis=args.axis))
+        return 0 if _render_html(cfg, lb_path) else 3
     if args.check:
         return _check(cfg, args)
 
@@ -1901,6 +1906,7 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
         print("   - " + "\n   - ".join(problems), file=sys.stderr)
         print(f"   Results (results.invalid.json) and report kept for diagnosis: "
               f"{out_dir}", file=sys.stderr)
+        _render_html(cfg, lb_path)
         return 4
     # Per-task results = the Fermix arm of an uplift pairing (run_uplift.py reads this
     # against a baseline arm; run_arms.py against the control configuration's).
@@ -1918,6 +1924,7 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
     print(f"\nscored config: {config_id}  (composite over {score.n_tasks} tasks)")
     print(md)
     print(f"leaderboard: {lb_path}")
+    _render_html(cfg, lb_path)
     if gate.passed:
         print("release gate: PASS")
         return 0
@@ -1981,6 +1988,21 @@ def _publish(cfg, args, lb_path, config_id, score, meta, run: _Run) -> str:
 def _write_report(out_dir, run_id, config_id, meta, score, gate, problems) -> None:
     with open(os.path.join(out_dir, "report.md"), "w", encoding="utf-8") as fh:
         fh.write(render_report(run_id, config_id, meta, score, gate, problems))
+    leaderboard_html.write_run_record(out_dir, meta, score, problems)
+
+
+def _render_html(cfg, lb_path) -> bool:
+    """Re-render leaderboard.html. After a sweep the run's results, report and any
+    leaderboard row are already on disk, so a failure is reported and the sweep keeps
+    its exit code; `--rank-only` turns the False into exit 3."""
+    try:
+        page = leaderboard_html.write(cfg.report_dir, leaderboard.load_store(lb_path),
+                                      SKILL_DIR, now_utc())
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f"leaderboard page NOT rendered: {exc}", file=sys.stderr)
+        return False
+    print(f"leaderboard page: {page}")
+    return True
 
 
 if __name__ == "__main__":

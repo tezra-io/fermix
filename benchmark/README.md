@@ -134,7 +134,7 @@ make estimate           # rough turn/time/price range, no model calls
 make capability-auto     # full 24-task sweep: seed+start a disposable daemon, run, tear down
 make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
 make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
-make rank                # render the leaderboard
+make rank                # render the leaderboard: markdown + reports/capability/leaderboard.html
 ```
 
 `make estimate` prints a rough turn/time/price range without model calls; it is
@@ -325,7 +325,27 @@ never ranked against a full-set row; and if the registry cannot be read at all t
 refuses on exit 3 rather than guessing either way.
 
 The leaderboard lives at `reports/capability/leaderboard.json` and is rendered by
-`make rank`. The served config is **auto-detected** from the trace, so each row is
+`make rank`, which also writes **`reports/capability/leaderboard.html`** (every sweep
+re-renders it too). Open that page rather than reading the markdown. It has three tabs:
+
+- **Leaderboard**: each model's latest valid full sweep, ranked on the tasks they all
+  ran, with a task-by-model grid of success, median time and cost per trial. Tied
+  models share a rank. A saturation note appears when the leader is at 95% or more or
+  most shared tasks were passed by every model.
+- **Same task set**: the strict comparison, one table per cohort (below), ranked only
+  when two or more models ran the identical, pinned task set.
+- **Runs by change**: every run, valid or not, grouped by the commit it measured,
+  newest first. Each run expands to its per-task table, and the compare box puts any
+  ticked runs side by side task by task.
+
+Time and cost sit in a column block labelled "beside the score, never ranked". Each run
+writes `run.json` (its identity, score and any invalidity reasons) and per-task tokens
+and rate-card cost into `results.json`. Runs from before that recorded neither their
+commit nor per-task cost or time: the page places them on the `origin/dev` commit that
+was current when they started, marked "inferred", and shows "—" for what was never
+recorded.
+
+The served config is **auto-detected** from the trace, so each row is
 labeled `provider/model/effort` (e.g. `openai/gpt-5.5/xhigh`,
 `anthropic/claude-opus-4-8/high`) — the same model at a different reasoning effort
 is a separate row. **Exception:** `openai_codex` (OAuth) reports as `openai` in
