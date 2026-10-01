@@ -56,8 +56,10 @@ scenarios:
     severity: normal
     tags: [parity, tools, web]
     cases:
+      # Both asks are inherently fresh, so the search is forced by the question
+      # rather than by an instruction to search; the mechanism gate stays.
       - id: search_current_fact
-        query: "Search the web and tell me: what is the latest stable release version of the Elixir language?"
+        query: "What's the latest stable release of the Elixir language?"
         expect:
           tools_any: [web_search]
           reply_matches: "(?i)\\bv?1\\.\\d{1,2}"
@@ -66,10 +68,11 @@ scenarios:
           max_duration_ms: 120000
         rubric: "Uses web_search and reports an Elixir version number (1.x line) from the results."
       - id: search_recent_event
-        query: "Use web search to find who won the most recent men's singles title at Wimbledon, then name them."
+        query: "Who won the men's singles at Wimbledon this year?"
         expect:
           tools_any: [web_search]
-          reply_matches: "[A-Z][A-Za-z.'’-]+ [A-Z][A-Za-z.'’-]+"
+          # The old "Two Capitalised Words" floor matched "Men's Singles" and
+          # could not fail; the champion's name is the rubric's to check.
           reply_not_matches: "(?i)no results|could not find|couldn'?t find|no (winner|champion)|unable to find"
           no_tool_errors: false
           max_cost_usd: 1.0

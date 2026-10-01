@@ -2,14 +2,14 @@ suite: web
 risk: host_readonly
 title: "Web research — search, fetch, and summarize"
 description: >
-  Exercises the assistant's web-research capability: searching the live web for
-  a topic, asking for the latest on something, looking things up, and fetching a
-  concrete public URL to summarize it. Gates are deliberately tolerant of the
-  model's route — for an open-ended "what's the latest" or "look up" request the
-  model may reach for web_search, and for a fetch-this-URL request it should reach
-  for web_fetch, but either may chain the other, so tools gates use tools_any and
-  reply_matches asserts a topical token rather than pinning an exact tool sequence.
-  Network-bound, so budgets and timeouts are set higher than for offline lookups.
+  Exercises the assistant's web-research capability: answering a factual
+  question, asking for the latest on something, looking up a fact that moves,
+  and reading a concrete public URL. Gates grade the outcome rather than the
+  route: a researched answer carries URLs that the tool evidence actually
+  returned (reply_urls_in_evidence), a fact question is graded on the fact
+  itself, and only the fetch scenario pins that the page was read by a tool,
+  because "read this page" is the task. Network-bound, so budgets and timeouts
+  are set higher than for offline lookups.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -18,80 +18,81 @@ defaults:
 
 scenarios:
   - id: search_the_web
-    title: "Searches the web for a topic on request"
+    title: "Answers a factual question correctly, searching or not"
     severity: normal
     tags: [web, search, core]
     cases:
+      # Reworded: the old prompt told the model not to answer from memory, and
+      # the old gate passed on the word "mars". The floor is now the complete
+      # answer — five rovers landed, and a half-remembered list drops Sojourner.
       - id: mars_rovers
-        query: "What are the names of all of NASA's Mars rovers? I want the current list, not a half-remembered one."
+        query: "Which rovers has NASA actually landed on Mars so far?"
         expect:
-          # Model may answer from training data (correct) or web_search — both valid.
-          # Gate on accuracy: Curiosity + Perseverance must appear.
-          reply_matches: "(?i)curiosity|perseverance|rover|mars"
+          reply_matches: "(?is)(?=.*sojourner)(?=.*spirit)(?=.*opportunity)(?=.*curiosity)(?=.*perseverance)"
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Reports real Mars rover names (Curiosity, Perseverance, etc.) without inventing any."
-      - id: nobel_physics
-        query: "Who won the most recent Nobel Prize in Physics?"
-        expect:
-          # The most-recent laureate is knowable from training, so the model may answer
-          # correctly WITHOUT searching — don't hard-gate web_search (it would falsely fail a
-          # right-from-memory answer, the parametric-shortcut trap). Gate on accuracy, like
-          # mars_rovers / tallest_building; latest_ai / latest_spacex cover the genuinely-
-          # fresh "must search" cases.
-          reply_matches: "(?i)nobel|physics|prize|laureate"
-          max_cost_usd: 1.5
-          max_duration_ms: 150000
-        rubric: "Reports a real Nobel Prize in Physics laureate without inventing one (from search or knowledge)."
+        rubric: >
+          Names all five NASA rovers that landed on Mars — Sojourner, Spirit,
+          Opportunity, Curiosity and Perseverance — and invents none; a non-NASA
+          rover may appear only if it is labelled as such. Searching is fine and
+          answering from knowledge is fine.
+      # Mutable in principle (a taller tower is under construction), so this
+      # gate is re-checked whenever the answer changes; today it is a fixed fact.
       - id: tallest_building
         query: "What's the tallest building in the world right now?"
         expect:
-          reply_matches: "(?i)burj khalifa|tallest|building|meter|metre|feet"
+          reply_matches: "(?i)burj khalifa"
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Reports the world's tallest building (Burj Khalifa) without inventing one."
+        rubric: "Names the Burj Khalifa as the world's tallest completed building, without inventing a taller one."
 
+  # Grounding is graded structurally, not by route: the reply must carry at
+  # least one URL, and every URL in it must be one a tool actually returned.
+  # A memory-only answer has no URL in the evidence inventory and a rebuilt
+  # link fails it, so this tells research from recall whatever tool the model
+  # chose. The vocabulary gates that used to sit here ("model|release|ai")
+  # could not fail.
   - id: whats_the_latest
-    title: "Reports the latest on a current topic"
+    title: "Reports the latest on a current topic, with its sources"
     severity: normal
     tags: [web, search, news]
     cases:
       - id: latest_ai
         query: "What's the latest on AI model releases this year? Give me a quick rundown."
         expect:
-          tools_any: [web_search]
-          reply_matches: "(?i)model|release|ai|launch|announce"
+          reply_matches: 'https?://'
+          reply_urls_in_evidence: true
           max_cost_usd: 2.0
           max_duration_ms: 150000
         rubric: >
-          Searches the web and summarizes recent AI model releases grounded in
-          the search results, not from memory alone. The rundown also reads well
-          on a chat surface: it leads with the answer rather than with method or
+          Summarizes recent AI model releases grounded in what the tools
+          returned, not from memory alone. The rundown also reads well on a
+          chat surface: it leads with the answer rather than with method or
           preamble, its sections are short and self-contained, and it uses no
           markdown tables and no horizontal rules.
       - id: latest_spacex
         query: "What's the latest news on SpaceX launches?"
         expect:
-          tools_any: [web_search]
-          reply_matches: "(?i)spacex|launch|rocket|starship|falcon"
+          reply_matches: 'https?://'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
-          Searches the web and reports recent SpaceX launch news from the
-          results. The answer also reads well on a chat surface: it leads with
-          the answer rather than with method or preamble, its sections are short
-          and self-contained, and it uses no markdown tables and no horizontal
+          Reports recent SpaceX launch news from what the tools returned. The
+          answer also reads well on a chat surface: it leads with the answer
+          rather than with method or preamble, its sections are short and
+          self-contained, and it uses no markdown tables and no horizontal
           rules.
 
   # The parametric-shortcut trap, stated as the thing under test: at lower
   # reasoning effort the model answers a current-but-mutable fact (a rate, a
   # version, who holds a role) from training data instead of searching. The
-  # routing surfaces now say that a confident memory of a mutable fact is
-  # still a reason to search, and this is the turn that proves the model acts
-  # on it. `tools_any: [web_search]` is a labelled route gate because here the
-  # ROUTE is the behavior under test — unlike mars_rovers / nobel_physics
-  # above, where a right-from-memory answer is legitimate and gating the route
-  # would falsely fail it. The value is deliberately not graded: both facts
+  # routing surfaces say that a confident memory of a mutable fact is still a
+  # reason to search, and this is the turn that proves the model acts on it.
+  # The proof is the evidence inventory rather than a route gate: the reply
+  # must state the fact AND carry a source URL, and every URL must come from
+  # tool evidence — which a memory answer cannot produce whichever tool the
+  # model would have picked. The value is deliberately not graded: both facts
   # move, so an answer is judged on being grounded, not on matching a figure
   # this file would have to chase.
   - id: grounds_mutable_fact
@@ -102,63 +103,67 @@ scenarios:
       - id: fed_funds_rate
         query: "What's the current federal funds target rate?"
         expect:
-          tools_any: [web_search]
-          reply_matches: "(?i)\\d(\\.\\d+)?\\s*(%|percent|bps|basis)|target range|federal funds|fed"
+          reply_matches: '(?is)(?=.*\d(\.\d+)?\s*(%|percent))(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
-          The requirement is a search-grounded answer: the reply states the
-          current federal funds target rate or range and carries the source
-          link the search returned. Answering from memory without looking it up
-          is the failure this case tests and must be scored as a fail. The
-          exact number is not graded — the rate moves, so a figure that matches
-          the returned source is correct even if it differs from a remembered
+          The requirement is a grounded answer: the reply states the current
+          federal funds target rate or range and carries the source link the
+          lookup returned. Answering from memory without looking it up is the
+          failure this case tests and must be scored as a fail. The exact
+          number is not graded — the rate moves, so a figure that matches the
+          returned source is correct even if it differs from a remembered
           value.
       - id: node_lts_version
         query: "Which Node.js version is the current LTS?"
         expect:
-          tools_any: [web_search]
-          reply_matches: '(?is)(?=.*node)(?=.*\d)'
+          reply_matches: '(?is)(?=.*node)(?=.*\d)(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
-          The requirement is a search-grounded answer: the reply names the
-          current Node.js LTS version and carries the source link the search
-          returned. Answering from memory without looking it up is the failure
-          this case tests and must be scored as a fail. The exact version is
-          not graded — the LTS line rotates, so a version that matches the
-          returned source is correct even if it differs from a remembered
-          value.
+          The requirement is a grounded answer: the reply names the current
+          Node.js LTS version and carries the source link the lookup returned.
+          Answering from memory without looking it up is the failure this case
+          tests and must be scored as a fail. The exact version is not graded —
+          the LTS line rotates, so a version that matches the returned source
+          is correct even if it differs from a remembered value.
 
+  # ROUTE-SANITY SCENARIO — the one place this suite pins a tool. "Read this
+  # URL" is the task itself, so a summary from memory is the failure under
+  # test; web_fetch and the browser are both valid ways to read a page. The
+  # reply floor is a phrase from the page, not a word that already sits in the
+  # URL the user typed.
   - id: fetch_and_summarize
-    title: "Fetches a concrete public URL and summarizes it"
+    title: "Reads a concrete public URL and summarizes what is on it"
     severity: critical
-    tags: [web, fetch, core]
+    tags: [web, fetch, core, sanity]
     cases:
       - id: fetch_example_com
         query: "Fetch https://example.com and summarize what's on the page for me."
         expect:
-          tools_any: [web_fetch]
-          reply_matches: "(?i)example|domain|illustrative|documentation"
+          tools_any: [web_fetch, browser]
+          reply_matches: "(?i)illustrative|documentation|without (prior )?(coordination|permission|needing)|reserved"
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Fetches example.com and summarizes its actual content (the illustrative example-domain page), without fabricating sections that aren't there."
+        rubric: "Reads example.com and summarizes its actual content (the reserved example-domain notice), without fabricating sections that aren't there."
       - id: fetch_iana_about
         query: "Please grab the page at https://www.iana.org/about and give me a short summary of what IANA does."
         expect:
-          tools_any: [web_fetch]
-          reply_matches: "(?i)iana|internet|number|assigned|registr|domain"
+          tools_any: [web_fetch, browser]
+          reply_matches: "(?i)domain name|number resource|ip address|protocol (parameter|assignment)|dns root|root zone"
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Fetches the IANA about page and summarizes IANA's role (coordinating internet number/name assignments) from the page content."
+        rubric: "Reads the IANA about page and summarizes IANA's role (coordinating domain names, number resources and protocol assignments) from the page content."
       - id: fetch_rfc_editor
         query: "Read https://www.rfc-editor.org/ and tell me in a sentence or two what that site is for."
         expect:
-          tools_any: [web_fetch]
-          reply_matches: "(?i)rfc|request for comments|document|internet|standard"
+          tools_any: [web_fetch, browser]
+          reply_matches: '(?is)(?=.*\brfcs?\b)(?=.*(publish|editor|series|document|standard))'
           max_cost_usd: 1.5
           max_duration_ms: 150000
-        rubric: "Fetches the RFC Editor homepage and explains that it publishes/hosts RFC documents, grounded in the fetched content."
+        rubric: "Reads the RFC Editor homepage and explains that it publishes/hosts RFC documents, grounded in the fetched content."
 
   # MILESTONE_31 §9 (evidence-preserving answer contract) and §18 row "Citation
   # eval". The contract is a prompt contract, not a response rewriter, so the
@@ -173,7 +178,8 @@ scenarios:
   # to verify list membership, the judge HEDGES instead of checking (grounded
   # replies floored at 0.18 with the proof in hand), and on identical
   # payloads it flip-flopped 0.18 vs 0.93 between calls. Soft research-prose
-  # quality stays judged where it belongs: `whats_the_latest`.
+  # quality stays judged where it belongs: `whats_the_latest`. No route gate:
+  # a URL in the evidence inventory already proves a tool returned it.
   #
   # These live in the web suite rather than in `places.yaml` because the
   # citation contract is exercised by `web_search`/`web_fetch`, which this suite
@@ -190,7 +196,6 @@ scenarios:
           What has the James Webb Space Telescope turned up recently? Give me
           two or three highlights from the past few months.
         expect:
-          tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*(?:webb|jwst))(?=.*https?://)'
           reply_urls_in_evidence: true
           max_cost_usd: 2.0
@@ -200,7 +205,6 @@ scenarios:
           What are the most recent OpenSSL security advisories? Just the
           headline items and how serious they are.
         expect:
-          tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*(?:openssl|cve|advisor))(?=.*https?://)'
           reply_urls_in_evidence: true
           max_cost_usd: 2.0
@@ -210,7 +214,6 @@ scenarios:
           What changed in the last couple of Elixir releases? A short summary
           and where you read it.
         expect:
-          tools_any: [web_search, web_fetch]
           reply_matches: '(?is)(?=.*elixir)(?=.*https?://)'
           reply_urls_in_evidence: true
           max_cost_usd: 2.0

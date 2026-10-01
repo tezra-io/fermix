@@ -36,7 +36,9 @@ scenarios:
         query: "Open __EVAL_REPO_ROOT__/docs/TELEMETRY_CONTRACT.md and tell me in a couple of sentences what it's about."
         expect:
           tools_any: [file_read, glob_search, content_search]
-          reply_matches: "(?is)(?=.*telemetry)(?=.*trace)(?=.*session_id)(?=.*emitter)"
+          # A two-sentence summary need not say "emitter"; the document's thesis
+          # is correlation by session id, so that is the floor.
+          reply_matches: "(?is)(?=.*telemetry)(?=.*(session.?id|correlat))"
           max_cost_usd: 0.6
           max_duration_ms: 90000
         rubric: "Summarizes the telemetry contract's shared emitters, session correlation, and Opik tracing from the document."
@@ -57,27 +59,31 @@ scenarios:
       - id: ex_files_mentioning_gateway
         query: "Find all the *.ex files under __EVAL_REPO_ROOT__/apps that mention Gateway, and list a few of them."
         expect:
-          tools_any: [glob_search, content_search, file_read]
+          tools_any: [glob_search, content_search, file_read, shell]
           reply_matches: "(?is)(?=.*gateway)(?=.*apps/)(?=.*\\.ex)"
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: "Lists real .ex files under apps/ that reference Gateway, grounded in the search results; a denial or invented path fails."
       - id: list_test_files
-        query: "List the Elixir test files under __EVAL_REPO_ROOT__ — anything matching apps/**/test/**/*_test.exs would do."
+        # The old prompt handed over the glob pattern; the user names the
+        # intent and the model works out the pattern.
+        query: "List some of the Elixir test files under __EVAL_REPO_ROOT__/apps — a dozen or so is plenty."
         expect:
-          tools_any: [glob_search, content_search, file_read]
-          reply_matches: "(?is)(?=.*apps/)(?=.*/test/)(?=.*_test\\.exs)"
+          tools_any: [glob_search, content_search, file_read, shell]
+          reply_matches: "(?is)(?=.*/test/)(?=.*_test\\.exs)"
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: "Lists real *_test.exs files under apps/**/test from the glob results; a denial or fabricated path fails."
       - id: find_markdown_docs
+        # The milestone docs moved to docs/design/, so the old `docs/MILESTONE`
+        # gate failed every correct answer.
         query: "What milestone design docs are under __EVAL_REPO_ROOT__/docs? List the markdown files that start with MILESTONE."
         expect:
-          tools_any: [glob_search, content_search, file_read]
-          reply_matches: "(?i)docs/MILESTONE[^\\s`]*\\.md"
+          tools_any: [glob_search, content_search, file_read, shell]
+          reply_matches: "(?i)MILESTONE_[0-9]+[^\\s`]*\\.md"
           max_cost_usd: 1.0
           max_duration_ms: 120000
-        rubric: "Returns real MILESTONE_*.md paths under docs/ from the glob results; a denial or invented document fails."
+        rubric: "Returns real MILESTONE_*.md paths found under docs/ (they live in docs/design/); a denial or an invented document fails."
 
   - id: search_repo_for_term
     title: "Searches repo content for a term and reports where it is used"
@@ -87,7 +93,7 @@ scenarios:
       - id: hardline_usage
         query: "Search __EVAL_REPO_ROOT__ for the word 'hardline' and tell me where it's used."
         expect:
-          tools_any: [content_search, glob_search, file_read]
+          tools_any: [content_search, glob_search, file_read, shell]
           reply_matches: "(?is)(?=.*hardline)(?=.*sandbox)(?=.*\\.(?:ex|md))"
           max_cost_usd: 1.0
           max_duration_ms: 120000
@@ -95,7 +101,7 @@ scenarios:
       - id: telemetry_execute_calls
         query: "Under __EVAL_REPO_ROOT__, where do we call :telemetry.execute with the [:fermix, :tool, :exec] event? Point me at the files."
         expect:
-          tools_any: [content_search, glob_search, file_read]
+          tools_any: [content_search, glob_search, file_read, shell]
           reply_matches: "(?is)(?=.*tools/telemetry\\.ex)(?=.*:fermix)(?=.*:tool)(?=.*:exec)"
           max_cost_usd: 1.0
           max_duration_ms: 120000
@@ -103,7 +109,7 @@ scenarios:
       - id: count_saferm_mentions
         query: "Where does SafeRm appear under __EVAL_REPO_ROOT__, and what roles do those references play?"
         expect:
-          tools_any: [content_search, glob_search, file_read]
+          tools_any: [content_search, glob_search, file_read, shell]
           reply_matches: "(?is)(?=.*SafeRm)(?=.*test/support/safe_rm\\.ex)(?=.*(?:rm_rf|sandbox))"
           max_cost_usd: 1.0
           max_duration_ms: 120000

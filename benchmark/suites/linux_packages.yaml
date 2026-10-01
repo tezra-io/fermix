@@ -90,9 +90,9 @@ scenarios:
         rubric: >
           Says yes: every release carries an `.rpm`, and the installer at
           `https://fermix.ai/install` installs it through dnf after checking the
-          download. Mentions that the package owns the engine in `/usr/bin` and
-          a systemd user unit, or that `fermix setup` turns the service on
-          afterwards. Does not invent a dnf repository or a `.repo` file to add.
+          download. Mentions that the package ships a systemd user unit, or
+          that `fermix setup` follows and turns the service on. Does not invent
+          a dnf repository or a `.repo` file to add.
 
   - id: package_update
     title: "A packaged install updates by installing the newer package, then restarting"

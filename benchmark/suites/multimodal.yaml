@@ -43,12 +43,15 @@ scenarios:
           reply_matches: "(?i)(red|square|colou?r)"
           reply_not_matches: "(?i)(can't|cannot|unable to) (see|view)"
         rubric: "Describes a solid red square / red image."
-      - id: red_square_choice
+      # Replaces a three-way multiple choice a blind guess passed one time in
+      # three: colour AND shape together cannot be guessed from the question.
+      - id: red_square_colour_and_shape
         image: fixtures/red_square.png
-        query: "Is this image mostly red, green, or blue?"
+        query: "What colour is this, and roughly what shape?"
         expect:
-          reply_matches: "(?i)\\bred\\b"
-        rubric: "Answers red."
+          reply_matches: "(?is)(?=.*\\bred\\b)(?=.*\\b(square|rectang|block)\\w*)"
+          reply_not_matches: "(?i)(can't|cannot|unable to) (see|view)"
+        rubric: "Says the image is red and square (or a red rectangular block)."
 
   # OCR: a bundled image with rendered text ("ALPHA 42"). The model must read it
   # back, so the assertion is exact-string, not a fuzzy description.
@@ -121,7 +124,9 @@ scenarios:
           # The model must say something concrete about the picture — NOT claim it
           # cannot see an image (the pre-M14 failure mode).
           reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|access|open).{0,20}(image|picture|photo|attach)"
-          reply_matches: "(?is)(?=.*\\bred\\b)(?=.*\\bsquare\\b)"
+          # "red" alone, as the automated twin accepts: a one-sentence description
+          # may say block or rectangle, and the shape was never the point.
+          reply_matches: "(?i)\\bred\\b"
       - id: photo_read_text
         drive: telegram_operator
         image: fixtures/text_alpha.png

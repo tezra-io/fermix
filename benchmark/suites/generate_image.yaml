@@ -5,6 +5,9 @@
 # and the MODEL decides the tool. Route is asserted in exactly two LABELED sanity
 # scenarios (one for create, one for edit) — everywhere else we gate on the
 # OUTCOME (the turn completed and the reply is honest), not on which tool fired.
+# "Honest" is a `reply_not_matches` on a delivery claim plus the rubric: the old
+# positive vocabulary ("image|generat|can't|unsupported|media") accepted every
+# outcome including a refusal and could not fail.
 #
 # CLI HAS NO MEDIA REPLY PORT. The harness drives the local `cli` channel, whose
 # reply_fn returns {:error, :media_unsupported} for a media part (cli.ex). So a
@@ -73,7 +76,7 @@ scenarios:
         query: "Generate an image of a watercolor fox sitting in autumn leaves."
         expect:
           tools_any: [generate_image]
-          reply_matches: "(?i)image|generat|creat|render|pictur|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 0.6
           max_duration_ms: 150000
         rubric: >
@@ -85,7 +88,7 @@ scenarios:
         query: "Please create a picture: a cozy isometric cabin in a snowy forest at dusk."
         expect:
           tools_any: [generate_image]
-          reply_matches: "(?i)image|generat|creat|render|pictur|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 0.6
           max_duration_ms: 150000
         rubric: >
@@ -106,7 +109,7 @@ scenarios:
         query: "Take the image I just sent and turn the background a deep ocean blue."
         expect:
           tools_any: [generate_image]
-          reply_matches: "(?i)image|edit|blue|generat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 1.20
           max_duration_ms: 180000
         rubric: >
@@ -119,7 +122,7 @@ scenarios:
         query: "Edit the picture I attached: add a small yellow star in the centre."
         expect:
           tools_any: [generate_image]
-          reply_matches: "(?i)image|edit|star|generat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 1.20
           max_duration_ms: 180000
         rubric: >
@@ -137,7 +140,7 @@ scenarios:
       - id: logo_idea
         query: "I need a simple flat logo for a coffee shop called 'Ember' — can you make one?"
         expect:
-          reply_matches: "(?i)image|logo|generat|creat|render|design|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 1.20
           max_duration_ms: 150000
         rubric: >
@@ -147,7 +150,7 @@ scenarios:
       - id: birthday_card
         query: "Make me a birthday card image with balloons and confetti for my friend Sam."
         expect:
-          reply_matches: "(?i)image|card|generat|creat|render|saved|can'?t|cannot|unsupported|channel|deliver|media"
+          reply_not_matches: "(?i)\\b(i('ve| have)? (sent|delivered|attached) (it|you|the (image|picture|file|card|logo))|sent (it )?to you|attached below)\\b"
           max_cost_usd: 1.20
           max_duration_ms: 150000
         rubric: >

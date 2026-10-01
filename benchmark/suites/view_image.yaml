@@ -23,10 +23,10 @@ description: >
   Exercises the view_image builtin against bundled fixtures with known contents:
   one file read back, two files read in one call, and a comparison between them.
   A denial, or an answer that hedges about not being able to see images, is a
-  capability failure rather than an acceptable reply. Gates are tools_any over
-  the plausible read tools plus a reply_matches on the text the picture actually
-  contains; tools_all / tools_in_order are avoided because the model may
-  legitimately glob or read around the file first.
+  capability failure rather than an acceptable reply. The gate is the text the
+  picture actually contains: the numbers 42 and 73 live in the pixels and not in
+  the filenames, so the content floor alone proves the file was looked at, and
+  only the labelled sanity case pins the route.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -57,7 +57,6 @@ scenarios:
       - id: describe_bravo
         query: "I've got a picture at __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png — what's in it?"
         expect:
-          tools_any: [view_image, file_read, glob_search]
           reply_matches: "(?is)(?=.*\\bbravo\\b)(?=.*\\b73\\b)"
           max_cost_usd: 0.8
           max_duration_ms: 120000
@@ -73,7 +72,6 @@ scenarios:
       - id: read_both_labels
         query: "Have a look at both __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_alpha.png and __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png and list what each one says."
         expect:
-          tools_any: [view_image]
           reply_matches: "(?i)(?=[\\s\\S]*\\balpha\\b)(?=[\\s\\S]*\\bbravo\\b)"
           reply_not_matches: "(?i)(only|just) (one|a single|1) (image|file|picture)"
           max_cost_usd: 1.0
@@ -84,7 +82,6 @@ scenarios:
       - id: compare_the_numbers
         query: "Which of these two has the bigger number on it — __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_alpha.png or __EVAL_REPO_ROOT__/benchmark/suites/fixtures/text_bravo.png?"
         expect:
-          tools_any: [view_image]
           reply_matches: "(?is)(?=.*\\bbravo\\b)(?=.*\\b73\\b)"
           max_cost_usd: 1.0
           max_duration_ms: 150000

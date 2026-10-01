@@ -5,9 +5,11 @@ description: >
   Exercises the assistant's read-only git surface against the repository under
   evaluation. The runner expands an explicit repository-root placeholder so the
   development daemon does not mistake its own workspace for the target checkout.
-  Gates are tolerant of the model's route — it may run one git_read or several —
-  and assert git_read was used plus that the reply mentions the relevant
-  branch/commit/status vocabulary.
+  The working tree and recent history are live state with no fixed answer, so
+  those cases are graded by the rubric against the tool evidence; the one
+  scenario with a fixed floor asks about the repository's first commit, which
+  never changes. The model may run git_read or a git command through the shell,
+  so tool gates list both.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -18,87 +20,67 @@ defaults:
 scenarios:
   - id: working_tree_status
     title: "Reports the current git status"
-    # critical: git tooling is a differentiator; deterministic (git_read span) so a broken
-    # git path fails the run rather than passing green.
+    # critical: git tooling is a differentiator; deterministic (a git span) so a
+    # broken git path fails the run rather than passing green.
     severity: critical
     tags: [git, read, status]
     cases:
       - id: whats_the_status
         query: "What's the current git status of the repository at __EVAL_REPO_ROOT__?"
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)status|clean|modified|staged|untracked|changes|nothing to commit|working tree"
+          tools_any: [git_read, shell]
           max_cost_usd: 0.6
           max_duration_ms: 90000
-        rubric: "Reports the working-tree status (clean, or which files are modified/staged/untracked) based on a real git_read, without inventing files."
-      - id: anything_uncommitted
-        query: "Does the repository at __EVAL_REPO_ROOT__ have uncommitted changes? Give me the short version."
-        expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)clean|nothing to commit|no (uncommitted|pending) changes|modified|staged|untracked|uncommitted"
-          max_cost_usd: 0.6
-          max_duration_ms: 90000
-        rubric: "Answers whether there are uncommitted changes, grounded in actual git status output."
+        rubric: "Reports the working-tree status (clean, or which files are modified/staged/untracked) based on real git output, without inventing files."
       - id: check_state_before_commit
         query: "Before I commit in the repository at __EVAL_REPO_ROOT__, check whether its working tree is clean."
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)clean|working tree|nothing to commit|modified|staged|untracked|uncommitted"
+          tools_any: [git_read, shell]
           max_cost_usd: 0.6
           max_duration_ms: 90000
-        rubric: "Inspects git status and reports whether the working tree is clean or has pending changes."
+        rubric: "Inspects git status and reports whether the working tree is clean or has pending changes, naming real files if there are any."
 
   - id: recent_history
     title: "Shows recent commits and the current branch"
     severity: normal
     tags: [git, read, log, branch]
     cases:
-      - id: last_three_commits
-        query: "Show me the last 3 commits in the repository at __EVAL_REPO_ROOT__."
-        expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)commit|log|message|author|[0-9a-f]{7}"
-          max_cost_usd: 0.7
-          max_duration_ms: 100000
-        rubric: "Lists recent commits (subjects and/or hashes) drawn from a real git log, without fabricating commits."
       - id: what_branch
         query: "What branch is checked out in the repository at __EVAL_REPO_ROOT__?"
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)branch|main|dev|master|on .* branch|currently on"
+          tools_any: [git_read, shell]
           max_cost_usd: 0.5
           max_duration_ms: 80000
-        rubric: "Names the current git branch based on git_read, not a guess."
+        rubric: "Names the branch that git reports as checked out, not a guess such as main."
       - id: summarize_recent_changes
-        query: "Summarize the last few commits in the repository at __EVAL_REPO_ROOT__."
+        query: "Summarize the last 3 commits in the repository at __EVAL_REPO_ROOT__."
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)commit|recent|change|log|added|fixed|updated|feat|fix"
+          tools_any: [git_read, shell]
           max_cost_usd: 0.9
           max_duration_ms: 120000
-        rubric: "Summarizes the recent commit history from real git log output, without inventing changes."
+        rubric: "Summarizes the three most recent commits from real git log output — subjects or hashes that appear in the evidence — without inventing changes."
 
-  - id: diff_inspect
-    title: "Inspects uncommitted diff without staging (read-only write-path coverage)"
+  - id: project_origins
+    title: "Finds the repository's first commit (a fixed floor in live history)"
     severity: normal
-    tags: [git, read, diff]
+    tags: [git, read, log]
     cases:
-      # Stage-write cases are NOT in the eval suite — an automated test must not
-      # mutate the host repo. Write-path coverage lives in the ExUnit suite.
-      # These cases cover the read side of the git diff/stat surface instead.
-      - id: whats_changed_in_detail
-        query: "What files have changed in the git repository at __EVAL_REPO_ROOT__, and what's the broad breakdown?"
+      # Replaces the old diff_inspect pair, whose gates ("diff|\+|aggregation|
+      # unchanged") could not fail. The root commit is dated 2026-03-30 and
+      # added CLAUDE.md, a project plan and .gitignore; neither fact moves.
+      - id: first_commit_when
+        query: "When was the very first commit made in the repository at __EVAL_REPO_ROOT__, and what was it about?"
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)modified|changed|file|\\.ex|apps/|clean|no (diff|change)|nothing to commit"
-          max_cost_usd: 0.8
-          max_duration_ms: 110000
-        rubric: "Lists the changed files or gives a breakdown of what is modified, drawn from real git status/diff output, without fabricating files."
-      - id: show_diff_one_file
-        query: "In the git repository at __EVAL_REPO_ROOT__, show me the diff for apps/fermix_opik/lib/fermix_opik/aggregation.ex."
+          tools_any: [git_read, shell]
+          reply_matches: '(?is)(?=.*2026)(?=.*(2026-03-30|30(th)?\s+(of\s+)?mar(ch)?\b|\bmar(ch)?\s+30(th)?\b))(?=.*\binit)'
+          max_cost_usd: 0.9
+          max_duration_ms: 120000
+        rubric: "Dates the first commit to 30 March 2026 and describes it as the project's initial commit, from real git log output rather than assumption."
+      - id: first_commit_contents
+        query: "What files did the very first commit in the repository at __EVAL_REPO_ROOT__ add?"
         expect:
-          tools_any: [git_read]
-          reply_matches: "(?i)diff|\\+|aggregation|no (diff|change)|not modified|unchanged|identical"
-          max_cost_usd: 0.8
-          max_duration_ms: 110000
-        rubric: "Shows the diff for aggregation.ex from real git output, or states there is no diff if the file is unchanged."
+          tools_any: [git_read, shell]
+          reply_matches: '(?i)\.gitignore|CLAUDE\.md'
+          max_cost_usd: 0.9
+          max_duration_ms: 120000
+        rubric: "Lists the files the root commit added (it included CLAUDE.md, a project plan document and .gitignore), taken from git's own listing of that commit."

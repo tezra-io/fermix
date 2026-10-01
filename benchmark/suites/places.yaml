@@ -32,7 +32,11 @@
 # judge receives that output as span-backed tool evidence, so the anchor clause
 # in each discovery rubric grades the real routing decision. The user-visible
 # half of the same invariant — the answer is about the area the user named, not
-# somewhere near home — stays a structural `reply_matches` gate.
+# somewhere near home — stays a structural `reply_matches` gate, and "each
+# place keeps the exact URL the tool returned" is `reply_urls_in_evidence`:
+# web.yaml records that a judge asked to verify URL membership hedges instead
+# of checking, so the rubric clause is backed by the deterministic inventory
+# gate on every discovery case.
 #
 # COST. One Brave Place Search request per invocation; M31 makes no detail
 # follow-up call. Model spend is a normal short research turn.
@@ -75,6 +79,7 @@ scenarios:
           tools_none: [browser]
           max_tool_calls: 4
           reply_matches: '(?is)(?=.*\bsoho\b)(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
@@ -91,6 +96,7 @@ scenarios:
         expect:
           tools_any: [place_search]
           reply_matches: '(?is)(?=.*(?:kreuzberg|berlin))(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
@@ -106,6 +112,7 @@ scenarios:
         expect:
           tools_any: [place_search]
           reply_matches: '(?is)(?=.*(?:mission|san francisco))(?=.*https?://)'
+          reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
         rubric: >
@@ -142,6 +149,7 @@ scenarios:
             expect:
               tools_any: [place_search]
               reply_matches: '(?is)(?=.*(?:kreuzberg|berlin))(?=.*https?://)'
+              reply_urls_in_evidence: true
         expect:
           max_cost_usd: 1.5
           max_duration_ms: 150000
@@ -161,6 +169,7 @@ scenarios:
             expect:
               tools_any: [place_search]
               reply_matches: '(?is)(?=.*(?:shoreditch|london))(?=.*https?://)'
+              reply_urls_in_evidence: true
         expect:
           max_cost_usd: 1.5
           max_duration_ms: 150000
@@ -177,6 +186,7 @@ scenarios:
             expect:
               tools_any: [place_search]
               reply_matches: '(?is)(?=.*(?:wicker park|chicago))(?=.*https?://)'
+              reply_urls_in_evidence: true
         expect:
           max_cost_usd: 1.5
           max_duration_ms: 150000
