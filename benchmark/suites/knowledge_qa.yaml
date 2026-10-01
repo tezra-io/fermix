@@ -2,15 +2,18 @@ suite: knowledge_qa
 risk: host_readonly
 title: "Knowledge Q&A — answer directly from reasoning, no tools"
 description: >
-  The foundational smoke test: plain reasoning and Q&A the model should answer
-  straight from its own knowledge, without reaching for tools. Covers arithmetic
-  and logic, definitions, short explanations, "explain like I'm five", a small
-  self-contained coding question, and simple comparisons. Gates assert the reply
-  content and keep iterations/cost small. Where the answer is unambiguously a
-  closed-form fact (math, definitions, language trivia), we add tools_none to
-  prove it answered directly rather than searching/shelling out. We deliberately
-  do NOT use tools_none on questions a model might legitimately look up (current
+  The foundational smoke test, and the "does NOT search when it shouldn't"
+  half of the tool-use coverage: plain reasoning and Q&A the model should
+  answer straight from its own knowledge, without reaching for tools. Covers
+  arithmetic, definitions, "explain like I'm five", a small self-contained
+  coding question, and a simple comparison. Gates assert the reply content and
+  keep iterations/cost small. Where the answer is unambiguously a closed-form
+  fact (math, definitions, language trivia), `max_tool_calls: 0` proves it
+  answered directly rather than searching/shelling out. We deliberately do NOT
+  cap tool calls on questions a model might legitimately look up (current
   events, version-specific library behaviour) — none of those appear here.
+  Two cases per shape: a third phrasing of the same closed-form question
+  measured nothing a second did not.
 defaults:
   timeout_ms: 120000
   judge: true
@@ -42,15 +45,6 @@ scenarios:
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: "Answers that the trip took 2 hours and 30 minutes."
-      - id: parity_logic
-        query: "I have 3 red socks and 4 blue socks in a drawer. If I pull two socks at random, can I be sure they match? Yes or no, and why."
-        expect:
-          reply_matches: "(?i)\\bno\\b"
-          max_tool_calls: 0
-          max_iterations: 3
-          max_cost_usd: 0.4
-          max_duration_ms: 60000
-        rubric: "Answers no — two random socks are not guaranteed to be the same colour."
 
   - id: definitions
     title: "Plain definitions answered without lookup"
@@ -66,15 +60,6 @@ scenarios:
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: "Defines photosynthesis as plants converting light into chemical energy/food."
-      - id: define_inflation
-        query: "What does the word 'inflation' mean in economics?"
-        expect:
-          reply_matches: "(?i)(general|overall|sustained).*(rise|increase).*pric|pric.*(rise|increase|go(ing)? up)|purchasing power"
-          max_tool_calls: 0
-          max_iterations: 2
-          max_cost_usd: 0.3
-          max_duration_ms: 60000
-        rubric: "Defines inflation as a general rise in prices / fall in purchasing power."
       - id: define_idempotent
         query: "What does it mean for an HTTP method to be idempotent?"
         expect:
@@ -98,14 +83,6 @@ scenarios:
           max_cost_usd: 0.4
           max_duration_ms: 60000
         rubric: "Explains gravity simply as the pull that brings things toward the ground / each other."
-      - id: eli5_wifi
-        query: "How does WiFi work? Keep it really simple, like explaining to a kid."
-        expect:
-          reply_matches: "(?i)(radio|invisible).*(wave|signal)|wireless.*(signal|wave)|through the air"
-          max_iterations: 3
-          max_cost_usd: 0.5
-          max_duration_ms: 75000
-        rubric: "Explains WiFi simply as sending data through invisible radio waves through the air."
       - id: eli5_recursion
         query: "Explain recursion in plain English to someone new to programming."
         expect:
@@ -138,15 +115,6 @@ scenarios:
           max_cost_usd: 0.4
           max_duration_ms: 60000
         rubric: "States that lists are mutable and tuples are immutable."
-      - id: fizzbuzz_modulo
-        query: "In a FizzBuzz, which operator do you use to check if a number is divisible by 3?"
-        expect:
-          reply_matches: "(?i)modul(o|us)|remainder|%|mod\\b"
-          max_tool_calls: 0
-          max_iterations: 2
-          max_cost_usd: 0.3
-          max_duration_ms: 60000
-        rubric: "Identifies the modulo / remainder operator (%) as the divisibility check."
 
   - id: comparisons
     title: "Simple factual comparisons from knowledge"
@@ -162,15 +130,6 @@ scenarios:
           max_cost_usd: 0.4
           max_duration_ms: 60000
         rubric: "Contrasts TCP as reliable/connection-oriented with UDP as faster/connectionless without delivery guarantees."
-      - id: bigger_number
-        query: "Which is larger, one million or one thousand thousand?"
-        expect:
-          reply_matches: "(?i)equal|same|both.*(equal|same)|1,?000,?000|one million.*=.*thousand thousand|they(')?re the same"
-          max_tool_calls: 0
-          max_iterations: 2
-          max_cost_usd: 0.3
-          max_duration_ms: 60000
-        rubric: "Recognises that one million equals one thousand thousand — they are the same."
       - id: cpu_vs_gpu
         query: "In one or two lines, how is a GPU different from a CPU?"
         expect:

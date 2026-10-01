@@ -38,8 +38,13 @@ scenarios:
             expect:
               reply_matches: "(?i)paris"
           - query: "Hey!"
+            # No positive greeting gate, for the reason the sibling case below
+            # records: a greeting has no content floor, so any word/emoji list
+            # is a hand-maintained vocabulary (the old one named six phrasings
+            # and one emoji, and a 🤝 or a react-tool wave failed it). The
+            # structural half is reply_not_matches — the model did not re-run
+            # the France answer — and the rubric owns "is this a greeting".
             expect:
-              reply_matches: "(?i)\\b(hi|hey|hello|hiya|how can i help|how'?s it going|what'?s up)\\b|👋"
               reply_not_matches: "(?i)paris|capital of france"
               max_tool_calls: 1
               max_iterations: 2
@@ -47,8 +52,10 @@ scenarios:
           max_cost_usd: 1.0
           max_duration_ms: 120000
         rubric: >
-          The second reply greets back / engages with the greeting itself. It
-          does NOT re-answer or continue the earlier question about France.
+          The second reply greets back / engages with the greeting itself —
+          words, an emoji, or an emoji reaction (react tool, possibly with no
+          reply text) all count. It does NOT re-answer or continue the earlier
+          question about France.
       - id: thanks_after_fact
         turns:
           - query: "In one sentence, how does photosynthesis work?"

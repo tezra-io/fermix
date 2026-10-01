@@ -9,10 +9,11 @@ description: >
   turn times out or the daemon stops after scheduling, the identifiable job can
   remain in the disposable eval home. Stop the eval daemon and inspect/discard
   that home after an interrupted run. Structural gates are strict where
-  identity-preserving behavior matters (clarify before create, update in place,
-  bounded polling, and single-call cleanup) and allow a read only where the
-  scenario says so. Reply assertions remain phrasing-tolerant. The follow-ups
-  rely on one shared conversation thread, so each lifecycle is multi-turn.
+  identity-preserving behavior matters (clarify before create, update in place
+  rather than delete-and-recreate) and leave room for one read beside the
+  write: a `list_jobs` before an update or a removal is a reasonable route, not
+  a defect. Reply assertions remain phrasing-tolerant. The follow-ups rely on
+  one shared conversation thread, so each lifecycle is multi-turn.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -129,6 +130,10 @@ scenarios:
     title: "Schedule a job, change its timing, then remove it"
     severity: normal
     tags: [jobs, lifecycle, update]
+    # Identity-preserving: a retime is an update_job on the same job, never a
+    # remove-and-recreate (the tools_none pins that). One read beside the write
+    # is allowed — the old `max_tool_calls: 1` failed a model that listed jobs
+    # to find the id before editing, which is a reasonable route.
     cases:
       - id: meds_retime
         turns:
@@ -140,13 +145,13 @@ scenarios:
             expect:
               tools_all: [update_job]
               tools_none: [schedule_job, remove_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)8\\s*am|updat|chang|moved|reschedul"
           - query: "Thanks — now delete the medication reminder."
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|done"
         expect:
           max_cost_usd: 1.5
@@ -165,13 +170,13 @@ scenarios:
             expect:
               tools_all: [update_job]
               tools_none: [schedule_job, remove_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)thursday|3\\s*pm|updat|chang|moved|reschedul"
           - query: "Great, you can remove the report reminder now."
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|done"
         expect:
           max_cost_usd: 1.5
@@ -185,6 +190,10 @@ scenarios:
     title: "Clarifies missing action details before creating a durable job"
     severity: critical
     tags: [jobs, chief-of-staff, multi-turn, clarification, action-boundary]
+    # The first-turn floor is "asked a question" plus no write. The old gates
+    # demanded the words "time" / "when" / "how long" and both questions at
+    # once; a model that asks "Mondays at 9?" or asks the two questions one at
+    # a time was correct and failed. Which detail it asked for is the rubric's.
     cases:
       - id: leadership_checkin_scope
         turns:
@@ -194,7 +203,7 @@ scenarios:
             expect:
               tools_none: [schedule_job, update_job]
               max_tool_calls: 0
-              reply_matches: "(?is)(?=.*(?:what|which) time|.*time.{0,40}\\?)(?=.*\\?)"
+              reply_matches: '\?'
           - query: "Use 9:00 AM America/New_York every Monday."
             expect:
               tools_all: [schedule_job]
@@ -205,15 +214,17 @@ scenarios:
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
           max_cost_usd: 1.5
           max_duration_ms: 180000
         rubric: >
           Does not invent a time or create a partial reminder on the ambiguous
-          first turn. It asks only for the missing schedule detail, creates the
-          named Monday reminder after the answer, and removes that same job.
+          first turn. It asks for the missing schedule detail (the time; a
+          proposed default is fine as long as nothing is created before the
+          answer), creates the named Monday reminder after the answer, and
+          removes that same job.
       - id: board_packet_scope
         turns:
           - query: >
@@ -222,7 +233,7 @@ scenarios:
             expect:
               tools_none: [schedule_job, update_job]
               max_tool_calls: 0
-              reply_matches: "(?is)(?=.*(?:when|date|time))(?=.*(?:how long|how far|lead time|before))(?=.*\\?)"
+              reply_matches: '\?'
           - query: >
               The review is September 10, 2035 at 2:00 PM America/New_York;
               remind me two hours before.
@@ -235,92 +246,93 @@ scenarios:
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
           max_cost_usd: 1.5
           max_duration_ms: 180000
         rubric: >
-          Asks for the review schedule and lead time before mutating durable
-          state, then schedules the correct noon reminder and removes that same
-          job. It does not pretend the incomplete first request was actionable.
+          Asks for the review date and the lead time (either or both; a second
+          question after the first answer is fine) before mutating durable
+          state, then schedules the noon reminder and removes that same job. It
+          does not pretend the incomplete first request was actionable.
 
   - id: run_and_inspect
     title: "Fire a job now and read its execution history (runtime, not just CRUD)"
     # The jobs RUNTIME tools (run_job_now / list_job_runs / get_job_run) were untested —
-    # scheduling CRUD never proved a job actually EXECUTES. Deterministic tool-span gates.
+    # scheduling CRUD never proved a job actually EXECUTES. Deterministic tool-span gates
+    # on the run and the history read; the detail read is one valid route, not required,
+    # because list_job_runs already carries each run's final response.
     severity: normal
     tags: [jobs, runtime, execution]
     cases:
       - id: run_now_then_history
         turns:
           - query: >
-              Create a one-off job named "eval-run-__EVAL_RUN_ID__-__EVAL_TRIAL__"
-              scheduled for 2035-01-01T00:00:00Z. Its task is to return the exact
-              marker EVAL-RUN-OK. Trigger it right now, but do not claim an outcome
-              yet and do not remove it.
+              Set up a one-off job called "eval-run-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              for 2035-01-01 00:00 UTC whose only task is to reply with the exact
+              marker EVAL-RUN-OK, then kick it off right now so I can see it
+              work. Don't tell me how it went yet.
             expect:
               tools_all: [schedule_job, run_job_now]
               tools_none: [remove_job]
-              reply_matches: "(?i)trigger|started|queued|running|run"
+              reply_matches: "(?i)trigger|started|queued|running|run|kicked"
               reply_not_matches: "(?i)(can'?t|cannot|unable to|couldn'?t) (run|trigger|fire|schedule|create) (the |a )?job"
           - query: >
-              Inspect that job's run history now. If its newest manual run is still
-              queued or running, re-check at most three times. Report the actual
-              terminal status and output or error; do not remove the job yet.
+              Did it finish? Check that job's run history and tell me the actual
+              result — if the newest run is still going, look again a couple of
+              times, but don't make anything up and don't remove the job.
             expect:
-              tools_all: [list_job_runs]
+              tools_any: [list_job_runs, get_job_run]
               tools_none: [remove_job]
               max_tool_calls: 5
               reply_matches: "(?is)(?=.*\\bok\\b)(?=.*EVAL-RUN-OK)"
               reply_not_matches: "(?i)still (queued|running|pending)|not finished yet"
-          - query: >
-              Now remove that one-off eval job. Confirm only after it is gone.
+          - query: "Great, delete that one-off job now."
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job, run_job_now]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
           max_cost_usd: 2.5
           max_duration_ms: 240000
         rubric: >
-          Creates a far-future one-off job, fires it immediately, waits with no more
-          than four total history reads (the initial read plus three re-checks) for an
-          `ok` run containing EVAL-RUN-OK, reports that record, then removes the job.
-          It neither races the async run nor invents an outcome.
+          Creates a far-future one-off job, fires it immediately, reads its
+          history with bounded re-checks until an `ok` run containing
+          EVAL-RUN-OK appears, reports that record, then removes the job. It
+          neither races the async run nor invents an outcome.
       - id: run_now_then_run_detail
         turns:
           - query: >
-              Create a one-off job called "backup-check-__EVAL_RUN_ID__-__EVAL_TRIAL__"
-              scheduled for 2035-01-02T00:00:00Z. Its task is to return the exact
-              marker BACKUP-CHECK-OK. Trigger it now, but do not claim it completed
-              and do not remove it.
+              Set up a one-off job called "backup-check-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              for 2035-01-02 00:00 UTC whose only task is to reply with the exact
+              marker BACKUP-CHECK-OK, and run it right away. No need to report
+              the outcome yet.
             expect:
               tools_all: [schedule_job, run_job_now]
               tools_none: [remove_job]
-              reply_matches: "(?i)trigger|started|queued|running|run"
+              reply_matches: "(?i)trigger|started|queued|running|run|kicked"
           - query: >
-              Find the newest manual run for that job. If it is still queued or
-              running, re-check at most three times, then inspect that specific run.
-              Report its terminal status and actual output or error. Do not remove it.
+              What did that run actually produce? Pull up the newest run of that
+              job and give me its status and output — re-check a couple of times
+              if it hasn't finished, and leave the job in place.
             expect:
-              tools_all: [list_job_runs, get_job_run]
+              tools_any: [list_job_runs, get_job_run]
               tools_none: [remove_job]
               max_tool_calls: 6
               reply_matches: "(?is)(?=.*\\bok\\b)(?=.*BACKUP-CHECK-OK)"
               reply_not_matches: "(?i)still (queued|running|pending)|not finished yet"
-          - query: >
-              Remove that one-off backup-check job now and confirm the cleanup.
+          - query: "Remove that backup-check job now and confirm it's gone."
             expect:
               tools_all: [remove_job]
               tools_none: [schedule_job, update_job, run_job_now]
-              max_tool_calls: 1
+              max_tool_calls: 2
               reply_matches: "(?i)remov|delet|cancel|gone|clean"
         expect:
           max_cost_usd: 2.5
           max_duration_ms: 240000
         rubric: >
-          Schedules and triggers the job, uses at most four history reads before one
-          detail read, verifies the identified run is `ok` with BACKUP-CHECK-OK,
-          grounds the report in that record, and removes the durable job afterward.
+          Schedules and triggers the job, finds the identified run with bounded
+          re-checks, verifies it is `ok` with BACKUP-CHECK-OK, grounds the
+          report in that record, and removes the durable job afterward.

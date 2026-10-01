@@ -1,19 +1,24 @@
 suite: subagents
 risk: expensive
-title: "Subagents — fan-out mechanism + model routing"
+title: "Subagents — fan-out mechanism + delegation judgment"
 description: >
   Tests both the deterministic delegation mechanism and the non-deterministic
-  chief-of-staff judgment of when delegation is proportionate. Explicit cases
-  verify fan-out plumbing; a paired natural-request scenario lets the judge assess
-  the chosen approach for a broad dossier review while requiring a small
-  prioritization to stay direct.
-  Run the judgment pair with `--repeat 3` when measuring behavioral stability.
+  chief-of-staff judgment of when delegation is proportionate. The
+  `fanout_plumbing` scenario is the suite's LABELLED route-asserting scenario:
+  its prompts name the route on purpose so that a broken fan-out fails loudly.
+  The judgment pair never names a route; it lets the judge assess the chosen
+  approach for a broad dossier review while requiring a small prioritization to
+  stay direct. Run the judgment pair with `--repeat 3` when measuring behavioral
+  stability.
 
   Model routing gates (`main_model_matches`, `subagent_model_matches`) are
   deliberately omitted here — they are daemon-config-specific and would fail any
   time the daemon runs a different provider. Add them as case-level overrides in
   a daemon-specific test run when you want to pin and verify exact model slugs
   (e.g. `subagent_model_matches: "gpt-4o-mini"` when the daemon is on OpenAI).
+  The per-call worker-model override used to have a third plumbing case here;
+  it asserted nothing the first case did not (the slug is config-dependent, so
+  no gate could pin it) and the override path is covered in ExUnit.
 defaults:
   # No `no_tool_errors` default: a worker's occasional failed web_fetch among many
   # tool calls is normal and must not fail the case. timeout_ms is generous; the
@@ -24,12 +29,12 @@ defaults:
     status: ok
 
 scenarios:
-  - id: model_routing
-    title: "Explicit fan-out spawns workers and synthesizes across all branches"
+  - id: fanout_plumbing
+    title: "Explicit fan-out spawns workers and synthesizes across all branches (labelled route sanity)"
     # critical: delegation is a headline differentiator — a broken fan-out must FAIL
     # the regression run (the exit code trips only on critical scenarios).
     severity: critical
-    tags: [subagents, delegation, routing]
+    tags: [subagents, delegation, routing, sanity]
     cases:
       - id: default_subagent_model
         query: >
@@ -47,29 +52,6 @@ scenarios:
         rubric: >
           Fans out into at least two parallel workers and returns a combined summary
           covering all three topics (espresso, tides, bookbinding).
-      - id: per_call_model_override
-        # Tests the on-the-fly worker model override path: the user asks workers
-        # to use a smaller/faster model than the main agent. We verify fan-out
-        # happened and the reply covers all topics; the actual model slug used is
-        # daemon-config-dependent so we don't assert it here — add
-        # `subagent_model_matches` as a case-level override when running against
-        # a pinned daemon config.
-        query: >
-          Spin up parallel subagents to look into three separate topics — the rules
-          of cricket, how vaccines work, and the basics of jazz harmony. For each
-          worker, use a smaller or faster model than the main agent if your config
-          supports it. Bring the results back as one combined summary.
-        expect:
-          tools_any: [subagents]
-          min_subagent_spawns: 2
-          reply_matches: "(?is)(?=.*cricket)(?=.*vaccine)(?=.*jazz)"
-          max_cost_usd: 30
-          max_duration_ms: 900000
-        rubric: >
-          Honors the request to use lighter worker models (passes a model param to
-          the subagents tool or uses the configured sub-agent model), fans out into
-          at least two parallel workers, and returns a summary covering all three
-          topics (cricket, vaccines, jazz).
       - id: chief_of_staff_launch_workstreams
         query: |
           Act as my chief of staff. Use exactly three parallel subagent tasks to
@@ -77,19 +59,22 @@ scenarios:
           one go/no-go recommendation yourself. Security: two P0s are open and have
           no owners. Revenue: forecast is $1.2M, including a $400k renewal contingent
           on launch. Staffing: launch-day on-call coverage is empty from 18:00–22:00.
-          Do not browse, write, schedule, send, or change anything.
         expect:
           tools_all: [subagents]
           min_subagent_spawns: 3
           tools_none: [file_write, file_edit, git_write, shell, browser, computer_use, web_search, web_fetch, schedule_job, update_job, pause_job, resume_job, remove_job, run_job_now, send_attachment, memory_store, skill_create, model_routing_config]
-          reply_matches: '(?is)(?=.*two P0|.*2 P0)(?=.*\$1\.2M)(?=.*\$400k)(?=.*18:00)(?=.*22:00)(?=.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)'
+          # Fact anchors from all three workstreams; the recommendation's
+          # direction is the rubric's, and only the negated-risk claim is gated.
+          reply_matches: '(?is)(?=.*two P0|.*2 P0)(?=.*\$1\.2M)(?=.*\$400k)(?=.*18:00)(?=.*22:00)'
           reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
           Uses three workers for the three separable analyses, preserves every
-          supplied fact, and personally synthesizes a decisive recommendation with
-          clear unblock conditions rather than pasting three reports together.
+          supplied fact, and personally synthesizes a decisive recommendation
+          (a hold or a conditional go with the unowned P0s and the empty on-call
+          window as unblock conditions) rather than pasting three reports
+          together or calling the launch safe.
 
   - id: autonomous_delegation_judgment
     title: "Chooses delegation proportionally without being told which route to use"
@@ -99,17 +84,15 @@ scenarios:
       - id: autonomous_launch_diligence
         query: |
           Act as my chief of staff and prepare one go/no-go launch brief from these
-          four synthetic dossiers. Assess the security, commercial, staffing, and
-          governance evidence as separate workstreams, reconcile conflicts, then
-          give your own ordered recommendation with owners and unblock conditions.
-          Choose the work approach yourself; do not ask me how to organize it.
+          four dossiers. Assess the security, commercial, staffing, and governance
+          evidence as separate workstreams, reconcile conflicts, then give your own
+          ordered recommendation with owners and unblock conditions. Choose the
+          work approach yourself; don't ask me how to organize it.
 
           __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_calendar.md
           __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_inbox.md
           __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_tracker.md
           __EVAL_REPO_ROOT__/benchmark/suites/fixtures/chief_of_staff/launch_notes.md
-
-          Do not write, schedule, send, or change anything.
         expect:
           tools_any: [file_read, content_search, subagents]
           tools_none: [file_write, file_edit, git_write, shell, browser, computer_use, web_search, web_fetch, schedule_job, update_job, pause_job, resume_job, remove_job, run_job_now, send_attachment, memory_store, skill_create, model_routing_config]
@@ -118,27 +101,31 @@ scenarios:
             - 'benchmark/suites/fixtures/chief_of_staff/launch_inbox\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/launch_tracker\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/launch_notes\.md'
-          reply_matches: '(?is)(?=.*P1)(?=.*Northstar)(?=.*board[ -]memo)(?=.*Tuesday.{0,40}11:30|.*11:30.{0,40}Tuesday)(?=.*10:30)(?=.*18 (?:of|/) 20)(?=.*provisional|.*assumption)(?=.*\brecommend(?:ation)?(?: is|:)? (?:to )?(?:hold|delay|no-go)|.*\b(?:should|must|need to) (?:hold|delay)|.*(?:^|[.!?]\s*)(?:hold|no-go)\b|.*\bconditional (?:on|upon)\b|.*\bproceed only if\b|.*\bdo not launch\b)(?=.*owner|.*Sam)'
+          # Evidence unique to each of the four dossiers must reach the brief;
+          # the hold/conditional wording is the rubric's.
+          reply_matches: '(?is)(?=.*P1)(?=.*Northstar)(?=.*board[ -]memo)(?=.*Tuesday.{0,40}11:30|.*11:30.{0,40}Tuesday)(?=.*10:30)(?=.*18 (?:of|/) 20)(?=.*provisional|.*assumption)'
           reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
           max_cost_usd: 30
           max_duration_ms: 900000
         rubric: >
           Chooses and executes a proportionate approach without asking the user to
           design the workflow, covers all four dossiers, and reconciles them into
-          one decision. A small parallel team is reasonable; direct analysis is
-          also acceptable if it is efficient and complete. Excess workers,
-          duplicated work, or pasted worker reports are disproportionate.
+          one decision with named owners (Sam on the P1) and unblock conditions.
+          A small parallel team is reasonable; direct analysis is also acceptable
+          if it is efficient and complete. Excess workers, duplicated work, or
+          pasted worker reports are disproportionate. Calling the launch on
+          track while the P1 is unresolved is a fail.
       - id: autonomous_single_priority
         query: >
-          Act as my chief of staff. From these synthetic facts, return only the
-          single most urgent item and its owner: checkout P1 due at noon, owned by
-          Sam; board memo due Friday, owned by Lea; optional coffee chat next week.
-          Choose the work approach yourself.
+          Quick one: what's the single most urgent thing on my plate and who owns
+          it? Checkout P1 due at noon (Sam); board memo due Friday (Lea); optional
+          coffee chat next week.
         expect:
           tools_none: [subagents]
           max_tool_calls: 0
-          reply_matches: '(?is)(?=.*checkout P1|.*P1)(?=.*Sam)'
+          reply_matches: '(?is)(?=.*P1)(?=.*Sam)'
           reply_not_matches: '(?i)board memo|coffee chat|Lea'
         rubric: >
-          Answers the tiny prioritization directly in one concise line. Spawning
-          workers, outlining workstreams, or adding unrelated items is overkill.
+          Answers the tiny prioritization directly in one concise line (the
+          checkout P1, Sam). Spawning workers, outlining workstreams, or adding
+          the other items is overkill.

@@ -48,16 +48,18 @@ scenarios:
         query: "In one short sentence, what is the BEAM virtual machine?"
         expect:
           # The whole stream-span surface, not a subset — a span kind added
-          # later must join this list or the invariant is a hole.
+          # later must join this list or the invariant is a hole. `stream:edit`
+          # is deliberately NOT exported today (fermix_opik's aggregation test
+          # refutes it); it is listed so the invariant holds if that changes.
           tools_none:
-            ["stream:open", "stream:block", "stream:rotate", "stream:seal", "stream:discard"]
+            ["stream:open", "stream:block", "stream:rotate", "stream:edit", "stream:seal", "stream:discard"]
           reply_matches: "(?i)erlang|virtual machine|vm"
       - id: tool_ask_no_stream
         query: "Print 'stream-check-ok' for me and tell me exactly what it output."
         expect:
           tools_any: [shell]
           tools_none:
-            ["stream:open", "stream:block", "stream:rotate", "stream:seal", "stream:discard"]
+            ["stream:open", "stream:block", "stream:rotate", "stream:edit", "stream:seal", "stream:discard"]
           reply_matches: "stream-check-ok"
 
   - id: telegram_draft_stream
@@ -81,4 +83,6 @@ scenarios:
         expect:
           tools_all: ["stream:open", "stream:seal"]
           tools_none: ["stream:discard"]
-          reply_matches: "(?i)bullet|help|can|skill|task|•|-"
+          # A list actually rendered (the old floor accepted any reply with a
+          # hyphen in it).
+          reply_matches: "(?m)^\\s*(?:[-•*]|\\d+[.)])\\s+\\S"
