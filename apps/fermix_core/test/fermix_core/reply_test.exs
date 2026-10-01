@@ -55,6 +55,7 @@ defmodule FermixCore.ReplyTest do
         :connection_refused,
         :connection_reset,
         :network_unreachable,
+        :proxy_unavailable,
         :timeout
       ]
 

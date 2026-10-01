@@ -16,6 +16,7 @@ defmodule FermixCore.Providers.ModelListing do
   """
 
   alias FermixCore.Config
+  alias FermixCore.Net.Egress
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
 
@@ -232,6 +233,7 @@ defmodule FermixCore.Providers.ModelListing do
         receive_timeout: Keyword.get(opts, :receive_timeout_ms, @receive_timeout_ms)
       )
       |> Req.merge(Keyword.get(opts, :req_options, []))
+      |> Egress.attach(:direct)
 
     case Req.request(request) do
       {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->

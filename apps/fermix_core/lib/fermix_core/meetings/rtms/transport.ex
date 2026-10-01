@@ -61,6 +61,7 @@ defmodule FermixCore.Meetings.Rtms.Transport.WebSockex do
 
   use WebSockex
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Tls
 
   @behaviour FermixCore.Meetings.Rtms.Transport
@@ -72,8 +73,12 @@ defmodule FermixCore.Meetings.Rtms.Transport.WebSockex do
   def connect(url, owner, opts) when is_binary(url) and is_pid(owner) and is_list(opts) do
     tag = Keyword.fetch!(opts, :tag)
     timeout = Keyword.get(opts, :connect_timeout_ms, @default_connect_timeout_ms)
+    egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
 
-    with {:ok, start_opts} <- start_options(url, timeout) do
+    # This socket cannot tunnel, so behind a proxy it refuses rather than dial
+    # around it.
+    with :ok <- Egress.ensure_direct(url, egress),
+         {:ok, start_opts} <- start_options(url, timeout) do
       WebSockex.start_link(url, __MODULE__, %{owner: owner, tag: tag}, start_opts)
     end
   end

@@ -61,6 +61,31 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The proxy has no pane and no setup flag, so the skill is the only place an
+  # operator's question about it can be answered, and it must not promise a
+  # surface that does not exist or an environment variable Fermix ignores.
+  test "documents the outbound proxy, where it is set and what it does not cover" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(config_reference_path())
+
+    assert body =~ "[fermix_core.network]"
+    assert body =~ "does not read `HTTPS_PROXY`"
+
+    for required <- [
+          "[fermix_core.network]",
+          "proxy_bypass",
+          "HTTPS_PROXY",
+          "never prints the value",
+          "Nothing falls back to a direct connection",
+          "no Mac Settings pane",
+          "fermix doctor"
+        ] do
+      assert reference =~ required, "config self-knowledge does not mention #{required}"
+    end
+
+    refute reference =~ "--proxy"
+  end
+
   test "documents the mobile companion setup and its v1 boundaries" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(mobile_reference_path())
@@ -379,6 +404,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     |> String.split("\n")
     |> Enum.filter(&String.starts_with?(&1, "- Service:"))
     |> Enum.join("\n")
+  end
+
+  defp config_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/config.md", __DIR__)
   end
 
   defp providers_reference_path do

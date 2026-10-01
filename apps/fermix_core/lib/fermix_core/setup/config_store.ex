@@ -14,6 +14,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
@@ -120,6 +121,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: Application.get_env(:fermix_core, :jobs, []),
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
+        network: Application.get_env(:fermix_core, :network, []),
         harness: Application.get_env(:fermix_core, :harness, []),
         browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
@@ -215,6 +217,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
+    apply_network_config(Keyword.get(persisted.fermix_core, :network, []))
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
     apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
@@ -391,6 +394,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:compaction, [])
           |> normalize_compaction(),
+        network:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:network, [])
+          |> normalize_network(),
         harness:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -597,6 +605,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: [],
         routing: [],
         compaction: [],
+        network: [],
         harness: [],
         browser: [],
         skill_curation: [],
@@ -857,6 +866,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the section has no compile-time baseline, so a proxy
+  # removed from the file must be removed here too. This is the persisted
+  # setting; the egress a running daemon dials through is the one
+  # `Egress.activate/0` recorded at boot, and changes only on a restart.
+  defp apply_network_config(network_config) do
+    Application.put_env(:fermix_core, :network, network_config)
+    :ok
+  end
+
   # Replace (not merge): the harness section has no compile-time baseline, so the
   # persisted keyword — already fully normalized by persistable_snapshot — is the
   # complete intended state (same rationale as routing/computer_use).
@@ -1017,6 +1035,7 @@ defmodule FermixCore.Setup.ConfigStore do
     jobs = Keyword.get(fermix_core, :jobs, [])
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
+    network = Keyword.get(fermix_core, :network, [])
     harness = Keyword.get(fermix_core, :harness, [])
     browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
@@ -1059,6 +1078,7 @@ defmodule FermixCore.Setup.ConfigStore do
       ),
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
+      render_section(["fermix_core", "network"], network),
       render_section(["fermix_core", "harness"], harness),
       render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
@@ -1290,6 +1310,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
+        network: normalize_network(get_in(document, ["fermix_core", "network"])),
         harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
         browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
@@ -2177,6 +2198,11 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_compaction(config), do: CompactionConfig.normalize(config)
+
+  # `[fermix_core.network]` (the outbound proxy). `Egress.normalize/1` validates
+  # every value and refuses an unknown key: a misspelt `proxy` must stop the
+  # boot, not leave the daemon dialing direct on a host that may not (Rule #12).
+  defp normalize_network(config), do: Egress.normalize(config)
 
   # `[fermix_core.harness]` (coding-harness substrate). Value validation lives in
   # HarnessConfig.normalize (fail-loud per key). Unknown keys are rejected here at

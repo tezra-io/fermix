@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.WebToolsTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Tools.WebFetch
   alias FermixCore.Tools.WebSearch
 
@@ -186,6 +187,70 @@ defmodule FermixCore.Tools.WebToolsTest do
     assert_receive {:web_fetch_request, request_host, host_header}
     assert request_host == "93.184.216.34"
     assert host_header == "example.com"
+  end
+
+  # Behind a proxy the pin must survive: the tunnel is opened to the address
+  # the guard validated, and the name is checked in TLS, so the proxy is never
+  # handed a host name it could resolve to somewhere the guard refused.
+  test "web_fetch through a proxy tunnels to the validated address and keeps the name in SNI" do
+    test_pid = self()
+
+    adapter = fn request ->
+      send(test_pid, {:hop, request.url.host, request.options[:connect_options]})
+      {request, Req.Response.new(status: 200, body: "<h1>ok</h1>")}
+    end
+
+    context =
+      Map.merge(@context, %{
+        req_options: [adapter: adapter],
+        net_resolver: fn "example.com" -> {:ok, [{93, 184, 216, 34}]} end,
+        net_egress: Egress.new(proxy: "http://proxy.test:3128")
+      })
+
+    assert {:ok, %{success: true}} =
+             WebFetch.execute(%{"url" => "https://example.com/docs"}, context)
+
+    assert_receive {:hop, "93.184.216.34", connect_options}
+    assert {:http, "proxy.test", 3128, _phases} = connect_options[:proxy]
+    assert connect_options[:transport_opts][:server_name_indication] == ~c"example.com"
+  end
+
+  # A plain-HTTP page cannot keep its pin through a proxy, so it is not sent,
+  # and the model is told the one thing that works.
+  test "web_fetch through a proxy refuses a plain http page and points at https" do
+    adapter = fn _request -> flunk("a pinned plain-HTTP hop must not be sent to the proxy") end
+
+    context =
+      Map.merge(@context, %{
+        req_options: [adapter: adapter],
+        net_resolver: fn "example.com" -> {:ok, [{93, 184, 216, 34}]} end,
+        net_egress: Egress.new(proxy: "http://proxy.test:3128")
+      })
+
+    assert {:ok, %{success: false, error: message}} =
+             WebFetch.execute(%{"url" => "http://example.com/docs"}, context)
+
+    assert message =~ "network:"
+    assert message =~ "https://"
+    refute message =~ "TransportError"
+  end
+
+  # The guard is not relaxed for a proxied host: a name that resolves inside
+  # the network is refused before anything is sent, proxy or no proxy.
+  test "web_fetch through a proxy still refuses a name that resolves to a private address" do
+    adapter = fn _request -> flunk("a refused URL must not be requested") end
+
+    context =
+      Map.merge(@context, %{
+        req_options: [adapter: adapter],
+        net_resolver: fn "intranet.example" -> {:ok, [{10, 0, 0, 7}]} end,
+        net_egress: Egress.new(proxy: "http://proxy.test:3128")
+      })
+
+    assert {:ok, %{success: false, error: message}} =
+             WebFetch.execute(%{"url" => "https://intranet.example/wiki"}, context)
+
+    assert message =~ "blocked_url"
   end
 
   test "web_fetch blocks private redirects before following them" do

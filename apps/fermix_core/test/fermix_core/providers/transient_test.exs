@@ -11,7 +11,13 @@ defmodule FermixCore.Providers.TransientTest do
 
   describe "retryable?/1" do
     test "true for transient transport kinds" do
-      for kind <- [:connection_unavailable, :timeout, :transport_closed, :network] do
+      for kind <- [
+            :connection_unavailable,
+            :proxy_unreachable,
+            :timeout,
+            :transport_closed,
+            :network
+          ] do
         assert Transient.retryable?({:provider_transport_error, %{kind: kind}}), "kind #{kind}"
       end
     end

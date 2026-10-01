@@ -25,6 +25,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
   alias FermixChannels.Channels.Telegram
   alias FermixChannels.Gateway.AlbumBuffer
   alias FermixChannels.Telemetry
+  alias FermixCore.Net.Egress
 
   @bot_api_base "https://api.telegram.org"
   @default_error_backoff_ms 5_000
@@ -199,6 +200,7 @@ defmodule FermixChannels.Channels.Telegram.Poller do
       result =
         Req.new(url: url, method: :post, json: body, receive_timeout: @receive_timeout_ms)
         |> Req.merge(state.req_options)
+        |> Egress.attach(:direct)
         |> Req.request()
 
       case result do

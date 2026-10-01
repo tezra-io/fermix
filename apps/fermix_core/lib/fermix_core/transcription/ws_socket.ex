@@ -44,6 +44,7 @@ defmodule FermixCore.Transcription.WsSocket do
 
   use WebSockex
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Tls
   alias FermixCore.Timeouts
 
@@ -56,8 +57,12 @@ defmodule FermixCore.Transcription.WsSocket do
     url = Keyword.fetch!(opts, :url)
     headers = Keyword.fetch!(opts, :headers)
     parent = Keyword.fetch!(opts, :parent)
+    egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
 
-    with {:ok, start_opts} <- start_options(url, headers) do
+    # This socket cannot tunnel, so behind a proxy it refuses rather than dial
+    # around it.
+    with :ok <- Egress.ensure_direct(url, egress),
+         {:ok, start_opts} <- start_options(url, headers) do
       WebSockex.start(url, __MODULE__, %{parent: parent}, start_opts)
     end
   end

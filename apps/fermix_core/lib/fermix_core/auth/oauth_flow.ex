@@ -32,6 +32,7 @@ defmodule FermixCore.Auth.OAuthFlow do
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.RefreshClient
+  alias FermixCore.Net.Egress
 
   require Logger
 
@@ -231,7 +232,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         ] ++ RefreshClient.request_bounds()
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 
@@ -273,7 +274,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         ] ++ RefreshClient.request_bounds()
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: status, body: body}} ->
         exchange_response(provider, status, body)
 
@@ -312,7 +313,7 @@ defmodule FermixCore.Auth.OAuthFlow do
         ] ++ RefreshClient.request_bounds()
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: 200, body: body}} when is_map(body) -> {:ok, body}
       {:ok, %{status: status, body: body}} -> {:error, {:userinfo_failed, status, body}}
       {:error, reason} -> {:error, reason}

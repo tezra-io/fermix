@@ -15,7 +15,16 @@ defmodule FermixCore.Setup.RestartStateTest do
   alias FermixCore.Setup.SecretWriteLog
   alias FermixTestSupport.SafeRm
 
-  @env_keys [:providers, :personalization, :agent, :realtime, :harness, :meetings, :sandbox]
+  @env_keys [
+    :providers,
+    :personalization,
+    :agent,
+    :realtime,
+    :harness,
+    :meetings,
+    :sandbox,
+    :network
+  ]
 
   setup do
     home = System.get_env("FERMIX_HOME")
@@ -80,6 +89,17 @@ defmodule FermixCore.Setup.RestartStateTest do
       assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
       assert reason.section == "realtime"
       assert reason.sentence == "Voice settings changed since Fermix started."
+    end
+
+    # The outbound pools are built from the proxy at boot, so a saved proxy is
+    # not in force until the daemon starts again, and the banner has to say so.
+    test "a proxy set since boot is a reason" do
+      server = start_state()
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+
+      assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
+      assert reason.section == "network"
+      assert reason.sentence == "Network settings changed since Fermix started."
     end
 
     # `lifecycle.commit` runs the daemon's shutdown path, so the boot baseline

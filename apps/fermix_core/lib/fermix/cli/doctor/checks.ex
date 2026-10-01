@@ -34,7 +34,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Nostr.Key, as: NostrKey
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.McpSource
@@ -1184,7 +1186,13 @@ defmodule Fermix.CLI.Doctor.Checks do
       connect_options: [timeout: timeout_ms, transport_opts: [verify: :verify_none]]
     ]
 
-    case Req.get(url, request_opts) do
+    request =
+      [method: :get, url: url]
+      |> Keyword.merge(request_opts)
+      |> Req.new()
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
       {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => v}}}
       when is_integer(v) and v > 0 ->
         :ok
@@ -2912,6 +2920,115 @@ defmodule Fermix.CLI.Doctor.Checks do
       ok("auth perms", "auth.json is 0600 at #{path}")
     else
       ok("auth perms", "no auth.json present")
+    end
+  end
+
+  @proxy_env_names ~w(HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy)
+
+  @doc """
+  The outbound proxy (`[fermix_core.network]`): which one is set, what stays
+  direct, and what cannot use it.
+
+  Also the one place that says Fermix does not read `HTTPS_PROXY`: a host whose
+  shell exports it and whose daemon cannot reach a provider looks, from every
+  other check, like a provider outage. The variable is named, never printed.
+
+  It describes the settings this process loaded. Run inside the daemon (the
+  app's Doctor), it also sees when those differ from the egress the daemon
+  started on. `fermix doctor` is its own process with no such history, so its
+  row says the setting is read at start rather than claim it is in force. An
+  unusable section never reaches here: the settings loader refuses it first.
+  """
+  @spec network_proxy(keyword()) :: result()
+  def network_proxy(opts \\ []) when is_list(opts) do
+    env = Keyword.get_lazy(opts, :env, &System.get_env/0)
+    saved = Egress.new(Application.get_env(:fermix_core, :network, []))
+    active = Egress.active()
+
+    cond do
+      saved != active -> warn("network", network_restart_detail(saved, active))
+      Egress.describe(saved) == nil -> network_without_proxy(env, saved)
+      true -> network_with_proxy(saved)
+    end
+  end
+
+  # Either direction: a proxy saved and not yet in force, or one removed from
+  # the settings that this process still sends traffic through.
+  defp network_restart_detail(saved, active) do
+    "the saved network settings take effect when Fermix restarts. " <>
+      "Saved: #{network_label(saved)}. In force: #{network_label(active)}."
+  end
+
+  defp network_label(egress) do
+    case Egress.describe(egress) do
+      nil -> "no proxy"
+      proxy -> "proxy #{proxy}"
+    end
+  end
+
+  defp network_without_proxy(env, saved) do
+    case Enum.find(@proxy_env_names, &(Map.get(env, &1, "") != "")) do
+      nil ->
+        not_applicable("network", "no outbound proxy configured" <> unused_bypass_note(saved))
+
+      name ->
+        warn(
+          "network",
+          "this environment sets #{name}, which Fermix does not read. To send traffic " <>
+            "through a proxy, set proxy under [fermix_core.network] in config.toml and restart."
+        )
+    end
+  end
+
+  defp unused_bypass_note(%Egress{bypass: []}), do: ""
+  defp unused_bypass_note(%Egress{}), do: " (proxy_bypass is set and has no effect without proxy)"
+
+  defp network_with_proxy(saved) do
+    summary =
+      "#{network_label(saved)}, read when Fermix starts; direct: #{direct_summary(saved)}"
+
+    case features_refused_by_proxy(saved) do
+      [] ->
+        ok(
+          "network",
+          "#{summary}. Voice, Discord, Zoom capture, streaming transcription, remote MCP " <>
+            "plugins and phone push cannot use a proxy."
+        )
+
+      refused ->
+        warn(
+          "network",
+          "#{summary}. These are on and cannot use a proxy, so they will not connect: " <>
+            "#{Enum.join(refused, ", ")}. If this machine reaches their hosts directly, " <>
+            "list those hosts in proxy_bypass."
+        )
+    end
+  end
+
+  defp direct_summary(%Egress{bypass: []}), do: "this machine and private addresses"
+
+  defp direct_summary(%Egress{bypass: bypass}),
+    do: "this machine, private addresses, #{Enum.join(bypass, ", ")}"
+
+  # The features an operator turned on whose transport refuses a proxied route
+  # (`Egress.ensure_direct/2`), asked of the route itself, so a host listed in
+  # `proxy_bypass` clears the warning.
+  defp features_refused_by_proxy(egress) do
+    [
+      {"voice", "wss://api.openai.com", RealtimeConfig.enabled?()},
+      {"Discord", "wss://gateway.discord.gg", channel_enabled?(:discord)},
+      {"Zoom capture", "wss://ws.zoom.us", MeetingsConfig.enabled?()}
+    ]
+    |> Enum.filter(fn {_name, url, enabled?} ->
+      enabled? and Egress.ensure_direct(url, egress) != :ok
+    end)
+    |> Enum.map(fn {name, _url, _enabled?} -> name end)
+  end
+
+  defp channel_enabled?(channel) do
+    case CoreConfig.channel(channel) do
+      {:ok, config} -> Keyword.get(config, :enabled, false) == true
+      _absent -> false
     end
   end
 

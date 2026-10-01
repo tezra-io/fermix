@@ -6,6 +6,7 @@ defmodule FermixCore.Plugins.Health do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Registry
   alias FermixCore.Plugins.Status
@@ -56,6 +57,7 @@ defmodule FermixCore.Plugins.Health do
   defp request(url, token, req_options) do
     Req.new(method: :get, url: url, headers: [{"authorization", "Bearer #{token}"}])
     |> Req.merge(req_options)
+    |> Egress.attach(:direct)
     |> Req.request()
   end
 

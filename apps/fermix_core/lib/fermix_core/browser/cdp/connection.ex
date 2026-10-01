@@ -6,18 +6,25 @@ defmodule FermixCore.Browser.CDP.Connection do
   @behaviour FermixCore.Browser.CDP.Transport
 
   alias FermixCore.Browser.Error
+  alias FermixCore.Net.Egress
 
   @impl FermixCore.Browser.CDP.Transport
   @spec start_link(String.t(), keyword()) :: GenServer.on_start()
   def start_link(url, opts \\ []) when is_binary(url) and is_list(opts) do
     owner = Keyword.get(opts, :owner, self())
 
-    WebSockex.start_link(url, __MODULE__, %{
+    state = %{
       owner: owner,
       next_id: 1,
       pending: %{},
       keepalive_ms: Keyword.fetch!(opts, :keepalive_ms)
-    })
+    }
+
+    # A DevTools endpoint is on this machine, which is always a direct route.
+    # Asked all the same, so an endpoint that ever is not is refused, not dialed.
+    with :ok <- Egress.ensure_direct(url) do
+      WebSockex.start_link(url, __MODULE__, state)
+    end
   end
 
   @impl FermixCore.Browser.CDP.Transport

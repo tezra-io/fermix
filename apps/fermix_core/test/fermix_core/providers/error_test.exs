@@ -7,6 +7,35 @@ defmodule FermixCore.Providers.ErrorTest do
 
   @no_reason "The response body was empty, so the provider gave no reason for this status."
 
+  # Every route leaves through the one proxy, so a failed proxy hop is never a
+  # reason to sweep the failover chain.
+  describe "transport/4 on a failed proxy hop" do
+    # The proxy is down or slow: the same condition as a pool with no
+    # connection to give, one hop out. Tried again on the same route, by the
+    # in-turn retry and by a scheduled run's backoff alike.
+    test "an unreachable proxy is retried on the same route and never failed over" do
+      error = ProviderError.transport(:openai, :responses, :proxy_unreachable)
+
+      assert {:provider_transport_error, %{kind: :proxy_unreachable}} = error
+      assert Transient.retryable?(error)
+      assert Transient.connection_unavailable?(error)
+      refute Failover.eligible?(error)
+    end
+
+    for reason <- [:proxy_auth_required, :proxy_refused, :proxy_needs_https] do
+      test "#{reason} is a refusal: asking again changes nothing" do
+        error = ProviderError.transport(:openai, :responses, unquote(reason))
+
+        assert {:provider_transport_error, %{kind: :proxy_refused, reason: unquote(reason)}} =
+                 error
+
+        refute Transient.retryable?(error)
+        refute Transient.connection_unavailable?(error)
+        refute Failover.eligible?(error)
+      end
+    end
+  end
+
   describe "api/5 when the body carries no reason" do
     # Codex answered the first call of a cron run with HTTP 404 and a zero-byte
     # body (2026-09-15). That decoded to a message of "" rather than nil, so the

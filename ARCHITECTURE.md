@@ -195,13 +195,25 @@ providers through `OAuthProviders`), and `TokenSupervisor` runs one
 `TokenManager` per profile.
 
 `Net.HttpClient` sends outbound HTTP on the shared `FermixCore.Finch` pool,
-retrying once on a stale socket and never on a timeout. `Net.TimeoutPolicy`
+retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
+each connection leaves: direct, or through the HTTP proxy `[fermix_core.network]`
+names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
+HTTPS is tunnelled with `CONNECT`. `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
 options for WebSockets, and `Net.Guard` the public-URL checks.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
+
+Architecture Invariant: no connector in the BEAM chooses its own way out. Every
+`Req` request is routed by `Net.Egress.attach/3` at its adapter, once per hop, and
+a transport that cannot tunnel (the WebSocket clients, the pinned remote MCP
+connector, the APNs socket) asks `Net.Egress.ensure_direct/2` and refuses a proxied
+route. A proxied request whose proxy fails is an error, never a direct dial.
+`Net.EgressSurfaceTest` reads the source of every app to hold this. Processes
+Fermix spawns (the browser, coding agents, sidecars, the agent's shell) make their
+own connections and are outside it.
 
 Architecture Invariant: `auth.json` has two lockfiles beside it, shared by every
 VM on the host. Every read-modify-write of the file holds the store lock, and a

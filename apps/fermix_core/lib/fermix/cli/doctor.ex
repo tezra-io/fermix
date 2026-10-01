@@ -87,19 +87,12 @@ defmodule Fermix.CLI.Doctor do
   end
 
   # `--full` live probes (provider auth, channels, web search) route through
-  # `FermixCore.Net.HttpClient`, which pins the shared `FermixCore.Finch`
-  # pool. The daemon supervision tree owns that pool, but `fermix doctor`
-  # runs in the tree-less CLI dispatch — bring the pool up here (a no-op when
-  # a tree is already running, e.g. under `mix test`), mirroring
-  # `mix fermix.eval.transcription`.
-  defp ensure_http_pool do
-    if Process.whereis(FermixCore.Finch) == nil do
-      {:ok, _pid} =
-        Finch.start_link(name: FermixCore.Finch, pools: FermixCore.Application.finch_pools())
-    end
-
-    :ok
-  end
+  # `FermixCore.Net.HttpClient`, which runs on the shared outbound pools. The
+  # daemon supervision tree owns them, but `fermix doctor` runs in the tree-less
+  # CLI dispatch — bring them up here (a no-op when a tree is already running,
+  # e.g. under `mix test`), mirroring `mix fermix.eval.transcription`. Built by
+  # the daemon's own constructor, so a probe leaves by the route a turn would.
+  defp ensure_http_pool, do: FermixCore.Application.ensure_finch_pools()
 
   defp collect_results(full?) do
     base = [
@@ -115,6 +108,7 @@ defmodule Fermix.CLI.Doctor do
       Checks.compaction_config(),
       Checks.bootstrap_template_drift(),
       Checks.routing_overrides(),
+      Checks.network_proxy(),
       Checks.command_owner_config(),
       Checks.streaming_config(),
       Checks.sandbox_config(),

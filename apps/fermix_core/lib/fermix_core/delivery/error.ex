@@ -43,6 +43,7 @@ defmodule FermixCore.Delivery.Error do
     :connection_refused,
     :connection_reset,
     :network_unreachable,
+    :proxy_unavailable,
     :timeout
   ]
 
@@ -67,7 +68,16 @@ defmodule FermixCore.Delivery.Error do
     ehostunreach: :network_unreachable,
     enetunreach: :network_unreachable,
     nxdomain: :network_unreachable,
-    timeout: :timeout
+    timeout: :timeout,
+    # A failed hop through the configured proxy (`FermixCore.Net.Egress`). The
+    # channel's own host was never asked, so these are one kind of their own
+    # rather than a guess about that host. Retryable like every transport kind,
+    # a refusal included: the rail's retries are few, spaced and durable, and a
+    # proxy an operator is fixing is the outage they exist for.
+    proxy_unreachable: :proxy_unavailable,
+    proxy_auth_required: :proxy_unavailable,
+    proxy_refused: :proxy_unavailable,
+    proxy_needs_https: :proxy_unavailable
   }
 
   # HTTP statuses below 500 that are still worth another claim cycle (§11.4).
@@ -79,6 +89,7 @@ defmodule FermixCore.Delivery.Error do
           | :connection_refused
           | :connection_reset
           | :network_unreachable
+          | :proxy_unavailable
           | :timeout
 
   @type permanent_kind ::

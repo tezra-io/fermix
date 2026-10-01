@@ -1610,6 +1610,25 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
+    # A proxied host that cannot get out says so in the reply: the operator is
+    # sent to the proxy, not to the provider's status page.
+    test "maps a failed proxy hop to a reply that names the proxy, not the provider's network" do
+      refused =
+        TurnRunner.error_reply(ProviderError.transport(:openai, :responses, :proxy_auth_required))
+
+      assert refused =~ "OpenAI"
+      assert refused =~ "proxy"
+      assert refused =~ "HTTP 407"
+      refute refused =~ "proxy_auth_required"
+
+      unreachable =
+        TurnRunner.error_reply(ProviderError.transport(:anthropic, :messages, :proxy_unreachable))
+
+      assert unreachable =~ "proxy"
+      assert unreachable =~ "could not be reached"
+      refute unreachable =~ "proxy_unreachable"
+    end
+
     # MILESTONE_29 §17 phase 1 minted `code: "empty_response"` for a 200 the
     # server declared terminal that carried nothing. Left on the `%{status: …}`
     # floor clause it reads "returned HTTP 200", which sends the operator after a

@@ -32,6 +32,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
@@ -239,6 +240,7 @@ defmodule FermixCore.Setup.Doctor do
 
     Req.new(url: @openai_models_url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
     |> Req.merge(probe_req_options(opts))
+    |> Egress.attach(:direct)
     |> Req.request()
     |> classify_key_probe(start)
   end
@@ -1181,6 +1183,7 @@ defmodule FermixCore.Setup.Doctor do
   defp fetch_ollama_num_ctx(native_root, model, opts) do
     Req.new(url: "#{native_root}/api/show", method: :post, json: %{model: model}, retry: false)
     |> Req.merge(probe_req_options(opts))
+    |> Egress.attach(:direct)
     |> Req.request()
     |> case do
       {:ok, %Req.Response{status: 200, body: body}} when is_map(body) ->
@@ -1353,6 +1356,7 @@ defmodule FermixCore.Setup.Doctor do
 
     Req.new(url: url, method: :post, json: body, headers: headers, retry: false)
     |> Req.merge(probe_req_options(opts))
+    |> Egress.attach(:direct)
     |> Req.request()
     |> classify(provider, model, surface, start)
   end
@@ -1362,6 +1366,7 @@ defmodule FermixCore.Setup.Doctor do
 
     Req.new(url: url, method: :get, headers: headers, retry: false)
     |> Req.merge(probe_req_options(opts))
+    |> Egress.attach(:direct)
     |> Req.request()
     |> classify(provider, model, surface, start)
   end

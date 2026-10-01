@@ -3,6 +3,7 @@ defmodule FermixCore.Net.HttpClientTest do
 
   import ExUnit.CaptureLog
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.HttpClient
 
   defp request(opts) do
@@ -187,6 +188,109 @@ defmodule FermixCore.Net.HttpClientTest do
 
     assert pools[:default][:count] == 2
     assert pools["https://chatgpt.com"][:count] == 2
+  end
+
+  describe "the outbound proxy" do
+    @proxied Egress.new(proxy: "http://proxy.test:3128", proxy_bypass: ["git.corp.test"])
+
+    defp pool_recorder(parent, result \\ nil) do
+      fn request ->
+        send(parent, {:pool, request.url.host, request.options[:finch]})
+        {request, result || Req.Response.new(status: 200, body: "ok")}
+      end
+    end
+
+    # Asserted against the egress this VM booted on rather than assumed: the
+    # claim is that request/2 and the pools agree, whatever that egress is.
+    test "request/2 runs on the egress the pools were built from" do
+      req = Req.new(url: "https://example.test", retry: false, adapter: pool_recorder(self()))
+
+      expected =
+        case Egress.route(Egress.active(), "https://example.test") do
+          :direct -> FermixCore.Finch
+          {:proxy, _proxy} -> FermixCore.Finch.Proxied
+        end
+
+      assert {:ok, %Req.Response{status: 200}} = HttpClient.request(req, "test")
+      assert_received {:pool, "example.test", ^expected}
+    end
+
+    test "request/3 sends a proxied destination to the proxied pool, a bypassed one direct" do
+      for {host, pool} <- [
+            {"api.openai.test", FermixCore.Finch.Proxied},
+            {"git.corp.test", FermixCore.Finch},
+            {"localhost", FermixCore.Finch}
+          ] do
+        req = Req.new(url: "https://#{host}", retry: false, adapter: pool_recorder(self()))
+
+        assert {:ok, %Req.Response{status: 200}} = HttpClient.request(req, "test", @proxied)
+        assert_received {:pool, ^host, ^pool}
+      end
+    end
+
+    test "a refused tunnel is one failed request: the proxy's answer, never retried" do
+      refused = %Mint.HTTPError{
+        module: Mint.TunnelProxy,
+        reason: {:proxy, {:unexpected_status, 407}}
+      }
+
+      req =
+        Req.new(
+          url: "https://api.openai.test",
+          retry: false,
+          adapter: pool_recorder(self(), refused)
+        )
+
+      {result, _log} = with_log(fn -> HttpClient.request(req, "test", @proxied) end)
+
+      assert result == {:error, %Req.TransportError{reason: :proxy_auth_required}}
+
+      assert_received {:pool, "api.openai.test", FermixCore.Finch.Proxied}
+      refute_received {:pool, _host, _pool}
+    end
+
+    # `:econnrefused` on a direct hop is the stale-socket class this wrapper
+    # retries once. On a proxied hop it is the proxy that refused, and a second
+    # attempt would only knock on the same closed door.
+    test "a dead proxy is not mistaken for a stale socket and retried" do
+      req =
+        Req.new(
+          url: "https://api.openai.test",
+          retry: false,
+          adapter: pool_recorder(self(), %Req.TransportError{reason: :econnrefused})
+        )
+
+      {result, _log} = with_log(fn -> HttpClient.request(req, "test", @proxied) end)
+
+      assert result == {:error, %Req.TransportError{reason: :proxy_unreachable}}
+      assert_received {:pool, "api.openai.test", FermixCore.Finch.Proxied}
+      refute_received {:pool, _host, _pool}
+    end
+
+    test "the proxied pool runs exactly when the active egress has a proxy" do
+      proxied? = Egress.describe(Egress.active()) != nil
+
+      assert is_pid(Process.whereis(FermixCore.Finch.Proxied)) == proxied?
+    end
+
+    test "finch_instances/1 is the direct pool alone, or both when a proxy is set" do
+      assert [[name: FermixCore.Finch, pools: direct]] =
+               FermixCore.Application.finch_instances(Egress.new([]))
+
+      assert direct == FermixCore.Application.finch_pools()
+
+      assert [
+               [name: FermixCore.Finch, pools: ^direct],
+               [name: FermixCore.Finch.Proxied, pools: proxied]
+             ] =
+               FermixCore.Application.finch_instances(@proxied)
+
+      assert {:http, "proxy.test", 3128, _phases} = proxied[:default][:conn_opts][:proxy]
+      # The proxied table is the direct one plus the proxy: the idle cap and the
+      # pool count that fix the stale-socket class hold on both.
+      assert proxied[:default][:conn_max_idle_time] == direct[:default][:conn_max_idle_time]
+      assert proxied[:default][:count] == direct[:default][:count]
+    end
   end
 
   test "request/2 widens the pool-checkout timeout so a briefly-blocked pool is waited out" do

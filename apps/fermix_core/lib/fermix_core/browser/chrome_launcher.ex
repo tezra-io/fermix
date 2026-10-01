@@ -4,6 +4,7 @@ defmodule FermixCore.Browser.ChromeLauncher do
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Meetings.BrowserInstall
+  alias FermixCore.Net.Egress
   alias FermixCore.Setup.ConfigStore
 
   # Every candidate carries the name a person knows it by, which is what a
@@ -551,7 +552,18 @@ defmodule FermixCore.Browser.ChromeLauncher do
   defp fetch_version(port, %Config{} = config) do
     url = "http://127.0.0.1:#{port}/json/version"
 
-    case Req.get(url, receive_timeout: config.cdp_version_probe_timeout_ms, retry: false) do
+    # Loopback, so always a direct route; routed all the same, so no HTTP site
+    # in the daemon decides its own way out.
+    request =
+      Req.new(
+        method: :get,
+        url: url,
+        receive_timeout: config.cdp_version_probe_timeout_ms,
+        retry: false
+      )
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
       {:ok, %{status: 200, body: %{"webSocketDebuggerUrl" => ws_url}}} -> {:ok, ws_url}
       {:ok, %{status: 200, body: body}} when is_binary(body) -> decode_version(body)
       other -> {:error, other}

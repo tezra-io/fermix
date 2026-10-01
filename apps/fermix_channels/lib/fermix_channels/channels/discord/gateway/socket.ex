@@ -16,6 +16,7 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
   require Logger
 
   alias FermixChannels.Channels.Discord.Gateway
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Tls
 
   @guilds_intent 1 <<< 0
@@ -31,7 +32,12 @@ defmodule FermixChannels.Channels.Discord.Gateway.Socket do
   @spec start_link(String.t(), map(), keyword()) :: {:ok, pid()} | {:error, term()}
   def start_link(url, state, opts \\ [])
       when is_binary(url) and is_map(state) and is_list(opts) do
-    with {:ok, start_opts} <- start_options(url, opts) do
+    {egress, opts} = Keyword.pop_lazy(opts, :egress, &Egress.active/0)
+
+    # This socket cannot tunnel, so behind a proxy it refuses rather than dial
+    # around it.
+    with :ok <- Egress.ensure_direct(url, egress),
+         {:ok, start_opts} <- start_options(url, opts) do
       WebSockex.start(url, __MODULE__, state, start_opts)
     end
   end

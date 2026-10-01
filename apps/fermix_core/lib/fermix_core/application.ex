@@ -39,6 +39,7 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
@@ -168,7 +169,7 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        {Finch, name: FermixCore.Finch, pools: finch_pools()},
+        finch_children(Egress.activate()),
         {Trace, trace_opts()},
         TokenSupervisor,
         maybe_token_manager(),
@@ -352,6 +353,47 @@ defmodule FermixCore.Application do
       count: @http_pool_count,
       conn_opts: [transport_opts: [timeout: @web_search_connect_timeout_ms]]
     ]
+  end
+
+  @doc """
+  The outbound pools this process runs: the direct one always, and a second one
+  for proxied destinations when `[fermix_core.network]` names a proxy. The
+  proxied table is the direct table with the proxy added, so both keep the idle
+  caps and pool counts above.
+  """
+  @spec finch_instances(Egress.t()) :: [keyword()]
+  def finch_instances(%Egress{} = egress) do
+    direct = [name: Egress.direct_pool(), pools: finch_pools()]
+
+    case Egress.proxied_pools(egress, finch_pools()) do
+      nil -> [direct]
+      proxied -> [direct, [name: Egress.proxied_pool(), pools: proxied]]
+    end
+  end
+
+  @doc """
+  Starts the outbound pools for a caller that has no supervision tree (a CLI
+  verb, a Mix task), through the same constructor the daemon uses, so a probe
+  travels the route a turn would. A no-op when the pools are already running.
+  """
+  @spec ensure_finch_pools() :: :ok
+  def ensure_finch_pools do
+    if Process.whereis(Egress.direct_pool()) == nil do
+      Egress.activate() |> finch_instances() |> Enum.each(&start_finch!/1)
+    end
+
+    :ok
+  end
+
+  defp start_finch!(instance) do
+    {:ok, _pid} = Finch.start_link(instance)
+    :ok
+  end
+
+  defp finch_children(egress) do
+    egress
+    |> finch_instances()
+    |> Enum.map(&Supervisor.child_spec({Finch, &1}, id: Keyword.fetch!(&1, :name)))
   end
 
   defp run_cli(argv) do

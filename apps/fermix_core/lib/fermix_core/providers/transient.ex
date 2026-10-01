@@ -23,7 +23,13 @@ defmodule FermixCore.Providers.Transient do
 
   alias FermixCore.Net.HttpClient
 
-  @retryable_transport_kinds [:connection_unavailable, :timeout, :transport_closed, :network]
+  @retryable_transport_kinds [
+    :connection_unavailable,
+    :proxy_unreachable,
+    :timeout,
+    :transport_closed,
+    :network
+  ]
   @retryable_api_kinds [:timeout, :provider_unavailable]
 
   @doc """
@@ -61,6 +67,11 @@ defmodule FermixCore.Providers.Transient do
   """
   @spec connection_unavailable?(term()) :: boolean()
   def connection_unavailable?({:provider_transport_error, %{kind: :connection_unavailable}}),
+    do: true
+
+  # The same condition one hop out: the configured proxy could not be reached,
+  # so no route has a connection to offer and the same route is tried again.
+  def connection_unavailable?({:provider_transport_error, %{kind: :proxy_unreachable}}),
     do: true
 
   def connection_unavailable?(%RuntimeError{} = reason),

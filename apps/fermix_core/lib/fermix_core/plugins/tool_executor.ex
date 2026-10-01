@@ -7,6 +7,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Guard
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Http.Interpreter
@@ -305,6 +306,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       )
       |> maybe_merge(:json, request.body)
       |> Req.merge(req_options)
+      |> Egress.attach(:direct)
 
     case Req.request(req) do
       {:ok, %{status: 401}} when attempt == 0 ->
@@ -621,7 +623,7 @@ defmodule FermixCore.Plugins.ToolExecutor do
       |> maybe_merge(:json, Keyword.get(opts, :json))
       |> maybe_put_body(Keyword.get(opts, :body), Keyword.get(opts, :content_type))
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: status, body: body}} when status in 200..299 ->
         {:ok, body}
 

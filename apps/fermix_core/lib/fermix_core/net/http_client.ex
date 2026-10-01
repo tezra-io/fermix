@@ -10,14 +10,21 @@ defmodule FermixCore.Net.HttpClient do
   `Req.TransportError{reason: :closed}` (or `:econnrefused` against some
   edges). A single retry opens a fresh connection and recovers transparently.
 
-  Every request is pinned to the shared `FermixCore.Finch` pool (started in
-  `FermixCore.Application`), whose `conn_max_idle_time` discards connections
+  Every request runs on a shared pool started in `FermixCore.Application`:
+  `FermixCore.Finch`, or its proxied twin when `FermixCore.Net.Egress` routes
+  the destination through the configured proxy. The pool is chosen at the
+  adapter, once per hop, so a redirect is routed for the host it lands on. Both
+  pools' `conn_max_idle_time` discards connections
   that sat idle too long at checkout — so the stale-socket class mostly
   self-heals before a request can hit it, and the retry below is guaranteed
   a freshly handshaked connection rather than a second dead socket from the
   same pool. Req forbids combining `:finch` with `:connect_options`, so
   callers must not pass `connect_options`; per-host connection options
   belong in the pool definition (see `FermixCore.Application`).
+
+  A failure of the proxy itself comes back as
+  `%Req.TransportError{reason: {:proxy, reason}}` and is not retried here: it
+  is not a stale socket, and nothing falls back to a direct dial.
 
   This wrapper deliberately does NOT retry `:timeout` — a slow server should
   not be hammered. It also does NOT retry HTTP-level errors (4xx/5xx); use
@@ -45,6 +52,8 @@ defmodule FermixCore.Net.HttpClient do
 
   require Logger
 
+  alias FermixCore.Net.Egress
+
   @retry_reasons [:closed, :econnrefused]
 
   # Substring of the RuntimeError Finch reraises on a pool-checkout queue
@@ -67,9 +76,14 @@ defmodule FermixCore.Net.HttpClient do
   # the only one. Applied to every shared-pool request.
   @pool_checkout_timeout_ms 15_000
 
-  @spec request(Req.Request.t(), String.t()) :: {:ok, Req.Response.t()} | {:error, Exception.t()}
-  def request(%Req.Request{} = req, label) when is_binary(label) do
-    req = Req.merge(req, finch: FermixCore.Finch, pool_timeout: @pool_checkout_timeout_ms)
+  @spec request(Req.Request.t(), String.t(), Egress.t()) ::
+          {:ok, Req.Response.t()} | {:error, Exception.t()}
+  def request(%Req.Request{} = req, label, %Egress{} = egress \\ Egress.active())
+      when is_binary(label) do
+    req =
+      req
+      |> Req.merge(pool_timeout: @pool_checkout_timeout_ms)
+      |> Egress.attach(:pooled, egress)
 
     case run(req, label) do
       {:error, %Req.TransportError{reason: reason}} when reason in @retry_reasons ->

@@ -47,16 +47,12 @@ defmodule Mix.Tasks.Fermix.Eval.Transcription do
     Mix.Task.run("loadpaths")
     Mix.Task.run("app.config")
     {:ok, _started} = Application.ensure_all_started(:req)
-    start_http_pool()
+    # Config first: the pools are built from `[fermix_core.network]`.
     bootstrap_config()
+    start_http_pool()
   end
 
-  defp start_http_pool do
-    {:ok, _pid} =
-      Finch.start_link(name: FermixCore.Finch, pools: FermixCore.Application.finch_pools())
-
-    :ok
-  end
+  defp start_http_pool, do: FermixCore.Application.ensure_finch_pools()
 
   defp bootstrap_config do
     # Tree-less task (no daemon supervision tree — see @moduledoc): a `@keyring`

@@ -13,6 +13,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     agent = Application.get_env(:fermix_core, :agent, [])
     jobs = Application.get_env(:fermix_core, :jobs, [])
     compaction = Application.get_env(:fermix_core, :compaction, [])
+    network = Application.get_env(:fermix_core, :network, [])
     harness = Application.get_env(:fermix_core, :harness, [])
     skill_curation = Application.get_env(:fermix_core, :skill_curation, [])
     memory = Application.get_env(:fermix_core, :memory, [])
@@ -37,6 +38,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       Application.put_env(:fermix_core, :agent, agent)
       Application.put_env(:fermix_core, :jobs, jobs)
       Application.put_env(:fermix_core, :compaction, compaction)
+      Application.put_env(:fermix_core, :network, network)
       Application.put_env(:fermix_core, :harness, harness)
       Application.put_env(:fermix_core, :skill_curation, skill_curation)
       Application.put_env(:fermix_core, :memory, memory)
@@ -661,6 +663,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
   [fermix_core.compaction]
   threshold = 0.85
+
+  [fermix_core.network]
+  proxy = "http://proxy.corp.test:3128"
+  proxy_bypass = ["ollama.internal", ".corp.test"]
 
   [fermix_core.harness]
   enabled = true
@@ -1984,6 +1990,95 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert Keyword.get(compaction, :enabled) == true
     assert Keyword.get(compaction, :threshold) == 0.85
+  end
+
+  # Seeded with the normalized application-environment shape, the one a live
+  # save hands the store (the config round-trips rule).
+  test "save/load round-trips the network section" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    network = [
+      proxy: "http://proxy.corp.test:3128",
+      proxy_bypass: ["ollama.internal", ".corp.test"]
+    ]
+
+    snapshot = %{
+      fermix_core: [providers: [openai: []], agent: [name: "fermix"], network: network],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.network]"
+    assert contents =~ ~s(proxy = "http://proxy.corp.test:3128")
+    assert contents =~ ~s(proxy_bypass = ["ollama.internal", ".corp.test"])
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :network) == network
+
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :network) == network
+  end
+
+  test "a home with no network section applies an empty one, so a removed proxy is removed" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+    File.write!(Path.join(tmp_home, "config.toml"), "[fermix_core.agent]\nname = \"fermix\"\n")
+
+    Application.put_env(:fermix_core, :network, proxy: "http://stale.test:3128")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert Keyword.get(loaded.fermix_core, :network) == []
+    assert :ok = ConfigStore.apply_snapshot(loaded)
+    assert Application.get_env(:fermix_core, :network) == []
+  end
+
+  test "load refuses to boot on an unknown network key, so a misspelt proxy is not ignored" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.network]
+    proxi = "http://proxy.corp.test:3128"
+    """)
+
+    assert_raise ArgumentError, ~r/\[fermix_core.network\] has unknown key\(s\): proxi/, fn ->
+      ConfigStore.load_runtime_config()
+    end
+  end
+
+  test "load refuses a proxy that carries a credential, without printing it" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+    File.mkdir_p!(tmp_home)
+
+    File.write!(Path.join(tmp_home, "config.toml"), """
+    [fermix_core.network]
+    proxy = "http://operator:hunter2@proxy.corp.test:3128"
+    """)
+
+    error = assert_raise ArgumentError, fn -> ConfigStore.load_runtime_config() end
+
+    assert error.message =~ "[fermix_core.network] proxy"
+    refute error.message =~ "hunter2"
+    refute error.message =~ "operator"
   end
 
   test "save/load round-trips the harness config section" do

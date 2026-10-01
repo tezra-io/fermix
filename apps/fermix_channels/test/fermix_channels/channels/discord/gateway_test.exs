@@ -16,6 +16,14 @@ defmodule FermixChannels.Channels.Discord.GatewayTest do
     def handle_message(_message, _test_pid), do: {:error, :agent_unavailable}
   end
 
+  # The socket's answer on a route that would have to go through the proxy.
+  defmodule ProxiedSocketClient do
+    def start_link(_url, _socket_state, opts) do
+      send(Keyword.fetch!(opts, :test_pid), :socket_start_attempted)
+      {:error, :proxy_unsupported_transport}
+    end
+  end
+
   defmodule FakeSocketClient do
     def start_link(url, socket_state, opts) do
       test_pid = Keyword.fetch!(opts, :test_pid)
@@ -88,6 +96,47 @@ defmodule FermixChannels.Channels.Discord.GatewayTest do
 
     assert socket_state.gateway == gateway
     assert socket_state.token == "discord-bot-token"
+  end
+
+  # The refusal is deterministic until the settings change, and those are read
+  # at start. Reconnecting would repeat an authenticated request and an error
+  # line every few seconds for nothing.
+  test "a gateway refused for the proxy is reported once and not reconnected" do
+    test_pid = self()
+
+    Req.Test.stub(:discord_gateway_proxied, fn conn ->
+      send(test_pid, :gateway_url_fetched)
+
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.send_resp(200, Jason.encode!(%{"url" => "wss://gateway.discord.test"}))
+    end)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        {:ok, _gateway} =
+          start_supervised(
+            {Gateway,
+             [
+               name: :"discord_gateway_#{System.unique_integer([:positive])}",
+               agent: CapturingAgent,
+               agent_server: test_pid,
+               req_options: [plug: {Req.Test, :discord_gateway_proxied}],
+               socket_client: ProxiedSocketClient,
+               socket_options: [test_pid: test_pid],
+               reconnect_ms: 20
+             ]}
+          )
+
+        assert_receive :gateway_url_fetched
+        assert_receive :socket_start_attempted
+        # Several reconnect intervals pass with no second attempt of either.
+        refute_receive :socket_start_attempted, 150
+        refute_receive :gateway_url_fetched, 10
+      end)
+
+    assert log =~ "cannot use the outbound proxy"
+    assert log =~ "proxy_bypass"
   end
 
   test "logs dispatcher delivery failures with gateway context" do

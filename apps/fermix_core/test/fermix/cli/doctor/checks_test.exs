@@ -7,6 +7,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Net.Egress
   alias FermixCore.Setup.ConfigStore
 
   # Published NIP-19 vector (derived in nostr/key_test.exs). The nsec is here so
@@ -614,6 +615,139 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       result = Checks.bootstrap_template_drift(Keyword.put(ctx.opts, :repo, disabled))
       assert result.status == :ok
       assert result.detail =~ "skipped (memory repo unavailable)"
+    end
+  end
+
+  describe "network_proxy/1" do
+    setup do
+      keys = [:network, :egress, :realtime, :meetings]
+      core = Map.new(keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
+      discord = Application.get_env(:fermix_channels, :discord)
+
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+      Application.put_env(:fermix_core, :meetings, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      # A CLI verb has no pools, so the active egress is the section as loaded.
+      Application.delete_env(:fermix_core, :egress)
+
+      on_exit(fn ->
+        Enum.each(core, fn
+          {key, nil} -> Application.delete_env(:fermix_core, key)
+          {key, value} -> Application.put_env(:fermix_core, key, value)
+        end)
+
+        case discord do
+          nil -> Application.delete_env(:fermix_channels, :discord)
+          value -> Application.put_env(:fermix_channels, :discord, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "is not applicable with no proxy configured and none in the environment" do
+      Application.put_env(:fermix_core, :network, [])
+
+      result = Checks.network_proxy(env: %{"PATH" => "/usr/bin"})
+
+      assert result.name == "network"
+      assert result.status == :not_applicable
+    end
+
+    # The reporting case: a shell that exports HTTPS_PROXY, a daemon that never
+    # reads it, and nothing to say why the provider cannot be reached.
+    test "warns when the environment names a proxy Fermix does not read" do
+      Application.put_env(:fermix_core, :network, [])
+
+      for name <- ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY"] do
+        result = Checks.network_proxy(env: %{name => "http://user:hunter2@proxy.test:3128"})
+
+        assert result.status == :warn
+        assert result.detail =~ name
+        assert result.detail =~ "[fermix_core.network]"
+        refute result.detail =~ "hunter2"
+        refute result.detail =~ "proxy.test"
+      end
+    end
+
+    test "names the proxy and what stays direct" do
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["ollama.internal"]
+      )
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :ok
+      assert result.detail =~ "http://proxy.corp.test:3128"
+      assert result.detail =~ "ollama.internal"
+    end
+
+    test "warns about an enabled feature that cannot use the proxy" do
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+      Application.put_env(:fermix_channels, :discord, enabled: true)
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "Discord"
+      assert result.detail =~ "proxy_bypass"
+      refute result.detail =~ "voice"
+    end
+
+    test "a host listed in proxy_bypass clears the warning for its feature" do
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["gateway.discord.gg"]
+      )
+
+      Application.put_env(:fermix_channels, :discord, enabled: true)
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :ok
+      refute result.detail =~ "will not connect"
+    end
+
+    # The other direction of a pending restart: the settings no longer name a
+    # proxy, and this process still sends traffic through the one it booted on.
+    test "says a removed proxy is still in force until a restart" do
+      Application.put_env(:fermix_core, :egress, Egress.new(proxy: "http://proxy.corp.test:3128"))
+      Application.put_env(:fermix_core, :network, [])
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "restart"
+      assert result.detail =~ "In force: proxy http://proxy.corp.test:3128"
+      assert result.detail =~ "Saved: no proxy"
+    end
+
+    test "says a saved proxy is waiting for a restart" do
+      Application.put_env(:fermix_core, :egress, Egress.new([]))
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "restart"
+    end
+
+    # `fermix doctor` is its own process: it cannot know what a running daemon
+    # started on, so its row must not read as "in force".
+    test "says the setting is read at start" do
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+
+      assert Checks.network_proxy(env: %{}).detail =~ "read when Fermix starts"
+    end
+
+    test "says a bypass list with no proxy has no effect" do
+      Application.put_env(:fermix_core, :network, proxy_bypass: ["ollama.internal"])
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no effect"
     end
   end
 

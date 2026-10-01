@@ -29,6 +29,7 @@ defmodule FermixCore.Auth.RefreshClient do
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Net.Egress
 
   @client_id "app_EMoamEEZ73f0CkXaXp7hrann"
   @token_url "https://auth.openai.com/oauth/token"
@@ -109,7 +110,7 @@ defmodule FermixCore.Auth.RefreshClient do
         ] ++ request_bounds()
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: 200, body: body}} ->
         parse_token_response(body)
 
@@ -153,7 +154,7 @@ defmodule FermixCore.Auth.RefreshClient do
         ] ++ request_bounds()
       )
 
-    response = request |> Req.merge(req_options) |> Req.request()
+    response = request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request()
 
     case client_rejection(provider, response) do
       nil -> refresh_response(provider, refresh_token, req_options, sleep, attempt, response)

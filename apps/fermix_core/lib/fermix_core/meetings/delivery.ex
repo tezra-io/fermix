@@ -55,7 +55,9 @@ defmodule FermixCore.Meetings.Delivery do
     :econnreset,
     :ehostunreach,
     :enetunreach,
-    :nxdomain
+    :nxdomain,
+    # What a refused or unresolved connect is called when the hop is the proxy.
+    :proxy_unreachable
   ]
 
   @type target :: %{platform: String.t(), destination: String.t(), opts: keyword()}

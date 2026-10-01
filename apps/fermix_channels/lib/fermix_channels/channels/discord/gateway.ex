@@ -116,6 +116,19 @@ defmodule FermixChannels.Channels.Discord.Gateway do
 
       %{state | socket: socket, socket_ref: ref}
     else
+      # The gateway socket cannot use the configured proxy. Nothing changes
+      # until the settings do, and those are read at start, so trying again
+      # would only repeat an authenticated request and this line every few
+      # seconds.
+      {:error, :proxy_unsupported_transport} ->
+        Logger.error(
+          "Discord gateway is not connected: its socket cannot use the outbound proxy. " <>
+            "List the gateway host in [fermix_core.network] proxy_bypass if this machine " <>
+            "reaches it directly, then restart."
+        )
+
+        state
+
       {:error, reason} ->
         Logger.error("Discord gateway connect failed: #{inspect(reason)}")
         schedule_reconnect(state)

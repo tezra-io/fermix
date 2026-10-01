@@ -38,6 +38,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Net.Egress
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Error, as: ProviderError
@@ -895,6 +896,13 @@ defmodule FermixCore.Agents.TurnRunner do
   defp provider_error_reply({:provider_transport_error, %{kind: :transport_closed} = error}) do
     "#{provider_label(error)} provider closed the connection before returning a response. Retry, " <>
       "or reduce request size/effort if it persists."
+  end
+
+  defp provider_error_reply({:provider_transport_error, %{kind: kind} = error})
+       when kind in [:proxy_unreachable, :proxy_refused] do
+    "#{provider_label(error)} could not be reached through the configured proxy: " <>
+      "#{Egress.describe_failure(Map.get(error, :reason))}. " <>
+      "Check the proxy and the [fermix_core.network] settings."
   end
 
   defp provider_error_reply({:provider_transport_error, error}) when is_map(error) do

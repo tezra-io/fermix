@@ -58,6 +58,7 @@ defmodule FermixCore.Setup.RestartState do
   @boot_bound [
     {:providers, "Provider settings changed since Fermix started."},
     {:routing, "Model routing changed since Fermix started."},
+    {:network, "Network settings changed since Fermix started."},
     {:realtime, "Voice settings changed since Fermix started."},
     {:channels, "Channel settings changed since Fermix started."},
     {:acp, "The coding agent connection changed since Fermix started."},

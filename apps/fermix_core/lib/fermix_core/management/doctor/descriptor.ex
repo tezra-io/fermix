@@ -129,6 +129,7 @@ defmodule FermixCore.Management.Doctor.Descriptor do
         &Checks.bootstrap_template_drift/0
       ),
       spec("routing_overrides", :configuration, :warning, :always, &Checks.routing_overrides/0),
+      spec("network_proxy", :configuration, :warning, :configured, &Checks.network_proxy/0),
       spec(
         "command_owner_config",
         :configuration,

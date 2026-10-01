@@ -208,6 +208,16 @@ defmodule FermixCore.Providers.Error do
   # terminal for failover (every provider shares the dead local network) and is
   # recovered by the scheduled-job runner's transient backoff instead.
   defp transport_kind(:connection_unavailable), do: :connection_unavailable
+  # A failed hop through the configured proxy (`FermixCore.Net.Egress`). Neither
+  # kind is failover-eligible: every route leaves through the same proxy, so
+  # another provider cannot help. An unreachable proxy is worth another try on
+  # the same route, like a pool with no connection to give; a refusal is not.
+  defp transport_kind(:proxy_unreachable), do: :proxy_unreachable
+
+  defp transport_kind(reason)
+       when reason in [:proxy_auth_required, :proxy_refused, :proxy_needs_https],
+       do: :proxy_refused
+
   defp transport_kind(_reason), do: :transport
 
   defp stage_opt(opts) do
