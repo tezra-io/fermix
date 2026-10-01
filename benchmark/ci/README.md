@@ -95,7 +95,7 @@ strict preflight requires the workspace HEAD to match the harness checkout.
 
 **Model rule:** the candidate model (eval-box input `model`, default
 `gpt-5.6-luna`) must differ from `judge.model` in `benchmark/config.yaml`
-(`gpt-5.4-mini`) — the harness refuses a judge that matches the candidate.
+(`gpt-6-luna`) — the harness refuses a judge that matches the candidate.
 
 Secrets are reachable only from `schedule`/`workflow_dispatch` runs — no
 PR-triggered workflow declares them.

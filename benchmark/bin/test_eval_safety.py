@@ -521,7 +521,7 @@ def test_behavioral_config_defaults_to_the_dev_daemon(monkeypatch):
     assert cfg.daemon.fermix_home == os.path.expanduser("~/.fermix-dev")
     assert cfg.opik.project == "fermix-dev"
     assert cfg.judge.backend == "openai"
-    assert cfg.judge.model == "gpt-5.4-mini"
+    assert cfg.judge.model == "gpt-6-luna"
 
 
 def test_daemon_sandbox_requires_strict_eval_scoped_workspace(tmp_path):

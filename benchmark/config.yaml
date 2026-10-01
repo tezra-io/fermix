@@ -40,7 +40,7 @@ judge:
   # `fermix:OPENAI_API_KEY`), so no extra setup. The judge model MUST differ from
   # the candidate model. Opik still reports each candidate turn's token usage/cost.
   backend: "openai"
-  model: "gpt-5.4-mini"
+  model: "gpt-6-luna"
   # Judge runs only when enabled here OR `--judge` is passed. Off by default so a
   # run makes fewer real model calls.
   enabled: false

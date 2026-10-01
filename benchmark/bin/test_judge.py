@@ -144,5 +144,29 @@ def test_the_invalid_verdict_error_never_echoes_judge_prose(dispatch):
     assert "invalid verdict shape" in result.error
 
 
+def test_the_request_asks_for_exactly_the_verdict_the_parser_accepts(dispatch):
+    dispatch.run([_ok_body()])
+    body = json.loads(dispatch.requests[0].data)
+    schema = body["response_format"]["json_schema"]["schema"]
+    assert body["response_format"]["json_schema"]["strict"] is True
+    assert set(schema["properties"]) == {"pass", "score", "rationale"}
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+
+
+def test_a_missing_tool_record_is_sent_as_not_recorded_not_as_no_tools(dispatch):
+    dispatch.run([_ok_body()])
+    sent = json.loads(json.loads(dispatch.requests[0].data)["messages"][1]["content"])
+    assert sent["tool_evidence"] == judge.NOT_RECORDED
+    assert judge._evaluation_data("q", "r", "x", None, [], None)["tool_evidence"] == []
+
+
+def test_a_verdict_in_schema_order_parses(dispatch):
+    body = json.dumps({"rationale": "met both", "score": 1.0, "pass": True})
+    result = dispatch.run([_ok_body(content=body)])
+    assert result.evaluated is True
+    assert result.score == 1.0
+
+
 if __name__ == "__main__":
     raise SystemExit(pytest.main([__file__, "-q"]))

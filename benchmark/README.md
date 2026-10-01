@@ -46,7 +46,7 @@ benchmark's config** (`config.yaml` / `behavioral_config.yaml`):
 ```yaml
 judge:
   backend: "openai"        # or "none" to skip rubric judging
-  model: "gpt-5.4-mini"    # must differ from the candidate model
+  model: "gpt-6-luna"      # must differ from the candidate model
 ```
 
 The call authenticates with `EVAL_JUDGE_API_KEY`; the `make` judged targets
