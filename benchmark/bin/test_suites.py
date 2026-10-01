@@ -254,6 +254,23 @@ def test_shipped_suites_still_load():
     assert suites.load_all(CAP_DIR, include_candidates=True)
 
 
+_ONE_CASE = ("suite: {name}\nrisk: host_readonly\ntitle: t\nscenarios:\n"
+             "  - id: s\n    title: t\n    cases:\n      - id: c\n        query: q\n"
+             "        score: {{match: contains, expected: x}}\n")
+
+
+def test_a_behavioral_scenario_still_needs_two_phrasings(tmp_path):
+    (tmp_path / "one.yaml").write_text(_ONE_CASE.format(name="one"))
+    with pytest.raises(suites.SuiteError) as raised:
+        suites.load_all(str(tmp_path))
+    assert any("needs at least 2 case" in p for p in raised.value.problems)
+
+
+def test_a_capability_scenario_may_hold_one_task(tmp_path):
+    (tmp_path / "one.yaml").write_text(_ONE_CASE.format(name="cap_one"))
+    assert suites.load_all(str(tmp_path))[0].name == "cap_one"
+
+
 # --- session_ids.sess -------------------------------------------------------
 
 def test_sess_leaves_a_short_id_unchanged():

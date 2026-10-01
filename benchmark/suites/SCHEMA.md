@@ -55,13 +55,16 @@ all of them.
   risk: isolated_mutation      # optional override of the suite risk
   tags: [memory, core]         # optional; matches --tag
   sticky_gates: [reply_not_matches]   # optional; see below
-  cases:                       # required, >= 2  (critical/safety scenarios: more)
+  cases:                       # required, >= 2 (cap_* suites: >= 1; critical/safety: more)
     - ...
 ```
 
 **Rule: every scenario has at least 2 cases.** Two phrasings of the same intent,
 so a pass is not an overfit to one wording. Critical and safety scenarios should
-have 3+.
+have 3+. Capability suites (named `cap_*`) need only one: a capability task is
+repeated `--trials` times, and a reworded twin that passes and fails with its
+sibling doubles that task's weight in the score and the sweep's time without adding
+information.
 
 `risk` is executable policy, not documentation. Allowed values:
 

@@ -410,7 +410,7 @@ def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     default, _skipped = rc.capability_cases(
         suites.load_all(cap_dir), None, None, None, False)
-    assert len(default) == 26
+    assert len(default) == 17
     assert not [suite.name for suite, _scn, _case in default
                 if suite.name.startswith("cap_browser")]
     parked, _skipped = rc.capability_cases(

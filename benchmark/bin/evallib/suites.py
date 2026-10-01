@@ -173,6 +173,22 @@ class Suite:
 
 # --- validation helpers -----------------------------------------------------
 
+# A behavioral scenario needs two phrasings of one intent, so a pass is not an overfit
+# to one wording (SCHEMA.md). A capability task (every capability suite is named cap_*)
+# is repeated k times instead, and a paraphrase twin that passes and fails with its
+# sibling doubles the task's weight in the score and the sweep's time without adding
+# information, so one case is enough there.
+BEHAVIORAL_MIN_CASES = 2
+CAPABILITY_MIN_CASES = 1
+CAPABILITY_SUITE_PREFIX = "cap_"
+
+
+def min_cases_for(suite_name: str) -> int:
+    if suite_name.startswith(CAPABILITY_SUITE_PREFIX):
+        return CAPABILITY_MIN_CASES
+    return BEHAVIORAL_MIN_CASES
+
+
 def _validate_expect(expect, where: str, problems: list[str]) -> None:
     if not isinstance(expect, dict):
         problems.append(f"{where}: `expect` must be a map, got {type(expect).__name__}")
@@ -581,8 +597,10 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
         sticky_gates = _validate_sticky_gates(sc.get("sticky_gates", []), loc, problems)
 
         cases_raw = sc.get("cases")
-        if not isinstance(cases_raw, list) or len(cases_raw) < 2:
-            problems.append(f"{loc}: needs at least 2 cases (got {len(cases_raw) if isinstance(cases_raw, list) else 0})")
+        min_cases = min_cases_for(str(name))
+        if not isinstance(cases_raw, list) or len(cases_raw) < min_cases:
+            problems.append(f"{loc}: needs at least {min_cases} case(s) "
+                            f"(got {len(cases_raw) if isinstance(cases_raw, list) else 0})")
             cases_raw = cases_raw if isinstance(cases_raw, list) else []
 
         cases: list[Case] = []
