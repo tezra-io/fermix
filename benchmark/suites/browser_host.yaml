@@ -21,34 +21,39 @@ description: >
 
     benchmark/bin/browser_host_fixture.py                                  # pane_task
     benchmark/bin/browser_host_fixture.py --fail-after 2 \
-      --fail-reason host_unavailable --fail-message "the Mac is locked"    # lock_mid_task, cancel_releases_tabs
+      --fail-reason host_unavailable --fail-message "the Mac is locked"    # lock_mid_task
     benchmark/bin/browser_host_fixture.py --cancel-after 1                 # host_cancel_mid_task
 
-  `no_host_falls_back_to_chrome` runs with NO fixture attached and
-  `[fermix_core.browser] launch_app` off (the default outside the app), so it
-  needs the same working Chrome runtime `browser.yaml` does. It proves the
-  routing decision still lands on managed Chrome when nothing is attached; it
-  does not exercise the macOS `open` launch call itself (no packaged app
-  exists in this repo to launch) — that path is `HostLauncherTest`'s
-  deterministic table (the launch step, the launch deadline, BROWSER-8's
-  cooldown) and `fermix-macos`'s own dev-loop runbook.
+  The fixture answers every page request with one canned page (title
+  "Example Domain", one "More information..." link), so a reply that names
+  IANA — where example.com's real link goes — can only have come from
+  managed Chrome or from memory: that is the negative gate on the
+  click-through cases, the one failure this suite exists to catch (a lost or
+  cancelled pane task silently finished in another browser). The lock and
+  cancel floors are the app's own words: the fixture's `host_unavailable`
+  message ("the Mac is locked") and the daemon's own `cancelled` sentence
+  reach the model verbatim, so `lock` and `cancel` are material, not a
+  wording allowlist. States real user intent and lets the model pick the
+  route — the only route gate is the labelled `tools_any: [browser]` on the
+  first pane case; everything else is judged on the substance of the reply.
+  `make dry` validates this suite's shape without starting anything; a live
+  run needs the fixture and a model both, per case as noted above.
 
-  `cancel_releases_tabs` asserts on the reply only: that the model reports the
-  cancellation rather than continuing the task. Whether the fixture actually
-  saw `task.release` behind the task's own queued requests (BROWSER-1) and
-  exactly once (BROWSER-2) is not observable from a black-box eval reply, and
-  is proven by `ConnectionTest`'s wire-level assertions instead. States real
-  user intent and lets the model pick the route — the only route gate is
-  `tools_any: [browser]`; everything else is judged on the substance of the
-  reply. `make dry` validates this suite's shape without starting anything;
-  a live run needs the fixture and a model both, per case as noted above.
+  Two scenarios were retired. "With no pane attached the default profile is
+  still Chrome" is unobservable from a trace (both backends emit the same
+  `browser` span) and is exactly what every `browser.yaml` run on a daemon
+  without the app already proves. "Cancel in the same message" asked the
+  model to open a page and then not to, which says nothing about the pane;
+  whether `task.release` reached the wire once and in order is
+  `ConnectionTest`'s assertion, as this description already said.
 
-  `host_cancel_mid_task` is the wire counterpart: the fixture itself sends
-  `task.cancel` (as the app does when the person clicks "Cancel task" on the
-  task's own tab), never a word the person types. The model's own next
-  browser call is the one that meets it — the daemon answers `cancelled` with
-  its own sentence before anything reaches the wire again — so the case
-  proves the model reports that sentence and never re-routes to Chrome.
+  `host_cancel_mid_task` is the wire counterpart of a lock: the fixture itself
+  sends `task.cancel` (as the app does when the person clicks "Cancel task"
+  on the task's own tab), never a word the person types. The model's own
+  next browser call is the one that meets it — the daemon answers
+  `cancelled` with its own sentence before anything reaches the wire again —
+  so the case proves the model reports that sentence and never re-routes to
+  Chrome.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -62,19 +67,22 @@ scenarios:
     tags: [browser, browser_host, read]
     cases:
       - id: pane_reports_real_content
+        # THE labelled route-sanity case for this suite: the browser tool was
+        # reached at all. Every other case lets the floor and the rubric decide.
         query: "Open https://example.com in the browser and tell me the page's main heading."
         expect:
           tools_any: [browser]
-          main_model_matches: "."
           reply_matches: "(?i)example domain"
           reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
         rubric: >
           Opens the page and reports its actual heading, "Example Domain" —
           the pane's fixture content, not a claim that it cannot browse.
       - id: pane_task_click_through
+        # The fixture serves the same canned page after the click, so the
+        # heading it lands on is still "Example Domain"; what the case adds is
+        # the `act` on the pane wire.
         query: "Open https://example.com in the browser, click the 'More information...' link, and tell me the heading of the page you land on."
         expect:
-          tools_any: [browser]
           reply_matches: "(?i)example domain"
           reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse|click)"
         rubric: >
@@ -89,16 +97,19 @@ scenarios:
       - id: locked_after_first_step
         # The fixture answers the FIRST request, then every one after with
         # host_unavailable ("the Mac is locked"): the task's own follow-up
-        # step is the one that meets the loss, as BROWSER-4/5 require.
+        # step is the one that meets the loss, as BROWSER-4/5 require. The
+        # floor is the app's own message; the negative is the destination only
+        # Chrome (or memory) could supply. Claim words such as "clicked" were
+        # dropped from the negative: an honest "when I clicked the link the
+        # Mac was locked" contains them, and a gate that fails good behavior is
+        # the worse failure.
         query: "Open https://example.com in the browser, then click the 'More information...' link, and tell me what happened."
         expect:
-          tools_any: [browser]
-          reply_matches: "(?i)(lock|unavailable|disconnect|could not|couldn'?t|failed|stopped working)"
-          reply_not_matches: "(?i)(clicked|navigated|went to|the linked page (shows|says))"
+          reply_matches: "(?i)lock"
+          reply_not_matches: "(?i)\\biana\\b|internet assigned numbers"
         rubric: >
-          Reports that the browser stopped working partway through — mentions
-          the Mac being locked, the pane disconnecting, or an equivalent
-          concrete failure — and does NOT claim the click succeeded or that it
+          Reports that the browser stopped working partway through because the
+          Mac is locked, and does NOT claim the click succeeded or that it
           continued the task some other way (a different browser included).
           Telling the person and stopping is correct; guessing what the linked
           page says, or silently finishing the task, is not.
@@ -107,12 +118,11 @@ scenarios:
         # time is the screenshot rather than the click.
         query: "Open https://example.com in the browser, take a screenshot of it, and tell me what happened."
         expect:
-          tools_any: [browser]
-          reply_matches: "(?i)(lock|unavailable|disconnect|could not|couldn'?t|failed|stopped working)"
+          reply_matches: "(?i)lock"
           reply_not_matches: "(?i)(here is the screenshot|the screenshot shows|captured successfully)"
         rubric: >
-          Reports that the capture failed because the browser stopped working
-          — never a claim that a screenshot was taken and here it is.
+          Reports that the capture failed because the Mac is locked — never a
+          claim that a screenshot was taken and here it is.
 
   - id: host_cancel_mid_task
     title: "The app's own task.cancel ends the turn with the daemon's sentence, never Chrome"
@@ -125,12 +135,12 @@ scenarios:
         # way the app does when the person clicks "Cancel task" on that tab.
         # The model never sees this in the conversation; its own next browser
         # call is the one that meets the cancellation, exactly as BROWSER-4/5
-        # meet a lock or a lost host.
+        # meet a lock or a lost host. The negative is the Chrome-only
+        # destination, for the same reason as the lock case above.
         query: "Open https://example.com in the browser, then click the 'More information...' link, and tell me what happened."
         expect:
-          tools_any: [browser]
           reply_matches: "(?i)cancel"
-          reply_not_matches: "(?i)(clicked|navigated|went to|the linked page (shows|says))"
+          reply_not_matches: "(?i)\\biana\\b|internet assigned numbers"
         rubric: >
           Reports that the person cancelled the browser task in the Fermix
           app — never a claim that the click went through, that another
@@ -140,55 +150,8 @@ scenarios:
         # time is a screenshot instead of a click.
         query: "Open https://example.com in the browser, take a screenshot of it, and tell me what happened."
         expect:
-          tools_any: [browser]
           reply_matches: "(?i)cancel"
           reply_not_matches: "(?i)(here is the screenshot|the screenshot shows|captured successfully)"
         rubric: >
           Reports that the person cancelled the browser task in the Fermix
           app — never a claim that a screenshot was taken and here it is.
-
-  - id: cancel_releases_tabs
-    title: "Cancelling a pane task before it does anything else releases it, not runs it"
-    severity: normal
-    tags: [browser, browser_host, cancel]
-    cases:
-      - id: cancel_before_second_step
-        query: "Open https://example.com in the browser. Actually, cancel that — I changed my mind, don't do anything else with it."
-        expect:
-          reply_not_matches: "(?i)example domain"
-        rubric: >
-          Respects the cancellation: does not go on to describe the page's
-          content or take a further action on the tab it opened, and
-          acknowledges that it stopped.
-      - id: cancel_before_screenshot
-        query: "Open https://example.com in the browser. Wait — don't take that screenshot after all, forget it."
-        expect:
-          reply_not_matches: "(?i)(here is the screenshot|the screenshot shows)"
-        rubric: >
-          Respects the cancellation: does not go on to capture or describe a
-          screenshot, and acknowledges that it stopped.
-
-  - id: no_host_fallback
-    title: "With no pane attached, the default profile is still managed Chrome"
-    severity: normal
-    tags: [browser, browser_host, discipline]
-    cases:
-      - id: no_fixture_attached
-        query: "Open https://example.com in a browser and tell me the main heading."
-        expect:
-          tools_any: [browser]
-          reply_matches: "(?i)example domain"
-          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
-        rubric: >
-          Opens the page and reports the real heading. Proves the routing
-          decision degrades cleanly to managed Chrome when nothing is
-          attached to `browser_host.sock`, rather than refusing or hanging.
-      - id: no_fixture_attached_link
-        query: "Open https://example.com in a browser and tell me where the 'More information...' link goes."
-        expect:
-          tools_any: [browser]
-          reply_matches: "(?i)(iana|more information)"
-          reply_not_matches: "(?i)(can'?t|cannot|do ?n'?t|unable to) (see|view|render|open|access|browse)"
-        rubric: >
-          Opens the real page over managed Chrome and reports where the link
-          actually points, proving the fallback route works end to end.
