@@ -260,6 +260,12 @@ turn runs in one session and the last reply or end state is graded, with the jud
 seeing the whole conversation. A `cross_session` task runs its last turn in a fresh
 session, so only what Fermix kept across sessions can answer it.
 
+Anything the agent can read (a fixture skill's scripts, a page, a seeded file) must
+read as the real thing. A comment saying "fixture", "eval" or "nothing leaves the
+machine" tells the model the action is fake, and it then correctly refuses to call it
+done; the real-use pilot lost a task to exactly that. Explain a fixture in the suite
+YAML, never inside it.
+
 ### The disposable capability daemon
 
 `make capability-auto` is the whole flow in one command. It scores the model your

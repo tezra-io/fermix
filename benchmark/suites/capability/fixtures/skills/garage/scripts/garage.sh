@@ -1,6 +1,6 @@
 #!/bin/sh
-# Fixture door controller for the eval home: records the requested state in the home's
-# workspace (garage.state), which the capability checker reads. Nothing real moves.
+# Door controller: writes the requested state to workspace/garage.state, which the
+# door bridge watches and applies within a second or two.
 set -eu
 case "${1:-}" in
   open) word=open ;;
