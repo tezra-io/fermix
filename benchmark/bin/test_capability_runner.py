@@ -1354,6 +1354,12 @@ def _run_checker_trial(tmp_path, monkeypatch, result, *, case=None):
                               str(home / "workspace" / "eval"), False)
 
 
+def test_a_failed_checker_trial_prints_the_checkers_reason(tmp_path, monkeypatch, capsys):
+    result = rc.checker.CheckerResult(0.0, "2 sends recorded, want exactly one")
+    _run_checker_trial(tmp_path, monkeypatch, result)
+    assert "2 sends recorded, want exactly one" in capsys.readouterr().err
+
+
 def test_a_checker_error_is_an_invalid_trial_not_a_model_zero(tmp_path, monkeypatch):
     # Every CheckerResult error path (script missing, boundary error, timeout, spawn
     # OSError, unparseable output) used to become a VALID 0.0 that entered the
@@ -1486,6 +1492,19 @@ def test_the_judge_sees_what_a_page_recorded_once_it_reported_in(monkeypatch):
 def test_the_judge_gets_no_page_record_from_a_page_that_never_reported_in(monkeypatch):
     assert _judged_with(monkeypatch, {}) is None
     assert _judged_with(monkeypatch, None) is None
+
+
+def test_a_trial_that_misses_full_credit_prints_the_judges_reason(tmp_path, monkeypatch, capsys):
+    monkeypatch.setattr(rc, "_capture_turn", lambda *_a: _captured(reply="draft"))
+    reason = "The draft never addresses Jordan; every other requirement is met. " * 3
+    monkeypatch.setattr(rc.judge, "judge_case", lambda *_a, **_k: rc.judge.JudgeResult(
+        evaluated=True, passed=False, score=0.8, rationale=reason))
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = _two_turn_case(score_spec=None, rubric="Addresses Jordan.")
+    rc._standard_trial(cfg, None, SimpleNamespace(name="cap_x"), case, "run", 0, False,
+                       "task", None, None, True)
+    err = capsys.readouterr().err
+    assert "judge 0.80" in err and reason[:180] in err
 
 
 def test_the_checker_reads_the_tasks_gold_from_the_evidence_file():

@@ -567,7 +567,7 @@ def _task_success(cfg, case, reply, want_judge, tag,
             transcript=transcript, tool_evidence=_page_record(fixture_state),
             candidate_routes=candidate_routes)
         if jr.evaluated and jr.score is not None:
-            return jr.score, f"judge {jr.score:.2f}: {jr.rationale[:60]}"
+            return jr.score, f"judge {jr.score:.2f}: {jr.rationale[:300]}"
         raise JudgeUnavailable(case.id, jr.error or "judge result was not gradeable")
     return 0.0, "no score_spec and judge off (skip-scored 0)"
 
@@ -1058,9 +1058,11 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
                                   state)
         # Read AFTER the last turn settled, so everything the conversation made the page
         # do is in the state this trial is scored on.
-        succ, _detail = _task_success(
+        succ, detail = _task_success(
             cfg, case, cap.view.reply, want_judge, session, _candidate_routes(cap.view),
             _page_state(binding), transcript=_transcript(case, ep))
+        if succ < 1.0:   # the scorer's own reason, so a partial score can be reviewed
+            print(f"    · {label}: {detail}", file=sys.stderr)
         succ = _provenance_gate(case, ep, succ, label)
         return _finish_trial(case, ep, succ, label)
     finally:
@@ -1100,6 +1102,8 @@ def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, l
     if cr.violations:
         print(f"    ⚠️ {label}: checker reported violation(s): {'; '.join(cr.violations)}",
               file=sys.stderr)
+    if cr.score < 1.0:
+        print(f"    · {label}: checker: {cr.detail}", file=sys.stderr)
     succ = _provenance_gate(case, ep, cr.score, label)
     return _finish_trial(case, ep, succ, label, checker_safety=cr.safety_ok)
 
