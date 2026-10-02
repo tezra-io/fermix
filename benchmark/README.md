@@ -393,7 +393,9 @@ re-renders it too). Open that page rather than reading the markdown. It has thre
 - **Leaderboard**: each model's latest valid full sweep, ranked on the tasks they all
   ran, with a task-by-model grid of success, median time and cost per trial. Tied
   models share a rank. A saturation note appears when the leader is at 95% or more or
-  most shared tasks were passed by every model.
+  most shared tasks were passed by every model. Once a `--private` run exists, a second
+  board below it ranks the `:private` rows on the held-out real-use set by themselves;
+  the two sets are never added together.
 - **Same task set**: the strict comparison, one table per cohort (below), ranked only
   when two or more models ran the identical, pinned task set.
 - **Runs by change**: every run, valid or not, grouped by the commit it measured,

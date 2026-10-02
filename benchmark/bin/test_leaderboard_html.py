@@ -161,6 +161,25 @@ def test_subset_runs_smoke_labels_and_soft_axes_stay_off_the_board(tmp_path):
         ("openai/m/high", "20260901T000000Z")]
 
 
+def test_private_runs_rank_on_their_own_board_and_never_join_the_public_one(tmp_path):
+    _write_run(tmp_path, "20260901T000000Z", "openai/m/high", {"cap_x/a": _task(1.0)},
+               run_json={"meta": _meta("20260901T000000Z"), "score": _score(1.0),
+                         "problems": []})
+    for run_id, config, success in (("20260902T000000Z", "openai/m/high:private", 0.5),
+                                    ("20260903T000000Z", "openai/n/high:private", 1.0)):
+        _write_run(tmp_path, run_id, config, {"cap_ru/x": _task(success)},
+                   run_json={"meta": _meta(run_id, tasks_hash="0123456789abcdef"),
+                             "score": _score(success), "problems": []})
+    runs = _runs(tmp_path)
+    assert [r["config_id"] for r in lh.leaderboard_view(runs)["rows"]] == ["openai/m/high"]
+    private = lh.leaderboard_view(runs, axis="private")
+    assert [(r["rank"], r["config_id"]) for r in private["rows"]] == [
+        (1, "openai/n/high:private"), (2, "openai/m/high:private")]
+    assert [len(c["runs"]) for c in lh.cohort_views(runs)] == [2, 1]
+    page = lh.render(runs, datetime(2026, 9, 4, tzinfo=timezone.utc))
+    assert "Real use (private holdout)" in page
+
+
 def test_cohorts_rank_only_a_pinned_task_set_with_two_models(tmp_path):
     tasks = {"cap_x/a": _task(1.0)}
     for run_id, config in (("20260901T000000Z", "openai/a/high"),

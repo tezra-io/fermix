@@ -293,10 +293,19 @@ def attach_commits(runs: list[dict], history: GitHistory) -> None:
 
 # --- views -------------------------------------------------------------------------
 
-def _is_model_run(run: dict) -> bool:
-    """A model's sweep, not a harness smoke (`cap-smoke`) or a soft/private axis row."""
+PRIVATE_SUFFIX = ":private"
+
+
+def _axis(run: dict) -> str | None:
+    """Which board a run belongs to: "public" for a model's sweep of the public set,
+    "private" for its sweep of the held-out real-use set, None for a harness smoke
+    (`cap-smoke`) or a soft/taste axis row."""
     config = run["config_id"]
-    return "/" in config and ":" not in config
+    if config.endswith(PRIVATE_SUFFIX):
+        config, axis = config[:-len(PRIVATE_SUFFIX)], "private"
+    else:
+        axis = "public"
+    return axis if "/" in config and ":" not in config else None
 
 
 def _is_full_sweep(run: dict) -> bool:
@@ -309,11 +318,13 @@ def _rank_key(success: float | None, pass_hat_k: float | None, config: str) -> t
     return (-((success or 0.0) + (pass_hat_k or 0.0) * 1e-3), config)
 
 
-def leaderboard_view(runs: list[dict]) -> dict:
-    """Each model's latest valid full sweep, ranked on the tasks all of them ran."""
+def leaderboard_view(runs: list[dict], axis: str = "public") -> dict:
+    """Each model's latest valid full sweep of one axis, ranked on the tasks all of them
+    ran. The public and private sets never share a board: different tasks, different
+    scale."""
     latest = {}
     for run in runs:
-        if run["valid"] and _is_model_run(run) and _is_full_sweep(run):
+        if run["valid"] and _axis(run) == axis and _is_full_sweep(run):
             latest[run["config_id"]] = run      # runs are oldest first
     entries = list(latest.values())
     if not entries:
@@ -352,7 +363,7 @@ def cohort_views(runs: list[dict]) -> list[dict]:
     Within a cohort, each model's latest run; ranked only when the hash pins the tasks."""
     grouped: dict[str, dict] = {}
     for run in runs:
-        if not (run["valid"] and _is_model_run(run)):
+        if not (run["valid"] and _axis(run)):
             continue
         key, pinned = _cohort_of(run)
         cohort = grouped.setdefault(key, {"key": key, "pinned": pinned, "latest": {},
@@ -411,7 +422,8 @@ def render(runs: list[dict], generated_at: datetime) -> str:
         '<button data-tab="leaderboard" aria-selected="true">Leaderboard</button>'
         '<button data-tab="cohorts" aria-selected="false">Same task set</button>'
         '<button data-tab="runs" aria-selected="false">Runs by change</button></nav>',
-        f'<section id="leaderboard">{_render_leaderboard(board)}</section>',
+        (f'<section id="leaderboard">{_render_leaderboard(board)}'
+         f'{_render_private(leaderboard_view(runs, axis="private"))}</section>'),
         f'<section id="cohorts" hidden>{_render_cohorts(cohort_views(runs))}</section>',
         f'<section id="runs" hidden>{_render_changes(change_groups(runs))}</section>',
     ])
@@ -457,6 +469,16 @@ def _render_leaderboard(board: dict) -> str:
         ["Median task", "Trial time", "Cost / run", "$ / success"],
         [_leaderboard_cells(row) for row in rows])
     return "".join(notes) + table + _render_matrix(rows, shared, set(saturated))
+
+
+def _render_private(board: dict) -> str:
+    """The held-out real-use set's own board, shown only once a private run exists."""
+    if not board["rows"]:
+        return ""
+    return ('<h2>Real use (private holdout)</h2><p>Tasks kept outside this repo so nobody '
+            'tuning Fermix can read their answers. A different task set from the board '
+            'above, so the two are never added together or compared row for row.</p>'
+            + _render_leaderboard(board))
 
 
 def _leaderboard_cells(row: dict) -> tuple[list[str], list[str]]:
