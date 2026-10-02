@@ -23,6 +23,7 @@ defmodule FermixCore.Memory.Store do
           | {:conversation, conversation_key()}
           | {:agent, String.t()}
   @type memory_scope :: conversation_key() | explicit_scope()
+  @type durability :: :durable | :session_only
 
   # --- Client API ---
 
@@ -32,7 +33,14 @@ defmodule FermixCore.Memory.Store do
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
-  @spec store(memory_scope(), String.t(), String.t(), keyword()) :: :ok
+  @doc """
+  Stores one memory key and says where it landed: `:durable` is a row in
+  SQLite, `:session_only` is ETS alone (durable memory is off) and lasts until
+  this process stops. A write SQLite refused is `{:error, reason}` and leaves
+  the cache as it was.
+  """
+  @spec store(memory_scope(), String.t(), String.t(), keyword()) ::
+          {:ok, durability()} | {:error, term()}
   def store(scope, key, value, opts \\ [])
       when is_binary(key) and is_binary(value) do
     assert_scope!(scope)
@@ -44,11 +52,12 @@ defmodule FermixCore.Memory.Store do
   @spec recall(memory_scope(), String.t(), keyword()) ::
           {:ok, String.t()} | {:error, :not_found}
   @doc """
-  Recalls one memory key from ETS first, falling back to SQLite only on cache miss.
+  Recalls one memory key.
 
-  This intentionally preserves hot-path cache authority for single-key lookups.
-  Use `recall_all/2` when the caller needs SQLite to authoritatively resync the
-  scope cache.
+  When durable memory is enabled, SQLite is authoritative: rows are also
+  written past this process (the reviewer, the memory tools' edits by id, a
+  coding run's write-back), so the cache is refreshed from the row rather than
+  trusted over it. When no repo is registered, it returns the ETS value.
   """
   def recall(scope, key, opts \\ []) when is_binary(key) do
     assert_scope!(scope)
@@ -98,9 +107,7 @@ defmodule FermixCore.Memory.Store do
   @impl true
   def handle_call({:store, scope, key, value}, _from, state) do
     scope_ref = normalize_scope!(scope, state)
-    persist_memory!(state, scope_ref, key, value)
-    put_cached_memory(state.table, scope_ref, key, value)
-    {:reply, :ok, state}
+    {:reply, store_memory(state, scope_ref, key, value), state}
   end
 
   def handle_call({:recall, scope, key}, _from, state) do
@@ -122,19 +129,16 @@ defmodule FermixCore.Memory.Store do
     {:reply, :ok, state}
   end
 
-  defp recall_value(state, scope_ref, key) do
-    case recall_cached_value(state.table, scope_ref, key) do
-      {:ok, value} ->
-        {:ok, value}
-
-      {:error, :not_found} ->
-        recall_repo_fallback(state, scope_ref, key)
+  defp store_memory(state, scope_ref, key, value) do
+    with {:ok, durability} <- persist_memory(state, scope_ref, key, value) do
+      put_cached_memory(state.table, scope_ref, key, value)
+      {:ok, durability}
     end
   end
 
-  defp recall_repo_fallback(state, scope_ref, key) do
+  defp recall_value(state, scope_ref, key) do
     case repo_server(state.repo) do
-      nil -> {:error, :not_found}
+      nil -> recall_cached_value(state.table, scope_ref, key)
       repo -> recall_repo_value(state.table, repo, scope_ref, key)
     end
   end
@@ -147,6 +151,7 @@ defmodule FermixCore.Memory.Store do
         {:ok, rendered}
 
       {:error, :not_found} ->
+        delete_cached_memory(table, scope_ref, key)
         {:error, :not_found}
 
       {:error, reason} ->
@@ -221,17 +226,18 @@ defmodule FermixCore.Memory.Store do
     :ets.match_delete(table, {{namespace(scope_ref), :_}, :_, :_})
   end
 
-  defp persist_memory!(state, scope_ref, key, value) do
+  defp persist_memory(state, scope_ref, key, value) do
     case repo_server(state.repo) do
-      nil ->
-        :ok
+      nil -> {:ok, :session_only}
+      repo -> upsert_durable(repo, scope_ref, key, value)
+    end
+  end
 
-      repo ->
-        case Repo.upsert_memory(repo_attrs(scope_ref, key, value), server: repo) do
-          {:ok, _memory} -> :ok
-          {:error, :disabled} -> :ok
-          {:error, reason} -> raise "memory repo write failed: #{inspect(reason)}"
-        end
+  defp upsert_durable(repo, scope_ref, key, value) do
+    case Repo.upsert_memory(repo_attrs(scope_ref, key, value), server: repo) do
+      {:ok, _memory} -> {:ok, :durable}
+      {:error, :disabled} -> {:ok, :session_only}
+      {:error, reason} -> {:error, reason}
     end
   end
 

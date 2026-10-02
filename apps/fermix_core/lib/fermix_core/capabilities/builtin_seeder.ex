@@ -64,6 +64,7 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ModelRoutingConfig,
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,
+    FermixCore.Tools.MemoryForget,
     FermixCore.Tools.MemoryRecall,
     FermixCore.Tools.RecallActivity,
     FermixCore.Tools.ToolResultRecall,

@@ -64,6 +64,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "tool_call" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
     "memory_recall" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
     "memory_store" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
+    "memory_forget" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "schedule_job" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "update_job" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "list_jobs" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},

@@ -485,6 +485,9 @@ defmodule FermixCore.Agents.TurnRunner do
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
+      # A memory tool that changes USER.md or MEMORY.md invalidates the cached
+      # runtime context here, so the next turn is built from what it saved.
+      main_agent_server: Map.get(state, :main_agent_server),
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,

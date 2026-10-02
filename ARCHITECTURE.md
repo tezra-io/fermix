@@ -257,8 +257,9 @@ tool schemas.
 Built-in tool families: file read/write/edit, glob and content search, shell,
 and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 `place_search`, `browser`); skills and delegation (`skill_*`, `subagents`,
-`model_routing_config`); memory (`memory_store`, `memory_recall`,
-`memory_sources_list`, `recall_activity`); scheduled jobs; dated events and
+`model_routing_config`); memory (`memory_store`, `memory_forget`,
+`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs;
+dated events and
 reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
 `react`); `generate_image`, `request_directory_access`, and `tool_help`.
 `computer_use`, the coding-harness tools, and the meeting tools are registered
@@ -297,12 +298,15 @@ The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
 skill usage and curation, the companion timeline, and computer-history rows.
 
-`Memory.Reviewer` writes durable memory. It is a time-gated background review
-(daily by default) of the owner's recent messages that applies add, replace,
-and archive operations through `ReviewTools`, after which `PromptFiles` rebuilds
-`USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Admission` holds
-category and scope policy, `Compactor` summarizes long conversations, and
-`Search` runs FTS5 lookups.
+Durable memory has two writers, and both end by having `PromptFiles` rebuild
+`USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Memory.Reviewer`
+is a time-gated background review (daily by default) of the owner's recent
+messages that applies add, replace, and archive operations through
+`ReviewTools`. `Memory.LongTerm` is the foreground path behind the
+`memory_store` and `memory_forget` tools: a save under a category, a correction
+by row id, or a forget, applied at once and reported with what actually
+happened. `Admission` holds the category and scope policy both writers share,
+`Compactor` summarizes long conversations, and `Search` runs FTS5 lookups.
 
 Architecture Invariant: SQLite is canonical for durable memory. Prompt memory
 files are derived prompt artifacts, not the source of truth.
@@ -310,6 +314,11 @@ files are derived prompt artifacts, not the source of truth.
 Architecture Invariant: memory review runs after the reply is delivered, in a
 supervised task. A failed review records backoff state and never turns a
 delivered reply into a failed turn.
+
+Architecture Invariant: the owner's memory is the owner's. A guest's turn is
+never sent `USER.md` or `MEMORY.md`, never starts a review, and what a guest
+says is stored marked as theirs, so no review reads it, in a shared chat
+included.
 
 ### `FermixCore.Prompt`
 

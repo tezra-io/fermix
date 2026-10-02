@@ -9,10 +9,23 @@ defmodule FermixCore.Memory.StoreTest do
     %{store: pid}
   end
 
+  defmodule RefusingRepo do
+    use GenServer
+
+    def start_link(opts), do: GenServer.start_link(__MODULE__, opts)
+
+    @impl true
+    def init(_opts), do: {:ok, %{}}
+
+    @impl true
+    def handle_call({:upsert_memory, _attrs}, _from, state),
+      do: {:reply, {:error, :disk_full}, state}
+  end
+
   describe "store/4 and recall/3" do
     test "stores and recalls a value", %{store: store} do
       conv_key = {"telegram", "chat_1"}
-      assert :ok = Store.store(conv_key, "user_name", "Alice", server: store)
+      assert {:ok, _durability} = Store.store(conv_key, "user_name", "Alice", server: store)
       assert {:ok, "Alice"} = Store.recall(conv_key, "user_name", server: store)
     end
 
@@ -94,7 +107,9 @@ defmodule FermixCore.Memory.StoreTest do
 
     :sys.replace_state(store, fn state -> %{state | repo: repo_name} end)
 
-    assert :ok = Store.store({"telegram", "chat_1"}, "name", "Alice", server: store)
+    assert {:ok, :session_only} =
+             Store.store({"telegram", "chat_1"}, "name", "Alice", server: store)
+
     assert {:ok, "Alice"} = Store.recall({"telegram", "chat_1"}, "name", server: store)
     assert %{"name" => "Alice"} = Store.recall_all({"telegram", "chat_1"}, server: store)
   end
@@ -150,7 +165,7 @@ defmodule FermixCore.Memory.StoreTest do
     test "reloads memories from sqlite after the store restarts", %{repo: repo, store: store} do
       conv_key = {"telegram", "chat_1", :root}
 
-      assert :ok = Store.store(conv_key, "user_name", "Alice", server: store)
+      assert {:ok, _durability} = Store.store(conv_key, "user_name", "Alice", server: store)
       assert :ok = GenServer.stop(store)
 
       restarted = :"store_restarted_#{System.unique_integer([:positive])}"
@@ -167,7 +182,7 @@ defmodule FermixCore.Memory.StoreTest do
     test "recall/3 reloads a single key from sqlite after cache eviction", %{store: store} do
       conv_key = {"telegram", "chat_1", :root}
 
-      assert :ok = Store.store(conv_key, "user_name", "Alice", server: store)
+      assert {:ok, _durability} = Store.store(conv_key, "user_name", "Alice", server: store)
 
       evict_store_cache(store)
 
@@ -175,8 +190,12 @@ defmodule FermixCore.Memory.StoreTest do
     end
 
     test "persists owner and agent scoped memories across restart", %{repo: repo, store: store} do
-      assert :ok = Store.store({:owner, "default"}, "timezone", "UTC", server: store)
-      assert :ok = Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: store)
+      assert {:ok, _durability} =
+               Store.store({:owner, "default"}, "timezone", "UTC", server: store)
+
+      assert {:ok, _durability} =
+               Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: store)
+
       assert :ok = GenServer.stop(store)
 
       restarted = :"store_scoped_restarted_#{System.unique_integer([:positive])}"
@@ -199,8 +218,8 @@ defmodule FermixCore.Memory.StoreTest do
       legacy_key = {"telegram", "chat_1"}
       root_key = {"telegram", "chat_1", :root}
 
-      assert :ok = Store.store(legacy_key, "topic", "legacy", server: store)
-      assert :ok = Store.store(root_key, "topic", "root", server: store)
+      assert {:ok, _durability} = Store.store(legacy_key, "topic", "legacy", server: store)
+      assert {:ok, _durability} = Store.store(root_key, "topic", "root", server: store)
       assert :ok = GenServer.stop(store)
 
       restarted = :"store_namespace_restarted_#{System.unique_integer([:positive])}"
@@ -263,7 +282,7 @@ defmodule FermixCore.Memory.StoreTest do
 
       assert migrated.value == "historic"
 
-      assert :ok = Store.store(root_key, "topic", "fresh-root", server: store)
+      assert {:ok, _durability} = Store.store(root_key, "topic", "fresh-root", server: store)
       assert {:ok, "historic"} = Store.recall(legacy_key, "topic", server: store)
       assert {:ok, "fresh-root"} = Store.recall(root_key, "topic", server: store)
     end
@@ -272,7 +291,7 @@ defmodule FermixCore.Memory.StoreTest do
       conv_key = {"telegram", "chat_1", :root}
       scope_id = "telegram:chat_1:root"
 
-      assert :ok = Store.store(conv_key, "topic", "cached", server: store)
+      assert {:ok, _durability} = Store.store(conv_key, "topic", "cached", server: store)
 
       assert {:ok, _memory} =
                Repo.upsert_memory(
@@ -291,11 +310,14 @@ defmodule FermixCore.Memory.StoreTest do
       assert %{"topic" => "persisted"} = Store.recall_all(conv_key, server: store)
     end
 
-    test "recall prefers cached values when ETS diverges from sqlite", %{repo: repo, store: store} do
+    test "recall reads sqlite, so a row changed past the cache is read as it now is", %{
+      repo: repo,
+      store: store
+    } do
       conv_key = {"telegram", "chat_1", :root}
       scope_id = "telegram:chat_1:root"
 
-      assert :ok = Store.store(conv_key, "topic", "cached", server: store)
+      assert {:ok, :durable} = Store.store(conv_key, "topic", "cached", server: store)
 
       assert {:ok, _memory} =
                Repo.upsert_memory(
@@ -311,7 +333,52 @@ defmodule FermixCore.Memory.StoreTest do
                  server: repo
                )
 
-      assert {:ok, "cached"} = Store.recall(conv_key, "topic", server: store)
+      assert {:ok, "persisted"} = Store.recall(conv_key, "topic", server: store)
+
+      # A row archived past the cache is gone from recall, not served from it.
+      assert {:ok, row} =
+               Repo.get_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "conversation",
+                   scope_id: scope_id,
+                   key: "topic",
+                   archived?: false
+                 },
+                 server: repo
+               )
+
+      assert {:ok, _archived} =
+               Repo.archive_memory(
+                 %{id: row.id, agent_id: "main", owner_id: "default", archived?: false},
+                 "test",
+                 "no longer wanted",
+                 DateTime.utc_now(),
+                 server: repo
+               )
+
+      assert {:error, :not_found} = Store.recall(conv_key, "topic", server: store)
+    end
+
+    test "a write sqlite refuses is an error, not a crash and not a success", %{store: store} do
+      refusing = start_supervised!({RefusingRepo, []})
+      refusing_store = :"store_refusing_#{System.unique_integer([:positive])}"
+
+      start_supervised!(%{
+        id: refusing_store,
+        start: {Store, :start_link, [[name: refusing_store, repo: refusing]]}
+      })
+
+      conv_key = {"telegram", "chat_1", :root}
+
+      assert {:error, :disk_full} =
+               Store.store(conv_key, "topic", "value", server: refusing_store)
+
+      assert Process.alive?(Process.whereis(refusing_store))
+
+      # The durable store, by contrast, says the row is in sqlite.
+      assert {:ok, :durable} = Store.store(conv_key, "topic", "value", server: store)
     end
 
     test "owner and agent scopes stay namespaced by both agent_id and owner_id", %{repo: repo} do
@@ -319,13 +386,16 @@ defmodule FermixCore.Memory.StoreTest do
       side_agent_store = start_repo_backed_store(repo, agent_id: "sidecar", owner_id: "default")
       side_owner_store = start_repo_backed_store(repo, agent_id: "main", owner_id: "secondary")
 
-      assert :ok = Store.store({:owner, "default"}, "timezone", "UTC", server: main_store)
+      assert {:ok, _durability} =
+               Store.store({:owner, "default"}, "timezone", "UTC", server: main_store)
+
       assert {:ok, "UTC"} = Store.recall({:owner, "default"}, "timezone", server: main_store)
 
       assert {:error, :not_found} =
                Store.recall({:owner, "default"}, "timezone", server: side_agent_store)
 
-      assert :ok = Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: main_store)
+      assert {:ok, _durability} =
+               Store.store({:agent, "main"}, "workspace", "/tmp/fermix", server: main_store)
 
       assert {:ok, "/tmp/fermix"} =
                Store.recall({:agent, "main"}, "workspace", server: main_store)
