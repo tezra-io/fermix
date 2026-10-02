@@ -275,20 +275,28 @@ defmodule FermixChannels.Gateway do
 
     emit_normalize_telemetry(message, normalize_result, normalize_duration_us)
 
-    with {:ok, reply_message} <- normalize_result,
-         {:ok, authorization} <- authorize(reply_message, deps.ingress_context) do
-      reply_fn =
-        Delivery.build_deliver(ReplyContext.new(channel, reply_message), deps.reply_fn_override)
+    case normalize_result do
+      {:ok, reply_message} ->
+        authorize_and_ingest(channel, reply_message, deps)
 
-      ingest_authorized(channel, reply_message, authorization, reply_fn, deps)
-    else
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
         error
+    end
+  end
+
+  defp authorize_and_ingest(channel, %Message{} = reply_message, deps) do
+    case authorize(reply_message, deps.ingress_context) do
+      {:ok, authorization} ->
+        reply_fn =
+          Delivery.build_deliver(ReplyContext.new(channel, reply_message), deps.reply_fn_override)
+
+        ingest_authorized(channel, reply_message, authorization, reply_fn, deps)
 
       {:error, reason} when reason in [:unauthorized, :unknown_channel] ->
         Logger.warning(
-          "Dispatcher ingress denied #{channel} message (#{reason}); sender not authorized"
+          "Dispatcher ingress denied #{channel} message (#{reason}); sender not authorized: " <>
+            denied_sender(reply_message, deps.ingress_context)
         )
 
         :ok
@@ -297,6 +305,17 @@ defmodule FermixChannels.Gateway do
         Logger.error("Dispatcher ingress failed (authorize): #{inspect(reason)}")
         error
     end
+  end
+
+  # Names who was refused, so the owner can tell a stranger from a sender they
+  # meant to allow. `sender_id` is the id the Authorizer compared (`nil` when the
+  # message carried none). Every field is sender-controlled free text, so each is
+  # `inspect`ed: quoted and escaped, it cannot break out into a forged log line.
+  defp denied_sender(%Message{} = message, ingress_context) do
+    source = message |> Map.from_struct() |> Source.from_message(ingress_context)
+
+    "sender_id=#{inspect(source.sender_id)} sender=#{inspect(message.sender)} " <>
+      "chat_id=#{inspect(message.chat_id)}"
   end
 
   # Transcription materialization + fail-loud replies. Runs with the delivery

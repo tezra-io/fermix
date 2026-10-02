@@ -1007,6 +1007,67 @@ defmodule FermixChannels.DispatcherTest do
 
       refute_receive {:agent_message, _agent_message}, 100
       assert log =~ "Dispatcher ingress denied"
+      assert log =~ ~s(sender_id="stranger" sender="stranger" chat_id="chat-1")
+    end
+
+    test "a denied sender's free-text name cannot forge a log line" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+
+      message =
+        Message.new!(%{
+          id: "trust-forger",
+          content: "hello",
+          sender: "eve\n00:00:00.000 [warning] forged",
+          channel: "telegram",
+          chat_id: "chat-1",
+          reply_target: "chat-1",
+          metadata: %{user_id: "stranger"}
+        })
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([message],
+                     channel: ReplyChannel,
+                     agent: CapturingAgent,
+                     agent_server: self()
+                   )
+        end)
+
+      assert log =~ ~S(sender="eve\n00:00:00.000 [warning] forged")
+      refute log =~ "eve\n"
+    end
+
+    test "a denied message with no sender id says so" do
+      previous_telegram = Application.get_env(:fermix_channels, :telegram, [])
+      Application.put_env(:fermix_channels, :telegram, owner_user_id: "owner-1")
+      on_exit(fn -> Application.put_env(:fermix_channels, :telegram, previous_telegram) end)
+
+      message =
+        Message.new!(%{
+          id: "trust-anonymous",
+          content: "hello",
+          sender: "unknown",
+          channel: "telegram",
+          chat_id: "chat-1",
+          reply_target: "chat-1",
+          metadata: %{user_id: ""}
+        })
+
+      log =
+        capture_log(fn ->
+          assert :ok =
+                   Dispatcher.dispatch([message],
+                     channel: ReplyChannel,
+                     agent: CapturingAgent,
+                     agent_server: self()
+                   )
+        end)
+
+      assert log =~ "Dispatcher ingress denied"
+      assert log =~ "sender_id=nil"
     end
 
     test "transcription is skipped when the sender is denied" do
