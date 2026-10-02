@@ -350,11 +350,43 @@ defmodule Fermix.CLI.Service.PackagedTest do
       assert Packaged.install(opts) == {:error, :activation_timeout}
     end
 
-    test "a running daemon whose web address is dead is a named failure", context do
+    # The control socket answers before the web endpoint listens: the daemon's
+    # apps start in order and the web endpoint comes last. The release rail's
+    # first install of a deb lost that race when one probe ran right behind
+    # the hello.
+    test "a web address that answers after the socket does is still an activation", context do
+      test = self()
+      counter = :counters.new(1, [])
+
+      probe = fn _origin ->
+        :counters.add(counter, 1, 1)
+        if :counters.get(counter, 1) < 3, do: {:error, :econnrefused}, else: :ok
+      end
+
       opts =
-        opts(context, home: context.home, health_probe: fn _origin -> {:error, :econnrefused} end)
+        opts(context,
+          home: context.home,
+          health_probe: probe,
+          sleep: fn ms -> send(test, {:slept, ms}) end
+        )
+
+      assert {:ok, _status} = Packaged.install(opts)
+      assert :counters.get(counter, 1) == 3
+      assert_received {:slept, 500}
+    end
+
+    test "a running daemon whose web address is dead is a named failure", context do
+      counter = :counters.new(1, [])
+
+      probe = fn _origin ->
+        :counters.add(counter, 1, 1)
+        {:error, :econnrefused}
+      end
+
+      opts = opts(context, home: context.home, health_probe: probe, poll_attempts: 3)
 
       assert Packaged.install(opts) == {:error, :health_unavailable}
+      assert :counters.get(counter, 1) == 3
     end
   end
 

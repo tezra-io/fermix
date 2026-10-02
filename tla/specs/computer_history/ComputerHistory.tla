@@ -21,7 +21,7 @@
 (*    reaches it (computer_history_sql.ex:1141-1151, :1220-1228, the      *)
 (*    mark read first in Summarizer.run_session/4 and                     *)
 (*    Rollup.maybe_run/3); migration 32, which turns a stored watermark   *)
-(*    into one interval (repo.ex:3890, computer_history_sql.ex:284-298);  *)
+(*    into one interval (repo.ex:4121, computer_history_sql.ex:284-298);  *)
 (*    pruning at the 48 h sweep (:437, far beyond MaxTime); `purge all`,  *)
 (*    whose [0, now] has the shape of a window (purge.ex:79); more than   *)
 (*    one recorded interval (the owner purges once; the insert checks     *)
@@ -65,7 +65,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ fe920569e2f8
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,computer_history_insert_events,computer_history_purge_window,computer_history_set_pause_until @ 62edd6a2ac97
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,computer_history_insert_events,computer_history_purge_window,computer_history_set_pause_until @ cc133954e09f
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#computer_history_ensure_state @ ad9078b46f85
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/history.ex @ 1911dca78a4e
 EXTENDS Naturals, Sequences, FiniteSets
@@ -350,7 +350,7 @@ FlushCheck ==
     /\ CapturerOthersUnchanged
 
 \* Ingest's second Repo call: computer_history_insert_events (ingest.ex:201,
-\* repo.ex:3285 -> computer_history_sql.ex:346-402), one BEGIN IMMEDIATE
+\* repo.ex:3434 -> computer_history_sql.ex:346-402), one BEGIN IMMEDIATE
 \* transaction that checks each row against the recorded purge intervals, then
 \* INSERT OR IGNOREs the rest. It does not read the pause.
 FlushInsert ==
@@ -405,8 +405,9 @@ TermStop ==
     /\ UNCHANGED <<where, dsBusy>>
     /\ CapturerOthersUnchanged
 
-\* A Capturer callback raises (for example a Repo call past GenServer.call's
-\* 5 s default, repo.ex:3777-3780). gen_server then runs terminate/2.
+\* A Capturer callback raises (for example a Repo call past its 5 s timeout,
+\* which exits a caller that passes no on_timeout: :error, and Ingest passes
+\* none, repo.ex:3936-3944). gen_server then runs terminate/2.
 CapturerCrash ==
     /\ CapturerCanCrash
     /\ faultsLeft > 0

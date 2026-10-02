@@ -217,6 +217,17 @@ defmodule FermixCore.Timeouts do
   @spec meeting_summarize() :: pos_integer()
   def meeting_summarize, do: @meeting_summarize_ms
 
+  # --- Memory store ---------------------------------------------------------
+  # `Memory.Repo` is one process serving every SQLite request in order, so this
+  # budget includes waiting behind every request ahead of the caller's. A caller
+  # that opts in (`Memory.Repo.periodic_opts/2`) gets an error it logs and
+  # retries later; every other caller exits.
+  @repo_call_ms 5_000
+
+  @doc "How long a caller waits for `Memory.Repo` to answer one request."
+  @spec repo_call() :: pos_integer()
+  def repo_call, do: @repo_call_ms
+
   @doc """
   Record a fired failure timeout and return its firing-site error shape.
 

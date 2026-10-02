@@ -34,11 +34,14 @@ mechanism check.
   (`delivery_worker.ex:210-213`, `:75`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:190-269`) restarts it too, as does a Repo
-  call that exceeds `GenServer.call`'s 5 s default inside a scheduler callback.
+  `JobScheduler`, …; `application.ex:190-269`) restarts it too. A scheduler
+  Repo call that times out no longer does: it returns an error (see
+  `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
-- `RepoCanFail`: a scheduler recovery or boot-sweep Repo call returns an error
-  and its transaction rolls back.
+- `RepoCanFail`: a scheduler Repo call returns an error. Either its transaction
+  rolled back (a recovery or the boot sweep: the row is unchanged), or it timed
+  out and its request still runs later (the claim, `ClaimTimesOut`; see "Repo
+  call timeouts" under Assumptions).
 - `OwnerCanChange`: the owner edits or cancels the event.
 - `DownHandledBeforeRetryDue`: a timing fact, not a code mechanism. A worker
   that settles a retry exits at once, so its `:DOWN` reaches the scheduler long
@@ -56,7 +59,7 @@ least one check):
 - `ClaimRequiresPending`: the claim takes only pending rows. The load-bearing
   filter is the due scan's `status = 'pending'` (`temporal_sql.ex:1582`). The
   per-row re-read (`:1602`) and the UPDATE's `WHERE status = 'pending'`
-  (`:1042`) repeat it inside the same Repo callback (`repo.ex:3012-3015`), where
+  (`:1042`) repeat it inside the same Repo callback (`repo.ex:3026-3029`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
   under `:rest_for_one` (`application.ex:251-252`, `:269`).
@@ -66,7 +69,7 @@ least one check):
   REMIND-2 fix: the send is `spawn_monitor`ed, not linked, and outlives its
   worker.
 - `ResetSkipsMonitored`: the 60 s check leaves rows with a monitored worker
-  alone (`scheduler.ex:508-511`).
+  alone (`scheduler.ex:532-535`).
 - `RecoverSkipsSettled`: recovery leaves a row that is no longer `delivering`
   untouched (`temporal_sql.ex:1108-1111`).
 - `RefusesWhileDelivering`: edit and cancel refuse while a row is `delivering`
@@ -78,11 +81,11 @@ least one check):
 - `ClampsWatchdog`: `timeout_ms = min(60 s, valid_until - now)`
   (`delivery_worker.ex:111-119`).
 - `BoundaryExpires`: the 60 s page expires pending rows past `valid_until`
-  (`scheduler.ex:392-405` → `temporal_sql.ex:1212-1249`).
+  (`scheduler.ex:409-425` → `temporal_sql.ex:1212-1249`).
 
 **What holds:**
-- Check 01, with every fault on (no dedupe), 7,111 states:
-  - No sixth attempt (`scheduler.ex:317-320`). This rests on `AttemptCap`
+- Check 01, with every fault on (no dedupe), 7,173 states:
+  - No sixth attempt (`scheduler.ex:330-333`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
     `application.ex:238-244`). This rests on `ClaimRequiresPending` (check 03),
@@ -104,7 +107,7 @@ least one check):
   were orphaned sends.
 - Check 06, **hypothetical**: no reminder platform reads `proactive_key`
   (`registry.ex:48`, enforced at `:1458` and `:1503`). With every fault on and a
-  platform that deduplicates, the user sees the reminder at most once (5,173
+  platform that deduplicates, the user sees the reminder at most once (5,223
   states). This rests on `StableKey` (check 07).
 - Check 08, with no faults and a platform that answers inside the watchdog, 268
   states:
@@ -117,7 +120,7 @@ least one check):
     `RefusesWhileDelivering` (check 11). This claimed rule also holds with
     every fault on (check 01). The stronger proposed rule, which also counts a
     request still at the platform, breaks (REMIND-3, check 28).
-- Check 12, with every fault on, 7,111 states: no send process is still
+- Check 12, with every fault on, 7,173 states: no send process is still
   running past `valid_until` (`delivery_worker.ex:11-13`). This rests on
   `ClampsWatchdog` (check 13) and `SendsDieWithWorker` (check 25: unlinked, a
   restart leaves the send with no watchdog, and it can still be running, or not
@@ -130,7 +133,7 @@ least one check):
   shortens the watchdog enough that an ordinary platform latency can outlast
   it.
 - Check 14, with every fault on: the reminder always ends delivered, failed,
-  expired or cancelled, and stays there (7,111 states). Weak fairness covers:
+  expired or cancelled, and stays there (7,173 states). Weak fairness covers:
   - the scheduler's steps and timers, and the due timer;
   - each worker's next step, its watchdog included;
   - a live send process sending its request, and taking an answer the platform
@@ -156,9 +159,12 @@ to that bounded attempt and disclaims recall, so the stronger
 abandoned at the platform, is a proposed rule (REMIND-3).
 
 **Witnesses and the timing check:**
-- 17: a failed recovery leaves a `delivering` row that only the 60 s monitor
-  check can reset (a claim, a restart before the worker starts, a failed boot
-  sweep; `scheduler.ex:207`).
+- 17: a `delivering` row that no worker holds and no `:DOWN` will recover,
+  with the scheduler up, which only the 60 s monitor check can reset. The
+  shortest path is a claim that times out but still lands (`ClaimTimesOut`,
+  three states). A `:DOWN` recovery that rolls back reaches it too, as does a
+  restart between the claim and the worker's start followed by a boot sweep
+  that rolls back (`scheduler.ex:220`).
 - 19: a row claimed while valid reaches its worker after `valid_until` (claim,
   then the boundary passes, then `handle_continue`), a path
   `delivery_worker.ex:173-176` calls impossible (see the drift note).
@@ -177,11 +183,11 @@ still holds.
 
 | Check | Normal bound (3 slots, 2 faults) | +1 (4 slots, 3 faults) |
 |---|---|---|
-| 01 | 7,111 states | 9,590 states |
-| 06 | 5,173 states | 6,973 states |
+| 01 | 7,173 states | 9,652 states |
+| 06 | 5,223 states | 7,023 states |
 | 08 | 268 states | 268 states (no faults, so one slot is ever used) |
-| 12 | 7,111 states | 9,590 states |
-| 14 | 7,111 states | 9,590 states |
+| 12 | 7,173 states | 9,652 states |
+| 14 | 7,173 states | 9,652 states |
 
 ## Plan hypotheses (TLA_PLUS_MODELS.md §4.4)
 
@@ -402,14 +408,35 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   can show a message after the HTTP call was abandoned is the platform's
   business. With `PlatformCanBeSlow = FALSE` the platform always answers inside
   the watchdog, so the watchdog can only catch a send that never reached it.
-- **Repo call timeouts.** `Memory.Repo` calls use `GenServer.call`'s 5 s default
-  and nobody catches the exit (`repo.ex:3917-3920`).
-  - A timed-out claim crashes the scheduler (a `SchedulerRestart`). The claim
-    still lands before the boot sweep, since both queue in the Repo's mailbox in
-    order.
-  - A timed-out settlement crashes the worker, but the settlement still lands
-    before the `:DOWN` recovery, which then sees a settled row. In the spec that
-    is `Settle` followed by `Down`, not `WorkerCrash`.
+- **Repo call timeouts.** `Memory.Repo` serves every request in order, and a
+  call gives up after 5 s (`repo.ex:3931-3954`). Every call the scheduler
+  process makes passes `Repo.periodic_opts/2` (`scheduler.ex:177-185`), so a
+  timeout returns `{:error, :repo_timeout}`: the scheduler takes that site's
+  error branch and keeps running, monitors intact. The request is not
+  cancelled. It still runs, ahead of anything the scheduler sends next, so its
+  write lands whole and no scheduler step can read the row in between. That
+  is unlike a Repo error, which rolls back (`RepoFails`).
+  - A timed-out claim lands as a `delivering` row with its attempt consumed,
+    no worker and no monitor (`ClaimTimesOut`). Only the 60 s monitor check
+    resets it, or a restart's boot sweep. Before the change the timeout crashed
+    the scheduler (a `SchedulerRestart`, which also killed every in-flight
+    worker and send), and the boot sweep reset the row.
+  - At every other site the timeout is an existing step taken where the write
+    lands: a `:DOWN` recover is `Down`'s `RecoverRow` branch, the boot sweep
+    `Boot`'s sweep branch, a monitor-check recover `MonitorCheck`'s
+    `RecoverRow` branch, a boundary page `BoundaryPage`. A timed-out read (the
+    monitor check's list, the next-wakeup lookup) changes nothing. The only
+    scheduler-side difference is that it logs and, after a `:DOWN`, skips
+    re-arming its due timer, which the 60 s tick's due scan covers.
+  - In particular a late `:DOWN` recover never races the monitor check's own
+    recover: the check's list, like a new claim, is a later request of the
+    same process and is served after it. The check resets a row whose `:DOWN`
+    recovery failed only when that recovery never ran (it rolled back, or the
+    Repo died first, which restarts the scheduler too).
+  - Delivery workers still use the plain call. A timed-out settlement crashes
+    the worker, but the settlement still lands before the `:DOWN` recovery,
+    which then sees a settled row. In the spec that is `Settle` followed by
+    `Down`, not `WorkerCrash`.
   - Only a settlement that returns an error leaves the row `delivering`, which
     is what `WorkerCrash` models.
 - **Folded steps.** The 60 s monitor check's list and recovery calls are one

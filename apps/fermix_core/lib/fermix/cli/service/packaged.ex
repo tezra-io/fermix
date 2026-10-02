@@ -296,7 +296,7 @@ defmodule Fermix.CLI.Service.Packaged do
     attempts = Keyword.get(opts, :poll_attempts, @poll_attempts)
 
     with {:ok, hello} <- await_packaged_hello(home, attempts, opts),
-         :ok <- probe_health(hello, opts) do
+         :ok <- await_health(get_in(hello, ["setup", "origin"]), attempts, opts) do
       {:ok, hello}
     end
   end
@@ -316,12 +316,21 @@ defmodule Fermix.CLI.Service.Packaged do
     end
   end
 
-  defp probe_health(hello, opts) do
-    origin = get_in(hello, ["setup", "origin"])
+  # The control socket answers before the web endpoint listens (the daemon's
+  # apps start in order and the web endpoint is last), so the web address is
+  # polled on the same bounded budget as the hello, not probed once behind it.
+  defp await_health(_origin, attempts, _opts) when attempts <= 0 do
+    {:error, :health_unavailable}
+  end
 
+  defp await_health(origin, attempts, opts) do
     case health_probe(opts).(origin) do
-      :ok -> :ok
-      {:error, _reason} -> {:error, :health_unavailable}
+      :ok ->
+        :ok
+
+      {:error, _not_yet} ->
+        sleep(opts).(@poll_interval_ms)
+        await_health(origin, attempts - 1, opts)
     end
   end
 

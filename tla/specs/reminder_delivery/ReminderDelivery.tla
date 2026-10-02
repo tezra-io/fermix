@@ -6,7 +6,8 @@
 (* or cancel, the scheduler's recovery paths (the DOWN handler, the boot   *)
 (* sweep, the 60 s monitor check and validity pages), and the faults:      *)
 (* a worker exiting before it settles, a scheduler restart under           *)
-(* :rest_for_one, a daemon crash, and a Repo call that returns an error.   *)
+(* :rest_for_one, a daemon crash, a Repo call that returns an error, and   *)
+(* a claim that times out but still lands.                                 *)
 (*                                                                         *)
 (* Time is two booleans: `due` (ready_at has passed) and `valid`           *)
 (* (valid_until has not). Retry delays and backoff are abstract: a retry   *)
@@ -27,12 +28,12 @@
 (* access goes through the single Memory.Repo process, so one Repo call is *)
 (* atomic whatever SQL it runs.                                            *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/scheduler.ex @ a9e6d64a50c8
+\* SOURCE: apps/fermix_core/lib/fermix_core/temporal/scheduler.ex @ 0a264754d567
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_worker.ex @ 35e1b4be4964
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery.ex @ f0cf3e71c8ff
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/delivery_supervisor.ex @ f4c7d9dd90a1
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/temporal_sql.ex @ c322fb1ca6bc
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ b3e57e29ef6e
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,call_or_timeout_error,periodic_opts,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ ebd91fdc0e6f
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 380824457212
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 7ba02aa96383
@@ -46,8 +47,8 @@ CONSTANTS
     Workers,        \* slots for DeliveryWorker processes, e.g. {w1, w2, w3}. A
                     \* slot is reused once its worker is gone, its DOWN handled
                     \* and its send process finished.
-    MaxFaults,      \* how many injected faults (crashes, restarts, Repo errors)
-                    \* one behaviour may contain
+    MaxFaults,      \* how many injected faults (crashes, restarts, Repo errors
+                    \* and timeouts) one behaviour may contain
     \* Environment switches: what may happen to the rail.
     PlatformDedupes,     \* the platform drops a second message with the same
                          \* proactive_key (only the companion timeline does,
@@ -60,7 +61,9 @@ CONSTANTS
     SchedulerCanRestart, \* the scheduler, or an earlier :rest_for_one sibling,
                          \* crashes while the BEAM stays up
     DaemonCanCrash,      \* the whole daemon dies and boots again
-    RepoCanFail,         \* a scheduler recovery or boot-sweep Repo call errors
+    RepoCanFail,         \* a scheduler Repo call returns an error: it rolled
+                         \* back (a recovery, the boot sweep), or it timed out
+                         \* and its request still runs later (the claim)
     OwnerCanChange,      \* the owner edits or cancels the event
     DownHandledBeforeRetryDue,
                          \* timing, not a code mechanism: the scheduler handles a
@@ -75,14 +78,14 @@ CONSTANTS
                              \* status = 'pending' (temporal_sql.ex:1582). The
                              \* per-row re-read (:1602) and the UPDATE's WHERE
                              \* (:1042) repeat it inside the same Repo call
-                             \* (repo.ex:3012-3015), so they add nothing here.
+                             \* (repo.ex:3026-3029), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
                              \* :rest_for_one (application.ex:246-247, :264)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
     ResetSkipsMonitored,     \* the 60 s check leaves rows with a monitored worker
-                             \* alone (scheduler.ex:508-511)
+                             \* alone (scheduler.ex:532-535)
     RecoverSkipsSettled,     \* recovery leaves a row that is no longer delivering
                              \* untouched (temporal_sql.ex:1108-1111)
     RefusesWhileDelivering,  \* edit and cancel refuse while a row is delivering
@@ -94,7 +97,7 @@ CONSTANTS
     ClampsWatchdog,          \* timeout_ms = min(60 s, valid_until - now)
                              \* (delivery_worker.ex:111-119)
     BoundaryExpires          \* the 60 s page expires pending rows past valid_until
-                             \* (scheduler.ex:392-405, temporal_sql.ex:1212-1249)
+                             \* (scheduler.ex:409-425, temporal_sql.ex:1212-1249)
 
 VARIABLES
     status,     \* SQLite row: the reminder_occurrences status
@@ -155,7 +158,7 @@ RetryRow == \E fits \in BOOLEAN : status' = AfterRetry(fits) /\ due' = FALSE
 
 \* recover_delivering/5 -> recover_row (temporal_sql.ex:1100-1115): a row that
 \* is no longer delivering is reported :settled and left alone; otherwise
-\* apply_retry at now + 5 s (scheduler.ex:323, :367, :527).
+\* apply_retry at now + 5 s (scheduler.ex:336, :384, :551).
 RecoverRow ==
     IF status /= "delivering" /\ RecoverSkipsSettled
     THEN UNCHANGED <<status, due>>
@@ -163,7 +166,16 @@ RecoverRow ==
 
 \* The Repo call returns {:error, _}: its transaction rolls back, the row is
 \* unchanged, and the scheduler logs it and moves on (log_recovery_error,
-\* scheduler.ex:359-363; the boot sweep, :207).
+\* scheduler.ex:376-380; the boot sweep, :220).
+\* A call that times out is not this. Every scheduler call passes
+\* Repo.periodic_opts/2 (scheduler.ex:177-185), so a timeout returns
+\* {:error, :repo_timeout} (call_or_timeout_error, repo.ex:3946-3954) and
+\* takes the same error branch, but the request is not cancelled: the Repo
+\* serves requests in order, so it still runs, ahead of anything the
+\* scheduler sends next (repo.ex:3931-3935). Its write lands whole, and no
+\* scheduler step can read the row in between. At every site but the claim
+\* that is the site's success step taken where the write lands; the claim is
+\* ClaimTimesOut.
 RepoFails ==
     /\ RepoCanFail /\ faults > 0
     /\ faults' = faults - 1
@@ -203,7 +215,7 @@ SendRunning == \E w \in Workers : sender[w] /= "idle"
 Sending == SendRunning \/ late > 0
 
 \* Something a crash could interrupt. A crash with nothing in flight changes
-\* nothing durable: init re-arms both timers (scheduler.ex:116-124).
+\* nothing durable: init re-arms both timers (scheduler.ex:118-126).
 InFlight ==
     \/ sched = "claimed"
     \/ status = "delivering"
@@ -221,8 +233,8 @@ Claimable ==
     /\ attempts < 6
     /\ due /\ valid /\ eventLive
 
-\* :due_tick or :reconcile_tick -> run_due -> claim_due (scheduler.ex:238-248)
-\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:3012-3015) that
+\* :due_tick or :reconcile_tick -> run_due -> claim_due (scheduler.ex:251-261)
+\* -> Repo.claim_due_reminders, ONE Repo callback (repo.ex:3026-3029) that
 \* runs the due scan and every per-row claim (temporal_sql.ex:1010-1047):
 \* delivering and attempt_count + 1 before any I/O. The free-slot guard is
 \* the spec's bound, not free_slots/1 (DeliverySupervisor allows 4).
@@ -237,7 +249,7 @@ Claim ==
                    seen, seenAfterChange, changed, changeObs, faults>>
 
 \* The rest of the same callback: start_delivery -> DeliverySupervisor.
-\* start_child, then Process.monitor (scheduler.ex:283-307). The worker's init
+\* start_child, then Process.monitor (scheduler.ex:296-320). The worker's init
 \* does no I/O (delivery_worker.ex:69). A worker that already exited before
 \* the monitor still yields a DOWN (:noproc), so folding the monitor into the
 \* start loses nothing. CHOOSE picks one free slot, always the same one for
@@ -252,8 +264,37 @@ StartWorker ==
     /\ UNCHANGED <<status, attempts, due, eventLive, valid, sender, request, late,
                    seen, seenAfterChange, changed, changeObs, faults>>
 
-\* handle_info({:DOWN, ...}) -> worker_down -> recover (scheduler.ex:158-162,
-\* :313-338): drop the monitor, then one Repo.recover_delivering_reminder call.
+\* The same Repo.claim_due_reminders call times out (see RepoFails):
+\* claim_due logs "Reminder due scan failed" and returns {:error, state}
+\* (scheduler.ex:263-265), so no worker starts, nothing is monitored and the
+\* scheduler stays up. The claim still runs before the scheduler's next Repo
+\* call: the row is delivering with its attempt consumed, and no DOWN will
+\* recover it. The 60 s monitor check resets it (the expected cause named at
+\* scheduler.ex:524-528), or a restart's boot sweep. This is the one site
+\* where a timeout is not an existing step: the success branch starts a
+\* worker, the error branch does not, and the write lands either way. A
+\* claim that finds nothing claimable when it runs changes nothing.
+ClaimTimesOut ==
+    /\ RepoCanFail /\ faults > 0
+    /\ sched = "up"
+    /\ Claimable
+    /\ FreeSlots /= {}
+    /\ faults' = faults - 1
+    /\ status' = "delivering"
+    /\ attempts' = attempts + 1
+    /\ UNCHANGED <<due, eventLive, valid, sched, monitors, worker, sender, request, late,
+                   seen, seenAfterChange, changed, changeObs>>
+
+\* handle_info({:DOWN, ...}) -> worker_down -> recover (scheduler.ex:160-164,
+\* :326-355): drop the monitor, then one Repo.recover_delivering_reminder call.
+\* A recover that times out is logged "claim recovery failed" (:352-353,
+\* :376-380), but it still runs before the scheduler's next Repo call, so it
+\* is the RecoverRow branch taken where it lands, not RepoFails. Only other
+\* processes' calls can land in between, and none is a worker of this row
+\* (the dead worker's settlement was sent before its DOWN). The 60 s check's
+\* list, a new claim and a restart's boot sweep are all sent after it and
+\* served after it, so none of them races it. The scheduler only skips
+\* re-arming its due timer, which the 60 s tick's due scan covers.
 Down(w) ==
     /\ sched = "up"
     /\ w \in monitors /\ worker[w] = "none"
@@ -263,10 +304,13 @@ Down(w) ==
     /\ UNCHANGED <<attempts, eventLive, valid, sched, worker, sender, request, late,
                    seen, seenAfterChange, changed, changeObs>>
 
-\* The 60 s :reconcile_tick -> assert_monitor_invariant (scheduler.ex:505-541):
+\* The 60 s :reconcile_tick -> assert_monitor_invariant (scheduler.ex:529-569):
 \* list delivering rows, then recover each one no monitored worker holds.
 \* Two Repo calls folded into one step: between them only a worker's
 \* settlement can land, and recover_row re-reads the row anyway.
+\* A list that times out is a read, so it is the RepoFails branch (nothing
+\* changes); a recover that times out still runs before the scheduler's next
+\* call, so it is the RecoverRow branch taken where it lands, as in Down.
 MonitorCheck ==
     /\ sched = "up"
     /\ status = "delivering"
@@ -276,8 +320,10 @@ MonitorCheck ==
     /\ UNCHANGED <<attempts, eventLive, valid, sched, monitors, worker, sender, request,
                    late, seen, seenAfterChange, changed, changeObs>>
 
-\* The 60 s :reconcile_tick -> reconcile_boundaries (scheduler.ex:392-405) ->
+\* The 60 s :reconcile_tick -> reconcile_boundaries (scheduler.ex:409-425) ->
 \* temporal_sql.ex:1212-1249: a pending row past valid_until is expired.
+\* A page that errors leaves the row for the next page (a stutter); one that
+\* times out still runs before the scheduler's next call, so it is this step.
 BoundaryPage ==
     /\ BoundaryExpires
     /\ sched = "up"
@@ -287,9 +333,12 @@ BoundaryPage ==
                    request, late, seen, seenAfterChange, changed, changeObs,
                    faults>>
 
-\* The restarted scheduler's init/1 -> boot_sweep (scheduler.ex:116-124,
-\* :202-211) -> Repo.sweep_delivering_reminders (temporal_sql.ex:1174-1202).
-\* A failed sweep is logged and the scheduler boots anyway.
+\* The restarted scheduler's init/1 -> boot_sweep (scheduler.ex:118-126,
+\* :215-224) -> Repo.sweep_delivering_reminders (temporal_sql.ex:1174-1202).
+\* A failed sweep is logged and the scheduler boots anyway. A sweep that
+\* times out is logged the same way (:220) but still runs before the
+\* scheduler's next call, so it is the first branch taken where it lands; the
+\* RepoFails branch is a sweep that rolled back.
 Boot ==
     /\ sched = "down"
     /\ sched' = "up"
@@ -322,6 +371,8 @@ Boot ==
 \* Capabilities.AccessGate.Pending (application.ex:222) is one more earlier
 \* child: its crash is this step. The owner confirmations it parks are never
 \* read by the reminder rail, so they are not modelled.
+\* A scheduler Repo call that times out is no longer a cause: it returns an
+\* error and the scheduler keeps running (RepoFails, ClaimTimesOut).
 SendsDie == WorkersDieWithScheduler /\ SendsDieWithWorker
 
 SchedulerRestart ==
@@ -499,7 +550,7 @@ OwnerChange ==
                    seen, seenAfterChange, faults>>
 
 \* ready_at passes and the scheduler's due timer fires (schedule_due_timer,
-\* scheduler.ex:545-604; the 60 s tick also runs a due scan).
+\* scheduler.ex:573-632; the 60 s tick also runs a due scan).
 \* DownHandledBeforeRetryDue: a worker that settled a retry has exited, and
 \* its DOWN is in the scheduler's mailbox long before the retry is due (the
 \* shortest retry delay is 60 s, delivery.ex:29, delivery_worker.ex:143).
@@ -584,7 +635,7 @@ Done ==
 Terminated == Done /\ UNCHANGED vars
 
 Next ==
-    \/ Claim \/ StartWorker \/ MonitorCheck \/ BoundaryPage \/ Boot
+    \/ Claim \/ StartWorker \/ ClaimTimesOut \/ MonitorCheck \/ BoundaryPage \/ Boot
     \/ \E w \in Workers :
           \/ Down(w) \/ WorkerStep(w) \/ WorkerCrash(w)
           \/ SenderSend(w) \/ SenderAnswer(w) \/ PlatformDecide(w)
@@ -609,7 +660,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* scheduler.ex:317-320: a still-delivering row "returns to pending at the
+\* scheduler.ex:330-333: a still-delivering row "returns to pending at the
 \* error floor with its attempt consumed, or becomes failed at the cap —
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
@@ -665,8 +716,8 @@ NoReminderAfterChange == ~seenAfterChange
 AtMostOnce == seen <= 1
 
 \* Proposed rule: every reminder ends delivered, failed, expired or
-\* cancelled, and stays there (scheduler.ex:501-504: "a wedged row cannot sit
-\* delivering forever").
+\* cancelled, and stays there (scheduler.ex:524-528: a stranded row is "never
+\* left `delivering` forever").
 Settles == <>[](status \in Terminal)
 
 -----------------------------------------------------------------------------

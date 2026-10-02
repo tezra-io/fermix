@@ -49,6 +49,7 @@ defmodule FermixCore.Temporal.Scheduler do
   alias FermixCore.Temporal.FollowupSupervisor
   alias FermixCore.Temporal.Planner
   alias FermixCore.Temporal.Telemetry, as: TemporalTelemetry
+  alias FermixCore.Timeouts
 
   @default_reconciliation_interval_ms 60_000
 
@@ -77,6 +78,7 @@ defmodule FermixCore.Temporal.Scheduler do
           enabled?: boolean(),
           timer_enabled?: boolean(),
           repo: GenServer.server(),
+          repo_opts: keyword(),
           delivery_supervisor: Supervisor.supervisor(),
           delivery_worker_module: module(),
           delivery_opts: keyword(),
@@ -166,10 +168,21 @@ defmodule FermixCore.Temporal.Scheduler do
   # --- state ---------------------------------------------------------------
 
   defp build_state(opts) do
+    repo = Keyword.get(opts, :repo, Repo)
+
     %{
       enabled?: Keyword.get(opts, :scheduler_enabled, temporal_config(:scheduler_enabled, true)),
       timer_enabled?: Keyword.get(opts, :timer_enabled, true),
-      repo: Keyword.get(opts, :repo, Repo),
+      repo: repo,
+      # Every Repo call this scheduler makes, the worker-exit recoveries included:
+      # a Repo that does not answer in time is an error each path logs and
+      # retries, not an exit (`Repo.periodic_opts/2`). The request still runs,
+      # ahead of anything this scheduler sends next; a late claim is a
+      # `delivering` row with no worker, which the monitor-invariant scan resets.
+      # The scheduler-before-delivery-supervisor order holds whether or not the
+      # scheduler crashes, so exiting here would fence nothing, only restart.
+      repo_opts:
+        Repo.periodic_opts(repo, Keyword.get(opts, :repo_timeout_ms, Timeouts.repo_call())),
       delivery_supervisor: Keyword.get(opts, :delivery_supervisor, DeliverySupervisor),
       delivery_worker_module: Keyword.get(opts, :delivery_worker_module, DeliveryWorker),
       delivery_opts: Keyword.get(opts, :delivery_opts, []),
@@ -200,7 +213,7 @@ defmodule FermixCore.Temporal.Scheduler do
   defp boot_sweep(%{enabled?: false} = state), do: state
 
   defp boot_sweep(state) do
-    case Repo.sweep_delivering_reminders(state.now_fn.(), server: state.repo) do
+    case Repo.sweep_delivering_reminders(state.now_fn.(), state.repo_opts) do
       {:ok, swept} -> log_and_trace_sweep(swept)
       # Reconciliation retries the invariant assert, so a failed sweep must not
       # stop the scheduler from booting and serving healthy rows.
@@ -243,7 +256,7 @@ defmodule FermixCore.Temporal.Scheduler do
   end
 
   defp claim_due(state, now, limit) do
-    case Repo.claim_due_reminders(now, limit, server: state.repo) do
+    case Repo.claim_due_reminders(now, limit, state.repo_opts) do
       {:ok, rows} ->
         {:ok, Enum.reduce(rows, state, &start_delivery(&1, now, &2))}
 
@@ -322,8 +335,12 @@ defmodule FermixCore.Temporal.Scheduler do
     now = state.now_fn.()
     ready_at = DateTime.add(now, @error_backoff_ms, :millisecond)
 
-    case Repo.recover_delivering_reminder(reminder_id, ready_at, error_text, now,
-           server: state.repo
+    case Repo.recover_delivering_reminder(
+           reminder_id,
+           ready_at,
+           error_text,
+           now,
+           state.repo_opts
          ) do
       {:ok, {:settled, _row}} ->
         schedule_due_timer(state)
@@ -366,7 +383,7 @@ defmodule FermixCore.Temporal.Scheduler do
     Logger.error("Reminder #{row.id} delivery worker start failed: #{inspect(reason)}")
     ready_at = DateTime.add(now, @error_backoff_ms, :millisecond)
 
-    case Repo.recover_delivering_reminder(row.id, ready_at, error_text, now, server: state.repo) do
+    case Repo.recover_delivering_reminder(row.id, ready_at, error_text, now, state.repo_opts) do
       {:ok, {:settled, _row}} -> state
       {:ok, {outcome, settled}} -> settled_stranded_state(outcome, settled, reason, state)
       {:error, error} -> log_recovery_error(row.id, error, state)
@@ -390,8 +407,11 @@ defmodule FermixCore.Temporal.Scheduler do
   end
 
   defp reconcile_boundaries(state, now) do
-    case Repo.reconcile_temporal_boundaries(now, state.boundary_cursor, state.reconcile_limit,
-           server: state.repo
+    case Repo.reconcile_temporal_boundaries(
+           now,
+           state.boundary_cursor,
+           state.reconcile_limit,
+           state.repo_opts
          ) do
       {:ok, page} ->
         emit_boundaries(page)
@@ -426,8 +446,11 @@ defmodule FermixCore.Temporal.Scheduler do
   defp reconcile_annual_horizon(state, now) do
     threshold = Date.add(DateTime.to_date(now), @annual_horizon_days)
 
-    case Repo.annual_horizon_events(threshold, state.annual_cursor, state.reconcile_limit,
-           server: state.repo
+    case Repo.annual_horizon_events(
+           threshold,
+           state.annual_cursor,
+           state.reconcile_limit,
+           state.repo_opts
          ) do
       {:ok, page} ->
         Enum.each(page.events, &materialize_horizon(&1, now, state))
@@ -494,16 +517,17 @@ defmodule FermixCore.Temporal.Scheduler do
       event.revision,
       %{plan | occurrences: occurrences},
       now,
-      server: state.repo
+      state.repo_opts
     )
   end
 
-  # Mid-lifetime this set is always exactly the monitored workers: the boot sweep
-  # covers restarts and `:DOWN` covers crashes. Anything else means the invariant
-  # broke, so it is traced loudly and reset — not because a second recovery path
-  # is wanted, but so a wedged row cannot sit `delivering` forever.
+  # Mid-lifetime this set is exactly the monitored workers: the boot sweep covers
+  # restarts and `:DOWN` covers crashes, unless a Repo call failed (a sweep or
+  # recovery that errored, or a claim that landed after this scheduler stopped
+  # waiting, so no worker started). Anything else means the invariant broke;
+  # either way it is traced loudly and reset, never left `delivering` forever.
   defp assert_monitor_invariant(state, now) do
-    case Repo.list_temporal_reminders(%{status: ["delivering"]}, server: state.repo) do
+    case Repo.list_temporal_reminders(%{status: ["delivering"]}, state.repo_opts) do
       {:ok, rows} ->
         monitored = MapSet.new(Map.values(state.monitors))
 
@@ -526,8 +550,12 @@ defmodule FermixCore.Temporal.Scheduler do
   defp settle_stranded_row(row, now, state) do
     ready_at = DateTime.add(now, @error_backoff_ms, :millisecond)
 
-    case Repo.recover_delivering_reminder(row.id, ready_at, @stranded_error, now,
-           server: state.repo
+    case Repo.recover_delivering_reminder(
+           row.id,
+           ready_at,
+           @stranded_error,
+           now,
+           state.repo_opts
          ) do
       {:ok, {:settled, _row}} ->
         state
@@ -562,7 +590,7 @@ defmodule FermixCore.Temporal.Scheduler do
   defp next_due_timer(state, outcome) do
     now = state.now_fn.()
 
-    case Repo.next_pending_reminder_ready_at(now, server: state.repo) do
+    case Repo.next_pending_reminder_ready_at(now, state.repo_opts) do
       {:ok, %DateTime{} = ready_at} -> arm(due_delay_ms(ready_at, now, outcome))
       {:ok, nil} -> backoff_timer(outcome)
       {:error, reason} -> log_timer_error(reason)

@@ -789,4 +789,71 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
     on_exit(fn -> :telemetry.detach(handler) end)
   end
+
+  # A Repo stuck behind a long operation must cost a tick, not a restart, which
+  # would also tear down every in-flight delivery behind the scheduler.
+  describe "a Repo that does not answer" do
+    test "boot, reconciliation, the due scan and the timer lookup are skipped and the scheduler keeps running",
+         ctx do
+      stalled = start_supervised!(FermixTestSupport.StalledRepo)
+
+      {{name, pid}, log} =
+        with_log(fn ->
+          name = start_scheduler(ctx, repo: stalled, repo_timeout_ms: 50, timer_enabled: true)
+          pid = Process.whereis(name)
+          send(pid, :reconcile_tick)
+          _state = :sys.get_state(pid)
+          {name, pid}
+        end)
+
+      assert Process.whereis(name) == pid
+
+      for site <- [
+            "Reminder boot sweep failed",
+            "Reminder validity reconciliation failed",
+            "Reminder monitor invariant scan failed",
+            "Reminder due scan failed",
+            "Reminder timer lookup failed"
+          ] do
+        assert log =~ "#{site}: :repo_timeout"
+      end
+    end
+
+    # The crash path runs outside any tick: the worker's :DOWN reaches the
+    # scheduler on its own, and its recovery write is the Repo call that stalls.
+    # The proxy never runs it, so the row stays `delivering`; the real Repo runs
+    # it late, ahead of the scheduler's next request.
+    test "a crashed worker's recovery is skipped and the scheduler keeps running", ctx do
+      due = ~U[2026-09-20 17:00:00Z]
+      {_event, [row]} = create!(ctx, reminder_spec("Submit the report", due))
+
+      stalling =
+        start_supervised!(
+          {FermixTestSupport.StalledRepo,
+           forward_to: ctx.repo, stall: [:recover_delivering_reminder]}
+        )
+
+      {{name, pid}, log} =
+        with_log(fn ->
+          # Forwarded requests share this budget, so it leaves room for a slow
+          # but answering Repo; only the stalled recovery spends all of it.
+          name =
+            start_scheduler(ctx,
+              repo: stalling,
+              repo_timeout_ms: 1_000,
+              delivery_worker_module: CrashingWorker
+            )
+
+          set_now(ctx, due)
+          :ok = Scheduler.tick(name, now: due)
+          :ok = await_worker_exit(row.id)
+          sync(name)
+          {name, Process.whereis(name)}
+        end)
+
+      assert Process.whereis(name) == pid
+      assert log =~ "Reminder #{row.id} claim recovery failed: :repo_timeout"
+      assert reminder(ctx, row.id).status == "delivering"
+    end
+  end
 end

@@ -65,7 +65,7 @@ Off unless `FERMIX_OPIK_ENABLED` (`1`/`true`/`yes`) reaches the daemon; `FERMIX_
 | A running turn, `/background` work | ended |
 | A parked access-sensitive command | forgotten; the owner is asked again |
 | A pending `/confirm` token | lost (held in memory); ask again |
-| An in-flight scheduled run | marked `reaped: no live runner (daemon or scheduler restart)` |
+| An in-flight scheduled run | marked `reaped: no live runner (daemon or scheduler restart, or a memory store that answered too late)` |
 | An active meeting | marked failed, `daemon_restarted`; not rejoined |
 | A local coding run | finalized `interrupted`, with resume guidance in its delivery |
 | A mobile or companion request accepted but unfinished | runs again at the next start |

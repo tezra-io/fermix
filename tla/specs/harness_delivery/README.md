@@ -37,7 +37,7 @@ them, or during the write-back, leaves a terminal pending row and no sender.
 **The hand-off lease** (`leased`): the terminal UPDATE also writes
 `next_delivery_at = now + @handoff_lease_ms` (120 s; `terminalize_and_notify/4`,
 `manager.ex:1102-1114`, `:90-102`), and the worker selects only due rows
-(`repo.ex:6624`). So the row is terminal and leased in one statement, and the
+(`repo.ex:6709`). So the row is terminal and leased in one statement, and the
 worker cannot select it until the lease ends. The lease clock starts before
 the terminal write is served (`manager.ex:1103`), so the lease must outlast that write
 and the Manager's own hand-off: the terminal write, at most two write-back Repo
@@ -72,7 +72,7 @@ may still land (the code before the link).
   the worker finds is one whose hand-off recorded no outcome (the Manager died
   inside it, or the lease lapsed), and the worker dead-letters it on that tick
   as `:handoff_unrecorded`, with no send (`process_row/3`,
-  `delivery_worker.ex:125-140`; `Delivery.client_owned?/1`, `delivery.ex:111`).
+  `delivery_worker.ex:134-149`; `Delivery.client_owned?/1`, `delivery.ex:111`).
 
 A row the owner cancelled is an owner halt whatever its origin
 (`not_continuable_reason/1`, `manager.ex:1201`): a framework origin gets the
@@ -98,8 +98,30 @@ send (`manager.ex:1253-1259`).
 - advisory notices and telemetry;
 - the worker's backoff clock and its max-age rule, and the lease's length (see
   above);
-- a failed delivery mark. It is logged and leaves the row pending, which gives
-  the same resend a timeout does;
+- a failed delivery mark, one that returns an error other than a Repo
+  timeout. It is logged and leaves the row pending, which gives the same resend
+  as an accepted send that timed out;
+- the DeliveryWorker's Repo timeouts, because each is a step already modelled.
+  The worker passes `on_timeout: :error` on its tick read and its delivery
+  marks (`Repo.periodic_opts/2`, `delivery_worker.ex:85-86`), so a call past
+  its 5 s budget returns `{:error, :repo_timeout}` (`repo.ex:3946-3954`) and
+  the worker logs it instead of exiting. (It used to exit: a DeliveryWorker
+  crash on its own.)
+  - A timed-out tick read (`delivery_worker.ex:116-118`) ends the tick with no
+    row selected. That is a stutter, and the next tick reads again, so the weak
+    fairness on the worker's steps assumes some later tick's read is answered
+    in time.
+  - A timed-out mark (`:216-225`) is not a failed mark. The Repo serves
+    requests one at a time in arrival order and still runs one whose caller
+    gave up (`repo.ex:3931-3935`), so the UPDATE lands exactly where it would
+    have if the worker had waited, ahead of the worker's next request, its
+    next tick's read included. The worker reads the answer only to log it,
+    and nothing it does in between reaches the row except through the Repo,
+    behind that write. So the mark is `WkrResolve` or `WkrDeadLetter`, with
+    the worker's return to idle ordered after the write. If the Repo itself
+    restarts before serving it, the write is lost, but that restart also
+    restarts the harness subtree (see Assumptions): the modelled Manager crash
+    with the worker still `sending`;
 - the DeliveryWorker crashing on its own.
 
 **Environment switches** (set per check):
@@ -135,7 +157,7 @@ least one check):
   `run_monitors` entry. It is `TRUE` at start and `FALSE` after a crash, because
   the restarted Manager begins with empty maps (`manager.ex:1599-1600`).
 - `GuardedTerminalUpdate`: the terminal UPDATE only matches an active row
-  (`repo.ex:6492-6497`), and `:already_terminal` is dropped (`manager.ex:1107`,
+  (`repo.ex:6577-6582`), and `:already_terminal` is dropped (`manager.ex:1107`,
   `:1146-1151`).
 - `RestForOne`: a Manager crash also restarts the `RunSupervisor` and the
   `DeliveryWorker`, killing every live Run first (`supervisor.ex:38-44`).
@@ -148,9 +170,9 @@ least one check):
 - `ClientDeadLetters`: a failed client-owned dispatch dead-letters the row with
   its named cause (`manager.ex:1229-1235`, `:1263-1278`).
 - `WorkerDrainsOutbox`: the worker selects terminal rows that are still pending
-  (`delivery_worker.ex:104-147`, `repo.ex:6615-6627`).
+  (`delivery_worker.ex:113-156`, `repo.ex:6700-6712`).
 - `DeadLetterCap`: the worker dead-letters a row at `MaxAttempts`
-  (`delivery_worker.ex:153-165`).
+  (`delivery_worker.ex:162-174`).
 - `LeasesFirstAttempt`: the terminal write leases the row to the Manager's
   inline first attempt (`manager.ex:1102-1114`, `:90-102`; see above).
 - `SendsDieWithCaller`: a `with_timeout` sender is linked to its caller
@@ -161,7 +183,7 @@ least one check):
   `manager.ex:1038-1054`). Off, it is the code before the fix:
   `terminal_cancel_reply/2` answered `:already_terminal` for any row it found.
 - `WorkerDeadLettersClient`: the worker dead-letters a client-owned row it
-  selects as `:handoff_unrecorded` and sends nothing (`delivery_worker.ex:125-140`).
+  selects as `:handoff_unrecorded` and sends nothing (`delivery_worker.ex:134-149`).
   Off, it is the code before the fix: the worker sent the row a text, which
   `ChannelSend` refuses, and rescheduled it up to the dead-letter cap.
 
@@ -257,12 +279,12 @@ All three origins are in checks 01 to 16, 29 and 34. The run count is fixed at o
   no longer true: the terminal UPDATE now writes the lease with the status.
   - `admit_attrs` writes neither `delivery_status` nor `next_delivery_at`
     (`manager.ex:456-486`), so the insert stores `'pending'` and `NULL`
-    (`repo.ex:505-508`, `:6951-6953`).
+    (`repo.ex:507-510`, `:7036-7038`).
   - The terminal UPDATE writes the status, the outcome's ledger fields,
-    `completed_at` and, since the fix, `next_delivery_at` (`repo.ex:6485-6497`;
+    `completed_at` and, since the fix, `next_delivery_at` (`repo.ex:6570-6582`;
     the fields come from `manager.ex:1103`, `:1328-1385`).
   - The worker's query takes any non-active row that is `pending` with a
-    `NULL` or past `next_delivery_at` (`repo.ex:6615-6627`).
+    `NULL` or past `next_delivery_at` (`repo.ex:6700-6712`).
 - **A tick during the inline hand-off sends the outcome twice:** confirmed,
   then fixed. See HARNESS-1 (checks 17 and 25).
 - **A tick during the hand-off sends a text on top of the continuation turn:**
@@ -311,13 +333,13 @@ run `tla/bin/check.py harness_delivery` and open
     take up to 60 s (`delivery.ex:52`, `:292-305`), and a dispatch up to 15 s
     (`continuation.ex:55`, `:156-168`). Only then does the Manager mark the row
     (`manager.ex:1291-1301`).
-  - Meanwhile `run_tick/1` selected the row (`delivery_worker.ex:104-111`), and
+  - Meanwhile `run_tick/1` selected the row (`delivery_worker.ex:113-120`), and
     `process_row/3` sends from that snapshot without re-reading the row
-    (`:125-131`, through `send_row/3`, `:142-147`). Nothing claims the row
+    (`:134-140`, through `send_row/3`, `:151-156`). Nothing claims the row
     between the select and the send.
   - Both sides mark the row with an unguarded `UPDATE ... WHERE id = ?`
-    (`repo.ex:6526-6533`). `reschedule/5` writes `last_delivery_error` without
-    checking `delivery_status` (`delivery_worker.ex:184-192`).
+    (`repo.ex:6611-6618`). `reschedule/5` writes `last_delivery_error` without
+    checking `delivery_status` (`delivery_worker.ex:193-201`).
 - **Fix:** `terminalize_and_notify/4` passes
   `next_delivery_at = now + @handoff_lease_ms` (120 s) to `Ledger.terminalize`,
   so the guarded UPDATE writes the status and the lease in one statement
@@ -370,7 +392,7 @@ run `tla/bin/check.py harness_delivery` and open
     dropped").
   - `reconcile/1` only logs a scan error (`manager.ex:1435-1440`,
     `:1531-1534`), and the restarted Manager tracks nothing.
-  - The worker never selects an active row (`repo.ex:6623`).
+  - The worker never selects an active row (`repo.ex:6708`).
   - Only the next Manager start with a working scan reconciles the row, as
     `interrupted` (`manager.ex:1442-1446`).
 - **Impact before the fix:**
@@ -380,7 +402,7 @@ run `tla/bin/check.py harness_delivery` and open
     `terminal_cancel_reply/2` treated any row it found as terminal. The owner
     could not cancel it.
   - Its workspace lock roots and capacity slot stay held, because admission
-    counts active rows (`repo.ex:6386-6414`). Later runs in that worktree are
+    counts active rows (`repo.ex:6471-6499`). Later runs in that worktree are
     refused `workspace_locked`.
 - **Fix:** an owner cancel of a run absent from the runs map now reads the row
   (`cancel_untracked/3`, `manager.ex:1038-1054`). An active local row has no live
