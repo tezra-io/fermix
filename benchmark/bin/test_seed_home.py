@@ -202,11 +202,21 @@ def test_install_skills_adds_the_private_holdouts_skills(tmp_path):
     home = tmp_path / "x-eval"
     home.mkdir()
     private = tmp_path / "fermix-eval-private"
-    (private / "skills" / "garage").mkdir(parents=True)
-    (private / "skills" / "garage" / "SKILL.md").write_text("---\nname: garage\n---\n")
+    (private / "skills" / "notes-mailer").mkdir(parents=True)
+    (private / "skills" / "notes-mailer" / "SKILL.md").write_text("---\nname: notes-mailer\n---\n")
     seed.install_skills(str(home), str(private))
-    assert (home / "skills" / "garage" / "SKILL.md").is_file()
+    assert (home / "skills" / "notes-mailer" / "SKILL.md").is_file()
     assert (home / "skills" / "receipt-filing" / "SKILL.md").is_file()
+
+
+def test_a_skill_named_in_two_sources_is_refused_not_silently_overwritten(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    private = tmp_path / "fermix-eval-private"
+    (private / "skills" / "garage").mkdir(parents=True)          # also a public fixture
+    (private / "skills" / "garage" / "SKILL.md").write_text("---\nname: garage\n---\n")
+    with pytest.raises(SystemExit):
+        seed.install_skills(str(home), str(private))
 
 
 def test_install_skills_refuses_a_skills_dir_that_was_not_reset(tmp_path):

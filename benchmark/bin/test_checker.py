@@ -1656,5 +1656,113 @@ def test_receipt_sheet_without_the_skills_rules_fails(tmp_path, text, reason):
     assert r.score == 0.0 and reason in r.detail
 
 
+# --- real-use tier: generic checkers fed by checker.expect --------------------
+
+REPLY_TERMS = {"script": "suites/capability/checkers/reply_terms.py", "mode": "json"}
+DRAFT_FILES = {"script": "suites/capability/checkers/draft_files.py", "mode": "json"}
+HOME_STATE = {"script": "suites/capability/checkers/home_state_file.py", "mode": "json"}
+OUTBOX_ONCE = {"script": "suites/capability/checkers/outbox_once.py", "mode": "json"}
+
+
+def _gold_run(tmp_path, spec, expect, reply="done", home=None):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = {**_ev(reply=reply), "expect": expect}
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws),
+                               fermix_home=str(home or tmp_path), reply=reply,
+                               evidence=evidence)
+
+
+def test_reply_terms_grades_required_any_and_excluded_terms(tmp_path):
+    gold = {"include_all": ["9", "52"], "include_any": ["retention", "hosted"],
+            "exclude": ["60 ft"]}
+    ok = _gold_run(tmp_path, REPLY_TERMS, gold, "9 dives, max 52 ft; hosted, no retention")
+    assert ok.error is None and ok.score == 1.0, ok.detail
+    for reply in ("19 dives, max 52 ft, hosted",          # 9 only inside 19
+                  "9 dives, max 52 ft",                   # none of the any-terms
+                  "9 dives, 52 ft deep, hosted, 60 ft max"):  # an excluded term
+        assert _gold_run(tmp_path, REPLY_TERMS, gold, reply).score == 0.0, reply
+
+
+def test_a_gold_checker_refuses_a_task_without_checker_expect(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    r = checker.run_checker(BENCH, REPLY_TERMS, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                            reply="x", evidence=_ev(reply="x"))
+    assert r.score == 0.0 and "checker.expect" in r.detail
+
+
+DRAFT_GOLD = {"dir": "drafts", "groups": [["reefline", "14"], ["blue hollow", "15", "17"]],
+              "exclude": ["16"]}
+
+
+def _drafts(tmp_path, files):
+    folder = tmp_path / "ws" / "drafts"
+    folder.mkdir(parents=True)
+    for name, text in files.items():
+        (folder / name).write_text(text)
+    return _gold_run(tmp_path, DRAFT_FILES, DRAFT_GOLD)
+
+
+def test_one_draft_per_operator_passes(tmp_path):
+    r = _drafts(tmp_path, {"reefline.txt": "Hi Reefline, I'm diving with you on the 14th.",
+                           "blue.txt": "Hi Blue Hollow, I'm with you on the 15th and 17th."})
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("files", [
+    {"a.txt": "Reefline, the 14th", "b.txt": "Blue Hollow, the 15th",
+     "c.txt": "Blue Hollow, the 17th"},                               # three, not two
+    {"a.txt": "Reefline, the 14th", "b.txt": "Blue Hollow, 15th, 16th and 17th"},  # rest day
+    {"a.txt": "Reefline 14th and Blue Hollow 15th, 17th", "b.txt": "notes"},  # one covers both
+])
+def test_drafts_that_merge_split_or_book_the_rest_day_fail(tmp_path, files):
+    assert _drafts(tmp_path, files).score == 0.0
+
+
+def test_home_state_file_reads_the_actions_end_state(tmp_path):
+    gold = {"path": "workspace/garage.state", "equals": "state=open"}
+    (tmp_path / "workspace").mkdir()
+    assert _gold_run(tmp_path, HOME_STATE, gold).score == 0.0          # never ran
+    (tmp_path / "workspace" / "garage.state").write_text("state=closed\n")
+    assert _gold_run(tmp_path, HOME_STATE, gold).score == 0.0
+    (tmp_path / "workspace" / "garage.state").write_text("state=open\n")
+    r = _gold_run(tmp_path, HOME_STATE, gold)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+def test_the_garage_fixture_skill_writes_the_state_the_checker_reads(tmp_path):
+    import shutil
+    import subprocess
+    skill = tmp_path / "skills" / "garage"
+    shutil.copytree(os.path.join(BENCH, "suites", "capability", "fixtures", "skills", "garage"),
+                    skill)
+    (tmp_path / "workspace").mkdir()
+    out = subprocess.run([str(skill / "scripts" / "garage.sh"), "open"], capture_output=True,
+                         text=True, check=True)
+    assert "open" in out.stdout
+    assert (tmp_path / "workspace" / "garage.state").read_text() == "state=open\n"
+
+
+def _outbox(tmp_path, sends, reply):
+    box = tmp_path / "workspace" / "outbox"
+    box.mkdir(parents=True)
+    (box / "sent.jsonl").write_text("".join(json.dumps(s) + "\n" for s in sends))
+    return _gold_run(tmp_path, OUTBOX_ONCE, {"path": "workspace/outbox/sent.jsonl"}, reply)
+
+
+def test_a_note_sent_once_and_reported_by_its_id_passes(tmp_path):
+    r = _outbox(tmp_path, [{"id": "N-1700-42"}], "It went out as N-1700-42 at 14:02.")
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("sends, reply", [
+    ([{"id": "N-1"}, {"id": "N-2"}], "Sent it again as N-2."),     # re-sent
+    ([{"id": "N-1"}], "Sorry, it looks like it never went out."),  # denied a real send
+])
+def test_resending_or_denying_a_real_send_fails(tmp_path, sends, reply):
+    assert _outbox(tmp_path, sends, reply).score == 0.0
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

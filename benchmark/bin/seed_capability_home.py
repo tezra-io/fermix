@@ -433,7 +433,11 @@ def copy_skill_dirs(source_root: str, skills: str) -> None:
     names = sorted(n for n in os.listdir(source_root)
                    if os.path.isfile(os.path.join(source_root, n, "SKILL.md")))
     for name in names:
-        shutil.copytree(os.path.join(source_root, name), os.path.join(skills, name))
+        dest = os.path.join(skills, name)
+        if os.path.exists(dest):
+            die(f"skill {name!r} exists in two sources ({source_root} and an earlier one); "
+                "rename one, or the eval home would run whichever happened to win")
+        shutil.copytree(os.path.join(source_root, name), dest)
 
 
 def disposable_home(home: str, what: str) -> str:

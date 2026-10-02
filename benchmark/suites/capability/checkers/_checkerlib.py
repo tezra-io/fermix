@@ -116,6 +116,22 @@ def spans(ev, name, status="ok"):
     return out
 
 
+def _edge(char, side):
+    """The boundary for one end of a term: digits must not continue the number ("14"
+    matches "14th", not "114"); letters must not continue the word."""
+    if char.isdigit():
+        return r"(?<!\d)" if side == "start" else r"(?!\d)"
+    if char.isalpha():
+        return r"\b"
+    return ""
+
+
+def term_present(text, term):
+    """Case-insensitive term match with number- and word-aware edges (see _edge)."""
+    pattern = _edge(term[:1], "start") + re.escape(term) + _edge(term[-1:], "end")
+    return re.search(pattern, text, re.IGNORECASE) is not None
+
+
 def expected(ev):
     """The task's gold (`checker.expect`) from the evidence file: the one place it lives
     outside the private suite, and out of the agent's reach. A task without one is
