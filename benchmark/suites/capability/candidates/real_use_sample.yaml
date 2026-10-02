@@ -50,9 +50,9 @@ scenarios:
           > Jordan, Acme Cloud developer relations
         rubric: >
           Requirements: the draft is 60 words or fewer; it addresses Jordan; it asks to
-          be updated when reviews reopen; it signs off with no name, a placeholder, or
-          a clearly marked spot for one, never an invented name; it makes no commitment
-          the user did not ask for.
+          be updated when reviews reopen; it contains no invented name for the user (no
+          sign-off at all, a sign-off with no name, a placeholder, or a clearly marked
+          spot for a name all meet this); it makes no commitment the user did not ask for.
 
   - id: firm_rephrase
     title: "Rephrase a complaint firmly without dropping either demand"
