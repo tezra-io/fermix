@@ -333,6 +333,23 @@ def _missing_tools_reason(case, advertised: set[str]) -> str | None:
     return None
 
 
+# Tools can register after the daemon first answers: an MCP server starts and lists
+# its tools asynchronously, so a read right after boot can miss them (the 2026-10-01
+# tool-discovery arms run held out five of six tasks that way). A missing required tool
+# is re-read for at most this long before the task is called not evaluated.
+LATE_TOOL_WAIT_S = 60
+LATE_TOOL_POLL_S = 3
+
+
+def _advertised_with_late_tools(cfg, cases) -> set[str]:
+    advertised = driver.advertised_tools(cfg)
+    deadline = time.monotonic() + LATE_TOOL_WAIT_S
+    while _unmet_tool_preconditions(cases, advertised) and time.monotonic() < deadline:
+        time.sleep(LATE_TOOL_POLL_S)
+        advertised = driver.advertised_tools(cfg)
+    return advertised
+
+
 def _hold_out_unmet_preconditions(cfg, cases) -> tuple[list, list, int | None]:
     """Split the selection into what this daemon can be measured on and what it cannot.
 
@@ -344,7 +361,7 @@ def _hold_out_unmet_preconditions(cfg, cases) -> tuple[list, list, int | None]:
     if not any(case.requires_tools or case.requires_tools_all for _s, _scn, case in cases):
         return cases, [], None
     try:
-        advertised = driver.advertised_tools(cfg)
+        advertised = _advertised_with_late_tools(cfg, cases)
     except driver.AdvertisedToolsUnavailable as exc:
         print("preconditions:\n  - could not read the daemon's advertised capabilities, "
               "so an unmet precondition cannot be told apart from a candidate failure "

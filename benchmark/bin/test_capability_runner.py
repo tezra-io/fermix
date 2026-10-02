@@ -2129,6 +2129,7 @@ def test_a_case_that_declares_no_tool_is_always_evaluated():
 
 
 def test_the_hold_out_notice_names_the_suite_case_and_the_missing_tools(monkeypatch, capsys):
+    monkeypatch.setattr(rc, "LATE_TOOL_WAIT_S", 0)        # genuinely absent: no wait
     monkeypatch.setattr(driver, "advertised_tools", lambda _cfg: {"shell", "file_read"})
     cases = _selection(_req_case(any_of=("codex_run", "claude_code_run")), _req_case("plain"))
 
@@ -2142,6 +2143,18 @@ def test_the_hold_out_notice_names_the_suite_case_and_the_missing_tools(monkeypa
     assert "cap_harness/harness_delegated_bugfix" in out
     assert "codex_run" in out and "claude_code_run" in out
     assert "composite" in out          # says where the task did NOT land
+
+
+def test_a_tool_that_registers_after_boot_is_waited_for_not_held_out(monkeypatch):
+    # An MCP server lists its tools asynchronously after the daemon first answers.
+    reads = iter([{"shell"}, {"shell"}, {"shell", "codex_run"}])
+    monkeypatch.setattr(driver, "advertised_tools", lambda _cfg: next(reads))
+    sleeps = []
+    monkeypatch.setattr(rc.time, "sleep", sleeps.append)
+    cases = _selection(_req_case(any_of=("codex_run",)))
+    kept, unmet, refusal = rc._hold_out_unmet_preconditions(_daemon_cfg(), cases)
+    assert (kept, unmet, refusal) == (cases, [], None)
+    assert sleeps == [rc.LATE_TOOL_POLL_S, rc.LATE_TOOL_POLL_S]
 
 
 def test_a_selection_with_no_declared_tools_never_queries_the_daemon(monkeypatch):
@@ -2167,6 +2180,7 @@ def test_a_daemon_that_cannot_say_what_it_advertises_refuses_the_sweep(monkeypat
 
 
 def test_a_selection_this_daemon_cannot_measure_at_all_refuses(monkeypatch, capsys):
+    monkeypatch.setattr(rc, "LATE_TOOL_WAIT_S", 0)        # genuinely absent: no wait
     monkeypatch.setattr(driver, "advertised_tools", lambda _cfg: {"shell"})
     cases = _selection(_req_case(any_of=("codex_run", "claude_code_run")))
 
