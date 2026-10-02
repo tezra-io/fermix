@@ -35,6 +35,13 @@ defmodule FermixCore.Memory.ReviewerTest do
     end
   end
 
+  defmodule PromptEchoProvider do
+    def chat(messages, _opts) do
+      send(Process.get(:test_pid), {:review_prompt, messages})
+      {:ok, %{content: "Nothing to save.", tool_calls: [], usage: %{}}}
+    end
+  end
+
   defmodule FailProvider do
     def chat(_messages, _opts), do: {:error, "boom"}
   end
@@ -419,6 +426,138 @@ defmodule FermixCore.Memory.ReviewerTest do
     assert state.last_reviewed_message_id == first.id
   end
 
+  test "an oversized message is reviewed by its head and its tail, and the pointer moves on", %{
+    repo: repo
+  } do
+    # 400 bytes of budget; the message is several times that.
+    filler = String.duplicate("pasted log line that says nothing durable. ", 60)
+
+    oversized =
+      insert_user_message(
+        repo,
+        "Head: call me Wren. " <> filler <> " Tail: always quote prices in CHF — naïve é"
+      )
+
+    later = insert_user_message(repo, "a later message")
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root},
+               review_input_token_budget: 100
+             )
+
+    assert result.input_messages == 1
+    assert_receive {:review_prompt, messages}
+    prompt_text = Enum.map_join(messages, "\n", & &1.content)
+
+    assert String.valid?(prompt_text)
+    assert prompt_text =~ "message_id=#{oversized.id}: Head: call me Wren."
+    assert prompt_text =~ "always quote prices in CHF — naïve é"
+    assert prompt_text =~ "[the middle of this message is omitted"
+    refute prompt_text =~ "a later message"
+
+    # The pointer advances past the oversized message, so the next pass reads
+    # what came after it instead of meeting the same paste again.
+    assert {:ok, state} = Repo.get_memory_review_state(conversation_selector(), server: repo)
+    assert state.last_reviewed_message_id == oversized.id
+
+    assert {:ok, _result} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert_receive {:review_prompt, next_messages}
+    assert Enum.map_join(next_messages, "\n", & &1.content) =~ "a later message"
+
+    assert {:ok, state} = Repo.get_memory_review_state(conversation_selector(), server: repo)
+    assert state.last_reviewed_message_id == later.id
+  end
+
+  test "the reviewer is shown each category's rows against its limit", %{repo: repo} do
+    for index <- 1..3 do
+      assert {:ok, _memory} =
+               Repo.upsert_memory(
+                 %{
+                   agent_id: "main",
+                   owner_id: "default",
+                   scope_type: "owner",
+                   scope_id: "default",
+                   category: "preference",
+                   key: "pref_#{index}",
+                   value: "preference #{index}"
+                 },
+                 server: repo
+               )
+    end
+
+    insert_user_message(repo, "anything new")
+
+    assert {:ok, _result} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+
+    assert_receive {:review_prompt, messages}
+    prompt_text = Enum.map_join(messages, "\n", & &1.content)
+
+    assert prompt_text =~
+             ~s(rows="identity 0/10, preference 3/16, interest 0/8, goal 0/8">)
+
+    assert prompt_text =~ ~s(rows="directive 0/16, context 0/40">)
+    assert prompt_text =~ "each category's row limit"
+  end
+
+  test "a guest's messages are never part of a review", %{repo: repo} do
+    owner_message = insert_user_message(repo, "I work from Lisbon")
+
+    for index <- 1..3 do
+      insert_user_message(repo, "guest says #{index}", %{guest: true})
+    end
+
+    assert {:ok, result} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root},
+               review_max_messages: 2
+             )
+
+    # The guest rows do not count against the page: the one owner message is
+    # the whole input, and the pointer rests on it.
+    assert result.input_messages == 1
+    assert_receive {:review_prompt, messages}
+    prompt_text = Enum.map_join(messages, "\n", & &1.content)
+    assert prompt_text =~ "I work from Lisbon"
+    refute prompt_text =~ "guest says"
+
+    assert {:ok, state} = Repo.get_memory_review_state(conversation_selector(), server: repo)
+    assert state.last_reviewed_message_id == owner_message.id
+
+    # With only guest messages left, there is nothing to review.
+    assert {:skip, :no_new_messages} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: {"telegram", "chat-1", :root}
+             )
+  end
+
   test "failed review leaves the pointer untouched; a later success resets failure_count", %{
     repo: repo
   } do
@@ -538,7 +677,7 @@ defmodule FermixCore.Memory.ReviewerTest do
     fun.()
   end
 
-  defp insert_user_message(repo, content) do
+  defp insert_user_message(repo, content, metadata \\ nil) do
     assert {:ok, message} =
              Repo.insert_message(
                %{
@@ -550,7 +689,8 @@ defmodule FermixCore.Memory.ReviewerTest do
                  sender: "alice",
                  role: "user",
                  kind: "chat_message",
-                 content: content
+                 content: content,
+                 metadata: metadata
                },
                server: repo
              )

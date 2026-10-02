@@ -266,15 +266,14 @@ defmodule FermixCore.Prompt.PromptComposer do
 
   # Defang any wrapper tag the memory body itself carries, so recalled memory
   # cannot close the data frame early and have the text after it read as system
-  # instruction. The write path's `PromptFiles.normalize_inline/1` happens to
-  # destroy the hyphenated tag today; escaping here makes the boundary explicit
-  # at the boundary and leaves that normalizer free to change. Kept local: the
-  # tag is this module's, and a shared parameterized escaper for one caller
-  # would be indirection. A body without the tag is byte-identical.
+  # instruction. This is the only place the boundary is held: the write path
+  # (`PromptFiles`) keeps a value's punctuation, hyphens included. A model reads
+  # a tag loosely, so the match is too: any casing, any spacing inside the
+  # brackets. Kept local: the tag is this module's, and a shared parameterized
+  # escaper for one caller would be indirection. A body without the tag is
+  # byte-identical.
   defp neutralize(body) do
-    body
-    |> String.replace("</memory-context>", "</ memory-context>")
-    |> String.replace("<memory-context>", "< memory-context>")
+    Regex.replace(~r/<\s*(\/?)\s*(memory-context)\s*>/i, body, "<\\1 \\2>")
   end
 
   defp memory_section(part) do
