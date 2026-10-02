@@ -1902,6 +1902,25 @@ def test_resending_or_denying_a_real_send_fails(tmp_path, sends, reply):
     assert _outbox(tmp_path, sends, reply).score == 0.0
 
 
+@pytest.mark.parametrize("reply, ok", [
+    ("It went out at 23:03 UTC; check Updates.", True),
+    ("It went out at 7:03 PM your time; it can take a few minutes.", True),
+    ("It went out at 19:03.", True),
+    ("I checked and it went out earlier.", False),           # no fact from the record
+])
+def test_the_send_can_be_reported_by_its_time_in_utc_or_the_homes_zone(tmp_path, reply, ok):
+    box = tmp_path / "workspace" / "outbox"
+    box.mkdir(parents=True)
+    (box / "sent.jsonl").write_text(json.dumps({"id": "N-9", "sent_at": "2026-10-02T23:03:14Z"}) + "\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    evidence = {**_ev(reply=reply), "expect": {"path": "workspace/outbox/sent.jsonl"},
+                "state": {"today": "2026-10-02", "zone": "America/New_York"}}
+    r = checker.run_checker(BENCH, OUTBOX_ONCE, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                            reply=reply, evidence=evidence)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
 F1 = {"script": "suites/capability/checkers/f1_upcoming_race.py", "mode": "json"}
 
 
