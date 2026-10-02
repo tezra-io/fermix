@@ -37,8 +37,8 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ d6101c604486
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ 2664a9cfe3fe
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 8d67c5dddf84
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ 2a1652afbbdd
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
