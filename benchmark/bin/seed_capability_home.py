@@ -44,6 +44,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import socket
 import subprocess
 import sys
@@ -69,7 +70,7 @@ _NON_DISPOSABLE = tuple(os.path.realpath(os.path.expanduser(p))
 # run trees — both survive a sweep and are inherited by the next one's web and harness
 # tasks, which is the residue this reset exists to remove.
 STATE_DIRS = ("skills", "memory", "job_runs", "journals", "grants", "bootstrap",
-              "browser", "harness")
+              "browser", "harness", "eval-mcp")
 STATE_FILES = ("memory.db", "memory.db-wal", "memory.db-shm")
 # Only these keys are allowed in a provider block (else the daemon refuses boot).
 _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", "api_key")
@@ -81,6 +82,21 @@ _PROVIDER_KEYS = ("default_model", "reasoning_effort", "auth_mode", "base_url", 
 SKILL_TOKEN_NAME = "FERMIX_EVAL_SKILL_TOKEN"
 SKILL_TOKEN_VALUE = "fxeval-desk-7Kq2-Rm9p"
 SKILL_TOKEN_FILE = os.path.join("eval-fixtures", "skill_token")
+# The cap_tool_discovery fixtures. Operator MCP tools are deferred exactly like plugin
+# tools, so the invented halden_ops server is the eval home's deferred surface (a fresh
+# home has no plugins, so without it nothing there is ever deferred); receipt-filing is a
+# skill whose instructions are not in the prompt. The server keeps its state under
+# eval-mcp/, which reset_state clears with the rest of the baseline.
+BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+FIXTURE_MCP_SERVER = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "mcp",
+                                  "halden_ops.py")
+FIXTURE_SKILLS_DIR = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "skills")
+# The skills the daemon itself seeds. `SkillRegistry` copies them only into an EMPTY
+# skills dir, so a seeder that installs a fixture skill must lay these down too or the
+# eval home would silently run without them.
+BUNDLED_SKILLS_DIR = os.path.join(os.path.dirname(BENCH_DIR), "apps", "fermix_core", "priv",
+                                  "skills")
+MCP_STATE_DIR = "eval-mcp"
 # Primary provider id -> its key in the Fermix auth store ($FERMIX_HOME/auth.json),
 # for OAuth providers whose token must be copied into the disposable home.
 _OAUTH_PROFILE_KEY = {
@@ -115,6 +131,20 @@ def primary_provider(dev: dict) -> tuple[str, dict, str | None]:
     pid, blk = primary[0]
     if not blk.get("default_model"):
         die(f"primary provider {pid} has no default_model")
+    return pid, blk, core.get("profile")
+
+
+def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
+    """A NAMED provider block from the dev config, scored as this home's primary: same
+    model, effort and auth (keychain entry or OAuth login) the dev home uses for it.
+    Lets a configuration arm score any configured provider, OAuth ones included,
+    without exporting a key."""
+    core = dev.get("fermix_core", {})
+    blk = core.get("providers", {}).get(pid)
+    if not isinstance(blk, dict):
+        die(f"no [fermix_core.providers.{pid}] in {DEV_HOME}/config.toml")
+    if not blk.get("default_model"):
+        die(f"provider {pid} has no default_model in {DEV_HOME}/config.toml")
     return pid, blk, core.get("profile")
 
 
@@ -169,6 +199,13 @@ def render_config(
               f"[sandbox.env.{SKILL_TOKEN_NAME}]", 'source = "command"',
               'command = "/bin/cat"', f"args = [{json.dumps(token_path)}]",
               "timeout_ms = 3000", ""]
+    # The halden_ops fixture MCP server (cap_tool_discovery). `/usr/bin/env python3`
+    # because the server is standard-library only and this seeder's interpreter lives
+    # in a uv cache the daemon should not depend on.
+    server_args = ["python3", FIXTURE_MCP_SERVER,
+                   "--state-dir", os.path.join(home, MCP_STATE_DIR, "halden_ops")]
+    lines += ["[mcp.servers.halden_ops]", 'command = "/usr/bin/env"',
+              f"args = [{', '.join(json.dumps(arg) for arg in server_args)}]", ""]
     # Pre-approve coding agents in the disposable home. Consent is a setup decision
     # (design §23.3) and defaults false, and an unapproved host advertises no run
     # tool and renders no delegation steering at all (§23.4) — it does not stall,
@@ -294,7 +331,7 @@ def read_extra_config(rendered: str, path: str) -> str:
 
 
 def copy_oauth_token(home: str, pid: str) -> None:
-    """Copy the primary provider's OAuth entry from the dev auth store into the
+    """Copy the scored provider's OAuth entry from the dev auth store into the
     disposable home so the daemon authenticates without an interactive login.
 
     OAuth tokens are home-scoped ($FERMIX_HOME/auth.json), not host-global — a
@@ -373,6 +410,29 @@ def reset_state(home: str) -> None:
             os.remove(safe_rm.check(path, resolved, min_below=1))
 
 
+def install_skills(home: str) -> None:
+    """Lay down the reset skills dir: the daemon's bundled skills plus the fixture
+    skills. Runs right after reset_state, with the daemon down. The daemon would copy
+    the bundled skills itself, but only into an empty dir, which a fixture skill makes
+    it no longer be."""
+    skills = os.path.join(disposable_home(home, "install skills"), "skills")
+    if os.path.exists(skills):
+        die(f"refusing to install skills over an existing {skills}: reset_state runs first")
+    os.makedirs(skills)
+    for source_root in (BUNDLED_SKILLS_DIR, FIXTURE_SKILLS_DIR):
+        copy_skill_dirs(source_root, skills)
+
+
+def copy_skill_dirs(source_root: str, skills: str) -> None:
+    """Copy every skill directory (one holding a SKILL.md) under source_root."""
+    if not os.path.isdir(source_root):
+        die(f"skill source missing: {source_root}")
+    names = sorted(n for n in os.listdir(source_root)
+                   if os.path.isfile(os.path.join(source_root, n, "SKILL.md")))
+    for name in names:
+        shutil.copytree(os.path.join(source_root, name), os.path.join(skills, name))
+
+
 def disposable_home(home: str, what: str) -> str:
     """The home as a REALPATH, refused unless it is disposable.
 
@@ -422,6 +482,9 @@ def parse_args() -> argparse.Namespace:
                         help="explicit mode: default_model for the provider block")
     parser.add_argument("--reasoning-effort", dest="reasoning_effort",
                         help="explicit mode: optional reasoning_effort")
+    parser.add_argument("--dev-provider", dest="dev_provider",
+                        help="score this provider block from ~/.fermix-dev/config.toml "
+                             "(its model, effort and auth) instead of the dev primary")
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
     parser.add_argument("--extra-config", dest="extra_config",
@@ -451,6 +514,8 @@ def main() -> None:
     home = disposable_home(args.home, "seed")
     if bool(args.provider) != bool(args.model):
         die("explicit mode needs both --provider and --model")
+    if args.provider and args.dev_provider:
+        die("use --provider/--model (explicit mode) or --dev-provider, not both")
     allowed_roots = tuple(
         os.path.abspath(os.path.expanduser(p)) for p in args.allow_roots)
 
@@ -463,13 +528,17 @@ def main() -> None:
             die(f"no dev config to derive the scored model from: {dev_cfg}")
         with open(dev_cfg, "rb") as fh:
             dev = tomllib.load(fh)
-        pid, blk, profile = primary_provider(dev)
+        if args.dev_provider:
+            pid, blk, profile = dev_provider(dev, args.dev_provider)
+        else:
+            pid, blk, profile = primary_provider(dev)
 
     workspace = os.path.join(home, "workspace")
     os.makedirs(workspace, exist_ok=True)
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
     reset_state(home)
+    install_skills(home)
     write_skill_token(home)
 
     config = render_config(home, pid, blk, profile, allowed_roots,

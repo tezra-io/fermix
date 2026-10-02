@@ -131,12 +131,27 @@ run, and it is not quietly filed as one.
 
 **What the current sweep measures.** The public sweep is a feature check: does each
 Fermix capability (sub-agents, jobs, skills, memory, coding, delegation, browser, web
-research) work end to end with a given model? Every recent model scores at or near
+research, and tools and skills that load on demand) work end to end with a given model? Every recent model scores at or near
 100% on it, so it cannot say which model is better; the leaderboard page states this
 as "saturated" whenever it holds. A ranked tier built from how Fermix is actually used
 is being drafted under `suites/capability/candidates/`. It replaces this sweep as the
 ranking once its tasks are signed off and a calibration run shows the strongest model
 well below 100%.
+
+**Tools and skills that load on demand (`cap_tool_discovery`).** Fermix lists plugin
+and MCP tools and skills by name only; their schemas and instructions load when the model
+asks (`tool_search`, `tool_describe`, `tool_call`, `skill_view`). A fresh eval home has no
+plugins, so the seeder gives it something to discover: `halden_ops`, an invented supply
+company served as a local MCP server (`suites/capability/fixtures/mcp/halden_ops.py`, ten
+tools, answers derived from each request), and a `receipt-filing` skill whose rules exist
+only in its body. The suite is graded on outcomes, never on the route, except one labelled
+call budget that keeps an obvious request from paying a search toll. To run it on every
+configured model, one disposable home each:
+
+```sh
+uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml --dry-run   # plan, no spend
+uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml             # each arm reuses the dev home's auth for that provider
+```
 
 One case per capability scenario is enough (see `SCHEMA.md`): each task is repeated
 `--trials` times, and a reworded twin that always agreed with its sibling only doubled
@@ -144,7 +159,7 @@ that task's weight in the score and the sweep's time.
 
 ```sh
 make estimate           # rough turn/time/price range, no model calls
-make capability-auto     # full 17-task sweep: seed+start a disposable daemon, run, tear down
+make capability-auto     # full 23-task sweep: seed+start a disposable daemon, run, tear down
 make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
 make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
 make rank                # render the leaderboard: markdown + reports/capability/leaderboard.html
@@ -152,12 +167,12 @@ make rank                # render the leaderboard: markdown + reports/capability
 
 `make estimate` prints a rough turn/time/price range without model calls; it is
 not a quote or hard spend guard. At `--trials 5` the current public selection
-plans **17 tasks / 90 real turns** (18 declared turns per trial — a
+plans **23 tasks / 120 real turns** (24 declared turns per trial — a
 `cross_session` task is two turns, so counting tasks × trials understates the
 run). `make capability-judged` (4 rubric tasks) and
 `make capability-readonly` (`cap_web_research` + `cap_web_app`) run host-read-only
 against `~/.fermix-dev` / `fermix-dev` and need no isolation confirmation. `make
-capability-auto` is the full 17-task sweep — it includes isolated-mutation and
+capability-auto` is the full 23-task sweep — it includes isolated-mutation and
 expensive suites that must never touch `~/.fermix-dev`, so it stands up a
 throwaway daemon, supplies the isolation attestations and cost confirmation, runs,
 and tears the daemon down.
@@ -200,7 +215,7 @@ a row that never recorded strict pass@1 cannot clear a bar it never measured, an
 **safety must have been evaluated**: a denominator of zero graded safety trials is
 a gate failure, never a pass.
 
-**The shipped 17-task sweep declares no safety gate, so `make capability` exits 5
+**The shipped 23-task sweep declares no safety gate, so `make capability` exits 5
 today, by design.** The gate reads *"release gate: safety not evaluated (no
 capability case declares a safety gate)"*. That is the review's §4 P0 posture — a
 missing safety observation is never a pass, and release eligibility needs a

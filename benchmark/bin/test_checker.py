@@ -1505,5 +1505,156 @@ def test_cron_job_output_refuses_without_evidence(tmp_path):
     assert r.score == 0.0 and "no evidence file" in r.detail
 
 
+
+# --- cap_tool_discovery: deferred MCP tools and on-demand skills ---------------
+
+sys.path.insert(0, os.path.join(BENCH, "suites", "capability", "fixtures", "mcp"))
+import halden_ops  # noqa: E402
+
+SHIPMENT = {"script": "suites/capability/checkers/tool_discovery_shipment.py", "mode": "json"}
+LEDGER = {"script": "suites/capability/checkers/tool_discovery_ledger.py", "mode": "json"}
+RECEIPTS = {"script": "suites/capability/checkers/receipt_filing.py", "mode": "json"}
+SHIP_TOOL = "mcp_halden_ops_shipment_status"
+LEDGER_TOOL = "mcp_halden_ops_ledger_add_entry"
+
+
+def _tool_span(name, payload, status="ok"):
+    """A deferred-tool span as Opik records it: the server's JSON text wrapped as {"text": …}."""
+    return _span(name, status=status, out=json.dumps({"text": json.dumps(payload)}))
+
+
+def _discovery_score(tmp_path, spec, evidence):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply=evidence["reply"], evidence=evidence)
+
+
+def _shipment_reply(facts, eta_text=None):
+    return f"It's with {facts['carrier']}, {facts['status']}, due {eta_text or facts['eta']}."
+
+
+def test_shipment_reference_reply_passes_with_iso_or_written_date(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    span = _tool_span(SHIP_TOOL, facts)
+    month = ["january", "february", "march", "april", "may", "june", "july", "august",
+             "september", "october", "november", "december"][int(facts["eta"][5:7]) - 1]
+    written = f"{month.title()} {int(facts['eta'][8:])}"
+    for eta_text in (None, written):
+        r = _discovery_score(tmp_path, SHIPMENT,
+                             _ev(spans=[span], reply=_shipment_reply(facts, eta_text)))
+        assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("spelling", ["{m3} {d:02d}", "{m3}. {d}", "{month} {d}th",
+                                      "the {d}th of {month}", "{mm:02d}/{d:02d}"])
+def test_shipment_accepts_every_common_spelling_of_the_date(tmp_path, spelling):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    mm, d = int(facts["eta"][5:7]), int(facts["eta"][8:])
+    month = ["January", "February", "March", "April", "May", "June", "July", "August",
+             "September", "October", "November", "December"][mm - 1]
+    text = spelling.format(month=month, m3=month[:3], d=d, mm=mm)
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[_tool_span(SHIP_TOOL, facts)],
+                                                 reply=_shipment_reply(facts, text)))
+    assert r.error is None and r.score == 1.0, (text, r.detail)
+
+
+def test_shipment_date_match_respects_word_boundaries(tmp_path):
+    # A tracking number whose delivery date is April 1: "4/12" and "April 12" must not
+    # pass for it, "4/1" must.
+    token = next(f"TOK-{n}" for n in range(1000)
+                 if halden_ops.shipment_facts(f"TOK-{n}")["eta"] == "2027-04-01")
+    facts = halden_ops.shipment_facts(token)
+    span = _tool_span(SHIP_TOOL, facts)
+    for text, want in (("4/12", 0.0), ("April 12", 0.0), ("4/1", 1.0)):
+        r = _discovery_score(tmp_path, SHIPMENT,
+                             _ev(token=token, spans=[span], reply=_shipment_reply(facts, text)))
+        assert r.score == want, (text, r.detail)
+
+
+def test_shipment_rejects_a_right_looking_answer_without_the_tool(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[], reply=_shipment_reply(facts)))
+    assert r.score == 0.0 and "no successful" in r.detail
+
+
+def test_shipment_rejects_a_lookup_of_a_different_shipment(tmp_path):
+    other = halden_ops.shipment_facts("SOMETHING-ELSE")
+    r = _discovery_score(tmp_path, SHIPMENT,
+                         _ev(spans=[_tool_span(SHIP_TOOL, other)], reply=_shipment_reply(other)))
+    assert r.score == 0.0
+
+
+def test_shipment_rejects_a_reply_that_drops_the_date(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[_tool_span(SHIP_TOOL, facts)],
+                                                 reply=f"It's with {facts['carrier']}."))
+    assert r.score == 0.0 and "delivery date" in r.detail
+
+
+def _entry(**overrides):
+    entry = {"date": "2027-03-03", "amount_cents": 4250, "category": "meals",
+             "memo": "team lunch, receipt TOK-DEADBEEF"}
+    entry.update(overrides)
+    return {"entry_id": "L-1", "recorded": entry}
+
+
+def test_ledger_reference_entry_passes_after_a_rejected_guess(tmp_path):
+    # The shape a refused call really has on the trace (pilot 2026-10-01): an error span
+    # whose text wraps the server's payload.
+    rejected = _span(LEDGER_TOOL, status="error",
+                     out="MCP tool 'halden_ops/ledger_add_entry' reported an error: "
+                         '{"error": "category must be one of: meals, travel"}')
+    r = _discovery_score(tmp_path, LEDGER,
+                         _ev(spans=[rejected, _tool_span(LEDGER_TOOL, _entry())], reply="logged"))
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+def test_ledger_rejects_wrong_fields_and_double_booking(tmp_path):
+    wrong = _ev(spans=[_tool_span(LEDGER_TOOL, _entry(amount_cents=42))], reply="logged")
+    assert _discovery_score(tmp_path, LEDGER, wrong).score == 0.0
+    twice = _ev(spans=[_tool_span(LEDGER_TOOL, _entry()), _tool_span(LEDGER_TOOL, _entry())],
+                reply="logged")
+    r = _discovery_score(tmp_path, LEDGER, twice)
+    assert r.score == 0.0 and "twice" in r.detail
+
+
+def test_ledger_rejects_a_claim_with_no_accepted_entry(tmp_path):
+    r = _discovery_score(tmp_path, LEDGER, _ev(spans=[], reply="Logged it to the ledger."))
+    assert r.score == 0.0
+
+
+GOOD_SHEET = ("date;vendor;amount_cents;code\n2027-03-02;Blue Fern Cafe;1840;M2\n"
+              "2027-03-02;Ridewell;2310;T7\n2027-03-05;Draftboard;1500;S4\n")
+
+
+def _sheet_score(tmp_path, text):
+    ws = tmp_path / "ws"
+    if text is not None:
+        (ws / "expenses").mkdir(parents=True)
+        (ws / "expenses" / "2027-03.csv").write_text(text)
+    else:
+        ws.mkdir()
+    return checker.run_checker(BENCH, RECEIPTS, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply="filed", evidence=_ev(reply="filed"))
+
+
+def test_receipt_sheet_following_the_skill_passes(tmp_path):
+    r = _sheet_score(tmp_path, GOOD_SHEET)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("text, reason", [
+    (None, "no expenses"),
+    (GOOD_SHEET.replace(";", ","), "first line"),
+    (GOOD_SHEET.replace("1840", "18.40"), "rows differ"),
+    (GOOD_SHEET.replace(";M2", ";meals"), "rows differ"),
+    (GOOD_SHEET + "2027-03-05;Draftboard;1500;S4\n", "twice"),
+])
+def test_receipt_sheet_without_the_skills_rules_fails(tmp_path, text, reason):
+    r = _sheet_score(tmp_path, text)
+    assert r.score == 0.0 and reason in r.detail
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

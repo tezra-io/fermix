@@ -1,0 +1,47 @@
+# Tools and skills that load on demand, across every configured model.
+#
+# Fermix lists plugin/MCP tools and skills by name and loads their schemas and
+# instructions only when the model asks (tool_search / tool_describe / tool_call,
+# skill_view). cap_tool_discovery checks a model can reach what it first has to
+# look up; this file runs it on each model the owner has configured, one
+# disposable home per arm, and compares every arm with the control.
+#
+#   uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml --dry-run
+#   uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml
+#
+# The control is the ~/.fermix-dev primary. Every other arm scores one more provider
+# block from ~/.fermix-dev/config.toml through the seeder's --dev-provider: the same
+# model, effort and auth the dev home uses (keychain entry, or its OAuth login copied
+# into the throwaway home), so no key has to be exported. The runner takes at most six
+# arms per pass; Venice is left out because it serves the same Grok model as the xai
+# arm (copy this file with a venice arm to compare the two routes).
+title: "Tool discovery — every configured model"
+
+suites:
+  - cap_tool_discovery
+
+trials: 3
+
+arms:
+  - name: control
+    description: "The ~/.fermix-dev primary (openai_codex), seeded exactly as make capability-auto does."
+
+  - name: openai
+    description: "The dev home's openai block (gpt-5.4-mini)."
+    seed_args: ["--dev-provider", "openai"]
+
+  - name: anthropic
+    description: "The dev home's anthropic block (claude-opus-4-8, OAuth)."
+    seed_args: ["--dev-provider", "anthropic"]
+
+  - name: xai
+    description: "The dev home's xai block (grok-4.6, OAuth)."
+    seed_args: ["--dev-provider", "xai"]
+
+  - name: openrouter
+    description: "The dev home's openrouter block (moonshotai/kimi-k3)."
+    seed_args: ["--dev-provider", "openrouter"]
+
+  - name: mistral
+    description: "The dev home's mistral block (mistral-large-latest)."
+    seed_args: ["--dev-provider", "mistral"]
