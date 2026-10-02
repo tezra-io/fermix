@@ -665,12 +665,13 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: a case may carry only one of score/checker/rubric, got {present}")
             requires_tools = _validate_tool_list(cs, "requires_tools", cloc, problems)
             requires_all = _validate_tool_list(cs, "requires_tools_all", cloc, problems)
-            # cross_session: store the fact in turn 1's session, recall in a fresh
-            # session (turn 2) — needs exactly 2 turns + a `score` block on the recall.
+            # cross_session: every turn but the last runs in one session, the last
+            # (the recall) in a fresh one — needs 2+ turns + a `score` block on the recall.
             cross_session = _boolean(
                 cs.get("cross_session", False), f"{cloc}.cross_session", problems, False)
-            if cross_session and len(turns) != 2:
-                problems.append(f"{cloc}: `cross_session` requires exactly 2 turns (store, recall)")
+            if cross_session and len(turns) < 2:
+                problems.append(f"{cloc}: `cross_session` requires at least 2 turns "
+                                f"(store turns, then the recall)")
             if cross_session and score_spec is None:
                 problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the recall reply)")
             judge = _boolean(cs.get("judge", default_judge), f"{cloc}.judge", problems,

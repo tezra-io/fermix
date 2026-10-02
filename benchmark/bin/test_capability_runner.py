@@ -520,6 +520,39 @@ def test_cross_session_requires_two_turns_and_score(tmp_path):
     assert any("cross_session" in p and "2 turns" in p for p in ei.value.problems)
 
 
+def test_cross_session_loads_several_store_turns(tmp_path):
+    longer = _XSESSION.replace(
+        '          - query: "remember my codeword is {token}"\n',
+        '          - query: "my codeword is {token}"\n'
+        '          - query: "keep that one for next time"\n')
+    c = suites.load_all(_write(tmp_path, longer))[0].scenarios[0].cases[0]
+    assert c.cross_session is True and len(c.turns) == 3
+
+
+def test_cross_session_runs_the_store_turns_in_one_session_and_recalls_in_a_fresh_one(
+        monkeypatch):
+    case = _xsession_case(turns=[SimpleNamespace(query="first {token}", expect={}),
+                                 SimpleNamespace(query="second", expect={}),
+                                 SimpleNamespace(query="recall", expect={})])
+    seen = []
+    replies = iter(["noted", "noted again", "kestrel"])
+
+    def capture(_cfg, _opik, session, query, *_rest):
+        seen.append((session, query))
+        return _captured(reply=next(replies))
+
+    graded = []
+    monkeypatch.setattr(rc, "_capture_turn", capture)
+    monkeypatch.setattr(rc.scoring, "score_answer",
+                        lambda reply, _spec: graded.append(reply) or SimpleNamespace(score=1.0))
+    trial, _trace_id, _models = rc._cross_session_trial(
+        SimpleNamespace(), None, SimpleNamespace(name="cap_memory"), case, "run", 0)
+    sessions = [session for session, _query in seen]
+    assert sessions[0] == sessions[1] != sessions[2]
+    assert "{token}" not in seen[0][1] and graded == ["kestrel"]
+    assert trial.effective_success == 1.0
+
+
 def _xsession_case(**overrides):
     case = dict(
         id="durable_codeword",
@@ -1455,6 +1488,18 @@ def test_a_private_run_reads_its_suites_and_tasks_root_from_config(tmp_path):
     assert [s.name for s in suites_] == ["cap_private_x"]
     assert rc._pages_dir(tasks_root) == str(holdout / "fixtures" / "pages")
     assert rc._pages_dir(rc.SKILL_DIR) == rc.FIXTURE_PAGES_DIR
+
+
+def test_a_private_fixture_server_serves_the_harness_helper(tmp_path):
+    pages = tmp_path / "fixtures" / "pages"
+    pages.mkdir(parents=True)
+    (pages / "profile.html").write_text("<p>profile</p>")
+    case = SimpleNamespace(turns=[SimpleNamespace(query="open __EVAL_FIXTURE_URL__/profile.html")])
+    server = rc._start_fixture_server([(None, None, case)], str(pages))
+    try:
+        assert server.documents == ("fixture.js", "profile.html")
+    finally:
+        server.stop()
 
 
 def test_a_private_run_without_a_configured_holdout_is_refused(tmp_path):

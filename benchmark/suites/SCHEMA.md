@@ -451,6 +451,7 @@ They are validated here so a malformed capability case fails `--dry-run` too.
 |---|---|---|
 | `requires_tools` | [str] | provenance, **any-of**: the trial scores 0 unless ≥1 of these tool spans fired, so an answer reached from parametric recall cannot score |
 | `requires_tools_all` | [str] | provenance, **all-of**: every listed tool span must have fired. Use it when completion genuinely takes more than one step — `[skill_create, skill_reload]` as `requires_tools` means *either*, which lets half the work score full credit |
+| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only durable memory or message-history search can answer it. Needs 2+ turns and a `score` block, which grades the recall reply. `{token}` and `{subject}` are replaced per trial in every turn |
 
 Both keys may appear on one case (a mandatory pair plus an either-or research
 step). **A span carrying `error_info` satisfies neither key**: the tool has to
@@ -504,22 +505,11 @@ containing the expected value somewhere.
 
 ### Multi-turn capability cases
 
-A capability case (one carrying `score:` or `checker:`) may declare **one turn**,
-or exactly the two turns of a `cross_session: true` pair. Any other multi-turn
-capability case is a load error:
-
-```
-<suite>: <scenario>/<case>: multi-turn capability cases are not driven; use cross_session or a single turn
-```
-
-The runner drives one prompt per trial, so the earlier turns of a longer case
-would be silently dropped and the case scored off its last prompt alone. Refuse
-it at load rather than publish a number for work that never ran.
-
-A rubric-only case carries neither `score:` nor `checker:`, so the loader cannot
-see it as a capability case at all — it becomes one only when `--judge` admits it
-to a selection. `run_capability.py` therefore refuses the same shape again at
-selection time, before any spend, with the task ids named.
+A capability case may declare several turns. The runner drives every turn of a
+trial in one session, in order, then grades: `score:` and `checker:` read the last
+reply or the end state, a turn's own `expect` gates that turn, and the judge sees
+the whole conversation. A `cross_session: true` case runs its last turn in a fresh
+session instead (see the table above).
 
 ## Authoring guidance
 

@@ -119,11 +119,16 @@ class _TokenState:
 
 
 class FixtureServer:
-    def __init__(self, pages_dir: str) -> None:
+    def __init__(self, pages_dir: str, helper: str | None = None) -> None:
+        """`helper` is the harness's own `fixture.js`, served beside a pages directory
+        kept elsewhere (the private holdout's), so that directory never carries a copy
+        of the reporting contract that could drift from this server."""
         if not isinstance(pages_dir, str) or not pages_dir:
             raise ServerError("FixtureServer needs the fixture pages directory")
         self.pages_dir = os.path.realpath(os.path.expanduser(pages_dir))
         self._documents = _load_documents(self.pages_dir)
+        if helper is not None:
+            self._documents.update(_load_helper(helper, self._documents, self.pages_dir))
         self._tokens: dict[str, _TokenState] = {}
         self._lock = threading.Lock()
         self._httpd: ThreadingHTTPServer | None = None
@@ -279,6 +284,17 @@ def _load_documents(pages_dir: str) -> dict[str, tuple[str, bytes]]:
     if not documents:
         raise ServerError(f"no fixture documents under {pages_dir}")
     return documents
+
+
+def _load_helper(helper: str, documents: dict, pages_dir: str) -> dict[str, tuple[str, bytes]]:
+    name = os.path.basename(helper)
+    if name in documents:
+        raise ServerError(f"{pages_dir} carries its own {name}; delete it, the harness "
+                          f"serves the one copy of the reporting helper")
+    if not os.path.isfile(helper):
+        raise ServerError(f"fixture helper not found: {helper}")
+    with open(helper, "rb") as handle:
+        return {name: (_CONTENT_TYPES[os.path.splitext(name)[1]], handle.read())}
 
 
 # --- the state contract (one module owns writing it and reading it back) -----

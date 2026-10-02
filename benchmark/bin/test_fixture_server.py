@@ -100,6 +100,24 @@ def test_an_empty_pages_directory_fails_loudly(tmp_path):
         fx.FixtureServer(str(tmp_path))
 
 
+def test_the_harness_helper_is_served_beside_another_pages_directory(tmp_path):
+    (tmp_path / "profile.html").write_text("<p>profile</p>")
+    server = fx.FixtureServer(str(tmp_path), helper=os.path.join(PAGES_DIR, "fixture.js"))
+    assert server.documents == ("fixture.js", "profile.html")
+    server.start()
+    try:
+        status, helper = _get(f"{server.bind('tok-h').url}/fixture.js")
+    finally:
+        server.stop()
+    assert status == 200 and "fixtureReport" in helper
+
+
+def test_a_pages_directory_carrying_its_own_helper_is_refused(tmp_path):
+    (tmp_path / "fixture.js").write_text("// a stale copy")
+    with pytest.raises(fx.ServerError, match="fixture.js"):
+        fx.FixtureServer(str(tmp_path), helper=os.path.join(PAGES_DIR, "fixture.js"))
+
+
 # --- recorded state ---------------------------------------------------------
 
 def test_an_event_assigns_its_dotted_path_and_keeps_the_order(served):

@@ -85,6 +85,7 @@ SAFETY_GATES = ("tools_none", "tools_none_succeeded", "reply_not_matches")
 HASH_VERSION = leaderboard.CURRENT_HASH_VERSION
 CAP_DIR = os.path.join(SKILL_DIR, "suites", "capability")
 FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
+FIXTURE_HELPER = os.path.join(FIXTURE_PAGES_DIR, "fixture.js")   # served beside private pages
 DATASET = "fermix-capability"
 # `fixture_state` is this tier's third ground-truth scorer (beside `score:` and
 # `checker:`), never a constraint: the page's own record IS the task outcome, so
@@ -1042,31 +1043,34 @@ def _provenance_gate(case, ep: _Episode, succ: float, label: str) -> float:
 
 
 def _cross_session_trial(cfg, opik, s, case, run_id, i, fixtures=None):
-    """Store a tokened fact in session A, then recall it in a FRESH session B (same
-    owner). Because B shares NO conversation context, a correct recall can only come
-    from owner-scoped DURABLE memory carried across sessions — the one thing the
-    single-thread memory suite can't test, and where a raw/tool-less model scores 0
-    (the uplift signal)."""
+    """Run every turn but the last in session A, then the last (the recall) in a
+    FRESH session B (same owner). Because B shares NO conversation context, a correct
+    recall can only come from owner-scoped DURABLE memory carried across sessions —
+    the one thing the single-thread memory suite can't test, and where a raw/tool-less
+    model scores 0 (the uplift signal)."""
     token = _xsession_token(s.name, case.id, run_id, i)
     subject = _xsession_subject(s.name, case.id, run_id, i)
-    # Both turns address the SAME token: a cross-session pair is one episode, so
-    # what the store turn made the page record is still there for the recall one.
+    # Every turn addresses the SAME token: a cross-session case is one episode, so
+    # what the store turns made the page record is still there for the recall one.
     binding = _bind_page(fixtures, s.name, case, run_id, i)
-    store_q = _with_fixture_url(
-        case.turns[0].query.replace("{subject}", subject).replace("{token}", token), binding)
-    recall_q = _with_fixture_url(
-        case.turns[1].query.replace("{subject}", subject).replace("{token}", token), binding)
+    queries = [_with_fixture_url(
+        turn.query.replace("{subject}", subject).replace("{token}", token), binding)
+        for turn in case.turns]
     sess_a = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "store")
     sess_b = sess("e2e-cap", run_id, s.name, case.id, f"t{i}", "recall")
-
-    store = _capture_turn(cfg, opik, sess_a, store_q, case.timeout_ms, f"{case.id} t{i} store")
-    ep = _Episode(caps=[store], expects=[_case_expect(case, 0)])
+    ep = _Episode(caps=[], expects=[])
     label = f"{case.id} t{i}"
-    if store.status != "graded" or store.view is None:
-        return _fail_trial(case, ep, label)   # infra failure on store → recall is meaningless
-    cap = _capture_turn(cfg, opik, sess_b, recall_q, case.timeout_ms, f"{case.id} t{i} recall")
+    for index, store_q in enumerate(queries[:-1]):
+        store = _capture_turn(cfg, opik, sess_a, store_q, case.timeout_ms,
+                              f"{case.id} t{i} store {index + 1}")
+        ep.caps.append(store)
+        ep.expects.append(_case_expect(case, index))
+        if store.status != "graded" or store.view is None:
+            return _fail_trial(case, ep, label)   # infra failure on a store → recall is meaningless
+    cap = _capture_turn(cfg, opik, sess_b, queries[-1], case.timeout_ms,
+                        f"{case.id} t{i} recall")
     ep.caps.append(cap)
-    ep.expects.append(_case_expect(case, 1))
+    ep.expects.append(_case_expect(case, len(queries) - 1))
     if cap.status != "graded" or cap.view is None:
         return _fail_trial(case, ep, label)
     spec = {**case.score_spec, "expected": str(case.score_spec["expected"]).replace("{token}", token)}
@@ -1908,7 +1912,9 @@ def _start_fixture_server(cases, pages_dir: str | None = None) -> FixtureServer 
     failing to open a page."""
     if not any(case_uses_fixture(case) for _s, _scn, case in cases):
         return None
-    fixtures = FixtureServer(pages_dir or FIXTURE_PAGES_DIR)
+    pages_dir = pages_dir or FIXTURE_PAGES_DIR
+    helper = None if pages_dir == FIXTURE_PAGES_DIR else FIXTURE_HELPER
+    fixtures = FixtureServer(pages_dir, helper=helper)
     port = fixtures.start()
     print(f"  fixture server: 127.0.0.1:{port} "
           f"({len(fixtures.documents)} document(s), one token per trial)")

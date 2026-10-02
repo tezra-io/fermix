@@ -257,7 +257,8 @@ puts its expected answer in `checker.expect`, which the runner hands to the chec
 the per-trial evidence file outside the workspace (`_checkerlib.expected`), so the answer
 is never in a file the agent can read. Capability tasks may also be multi-turn: every
 turn runs in one session and the last reply or end state is graded, with the judge
-seeing the whole conversation.
+seeing the whole conversation. A `cross_session` task runs its last turn in a fresh
+session, so only what Fermix kept across sessions can answer it.
 
 ### The disposable capability daemon
 
