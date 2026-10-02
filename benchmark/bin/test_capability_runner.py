@@ -1546,6 +1546,98 @@ def test_a_private_seed_resolves_under_the_holdout_and_moves_the_task_hash(tmp_p
     assert rc._fixture_digest(case, str(holdout)) != before
 
 
+def test_a_state_spec_moves_the_task_hash_and_a_seed_only_digest_is_unchanged(tmp_path):
+    holdout = _holdout(tmp_path)
+    seed = holdout / "fixtures" / "seeds" / "ru_14"
+    seed.mkdir(parents=True)
+    (seed / "diving.md").write_text("9 dives\n")
+    seed_only = SimpleNamespace(checker_spec={"script": "x.py", "seed": "fixtures/seeds/ru_14"})
+    seed_digest = rc._fixture_digest(seed_only, str(holdout))
+    state = holdout / "fixtures" / "state"
+    state.mkdir(parents=True)
+    (state / "weather.json").write_text('{"jobs": []}')
+    both = SimpleNamespace(checker_spec={**seed_only.checker_spec,
+                                         "state": "fixtures/state/weather.json"})
+    before = rc._fixture_digest(both, str(holdout))
+    (state / "weather.json").write_text('{"jobs": [{"key": "w"}]}')
+    assert rc._fixture_digest(both, str(holdout)) != before
+    assert rc._fixture_digest(seed_only, str(holdout)) == seed_digest != before
+
+
+def test_seeding_state_runs_the_helper_in_the_eval_home_and_returns_its_manifest(
+        tmp_path, monkeypatch):
+    (tmp_path / "fixtures" / "state").mkdir(parents=True)
+    (tmp_path / "fixtures" / "state" / "w.json").write_text("{}")
+    seen = {}
+
+    def fake_run(argv, **kwargs):
+        seen.update(argv=argv, env=kwargs["env"], cwd=kwargs["cwd"])
+        return SimpleNamespace(returncode=0, stderr="",
+                               stdout='compiling noise\n{"jobs": {"weather": "weather_1"}}\n')
+
+    monkeypatch.setattr(rc.subprocess, "run", fake_run)
+    manifest = rc._seed_state("/h/x-eval", str(tmp_path), "fixtures/state/w.json")
+    assert manifest == {"jobs": {"weather": "weather_1"}}
+    assert seen["env"]["FERMIX_HOME"] == "/h/x-eval" and seen["argv"][-2] == rc.SEED_STATE_SCRIPT
+    assert seen["argv"][-1] == str(tmp_path / "fixtures" / "state" / "w.json")
+    assert seen["cwd"] == rc.REPO_ROOT
+
+
+def test_a_failed_state_seed_is_a_harness_error_naming_the_helpers_reason(tmp_path, monkeypatch):
+    (tmp_path / "fixtures" / "state").mkdir(parents=True)
+    (tmp_path / "fixtures" / "state" / "w.json").write_text("{}")
+    monkeypatch.setattr(rc.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
+        returncode=1, stdout="", stderr="** (RuntimeError) a job run is still in flight"))
+    with pytest.raises(rc.StateSeedError, match="still in flight"):
+        rc._seed_state("/h/x-eval", str(tmp_path), "fixtures/state/w.json")
+
+    def too_slow(*_a, **_k):
+        raise rc.subprocess.TimeoutExpired(cmd="mix", timeout=1)
+
+    monkeypatch.setattr(rc.subprocess, "run", too_slow)
+    with pytest.raises(rc.StateSeedError, match="did not finish"):
+        rc._seed_state("/h/x-eval", str(tmp_path), "fixtures/state/w.json")
+
+
+def test_a_state_task_seeds_before_its_first_turn_and_hands_the_checker_the_manifest(
+        tmp_path, monkeypatch):
+    home = tmp_path / "fermix-capability-eval"
+    scoped = home / "workspace" / "eval" / "task" / "t0"
+    scoped.mkdir(parents=True)
+    case = _checker_case(checker_spec={"script": "chk.py", "mode": "json", "reset": [],
+                                       "state": "fixtures/state/w.json"})
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(home)))
+    order = []
+    monkeypatch.setattr(rc.checker, "scoped_dir", lambda *_a: str(scoped))
+    monkeypatch.setattr(rc.checker, "seed_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc.checker, "teardown_workspace", lambda *_a: None)
+    monkeypatch.setattr(rc, "_seed_state", lambda home_, root, path: order.append(
+        ("seed", home_, root, path)) or {"jobs": {"weather": "weather_1"}})
+    monkeypatch.setattr(rc, "_capture_turn",
+                        lambda *_a: order.append(("turn",)) or _captured())
+    seen = {}
+
+    def fake_run_checker(_skill_dir, _spec, _scoped, _reply, _home, evidence=None):
+        seen["evidence"] = evidence
+        return rc.checker.CheckerResult(1.0, "ok")
+
+    monkeypatch.setattr(rc.checker, "run_checker", fake_run_checker)
+    rc._standard_trial(cfg, None, SimpleNamespace(name="cap_ru_jobs"), case, "run", 0, True,
+                       "task", None, str(home / "workspace" / "eval"), False, None,
+                       str(tmp_path))
+    assert order == [("seed", str(home), str(tmp_path), "fixtures/state/w.json"), ("turn",)]
+    assert seen["evidence"]["state"] == {"jobs": {"weather": "weather_1"}}
+
+
+def test_a_state_seed_failure_stops_the_sweep_on_the_preconditions_exit(capsys):
+    broken = rc.StateSeedError("a job run is still in flight")
+    broken.locate("cap_ru_jobs", "fix_timeout_in_place", 2)
+    assert rc._abort_state_seed(broken, done=3, total=10) == 3
+    err = capsys.readouterr().err
+    assert "cap_ru_jobs/fix_timeout_in_place (trial 2)" in err and "still in flight" in err
+    assert "Leaderboard NOT written" in err
+
+
 def test_the_tasks_gold_is_part_of_the_task_identity():
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="none", model=None))
     a = _two_turn_case(checker_spec={"script": "suites/capability/checkers/expense_total.py",

@@ -495,6 +495,39 @@ itself. A bare root used to validate and be refused only mid-sweep by the runtim
 SafeRm guard, i.e. after loading, `--estimate`, seeding and possibly earlier
 tasks' spend — and that refusal aborts the run.
 
+### `checker.state`
+
+```yaml
+checker:
+  script: suites/capability/checkers/jobs_state.py
+  mode: json
+  state: fixtures/state/handle_jobs.json   # optional, under the tasks root
+```
+
+The jobs and reminders a task starts from, restored **before every trial** by
+`bin/seed_state.exs` (run with `mix run --no-start` from the umbrella root, beside
+the eval daemon): it waits for any job run in flight, deletes every scheduled job,
+cancels every active reminder, then creates the spec's through `Jobs.Registry`,
+the scheduler's claim/settle calls (for past runs) and `Temporal.Registry`. The spec:
+
+```json
+{"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",
+           "task_prompt": "...", "timeout_seconds": 300, "expires_in_days": 60,
+           "runs": [{"hours_ago": 25, "duration_seconds": 300, "status": "timeout",
+                     "error": "wall-clock timeout after 300000ms"}]}],
+ "reminders": [{"title": "...", "date": "2027-04-16", "time": "09:00:00",
+                "kind": "appointment", "plan": [{"type": "at_time"}]}]}
+```
+
+Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
+means something different on a Friday than on a Monday. The checker reads the
+manifest from the evidence file as `state`: `jobs` (each key's id and seeded
+columns, for "unchanged" and "same id" checks), `reminders` (the seeded ids, so
+only what the trial created is graded), `zone` and `today` (the home's local date
+at seed time, for "tomorrow"). `jobs_state.py` and `reminders_state.py` grade
+against it. A seed failure stops the sweep on exit 3 rather than running a trial
+on what the previous one left behind.
+
 ### `score.single`
 
 ```yaml

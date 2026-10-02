@@ -218,6 +218,19 @@ def test_checker_expect_must_be_a_non_empty_map(tmp_path):
     assert scn.cases[0].checker_spec["expect"] == {"hotel": "C"}
 
 
+def test_checker_state_is_a_relative_json_path(tmp_path):
+    for bad in ("../state/w.json", "/abs/w.json", "fixtures/state/w.yaml", ""):
+        case = {"id": "case_a", "query": "q",
+                "checker": {"script": "checkers/thing.py", "mode": "json", "state": bad}}
+        problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
+        assert any("checker.state" in p for p in problems), (bad, problems)
+    case = {"id": "case_a", "query": "q",
+            "checker": {"script": "checkers/thing.py", "mode": "json",
+                        "state": "fixtures/state/w.json"}}
+    scn = _load_one_scenario(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert scn.cases[0].checker_spec["state"] == "fixtures/state/w.json"
+
+
 def test_cross_session_two_turn_case_is_allowed(tmp_path):
     case = {"id": "case_a", "cross_session": True,
             "turns": [{"query": "remember 42"}, {"query": "what was it?"}],

@@ -86,6 +86,12 @@ HASH_VERSION = leaderboard.CURRENT_HASH_VERSION
 CAP_DIR = os.path.join(SKILL_DIR, "suites", "capability")
 FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
 FIXTURE_HELPER = os.path.join(FIXTURE_PAGES_DIR, "fixture.js")   # served beside private pages
+# `checker.state`: jobs and reminders restored per trial by an Elixir helper run from the
+# umbrella root (the tree the eval daemon was compiled from). The bound covers the
+# helper's own 120 s wait for a job run still in flight, plus a BEAM boot.
+REPO_ROOT = os.path.dirname(SKILL_DIR)
+SEED_STATE_SCRIPT = os.path.join(SKILL_DIR, "bin", "seed_state.exs")
+STATE_SEED_TIMEOUT_S = 240
 DATASET = "fermix-capability"
 # `fixture_state` is this tier's third ground-truth scorer (beside `score:` and
 # `checker:`), never a constraint: the page's own record IS the task outcome, so
@@ -126,17 +132,43 @@ def _fixture_digest(case, tasks_root: str | None = None) -> str:
     re-seeded run compares as the same task set."""
     if not case.checker_spec:
         return ""
-    seed = case.checker_spec.get("seed")
-    if not seed:
+    seed, state = case.checker_spec.get("seed"), case.checker_spec.get("state")
+    if not seed and not state:
         return "no-seed"
-    # raises: an unreadable seed is loud
-    root = checker.resolve_fixture(tasks_root or SKILL_DIR, seed)
     h = hashlib.sha256()
-    for path in sorted(_fixture_files(root)):
-        h.update(os.path.relpath(path, root).encode("utf-8"))
-        with open(path, "rb") as fh:
-            h.update(hashlib.sha256(fh.read()).hexdigest().encode("ascii"))
+    if seed:
+        # raises: an unreadable seed is loud
+        root = checker.resolve_fixture(tasks_root or SKILL_DIR, seed)
+        for path in sorted(_fixture_files(root)):
+            h.update(os.path.relpath(path, root).encode("utf-8"))
+            with open(path, "rb") as fh:
+                h.update(hashlib.sha256(fh.read()).hexdigest().encode("ascii"))
+    if state:
+        with open(checker.resolve_state_spec(tasks_root or SKILL_DIR, state), "rb") as fh:
+            h.update(b"state:" + hashlib.sha256(fh.read()).hexdigest().encode("ascii"))
     return h.hexdigest()[:16]
+
+
+def _seed_state(fermix_home: str, tasks_root: str, state_path: str) -> dict:
+    """Restore a task's jobs and reminders baseline (`checker.state`) in the eval home
+    and return the helper's manifest (the ids it created), which the checker reads from
+    the evidence file. Any failure raises StateSeedError: never a trial on leftovers."""
+    spec = checker.resolve_state_spec(tasks_root, state_path)
+    argv = ["mix", "run", "--no-start", "--no-compile", SEED_STATE_SCRIPT, spec]
+    try:
+        proc = subprocess.run(argv, cwd=REPO_ROOT, env={**os.environ, "FERMIX_HOME": fermix_home},
+                              capture_output=True, text=True, timeout=STATE_SEED_TIMEOUT_S)
+    except subprocess.TimeoutExpired as exc:
+        raise StateSeedError(f"seed_state.exs did not finish within {STATE_SEED_TIMEOUT_S} s "
+                             f"for {state_path}") from exc
+    if proc.returncode != 0:
+        tail = " ".join((proc.stderr or proc.stdout or "").strip().splitlines()[-3:])
+        raise StateSeedError(f"seed_state.exs exited {proc.returncode} for {state_path}: {tail}")
+    lines = (proc.stdout or "").strip().splitlines()
+    try:
+        return json.loads(lines[-1])
+    except (IndexError, ValueError) as exc:
+        raise StateSeedError(f"seed_state.exs printed no manifest for {state_path}") from exc
 
 
 def _fixture_files(root: str) -> list[str]:
@@ -236,6 +268,26 @@ class PricingContractError(RuntimeError):
     the card gives no write rate), and every dollar figure computed after it would be
     silently understated. The sweep stops on the documented invalid-measurement exit
     rather than publishing a row nobody can re-check."""
+
+    def __init__(self, error: str):
+        super().__init__(error)
+        self.error = error
+        self.suite = None
+        self.case_id = None
+        self.trial = None
+
+    def locate(self, suite: str, case_id: str, trial: int) -> None:
+        self.suite = suite
+        self.case_id = case_id
+        self.trial = trial
+
+
+class StateSeedError(RuntimeError):
+    """A task's declared jobs/reminders baseline could not be restored before a trial.
+
+    A precondition, not a measurement: the trial would run against whatever the last
+    trial left behind, so its score would measure leftovers. The sweep stops on the
+    preconditions exit and names the helper's own reason."""
 
     def __init__(self, error: str):
         super().__init__(error)
@@ -846,7 +898,7 @@ def trial_token(s_name: str, case_id: str, run_id: str, i: int) -> str:
 
 
 def _evidence(run_id: str, trial: int, session: str, token: str, ep: _Episode,
-              expect: dict | None = None) -> dict:
+              expect: dict | None = None, state: dict | None = None) -> dict:
     """The per-trial correlation record handed to the checker (checker.run_checker
     writes it outside the workspace, so the agent can neither read nor forge it).
 
@@ -863,6 +915,8 @@ def _evidence(run_id: str, trial: int, session: str, token: str, ep: _Episode,
         # The task's gold (`checker.expect`): here, outside the workspace, is the only
         # place a checker may read it.
         "expect": expect,
+        # What `checker.state` seeded for this trial (job ids, expiry, reminder dates).
+        "state": state,
         "reply": final.view.reply if final.view else "",
         "tool_spans": [span
                        for cap in ep.caps if cap.view is not None
@@ -976,6 +1030,7 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
     token = trial_token(s.name, case.id, run_id, i)
     binding = _bind_page(fixtures, s.name, case, run_id, i)
     scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i) if is_checker else None
+    state = None
     try:
         if is_checker:
             # Restore the declared daemon-state baseline, then a fresh scoring dir under
@@ -983,6 +1038,9 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
             # disposable daemon owns the broader sandbox.
             _reset_declared_state(cfg.daemon.fermix_home, case.checker_spec["reset"])
             checker.seed_workspace(scoped, tasks_root or SKILL_DIR, fixture_path, cleanup_root)
+            if case.checker_spec.get("state"):
+                state = _seed_state(cfg.daemon.fermix_home, tasks_root or SKILL_DIR,
+                                    case.checker_spec["state"])
         label = f"{case.id} t{i}"
         ep = _Episode(caps=[], expects=[])
         for index, turn in enumerate(case.turns):
@@ -996,7 +1054,8 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
             if cap.status != "graded" or cap.view is None:
                 return _fail_trial(case, ep, label)
         if is_checker:
-            return _checker_trial(cfg, case, ep, scoped, run_id, i, session, token, label)
+            return _checker_trial(cfg, case, ep, scoped, run_id, i, session, token, label,
+                                  state)
         # Read AFTER the last turn settled, so everything the conversation made the page
         # do is in the state this trial is scored on.
         succ, _detail = _task_success(
@@ -1021,7 +1080,8 @@ def _transcript(case, ep: _Episode) -> list[dict] | None:
     return rows
 
 
-def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, label):
+def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, label,
+                   state: dict | None = None):
     """Grade one checker task's end-state and fold the checker's verdict into the trial.
 
     A recorded checker error (script missing, boundary error, workspace or home gone,
@@ -1031,7 +1091,8 @@ def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, l
     cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, ep.caps[-1].view.reply,
                              cfg.daemon.fermix_home,
                              evidence=_evidence(run_id, i, session, token, ep,
-                                                expect=case.checker_spec.get("expect")))
+                                                expect=case.checker_spec.get("expect"),
+                                                state=state))
     if cr.error:
         print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
               "failure)", file=sys.stderr)
@@ -1123,6 +1184,9 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
             unavailable.locate(s.name, case.id, i)
             raise
         except PricingContractError as broken:
+            broken.locate(s.name, case.id, i)
+            raise
+        except StateSeedError as broken:
             broken.locate(s.name, case.id, i)
             raise
         results.append(tr)
@@ -1471,6 +1535,19 @@ def _abort_judge_unavailable(unavailable, done: int, total: int) -> int:
           "Leaderboard NOT written — judge infrastructure must not become a "
           "candidate score of zero.", file=sys.stderr)
     return 4
+
+
+def _abort_state_seed(broken, done: int, total: int) -> int:
+    """Stop the sweep when a task's jobs/reminders baseline cannot be restored: every
+    later trial of that task would run on what the previous one left behind."""
+    where = (f"{broken.suite}/{broken.case_id} (trial {broken.trial})"
+             if broken.suite else "a task")
+    print(f"\n⛔ could not restore the declared jobs/reminders state at {where}.",
+          file=sys.stderr)
+    print(f"   {broken.error}", file=sys.stderr)
+    print(f"   {done}/{total} task(s) scored before it. Leaderboard NOT written.",
+          file=sys.stderr)
+    return 3
 
 
 def _abort_pricing_contract(broken, done: int, total: int) -> int:
@@ -1905,6 +1982,8 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=(),
         return _abort_judge_unavailable(unavailable, len(run.outcomes), len(cases))
     except PricingContractError as broken:
         return _abort_pricing_contract(broken, len(run.outcomes), len(cases))
+    except StateSeedError as broken:
+        return _abort_state_seed(broken, len(run.outcomes), len(cases))
     finally:
         if fixtures is not None:
             fixtures.stop()

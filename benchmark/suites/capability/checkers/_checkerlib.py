@@ -142,6 +142,43 @@ def expected(ev):
     return gold
 
 
+def seeded(ev):
+    """What `checker.state` seeded for this trial (job snapshots by key, reminder ids,
+    the home's zone and local date at seed time), or a refusal."""
+    state = ev.get("state")
+    if not isinstance(state, dict) or "today" not in state:
+        refuse("evidence carries no seeded `state` (the case declares no checker.state)")
+    return state
+
+
+def memory_rows(sql, params=()):
+    """Rows from the eval home's memory.db, opened read-only: a checker never writes
+    the store it grades."""
+    import sqlite3
+
+    path = os.path.join(os.environ["FERMIX_EVAL_HOME"], "memory.db")
+    if not os.path.isfile(path):
+        refuse(f"no memory.db in the eval home ({path})")
+    conn = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    try:
+        conn.row_factory = sqlite3.Row
+        return [dict(row) for row in conn.execute(sql, params)]
+    finally:
+        conn.close()
+
+
+def reply_problem(ev, gold):
+    """The shared reply floor for state checkers: `reply_include_any` (one of these
+    terms) and `reply_question` (the reply asks something). None when it holds."""
+    reply = ev.get("reply") or ""
+    terms = gold.get("reply_include_any")
+    if terms and not any(term_present(reply, t) for t in terms):
+        return f"reply names none of {terms}"
+    if gold.get("reply_question") and "?" not in reply:
+        return "reply asks no question"
+    return None
+
+
 def span_text(span):
     """A span's input as searchable text; dict inputs are serialized so a nested
     task string is still matched."""

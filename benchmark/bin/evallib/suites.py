@@ -329,7 +329,7 @@ def _validate_score(score, where: str, problems: list[str]) -> None:
             problems.append(f"{where}: `score.expected` is not a valid regex: {exc}")
 
 
-_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms", "reset", "expect"}
+_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms", "reset", "expect", "state"}
 # Roots a `checker.reset` entry may name. Trial independence needs the daemon
 # state a checker task mutates restored, but a reset list is a recursive delete
 # inside the eval home: only the two subtrees a task legitimately owns are
@@ -406,6 +406,10 @@ def _validate_checker(chk, where: str, problems: list[str]) -> dict:
     if "seed" in chk and not _valid_checker_path(chk["seed"]):
         problems.append(
             f"{where}: `checker.seed` must be a non-empty relative path without traversal")
+    if "state" in chk and not (_valid_checker_path(chk["state"])
+                               and str(chk["state"]).endswith(".json")):
+        problems.append(f"{where}: `checker.state` must be a relative .json path without "
+                        "traversal (the jobs/reminders baseline restored before each trial)")
     if "timeout_ms" in chk:
         t = chk["timeout_ms"]
         if isinstance(t, bool) or not isinstance(t, int) or t <= 0:

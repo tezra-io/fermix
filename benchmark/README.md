@@ -363,6 +363,7 @@ trace that produced it. Four surfaces make that possible:
 | `{token}` | a per-run, per-trial marker the runner interpolates into the query (`TOK-<8 hex>`, derived from suite/case/run/trial). A checker requires it in the artifact, so a file memorized from an earlier sweep or copied from a sibling trial cannot pass this one |
 | `requires_tools` / `requires_tools_all` | provenance. `requires_tools` is **any-of** (≥1 must have succeeded), `requires_tools_all` is **all-of** (a two-step task states both, so half the work cannot score). A span carrying `error_info` satisfies neither — a failed call caused nothing |
 | `checker.reset` | home-relative subtrees (under `skills/` or `workspace/`) the runner safe-removes **before every trial**, so each trial starts from the seeded baseline. Without it a skill left by trial 1 makes trial 2's `skill_create` refuse "already exists" and the run measures leftovers |
+| `checker.state` | a JSON spec of scheduled jobs (with past runs) and reminders the runner restores in the eval home's `memory.db` **before every trial**, through `bin/seed_state.exs`: it deletes every job, cancels every reminder, then creates the spec's through the engine's own registries. The checker reads what was seeded (job snapshots, reminder ids, the home's local date) from the evidence file as `state`. A seed failure stops the sweep on exit 3 |
 
 A root-level entry (`skills/`, `skills/.`) is refused at LOAD time, before any
 spend. At run time the reset path re-asserts the eval-home leaf guard and goes

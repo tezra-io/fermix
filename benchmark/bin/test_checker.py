@@ -1731,6 +1731,125 @@ def test_home_state_file_reads_the_actions_end_state(tmp_path):
     assert r.error is None and r.score == 1.0, r.detail
 
 
+JOBS_STATE = {"script": "suites/capability/checkers/jobs_state.py", "mode": "json"}
+REMINDERS_STATE = {"script": "suites/capability/checkers/reminders_state.py", "mode": "json"}
+WEATHER = {"id": "morning_weather_1", "name": "morning weather", "description": None,
+           "schedule_expr": "0 7 * * *", "timezone": "America/New_York",
+           "task_prompt": "Check the forecast for Port Halden.", "skill_name": None,
+           "timeout_seconds": 300, "expires_at": "2027-06-01T07:00:00Z"}
+
+
+def _memory_db(home, jobs=(), events=()):
+    import sqlite3
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute("CREATE TABLE scheduled_jobs (id, name, description, schedule_expr, timezone, "
+                 "task_prompt, skill_name, timeout_seconds, expires_at)")
+    conn.execute("CREATE TABLE temporal_events (id, title, description, kind, local_time, "
+                 "next_occurrence_on, recurrence_kind, reminder_plan_json, status)")
+    for job in jobs:
+        conn.execute("INSERT INTO scheduled_jobs VALUES (?,?,?,?,?,?,?,?,?)",
+                     [job[k] for k in WEATHER])
+    for event in events:
+        conn.execute("INSERT INTO temporal_events VALUES (?,?,?,?,?,?,?,?,?)", event)
+    conn.commit()
+    conn.close()
+
+
+def _state_run(tmp_path, spec, expect, state, reply="done"):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = {**_ev(reply=reply), "expect": expect, "state": state}
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply=reply, evidence=evidence)
+
+
+JOB_STATE = {"today": "2026-10-02", "zone": "America/New_York", "jobs": {"weather": WEATHER}}
+FIX_GOLD = {"job_count": 1, "jobs": {"weather": {
+    "min": {"timeout_seconds": 301},
+    "unchanged": ["schedule_expr", "expires_at", "task_prompt"]}},
+    "reply_include_any": ["wall-clock", "5 minutes"]}
+
+
+@pytest.mark.parametrize("job, reply, ok", [
+    ({**WEATHER, "timeout_seconds": 900}, "it hit the 5 minutes wall-clock limit", True),
+    (WEATHER, "it hit the wall-clock limit", False),                                # not raised
+    ({**WEATHER, "timeout_seconds": 900, "id": "morning_weather_2"}, "wall-clock", False),  # recreated
+    ({**WEATHER, "timeout_seconds": 900, "expires_at": None}, "wall-clock", False),  # expiry lost
+    ({**WEATHER, "timeout_seconds": 900}, "fixed it", False),                       # no cause named
+])
+def test_jobs_state_grades_an_edit_in_place(tmp_path, job, reply, ok):
+    _memory_db(tmp_path, jobs=[job])
+    r = _state_run(tmp_path, JOBS_STATE, FIX_GOLD, JOB_STATE, reply)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_jobs_state_finds_a_term_left_in_any_job(tmp_path):
+    gold = {"no_job_contains": ["@oldcorp"]}
+    _memory_db(tmp_path, jobs=[{**WEATHER, "task_prompt": "post as @newcorp"},
+                               {**WEATHER, "id": "j2", "description": "from:@oldcorp"}])
+    r = _state_run(tmp_path, JOBS_STATE, gold, JOB_STATE)
+    assert r.score == 0.0 and "j2" in r.detail
+
+
+AT_TIME = '[{"kind":"at_occurrence","rule_id":"at_time"}]'
+LEAD = '[{"kind":"duration_before","rule_id":"r1","seconds":3600},' \
+       '{"kind":"at_occurrence","rule_id":"at_time"}]'
+REM_STATE = {"today": "2026-10-02", "zone": "America/New_York", "jobs": {},
+             "reminders": [{"id": "evt_seed"}]}
+SEEDED = ("evt_seed", "seeded", None, "explicit_reminder", "09:00:00", "2026-10-03", "once",
+          AT_TIME, "active")
+
+
+def test_reminders_state_counts_only_what_the_trial_created(tmp_path):
+    gold = {"count": 1, "each": {"next_on_offset_days": 1, "local_time": "20:00:00",
+                                 "title_include_any": ["harborlane", "renewal"]}}
+    _memory_db(tmp_path, events=[SEEDED, ("e1", "renew harborlane.example cert", None,
+                                          "explicit_reminder", "20:00:00", "2026-10-03",
+                                          "once", AT_TIME, "active")])
+    r = _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("event", [
+    ("e1", "renew harborlane.example cert", None, "explicit_reminder", "08:00:00",
+     "2026-10-03", "once", AT_TIME, "active"),                                   # 8 am
+    ("e1", "renew harborlane.example cert", None, "explicit_reminder", "20:00:00",
+     "2026-10-04", "once", AT_TIME, "active"),                                   # wrong day
+    ("e1", "call someone", None, "explicit_reminder", "20:00:00",
+     "2026-10-03", "once", AT_TIME, "active"),                                   # says nothing
+])
+def test_reminders_state_fails_the_wrong_time_day_or_subject(tmp_path, event):
+    gold = {"count": 1, "each": {"next_on_offset_days": 1, "local_time": "20:00:00",
+                                 "title_include_any": ["harborlane", "renewal"]}}
+    _memory_db(tmp_path, events=[SEEDED, event])
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE).score == 0.0
+
+
+def test_reminders_state_accepts_either_declared_outcome(tmp_path):
+    gold = {"any_of": [
+        {"count": 1, "each": {"local_time_between": ["06:00:00", "11:59:59"]},
+         "reply_include_any": ["9", "9:00"]},
+        {"count": 0, "reply_question": True}]}
+    _memory_db(tmp_path, events=[SEEDED])
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE,
+                      "what time works, 8 or 9?").score == 1.0
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE, "ok").score == 0.0
+
+
+def test_reminders_state_checks_kind_recurrence_and_lead_time(tmp_path):
+    gold = {"count": 1, "each": {"kind": "birthday", "recurrence": "yearly",
+                                 "next_on_offset_days": 1, "lead_time": True}}
+    _memory_db(tmp_path, events=[("b1", "Dana's birthday", None, "birthday", None,
+                                  "2026-10-03", "yearly", LEAD, "active")])
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE).score == 1.0
+
+
+def test_a_state_checker_refuses_a_trial_that_seeded_nothing(tmp_path):
+    _memory_db(tmp_path)
+    r = _state_run(tmp_path, JOBS_STATE, {"job_count": 0}, None)
+    assert r.score == 0.0 and "checker.state" in r.detail
+
+
 def test_the_garage_fixture_skill_writes_the_state_the_checker_reads(tmp_path):
     import shutil
     import subprocess
