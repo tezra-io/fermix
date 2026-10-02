@@ -20,7 +20,7 @@ No public URL: Fermix polls Telegram.
 
 Failures:
 - No owner id → Telegram never starts, nothing answers, the app still says Connected, the boot log says "Refusing to start the telegram adapter" → enter the id, restart.
-- @username or phone number as owner → every message dropped, log `Dispatcher ingress denied telegram message (unauthorized)` → use the numeric id.
+- @username or phone number as owner → every message dropped, log `Dispatcher ingress denied telegram message (unauthorized)`, ending in `sender_id="…"` (the id Fermix read from that message) → use the numeric id: the `sender_id` on the owner's own dropped message is it.
 - Token with a `bot` prefix or truncated → Doctor network check shows `invalid bot token (Telegram API HTTP 404 …)` → paste the exact @BotFather string. Revoked token → HTTP 401.
 - Two pollers on one token (a dev and a prod home, another bot framework) or a webhook left on it by an earlier tool → `409` poll errors, channel degraded → one bot per install; open `https://api.telegram.org/bot<TOKEN>/deleteWebhook` once.
 
@@ -105,7 +105,7 @@ Order: save the values, restart, start the tunnel; then WhatsApp > Configuration
 
 Failures:
 - Temporary token expired → messages arrive, no replies, log `WhatsApp send failed: 401` → system-user token.
-- Owner number with `+` or spaces → every message dropped, log `Dispatcher ingress denied whatsapp message (unauthorized)` → digits only.
+- Owner number with `+` or spaces → every message dropped, log `Dispatcher ingress denied whatsapp message (unauthorized)`, ending in `sender_id="…"` → digits only, exactly as that `sender_id` reads.
 - WhatsApp Business Account ID used as Phone number ID → Doctor network check fails with HTTP 400 → the ID under From.
 - **Verify and save** refused → tunnel down, Fermix not restarted, or the strings differ; log `WhatsApp webhook verification auth failed: :invalid_token`.
 - Wrong app secret → log `WhatsApp webhook auth failed: :invalid_signature`.
