@@ -161,8 +161,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:521`,
-  `:525`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:527`,
+  `:531`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -220,7 +220,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:148`).
+  `turn_runner.ex:149`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1088-1093`, `:1138-1151`).
@@ -245,7 +245,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:177`). The claim happens only after that returns
+  `turn_runner.ex:180`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips

@@ -11,7 +11,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:521, :525); a parked call is a held tool result      *)
+(*    (turn_runner.ex:527, :531); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - the empty-completion path (queue.ex:541-544, :723-732): it delivers *)
@@ -360,7 +360,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:935), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:948), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
@@ -390,7 +390,7 @@ MarkDelivered(m) ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, restarting, dropped, holding,
                    outcomes, shown, history>>
 
-\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:148): persist the reply,
+\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:149): persist the reply,
 \* then synchronous auto-compaction; the claim comes only after it returns.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
@@ -580,7 +580,7 @@ OnlyNamedTurnCancelled ==
 SingleFlight == Cardinality({m \in Msgs : pc[m] \in Alive}) <= 1
 
 \* TurnRunner.commit assumes the conversation is single-flight
-\* (turn_runner.ex:155-157). Read as: no turn commits its reply while
+\* (turn_runner.ex:156-158). Read as: no turn commits its reply while
 \* another turn of the same conversation is starting or running its loop.
 NoOrphanCommitBesideNewTurn ==
     ~(\E a, b \in Msgs :
