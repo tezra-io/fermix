@@ -7,6 +7,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -49,6 +50,8 @@ defmodule FermixCore.Setup.Wizard do
           | {:reasoning_effort, reasoning_effort() | String.t()}
           | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
+          | {:proxy, String.t()}
+          | {:proxy_bypass, [String.t()] | String.t()}
           | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
@@ -787,6 +790,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_signal_config(answers)
       |> put_channel_enabled(answers)
       |> put_acp_config(answers)
+      |> put_network_config(answers)
       |> put_mobile_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
@@ -2459,6 +2463,44 @@ defmodule FermixCore.Setup.Wizard do
 
         Map.put(snapshot, :fermix_channels, Keyword.put(channels, :acp, config))
     end
+  end
+
+  # The outbound proxy (`[fermix_core.network]`, `fermix setup --proxy`). An
+  # absent answer changes nothing, a blank one removes the key, and the merged
+  # section is normalized the way the boot loader normalizes it, so a value the
+  # daemon would refuse is refused here with the same sentence, which never
+  # prints the value.
+  defp put_network_config(snapshot, answers) do
+    proxy = Keyword.get(answers, :proxy)
+    bypass = Keyword.get(answers, :proxy_bypass)
+
+    if is_nil(proxy) and is_nil(bypass) do
+      snapshot
+    else
+      core = Map.get(snapshot, :fermix_core, [])
+
+      network =
+        core
+        |> Keyword.get(:network, [])
+        |> put_network_key(:proxy, proxy)
+        |> put_network_key(:proxy_bypass, normalize_bypass_answer(bypass))
+        |> Egress.normalize()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(core, :network, network))
+    end
+  end
+
+  defp put_network_key(network, _key, nil), do: network
+  defp put_network_key(network, key, ""), do: Keyword.delete(network, key)
+  defp put_network_key(network, key, []), do: Keyword.delete(network, key)
+  defp put_network_key(network, key, value), do: Keyword.put(network, key, value)
+
+  # The flag takes one comma-separated value; the browser form hands a list.
+  defp normalize_bypass_answer(nil), do: nil
+  defp normalize_bypass_answer(entries) when is_list(entries), do: entries
+
+  defp normalize_bypass_answer(value) when is_binary(value) do
+    value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
   end
 
   # The phone channel's four operator settings (M51 management pairing §6). Each

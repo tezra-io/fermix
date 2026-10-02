@@ -56,6 +56,8 @@ defmodule Fermix.CLI.Setup do
     signal_account: :string,
     signal_owner_user_id: :string,
     acp_enabled: :boolean,
+    proxy: :string,
+    proxy_bypass: :string,
     print_state: :boolean,
     reconfigure: :boolean,
     migrate_secrets: :boolean,

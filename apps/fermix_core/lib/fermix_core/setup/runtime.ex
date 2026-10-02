@@ -68,6 +68,8 @@ defmodule FermixCore.Setup.Runtime do
                    :signal_account,
                    :signal_owner_user_id,
                    :acp_enabled,
+                   :proxy,
+                   :proxy_bypass,
                    :secret_store
                  ]
 

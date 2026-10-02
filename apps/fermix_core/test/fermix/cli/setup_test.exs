@@ -119,6 +119,26 @@ defmodule Fermix.CLI.SetupTest do
     assert Keyword.get(opts, :openai_api_key) == "sk-test"
   end
 
+  # A server that reaches the internet only through a proxy has to say so before
+  # setup can check anything; the flags land as answers like every other.
+  test "--proxy and --proxy-bypass are recognized answers that route to the terminal runtime" do
+    parent = self()
+
+    assert 0 =
+             Setup.run(
+               ["--proxy", "http://proxy.corp.test:3128", "--proxy-bypass", "a.test,.corp.test"],
+               standalone?: fn -> true end,
+               display?: fn -> true end,
+               setup_ready?: fn -> false end,
+               runtime: runtime(parent),
+               web_launcher: unexpected_web_launcher(parent)
+             )
+
+    assert_receive {:runtime, opts}
+    assert Keyword.get(opts, :proxy) == "http://proxy.corp.test:3128"
+    assert Keyword.get(opts, :proxy_bypass) == "a.test,.corp.test"
+  end
+
   test "--acp-enabled is a recognized answer that routes to the terminal runtime" do
     parent = self()
 

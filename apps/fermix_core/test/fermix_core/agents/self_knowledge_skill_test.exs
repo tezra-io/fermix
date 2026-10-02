@@ -83,7 +83,7 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert reference =~ required, "config self-knowledge does not mention #{required}"
     end
 
-    refute reference =~ "--proxy"
+    assert reference =~ "fermix setup --proxy"
   end
 
   test "documents the mobile companion setup and its v1 boundaries" do

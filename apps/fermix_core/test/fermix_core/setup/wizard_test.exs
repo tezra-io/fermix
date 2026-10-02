@@ -453,6 +453,64 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.fetch!(persisted.fermix_channels, :acp) == [enabled: false]
   end
 
+  # The outbound proxy (`[fermix_core.network]`): an answer sets it, a blank
+  # answer removes it, an absent answer leaves it, and a value the section would
+  # refuse at boot is refused here, with the same sentence and without the value.
+  test "save_answers persists, keeps and clears the outbound proxy" do
+    network = Application.fetch_env(:fermix_core, :network)
+    on_exit(fn -> restore_env(:fermix_core, :network, network) end)
+    Application.put_env(:fermix_core, :network, [])
+    start_memory_repo!()
+
+    assert {:ok, report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               openai_api_key: "sk-test-123",
+               proxy: "http://proxy.corp.test:3128",
+               proxy_bypass: "ollama.internal, .corp.test"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network) == [
+             proxy: "http://proxy.corp.test:3128",
+             proxy_bypass: ["ollama.internal", ".corp.test"]
+           ]
+
+    # An unrelated save leaves the section alone.
+    assert {:ok, report} = Wizard.save_answers(report.wizard, default_model: "gpt-6-astra")
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network)[:proxy] ==
+             "http://proxy.corp.test:3128"
+
+    # A blank answer removes the proxy; the bypass list stays, inert.
+    assert {:ok, _report} = Wizard.save_answers(report.wizard, proxy: "")
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network) == [
+             proxy_bypass: ["ollama.internal", ".corp.test"]
+           ]
+  end
+
+  test "save_answers refuses a proxy the daemon could not use, without printing it" do
+    network = Application.fetch_env(:fermix_core, :network)
+    on_exit(fn -> restore_env(:fermix_core, :network, network) end)
+    Application.put_env(:fermix_core, :network, [])
+    start_memory_repo!()
+
+    error =
+      assert_raise ArgumentError, fn ->
+        Wizard.report().wizard
+        |> Wizard.save_answers(proxy: "http://user:hunter2@proxy.corp.test:3128")
+      end
+
+    assert error.message =~ "[fermix_core.network] proxy"
+    refute error.message =~ "hunter2"
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.get(persisted.fermix_core, :network, []) == []
+  end
+
   test "save_answers persists config, creates workspace directories, and updates readiness" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup")
 

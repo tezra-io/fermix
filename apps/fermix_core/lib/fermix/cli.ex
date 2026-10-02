@@ -110,6 +110,7 @@ defmodule Fermix.CLI do
                    [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--acp-enabled|--no-acp-enabled]
+                   [--proxy http://HOST:PORT] [--proxy-bypass HOST,.SUFFIX,...]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status

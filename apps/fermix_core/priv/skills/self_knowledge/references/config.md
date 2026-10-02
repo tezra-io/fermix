@@ -39,7 +39,7 @@
 | `[fermix_core.tools.generate_image]` | `backend` (`openai`, `xai`, `google`, `openai_codex`), `model`, `size`, `google_api_key`; nothing else |
 | `[fermix_core.browser]` | `allowed_hosts`, `default_profile` (how tasks run), `max_tabs`, `launch_app` (may the engine open the Fermix app for its browser pane; on by default only inside the app) |
 | `[fermix_core.compaction]` | `enabled`, `threshold`, `reasoning_effort` |
-| `[fermix_core.network]` | `proxy` (`http://host:port`), `proxy_bypass` (list of hosts or `.suffix` entries); nothing else, see Outbound proxy below |
+| `[fermix_core.network]` | `proxy` (`http://host:port`), `proxy_bypass` (list of hosts or `.suffix` entries); nothing else, see Outbound proxy below. Set with `fermix setup --proxy` on Linux |
 | `[fermix_core.transcription]` | `backend` (`openai`, `xai`, `deepgram`, `local`), `model`, `max_file_mb`, `openai_api_key`/`xai_api_key` (override the chat key), `deepgram_api_key` (required for Deepgram), all in the keychain; `local_offered` (puts the unshipped on-device choice back in setup) |
 | `[fermix_core.meetings]` | `enabled` (off by default), `bot_name`, `announce`, `announce_message`, `transcription_backend`, `retain_audio`, the Zoom RTMS values `zoom_account_id`, `zoom_client_id`, `zoom_client_secret` (kept in the keychain) and `zoom_ws_subscription_id` |
 | `[fermix_core.harness]` | `enabled`, `approved`, `default_vendor`, `cloud_enabled` |
@@ -58,7 +58,7 @@
 
 ## Outbound proxy
 
-For a host that may only reach the internet through an HTTP proxy. There is no Mac Settings pane and no setup flag for it yet: it is set in `config.toml`, and it is read when Fermix starts, so restart after changing it (`fermix doctor` shows the setting in the file, not what a running daemon started on).
+For a host that may only reach the internet through an HTTP proxy. On Linux and dev installs, `fermix setup --proxy http://host:port [--proxy-bypass host,.suffix]` writes it (`--proxy ""` removes it); it can also be set in `config.toml`. There is no Mac Settings pane for it yet. It is read when Fermix starts, so restart after changing it (`fermix doctor` shows the setting in the file, not what a running daemon started on).
 
 ```toml
 [fermix_core.network]
