@@ -1764,5 +1764,51 @@ def test_resending_or_denying_a_real_send_fails(tmp_path, sends, reply):
     assert _outbox(tmp_path, sends, reply).score == 0.0
 
 
+F1 = {"script": "suites/capability/checkers/f1_upcoming_race.py", "mode": "json"}
+
+
+def _calendar(tmp_path, races_by_year):
+    """Ergast-format season files served as file:// URLs, so no test touches the web."""
+    for year, races in races_by_year.items():
+        (tmp_path / f"{year}.json").write_text(json.dumps(
+            {"MRData": {"RaceTable": {"Races": races}}}))
+    return (tmp_path / "{year}.json").as_uri().replace("%7B", "{").replace("%7D", "}")
+
+
+def _race(name, date, locality, country, circuit):
+    return {"raceName": name, "date": date,
+            "Circuit": {"circuitName": circuit,
+                        "Location": {"locality": locality, "country": country}}}
+
+
+def test_f1_checker_grades_the_second_upcoming_race_from_a_calendar_read_at_grade_time(tmp_path):
+    year = datetime.date.today().year
+    past = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+    soon = (datetime.date.today() + datetime.timedelta(days=10)).isoformat()
+    later = (datetime.date.today() + datetime.timedelta(days=40)).isoformat()
+    url = _calendar(tmp_path, {year: [
+        _race("Past GP", past, "Montreal", "Canada", "Circuit Gilles Villeneuve"),
+        _race("Soon GP", soon, "Austin", "USA", "Circuit of the Americas"),
+        _race("Monaco GP", soon, "Monaco", "Monaco", "Circuit de Monaco"),
+        _race("Later GP", later, "Mexico City", "Mexico", "Autodromo Hermanos Rodriguez")],
+        year + 1: []})
+    gold = {"calendar_url": url, "countries": ["USA", "Canada", "Mexico"], "skip": 1}
+    d = datetime.date.fromisoformat(later)
+    good = f"The one after is in Mexico City on {d.strftime('%B')} {d.day}."
+    r = _gold_run(tmp_path, F1, gold, good)
+    assert r.error is None and r.score == 1.0, r.detail
+    s = datetime.date.fromisoformat(soon)
+    assert _gold_run(tmp_path, F1, gold,
+                     f"Austin on {s.strftime('%B')} {s.day}.").score == 0.0   # the next one
+    assert _gold_run(tmp_path, F1, gold, "Mexico City, sometime soon.").score == 0.0
+
+
+def test_an_unreachable_calendar_is_an_evaluator_failure_not_a_zero(tmp_path):
+    gold = {"calendar_url": (tmp_path / "missing-{year}.json").as_uri().replace(
+        "%7B", "{").replace("%7D", "}"), "countries": ["USA"], "skip": 0}
+    r = _gold_run(tmp_path, F1, gold, "Austin")
+    assert r.error is not None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))
