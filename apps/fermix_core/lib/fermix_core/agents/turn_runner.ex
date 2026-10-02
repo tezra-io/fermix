@@ -172,8 +172,10 @@ defmodule FermixCore.Agents.TurnRunner do
     # A Live voice delegation never dispatches a memory review (M41 §5.2): a
     # spoken fragment is not a durable fact about the owner, and an ephemeral
     # call has no history worth mining. `MainAgent` freezes the decision into
-    # the snapshot, so a mid-call config change cannot move it.
-    if Map.get(turn_state, :memory_review?, true), do: maybe_start_memory_review(msg, turn_state)
+    # the snapshot, so a mid-call config change cannot move it. Neither does a
+    # guest's turn: a review is the owner's memory being written, and it waits
+    # for a turn the owner took.
+    if memory_review?(msg, turn_state), do: maybe_start_memory_review(msg, turn_state)
 
     result =
       maybe_auto_compact(
@@ -949,8 +951,20 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: Map.get(msg, :metadata)
+      metadata: user_message_metadata(msg)
     )
+  end
+
+  # What a guest says is marked as theirs where it is stored, so the memory
+  # review — which reads a conversation's user messages — never distils it into
+  # the owner's memory, in a shared chat included.
+  defp user_message_metadata(msg) do
+    metadata = Map.get(msg, :metadata)
+
+    case profile_trust(Map.get(msg, :source_trust)) do
+      :guest -> Map.put(metadata || %{}, :guest, true)
+      :operator -> metadata
+    end
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
@@ -1492,6 +1506,11 @@ defmodule FermixCore.Agents.TurnRunner do
       total +
         byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
     end)
+  end
+
+  defp memory_review?(msg, turn_state) do
+    Map.get(turn_state, :memory_review?, true) and
+      profile_trust(Map.get(msg, :source_trust)) == :operator
   end
 
   defp maybe_start_memory_review(msg, state) do

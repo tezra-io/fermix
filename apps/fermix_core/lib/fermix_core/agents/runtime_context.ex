@@ -44,6 +44,7 @@ defmodule FermixCore.Agents.RuntimeContext do
           base_messages: [message()],
           stable_messages: [message()],
           volatile_messages: [message()],
+          volatile_names: [atom()],
           base_accounting: [Accounting.entry()],
           available_skills: [AgentDefinition.t()],
           operator_profile: profile(),
@@ -61,7 +62,8 @@ defmodule FermixCore.Agents.RuntimeContext do
     :available_skills,
     :operator_profile,
     :guest_profile,
-    :harness_free_profiles
+    :harness_free_profiles,
+    volatile_names: []
   ]
 
   @doc """
@@ -94,6 +96,7 @@ defmodule FermixCore.Agents.RuntimeContext do
          base_messages: split.stable ++ split.volatile,
          stable_messages: split.stable,
          volatile_messages: split.volatile,
+         volatile_names: for(%{tier: :volatile, name: name} <- base.parts, do: name),
          base_accounting: base.accounting,
          available_skills: available_skills,
          operator_profile: operator_profile,
@@ -202,26 +205,39 @@ defmodule FermixCore.Agents.RuntimeContext do
   (MILESTONE_41_OPENAI_LIVE_VOICE.md §6.3) — it must never mutate the shared
   prompt a text conversation replays, so it is never cached into a profile.
   Empty (the default) leaves every existing caller byte-identical.
+
+  The volatile tier is the owner's memory (USER.md and MEMORY.md). A turn on
+  the guest profile never carries it: the person being answered is not the
+  person the memory describes.
   """
   @spec messages_for(t(), profile(), [map()], message(), [message()]) :: [message()]
   def messages_for(
         %__MODULE__{} = ctx,
-        %{runtime_message: runtime_message},
+        %{runtime_message: runtime_message} = profile,
         history,
         user_message,
         extra_system \\ []
       )
       when is_list(history) and is_map(user_message) and is_list(extra_system) do
     ctx.stable_messages ++
-      [runtime_message] ++ extra_system ++ ctx.volatile_messages ++ history ++ [user_message]
+      [runtime_message] ++
+      extra_system ++ memory_messages(ctx, profile) ++ history ++ [user_message]
   end
+
+  defp memory_messages(_ctx, %{trust: :guest}), do: []
+  defp memory_messages(%__MODULE__{volatile_messages: volatile}, _profile), do: volatile
 
   @doc """
   Compose the accounting list reported by `[:fermix, :agent, :prompt_context]`
   telemetry: base accounting + the runtime section accounting for the
-  profile used on this turn.
+  profile used on this turn. A guest turn is not sent the memory parts
+  (`messages_for/5`), so it does not account for them.
   """
   @spec accounting_for(t(), profile()) :: [Accounting.entry()]
+  def accounting_for(%__MODULE__{} = ctx, %{trust: :guest, runtime_accounting: runtime}) do
+    Enum.reject(ctx.base_accounting, &(&1.name in ctx.volatile_names)) ++ [runtime]
+  end
+
   def accounting_for(%__MODULE__{base_accounting: base}, %{runtime_accounting: runtime}) do
     base ++ [runtime]
   end

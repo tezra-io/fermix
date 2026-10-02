@@ -4918,6 +4918,11 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # The memory review's input: what the owner said. A message a guest sent
+  # carries `"guest": true` in its metadata (`ConversationStore`) and is never
+  # selected, so nothing a guest says is distilled into the owner's memory. The
+  # filter is in the query, not after it, so a run of guest messages can never
+  # fill the page and stall the review cursor behind them.
   defp fetch_user_messages_after(conn, selector, last_id, limit) do
     review_selector = normalize_memory_review_selector(selector)
 
@@ -4934,6 +4939,11 @@ defmodule FermixCore.Memory.Repo do
                AND thread_scope = ?
                AND role = 'user'
                AND id > ?
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.guest') END,
+                     0
+                   ) != 1
              ORDER BY id ASC
              LIMIT ?
              """,

@@ -21,6 +21,13 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     def start_background(_opts), do: :ok
   end
 
+  defmodule RecordingReviewer do
+    def start_background(opts) do
+      send(self(), {:memory_review_dispatched, Keyword.fetch!(opts, :conversation_key)})
+      :ok
+    end
+  end
+
   defmodule MainAgentStub do
     use GenServer
 
@@ -670,6 +677,63 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  describe "commit/4 — a memory review waits for a turn the owner took" do
+    test "an owner turn dispatches the review" do
+      assert {key, _result} = commit_for_trust(:operator)
+      assert_received {:memory_review_dispatched, ^key}
+    end
+
+    test "a guest turn does not" do
+      commit_for_trust(:guest)
+      refute_received {:memory_review_dispatched, _key}
+    end
+
+    test "a turn with no trust set is least privilege here too" do
+      commit_for_trust(nil)
+      refute_received {:memory_review_dispatched, _key}
+    end
+
+    defp commit_for_trust(trust) do
+      store_name = :"turn_runner_review_store_#{System.unique_integer([:positive])}"
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "review_dispatch_#{System.unique_integer([:positive])}"
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "hello",
+        source_trust: trust
+      }
+
+      turn_state = %{
+        adapter: SummaryAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        provider: nil,
+        adapter_overrides: [],
+        conversation_store: store,
+        memory_agent_id: "main",
+        memory_owner_id: "default",
+        memory_reviewer: RecordingReviewer,
+        memory_repo: nil,
+        task_supervisor: self(),
+        main_agent_server: nil,
+        review_interval_hours: 24,
+        review_max_messages: 50,
+        review_input_token_budget: 4_000,
+        review_failure_backoff_ms: 60_000,
+        compaction_failures: %{}
+      }
+
+      {{"telegram", chat_id, :root}, TurnRunner.commit(msg, turn_state, "assistant reply", 10)}
+    end
+  end
+
   # MILESTONE_32 §13.6 / inv. 20 — a reply the model generated from an UNMASKED
   # tainted replay is itself activity-derived and must inherit the stamp. Before
   # this, `/history off` on an all-local chain left the earlier tainted turns
@@ -1151,6 +1215,44 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       history = ConversationStore.get_history({"telegram", "failed_turn", :root}, server: store)
       assert Enum.map(history, & &1.role) == ["user"]
       assert List.first(history).content == "keep this failed request"
+    end
+
+    test "a guest's message is stored as the guest's; the owner's is not marked" do
+      for {trust, marked?} <- [guest: true, operator: false] do
+        registry_name = :"turn_runner_guest_registry_#{System.unique_integer([:positive])}"
+        store_name = :"turn_runner_guest_store_#{System.unique_integer([:positive])}"
+
+        start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+
+        store =
+          start_supervised!(
+            {ConversationStore, name: store_name, max_messages: :infinity, repo: nil},
+            id: store_name
+          )
+
+        msg = %{
+          channel: "telegram",
+          chat_id: "guest_marker_#{trust}",
+          sender: "someone",
+          content: "I am vegetarian",
+          source_trust: trust
+        }
+
+        turn_state =
+          turn_state(
+            adapter: FailingAdapter,
+            adapter_opts: [model: "mock-model"],
+            capability_registry: registry_name,
+            conversation_store: store
+          )
+
+        assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+        assert [stored] =
+                 ConversationStore.get_history({"telegram", msg.chat_id, :root}, server: store)
+
+        assert Map.get(stored, :guest, false) == marked?
+      end
     end
 
     # The M29/Buzz duplicate-reply incident was diagnosed blind: the FAILED turn

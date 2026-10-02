@@ -290,6 +290,7 @@ defmodule FermixCore.Memory.ConversationStore do
       timestamp: DateTime.utc_now()
     }
     |> maybe_mark_tainted(Keyword.get(opts, :metadata))
+    |> maybe_mark_guest(Keyword.get(opts, :metadata))
   end
 
   # Carry the Computer History taint marker on the in-memory hot path so a
@@ -300,6 +301,13 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :history_tainted, true)
 
   defp maybe_mark_tainted(message, _metadata), do: message
+
+  # A guest's message keeps its marker for the same reason: compaction replaces
+  # the durable history from these maps, and a retained guest message that lost
+  # the marker would be re-inserted as if the owner had said it — and then read
+  # by the memory review (`Repo.get_user_messages_after/4`).
+  defp maybe_mark_guest(message, %{guest: true}), do: Map.put(message, :guest, true)
+  defp maybe_mark_guest(message, _metadata), do: message
 
   defp normalize_history_message(message) when is_map(message) do
     role = Map.get(message, :role, Map.get(message, "role"))
@@ -316,6 +324,7 @@ defmodule FermixCore.Memory.ConversationStore do
       timestamp: normalize_timestamp(Map.get(message, :timestamp, Map.get(message, "timestamp")))
     }
     |> carry_taint(message)
+    |> carry_guest(message)
   end
 
   # The Computer History taint marker (MILESTONE_32 §13.6) must survive a
@@ -325,6 +334,14 @@ defmodule FermixCore.Memory.ConversationStore do
   defp carry_taint(normalized, message) do
     if Map.get(message, :history_tainted, Map.get(message, "history_tainted")) == true do
       Map.put(normalized, :history_tainted, true)
+    else
+      normalized
+    end
+  end
+
+  defp carry_guest(normalized, message) do
+    if Map.get(message, :guest, Map.get(message, "guest")) == true do
+      Map.put(normalized, :guest, true)
     else
       normalized
     end
@@ -455,13 +472,16 @@ defmodule FermixCore.Memory.ConversationStore do
     end
   end
 
-  # Per-message metadata on the durable replace: a tainted retained message
-  # persists its marker (the backfill side re-derives it from the row's
-  # `"history_tainted"` metadata); untainted messages keep the caller's opts.
-  defp replace_message_opts(opts, %{history_tainted: true}),
-    do: Keyword.put(opts, :metadata, %{history_tainted: true})
-
-  defp replace_message_opts(opts, _message), do: opts
+  # Per-message metadata on the durable replace: a retained message persists
+  # the markers it carries — Computer History taint, guest authorship — and the
+  # backfill side re-derives them from the row's metadata; an unmarked message
+  # keeps the caller's opts.
+  defp replace_message_opts(opts, message) do
+    case Map.take(message, [:history_tainted, :guest]) do
+      markers when map_size(markers) == 0 -> opts
+      markers -> Keyword.put(opts, :metadata, markers)
+    end
+  end
 
   defp history_operation_context(state, key, repo, operation, opts, attrs, versions) do
     %{
@@ -778,6 +798,7 @@ defmodule FermixCore.Memory.ConversationStore do
       timestamp: row.created_at
     }
     |> maybe_mark_tainted_from_row(row)
+    |> maybe_mark_guest_from_row(row)
   end
 
   # The repo backfill path: the row's decoded metadata carries string keys, so
@@ -787,6 +808,11 @@ defmodule FermixCore.Memory.ConversationStore do
     do: Map.put(message, :history_tainted, true)
 
   defp maybe_mark_tainted_from_row(message, _row), do: message
+
+  defp maybe_mark_guest_from_row(message, %{metadata: %{"guest" => true}}),
+    do: Map.put(message, :guest, true)
+
+  defp maybe_mark_guest_from_row(message, _row), do: message
 
   defp elapsed_us(start) do
     System.monotonic_time()

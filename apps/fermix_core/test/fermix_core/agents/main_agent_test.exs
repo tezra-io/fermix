@@ -1227,7 +1227,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       send(review_pid, :continue_review)
     end
 
-    test "passes source trust through to background review", %{
+    test "a guest's turn starts no review; the owner's passes its trust through", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -1250,16 +1250,25 @@ defmodule FermixCore.Agents.MainAgentTest do
           id: agent_name
         )
 
-      MockProvider.set_responses([mock_response("Shared chat reply")])
+      MockProvider.set_responses([
+        mock_response("Shared chat reply"),
+        mock_response("Owner reply")
+      ])
 
+      # A review writes the owner's memory, so it waits for a turn the owner took.
       run_turn(
         make_message("Remember this from the group chat", source_trust: :guest),
         agent_name
       )
 
       assert_receive {:reply, "Shared chat reply"}, 5_000
+      refute_receive {:memory_review_started, _opts, _pid}, 200
+
+      run_turn(make_message("Remember this for me", source_trust: :operator), agent_name)
+
+      assert_receive {:reply, "Owner reply"}, 5_000
       assert_receive {:memory_review_started, review_opts, _pid}, 5_000
-      assert Keyword.get(review_opts, :source_trust) == :guest
+      assert Keyword.get(review_opts, :source_trust) == :operator
     end
 
     test "keeps reply handling successful when background review fails to start", %{

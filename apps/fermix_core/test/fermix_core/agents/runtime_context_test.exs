@@ -237,6 +237,64 @@ defmodule FermixCore.Agents.RuntimeContextTest do
              length(ctx.stable_messages) + length(ctx.volatile_messages)
   end
 
+  test "a guest turn is never sent the owner's memory", %{
+    agent_id: agent_id,
+    registry: registry
+  } do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_memory(agent_id, "USER.md", "## Identity\n- Lives in Lisbon")
+    write_memory(agent_id, "MEMORY.md", "## Working Rules\n- Show drafts before sending")
+    :ok = CapabilityRegistry.register(registry, cap("read_tool"))
+
+    {:ok, ctx} =
+      RuntimeContext.build(
+        agent_id: agent_id,
+        available_skills: [],
+        capability_registry: registry
+      )
+
+    history = [%{role: "user", content: "earlier"}, %{role: "assistant", content: "reply"}]
+    user_message = %{role: "user", content: "who am I talking to?"}
+
+    guest = RuntimeContext.messages_for(ctx, ctx.guest_profile, history, user_message)
+    guest_text = Enum.map_join(guest, "\n", & &1.content)
+
+    refute guest_text =~ "<memory-context>"
+    refute guest_text =~ "Lives in Lisbon"
+    refute guest_text =~ "Show drafts before sending"
+
+    # Everything else a guest turn is built from is still there, in order.
+    assert guest ==
+             ctx.stable_messages ++
+               [ctx.guest_profile.runtime_message] ++ history ++ [user_message]
+
+    # The harness-free guest variant is the same trust, so the same rule.
+    harness_free = RuntimeContext.profile_for(ctx, :guest, registry, harness_tools?: false)
+
+    harness_free_text =
+      ctx
+      |> RuntimeContext.messages_for(harness_free, [], user_message)
+      |> Enum.map_join("\n", & &1.content)
+
+    refute harness_free_text =~ "Lives in Lisbon"
+
+    # The owner's own turn is unchanged.
+    operator = RuntimeContext.messages_for(ctx, ctx.operator_profile, history, user_message)
+    operator_text = Enum.map_join(operator, "\n", & &1.content)
+    assert operator_text =~ "Lives in Lisbon"
+    assert operator_text =~ "Show drafts before sending"
+
+    # Accounting reports what was sent: no memory parts on the guest turn.
+    guest_names = ctx |> RuntimeContext.accounting_for(ctx.guest_profile) |> Enum.map(& &1.name)
+
+    operator_names =
+      ctx |> RuntimeContext.accounting_for(ctx.operator_profile) |> Enum.map(& &1.name)
+
+    assert :user in operator_names and :memory in operator_names
+    refute :user in guest_names or :memory in guest_names
+    assert List.last(guest_names) == :runtime
+  end
+
   test "build_profile/4 defers plugin schemas from the wire but keeps them dispatchable", %{
     agent_id: agent_id,
     registry: registry
