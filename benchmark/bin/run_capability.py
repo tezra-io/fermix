@@ -149,6 +149,17 @@ def _fixture_digest(case, tasks_root: str | None = None) -> str:
     return h.hexdigest()[:16]
 
 
+def _helper_reason(output: str) -> str:
+    """An Elixir crash prints its reason (`** (Error) ...` and the value) first and the
+    stack after it, so the reason is the `** (` line through the first frame, not the
+    output's tail."""
+    lines = [line.strip() for line in output.splitlines() if line.strip()]
+    start = next((i for i, line in enumerate(lines) if line.startswith("** (")), None)
+    if start is None:
+        return " ".join(lines[-3:])
+    return " ".join(lines[start:start + 3])
+
+
 def _seed_state(fermix_home: str, tasks_root: str, state_path: str) -> dict:
     """Restore a task's jobs and reminders baseline (`checker.state`) in the eval home
     and return the helper's manifest (the ids it created), which the checker reads from
@@ -162,8 +173,8 @@ def _seed_state(fermix_home: str, tasks_root: str, state_path: str) -> dict:
         raise StateSeedError(f"seed_state.exs did not finish within {STATE_SEED_TIMEOUT_S} s "
                              f"for {state_path}") from exc
     if proc.returncode != 0:
-        tail = " ".join((proc.stderr or proc.stdout or "").strip().splitlines()[-3:])
-        raise StateSeedError(f"seed_state.exs exited {proc.returncode} for {state_path}: {tail}")
+        reason = _helper_reason(proc.stderr or proc.stdout or "")
+        raise StateSeedError(f"seed_state.exs exited {proc.returncode} for {state_path}: {reason}")
     lines = (proc.stdout or "").strip().splitlines()
     try:
         return json.loads(lines[-1])

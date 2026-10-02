@@ -1605,9 +1605,14 @@ def test_seeding_state_runs_the_helper_in_the_eval_home_and_returns_its_manifest
 def test_a_failed_state_seed_is_a_harness_error_naming_the_helpers_reason(tmp_path, monkeypatch):
     (tmp_path / "fixtures" / "state").mkdir(parents=True)
     (tmp_path / "fixtures" / "state" / "w.json").write_text("{}")
+    crash = ("Compiling 1 file\n** (MatchError) no match of right hand side value:\n\n"
+             "    {:error, :job_running}\n\n"
+             "    benchmark/bin/seed_state.exs:120: SeedState.clear/1\n"
+             "    (elixir 1.19.5) lib/enum.ex:966: Enum.each/2\n"
+             "    (elixir 1.19.5) lib/kernel/cli.ex:136: anonymous fn/3\n")
     monkeypatch.setattr(rc.subprocess, "run", lambda *_a, **_k: SimpleNamespace(
-        returncode=1, stdout="", stderr="** (RuntimeError) a job run is still in flight"))
-    with pytest.raises(rc.StateSeedError, match="still in flight"):
+        returncode=1, stdout="", stderr=crash))
+    with pytest.raises(rc.StateSeedError, match=r"MatchError.*job_running.*seed_state\.exs:120"):
         rc._seed_state("/h/x-eval", str(tmp_path), "fixtures/state/w.json")
 
     def too_slow(*_a, **_k):
@@ -1650,10 +1655,10 @@ def test_a_state_task_seeds_before_its_first_turn_and_hands_the_checker_the_mani
 
 def test_a_state_seed_failure_stops_the_sweep_on_the_preconditions_exit(capsys):
     broken = rc.StateSeedError("a job run is still in flight")
-    broken.locate("cap_ru_jobs", "fix_timeout_in_place", 2)
+    broken.locate("cap_ru_jobs", "rename_sweep", 2)
     assert rc._abort_state_seed(broken, done=3, total=10) == 3
     err = capsys.readouterr().err
-    assert "cap_ru_jobs/fix_timeout_in_place (trial 2)" in err and "still in flight" in err
+    assert "cap_ru_jobs/rename_sweep (trial 2)" in err and "still in flight" in err
     assert "Leaderboard NOT written" in err
 
 

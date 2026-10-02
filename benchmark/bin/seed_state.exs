@@ -3,8 +3,8 @@
 #   FERMIX_HOME=<eval home> mix run --no-start --no-compile benchmark/bin/seed_state.exs <spec.json>
 #
 # Restores the task's baseline in the disposable eval home's memory.db before a
-# trial: waits for any job run still in flight, deletes every scheduled job,
-# cancels every active reminder, then creates the spec's jobs (with their past
+# trial: once no job run is in flight, removes every scheduled job and cancels
+# every active reminder, then creates the spec's jobs (with their past
 # runs) and reminders through the same registry and claim/settle calls the
 # daemon uses, so validation, schedule parsing and reminder planning are the
 # product's own. Run history is back-dated relative to now; reminders take
@@ -16,23 +16,27 @@
 
 defmodule SeedState do
   alias FermixCore.Jobs.Registry, as: Jobs
+  alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Temporal.Registry, as: Temporal
 
-  @idle_wait_ms 120_000
-  @idle_poll_ms 1_000
+  @reset_wait_ms 120_000
+  @reset_poll_ms 1_000
   @max_event_pages 50
+  # The refusals a reset outlasts: a run in flight (or claimed between the check and the
+  # delete) and a reminder mid-delivery. Anything else is not transient and raises.
+  @transient [:run_in_flight, :job_running, :delivery_in_progress]
 
   def main([spec_path]) do
-    eval_home!()
+    home = eval_home!()
     spec = spec_path |> File.read!() |> Jason.decode!()
     config = home_config!()
+    same_database!(home)
     {:ok, _} = Application.ensure_all_started(:exqlite)
     {:ok, _} = Repo.start_link([])
     now = DateTime.utc_now()
-    wait_for_idle_runs!(System.monotonic_time(:millisecond) + @idle_wait_ms)
-    clear!(now)
+    reset!(now, System.monotonic_time(:millisecond) + @reset_wait_ms)
     jobs = Map.new(Map.get(spec, "jobs", []), &seed_job!(&1, now, config))
     reminders = Enum.map(Map.get(spec, "reminders", []), &seed_reminder!(&1, now, config))
     # `today` is the home's local date at seed time: what a checker grading "tomorrow"
@@ -67,6 +71,18 @@ defmodule SeedState do
     home
   end
 
+  # The store the checkers read is <home>/memory.db; an inherited override
+  # (FERMIX_MEMORY_DB_PATH, MIX_ENV=test) would seed some other database and the
+  # trial would run on leftovers while the manifest looked fine.
+  defp same_database!(home) do
+    opened = Path.expand(MemoryConfig.database_path())
+    wanted = Path.expand(Path.join(home, "memory.db"))
+
+    unless opened == wanted do
+      raise "the helper would open #{opened}, not the eval home's #{wanted}"
+    end
+  end
+
   # The home's own config.toml through the engine's loader, so the timezone and the
   # delivery target are read exactly as the daemon read them at boot.
   defp home_config! do
@@ -84,39 +100,66 @@ defmodule SeedState do
 
   # --- reset -------------------------------------------------------------------
 
-  defp wait_for_idle_runs!(deadline) do
-    {:ok, active} = Repo.list_job_runs(%{status: ["queued", "running"]}, limit: 1)
-
-    cond do
-      active == [] ->
+  # Delete every job and cancel every reminder, once nothing is running. Removal goes
+  # through Jobs.Registry so each job's memory source is marked removed, exactly as
+  # the remove_job tool leaves it.
+  defp reset!(now, deadline) do
+    case clear(now) do
+      :ok ->
         :ok
 
-      System.monotonic_time(:millisecond) > deadline ->
-        raise "a job run is still in flight after #{@idle_wait_ms} ms; not resetting under it"
+      {:error, reason} when reason in @transient ->
+        if System.monotonic_time(:millisecond) > deadline do
+          raise "could not reset jobs and reminders within #{@reset_wait_ms} ms: #{reason}"
+        end
 
-      true ->
-        Process.sleep(@idle_poll_ms)
-        wait_for_idle_runs!(deadline)
+        Process.sleep(@reset_poll_ms)
+        reset!(now, deadline)
+
+      {:error, reason} ->
+        raise "could not reset jobs and reminders: #{inspect(reason)}"
     end
   end
 
-  defp clear!(now) do
+  defp clear(now) do
+    {:ok, unsettled} = Repo.unsettled_job_runs(limit: 1)
     {:ok, jobs} = Repo.list_scheduled_jobs(%{})
-    Enum.each(jobs, fn job -> :ok = Repo.delete_scheduled_job_if_idle(job.id) end)
-    cancel_active_events!(now, @max_event_pages)
+
+    cond do
+      unsettled != [] -> {:error, :run_in_flight}
+      true -> with :ok <- remove_jobs(jobs), do: cancel_active_events(now, @max_event_pages)
+    end
+  end
+
+  defp remove_jobs(jobs) do
+    Enum.reduce_while(jobs, :ok, fn job, :ok ->
+      case Jobs.remove_job(job.id, scheduler: nil) do
+        :ok -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   # Listing is paged; each pass cancels what it saw, so the next pass lists the rest.
-  defp cancel_active_events!(_now, 0),
-    do: raise("more active reminders than the reset cap allows")
+  defp cancel_active_events(_now, 0), do: {:error, :more_active_reminders_than_the_cap}
 
-  defp cancel_active_events!(now, pages_left) do
+  defp cancel_active_events(now, pages_left) do
     {:ok, %{events: events}} = Repo.list_temporal_events(%{status: "active", limit: 100})
 
-    unless events == [] do
-      Enum.each(events, fn event -> {:ok, _} = Repo.cancel_temporal_event(event.id, now) end)
-      cancel_active_events!(now, pages_left - 1)
+    case cancel_events(events, now) do
+      :ok when events == [] -> :ok
+      :ok -> cancel_active_events(now, pages_left - 1)
+      error -> error
     end
+  end
+
+  defp cancel_events(events, now) do
+    Enum.reduce_while(events, :ok, fn event, :ok ->
+      case Repo.cancel_temporal_event(event.id, now) do
+        {:ok, _} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
   end
 
   # --- jobs --------------------------------------------------------------------
@@ -187,7 +230,7 @@ defmodule SeedState do
       claimed_at: started,
       started_at: started,
       prompt_snapshot: job.task_prompt,
-      delivery_status: "none",
+      delivery_status: "delivered",
       created_at: started,
       updated_at: started
     }

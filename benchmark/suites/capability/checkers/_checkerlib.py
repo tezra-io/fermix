@@ -169,7 +169,9 @@ def memory_rows(sql, params=()):
 
 def reply_problem(ev, gold):
     """The shared reply floor for state checkers: `reply_include_any` (one of these
-    terms) and `reply_question` (the reply asks something). None when it holds."""
+    terms) and `reply_question` (the reply asks something). None when it holds. The
+    terms are facts a correct reply must carry (a date, a number, a name), never a
+    phrasing: a wording list rots on every model change (AGENTS.md)."""
     reply = ev.get("reply") or ""
     terms = gold.get("reply_include_any")
     if terms and not any(term_present(reply, t) for t in terms):

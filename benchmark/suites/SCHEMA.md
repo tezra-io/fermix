@@ -528,6 +528,15 @@ at seed time, for "tomorrow"). `jobs_state.py` and `reminders_state.py` grade
 against it. A seed failure stops the sweep on exit 3 rather than running a trial
 on what the previous one left behind.
 
+The helper runs in its own BEAM, so the daemon's job and reminder schedulers are
+not told about seeded rows; they pick them up on their next 60-second reconcile.
+Keep every seeded schedule and reminder due well outside a trial's few minutes (a
+daily job at a fixed hour, reminders on absolute future dates). Removed jobs and
+cancelled reminders are safe: due scans re-query, and a cancelled event's pending
+deliveries are cancelled with it. The helper refuses to run unless the database it
+would open is `<FERMIX_HOME>/memory.db`, so an inherited `FERMIX_MEMORY_DB_PATH` or
+`MIX_ENV=test` cannot seed some other store.
+
 ### `score.single`
 
 ```yaml

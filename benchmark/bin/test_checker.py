@@ -1764,7 +1764,7 @@ def _state_run(tmp_path, spec, expect, state, reply="done"):
 
 
 JOB_STATE = {"today": "2026-10-02", "zone": "America/New_York", "jobs": {"weather": WEATHER}}
-FIX_GOLD = {"job_count": 1, "jobs": {"weather": {
+EDIT_GOLD = {"job_count": 1, "jobs": {"weather": {
     "min": {"timeout_seconds": 301},
     "unchanged": ["schedule_expr", "expires_at", "task_prompt"]}},
     "reply_include_any": ["wall-clock", "5 minutes"]}
@@ -1777,9 +1777,9 @@ FIX_GOLD = {"job_count": 1, "jobs": {"weather": {
     ({**WEATHER, "timeout_seconds": 900, "expires_at": None}, "wall-clock", False),  # expiry lost
     ({**WEATHER, "timeout_seconds": 900}, "fixed it", False),                       # no cause named
 ])
-def test_jobs_state_grades_an_edit_in_place(tmp_path, job, reply, ok):
+def test_jobs_state_grades_a_floor_and_unchanged_columns(tmp_path, job, reply, ok):
     _memory_db(tmp_path, jobs=[job])
-    r = _state_run(tmp_path, JOBS_STATE, FIX_GOLD, JOB_STATE, reply)
+    r = _state_run(tmp_path, JOBS_STATE, EDIT_GOLD, JOB_STATE, reply)
     assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
 
 
@@ -1825,15 +1825,34 @@ def test_reminders_state_fails_the_wrong_time_day_or_subject(tmp_path, event):
     assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE).score == 0.0
 
 
+EITHER = {"any_of": [
+    {"count": 1, "each": {"local_time_between": ["06:00:00", "11:59:59"],
+                          "reply_states_time": True}},
+    {"count": 0, "reply_question": True}]}
+SQUASH = ("s1", "book the squash court", None, "explicit_reminder", "09:00:00", "2026-10-03",
+          "once", AT_TIME, "active")
+
+
 def test_reminders_state_accepts_either_declared_outcome(tmp_path):
-    gold = {"any_of": [
-        {"count": 1, "each": {"local_time_between": ["06:00:00", "11:59:59"]},
-         "reply_include_any": ["9", "9:00"]},
-        {"count": 0, "reply_question": True}]}
     _memory_db(tmp_path, events=[SEEDED])
-    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE,
+    assert _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE,
                       "what time works, 8 or 9?").score == 1.0
-    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE, "ok").score == 0.0
+    assert _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE, "ok").score == 0.0
+
+
+@pytest.mark.parametrize("reply, ok", [
+    ("set for 9am tomorrow", True), ("reminder at 09:00", True), ("done, 9:00 tomorrow", True),
+    ("set for tomorrow morning", False), ("set for 10am", False)])
+def test_a_stored_reminder_must_be_stated_at_its_own_time(tmp_path, reply, ok):
+    _memory_db(tmp_path, events=[SEEDED, SQUASH])
+    r = _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE, reply)
+    assert r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_an_any_of_gold_mixed_with_other_keys_is_an_evaluator_error(tmp_path):
+    _memory_db(tmp_path, events=[SEEDED])
+    r = _state_run(tmp_path, REMINDERS_STATE, {**EITHER, "count": 0}, REM_STATE, "ok?")
+    assert r.error is not None
 
 
 def test_reminders_state_checks_kind_recurrence_and_lead_time(tmp_path):
