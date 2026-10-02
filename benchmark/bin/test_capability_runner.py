@@ -1462,6 +1462,32 @@ def test_a_multi_turn_rubric_case_hands_the_judge_the_whole_conversation(
         "the code is 42, hold on to it", "noted", "what was the code?", "it was 42"]
 
 
+def _judged_with(monkeypatch, page_state):
+    seen = {}
+
+    def fake_judge(_cfg, _query, _reply, _rubric, _tag, **kwargs):
+        seen["tool_evidence"] = kwargs.get("tool_evidence")
+        return rc.judge.JudgeResult(evaluated=True, passed=True, score=1.0, rationale="ok")
+
+    monkeypatch.setattr(rc.judge, "judge_case", fake_judge)
+    case = SimpleNamespace(id="reply", score_spec=None, rubric="Posts one short reply.",
+                           expect={}, turns=[SimpleNamespace(query="q")])
+    rc._task_success(SimpleNamespace(), case, "done", True, "tag", [], page_state)
+    return seen["tool_evidence"]
+
+
+def test_the_judge_sees_what_a_page_recorded_once_it_reported_in(monkeypatch):
+    state = {"page": {"ready": "thread.html"}, "replies": ["no desktop app yet"],
+             "event_keys": ["page.ready", "replies"]}
+    evidence = _judged_with(monkeypatch, state)
+    assert evidence["web_page_record"]["state"] == state
+
+
+def test_the_judge_gets_no_page_record_from_a_page_that_never_reported_in(monkeypatch):
+    assert _judged_with(monkeypatch, {}) is None
+    assert _judged_with(monkeypatch, None) is None
+
+
 def test_the_checker_reads_the_tasks_gold_from_the_evidence_file():
     ev = rc._evidence("run", 0, "s", "TOK-1", _episode(_captured()),
                       expect={"hotel": "C", "rate": 136})

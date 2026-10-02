@@ -64,8 +64,8 @@ sys.path.insert(0, HERE)
 from evallib import (aggregate, checker, config as cfgmod, driver, grade, judge, leaderboard,
                      leaderboard_html, pricing, release_gate, safe_rm, scoring, uplift)
 from evallib.experiments import ExperimentWriter, OpikWriteError, stable_id
-from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
-                                    ServerError, case_uses_fixture, check_state)
+from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, PAGE_READY_PATH, FixtureServer,
+                                    ServerError, case_uses_fixture, check_state, read_path)
 from evallib.opik import OpikClient, OpikError
 from evallib.session_ids import sess
 from evallib.suites import UNCLASSIFIED_RISK, SuiteError, load_all
@@ -512,7 +512,8 @@ def _task_success(cfg, case, reply, want_judge, tag,
     if case.rubric and want_judge:
         jr = judge.judge_case(
             cfg, case.turns[-1].query, reply, case.rubric, tag,
-            transcript=transcript, candidate_routes=candidate_routes)
+            transcript=transcript, tool_evidence=_page_record(fixture_state),
+            candidate_routes=candidate_routes)
         if jr.evaluated and jr.score is not None:
             return jr.score, f"judge {jr.score:.2f}: {jr.rationale[:60]}"
         raise JudgeUnavailable(case.id, jr.error or "judge result was not gradeable")
@@ -928,6 +929,19 @@ def _bind_page(fixtures, s_name: str, case, run_id: str, i: int):
     if fixtures is None or not case_uses_fixture(case):
         return None
     return fixtures.bind(fixture_token(s_name, case.id, run_id, i))
+
+
+def _page_record(state: dict | None) -> dict | None:
+    """What a fixture page recorded, as evidence for the judge: the replies it took,
+    the buttons pressed on it. Only from a page that reported in (`page.ready`, sent
+    by the harness helper); a page without the helper records nothing, and an empty
+    record would read to the judge as proof that nothing was done."""
+    if not state or not read_path(state, PAGE_READY_PATH)[0]:
+        return None
+    return {"web_page_record": {
+        "about": "what the web page the assistant was given recorded being done to it, "
+                 "written by the page itself; event_keys is the order it happened in",
+        "state": state}}
 
 
 def _page_state(binding) -> dict | None:

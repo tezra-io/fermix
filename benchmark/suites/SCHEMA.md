@@ -351,7 +351,11 @@ March statement; only this one can say which button was pressed, and only
 - **In the capability tier it is a SCORER, not a constraint** (`score:` and
   `checker:` being the other two): all clauses hold -> 1.0, else 0.0. A
   capability case carrying `fixture_state` plus any of `score`/`checker`/`rubric`
-  declares two oracles and `run_capability.py` refuses the selection.
+  declares two oracles and `run_capability.py` refuses the selection. A
+  rubric-graded capability case may still open a fixture page: once the page
+  has reported in (`page.ready`), the judge receives the page's recorded state
+  as `tool_evidence` (`web_page_record`), so a rubric can grade what was posted
+  or pressed on the page, not what the reply claims.
 
 ### `drive: companion` — the Mac app's chat socket
 
