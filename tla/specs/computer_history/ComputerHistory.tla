@@ -63,7 +63,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/supervisor.ex @ 457bfb76bf4e
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history.ex @ a209702c717c
 \* SOURCE: apps/fermix_core/lib/fermix_core/computer_history/purge.ex @ 2f22405f1e30
-\* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a34df3f95db0
+\* SOURCE: apps/fermix_core/lib/fermix_core/computer_use/sidecar_installer.ex @ a2681ba9c881
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/computer_history_sql.ex @ fe920569e2f8
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,computer_history_insert_events,computer_history_purge_window,computer_history_set_pause_until @ 62edd6a2ac97
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#computer_history_ensure_state @ ad9078b46f85
@@ -88,7 +88,7 @@ CONSTANTS
     ReconcileCanStall,  \* the timeout can fire BEFORE the DynamicSupervisor has sent the
                         \* Capturer :shutdown. FALSE is a timing assumption: the work before
                         \* it (app env, file stats in installed?, whereis: controller.ex:94,
-                        \* :128, sidecar_installer.ex:62-67) takes far less than the timeout
+                        \* :128, sidecar_installer.ex:94-99) takes far less than the timeout
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by the checks that show a property needs it.
     IngestChecksPause,  \* Ingest has a pause gate: it reads the horizon once per batch and

@@ -13,7 +13,7 @@ is never torn, and the last rename wins. After a 4xx, a profile other than Codex
 writes back the entry it read when its refresh began
 (`mark_reauthorization_required`). Logout deletes the entry, then has the
 profile's manager forget its tokens and stops it (plugin logout,
-`plugins/auth.ex:66-88` → `TokenSupervisor.forget_signed_out`,
+`plugins/auth.ex:67-89` → `TokenSupervisor.forget_signed_out`,
 `token_supervisor.ex:132-171`) or only forgets them (provider sign-out,
 `management/auth.ex:135-142`). A logout from a tree-less CLI VM deletes the
 entry the same way, then has a running daemon let go of the profile over the
@@ -29,7 +29,7 @@ Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
   `token_supervisor.ex:322-331`, `codex_token.ex:112-126`), around a delete
   (`store.ex:139-146`), and around a sign-in or import from before it spends
   anything to its write (`store.ex:148-169`; `codex_login.ex:40-51`,
-  `xai_login.ex:50-58`, `plugins/auth.ex:195-206`, `codex_import.ex:38-56`,
+  `xai_login.ex:50-58`, `plugins/auth.ex:196-207`, `codex_import.ex:38-56`,
   `anthropic_login.ex:104-121`). Every taker waits the same 10 s, and a lock
   still busy after it is `{:error, :profile_busy}` with nothing spent.
 
@@ -48,7 +48,7 @@ rotating provider the Fermix side is the same: a consumed token draws a 4xx,
 which Fermix treats as permanent, and it quarantines the grant until a new
 sign-in (`token_manager.ex:343-349`, `:359-366`). A 408 or a 429 is not a
 verdict on the grant: `RefreshClient` retries it like a 5xx and never
-quarantines on it (`refresh_client.ex:43-48`).
+quarantines on it (`refresh_client.ex:44-49`).
 
 Most checks use two profiles:
 - `p1` is the Codex profile (`CodexProfiles = {p1}`): the top-level manager,
@@ -78,7 +78,7 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
   `forget`), not the plugin logout (delete, then `forget_signed_out`: forget,
   then `stop_profile`). The sign-out goes on to `forget` even when the entry
   is already gone (`management/auth.ex:351-360`). The in-daemon plugin logout
-  stops at the failed delete (`plugins/auth.ex:69-71`). Both CLI logouts go on to their
+  stops at the failed delete (`plugins/auth.ex:70-72`). Both CLI logouts go on to their
   notice (`auth_command.ex:295-298`, `plugins_command.ex:269-275`). Every
   entry starts stored, and with `MergesOnWrite` on (as in every check with
   `LogoutFromCli`) only the logout deletes one, so a CLI logout never finds its
@@ -101,13 +101,13 @@ least one check):
 - `MergesOnWrite`: `Store.write` re-reads the file and replaces only its own
   entry (`store.ex:387-395`, `:479-504`).
 - `LogoutReachesManager`: logout reaches the profile's live manager: the plugin
-  logout has it forget its tokens and stops it (`plugins/auth.ex:72` →
+  logout has it forget its tokens and stops it (`plugins/auth.ex:73` →
   `token_supervisor.ex:152-171`), the provider sign-out has it forget them
   (`management/auth.ex:138` → `token_manager.ex:205-208`).
 - `PluginLogoutForgets`: the in-daemon plugin logout calls
   `forget_signed_out`, the same call as a CLI logout's notice, so the manager
   forgets its tokens, which deletes its plugin child's access-token file,
-  before it is stopped (`plugins/auth.ex:72` → `token_supervisor.ex:152-171`;
+  before it is stopped (`plugins/auth.ex:73` → `token_supervisor.ex:152-171`;
   `drop_tokens`, `token_manager.ex:384-396`). Off, it calls `stop_profile`
   alone (`token_supervisor.ex:182-197`), as it did until this switch was
   added (ea1a12b5): the manager dies without a
@@ -342,7 +342,7 @@ failed before the fix. To see a counterexample, run
   due (`codex_token.ex:112-126`). The manager's own state and token file change
   after the lock is released. A busy lock is a transient, logged error, never a
   refresh from memory. `RefreshClient` states its per-attempt bounds (pool 5 s,
-  connect 10 s, receive 15 s; `refresh_client.ex:38-59`, `:199-214`), so a live
+  connect 10 s, receive 15 s; `refresh_client.ex:39-60`, `:200-215`), so a live
   refresh (about 107 s with two store-lock waits) ends before its lockfile
   looks stale, unless the wall clock jumps mid-refresh (a system sleep or a
   clock step; see "Lock staleness"); a test holds that bound.
@@ -371,8 +371,8 @@ failed before the fix. To see a counterexample, run
   session, and the manager refuses from then on.
 - **Code:**
   - `RefreshClient` retries a transport error, a 5xx, a 408 or a 429 with the
-    same refresh token, up to three attempts (`refresh_client.ex:35`,
-    `:43-48`, `:119-122`, `:127-130`; `:181-184`, `:189-192`).
+    same refresh token, up to three attempts (`refresh_client.ex:36`,
+    `:44-49`, `:120-123`, `:128-131`; `:181-184`, `:189-192`).
   - Req does not retry the POST itself: its default `retry: :safe_transient`
     covers GET and HEAD only.
 - **Impact:** the session is revoked on the retry, about 350 ms later, instead
@@ -393,7 +393,7 @@ failed before the fix. To see a counterexample, run
   manager (check 12) or forgets its tokens (check 13), but the entry is back.
 - **Code (693970b7):**
   - The plugin logout deletes, then calls `stop_profile`
-    (`plugins/auth.ex:71-72`), which kills the manager only after the delete. A
+    (`plugins/auth.ex:72-73`), which kills the manager only after the delete. A
     rename that lands in between stays.
   - A refresh that starts in that gap also wrote the entry back: `latest_entry`
     found no entry and fell back to the in-memory tokens
@@ -410,7 +410,7 @@ failed before the fix. To see a counterexample, run
   with nothing deleted (`{:error, :profile_busy}`). Every sign-in and import
   takes the same lock, with the same wait, before it spends anything, and holds
   it through its write: the code exchange of the Codex, xAI and plugin flows
-  (`codex_login.ex:40-51`, `xai_login.ex:50-58`, `plugins/auth.ex:195-206`,
+  (`codex_login.ex:40-51`, `xai_login.ex:50-58`, `plugins/auth.ex:196-207`,
   through `OAuthFlow`'s `:redeem`), the Codex import's refresh of the Codex
   CLI's token (`codex_import.ex:38-56`), and the write alone for the Claude
   Code import and a setup token (`anthropic_login.ex:104-121`). So an
@@ -544,7 +544,7 @@ code:
   pair only in Fermix's `auth.json` (`codex_import.ex:33-56`).
   `~/.codex/auth.json` is only read (`:66-76`), never rewritten, so the Codex
   CLI keeps the token Fermix just consumed.
-- Both use the same OAuth client id (`refresh_client.ex:33`), so they share one
+- Both use the same OAuth client id (`refresh_client.ex:34`), so they share one
   session.
 
 Under the rule the code states for Codex (`token_manager.ex:487-491`), the Codex
@@ -564,7 +564,7 @@ grace window.
   by a CLI refresh, say); the management caller then exits first, the socket
   turns that into `internal_error` (`cli/daemon.ex:364-374`), and
   `revert_route` (`management/auth.ex:139`) never runs. The in-daemon plugin
-  logout's forget (`forget_signed_out`, `plugins/auth.ex:72`) is the same call
+  logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) is the same call
   and can meet the same wait. Its caller then exits after the delete: the
   forget still runs, late, but the stop and the `Runtime.reload` do not.
 - **Lock staleness.** The model never breaks a lock. A lockfile is broken only
@@ -619,7 +619,7 @@ grace window.
   `providers/xai/responses.ex:233`) instead of answering
   `{:error, :reauthorization_required}`. The window is one message. The
   in-daemon plugin logout reaches it through the same `forget_signed_out`
-  (`plugins/auth.ex:72`), and had it before through its bare `stop_profile`.
+  (`plugins/auth.ex:73`), and had it before through its bare `stop_profile`.
   A manager that stopped itself after replying would not close it: calls
   still queued when any process stops exit the same way. The model has no
   callers.

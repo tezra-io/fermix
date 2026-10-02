@@ -34,9 +34,9 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/temporal_sql.ex @ c322fb1ca6bc
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo.ex#call,claim_due_reminders,recover_delivering_reminder,sweep_delivering_reminders,update_temporal_event @ b3e57e29ef6e
 \* SOURCE: apps/fermix_core/lib/fermix_core/delivery/channel_send.ex @ 380824457212
-\* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ 99d38bb9b68a
+\* SOURCE: apps/fermix_core/lib/fermix_core/delivery/error.ex @ a3cd3a75d3ca
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 7ba02aa96383
-\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 9c81b7cbca6f
+\* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 065d9245f103
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ c861328f6405
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 80b3699ec7e4
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ e4e83044eb85
@@ -77,7 +77,7 @@ CONSTANTS
                              \* (:1042) repeat it inside the same Repo call
                              \* (repo.ex:3012-3015), so they add nothing here.
     WorkersDieWithScheduler, \* DeliverySupervisor starts after the scheduler under
-                             \* :rest_for_one (application.ex:245-246, :263)
+                             \* :rest_for_one (application.ex:246-247, :264)
     SendsDieWithWorker,      \* a worker's send process is spawned linked to it
                              \* (Process.spawn [:link, :monitor], channel_send.ex:219-224),
                              \* so a worker killed mid-send takes its send with it
@@ -307,7 +307,7 @@ Boot ==
 (* Crashes *)
 
 \* The scheduler, or any earlier child of FermixCore.Supervisor (Repo,
-\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:263)
+\* MainAgent, JobScheduler, ...), crashes. :rest_for_one (application.ex:264)
 \* terminates every later child, DeliverySupervisor and its workers included
 \* (:245-246), before init runs again. The workers do not trap exits, so they
 \* die at once. Each worker's send process is linked to it
@@ -319,7 +319,7 @@ Boot ==
 \* workers die every send dies. A worker killed in the few instructions
 \* between its watchdog's unlink and kill (channel_send.ex:281-287) would
 \* leave its send running; that is below this spec's step granularity.
-\* Capabilities.AccessGate.Pending (application.ex:221) is one more earlier
+\* Capabilities.AccessGate.Pending (application.ex:222) is one more earlier
 \* child: its crash is this step. The owner confirmations it parks are never
 \* read by the reminder rail, so they are not modelled.
 SendsDie == WorkersDieWithScheduler /\ SendsDieWithWorker
@@ -375,7 +375,7 @@ Start(w) ==
 \* The `after timeout_ms` clause of monitored_call (channel_send.ex:239) ->
 \* kill_and_drain/3 (:284-300): unlink, kill the send process, wait for its
 \* :DOWN, drop any result it posted, and report :delivery_timeout, which is
-\* retryable (error.ex:180). A request already at the platform is not recalled. Unless
+\* retryable (error.ex:191). A request already at the platform is not recalled. Unless
 \* the platform can be slow, it always answers inside the watchdog, so the
 \* watchdog can only catch a send that has not reached it (a stuck pool
 \* checkout, for example).
@@ -453,7 +453,7 @@ PlatformDecide(w) ==
 \* exits :normal (channel_send.ex:224, :227-233, :248-254). Its worker then
 \* drops the link and the monitor (release/2, :264-269). A worker that is
 \* gone never gets the answer.
-\* The worker's view goes through Error.normalize/retryable? (error.ex:178-193).
+\* The worker's view goes through Error.normalize/retryable? (error.ex:189-204).
 SenderAnswer(w) ==
     /\ sender[w] = "out"
     /\ request[w] \in {"ok", "transient", "permanent"}
@@ -614,7 +614,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 \* never attempt six."
 NeverAttemptSix == attempts <= 5
 
-\* delivery_supervisor.ex:5-10 and application.ex:232-238: "no delivery
+\* delivery_supervisor.ex:5-10 and application.ex:233-239: "no delivery
 \* worker can outlive the scheduler", which is "what lets claims be
 \* serialized in one process"; M30 design §6.3 (:335-337): "two workers for
 \* the same row cannot exist".

@@ -75,15 +75,15 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ bae696857f03
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ f4767b7ba440
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 66baf0d471ef
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ a9372e2dcfd3
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ daf8f86bbc4f
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_token.ex @ 091e221339b5
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_import.ex @ b87011fae1ad
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_login.ex @ 0337bd553071
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ d81c71a108d7
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ e580e287fec4
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 238a61352a4c
-\* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 64e88a3f60f2
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ ca5678b38134
+\* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 2a44b8fd3cc2
 \* SOURCE: apps/fermix_core/lib/fermix_core/tools/media/backends/codex_image.ex @ ea4175294f01
@@ -99,7 +99,7 @@ CONSTANTS
     CliProfile,         \* the profile the CLI VM refreshes
     LogoutProfile,      \* the profile the user logs out of
     None,               \* "no token" / "no entry" / "no lock holder"
-    MaxAttempts,        \* RefreshClient @max_attempts (refresh_client.ex:35), 3 in the code
+    MaxAttempts,        \* RefreshClient @max_attempts (refresh_client.ex:36), 3 in the code
     Rounds,             \* bound: how many refreshes each refresher may start
     \* Environment switches: what may happen.
     CliRefreshes,           \* a tree-less CLI VM refreshes CliProfile directly
@@ -113,8 +113,8 @@ CONSTANTS
     ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:492-496)
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
     MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:387-395, :479-504)
-    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout), or forget (sign-out) (plugins/auth.ex:72, management/auth.ex:138)
-    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:72 -> token_supervisor.ex:152-171)
+    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout), or forget (sign-out) (plugins/auth.ex:73, management/auth.ex:138)
+    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:152-171)
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:123-128, :139-146)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:165-169)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:323-324, :372-380)
@@ -324,12 +324,12 @@ CliStart(a) ==
 
 -----------------------------------------------------------------------------
 (* The refresh request: one provider-side effect each. RefreshClient.refresh *)
-(* posts the refresh token (refresh_client.ex:94-135 for Codex, :137-197 for *)
+(* posts the refresh token (refresh_client.ex:95-136 for Codex, :137-197 for *)
 (* the others). The provider accepts only its newest token.                  *)
 
 Valid(a) == ~revoked[Prof(a)] /\ tok[a] = issued[Prof(a)]
 
-\* 200: the provider rotates and the new pair arrives (refresh_client.ex:113,
+\* 200: the provider rotates and the new pair arrives (refresh_client.ex:114,
 \* :175). refresh_entry goes on to Store.write.
 SendOk(a) ==
     /\ pc[a] = "send"
@@ -342,7 +342,7 @@ SendOk(a) ==
 
 \* The provider rotates, but the response is lost: Req's receive timeout, a
 \* closed connection, or a 5xx after the rotation. RefreshClient cannot tell
-\* and retries with the SAME refresh token (refresh_client.ex:119-122,
+\* and retries with the SAME refresh token (refresh_client.ex:120-123,
 \* :127-130; :181-184, :189-192). A 408 or a 429 takes the same retries (the
 \* classifier, :43-48); one sent after a rotation is this step. After the
 \* last attempt the refresh fails with no state change
@@ -359,7 +359,7 @@ SendLost(a) ==
     /\ UNCHANGED <<disk, revoked, mgr, mem, rounds, lpc, lbuf, best, slock, tfile>>
 
 \* A consumed token, or any token of a revoked session: a 4xx other than 408
-\* and 429, returned as {:permanent, status, body} (refresh_client.ex:43-48,
+\* and 429, returned as {:permanent, status, body} (refresh_client.ex:44-49,
 \* :116-117, :178-179). A consumed token revokes the whole session (Codex
 \* rule, token_manager.ex:487-491). The manager refuses from now on
 \* (refresh_outcome/2 -> permanently_refused/2, :343-349, :359-366; refuse/2,
@@ -453,7 +453,7 @@ RefreshStep(a) ==
 
 \* delete_provider (store.ex:139-146) takes the profile lock, then the store
 \* lock, then read_existing (:397-400, :456-472). With no entry, the in-daemon
-\* plugin logout fails and stops there (plugins/auth.ex:69-71), while the
+\* plugin logout fails and stops there (plugins/auth.ex:70-72), while the
 \* provider sign-out treats :provider_missing as done and goes on to forget
 \* (management/auth.ex:351-360), and both CLI logouts go on to their notice
 \* (auth_command.ex:295-298, plugins_command.ex:269-275). Init stores every
@@ -513,7 +513,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      when the daemon does not answer "ok" (the CLI then exits non-zero),
 \*      nothing reaches the manager.
 \*    - The in-daemon plugin logout calls it right after its delete
-\*      (plugins/auth.ex:72).
+\*      (plugins/auth.ex:73).
 \*  - stop_profile alone, the plugin logout without PluginLogoutForgets
 \*    (token_supervisor.ex:182-197): DynamicSupervisor.terminate_child sends
 \*    :shutdown; TokenManager does not trap exits and has no terminate/2, so

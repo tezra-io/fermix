@@ -34,7 +34,7 @@ mechanism check.
   (`delivery_worker.ex:210-213`, `:75`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:189-268`) restarts it too, as does a Repo
+  `JobScheduler`, …; `application.ex:190-269`) restarts it too, as does a Repo
   call that exceeds `GenServer.call`'s 5 s default inside a scheduler callback.
 - `DaemonCanCrash`: the whole daemon dies and boots again.
 - `RepoCanFail`: a scheduler recovery or boot-sweep Repo call returns an error
@@ -59,7 +59,7 @@ least one check):
   (`:1042`) repeat it inside the same Repo callback (`repo.ex:3012-3015`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:250-251`, `:268`).
+  under `:rest_for_one` (`application.ex:251-252`, `:269`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -85,7 +85,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:317-320`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:237-243`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:238-244`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -239,7 +239,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
 - **Code:**
   - The watchdog reports `:delivery_timeout` without knowing whether the request
     landed (`channel_send.ex:239`, `:284-300`), and that result is retryable
-    (`error.ex:180`, `delivery_worker.ex:134-151`). A result the send posted
+    (`error.ex:191`, `delivery_worker.ex:134-151`). A result the send posted
     just before the kill is discarded too, so a send that did deliver can still
     be reported as a timeout and sent again.
   - A failed settlement exits with `{:settlement_failed, _}`
@@ -251,7 +251,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   out:**
   - the HTTP client's own receive timeout (Req's 15 s default;
     `telegram.ex:577-580` sets none), which returns a retryable
-    `{:transport, :timeout}` (`error.ex:154-158`, `:179`) and is the usual way
+    `{:transport, :timeout}` (`error.ex:165-169`, `:190`) and is the usual way
     an attempt gives up on a request the platform may already hold, as are a
     connection reset after the write and signal-cli's own timeout
     (`signal.ex:544-547`);
@@ -290,7 +290,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   - `ChannelSend.with_timeout` ran the adapter call in a `spawn_monitor`ed
     process. It was not linked to the worker, and no supervisor owns it.
   - The worker does not trap exits, so the `DeliverySupervisor` shutdown under
-    `:rest_for_one` (`application.ex:250-251`, `:268`) kills it at once, inside
+    `:rest_for_one` (`application.ex:251-252`, `:269`) kills it at once, inside
     the watchdog's `receive`.
   - The watchdog is the worker's own `receive … after`, so the orphan was
     bounded only by the HTTP client's own timeouts (for example the 15 s pool

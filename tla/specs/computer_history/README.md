@@ -47,7 +47,7 @@ header lists everything else left out.
   sent the Capturer `:shutdown`. Setting it `FALSE` is a timing assumption:
   the work before the `:shutdown` is app-env reads, `File.regular?` stats in
   `SidecarInstaller.installed?` (`controller.ex:94`,
-  `sidecar_installer.ex:62-67`) and a `Process.whereis` (`controller.ex:128`),
+  `sidecar_installer.ex:94-99`) and a `Process.whereis` (`controller.ex:128`),
   so the assumption fails only if the filesystem or the scheduler stalls for
   seconds. No safety rule needs it any more (see What holds).
 - `MaxFaults` bounds restarts and crashes together (1 in every check).
