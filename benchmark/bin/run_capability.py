@@ -118,7 +118,7 @@ def _checker_fingerprint(case) -> str:
             f"{digest.hexdigest()[:16]}")
 
 
-def _fixture_digest(case) -> str:
+def _fixture_digest(case, tasks_root: str | None = None) -> str:
     """Content hash of a checker task's SEED FIXTURE TREE (sorted relative paths plus
     each file's sha256). Editing a seeded csv changes the question the model is being
     asked, whatever the prompt still says — so it must change the task identity, or a
@@ -128,7 +128,8 @@ def _fixture_digest(case) -> str:
     seed = case.checker_spec.get("seed")
     if not seed:
         return "no-seed"
-    root = checker.resolve_fixture(SKILL_DIR, seed)   # raises: an unreadable seed is loud
+    # raises: an unreadable seed is loud
+    root = checker.resolve_fixture(tasks_root or SKILL_DIR, seed)
     h = hashlib.sha256()
     for path in sorted(_fixture_files(root)):
         h.update(os.path.relpath(path, root).encode("utf-8"))
@@ -142,7 +143,7 @@ def _fixture_files(root: str) -> list[str]:
             for current, _dirs, files in os.walk(root) for name in files]
 
 
-def _case_identity(suite_name: str, case, cfg) -> str:
+def _case_identity(suite_name: str, case, cfg, tasks_root: str | None = None) -> str:
     """The full grading identity of ONE selected task, as canonical JSON."""
     payload = {
         "task": f"{suite_name}/{case.id}",
@@ -154,7 +155,9 @@ def _case_identity(suite_name: str, case, cfg) -> str:
         "score": case.score_spec,
         "checker": _checker_fingerprint(case),
         "checker_reset": sorted((case.checker_spec or {}).get("reset", [])),
-        "fixture": _fixture_digest(case),
+        "fixture": _fixture_digest(case, tasks_root),
+        # The gold a checker reads from the evidence file: changing it changes the task.
+        "checker_expect": (case.checker_spec or {}).get("expect"),
         "rubric": case.rubric,
         # A rubric task's oracle IS the judge, so its identity moves with the judge's
         # backend and model. A deterministic task is unaffected by either.
@@ -164,14 +167,14 @@ def _case_identity(suite_name: str, case, cfg) -> str:
     return json.dumps(payload, sort_keys=True, default=str)
 
 
-def tasks_hash(cases, cfg) -> str:
+def tasks_hash(cases, cfg, tasks_root: str | None = None) -> str:
     """Content hash of the SELECTED tasks — the reproducibility pin (v3, see
     HASH_VERSION). Any change to what is asked, what is required, or how it is graded
     yields a DISTINCT hash, so a `--max-tasks`/`--suite` subset or a re-graded run can
     never masquerade as a prior full run; a prose-only YAML edit leaves it unchanged.
     Hashes the selected cases, not the suite files."""
     h = hashlib.sha256()
-    for row in sorted(_case_identity(s.name, c, cfg) for s, _scn, c in cases):
+    for row in sorted(_case_identity(s.name, c, cfg, tasks_root) for s, _scn, c in cases):
         h.update(row.encode("utf-8"))
     return h.hexdigest()[:16]
 
@@ -388,22 +391,6 @@ def _print_not_evaluated(unmet: list[tuple[str, str, str]]) -> None:
         print(f"  - {suite_name}/{case_id} — {reason}")
 
 
-def _undriven_case_error(cases) -> str | None:
-    """Cases this runner cannot DRIVE. `_standard_trial` sends `case.turns[-1].query`
-    alone and `_cross_session_trial` drives exactly two; anything else would be scored
-    off its last prompt while the estimator counted every declared turn. The loader
-    already refuses this shape for score/checker cases at authoring time — it cannot
-    see rubric-only ones, which only exist as a selection once `--judge` admits them."""
-    undriven = sorted(f"{suite.name}/{case.id}"
-                      for suite, _scn, case in cases
-                      if len(case.turns) > 1 and not case.cross_session)
-    if not undriven:
-        return None
-    return ("multi-turn capability cases are not driven (only a cross_session pair is): "
-            + ", ".join(undriven)
-            + " — split them into single turns or declare cross_session")
-
-
 def _fixture_scoring_error(cases) -> str | None:
     """A case whose page state is the ground truth AND which carries another
     oracle. One task, one oracle: silently preferring one of two declared
@@ -508,7 +495,8 @@ def _gradeable(view) -> bool:
 
 
 def _task_success(cfg, case, reply, want_judge, tag,
-                  candidate_routes, fixture_state=None) -> tuple[float, str]:
+                  candidate_routes, fixture_state=None,
+                  transcript: list[dict] | None = None) -> tuple[float, str]:
     clauses = fixture_clauses(case)
     if clauses:
         # Ground truth from the PAGE, not from the reply: all clauses hold -> 1.0,
@@ -523,7 +511,7 @@ def _task_success(cfg, case, reply, want_judge, tag,
     if case.rubric and want_judge:
         jr = judge.judge_case(
             cfg, case.turns[-1].query, reply, case.rubric, tag,
-            candidate_routes=candidate_routes)
+            transcript=transcript, candidate_routes=candidate_routes)
         if jr.evaluated and jr.score is not None:
             return jr.score, f"judge {jr.score:.2f}: {jr.rationale[:60]}"
         raise JudgeUnavailable(case.id, jr.error or "judge result was not gradeable")
@@ -855,7 +843,8 @@ def trial_token(s_name: str, case_id: str, run_id: str, i: int) -> str:
     return "TOK-" + digest[:8].upper()
 
 
-def _evidence(run_id: str, trial: int, session: str, token: str, ep: _Episode) -> dict:
+def _evidence(run_id: str, trial: int, session: str, token: str, ep: _Episode,
+              expect: dict | None = None) -> dict:
     """The per-trial correlation record handed to the checker (checker.run_checker
     writes it outside the workspace, so the agent can neither read nor forge it).
 
@@ -869,6 +858,9 @@ def _evidence(run_id: str, trial: int, session: str, token: str, ep: _Episode) -
         "session": session,
         "trace_id": final.trace.get("id") if final.trace else None,
         "token": token,
+        # The task's gold (`checker.expect`): here, outside the workspace, is the only
+        # place a checker may read it.
+        "expect": expect,
         "reply": final.view.reply if final.view else "",
         "tool_spans": [span
                        for cap in ep.caps if cap.view is not None
@@ -961,11 +953,13 @@ def _with_fixture_url(query: str, binding) -> str:
 
 
 def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
-                    cleanup_root, want_judge, fixtures=None):
+                    cleanup_root, want_judge, fixtures=None, tasks_root: str | None = None):
+    """One trial: every declared turn, in order, in ONE session, then the grade over
+    the final reply or end-state. A multi-turn task is a conversation (a correction,
+    a follow-up, a "yea"), so each turn sees the turns before it."""
     session = sess("e2e-cap", run_id, s.name, case.id, f"t{i}")
     token = trial_token(s.name, case.id, run_id, i)
     binding = _bind_page(fixtures, s.name, case, run_id, i)
-    query = _with_fixture_url(case.turns[-1].query.replace("{token}", token), binding)
     scoped = checker.scoped_dir(cfg.daemon.fermix_home, task_key, i) if is_checker else None
     try:
         if is_checker:
@@ -973,25 +967,43 @@ def _standard_trial(cfg, opik, s, case, run_id, i, is_checker, task_key, fixture
             # the conventional capability workspace. Neither is containment; the
             # disposable daemon owns the broader sandbox.
             _reset_declared_state(cfg.daemon.fermix_home, case.checker_spec["reset"])
-            checker.seed_workspace(scoped, SKILL_DIR, fixture_path, cleanup_root)
-            query = query.replace("{ws}", scoped)
+            checker.seed_workspace(scoped, tasks_root or SKILL_DIR, fixture_path, cleanup_root)
         label = f"{case.id} t{i}"
-        cap = _capture_turn(cfg, opik, session, query, case.timeout_ms, label)
-        ep = _Episode(caps=[cap], expects=[_case_expect(case, len(case.turns) - 1)])
-        if cap.status != "graded" or cap.view is None:
-            return _fail_trial(case, ep, label)
+        ep = _Episode(caps=[], expects=[])
+        for index, turn in enumerate(case.turns):
+            query = _with_fixture_url(turn.query.replace("{token}", token), binding)
+            if scoped:
+                query = query.replace("{ws}", scoped)
+            turn_label = label if len(case.turns) == 1 else f"{label} turn {index + 1}"
+            cap = _capture_turn(cfg, opik, session, query, case.timeout_ms, turn_label)
+            ep.caps.append(cap)
+            ep.expects.append(_case_expect(case, index))
+            if cap.status != "graded" or cap.view is None:
+                return _fail_trial(case, ep, label)
         if is_checker:
             return _checker_trial(cfg, case, ep, scoped, run_id, i, session, token, label)
-        # Read AFTER the turn settled, so everything the turn made the page do is
-        # in the state this trial is scored on.
+        # Read AFTER the last turn settled, so everything the conversation made the page
+        # do is in the state this trial is scored on.
         succ, _detail = _task_success(
             cfg, case, cap.view.reply, want_judge, session, _candidate_routes(cap.view),
-            _page_state(binding))
+            _page_state(binding), transcript=_transcript(case, ep))
         succ = _provenance_gate(case, ep, succ, label)
         return _finish_trial(case, ep, succ, label)
     finally:
         if scoped and os.path.isdir(scoped):  # always clean full or partial seeds
             checker.teardown_workspace(cleanup_root, scoped)
+
+
+def _transcript(case, ep: _Episode) -> list[dict] | None:
+    """The conversation a judge grades: None for a single turn (the judge then builds
+    it from the query and reply), every user turn and reply otherwise."""
+    if len(case.turns) == 1:
+        return None
+    rows = []
+    for turn, cap in zip(case.turns, ep.caps):
+        rows += [{"role": "user", "content": turn.query},
+                 {"role": "assistant", "content": cap.view.reply}]
+    return rows
 
 
 def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, label):
@@ -1003,7 +1015,8 @@ def _checker_trial(cfg, case, ep: _Episode, scoped, run_id, i, session, token, l
     leaderboard as a valid 0.0 and drag pass@1."""
     cr = checker.run_checker(SKILL_DIR, case.checker_spec, scoped, ep.caps[-1].view.reply,
                              cfg.daemon.fermix_home,
-                             evidence=_evidence(run_id, i, session, token, ep))
+                             evidence=_evidence(run_id, i, session, token, ep,
+                                                expect=case.checker_spec.get("expect")))
     if cr.error:
         print(f"    ! checker error {label}: {cr.error} — trial INVALID (not a model "
               "failure)", file=sys.stderr)
@@ -1063,7 +1076,7 @@ def _cross_session_trial(cfg, opik, s, case, run_id, i, fixtures=None):
 
 
 def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
-             want_judge, fixtures=None) -> TaskOutcome:
+             want_judge, fixtures=None, tasks_root: str | None = None) -> TaskOutcome:
     is_checker = case.checker_spec is not None
     task_key = f"{s.name}-{case.id}"
     fixture_path = case.checker_spec.get("seed") if is_checker else None
@@ -1081,7 +1094,7 @@ def run_task(cfg, opik, s, scn, case, trials, k, threshold, run_id,
             else:
                 tr, trace_id, tmodels = _standard_trial(
                     cfg, opik, s, case, run_id, i, is_checker, task_key, fixture_path,
-                    cleanup_root, want_judge, fixtures)
+                    cleanup_root, want_judge, fixtures, tasks_root)
         except driver.UsageLimitHit as hit:
             hit.locate(s.name, case.id, i)   # stamp the resume pointer, then abort the sweep
             raise
@@ -1615,9 +1628,9 @@ def build_args(argv):
                         "(pair with --suite <name> to validate one in isolation)")
     p.add_argument("--no-opik", action="store_true", help="skip Opik writeback (local scores only)")
     p.add_argument("--private", action="store_true",
-                   help="run an operator-supplied held-out split (FERMIX_EVAL_HOLDOUT_DIR / --private-data)")
+                   help="run the private holdout (config private_suites.dir, or --private-data)")
     p.add_argument("--private-data",
-                   help="dir of held-out suites OUTSIDE the repo (or set FERMIX_EVAL_HOLDOUT_DIR)")
+                   help="dir of held-out suites OUTSIDE the repo (overrides private_suites.dir)")
     p.add_argument("--results-out",
                    help="also write this run's per-task results here (the arm file "
                         "run_arms.py/run_uplift.py pair on). Written ONLY for a valid "
@@ -1682,7 +1695,7 @@ def main(argv=None) -> int:
         return _check(cfg, args)
 
     want_judge = args.judge or cfg.judge.enabled
-    loaded, problem = _load_selection(args)
+    loaded, tasks_root, problem = _load_selection(args, cfg)
     if problem:
         print(problem, file=sys.stderr)
         return 2
@@ -1705,7 +1718,7 @@ def main(argv=None) -> int:
     cases, not_evaluated, refusal = _hold_out_unmet_preconditions(cfg, cases)
     if refusal is not None:
         return refusal
-    return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated)
+    return _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated, tasks_root)
 
 
 def _check(cfg, args) -> int:
@@ -1729,10 +1742,6 @@ def _planning_gate(cfg, cases, want_judge) -> int | None:
     policy_error = _selection_policy_error(cases)
     if policy_error:
         print(f"capability risk policy refused selection: {policy_error}", file=sys.stderr)
-        return 2
-    undriven = _undriven_case_error(cases)
-    if undriven:
-        print(f"capability runner refused selection: {undriven}", file=sys.stderr)
         return 2
     two_oracles = _fixture_scoring_error(cases)
     if two_oracles:
@@ -1769,18 +1778,21 @@ def _execution_gate(cfg, args, cases) -> int | None:
     return None
 
 
-def _load_selection(args) -> tuple[list, str | None]:
-    """Load the suites this run scores. Returns (suites, problem)."""
-    root, problem = _selection_root(args)
+def _load_selection(args, cfg) -> tuple[list, str, str | None]:
+    """Load the suites this run scores. Returns (suites, tasks_root, problem): the
+    tasks root is where checker seeds and fixture pages resolve, the harness root for
+    the public set and the holdout itself for a --private run."""
+    root, problem = _selection_root(args, cfg)
     if problem:
-        return [], problem
+        return [], SKILL_DIR, problem
+    tasks_root = root if args.private else SKILL_DIR
     try:
-        return load_all(root, include_candidates=args.candidates), None
+        return load_all(root, include_candidates=args.candidates), tasks_root, None
     except SuiteError as exc:
-        return [], "capability suites invalid:\n  - " + "\n  - ".join(exc.problems)
+        return [], tasks_root, "capability suites invalid:\n  - " + "\n  - ".join(exc.problems)
 
 
-def _selection_root(args) -> tuple[str, str | None]:
+def _selection_root(args, cfg) -> tuple[str, str | None]:
     """The public capability set, or ONLY an operator-supplied held-out split.
 
     --private never merges into the public set and scores under a distinct ':private'
@@ -1788,12 +1800,12 @@ def _selection_root(args) -> tuple[str, str | None]:
     would defeat the contamination check."""
     if not args.private:
         return CAP_DIR, None
-    holdout_dir = os.environ.get("FERMIX_EVAL_HOLDOUT_DIR") or args.private_data
+    configured = cfg.private_suites.dir if cfg.private_suites else None
+    holdout_dir = args.private_data or configured
     if not holdout_dir:
         return "", ("--private needs a held-out dir OUTSIDE the repo so its answers aren't "
-                    "readable by anyone iterating the eval: set FERMIX_EVAL_HOLDOUT_DIR or pass "
-                    "--private-data <dir>. See suites/capability/private/holdout.example.yaml "
-                    "for the format — copy it out of the repo and fill in your own tasks.")
+                    "readable by anyone iterating the eval: set `private_suites.dir` in "
+                    "config.yaml or pass --private-data <dir>. See README, \"Private suites\".")
     if not os.path.isdir(holdout_dir):
         return "", f"--private: held-out dir not found: {holdout_dir}"
     return holdout_dir, None
@@ -1830,7 +1842,8 @@ class _Run:
     not_evaluated: list = field(default_factory=list)
 
 
-def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
+def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=(),
+           tasks_root: str | None = None) -> int:
     """Drive every selected task, then report. Driving CONTINUES after an invalid
     trial — the remaining tasks are the diagnosis — but an invalid trial anywhere
     still costs the run its leaderboard row (see _report)."""
@@ -1839,7 +1852,7 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
                # identified is not reproducible, and finding that out afterwards wastes
                # the sweep. tasks_hash reads the checker scripts and the fixture trees,
                # and raises on an unreadable one.
-               revision=_repo_revision(), tasks_hash=tasks_hash(cases, cfg),
+               revision=_repo_revision(), tasks_hash=tasks_hash(cases, cfg, tasks_root),
                cases=cases, trials=args.trials,
                k=args.k or args.trials, want_judge=want_judge,
                not_evaluated=list(not_evaluated))
@@ -1848,7 +1861,7 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
     print(f"capability eval · {len(cases)} task(s) × {run.trials} trial(s) · "
           f"judge={'on' if want_judge else 'off'} · axis={args.axis}")
     try:
-        fixtures = _start_fixture_server(cases)
+        fixtures = _start_fixture_server(cases, _pages_dir(tasks_root))
     except ServerError as exc:
         # A precondition, not a measurement: without the pages every trial would
         # score 0 on a connection refused, which reads as the model failing.
@@ -1857,7 +1870,7 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
     try:
         for s, scn, case in cases:
             out = run_task(cfg, opik, s, scn, case, run.trials, run.k, args.threshold,
-                           run.run_id, want_judge, fixtures)
+                           run.run_id, want_judge, fixtures, tasks_root)
             run.outcomes.append((s.name, case.id, out))
             run.all_models += out.models
             run.task_stats.append(out.stats)
@@ -1880,14 +1893,22 @@ def _sweep(cfg, args, lb_path, cases, want_judge, not_evaluated=()) -> int:
     return _report(cfg, args, lb_path, run)
 
 
-def _start_fixture_server(cases) -> FixtureServer | None:
+def _pages_dir(tasks_root: str | None) -> str:
+    """The fixture pages a run serves: the harness's own, or the holdout's
+    `fixtures/pages` for a --private run, whose pages carry its answers."""
+    if tasks_root is None or tasks_root == SKILL_DIR:
+        return FIXTURE_PAGES_DIR
+    return os.path.join(tasks_root, "fixtures", "pages")
+
+
+def _start_fixture_server(cases, pages_dir: str | None = None) -> FixtureServer | None:
     """Start the fixture server if and only if a selected task addresses it, and
     before any spend: a sweep whose pages cannot be served must fail on the
     server, not trial by trial on a connection refused that scores as the model
     failing to open a page."""
     if not any(case_uses_fixture(case) for _s, _scn, case in cases):
         return None
-    fixtures = FixtureServer(FIXTURE_PAGES_DIR)
+    fixtures = FixtureServer(pages_dir or FIXTURE_PAGES_DIR)
     port = fixtures.start()
     print(f"  fixture server: 127.0.0.1:{port} "
           f"({len(fixtures.documents)} document(s), one token per trial)")

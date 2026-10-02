@@ -225,6 +225,40 @@ zero-violation column over gates nothing could fail is the reassuring checkmark
 the review exists to remove. Until the safety pack lands, read exit 5's reason
 before treating the tier as red about the model.
 
+### Private suites (the scored real-use tier)
+
+The tasks that rank models on how Fermix is actually used live in a private repo,
+`tezra-io/fermix-eval-private`, so no agent under test can find their answers with web
+search and no model trains on them. This repo keeps the harness, the checker scripts and
+a small public sample; the private repo holds the task definitions, their fixtures and
+their expected answers. Its own README covers the layout and how to write a task.
+
+`config.yaml` names it:
+
+```yaml
+private_suites:
+  dir: "~/projects/fermix-eval-private"
+  remote: "git@github.com:tezra-io/fermix-eval-private.git"
+```
+
+- `make capability-auto` clones it into `dir` (or fast-forwards an existing clone),
+  installs its `skills/` into the throwaway home, runs the public sweep, then scores the
+  private suites as their own `:private` leaderboard row against the same daemon. The
+  run's exit code is the worse of the two (invalid, preconditions, selection, then a red
+  gate). `CAPABILITY_PRIVATE=0 make capability-auto` leaves the private suites out, for
+  a machine without access to that repo.
+- `make capability-private` scores only the private suites (judged) against an isolated
+  daemon you started yourself.
+- CI never clones or runs them.
+
+For a private run the runner resolves workspace seeds (`checker.seed`) under the private
+repo and serves its `fixtures/pages/`; checker scripts still come from this repo. A task
+puts its expected answer in `checker.expect`, which the runner hands to the checker in
+the per-trial evidence file outside the workspace (`_checkerlib.expected`), so the answer
+is never in a file the agent can read. Capability tasks may also be multi-turn: every
+turn runs in one session and the last reply or end state is graded, with the judge
+seeing the whole conversation.
+
 ### The disposable capability daemon
 
 `make capability-auto` is the whole flow in one command. It scores the model your
@@ -292,7 +326,7 @@ Useful flags on `bin/run_capability.py`:
 | `--confirm-daemon-isolated` | attest that an isolated-profile run is using the declared disposable daemon |
 | `--confirm-isolated-env` | attest selected `isolated_mutation` tasks use the disposable capability home/workspace |
 | `--confirm-cost` | acknowledge selected `expensive` cases may spawn several billed calls |
-| `--private` | run an operator-supplied held-out split (`FERMIX_EVAL_HOLDOUT_DIR` or `--private-data <dir>`, OUTSIDE the repo) under a separate local `:private` row; skips Opik dataset/experiment/feedback writeback, but candidate turns still appear in the configured Opik trace store |
+| `--private` | run the private holdout (`private_suites.dir` in config.yaml, or `--private-data <dir>`, OUTSIDE the repo) under a separate local `:private` row; skips Opik dataset/experiment/feedback writeback, but candidate turns still appear in the configured Opik trace store |
 | `--config-id NAME` | override the auto-detected row label (needed to rank `openai` vs `openai_codex` — both report as `openai`) |
 | `--estimate` | print the plan and exit |
 | `--rank-only` | re-render the leaderboard, drive nothing |
@@ -529,7 +563,7 @@ Notes:
 | Goal | Command | Notes |
 |---|---|---|
 | Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external OpenAI judge, development daemon |
-| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, `export FERMIX_EVAL_HOLDOUT_DIR=…`, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
+| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |
 | Raw-intelligence baseline (Tier 0) | `make lmeval` (dry-run prints the `lm_eval` command) | needs `pip install lm-eval` + key |

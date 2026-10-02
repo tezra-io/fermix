@@ -25,7 +25,7 @@ set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
-TIERS="regression|behavioral-isolated|capability|capability-judged|capability-readonly"
+TIERS="regression|behavioral-isolated|capability|capability-judged|capability-readonly|capability-private"
 
 usage() {
   printf 'usage: %s [--print] <%s>\n' "$(basename "${BASH_SOURCE[0]}")" "$TIERS" >&2
@@ -82,6 +82,17 @@ case "$1" in
     cmd=(uv run bin/run_capability.py --suite cap_response_quality --trials 5 --judge --threshold 0.5) ;;
   capability-readonly)
     cmd=(uv run bin/run_capability.py --trials 5 --suite cap_web_research --suite cap_web_app) ;;
+  capability-private)
+    # The private holdout (config private_suites.dir): the scored real-use tier. Its
+    # editing and drafting tasks are judge-graded, so the judge key is resolved too.
+    judged=1
+    cmd=(uv run bin/run_capability.py --private --trials 5 --judge)
+    for flag in \
+      "$(attest "${CONFIRM_DAEMON_ISOLATED:-}" --confirm-daemon-isolated)" \
+      "$(attest "${CONFIRM_ISOLATED_ENV:-}" --confirm-isolated-env)" \
+      "$(attest "${CONFIRM_COST:-}" --confirm-cost)"; do
+      if [ -n "$flag" ]; then cmd+=("$flag"); fi
+    done ;;
   *)
     usage; exit 2 ;;
 esac

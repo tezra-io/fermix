@@ -116,6 +116,16 @@ def spans(ev, name, status="ok"):
     return out
 
 
+def expected(ev):
+    """The task's gold (`checker.expect`) from the evidence file: the one place it lives
+    outside the private suite, and out of the agent's reach. A task without one is
+    refused, never graded against nothing."""
+    gold = ev.get("expect")
+    if not isinstance(gold, dict) or not gold:
+        refuse("evidence carries no `expect` (the case declares no checker.expect)")
+    return gold
+
+
 def span_text(span):
     """A span's input as searchable text; dict inputs are serialized so a nested
     task string is still matched."""

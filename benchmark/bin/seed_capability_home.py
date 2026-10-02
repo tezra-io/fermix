@@ -410,17 +410,20 @@ def reset_state(home: str) -> None:
             os.remove(safe_rm.check(path, resolved, min_below=1))
 
 
-def install_skills(home: str) -> None:
-    """Lay down the reset skills dir: the daemon's bundled skills plus the fixture
-    skills. Runs right after reset_state, with the daemon down. The daemon would copy
-    the bundled skills itself, but only into an empty dir, which a fixture skill makes
-    it no longer be."""
+def install_skills(home: str, private_dir: str | None = None) -> None:
+    """Lay down the reset skills dir: the daemon's bundled skills, the public fixture
+    skills, and the private holdout's skills when a run includes it. Runs right after
+    reset_state, with the daemon down. The daemon would copy the bundled skills itself,
+    but only into an empty dir, which a fixture skill makes it no longer be."""
     skills = os.path.join(disposable_home(home, "install skills"), "skills")
     if os.path.exists(skills):
         die(f"refusing to install skills over an existing {skills}: reset_state runs first")
     os.makedirs(skills)
     for source_root in (BUNDLED_SKILLS_DIR, FIXTURE_SKILLS_DIR):
         copy_skill_dirs(source_root, skills)
+    # A holdout need not ship skills; when it does they live in <holdout>/skills.
+    if private_dir and os.path.isdir(os.path.join(private_dir, "skills")):
+        copy_skill_dirs(os.path.join(private_dir, "skills"), skills)
 
 
 def copy_skill_dirs(source_root: str, skills: str) -> None:
@@ -482,6 +485,9 @@ def parse_args() -> argparse.Namespace:
                         help="explicit mode: default_model for the provider block")
     parser.add_argument("--reasoning-effort", dest="reasoning_effort",
                         help="explicit mode: optional reasoning_effort")
+    parser.add_argument("--private-dir", dest="private_dir",
+                        help="the private holdout clone; its skills/ are installed too "
+                             "(make capability-auto passes it after syncing)")
     parser.add_argument("--dev-provider", dest="dev_provider",
                         help="score this provider block from ~/.fermix-dev/config.toml "
                              "(its model, effort and auth) instead of the dev primary")
@@ -538,7 +544,7 @@ def main() -> None:
     if not os.path.isdir(os.path.join(workspace, ".git")):
         subprocess.run(["git", "-C", workspace, "init", "-q"], check=True)
     reset_state(home)
-    install_skills(home)
+    install_skills(home, args.private_dir)
     write_skill_token(home)
 
     config = render_config(home, pid, blk, profile, allowed_roots,

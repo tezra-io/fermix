@@ -5,7 +5,7 @@
 # ///
 """Specs for the suite schema keys that make a measurement trustworthy: sticky
 safety gates, the all-of tool-provenance key, the per-trial checker reset list,
-single-number scoring, and the refusal of undriven multi-turn capability cases.
+single-number scoring, and multi-turn capability cases.
 Also covers the shared session-id helper. Pure: no daemon, no Opik, no spend.
 Run: `uv run bin/test_suites.py`."""
 from __future__ import annotations
@@ -195,27 +195,27 @@ def test_score_single_must_be_a_boolean(tmp_path):
     assert any("single" in p for p in problems), problems
 
 
-# --- multi-turn capability cases are refused at load time -------------------
+# --- multi-turn capability cases are driven, one session per trial ----------
 
-MULTI_TURN_REFUSAL = ("multi-turn capability cases are not driven; "
-                      "use cross_session or a single turn")
-
-
-def test_multi_turn_scored_case_is_rejected(tmp_path):
+def test_multi_turn_scored_case_loads(tmp_path):
     case = {"id": "case_a",
             "turns": [{"query": "set it up"}, {"query": "now answer"}],
             "score": {"match": "numeric", "expected": 42}}
-    problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
-    assert any(MULTI_TURN_REFUSAL in p for p in problems), problems
-    assert any("case_a" in p and MULTI_TURN_REFUSAL in p for p in problems), problems
+    scn = _load_one_scenario(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert len(scn.cases[0].turns) == 2
 
 
-def test_multi_turn_checker_case_is_rejected(tmp_path):
-    case = {"id": "case_a",
-            "turns": [{"query": "set it up"}, {"query": "now do it"}],
-            "checker": {"script": "checkers/thing.py", "mode": "exit"}}
-    problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
-    assert any(MULTI_TURN_REFUSAL in p for p in problems), problems
+def test_checker_expect_must_be_a_non_empty_map(tmp_path):
+    for bad in ({}, ["C"], "C"):
+        case = {"id": "case_a", "query": "q",
+                "checker": {"script": "checkers/thing.py", "mode": "json", "expect": bad}}
+        problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
+        assert any("checker.expect" in p for p in problems), (bad, problems)
+    case = {"id": "case_a", "query": "q",
+            "checker": {"script": "checkers/thing.py", "mode": "json",
+                        "expect": {"hotel": "C"}}}
+    scn = _load_one_scenario(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert scn.cases[0].checker_spec["expect"] == {"hotel": "C"}
 
 
 def test_cross_session_two_turn_case_is_allowed(tmp_path):

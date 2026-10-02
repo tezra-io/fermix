@@ -8,13 +8,13 @@ AIM_DISPLAY_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_LIVE_DISPLAY)),--co
 AIM_HANDS_ATTEST := $(if $(filter 1 true yes,$(CONFIRM_AIM_HANDS_OFF)),--confirm-hands-off,)
 AIM_ATTEST := $(AIM_DISPLAY_ATTEST) $(AIM_HANDS_ATTEST)
 
-.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
+.PHONY: help tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private estimate rank baseline uplift arms gaia lmeval aim aim-calibrate
 
 help:
-	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
+	@echo "targets: tests check dry regression behavioral-isolated capability capability-auto capability-judged capability-readonly capability-private estimate rank baseline uplift arms gaia lmeval aim aim-calibrate"
 
 tests:        ## developer tests for harness code; does not run behavioral/capability E2E
-	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code aim fixture_server arms; do \
+	@for t in scoring pricing aggregate leaderboard leaderboard_html halden_ops private_suites release_gate experiments uplift baseline lmeval gaia capability_runner checker grade suites companion judge eval_safety seed_home opik_client tier tier_exit_code aim fixture_server arms; do \
 	  echo "== $$t =="; $(UV) bin/test_$$t.py || exit 1; done
 
 check:        ## preconditions (Opik + daemon)
@@ -47,6 +47,9 @@ capability-judged:  ## isolated-judge response-quality axis against the developm
 
 capability-readonly:  ## capability score of the READ-ONLY suites vs the dev daemon (no disposable home)
 	bin/tier.sh capability-readonly
+
+capability-private:  ## the private holdout (config private_suites.dir), judged, vs an isolated daemon
+	bin/tier.sh capability-private
 
 estimate:     ## print the capability turn-count/cost plan (no spend)
 	$(UV) bin/run_capability.py --trials 5 --estimate

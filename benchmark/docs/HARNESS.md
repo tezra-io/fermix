@@ -92,7 +92,7 @@ How it scores (see `EVAL_CAPABILITY_SCORING.md`, beside this file):
   answer (`exact` compares the normalized whole reply; `numeric` grades the LAST
   number in it, and under `score.single: true` refuses more than one distinct
   number; regexes are single-quoted in YAML so backslashes survive). The private held-out split is **operator-supplied
-  OUTSIDE the repo** (`FERMIX_EVAL_HOLDOUT_DIR` / `--private-data`, run with
+  OUTSIDE the repo** (`private_suites.dir` in config.yaml / `--private-data`, run with
   `--private`) — answers are never shipped in the skill (they'd be readable by any
   agent iterating the eval); see `suites/capability/private/holdout.example.yaml`.
   `--private` skips Opik dataset/experiment/feedback writeback, but candidate

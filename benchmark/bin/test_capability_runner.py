@@ -1380,21 +1380,117 @@ def _plan_case(turns, cross_session=False):
         turns=[SimpleNamespace(query=f"q{i}", expect={}) for i in range(turns)])
 
 
-def test_the_runner_refuses_a_multi_turn_case_it_cannot_drive():
-    # `_standard_trial` sends only turns[-1].query while `_planned_turns` counts every
-    # declared turn, so an undriven multi-turn case is estimated as real work and then
-    # scored off its last prompt. The loader refuses this for score/checker cases; it
-    # cannot see a rubric-only one, which becomes a selection only under --judge.
-    rubric_two_turn = SimpleNamespace(id="r", cross_session=False,
-                                      turns=[SimpleNamespace(query="a", expect={}),
-                                             SimpleNamespace(query="b", expect={})])
-    cases = [(SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"), rubric_two_turn)]
-    problem = rc._undriven_case_error(cases)
-    assert problem is not None and "cap_x/r" in problem
-    ok = [(SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"), _plan_case(1)),
-          (SimpleNamespace(name="cap_x"), SimpleNamespace(id="s"),
-           _plan_case(2, cross_session=True))]
-    assert rc._undriven_case_error(ok) is None
+def _two_turn_case(**overrides):
+    case = dict(id="m", expect={}, requires_tools=[], requires_tools_all=(),
+                cross_session=False, score_spec={"match": "numeric", "expected": 42},
+                rubric=None, timeout_ms=1000, checker_spec=None,
+                turns=[SimpleNamespace(query="the code is 42, hold on to it", expect={}),
+                       SimpleNamespace(query="what was the code?", expect={})])
+    case.update(overrides)
+    return SimpleNamespace(**case)
+
+
+def test_a_multi_turn_case_runs_every_turn_in_one_session_and_grades_the_last(
+        tmp_path, monkeypatch):
+    seen = []
+
+    def fake_capture(_cfg, _opik, session, query, *_rest):
+        seen.append((session, query))
+        return _captured(reply="it was 42" if len(seen) == 2 else "noted")
+
+    monkeypatch.setattr(rc, "_capture_turn", fake_capture)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    trial, _trace_id, _models = rc._standard_trial(
+        cfg, None, SimpleNamespace(name="cap_x"), _two_turn_case(), "run", 0, False,
+        "task", None, None, False)
+    assert [query for _session, query in seen] == [
+        "the code is 42, hold on to it", "what was the code?"]
+    assert len({session for session, _query in seen}) == 1
+    assert trial.effective_success == 1.0
+
+
+def test_a_multi_turn_rubric_case_hands_the_judge_the_whole_conversation(
+        tmp_path, monkeypatch):
+    replies = iter(["noted", "it was 42"])
+    monkeypatch.setattr(rc, "_capture_turn",
+                        lambda *_a: _captured(reply=next(replies)))
+    seen = {}
+
+    def fake_judge(_cfg, _query, _reply, _rubric, _tag, **kwargs):
+        seen["transcript"] = kwargs["transcript"]
+        return rc.judge.JudgeResult(evaluated=True, passed=True, score=1.0, rationale="ok")
+
+    monkeypatch.setattr(rc.judge, "judge_case", fake_judge)
+    cfg = SimpleNamespace(daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = _two_turn_case(score_spec=None, rubric="Recalls 42.")
+    rc._standard_trial(cfg, None, SimpleNamespace(name="cap_x"), case, "run", 0, False,
+                       "task", None, None, True)
+    assert [row["content"] for row in seen["transcript"]] == [
+        "the code is 42, hold on to it", "noted", "what was the code?", "it was 42"]
+
+
+def test_the_checker_reads_the_tasks_gold_from_the_evidence_file():
+    ev = rc._evidence("run", 0, "s", "TOK-1", _episode(_captured()),
+                      expect={"hotel": "C", "rate": 136})
+    assert ev["expect"] == {"hotel": "C", "rate": 136}
+    assert rc._evidence("run", 0, "s", "TOK-1", _episode(_captured()))["expect"] is None
+
+
+def _holdout(tmp_path):
+    holdout = tmp_path / "fermix-eval-private"
+    holdout.mkdir()
+    (holdout / "real_use.yaml").write_text(
+        "suite: cap_private_x\nrisk: host_readonly\ntitle: t\nscenarios:\n"
+        "  - id: s\n    title: t\n    cases:\n      - id: c\n        query: q\n"
+        "        score: {match: contains, expected: x}\n")
+    return holdout
+
+
+def test_a_private_run_reads_its_suites_and_tasks_root_from_config(tmp_path):
+    holdout = _holdout(tmp_path)
+    cfg = SimpleNamespace(private_suites=rc.cfgmod.PrivateSuitesCfg(dir=str(holdout), remote=None))
+    args = SimpleNamespace(private=True, private_data=None, candidates=False)
+    suites_, tasks_root, problem = rc._load_selection(args, cfg)
+    assert problem is None and tasks_root == str(holdout)
+    assert [s.name for s in suites_] == ["cap_private_x"]
+    assert rc._pages_dir(tasks_root) == str(holdout / "fixtures" / "pages")
+    assert rc._pages_dir(rc.SKILL_DIR) == rc.FIXTURE_PAGES_DIR
+
+
+def test_a_private_run_without_a_configured_holdout_is_refused(tmp_path):
+    cfg = SimpleNamespace(private_suites=None)
+    args = SimpleNamespace(private=True, private_data=None, candidates=False)
+    _suites, _root, problem = rc._load_selection(args, cfg)
+    assert problem and "private_suites.dir" in problem
+
+
+def test_a_private_seed_resolves_under_the_holdout_and_moves_the_task_hash(tmp_path):
+    holdout = _holdout(tmp_path)
+    seed = holdout / "fixtures" / "seeds" / "ru_14"
+    seed.mkdir(parents=True)
+    (seed / "diving.md").write_text("9 dives\n")
+    case = SimpleNamespace(checker_spec={"script": "x.py", "seed": "fixtures/seeds/ru_14"})
+    before = rc._fixture_digest(case, str(holdout))
+    (seed / "diving.md").write_text("10 dives\n")
+    assert rc._fixture_digest(case, str(holdout)) != before
+
+
+def test_the_tasks_gold_is_part_of_the_task_identity():
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="none", model=None))
+    a = _two_turn_case(checker_spec={"script": "suites/capability/checkers/expense_total.py",
+                                     "mode": "json", "reset": [], "expect": {"hotel": "C"}})
+    b = _two_turn_case(checker_spec={**a.checker_spec, "expect": {"hotel": "B"}})
+    suite = SimpleNamespace(name="cap_x")
+    assert rc.tasks_hash([(suite, None, a)], cfg) != rc.tasks_hash([(suite, None, b)], cfg)
+
+
+def test_private_suites_load_from_config(tmp_path):
+    (tmp_path / "config.yaml").write_text(
+        'judge: {backend: none}\nprivate_suites:\n  dir: "~/fermix-eval-private"\n'
+        '  remote: "git@github.com:example/private.git"\n')
+    cfg = rc.cfgmod.load(str(tmp_path), str(tmp_path / "config.yaml"))
+    assert cfg.private_suites.dir == os.path.expanduser("~/fermix-eval-private")
+    assert cfg.private_suites.remote == "git@github.com:example/private.git"
 
 
 def test_planned_turns_counts_every_declared_turn():

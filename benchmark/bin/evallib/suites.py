@@ -329,7 +329,7 @@ def _validate_score(score, where: str, problems: list[str]) -> None:
             problems.append(f"{where}: `score.expected` is not a valid regex: {exc}")
 
 
-_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms", "reset"}
+_CHECKER_KEYS = {"script", "mode", "seed", "timeout_ms", "reset", "expect"}
 # Roots a `checker.reset` entry may name. Trial independence needs the daemon
 # state a checker task mutates restored, but a reset list is a recursive delete
 # inside the eval home: only the two subtrees a task legitimately owns are
@@ -381,9 +381,12 @@ def _validate_checker(chk, where: str, problems: list[str]) -> dict:
     """Validate a case-level `checker:` block (capability tier end-state scoring).
 
     A `checker:` runs a verification script over the sandbox after the turn:
-    `{script, mode: exit|json, seed?, timeout_ms?, reset?}`. `script`/`seed` are
-    paths relative to the harness root; the runner seeds `seed/` into the trial's
-    scoped workspace before the turn and runs `script` over it after (checker.py).
+    `{script, mode: exit|json, seed?, timeout_ms?, reset?, expect?}`. `script` is
+    relative to the harness root and `seed` to the run's tasks root (the harness root,
+    or the private holdout for a `--private` run); the runner seeds `seed/` into the
+    trial's scoped workspace before the turn and runs `script` over it after
+    (checker.py). `expect` is the task's gold, handed to the checker in the evidence
+    file outside the workspace, so the agent can never read it.
     `reset` names home-relative subtrees the runner safe-removes before EVERY
     trial, so a leftover artifact from the previous trial cannot pass this one.
 
@@ -407,6 +410,9 @@ def _validate_checker(chk, where: str, problems: list[str]) -> dict:
         t = chk["timeout_ms"]
         if isinstance(t, bool) or not isinstance(t, int) or t <= 0:
             problems.append(f"{where}: `checker.timeout_ms` must be a positive integer")
+    if "expect" in chk and (not isinstance(chk["expect"], dict) or not chk["expect"]):
+        problems.append(f"{where}: `checker.expect` must be a non-empty map (the gold the "
+                        "checker reads from the evidence file, never from the workspace)")
     return {**chk, "reset": _validate_reset_paths(chk.get("reset", []), where, problems)}
 
 
@@ -444,19 +450,6 @@ def _refuse_misplaced_fixture_state(case, cloc: str, problems: list[str]) -> Non
     if "fixture_state" in case.expect and not case_uses_fixture(case):
         problems.append(f"{cloc}: `fixture_state` needs a prompt addressing the fixture "
                         f"server — use {FIXTURE_URL_PLACEHOLDER} in `query`")
-
-
-def _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session: bool,
-                           cloc: str, problems: list[str]) -> None:
-    """A capability case is driven by run_capability, which sends ONE prompt (or the two
-    of a cross_session pair). Extra turns would be silently dropped and the case scored
-    off its last prompt alone, so refuse them at authoring time rather than publishing a
-    number for work that never ran. The runner refuses the same shape again at selection
-    time, where it also sees rubric-only cases (which carry neither spec)."""
-    if (score_spec is None and checker_spec is None) or cross_session or len(turns) <= 1:
-        return
-    problems.append(f"{cloc}: multi-turn capability cases are not driven; "
-                    "use cross_session or a single turn")
 
 
 def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], cloc: str,
@@ -680,8 +673,6 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 problems.append(f"{cloc}: `cross_session` requires exactly 2 turns (store, recall)")
             if cross_session and score_spec is None:
                 problems.append(f"{cloc}: `cross_session` requires a `score` block (grades the recall reply)")
-            _refuse_undriven_turns(turns, score_spec, checker_spec, cross_session,
-                                   cloc, problems)
             judge = _boolean(cs.get("judge", default_judge), f"{cloc}.judge", problems,
                              default_judge)
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout

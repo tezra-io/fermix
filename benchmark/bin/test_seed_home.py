@@ -198,6 +198,17 @@ def test_install_skills_lays_down_the_bundled_and_fixture_skills(tmp_path):
     assert (home / "skills" / "receipt-filing" / "SKILL.md").is_file()
 
 
+def test_install_skills_adds_the_private_holdouts_skills(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    private = tmp_path / "fermix-eval-private"
+    (private / "skills" / "garage").mkdir(parents=True)
+    (private / "skills" / "garage" / "SKILL.md").write_text("---\nname: garage\n---\n")
+    seed.install_skills(str(home), str(private))
+    assert (home / "skills" / "garage" / "SKILL.md").is_file()
+    assert (home / "skills" / "receipt-filing" / "SKILL.md").is_file()
+
+
 def test_install_skills_refuses_a_skills_dir_that_was_not_reset(tmp_path):
     home = tmp_path / "x-eval"
     (home / "skills").mkdir(parents=True)
