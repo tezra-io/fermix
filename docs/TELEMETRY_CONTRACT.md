@@ -451,7 +451,11 @@ so the UUID is what ties a trace to that record. The counter stays the trace's
 session id. Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
 the Opik exporter's sweep floor for the root; omit it and a call that sits quiet
 between delegations is force-closed at the idle TTL, and its ledger-bearing
-`call_stop` then mints a second, empty root. The delegation events carry
+`call_stop` then mints a second, empty root. It also sizes what the call started
+with (M56 §4.3), never quoting it: `instructions_bytes` (the composed
+instructions, the owner's details and memory files included) and `input_items`
+and `input_bytes` (the starting `session.input`: the chat's newest messages and
+earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
 the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
 with a `duration_ms` measurement. `provider_error` carries the vendor's bounded
@@ -474,7 +478,8 @@ delegation turns keep their own token usage on their own `llm` spans, so voice
 cost and backend cost stay separately attributed rather than double-counted, and
 an incomplete finalization stays visible as `accounting_complete: 0` rather than
 reading as a measured zero-cost call. Spoken content — captions, transcript
-fragments, the composed instructions — reaches no field on any of these events.
+fragments, the composed instructions, the starting input — reaches no field on
+any of these events.
 
 Backend work inside a delegation rides the shared emitters as usual
 (`Providers.Telemetry.emit_call/3`, `Tools.Telemetry.exec/5`) with the

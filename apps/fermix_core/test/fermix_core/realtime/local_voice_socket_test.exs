@@ -23,6 +23,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     @behaviour FermixCore.Realtime.VoiceBridge
 
     @impl true
+    def conversation_window(_bounds), do: {:ok, %{messages: [], gists: []}}
+    @impl true
     def open_call(_call), do: {:error, :not_in_this_test}
     @impl true
     def submit(_handle, _request, _callbacks), do: {:error, :not_in_this_test}

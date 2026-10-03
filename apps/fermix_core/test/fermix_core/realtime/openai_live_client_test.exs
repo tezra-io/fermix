@@ -61,6 +61,28 @@ defmodule FermixCore.Realtime.OpenAILiveClientTest do
         refute key in keys
       end
     end
+
+    # M56 §4.3: the chat a call starts with seeds the session as text messages.
+    test "carries the starting input as session.input when there is any" do
+      input = [
+        %{type: "message", role: "user", content: [%{type: "input_text", text: "hi"}]}
+      ]
+
+      event =
+        OpenAILiveClient.session_start_event(config(), @instructions,
+          event_id: "ev_1",
+          input: input
+        )
+
+      assert event.session.input == input
+      assert Jason.encode!(event) =~ ~s("input":[{)
+    end
+
+    test "an empty input leaves session.input out" do
+      event = OpenAILiveClient.session_start_event(config(), @instructions, input: [])
+
+      refute Map.has_key?(event.session, :input)
+    end
   end
 
   describe "append builders" do
@@ -105,6 +127,21 @@ defmodule FermixCore.Realtime.OpenAILiveClientTest do
                delegation_id: "dg_1",
                content: "The room is booked."
              }
+    end
+
+    # Session-wide quiet context, the typed-message mirror (M56 §4.3).
+    test "a thinking append for the whole session carries a present null delegation id" do
+      assert {"ev_8", event} =
+               OpenAILiveClient.thinking_append_event("ev_8", nil, "The owner typed: hi")
+
+      assert event == %{
+               type: "session.thinking.append",
+               event_id: "ev_8",
+               delegation_id: nil,
+               content: "The owner typed: hi"
+             }
+
+      assert Jason.encode!(event) =~ ~s("delegation_id":null)
     end
 
     test "mute and close carry their event id" do

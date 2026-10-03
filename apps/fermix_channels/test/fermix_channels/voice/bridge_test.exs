@@ -100,6 +100,9 @@ defmodule FermixChannels.Voice.BridgeTest do
 
   defp uuid, do: DeviceIdentity.generate_uuid()
 
+  defp add(key, role, content, opts \\ []),
+    do: :ok = ConversationStore.add_message(key, role, content, opts)
+
   defp callbacks do
     test_pid = self()
 
@@ -567,6 +570,57 @@ defmodule FermixChannels.Voice.BridgeTest do
       send(typed_pid, {:proceed, :reply})
       assert_receive {:turn_started, %{id: "typed-2"}, second_pid}, 5_000
       send(second_pid, {:proceed, :reply})
+    end
+  end
+
+  # M56 §4.3 (D6): what a call in the chat starts with, read before the call
+  # has a handle. The chat's own store, never a tool result or a summary.
+  describe "conversation_window/1" do
+    setup do
+      chat_key = Companion.chat_conversation_key()
+      :ok = ConversationStore.clear(chat_key)
+      on_exit(fn -> ConversationStore.clear(chat_key) end)
+      %{chat_key: chat_key}
+    end
+
+    test "reads the chat's newest user and assistant messages, oldest first", %{
+      chat_key: chat_key
+    } do
+      tainted = [metadata: %{history_tainted: true}]
+
+      add(chat_key, "system", "Conversation checkpoint summary:\nthe Q3 report", tainted)
+      add(chat_key, "user", "first")
+      add(chat_key, "assistant", "first answer")
+      add(chat_key, "user", "what was I reading")
+      add(chat_key, "assistant", "You were reading the Q3 report.", tainted)
+      add(chat_key, "tool", "raw tool output")
+      add(chat_key, "user", "send me the lease")
+      add(chat_key, "system", "Conversation checkpoint summary:\nlater")
+
+      assert {:ok, %{messages: messages, gists: []}} =
+               Bridge.conversation_window(%{messages: 3, gists: 3})
+
+      assert Enum.map(messages, &{&1.role, &1.content}) == [
+               {"user", "what was I reading"},
+               {"assistant", "You were reading the Q3 report."},
+               {"user", "send me the lease"}
+             ]
+
+      # The marker rides along, for Core to mask against the voice provider.
+      assert [false, true, false] == Enum.map(messages, &Map.get(&1, :history_tainted, false))
+    end
+
+    test "an empty chat is an empty window" do
+      assert {:ok, %{messages: [], gists: []}} =
+               Bridge.conversation_window(%{messages: 6, gists: 0})
+    end
+
+    test "another conversation is never read" do
+      elsewhere = {"telegram", "voice-window-elsewhere", :root}
+      on_exit(fn -> ConversationStore.clear(elsewhere) end)
+      add(elsewhere, "user", "a telegram message")
+
+      assert {:ok, %{messages: []}} = Bridge.conversation_window(%{messages: 6, gists: 3})
     end
   end
 

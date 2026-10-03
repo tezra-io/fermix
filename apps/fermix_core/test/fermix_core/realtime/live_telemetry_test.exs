@@ -15,6 +15,7 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   }
 
   @delegation %{delegation_id: "dlg_1", revision: 2, turn_session_id: "voice_delegation_7"}
+  @start_size %{instructions_bytes: 2_861, input_items: 0, input_bytes: 0}
 
   setup do
     handler_id = "test-voice-live-#{System.unique_integer([:positive])}"
@@ -46,7 +47,7 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   end
 
   test "call_start carries the call id, the engine and the sweep floor" do
-    LiveTelemetry.call_start(@meta, 900_000)
+    LiveTelemetry.call_start(@meta, 900_000, @start_size)
 
     assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
     assert meta.agent == "voice_live"
@@ -56,6 +57,26 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
     assert meta.model == "gpt-live-1"
     assert meta.voice == "marin"
     assert meta.max_duration_ms == 900_000
+  end
+
+  # M56 §4.3: what the call started with is sized, never quoted.
+  test "call_start carries the size of the instructions and the starting input" do
+    LiveTelemetry.call_start(@meta, 900_000, %{
+      instructions_bytes: 3_174,
+      input_items: 4,
+      input_bytes: 612
+    })
+
+    assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
+    assert meta.instructions_bytes == 3_174
+    assert meta.input_items == 4
+    assert meta.input_bytes == 612
+  end
+
+  test "call_start refuses a size that is not a count" do
+    assert_raise FunctionClauseError, fn ->
+      LiveTelemetry.call_start(@meta, 900_000, %{@start_size | input_bytes: "612"})
+    end
   end
 
   test "session_started carries the provider session id" do
@@ -136,7 +157,7 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   # The call id is a counter that restarts with the VM; the UUID is the key of
   # the call's durable record, so it is what ties a trace to that record.
   test "every event carries the call UUID beside the call id" do
-    LiveTelemetry.call_start(@meta, 900_000)
+    LiveTelemetry.call_start(@meta, 900_000, @start_size)
     LiveTelemetry.delegation_stop(@meta, @delegation, "completed", 10)
     LiveTelemetry.call_stop(@meta, %{voice_seconds: 1}, :call_stop)
 
@@ -148,7 +169,7 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   end
 
   test "absent optional metadata is dropped, never emitted as nil" do
-    LiveTelemetry.call_start(%{session_id: "voice_live:8"}, 60_000)
+    LiveTelemetry.call_start(%{session_id: "voice_live:8"}, 60_000, @start_size)
 
     assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
     refute Map.has_key?(meta, :provider_session_id)
@@ -160,14 +181,16 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
   end
 
   test "a parent session rides as correlation when the call was opened by a turn" do
-    LiveTelemetry.call_start(Map.put(@meta, :parent_session, "main-3"), 60_000)
+    LiveTelemetry.call_start(Map.put(@meta, :parent_session, "main-3"), 60_000, @start_size)
 
     assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
     assert meta.parent_session == "main-3"
   end
 
   test "a call without a session id fails loud rather than emitting an orphan" do
-    assert_raise KeyError, fn -> LiveTelemetry.call_start(%{model: "gpt-live-1"}, 60_000) end
+    assert_raise KeyError, fn ->
+      LiveTelemetry.call_start(%{model: "gpt-live-1"}, 60_000, @start_size)
+    end
   end
 
   test "trace_event_definitions covers every voice_live event as an agent_event" do

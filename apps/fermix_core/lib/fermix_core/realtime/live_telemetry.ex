@@ -104,18 +104,45 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   @spec trace_event_definitions() :: [map()]
   def trace_event_definitions, do: @trace_event_definitions
 
+  @typedoc """
+  How large what a call started with was (M56 §4.3): the instructions' bytes,
+  and the starting `session.input`'s items and text bytes. Sizes only: the
+  owner's details, memory and chat never reach a field.
+  """
+  @type start_size :: %{
+          instructions_bytes: non_neg_integer(),
+          input_items: non_neg_integer(),
+          input_bytes: non_neg_integer()
+        }
+
   @doc """
-  Opens the run, before the provider socket is even dialled.
+  Opens the run, as `session.start` goes out.
 
   `max_duration_ms` is the call's own cap and becomes the Opik exporter's sweep
   floor: a Live call is silent between delegations for minutes at a time, so
   without it a quiet call is force-closed at the idle TTL and its `call_stop`
-  mints a second, ledger-only root.
+  mints a second, ledger-only root. `start_size` rides as metadata.
   """
-  @spec call_start(meta(), pos_integer()) :: :ok
-  def call_start(meta, max_duration_ms)
-      when is_map(meta) and is_integer(max_duration_ms) and max_duration_ms > 0 do
-    execute(@call_start_event, %{}, Map.put(base(meta), :max_duration_ms, max_duration_ms))
+  @spec call_start(meta(), pos_integer(), start_size()) :: :ok
+  def call_start(
+        meta,
+        max_duration_ms,
+        %{instructions_bytes: instructions, input_items: items, input_bytes: input}
+      )
+      when is_map(meta) and is_integer(max_duration_ms) and max_duration_ms > 0 and
+             is_integer(instructions) and instructions >= 0 and is_integer(items) and
+             items >= 0 and is_integer(input) and input >= 0 do
+    metadata =
+      meta
+      |> base()
+      |> Map.merge(%{
+        max_duration_ms: max_duration_ms,
+        instructions_bytes: instructions,
+        input_items: items,
+        input_bytes: input
+      })
+
+    execute(@call_start_event, %{}, metadata)
   end
 
   @doc """

@@ -14,6 +14,9 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     @behaviour FermixCore.Realtime.VoiceBridge
 
     @impl true
+    def conversation_window(_bounds), do: {:ok, %{messages: [], gists: []}}
+
+    @impl true
     def open_call(_call), do: {:ok, :handle}
 
     @impl true
@@ -56,8 +59,15 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     assert_raise ArgumentError, ~r/voice_bridge must be a module/, fn -> VoiceBridge.resolve() end
   end
 
-  test "the behaviour declares the four call-scoped callbacks" do
+  # Four are call-scoped; the chat read runs before a call has a handle.
+  test "the behaviour declares the four call-scoped callbacks and the chat read" do
     assert Enum.sort(VoiceBridge.behaviour_info(:callbacks)) ==
-             Enum.sort(open_call: 1, submit: 3, cancel: 2, close_call: 1)
+             Enum.sort(
+               conversation_window: 1,
+               open_call: 1,
+               submit: 3,
+               cancel: 2,
+               close_call: 1
+             )
   end
 end

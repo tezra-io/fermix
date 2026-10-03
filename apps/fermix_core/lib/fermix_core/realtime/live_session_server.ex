@@ -39,6 +39,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
+  alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LiveDelegation
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.LiveLedger
@@ -404,9 +405,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp start_call(state) do
     with {:ok, bridge} <- resolve_bridge(state),
          {:ok, instructions} <- resolve_prompt(state),
+         {:ok, input} <- resolve_input(state, bridge),
          {:ok, api_key} <- require_binary(state.api_key, :api_key),
          {:ok, pid} <- open_socket(state, api_key) do
-      send_session_start(%{state | voice_bridge: bridge, live_pid: pid}, instructions)
+      send_session_start(%{state | voice_bridge: bridge, live_pid: pid}, instructions, input)
     else
       {:error, {:provider_refused, reason}} -> refuse_start(state, reason)
       {:error, reason} -> {:error, reason, notify_error(state, reason)}
@@ -427,15 +429,21 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {:error, :provider_refused, state}
   end
 
-  defp send_session_start(state, instructions) do
+  defp send_session_start(state, instructions, input) do
     event =
       OpenAILiveClient.session_start_event(state.config, instructions,
-        event_id: OpenAILiveClient.new_event_id()
+        event_id: OpenAILiveClient.new_event_id(),
+        input: input
       )
 
     case send_event(state, event) do
       :ok ->
-        LiveTelemetry.call_start(telemetry_meta(state), state.max_duration_ms)
+        LiveTelemetry.call_start(
+          telemetry_meta(state),
+          state.max_duration_ms,
+          Map.put(LiveChat.input_size(input), :instructions_bytes, byte_size(instructions))
+        )
+
         {:ok, state |> open_record() |> arm_start_deadline()}
 
       {:error, reason} ->
@@ -459,7 +467,25 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
-  # Tagged, because `start_call/1`'s `with` gathers four different failures and
+  # A call in the chat's conversation starts with the chat (M56 §4.3, D6),
+  # read through the bridge before the call has a handle. A private call reads
+  # none of it. A chat that cannot be read refuses the call, as a LIVE.md that
+  # cannot be read does: the call does not start on half of what it was meant
+  # to know.
+  defp resolve_input(state, bridge) do
+    case Config.conversation(state.config) do
+      "chat" -> chat_input(bridge)
+      "private" -> {:ok, []}
+    end
+  end
+
+  defp chat_input(bridge) do
+    with {:ok, window} <- bridge.conversation_window(LiveChat.window_bounds()) do
+      {:ok, LiveChat.input(window)}
+    end
+  end
+
+  # Tagged, because `start_call/1`'s `with` gathers five different failures and
   # only this one is the provider's: the others (no bridge, no key) are local
   # conditions with their own published kinds and no vendor words to quote.
   defp open_socket(state, api_key) do

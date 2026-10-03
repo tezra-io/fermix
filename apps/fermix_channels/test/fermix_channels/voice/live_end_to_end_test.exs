@@ -86,8 +86,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # `LiveSessionServer` builds the §6 `call` map itself, so it has no way to
   # name a scheduler — in production there is only one. This shim adds the
   # `agent_server` the bridge already accepts and delegates every callback
-  # unchanged, so `open_call/submit/cancel/close_call` are the shipped code
-  # paths; only the queue they reach is the test's.
+  # unchanged, so `conversation_window/open_call/submit/cancel/close_call` are
+  # the shipped code paths; only the queue they reach is the test's.
   defmodule QueueBoundBridge do
     @behaviour FermixCore.Realtime.VoiceBridge
 
@@ -104,6 +104,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
         pid -> Agent.stop(pid)
       end
     end
+
+    @impl true
+    def conversation_window(bounds), do: Bridge.conversation_window(bounds)
 
     @impl true
     def open_call(call),
@@ -300,6 +303,33 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     refute Process.alive?(store), "the ephemeral call store must be released on call stop"
     assert Registry.lookup(Voice.registry(), call_id) == []
+  end
+
+  # M56 §4.3: the stage's gate, through the real bridge: a call in the chat
+  # starts knowing what was just typed there, told it is context, not a request.
+  test "a call in the chat starts with what was typed there as session.input" do
+    Process.flag(:trap_exit, true)
+    chat_key = Companion.chat_conversation_key()
+    :ok = ConversationStore.clear(chat_key)
+    on_exit(fn -> ConversationStore.clear(chat_key) end)
+    :ok = ConversationStore.add_message(chat_key, "user", "the lease: https://x.test/lease")
+    :ok = ConversationStore.add_message(chat_key, "assistant", "Saved it.")
+    session = start_session()
+
+    :ok = SessionControl.call_start(session)
+
+    [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+
+    assert [
+             %{role: "user", content: [%{type: "input_text", text: "the lease: " <> _url}]},
+             %{role: "assistant", content: [%{type: "output_text", text: "Saved it."}]},
+             %{role: "developer", content: [%{text: closing}]}
+           ] = payload.input
+
+    assert closing =~ "not a request"
+
+    assert :ok = SessionControl.call_stop(session)
+    assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
   end
 
   test "cancelling a task stops the running turn and reports it to the call" do

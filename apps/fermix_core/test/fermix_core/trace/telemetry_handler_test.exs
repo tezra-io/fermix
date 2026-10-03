@@ -738,7 +738,12 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     delegation = %{delegation_id: "dlg_1", revision: 1, turn_session_id: "voice_delegation_7"}
 
-    LiveTelemetry.call_start(meta, 900_000)
+    LiveTelemetry.call_start(meta, 900_000, %{
+      instructions_bytes: 2_861,
+      input_items: 0,
+      input_bytes: 0
+    })
+
     LiveTelemetry.session_started(meta)
     LiveTelemetry.delegation_start(meta, delegation)
     LiveTelemetry.delegation_stop(meta, delegation, "completed", 1_200)

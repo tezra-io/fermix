@@ -34,6 +34,11 @@ defmodule FermixChannels.Voice.Bridge do
     restarts with the daemon and a later call must never inherit an earlier
     one's history.
 
+  A call in the chat's conversation starts with the chat (M56 §4.3, D6):
+  `conversation_window/1` reads the chat's newest user and assistant messages
+  from its durable store and the gists of the newest earlier calls, before
+  the call has a handle. Core shapes them for the provider (`LiveChat`).
+
   Two lifetimes are call-scoped either way:
 
   - **The turns.** The queue serializes one call's delegations in their
@@ -62,6 +67,8 @@ defmodule FermixChannels.Voice.Bridge do
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.VoiceBridge
 
@@ -95,6 +102,24 @@ defmodule FermixChannels.Voice.Bridge do
   stops it by.
   """
   @type task_ref :: {ConversationKey.t(), message_id :: String.t()}
+
+  @doc """
+  What a call in the chat's conversation starts with: the chat's newest
+  `messages` user and assistant messages, oldest first, as its store holds
+  them, and the gists of the newest `gists` earlier calls, newest first. A tool
+  result, a checkpoint summary or any other system message is never among
+  them. Memory off is a configuration, not a failure: there are no earlier
+  calls to read.
+  """
+  @impl true
+  @spec conversation_window(VoiceBridge.window_bounds()) ::
+          {:ok, VoiceBridge.conversation_window()} | {:error, term()}
+  def conversation_window(%{messages: messages, gists: gists})
+      when is_integer(messages) and messages > 0 and is_integer(gists) and gists >= 0 do
+    with {:ok, recent_gists} <- recent_gists(gists) do
+      {:ok, %{messages: chat_messages(messages), gists: recent_gists}}
+    end
+  end
 
   @doc """
   Open one call: claim the call id, then name the conversation its hand-offs
@@ -191,6 +216,22 @@ defmodule FermixChannels.Voice.Bridge do
 
     Logger.info("voice bridge closed call #{call_id}: #{inspect(outcomes)}")
     :ok
+  end
+
+  # --- What a call starts with ---
+
+  defp chat_messages(count) do
+    Companion.chat_conversation_key()
+    |> ConversationStore.get_history()
+    |> Enum.filter(&(&1.role in ["user", "assistant"]))
+    |> Enum.take(-count)
+  end
+
+  defp recent_gists(count) do
+    case CallRecord.recent_gists(count, CallRecord.repo_opts(Repo)) do
+      {:error, :disabled} -> {:ok, []}
+      read -> read
+    end
   end
 
   # --- Call lifetime ---

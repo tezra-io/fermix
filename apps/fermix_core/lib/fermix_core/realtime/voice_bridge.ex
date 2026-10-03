@@ -16,6 +16,11 @@ defmodule FermixCore.Realtime.VoiceBridge do
   `cancel/2` and `close_call/1` return once the work is stopped. They carry no
   deadline of their own and must stay bounded: the session runs them inside
   calls its own callers wait on with no timeout (`SessionControl`).
+
+  `conversation_window/1` is the one callback that is not call-scoped: a call
+  in the chat's conversation reads it before `session.start`, when no handle
+  exists yet, so it is a plain function of the module (M56 §4.3). A private
+  call never calls it.
   """
 
   @typedoc """
@@ -58,6 +63,21 @@ defmodule FermixCore.Realtime.VoiceBridge do
           result: ({:ok, String.t()} | {:cancelled} | {:error, String.t()} -> :ok)
         }
 
+  @typedoc "How much of the chat a call starts with (`LiveChat.window_bounds/0`)."
+  @type window_bounds :: %{messages: pos_integer(), gists: non_neg_integer()}
+
+  @typedoc """
+  The chat as a call starts with it (M56 §4.3, D6): the chat's newest user and
+  assistant messages, at most `messages`, oldest first, as the conversation
+  store holds them (a Computer History taint marker included, for Core to mask
+  against the voice provider), and the gists of the newest earlier calls, at
+  most `gists`, newest first. Never a tool result, a checkpoint summary or any
+  other system message.
+  """
+  @type conversation_window :: %{messages: [map()], gists: [String.t()]}
+
+  @callback conversation_window(window_bounds()) ::
+              {:ok, conversation_window()} | {:error, term()}
   @callback open_call(call()) :: {:ok, call_handle :: term()} | {:error, term()}
   @callback submit(call_handle :: term(), request(), callbacks()) ::
               {:ok, task_ref :: term()} | {:error, term()}

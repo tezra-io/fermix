@@ -9,6 +9,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.OpenAILiveClient
@@ -101,9 +102,27 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     # product does not have.
     def start(test_pid) do
       Agent.start(
-        fn -> %{test_pid: test_pid, submits: [], cancels: [], closed: 0, callbacks: %{}} end,
+        fn ->
+          %{
+            test_pid: test_pid,
+            submits: [],
+            cancels: [],
+            closed: 0,
+            callbacks: %{},
+            window: {:ok, %{messages: [], gists: []}}
+          }
+        end,
         name: __MODULE__
       )
+    end
+
+    @doc "What the next `conversation_window/1` answers."
+    def set_window(result), do: Agent.update(__MODULE__, &%{&1 | window: result})
+
+    @impl true
+    def conversation_window(bounds) do
+      send(test_pid(), {:bridge_window, bounds})
+      Agent.get(__MODULE__, & &1.window)
     end
 
     def stop do
@@ -164,6 +183,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   defmodule RefusingBridge do
     @behaviour FermixCore.Realtime.VoiceBridge
 
+    @impl true
+    def conversation_window(_bounds), do: {:ok, %{messages: [], gists: []}}
     @impl true
     def open_call(_call), do: {:error, :no_queue}
     @impl true
@@ -352,6 +373,89 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert_receive {:realtime, %{type: "error", kind: "bridge_unavailable"}}
       assert_receive {:EXIT, ^session, {:shutdown, :bridge_unavailable}}
+    end
+  end
+
+  # M56 §4.3 (D5, D6): a call in the chat's conversation starts with the chat
+  # as `session.input`, read through the bridge before `session.start`.
+  describe "what a call starts with" do
+    test "a chat call's session.start carries what the bridge reads of the chat", %{
+      clock: clock
+    } do
+      window = %{
+        messages: [
+          %{role: "user", content: "here is the lease: https://x.test/lease"},
+          %{role: "assistant", content: "Got it."}
+        ],
+        gists: ["Booked the dentist."]
+      }
+
+      FakeBridge.set_window({:ok, window})
+      session = start_session(clock: clock)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_received {:bridge_window, %{messages: 6, gists: 3}}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      assert payload.input == LiveChat.input(window)
+
+      assert Enum.map(payload.input, & &1.role) ==
+               ~w(developer user assistant developer)
+    end
+
+    test "an empty chat sends no session.input", %{clock: clock} do
+      session = start_session(clock: clock)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_received {:bridge_window, _bounds}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      refute Map.has_key?(payload, :input)
+    end
+
+    # M56 §5: a private call is kept apart from the chat, in both directions.
+    test "a private call reads nothing of the chat and sends no input", %{clock: clock} do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+
+      :ok = SessionControl.call_start(session)
+
+      refute_received {:bridge_window, _bounds}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      refute Map.has_key?(payload, :input)
+    end
+
+    # The same as a LIVE.md that cannot be read: the call does not start on
+    # half of what it was meant to know, and the reason is on the frame.
+    test "a chat the bridge cannot read refuses the call before any socket opens", %{
+      clock: clock
+    } do
+      FakeBridge.set_window({:error, :store_unavailable})
+      session = start_session(clock: clock)
+
+      assert {:error, :store_unavailable} = SessionControl.call_start(session)
+
+      assert_receive {:realtime, %{type: "error", reason: "store_unavailable"}}
+      assert FakeLiveClient.events() == []
+    end
+
+    test "call_start says how large the instructions and the input are, never what", %{
+      clock: clock
+    } do
+      scope = "voice_live:sizes_#{System.unique_integer([:positive, :monotonic])}"
+      attach_call_start_handler([scope])
+      window = %{messages: [%{role: "user", content: "a private link"}], gists: []}
+      FakeBridge.set_window({:ok, window})
+      session = start_session(clock: clock, session_scope: scope)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_receive {:call_start, metadata}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      assert metadata.instructions_bytes == byte_size(payload.instructions)
+      assert %{input_items: 2, input_bytes: input_bytes} = metadata
+      assert input_bytes == LiveChat.input_size(payload.input).input_bytes
+      refute inspect(metadata) =~ "private link"
     end
   end
 
