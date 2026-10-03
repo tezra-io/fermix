@@ -39,6 +39,12 @@ defmodule FermixChannels.Voice.Bridge do
   from its durable store and the gists of the newest earlier calls, before
   the call has a handle. Core shapes them for the provider (`LiveChat`).
 
+  A result the voice cannot say is shown in the chat (M56 §4.5): `show/2`
+  writes it through `Channels.Companion.write_call_row/3`, the one write for a
+  call's rows, to the chat's own timeline, announced to the Mac and the phones.
+  Core never names the companion channel, so its session reaches the write
+  only here.
+
   Two lifetimes are call-scoped either way:
 
   - **The turns.** The queue serializes one call's delegations in their
@@ -147,6 +153,20 @@ defmodule FermixChannels.Voice.Bridge do
        %{started_at: started_at, silence_allowed?: Companion.every_client_reads?("turn_done")}}
     else
       _not_the_chat_or_no_call -> :none
+    end
+  end
+
+  @doc """
+  Show `text` in the chat as a row of the call `call` names, and answer the
+  row's `server_seq`: the row already written when the same task revision was
+  shown before.
+  """
+  @impl true
+  @spec show(VoiceBridge.shown_call(), String.t()) :: {:ok, pos_integer()} | {:error, term()}
+  def show(call, text) when is_map(call) and is_binary(text) do
+    with {:ok, %{server_seq: server_seq}} <-
+           Companion.write_call_row(Companion.chat_profile(), text, call) do
+      {:ok, server_seq}
     end
   end
 

@@ -18,7 +18,10 @@ defmodule FermixChannels.Channels.Voice do
     ordinary replies, and each reply is one delegation result. Taking the raw
     tier keeps the gateway from chunking, and this adapter then drops every
     delta — the session speaks the final answer once, and partial text reaching
-    the voice model would be spoken twice.
+    the voice model would be spoken twice. The stream carries one thing on to
+    the session: `:history_tainted`, the runner's word, before the reply, that
+    the reply is drawn from Computer History (M56 §9), so the session gives it
+    to no voice that may not carry it.
   - **Media is refused.** The Live wire carries audio and text only, so an
     attachment has nowhere to go and says so (`:unsupported_in_voice`) instead
     of being silently dropped.
@@ -76,11 +79,17 @@ defmodule FermixChannels.Channels.Voice do
   The `:raw` tier's stream callback — a deliberate drop (see the moduledoc).
   Its job is to OWN the streaming decision, not to stream: with it the gateway
   never builds a draft or block engine, so one delegation produces exactly one
-  delivered answer.
+  delivered answer. `:history_tainted` alone goes on to the session, fenced
+  like the answer it comes before.
   """
   @impl true
-  def build_raw_stream_callback(%Message{}) do
-    fn _event -> :ok end
+  def build_raw_stream_callback(%Message{} = message) do
+    route = route(message)
+
+    fn
+      :history_tainted -> notify(route, {:provenance, :history_tainted})
+      _event -> :ok
+    end
   end
 
   @impl true
@@ -198,6 +207,12 @@ defmodule FermixChannels.Channels.Voice do
 
   defp dispatch(%{activity: activity}, {:activity, event}) when is_function(activity, 1) do
     _ = activity.(event)
+    :ok
+  end
+
+  defp dispatch(%{history_tainted: tainted}, {:provenance, :history_tainted})
+       when is_function(tainted, 0) do
+    _ = tainted.()
     :ok
   end
 

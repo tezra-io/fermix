@@ -104,6 +104,21 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
     assert measurements == %{duration_ms: 1_234}
     assert meta.status == "completed"
     assert meta.turn_session_id == "voice_delegation_7"
+    refute Map.has_key?(meta, :server_seq)
+    refute Map.has_key?(meta, :shown_bytes)
+  end
+
+  # M56 §4.5: a result shown in the chat is named by its row and sized, never
+  # quoted.
+  test "delegation_stop names the chat row a result was shown at, and its size" do
+    LiveTelemetry.delegation_stop(@meta, @delegation, "completed", 1_234, %{
+      server_seq: 42,
+      bytes: 913
+    })
+
+    assert_receive {:vl, [:fermix, :voice_live, :delegation_stop], _measurements, meta}
+    assert meta.server_seq == 42
+    assert meta.shown_bytes == 913
   end
 
   test "delegation_stop refuses a status outside the terminal vocabulary" do

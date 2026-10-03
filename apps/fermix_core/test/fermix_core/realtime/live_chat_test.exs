@@ -23,6 +23,22 @@ defmodule FermixCore.Realtime.LiveChatTest do
     :ok
   end
 
+  # M56 §9: one rule for what the voice may carry, read by the input, the
+  # mirror and a hand-off's reply alike.
+  describe "history_permitted?/0" do
+    test "is false while OpenAI is not granted history, true once it is" do
+      refute LiveChat.history_permitted?()
+
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      assert LiveChat.history_permitted?()
+    end
+  end
+
   describe "window_bounds/0" do
     test "asks for the six newest chat messages and the three newest gists" do
       assert LiveChat.window_bounds() == %{messages: 6, gists: 3}

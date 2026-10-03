@@ -29,6 +29,8 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     @impl true
     def chat_call(_key), do: :none
     @impl true
+    def show(_call, _text), do: {:error, :not_in_this_test}
+    @impl true
     def open_call(_call), do: {:error, :not_in_this_test}
     @impl true
     def submit(_handle, _request, _callbacks), do: {:error, :not_in_this_test}

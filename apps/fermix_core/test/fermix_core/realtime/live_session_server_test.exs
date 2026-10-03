@@ -111,7 +111,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
             cancels: [],
             closed: 0,
             callbacks: %{},
-            window: {:ok, %{messages: [], gists: []}}
+            window: {:ok, %{messages: [], gists: []}},
+            show: {:ok, 42}
           }
         end,
         name: __MODULE__
@@ -120,6 +121,15 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     @doc "What the next `conversation_window/1` answers."
     def set_window(result), do: Agent.update(__MODULE__, &%{&1 | window: result})
+
+    @doc "What the next `show/2` answers."
+    def set_show(result), do: Agent.update(__MODULE__, &%{&1 | show: result})
+
+    @impl true
+    def show(call, text) do
+      send(test_pid(), {:bridge_show, call, text})
+      Agent.get(__MODULE__, & &1.show)
+    end
 
     @impl true
     def conversation_window(bounds) do
@@ -185,6 +195,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok
     end
 
+    @doc "The delegation's turn read Computer History content, as its runner tells it."
+    def fire_tainted(delegation_id) do
+      callbacks = Agent.get(__MODULE__, &Map.fetch!(&1.callbacks, delegation_id))
+      callbacks.history_tainted.()
+      :ok
+    end
+
     defp test_pid, do: Agent.get(__MODULE__, & &1.test_pid)
   end
 
@@ -199,6 +216,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     def chat_call(_key), do: :none
     @impl true
     def open_call(_call), do: {:error, :no_queue}
+    @impl true
+    def show(_call, _text), do: {:error, :no_timeline}
     @impl true
     def submit(_handle, _request, _callbacks), do: {:error, :queue_down}
     @impl true
@@ -302,6 +321,33 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert payload.instructions =~ "Your name is Nova."
       assert payload.instructions =~ "## The owner\n\n- Name: Sujeeth"
       assert payload.instructions =~ CurrentDate.note()
+    end
+
+    # M56 §4.5: the voice learns from the generated instructions, not LIVE.md,
+    # that a result it cannot say is put in the chat; a private call shows none.
+    test "a call in the chat is told results it cannot say go to the chat, a private call not",
+         %{clock: clock} do
+      registry = start_capability_registry()
+      chat = start_session(clock: clock, prompt: nil, capability_registry: registry)
+      :ok = SessionControl.call_start(chat)
+      [%{type: "session.start", session: chat_start}] = FakeLiveClient.events()
+      end_call(chat)
+
+      private =
+        start_session(
+          clock: clock,
+          prompt: nil,
+          capability_registry: registry,
+          config: live_config(conversation: "private")
+        )
+
+      :ok = SessionControl.call_start(private)
+
+      %{session: private_start} =
+        FakeLiveClient.events() |> Enum.filter(&(&1.type == "session.start")) |> List.last()
+
+      assert chat_start.instructions =~ "in the owner's chat"
+      refute private_start.instructions =~ "in the owner's chat"
     end
 
     test "a v1-shaped realtime key never appears in any Live payload", %{clock: clock} do
@@ -1431,6 +1477,219 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # M56 §4.5: what cannot be said aloud is written to the chat while the voice
+  # says the short version, and the task frame names the row. §9: a reply drawn
+  # from Computer History reaches the voice only when OpenAI may carry it.
+  describe "a result shown in the chat" do
+    @delimiter LiveText.shown_delimiter()
+    @in_chat "The full result is in the chat."
+
+    setup %{clock: clock} do
+      original = Application.fetch_env(:fermix_core, :computer_history)
+      on_exit(fn -> restore_core_env({:computer_history, original}) end)
+      # History on, OpenAI not granted: the voice may not carry a tainted reply.
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+
+      scope = "voice_live:shown_#{System.unique_integer([:positive, :monotonic])}"
+      attach_delegation_stop_handler(scope)
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: call_uuid}}
+      speak(session, "find the sign-up form", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, _request}
+      %{session: session, call_uuid: call_uuid}
+    end
+
+    test "the line before the delimiter is said and the rest is shown once, at its row", ctx do
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, call, "It is at https://x.test/form."}
+
+      assert call == %{
+               "uuid" => ctx.call_uuid,
+               "event" => "shared",
+               "task_id" => "dg_1",
+               "revision" => 1
+             }
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_1",
+                        status: "completed",
+                        summary: "I found the form.",
+                        server_seq: 42
+                      }}
+
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == "I found the form. " <> @in_chat
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    test "with no delimiter a link is said in a sentence and the whole reply is shown", ctx do
+      reply = "The form is at https://x.test/form. It asks for a name. And a city."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, _call, ^reply}
+      assert_receive {:realtime, %{type: "task", status: "completed", server_seq: 42}}
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == reply <> " " <> @in_chat
+      sync(ctx.session)
+    end
+
+    test "a short plain reply is said only: nothing is shown and no row is named", ctx do
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+
+      assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+      refute Map.has_key?(task, :server_seq)
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: "The room is booked for 10am."}] = commentary("dg_1")
+      sync(ctx.session)
+    end
+
+    # Never say it is in the chat when it is not.
+    test "a write that fails is logged and the line is said as it was, with no row named" do
+      FakeBridge.set_show({:error, :disk_full})
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+          assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+          refute Map.has_key?(task, :server_seq)
+          assert task.summary == "I found the form."
+        end)
+
+      assert log =~ "could not be shown in the chat"
+      assert log =~ "disk_full"
+      assert [%{content: "I found the form."}] = commentary("dg_1")
+    end
+
+    test "the delegation's stop event names the row and its size, never its text", ctx do
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:delegation_stop, metadata}
+      assert metadata.server_seq == 42
+      assert metadata.shown_bytes == byte_size("It is at https://x.test/form.")
+      refute inspect(metadata) =~ "x.test"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is shown whole and the voice says only where",
+         ctx do
+      reply = "You were on the form.\n#{@delimiter}\nIt was https://x.test/form."
+
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, _call, shown}
+      assert shown == "You were on the form.\n\nIt was https://x.test/form."
+
+      assert_receive {:realtime,
+                      %{type: "task", summary: "The result is in the chat.", server_seq: 42}}
+
+      assert [%{content: "The result is in the chat."}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "x.test"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History that cannot be shown is not said either", ctx do
+      FakeBridge.set_show({:error, :disk_full})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = FakeBridge.fire_tainted("dg_1")
+        :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+        assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+        assert task.summary == "The result could not be put in the chat."
+      end)
+
+      assert [%{content: "The result could not be put in the chat."}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "Q3"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is said when OpenAI is granted history", ctx do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+
+      assert_receive {:realtime, %{type: "task", summary: "You were reading the Q3 report."}}
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: "You were reading the Q3 report."}] = commentary("dg_1")
+      sync(ctx.session)
+    end
+
+    test "the mark ends with its task: the next task's reply is said as any other", ctx do
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      speak(ctx.session, "and book the room", 5_000, 6_000)
+      send(ctx.session, {:openai_live_event, {:delegation_created, "dg_2", 6_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      :ok = FakeBridge.fire("dg_2", :result, {:ok, "The room is booked."})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", summary: summary}}
+      assert summary == "The room is booked."
+    end
+  end
+
+  # A private call shows nothing (M56 §5): every reply is spoken, cut to a
+  # sentence, as before.
+  describe "a result on a private call" do
+    setup %{clock: clock} do
+      original = Application.fetch_env(:fermix_core, :computer_history)
+      on_exit(fn -> restore_core_env({:computer_history, original}) end)
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      speak(session, "find the sign-up form", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, _request}
+      %{session: session}
+    end
+
+    test "a reply with a link is said cut to a sentence and nothing is shown", ctx do
+      reply = "The form is at https://x.test/form. " <> String.duplicate("It asks a lot. ", 200)
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+      refute Map.has_key?(task, :server_seq)
+      assert task.summary == LiveText.summary(reply, 240)
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == LiveText.sentence(reply, 1_500)
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is neither said nor shown", ctx do
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+
+      assert_receive {:realtime, %{type: "task", status: "completed", summary: summary}}
+      assert summary =~ "computer history"
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: ^summary}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "Q3"
+      sync(ctx.session)
+    end
+  end
+
   # An access-sensitive command a delegation turn parked on this call
   # (`Capabilities.AccessGate`): the next task Live raises after the question was
   # answered is read against what the owner said since, and a yes runs the
@@ -2074,6 +2333,32 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
     :ok
+  end
+
+  # Pinned to this call's id, for the same reason as the handler above.
+  defp attach_delegation_stop_handler(call_id) do
+    handler_id = "live-session-delegation-stop-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :voice_live, :delegation_stop],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.session_id == call_id, do: send(test_pid, {:delegation_stop, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok
+  end
+
+  # The commentary appends a delegation put on the Live wire: what the voice
+  # was given to say for it.
+  defp commentary(delegation_id) do
+    Enum.filter(FakeLiveClient.events(), fn event ->
+      event.type == "session.commentary.append" and event.delegation_id == delegation_id
+    end)
   end
 
   # Pinned to these calls' ids, for the same reason as the handler above.

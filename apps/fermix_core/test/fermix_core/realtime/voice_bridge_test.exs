@@ -23,6 +23,9 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     def chat_call(_key), do: :none
 
     @impl true
+    def show(_call, _text), do: {:ok, 1}
+
+    @impl true
     def open_call(_call), do: {:ok, :handle}
 
     @impl true
@@ -65,14 +68,16 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     assert_raise ArgumentError, ~r/voice_bridge must be a module/, fn -> VoiceBridge.resolve() end
   end
 
-  # Four are call-scoped; the chat read runs before a call has a handle, and
-  # a turn that is not the call's own asks about the call in the chat.
-  test "the behaviour declares the four call-scoped callbacks and the three about the chat" do
+  # Four are call-scoped; the chat read runs before a call has a handle, a
+  # turn that is not the call's own asks about the call in the chat, and a
+  # result shown in the chat is written to its timeline (M56 §4.5).
+  test "the behaviour declares the four call-scoped callbacks and the four about the chat" do
     assert Enum.sort(VoiceBridge.behaviour_info(:callbacks)) ==
              Enum.sort(
                conversation_window: 1,
                call_active?: 0,
                chat_call: 1,
+               show: 2,
                open_call: 1,
                submit: 3,
                cancel: 2,

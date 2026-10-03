@@ -21,6 +21,7 @@ defmodule FermixChannels.Channels.VoiceTest do
     callbacks = %{
       progress: fn text -> send(test_pid, {:progress, text}) && :ok end,
       activity: fn event -> send(test_pid, {:activity, event}) && :ok end,
+      history_tainted: fn -> send(test_pid, :history_tainted) && :ok end,
       result: fn outcome -> send(test_pid, {:result, outcome}) && :ok end
     }
 
@@ -79,6 +80,24 @@ defmodule FermixChannels.Channels.VoiceTest do
 
       refute_receive {:progress, _text}, 100
       refute_receive {:result, _outcome}, 100
+    end
+
+    # M56 §9: the one thing the stream carries to the session, told by the
+    # runner before the reply: the reply is drawn from Computer History.
+    test "the raw stream callback tells the session a reply is drawn from Computer History" do
+      id = call_id()
+      :ok = register(id, "d-1", 1)
+      callback = Voice.build_raw_stream_callback(message(id, "d-1", 1))
+
+      assert callback.(:history_tainted) == :ok
+      assert_receive :history_tainted, 1_000
+
+      superseded = call_id()
+      :ok = register(superseded, "d-1", 2)
+      stale = Voice.build_raw_stream_callback(message(superseded, "d-1", 1))
+
+      assert stale.(:history_tainted) == {:error, :superseded_revision}
+      refute_receive :history_tainted, 100
     end
   end
 

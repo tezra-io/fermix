@@ -31,6 +31,7 @@ defmodule FermixCore.Realtime.LiveChat do
   """
 
   alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Realtime.LiveText
 
@@ -63,6 +64,15 @@ defmodule FermixCore.Realtime.LiveChat do
           role: String.t(),
           content: [%{type: String.t(), text: String.t()}]
         }
+
+  @doc """
+  Whether text stamped as Computer History content may be given to the voice
+  (M56 §9): only when OpenAI, the Live voice's one hop, is granted history,
+  the rule a turn's own history is masked by. A hand-off's reply so stamped
+  is shown in the chat instead of said.
+  """
+  @spec history_permitted?() :: boolean()
+  def history_permitted?, do: Gate.chain_permits_history?(@live_chain)
 
   @doc "How much of the chat a call asks the bridge for."
   @spec window_bounds() :: %{messages: pos_integer(), gists: pos_integer()}

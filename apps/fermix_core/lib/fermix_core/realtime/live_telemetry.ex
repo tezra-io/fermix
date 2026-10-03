@@ -162,24 +162,39 @@ defmodule FermixCore.Realtime.LiveTelemetry do
     execute(@delegation_start_event, %{}, delegation_metadata(meta, delegation))
   end
 
+  @typedoc """
+  A delegation's result shown in the chat (M56 §4.5): the row it was written
+  to and how many bytes were shown. Sizes only: the text never reaches a field.
+  """
+  @type shown :: %{server_seq: pos_integer(), bytes: non_neg_integer()}
+
   @doc """
   A delegation reached a terminal state.
 
   `status` is the terminal word (`completed` / `failed` / `cancelled`), never a
   bare "ok": a cancelled delegation and a failed one are different outcomes and
-  the trace is the only place that distinction survives.
+  the trace is the only place that distinction survives. `shown`, when its
+  result was shown in the chat, adds `server_seq` and `shown_bytes`.
   """
-  @spec delegation_stop(meta(), delegation(), String.t(), non_neg_integer()) :: :ok
-  def delegation_stop(meta, delegation, status, duration_ms)
+  @spec delegation_stop(meta(), delegation(), String.t(), non_neg_integer(), shown() | nil) ::
+          :ok
+  def delegation_stop(meta, delegation, status, duration_ms, shown \\ nil)
       when is_map(meta) and is_map(delegation) and status in @delegation_statuses and
-             is_integer(duration_ms) and duration_ms >= 0 do
+             is_integer(duration_ms) and duration_ms >= 0 and (is_nil(shown) or is_map(shown)) do
     metadata =
       meta
       |> delegation_metadata(delegation)
       |> Map.put(:status, status)
+      |> put_shown(shown)
 
     execute(@delegation_stop_event, %{duration_ms: duration_ms}, metadata)
   end
+
+  defp put_shown(metadata, nil), do: metadata
+
+  defp put_shown(metadata, %{server_seq: server_seq, bytes: bytes})
+       when is_integer(server_seq) and server_seq > 0 and is_integer(bytes) and bytes >= 0,
+       do: Map.merge(metadata, %{server_seq: server_seq, shown_bytes: bytes})
 
   @doc """
   The provider reported an error mid-call. Not terminal on its own — a

@@ -25,6 +25,16 @@ defmodule FermixCore.Realtime.VoiceBridge do
   `voice_call_context`), and how a turn of the chat is told of it. Channels
   answers both, because the chat is its to name and the clients attached to it
   are its to count; a private call is no call in the chat.
+
+  Nor is `show/2` (M56 §4.5): it writes a row of the call to the chat's
+  timeline, announced to the Mac and the phones, and answers the row's
+  `server_seq`. The timeline's writer is the companion channel, which Core
+  never names, so a result the voice cannot say reaches the chat through here.
+
+  A running turn reports one fact besides its progress and its result:
+  `history_tainted`, before the result, when the turn read Computer History
+  content and its reply will carry the stamp (M56 §9), so the session never
+  gives that reply to a voice provider that may not carry it.
   """
 
   @typedoc """
@@ -64,8 +74,18 @@ defmodule FermixCore.Realtime.VoiceBridge do
   @type callbacks :: %{
           progress: (String.t() -> :ok),
           activity: (term() -> :ok),
+          history_tainted: (-> :ok),
           result: ({:ok, String.t()} | {:cancelled} | {:error, String.t()} -> :ok)
         }
+
+  @typedoc """
+  The `call` map of a row a Live call writes to the chat (M56 §6), string
+  keyed as the timeline stores it in the row's `metadata`;
+  `FermixCore.Companion.Protocol.validate_call_metadata/1` holds its shape. A
+  result shown during the call is `%{"uuid", "event" => "shared", "task_id",
+  "revision"}`.
+  """
+  @type shown_call :: %{required(String.t()) => String.t() | pos_integer()}
 
   @typedoc "How much of the chat a call starts with (`LiveChat.window_bounds/0`)."
   @type window_bounds :: %{messages: pos_integer(), gists: non_neg_integer()}
@@ -92,6 +112,8 @@ defmodule FermixCore.Realtime.VoiceBridge do
               {:ok, conversation_window()} | {:error, term()}
   @callback call_active?() :: boolean()
   @callback chat_call(FermixCore.Agents.ConversationKey.t()) :: {:ok, chat_call()} | :none
+  @callback show(shown_call(), String.t()) ::
+              {:ok, server_seq :: pos_integer()} | {:error, term()}
   @callback open_call(call()) :: {:ok, call_handle :: term()} | {:error, term()}
   @callback submit(call_handle :: term(), request(), callbacks()) ::
               {:ok, task_ref :: term()} | {:error, term()}

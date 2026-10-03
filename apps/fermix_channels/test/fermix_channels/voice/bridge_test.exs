@@ -65,6 +65,24 @@ defmodule FermixChannels.Voice.BridgeTest do
     def error_reply(reason), do: "error reply: #{inspect(reason)}"
   end
 
+  # A companion timeline that tells the test what a call row handed it, and
+  # answers the row as written.
+  defmodule RecordingTimeline do
+    def append_proactive(profile, key, attrs, _opts) do
+      send(:voice_bridge_show_test, {:append_proactive, profile, key, attrs})
+
+      row =
+        Map.merge(attrs, %{
+          profile_id: profile,
+          server_seq: 77,
+          proactive_key: key,
+          created_at: ~U[2026-10-03 14:06:00Z]
+        })
+
+      {:ok, {:created, row}}
+    end
+  end
+
   setup do
     task_supervisor = start_supervised!({Task.Supervisor, []})
 
@@ -627,6 +645,55 @@ defmodule FermixChannels.Voice.BridgeTest do
       add(elsewhere, "user", "a telegram message")
 
       assert {:ok, %{messages: []}} = Bridge.conversation_window(%{messages: 6, gists: 3})
+    end
+  end
+
+  # M56 §4.5: a result the voice cannot say is written to the chat's own
+  # timeline through the companion's call-row write, which answers its row.
+  # The write itself, through the real timeline, is the companion channel's
+  # suite; here the timeline only records what it was handed.
+  describe "show/2" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :companion_store)
+      Application.put_env(:fermix_channels, :companion_store, RecordingTimeline)
+      Process.register(self(), :voice_bridge_show_test)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, store} -> Application.put_env(:fermix_channels, :companion_store, store)
+          :error -> Application.delete_env(:fermix_channels, :companion_store)
+        end
+      end)
+
+      %{
+        call: %{
+          "uuid" => DeviceIdentity.generate_uuid(),
+          "event" => "shared",
+          "task_id" => "dg_1",
+          "revision" => 1
+        }
+      }
+    end
+
+    test "writes the result as a row of the chat carrying its call and answers the row", %{
+      call: call
+    } do
+      assert {:ok, 77} = Bridge.show(call, "See https://x.test/form")
+
+      expected_key = "voice:#{call["uuid"]}:dg_1:1"
+
+      assert_received {:append_proactive, "main", ^expected_key,
+                       %{role: "assistant", kind: "text", content: "See https://x.test/form"} =
+                         attrs}
+
+      assert attrs.metadata == %{"call" => call}
+    end
+
+    test "a call map in another shape writes nothing", %{call: call} do
+      assert {:error, {:invalid_field, "call.revision"}} =
+               Bridge.show(%{call | "revision" => 0}, "x")
+
+      refute_received {:append_proactive, _profile, _key, _attrs}
     end
   end
 

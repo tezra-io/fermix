@@ -95,6 +95,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @submit_failed_line "I could not start that task."
   @busy_line "I am already working on a task and one more is waiting."
 
+  # What the voice is told about a result shown in the chat (M56 §4.5), after
+  # the line it says, only once the row is written.
+  @in_chat_line "The full result is in the chat."
+  # What it says instead of a reply drawn from Computer History it may not
+  # carry (M56 §9): the product's own words, never the reply's.
+  @withheld_shown_line "The result is in the chat."
+  @withheld_unshown_line "The result could not be put in the chat."
+  @withheld_private_line "That result draws on your computer history, so it cannot be said on this call."
+
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
     GenServer.start_link(__MODULE__, opts, name: Keyword.get(opts, :name))
@@ -246,6 +255,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # until then (the exchange since the call started).
       exchange_since_ms: nil,
       delegations: LiveDelegation.new(),
+      # Delegations whose turn read Computer History content, as each turn's
+      # runner told it before its reply (M56 §9). Forgotten as each settles.
+      history_tainted: MapSet.new(),
       turn_sessions: %{},
       last_activity_ms: %{},
       pending_appends: [],
@@ -983,6 +995,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       activity: fn event ->
         send(session, {:delegation_event, delegation_id, {:activity, event}})
       end,
+      history_tainted: fn ->
+        send(session, {:delegation_event, delegation_id, :history_tainted})
+      end,
       result: fn result ->
         send(session, {:delegation_event, delegation_id, {:result, result}})
       end
@@ -1004,17 +1019,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp delegation_event({:activity, _event}, _record, state), do: {:noreply, state}
 
+  # Sent by the turn's own process before its reply, so it is here first.
+  defp delegation_event(:history_tainted, record, state),
+    do: {:noreply, %{state | history_tainted: MapSet.put(state.history_tainted, record.id)}}
+
   defp delegation_event({:result, {:ok, text}}, record, state) when is_binary(text) do
     state = %{state | ledger: LiveLedger.record_backend_turn(state.ledger, %{})}
+    answer = answer(state, record, text)
 
     state =
       state
-      |> send_append(
-        commentary(record.id, LiveText.sentence(text, @commentary_max_bytes)),
-        :commentary,
-        record.id
-      )
-      |> settle_delegation(record, :completed, LiveText.summary(text, @summary_max_chars))
+      |> send_append(commentary(record.id, answer.spoken), :commentary, record.id)
+      |> settle_delegation(record, :completed, answer.summary, answer.shown)
       |> start_next()
 
     {:noreply, state}
@@ -1051,6 +1067,95 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {:noreply, state}
   end
 
+  ## A hand-off's reply: what is said and what is shown
+
+  # M56 §4.5 and §9: what of a hand-off's reply the voice is given to say, the
+  # summary its task frame carries, and the chat row its result was shown at.
+  # A reply drawn from Computer History reaches the voice only when OpenAI may
+  # carry it, and a private call shows nothing.
+  defp answer(state, record, text) do
+    parts = LiveText.split(text, @commentary_max_bytes)
+
+    case {Config.conversation(state.config), voice_may_carry?(state, record)} do
+      {"private", true} -> said(text)
+      {"private", false} -> withheld(@withheld_private_line, nil)
+      {"chat", true} -> said_and_shown(state, record, parts)
+      {"chat", false} -> shown_only(state, record, parts)
+    end
+  end
+
+  defp voice_may_carry?(state, record),
+    do: not MapSet.member?(state.history_tainted, record.id) or LiveChat.history_permitted?()
+
+  # Every result of a private call, as every result was before: the reply cut
+  # to a sentence, nothing shown.
+  defp said(text) do
+    %{
+      spoken: LiveText.sentence(text, @commentary_max_bytes),
+      summary: LiveText.summary(text, @summary_max_chars),
+      shown: nil
+    }
+  end
+
+  defp said_and_shown(_state, _record, {spoken, nil}), do: said(spoken)
+
+  # The voice is told the rest is in the chat only once it is: a write that
+  # failed leaves the line it says as it was.
+  defp said_and_shown(state, record, {spoken, shown}) do
+    case show(state, record, shown) do
+      {:ok, row} ->
+        budget = @commentary_max_bytes - byte_size(@in_chat_line) - 1
+
+        %{
+          spoken: LiveText.sentence(spoken, budget) <> " " <> @in_chat_line,
+          summary: LiveText.summary(spoken, @summary_max_chars),
+          shown: row
+        }
+
+      :error ->
+        said(spoken)
+    end
+  end
+
+  # The whole reply is shown (the chat is local) and none of it is said.
+  defp shown_only(state, record, parts) do
+    case show(state, record, whole(parts)) do
+      {:ok, row} -> withheld(@withheld_shown_line, row)
+      :error -> withheld(@withheld_unshown_line, nil)
+    end
+  end
+
+  defp withheld(line, shown), do: %{spoken: line, summary: line, shown: shown}
+
+  # The reply as written, its delimiter line aside.
+  defp whole({spoken, nil}), do: spoken
+  defp whole({spoken, spoken}), do: spoken
+  defp whole({spoken, shown}), do: spoken <> "\n\n" <> shown
+
+  # One row per task revision, written through the bridge, which answers the
+  # row's `server_seq`. A write that fails is logged and the call goes on.
+  defp show(state, record, text) do
+    call = %{
+      "uuid" => state.call_uuid,
+      "event" => "shared",
+      "task_id" => record.id,
+      "revision" => record.revision
+    }
+
+    case bridge_call(fn -> state.voice_bridge.show(call, text) end) do
+      {:ok, server_seq} when is_integer(server_seq) and server_seq > 0 ->
+        {:ok, %{server_seq: server_seq, bytes: byte_size(text)}}
+
+      {:error, reason} ->
+        Logger.error(
+          "voice_live: the result of #{record.id} could not be shown in the chat: " <>
+            inspect(reason)
+        )
+
+        :error
+    end
+  end
+
   # The third delegation. Live is told out loud that Fermix is busy (so it can
   # say so), and the companion gets the refusal as a task frame rather than
   # nothing at all.
@@ -1082,7 +1187,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
-  defp settle_delegation(state, record, status, summary) do
+  # `shown` is the chat row a completed result was shown at, `nil` when nothing
+  # was shown (M56 §4.5).
+  defp settle_delegation(state, record, status, summary, shown \\ nil) do
     meta = delegation_meta(state, record)
 
     state =
@@ -1092,12 +1199,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
             telemetry_meta(state),
             meta,
             Atom.to_string(status),
-            duration_ms(state, record)
+            duration_ms(state, record),
+            shown
           )
 
           %{state | delegations: delegations}
           |> record_task(finished, Atom.to_string(status), %{summary: summary})
-          |> notify_task(finished, Atom.to_string(status), summary)
+          |> notify_task(finished, Atom.to_string(status), summary, shown_seq(shown))
 
         {:error, :unknown_delegation} ->
           state
@@ -1123,10 +1231,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
+  defp shown_seq(nil), do: nil
+  defp shown_seq(%{server_seq: server_seq}), do: server_seq
+
   defp forget_delegation(state, id) do
     %{
       state
-      | turn_sessions: Map.delete(state.turn_sessions, id),
+      | history_tainted: MapSet.delete(state.history_tainted, id),
+        turn_sessions: Map.delete(state.turn_sessions, id),
         last_activity_ms: Map.delete(state.last_activity_ms, id),
         context_timers: cancel_context_timer(state.context_timers, id)
     }
@@ -1295,8 +1407,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     state
   end
 
-  defp notify_task(state, record, status, summary) do
-    notify(state, LiveFrames.task(state.call_uuid, record.id, record.revision, status, summary))
+  defp notify_task(state, record, status, summary, server_seq \\ nil) do
+    notify(
+      state,
+      LiveFrames.task(state.call_uuid, record.id, record.revision, status, summary, server_seq)
+    )
+
     state
   end
 

@@ -29,7 +29,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
@@ -45,6 +47,16 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # This module's own call registry: the daemon's is under the realtime
   # supervisor, which the suite never starts.
   @call_registry Module.concat(__MODULE__, CallRegistry)
+  @timeline_repo :voice_e2e_timeline_repo
+  @timeline_env ~w(companion_store mobile_event_sink)a
+
+  # The chat's timeline on this module's throwaway repo.
+  defmodule E2ETimeline do
+    @opts [repo: :voice_e2e_timeline_repo]
+
+    def append_proactive(p, key, a, o), do: Timeline.append_proactive(p, key, a, o ++ @opts)
+    def history_page(p, o), do: Timeline.history_page(p, o ++ @opts)
+  end
 
   # Records what the session put on the Live wire and answers `session.close`
   # from inside the send — which runs in the session's own process, so the
@@ -86,9 +98,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # `LiveSessionServer` builds the §6 `call` map itself, so it has no way to
   # name a scheduler — in production there is only one. This shim adds the
   # `agent_server` the bridge already accepts and delegates every callback
-  # unchanged, so `conversation_window/call_active?/chat_call/open_call/submit/
-  # cancel/close_call` are the shipped code paths; only the queue they reach
-  # is the test's.
+  # unchanged, so `conversation_window/call_active?/chat_call/show/open_call/
+  # submit/cancel/close_call` are the shipped code paths; only the queue they
+  # reach is the test's.
   defmodule QueueBoundBridge do
     @behaviour FermixCore.Realtime.VoiceBridge
 
@@ -114,6 +126,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     @impl true
     def chat_call(key), do: Bridge.chat_call(key)
+
+    @impl true
+    def show(call, text), do: Bridge.show(call, text)
 
     @impl true
     def open_call(call),
@@ -339,6 +354,69 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
   end
 
+  # M56 §4.5: the stage's gate, through the real bridge and the companion's
+  # call-row write on a throwaway timeline: a reply carrying a link is said in
+  # a sentence, shown whole in the chat once, and its task names the row.
+  describe "a result shown in the chat" do
+    setup :start_timeline
+
+    test "a reply with a link is said in a sentence and shown whole, once" do
+      Process.flag(:trap_exit, true)
+      session = start_session()
+
+      :ok = SessionControl.call_start(session)
+      open_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: call_uuid}}
+
+      speak(session, "find the sign-up form", 1_000, 4_000)
+      delegate(session, "dg_1", 4_200)
+      assert_receive {:turn_started, _msg, turn_pid}, 5_000
+
+      shown = "It is at https://x.test/form. It asks for a name, a city and a dietary note."
+      send(turn_pid, {:proceed, "I found the sign-up form.\n---shown---\n" <> shown})
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_1",
+                        status: "completed",
+                        summary: "I found the sign-up form.",
+                        server_seq: seq
+                      }},
+                     5_000
+
+      assert_receive {:companion_event,
+                      %{"t" => "row", "server_seq" => ^seq, "text" => ^shown} = mac_row}
+
+      assert mac_row["metadata"] == %{
+               "call" => %{
+                 "uuid" => call_uuid,
+                 "event" => "shared",
+                 "task_id" => "dg_1",
+                 "revision" => 1
+               }
+             }
+
+      assert_receive {:mobile_event, "main", %{"t" => "row", "server_seq" => ^seq}}
+
+      assert eventually(fn ->
+               Enum.any?(FakeLiveClient.events(), fn event ->
+                 event.type == "session.commentary.append" and event.delegation_id == "dg_1" and
+                   event.content == "I found the sign-up form. The full result is in the chat."
+               end)
+             end)
+
+      refute Enum.any?(FakeLiveClient.events(), &(inspect(&1) =~ "x.test"))
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+      assert {:ok, %{messages: [%{server_seq: ^seq}]}} =
+               E2ETimeline.history_page("main", limit: 10)
+
+      refute_received {:companion_event, %{"t" => "row"}}
+    end
+  end
+
   test "cancelling a task stops the running turn and reports it to the call" do
     Process.flag(:trap_exit, true)
     session = start_session()
@@ -444,6 +522,35 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   end
 
   # --- Helpers ---
+
+  # The chat's timeline on a throwaway repo, a companion connection's place in
+  # the registry, and the phones' sink, all this test's.
+  defp start_timeline(_ctx) do
+    test_pid = self()
+    previous = Map.new(@timeline_env, &{&1, Application.fetch_env(:fermix_channels, &1)})
+    on_exit(fn -> Enum.each(previous, &restore_channels_env/1) end)
+    Application.put_env(:fermix_channels, :companion_store, E2ETimeline)
+
+    Application.put_env(:fermix_channels, :mobile_event_sink, fn profile, event ->
+      send(test_pid, {:mobile_event, profile, event})
+      :ok
+    end)
+
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("voice-e2e-timeline")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    start_supervised!(
+      {Repo, name: @timeline_repo, enabled: true, database_path: Path.join(dir, "memory.db")}
+    )
+
+    {:ok, _owner} = Registry.register(Companion.registry(), Companion.chat_profile(), 2)
+    :ok
+  end
+
+  defp restore_channels_env({key, {:ok, value}}),
+    do: Application.put_env(:fermix_channels, key, value)
+
+  defp restore_channels_env({key, :error}), do: Application.delete_env(:fermix_channels, key)
 
   defp start_session(config \\ live_config()) do
     opts = Keyword.put(live_session_opts(), :config, config)
