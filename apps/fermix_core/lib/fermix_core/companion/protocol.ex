@@ -24,7 +24,8 @@ defmodule FermixCore.Companion.Protocol do
   `PROTOCOL.md` for the state machine and the rollout order.
 
   Version 2 adds `turn_done`, the ending of a turn that wrote no reply (M56
-  §4.4). A client on version 1 would show such a turn as thinking until the
+  §4.4), and `cancel.task_ref`, which stops a GPT-Live task that outlived its
+  call by its three ids (§4.6). A client on version 1 would show such a turn as thinking until the
   next one began, so a server event names the version that brought it
   (`server_event_version/1`) and a connection is never sent one newer than the
   version its hello declared.
@@ -329,7 +330,11 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  defp validate_client("cancel", payload), do: strings(payload, ~w(profile_id client_msg_id))
+  defp validate_client("cancel", payload) do
+    with :ok <- strings(payload, ~w(profile_id client_msg_id)) do
+      optional_task_ref(payload)
+    end
+  end
 
   defp validate_client("history_pull", payload) do
     with :ok <- nonempty(payload, "profile_id"),
@@ -347,6 +352,21 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   defp validate_client("read_state", payload), do: validate_read_state(payload)
+
+  # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
+  # exactly its three ids, the ones its `task_running` row carries.
+  defp optional_task_ref(%{"task_ref" => task_ref}) do
+    if task_ref?(task_ref), do: :ok, else: {:error, {:invalid_field, "task_ref"}}
+  end
+
+  defp optional_task_ref(_payload), do: :ok
+
+  defp task_ref?(%{"call_uuid" => uuid, "task_id" => task_id, "revision" => revision} = ref)
+       when map_size(ref) == 3 and is_binary(uuid) and is_binary(task_id) and task_id != "" and
+              is_integer(revision) and revision > 0,
+       do: Regex.match?(@uuid, uuid)
+
+  defp task_ref?(_task_ref), do: false
 
   # Exactly one cursor: `after_seq` pages forward (the catch-up read), and
   # `before_seq` pages backward from it (scroll to the top).

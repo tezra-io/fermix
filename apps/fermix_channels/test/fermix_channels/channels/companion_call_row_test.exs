@@ -154,12 +154,35 @@ defmodule FermixChannels.Channels.CompanionCallRowTest do
     refute_receive {:companion_event, _row}, 100
   end
 
-  # The task events get their keys with the stage that writes them.
-  test "an event with no row key of its own is refused" do
+  # M56 §4.6: a task that outlives its call says so once, and ends once, each
+  # row keyed by the task revision and the event, so the boot pass that
+  # follows a crash finds a row already written.
+  test "a detached task's running and done rows are keyed by its revision and event" do
     running = %{shared_call() | "event" => "task_running"}
+    done = Map.merge(shared_call(), %{"event" => "task_done", "state" => "completed"})
 
-    assert {:error, {:unkeyed_call_event, "task_running"}} =
-             Companion.write_call_row("main", "Still working.", running)
+    assert {:ok, %{server_seq: running_seq, proactive_key: running_key}} =
+             Companion.write_call_row("main", "Still working on: book the room", running)
+
+    assert running_key == "voice:#{@call_uuid}:dg_01H9:1:running"
+
+    assert {:ok, %{server_seq: done_seq, proactive_key: done_key}} =
+             Companion.write_call_row("main", "The room is booked.", done)
+
+    assert done_key == "voice:#{@call_uuid}:dg_01H9:1:done"
+    assert done_seq > running_seq
+
+    assert_receive {:companion_event, %{"t" => "row", "server_seq" => ^running_seq} = mac_row}
+    assert mac_row["metadata"] == %{"call" => running}
+    assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
+    assert_receive {:companion_event, %{"t" => "row", "server_seq" => ^done_seq}}
+
+    failed = %{done | "state" => "failed"}
+
+    assert {:ok, %{server_seq: ^done_seq, content: "The room is booked."}} =
+             Companion.write_call_row("main", "The task stopped.", failed)
+
+    refute_receive {:companion_event, _row}, 100
   end
 
   test "a text past 32 KB is cut at the end, on a character, behind a marker" do

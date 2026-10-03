@@ -75,6 +75,10 @@ as thinking until the next one began. So the daemon:
   version 2. With a version 1 client attached the agent is told to answer
   briefly instead, and its answer ends the turn with `text_done` as always.
 
+Version 2 also adds one client field, `cancel.task_ref`, which stops a
+GPT-Live task that outlived its call (see *A Live call's rows*). A version 1
+client never sends it.
+
 A version 1 client is served as before and never sees `turn_done`. Every
 version 1 event, field and rule holds unchanged on version 2.
 
@@ -134,7 +138,7 @@ in a fixed order:
 | `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
-| `cancel` | `profile_id`, `client_msg_id` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. |
+| `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
 | `history_search` | `profile_id`, `query` (1–256 characters), `limit` (1–50); `before_seq?` | Full-text search of the timeline, newest first, below `before_seq` when given. |
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
@@ -191,15 +195,34 @@ call's own row when it ends is another (`event: "ended"`): the daemon's
 sentence, `Voice call, 6 minutes` (`under a minute` below one), then, on its
 own paragraph, the call's gist, a few sentences on what was asked, done,
 decided and left open; or, when the gist could not be made, the call's tasks,
-one a line, each its state and summary; or nothing more when the call had
-neither. It is written once the gist is made or has failed, so it always
-carries the settled cost. A private call writes no row. Such a row's
-`metadata.call` says what it is about:
+one a line, each its state and summary (`Still running` for a task that
+outlived the call); or nothing more when the call had neither. It is written
+once the gist is made or has failed, so it always carries the settled cost.
+A private call writes no row.
+
+A task still running when a call in the chat ends is not cancelled: it
+finishes into the chat, so it writes two rows of its own. The first, as the
+call ends, says it is still running (`event: "task_running"`): `Still working
+on:` and the request on one line. The second, when it ends
+(`event: "task_done"`, with its terminal `state`), is its result as the
+shown part of a reply (or the whole reply), its failure's sentence, or a fixed
+sentence for a task cancelled, timed out (it may run 30 minutes) or lost to a
+daemon restart (`failed`). A client resolves the running row with the done row
+of the same `uuid`, `task_id` and `revision`. While the running row stands, a
+version 2 client may stop the task with `cancel { task_ref: { call_uuid,
+task_id, revision } }`, the three ids that row carries: only that task's turn
+is stopped, and the acknowledgement is its done row with `state: "cancelled"`
+(or the state it reached first, when it was already finishing). A `task_ref`
+that names no task still running under exactly those ids (another revision, a
+task already done, a private call's) is refused with
+`error { reason: "request_failed", message }`, and the connection stays open.
+A `/stop` stops such a task too, which then writes its `cancelled` row. Such a
+row's `metadata.call` says what it is about:
 
 | Key | Type | Notes |
 |---|---|---|
 | `uuid` | UUID | The call, as `call_ready.call_uuid` names it on the realtime wire. Always present. |
-| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call; `ended` the call's row when it ends. |
+| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call; `ended` the call's row when it ends; `task_running` and `task_done` the two rows of a task that outlived its call. |
 | `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
 | `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
 | `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
@@ -210,9 +233,9 @@ carries the settled cost. A private call writes no row. Such a row's
 | `gist_status` | `written` \| `failed` \| `none` | What became of the call's gist: in the text, could not be made (the text lists the tasks), or none was needed (nothing was said). Present on `ended`. |
 
 No other key appears in it. A call's row is written once: a write repeated for
-the same task revision, or for the same call's end, finds the row already
-written, and the realtime wire's `task.server_seq` names a task's, so the app
-can say the result is in the chat.
+the same task revision and event, or for the same call's end, finds the row
+already written, and the realtime wire's `task.server_seq` names a task's, so
+the app can say the result is in the chat.
 
 ## One timeline with the phone
 
@@ -332,7 +355,10 @@ the request has reached the turn queue is not lost: the request is never
 queued and ends with `turn_error` (code `cancelled`), and a request the
 daemon recovers after a restart is not run again. A turn that had already
 finished when the cancel arrived ends with its `text_done`, not an error, and
-a cancel for a request that already ended changes nothing.
+a cancel for a request that already ended changes nothing. A `cancel` with
+`task_ref` (version 2) is the one a `cancel` is answered for: a task the
+daemon is not running under exactly those ids is refused with
+`request_failed`; see *A Live call's rows*.
 
 ## Approvals
 

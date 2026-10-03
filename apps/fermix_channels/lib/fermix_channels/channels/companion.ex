@@ -29,9 +29,11 @@ defmodule FermixChannels.Channels.Companion do
   ends that way.
 
   A Live call writes rows of its own through `write_call_row/3` (M56 §4.2,
-  §4.5), the one write for them: a result shown in the chat while the voice
-  says the short version, and the call's one row when it ends, its gist or
-  its task list. Core reaches it through `Voice.Bridge`, never by name.
+  §4.5, §4.6), the one write for them: a result shown in the chat while the
+  voice says the short version, the call's one row when it ends, its gist or
+  its task list, and the two rows of a task that outlives its call, what is
+  still running and how it ended. Core reaches it through `Voice.Bridge`, and
+  the owner of those tasks through the same bridge, never by name.
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -268,8 +270,10 @@ defmodule FermixChannels.Channels.Companion do
   the `call` map (`Protocol.validate_call_metadata/1` is its shape, checked
   here before anything is written). The row is keyed by what it is about, a
   result shown for one task revision being
-  `"voice:<uuid>:<task_id>:<revision>"` and the call's row when it ends
-  `"voice:<uuid>:ended"`, so a repeated write answers the row already written
+  `"voice:<uuid>:<task_id>:<revision>"`, the rows of a task that outlives its
+  call that key with `:running` or `:done` after it (M56 §4.6), and the call's
+  row when it ends `"voice:<uuid>:ended"`, so a repeated write answers the row
+  already written
   and announces nothing; a new row is announced to the Mac and the phones like
   any other. `text` past 32 KB is cut at the end, on a character, behind
   `call_row_cut_marker/0`.
@@ -302,15 +306,18 @@ defmodule FermixChannels.Channels.Companion do
   @spec call_row_cut_marker() :: String.t()
   def call_row_cut_marker, do: @call_row_cut_marker
 
-  # A task's result shown during its call is keyed by its revision, and the
-  # call's one row when it ends by the call alone; the task events take their
-  # keys with the writers that add them.
-  defp call_row_key(%{"event" => "shared"} = call),
-    do: {:ok, "voice:#{call["uuid"]}:#{call["task_id"]}:#{call["revision"]}"}
+  # A task's result shown during its call is keyed by its revision, the two
+  # rows of a task that outlives its call by its revision and the event, and
+  # the call's one row when it ends by the call alone.
+  defp call_row_key(%{"event" => "shared"} = call), do: {:ok, task_row_key(call)}
 
+  defp call_row_key(%{"event" => "task_running"} = call),
+    do: {:ok, task_row_key(call) <> ":running"}
+
+  defp call_row_key(%{"event" => "task_done"} = call), do: {:ok, task_row_key(call) <> ":done"}
   defp call_row_key(%{"event" => "ended"} = call), do: {:ok, "voice:#{call["uuid"]}:ended"}
 
-  defp call_row_key(%{"event" => event}), do: {:error, {:unkeyed_call_event, event}}
+  defp task_row_key(call), do: "voice:#{call["uuid"]}:#{call["task_id"]}:#{call["revision"]}"
 
   defp call_row_text(text) when byte_size(text) <= @call_row_max_bytes, do: text
 

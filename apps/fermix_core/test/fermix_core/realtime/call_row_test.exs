@@ -95,4 +95,77 @@ defmodule FermixCore.Realtime.CallRowTest do
     assert CallRow.sentence(90) == "Voice call, 2 minutes"
     assert CallRow.sentence(900) == "Voice call, 15 minutes"
   end
+
+  # M56 §4.6: the two rows of a task that outlives its call.
+  describe "a detached task's rows" do
+    test "the running row names the request on one line" do
+      {call, text} =
+        CallRow.task_running(@uuid, "dg_1", 2, "user: book the room\nfor ten\nassistant: On it.")
+
+      assert call == %{
+               "uuid" => @uuid,
+               "event" => "task_running",
+               "task_id" => "dg_1",
+               "revision" => 2
+             }
+
+      assert text == "Still working on: user: book the room for ten assistant: On it."
+      assert :ok = Protocol.validate_call_metadata(call)
+    end
+
+    test "a long request keeps its end, where the ask is" do
+      request = String.duplicate("earlier ", 200) <> "user: book the room"
+
+      {_call, text} = CallRow.task_running(@uuid, "dg_1", 1, request)
+
+      assert String.ends_with?(text, "user: book the room")
+      assert byte_size(text) <= 420
+    end
+
+    test "a completed task's row is the result shown, or the whole reply with no delimiter" do
+      {call, shown} =
+        CallRow.task_done(
+          @uuid,
+          "dg_1",
+          1,
+          {:completed, "I found it.\n---shown---\nIt is at https://x.test/form."}
+        )
+
+      assert shown == "It is at https://x.test/form."
+      assert call["state"] == "completed"
+      assert :ok = Protocol.validate_call_metadata(call)
+
+      assert {_call, "The room is booked for 10am."} =
+               CallRow.task_done(@uuid, "dg_1", 1, {:completed, "The room is booked for 10am."})
+    end
+
+    test "every other end is its state and a sentence of its own" do
+      for {outcome, state, text} <- [
+            {{:failed, "The calendar could not be reached."}, "failed",
+             "The calendar could not be reached."},
+            {:cancelled, "cancelled", "The task was cancelled."},
+            {:timed_out, "timed_out", "The task ran past its time limit and was stopped."},
+            {:restarted, "failed", "The task stopped when Fermix restarted."}
+          ] do
+        assert {call, ^text} = CallRow.task_done(@uuid, "dg_1", 3, outcome)
+
+        assert call == %{
+                 "uuid" => @uuid,
+                 "event" => "task_done",
+                 "task_id" => "dg_1",
+                 "revision" => 3,
+                 "state" => state
+               }
+
+        assert :ok = Protocol.validate_call_metadata(call)
+      end
+    end
+
+    test "the call's ended row names a task still running as such" do
+      task = %{"task_id" => "dg_4", "revision" => 1, "state" => "detached", "summary" => "x"}
+      {_call, text} = CallRow.ended(%{@record | tasks: [task], gist_status: "failed"})
+
+      assert text == "Voice call, 6 minutes\n\n- Still running: x"
+    end
+  end
 end

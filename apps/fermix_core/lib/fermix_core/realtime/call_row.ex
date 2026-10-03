@@ -1,9 +1,13 @@
 defmodule FermixCore.Realtime.CallRow do
   @moduledoc """
-  The one chat row a Live call in the chat leaves when it ends (M56 §4.2, D4),
-  rendered from the call's record as the memory database holds it, so the row
-  written as the gist settles and the row a boot writes for a daemon that died
-  first are the same row: one read path, whatever the record holds.
+  The chat rows a Live call in the chat writes about itself, rendered in one
+  place: the one row it leaves when it ends (M56 §4.2, D4), and the two rows
+  of a task that outlives it (§4.6).
+
+  The ended row is rendered from the call's record as the memory database
+  holds it, so the row written as the gist settles and the row a boot writes
+  for a daemon that died first are the same row: one read path, whatever the
+  record holds.
 
   The text is the daemon's sentence, "Voice call, 6 minutes", then on its own
   paragraph the gist; or, with no gist (it failed, or the daemon died before
@@ -11,10 +15,43 @@ defmodule FermixCore.Realtime.CallRow do
   nothing more when the call had neither. The `metadata.call` it carries is
   `Companion.Protocol.validate_call_metadata/1`'s `ended` shape: the call's
   UUID and engine, its length, its settled voice cost (absent when unknown)
-  and that cost's accounting, and what became of its gist.
+  and that cost's accounting, and what became of its gist. A task still
+  running when the row is written reads "Still running".
 
-  Pure: the record in, `{call, text}` out.
+  A task handed over to finish into the chat says so in one row
+  (`task_running/4`: "Still working on:" and the request on one line, its end
+  kept, since the end is the ask), and ends in another (`task_done/4`): a
+  completed task's result as the stage 5 split shows it (the part after the
+  delimiter, else the whole reply), a failure's sentence, or a fixed sentence
+  for a task cancelled, timed out or lost to a restart. Each names the task's
+  `metadata.call`, its terminal `state` on the second.
+
+  Pure: the record or the task in, `{call, text}` out.
   """
+
+  alias FermixCore.Realtime.LiveText
+
+  # The bound `LiveText.split/2` takes. No line of it is said after the call,
+  # and a reply with no delimiter is the whole text on both sides of the
+  # bound, so it changes nothing shown here.
+  @split_max_bytes 1_500
+  @request_line_max_bytes 400
+
+  @cancelled_text "The task was cancelled."
+  @timed_out_text "The task ran past its time limit and was stopped."
+  @restarted_text "The task stopped when Fermix restarted."
+
+  @typedoc """
+  How a task that outlived its call ended: its reply, its failure's sentence,
+  cancelled, past its wall clock, or lost to a daemon restart (a `failed`
+  task).
+  """
+  @type task_end ::
+          {:completed, String.t()}
+          | {:failed, String.t()}
+          | :cancelled
+          | :timed_out
+          | :restarted
 
   @doc "The row for a closed record: its `metadata.call` and its text."
   @spec ended(map()) :: {map(), String.t()}
@@ -35,6 +72,42 @@ defmodule FermixCore.Realtime.CallRow do
 
     {call, Enum.join([sentence(duration_s) | body(record)], "\n\n")}
   end
+
+  @doc "The row that says a task still runs after its call: its `metadata.call` and its text."
+  @spec task_running(String.t(), String.t(), pos_integer(), String.t()) :: {map(), String.t()}
+  def task_running(uuid, task_id, revision, request)
+      when is_binary(uuid) and is_binary(task_id) and is_integer(revision) and revision >= 1 and
+             is_binary(request) do
+    line =
+      request
+      |> LiveText.tail(@request_line_max_bytes)
+      |> LiveText.one_line(@request_line_max_bytes)
+
+    {task_call(uuid, "task_running", task_id, revision), "Still working on: " <> line}
+  end
+
+  @doc "The row a task that outlived its call ends with: its `metadata.call` and its text."
+  @spec task_done(String.t(), String.t(), pos_integer(), task_end()) :: {map(), String.t()}
+  def task_done(uuid, task_id, revision, task_end)
+      when is_binary(uuid) and is_binary(task_id) and is_integer(revision) and revision >= 1 do
+    {state, text} = ended_task(task_end)
+    {Map.put(task_call(uuid, "task_done", task_id, revision), "state", state), text}
+  end
+
+  defp ended_task({:completed, reply}) when is_binary(reply) do
+    case LiveText.split(reply, @split_max_bytes) do
+      {_spoken, shown} when is_binary(shown) -> {"completed", shown}
+      {spoken, nil} -> {"completed", spoken}
+    end
+  end
+
+  defp ended_task({:failed, sentence}) when is_binary(sentence), do: {"failed", sentence}
+  defp ended_task(:cancelled), do: {"cancelled", @cancelled_text}
+  defp ended_task(:timed_out), do: {"timed_out", @timed_out_text}
+  defp ended_task(:restarted), do: {"failed", @restarted_text}
+
+  defp task_call(uuid, event, task_id, revision),
+    do: %{"uuid" => uuid, "event" => event, "task_id" => task_id, "revision" => revision}
 
   @doc """
   The daemon's sentence for a call that lasted `seconds`: "under a minute"
@@ -63,6 +136,8 @@ defmodule FermixCore.Realtime.CallRow do
       _none -> "- #{state_words(state)}"
     end
   end
+
+  defp state_words("detached"), do: "Still running"
 
   defp state_words(state) when is_binary(state),
     do: state |> String.replace("_", " ") |> String.capitalize()

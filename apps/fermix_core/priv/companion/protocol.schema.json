@@ -183,7 +183,21 @@
       "properties": {
         "type": { "const": "cancel" },
         "profile_id": { "type": "string", "minLength": 1 },
-        "client_msg_id": { "type": "string", "minLength": 1 }
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "task_ref": {
+          "type": "object",
+          "x-since-version": 2,
+          "description": "Version 2. A GPT-Live task that outlived its call, named by the three ids its task_running row carries: stops that task's turn and no other, and client_msg_id then names the cancel itself, no request. Acknowledged by the task's task_done row; a task that is not running under exactly these ids is refused with request_failed.",
+          "required": ["call_uuid", "task_id", "revision"],
+          "properties": {
+            "call_uuid": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "task_id": { "type": "string", "minLength": 1 },
+            "revision": { "type": "integer", "minimum": 1 }
+          }
+        }
       }
     },
     "history_pull": {

@@ -128,6 +128,34 @@ defmodule FermixCore.Companion.ProtocolTest do
              decode(%{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 4})
   end
 
+  # M56 §4.6, §6: a version 2 cancel may name a task that outlived its call
+  # by its three ids instead of a request.
+  test "cancel may name a detached voice task by its call, task and revision" do
+    task_ref = %{
+      "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "task_id" => "dg_1",
+      "revision" => 2
+    }
+
+    base = %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-9"}
+
+    assert {:ok, %{payload: %{"task_ref" => ^task_ref}}} =
+             decode(Map.put(base, "task_ref", task_ref))
+
+    for bad <- [
+          "dg_1",
+          Map.delete(task_ref, "call_uuid"),
+          %{task_ref | "call_uuid" => "not-a-uuid"},
+          %{task_ref | "task_id" => ""},
+          %{task_ref | "revision" => 0},
+          %{task_ref | "revision" => "2"},
+          Map.put(task_ref, "turn_id", "turn-1")
+        ] do
+      assert {:error, {:invalid_field, "task_ref"}} = decode(Map.put(base, "task_ref", bad)),
+             "accepted task_ref #{inspect(bad)}"
+    end
+  end
+
   test "malformed and unknown lines fail loudly" do
     assert {:error, :invalid_json} = Protocol.decode_client_event("{")
     assert {:error, :invalid_event} = Protocol.decode_client_event("[1]")

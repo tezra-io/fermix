@@ -205,6 +205,41 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
   end
 
+  # M56 §4.6, §6: a version 2 cancel may stop a task that outlived its call,
+  # named by its three ids; its acknowledgement is that task's done row.
+  test "cancel publishes task_ref as a version 2 field, with a golden and its rows", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    task_ref = schema["$defs"]["cancel"]["properties"]["task_ref"]
+
+    assert task_ref["type"] == "object"
+    assert task_ref["x-since-version"] == 2
+    assert Enum.sort(task_ref["required"]) == ~w(call_uuid revision task_id)
+    refute "task_ref" in schema["$defs"]["cancel"]["required"]
+
+    golden =
+      @client_fixtures
+      |> jsonl()
+      |> Enum.find(&(&1["type"] == "cancel" and Map.has_key?(&1, "task_ref")))
+
+    assert %{"task_ref" => %{"call_uuid" => _uuid, "task_id" => _id, "revision" => _rev}} =
+             golden
+
+    server = jsonl(@server_fixtures)
+
+    for event <- ~w(task_running task_done) do
+      row = Enum.find(server, &(get_in(&1, ["metadata", "call", "event"]) == event))
+      assert %{"type" => "row", "kind" => "text"} = row, "no golden #{event} row"
+      assert :ok = Protocol.validate_call_metadata(row["metadata"]["call"])
+    end
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+    assert calls =~ "`task_running`"
+    assert calls =~ "`task_done`"
+    assert protocol =~ "`task_ref`"
+  end
+
   test "the golden fixtures cover every event of the catalog by direction" do
     assert fixture_types(@client_fixtures) == MapSet.new(Protocol.client_events())
     assert fixture_types(@server_fixtures) == MapSet.new(Protocol.server_events())
