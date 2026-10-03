@@ -406,11 +406,13 @@ defmodule FermixCore.Agents.MainAgent do
   # Only an owner's turn of the chat is told, and a hand-off never is: it is
   # the call's own turn, and runs in the chat's conversation by its key
   # override. Channels answers from the call registry and the companion
-  # clients attached; with no bridge registered no call can be up.
+  # clients attached, for the channel the turn came on (the Mac's and the
+  # phone's turns share the chat, M56 D9); with no bridge registered no call
+  # can be up.
   defp live_call(state, msg, :none) do
     with :operator <- Map.get(msg, :source_trust),
          {:ok, bridge} <- voice_bridge(state),
-         {:ok, call} <- bridge.chat_call(ConversationKey.from(msg)) do
+         {:ok, call} <- bridge.chat_call(ConversationKey.from(msg), Map.fetch!(msg, :channel)) do
       call
     else
       _not_told -> nil

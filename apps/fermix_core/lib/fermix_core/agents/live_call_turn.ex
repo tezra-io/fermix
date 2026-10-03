@@ -5,7 +5,7 @@ defmodule FermixCore.Agents.LiveCallTurn do
   (`voice_call_context`), and may end without a reply.
 
   `MainAgent` freezes the call into the turn's snapshot at checkout as
-  `live_call` (`VoiceBridge.chat_call/1`: when it started, and whether the turn
+  `live_call` (`VoiceBridge.chat_call/2`: when it started, and whether the turn
   may end with no reply), so a message that waited in the queue is judged
   when it runs. Only an owner's turn of the chat's own conversation is told,
   never a hand-off, which is the call's own turn, and never anything of a

@@ -146,7 +146,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     def call_active?, do: Bridge.call_active?()
 
     @impl true
-    def chat_call(key), do: Bridge.chat_call(key)
+    def chat_call(key, channel), do: Bridge.chat_call(key, channel)
 
     @impl true
     def show(call, text), do: Bridge.show(call, text)

@@ -20,11 +20,14 @@ defmodule FermixCore.Realtime.VoiceBridge do
   `conversation_window/1` is not call-scoped: a call in the chat's
   conversation reads it before `session.start`, when no handle exists yet, so
   it is a plain function of the module (M56 §4.3). A private call never calls
-  it. Nor are `call_active?/0` and `chat_call/1`, which Core asks for a turn
+  it. Nor are `call_active?/0` and `chat_call/2`, which Core asks for a turn
   that is not the call's own (M56 §4.4): whether a call in the chat is up (for
   `voice_call_context`), and how a turn of the chat is told of it. Channels
   answers both, because the chat is its to name and the clients attached to it
-  are its to count; a private call is no call in the chat.
+  are its to count; a private call is no call in the chat. A turn of the chat
+  names its conversation and the channel it came on, because the Mac's and
+  the phone's turns share the chat's conversation (M56 D9) and only the Mac's
+  wire can end a turn with no reply.
 
   Nor is `show/2` (M56 §4.2, §4.5): it writes a row of the call to the chat's
   timeline, announced to the Mac and the phones, and answers the row's
@@ -138,16 +141,17 @@ defmodule FermixCore.Realtime.VoiceBridge do
 
   @typedoc """
   A call in the chat, as a turn of the chat is told of it (M56 §4.4): when it
-  started, and whether that turn may end with no reply, which it may only
-  while every companion client attached reads a turn that ends that way
-  (companion protocol 2).
+  started, and whether that turn may end with no reply, which it may only on
+  the Mac's wire while every companion client attached reads a turn that ends
+  that way (companion protocol 2); a turn the phone runs never may (M56 D9).
   """
   @type chat_call :: %{started_at: DateTime.t(), silence_allowed?: boolean()}
 
   @callback conversation_window(window_bounds()) ::
               {:ok, conversation_window()} | {:error, term()}
   @callback call_active?() :: boolean()
-  @callback chat_call(FermixCore.Agents.ConversationKey.t()) :: {:ok, chat_call()} | :none
+  @callback chat_call(FermixCore.Agents.ConversationKey.t(), channel :: String.t()) ::
+              {:ok, chat_call()} | :none
   @callback show(shown_call(), String.t()) ::
               {:ok, server_seq :: pos_integer()} | {:error, term()}
   @callback open_call(call()) :: {:ok, call_handle :: term()} | {:error, term()}

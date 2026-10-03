@@ -813,7 +813,7 @@ defmodule FermixChannels.Voice.BridgeTest do
 
     test "with no call up, there is none to tell" do
       refute Bridge.call_active?()
-      assert Bridge.chat_call(Companion.chat_conversation_key()) == :none
+      assert Bridge.chat_call(Companion.chat_conversation_key(), "companion") == :none
     end
 
     test "a call in the chat is up, and the chat's turn is told when it started" do
@@ -821,15 +821,15 @@ defmodule FermixChannels.Voice.BridgeTest do
 
       assert Bridge.call_active?()
 
-      assert Bridge.chat_call(Companion.chat_conversation_key()) ==
+      assert Bridge.chat_call(Companion.chat_conversation_key(), "companion") ==
                {:ok, %{started_at: @call_started_at, silence_allowed?: true}}
     end
 
     test "another conversation's turn is never told of the call" do
       :ok = CallRegistry.claim(CallRegistry, claim("chat"))
 
-      assert Bridge.chat_call({"telegram", "chat-1", :root}) == :none
-      assert Bridge.chat_call({"mobile", "main", :root}) == :none
+      assert Bridge.chat_call({"telegram", "chat-1", :root}, "telegram") == :none
+      assert Bridge.chat_call({"mobile", "main", :root}, "mobile") == :none
     end
 
     # The chat does not know a private call exists (M56 §4.4).
@@ -837,7 +837,7 @@ defmodule FermixChannels.Voice.BridgeTest do
       :ok = CallRegistry.claim(CallRegistry, claim("private"))
 
       refute Bridge.call_active?()
-      assert Bridge.chat_call(Companion.chat_conversation_key()) == :none
+      assert Bridge.chat_call(Companion.chat_conversation_key(), "companion") == :none
     end
 
     # M56 §6: a version 1 client clears a turn only on text_done or
@@ -848,7 +848,7 @@ defmodule FermixChannels.Voice.BridgeTest do
       {:ok, _owner} = Registry.register(Companion.registry(), "main", 2)
 
       assert {:ok, %{silence_allowed?: true}} =
-               Bridge.chat_call(Companion.chat_conversation_key())
+               Bridge.chat_call(Companion.chat_conversation_key(), "companion")
     end
 
     test "one version 1 client attached is enough to forbid silence" do
@@ -857,7 +857,18 @@ defmodule FermixChannels.Voice.BridgeTest do
       attach_client(1)
 
       assert {:ok, %{silence_allowed?: false}} =
-               Bridge.chat_call(Companion.chat_conversation_key())
+               Bridge.chat_call(Companion.chat_conversation_key(), "companion")
+    end
+
+    # M56 D9: a phone turn runs in the chat's conversation, so it is told of
+    # the call; the phone's wire has no turn_done, so a turn it runs never
+    # ends without a reply, whatever the Mac's clients read.
+    test "a turn the phone runs in the chat is told of the call and never offered silence" do
+      :ok = CallRegistry.claim(CallRegistry, claim("chat"))
+      {:ok, _owner} = Registry.register(Companion.registry(), "main", 2)
+
+      assert Bridge.chat_call(Companion.chat_conversation_key(), "mobile") ==
+               {:ok, %{started_at: @call_started_at, silence_allowed?: false}}
     end
   end
 

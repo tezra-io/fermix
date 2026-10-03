@@ -165,7 +165,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     def call_active?, do: false
 
     @impl true
-    def chat_call(_key), do: :none
+    def chat_call(_key, _channel), do: :none
 
     @impl true
     def open_call(call) do
@@ -230,7 +230,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     @impl true
     def call_active?, do: false
     @impl true
-    def chat_call(_key), do: :none
+    def chat_call(_key, _channel), do: :none
     @impl true
     def open_call(_call), do: {:error, :no_queue}
     @impl true

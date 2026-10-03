@@ -149,23 +149,27 @@ defmodule FermixChannels.Voice.Bridge do
   def call_active?, do: match?({:ok, %{conversation: "chat"}}, CallRegistry.active(CallRegistry))
 
   @doc """
-  How a turn of conversation `key` is told of the call in the chat: `:none`
-  unless `key` is the chat's own and a call in the chat is up; otherwise its
-  start, and whether the turn may end with no reply, which it may only while
-  every companion client attached reads `turn_done` (M56 §4.4, §6).
+  How a turn of conversation `key`, on `channel`, is told of the call in the
+  chat: `:none` unless `key` is the chat's own and a call in the chat is up;
+  otherwise its start, and whether the turn may end with no reply (M56 §4.4,
+  §6). It may only on the Mac's wire, while every companion client attached
+  reads `turn_done`: the phone's turns run in the chat too (M56 D9), and its
+  wire has no ending without a reply, so a turn it runs answers briefly.
   """
   @impl true
-  @spec chat_call(ConversationKey.t()) :: {:ok, VoiceBridge.chat_call()} | :none
-  def chat_call(key) when is_tuple(key) do
+  @spec chat_call(ConversationKey.t(), String.t()) :: {:ok, VoiceBridge.chat_call()} | :none
+  def chat_call(key, channel) when is_tuple(key) and is_binary(channel) do
     with true <- key == Companion.chat_conversation_key(),
          {:ok, %{conversation: "chat", started_at: started_at}} <-
            CallRegistry.active(CallRegistry) do
-      {:ok,
-       %{started_at: started_at, silence_allowed?: Companion.every_client_reads?("turn_done")}}
+      {:ok, %{started_at: started_at, silence_allowed?: silence_allowed?(channel)}}
     else
       _not_the_chat_or_no_call -> :none
     end
   end
+
+  defp silence_allowed?(channel),
+    do: channel == Companion.channel() and Companion.every_client_reads?("turn_done")
 
   @doc """
   Show `text` in the chat as a row of the call `call` names, and answer the

@@ -20,7 +20,7 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     def call_active?, do: false
 
     @impl true
-    def chat_call(_key), do: :none
+    def chat_call(_key, _channel), do: :none
 
     @impl true
     def show(_call, _text), do: {:ok, 1}
@@ -80,7 +80,7 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
              Enum.sort(
                conversation_window: 1,
                call_active?: 0,
-               chat_call: 1,
+               chat_call: 2,
                show: 2,
                open_call: 1,
                submit: 3,

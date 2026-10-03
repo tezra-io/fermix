@@ -732,7 +732,7 @@ Current channels:
   run, which reports back into the chat, and a private call may not. While a
   call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
   answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
-  each such turn is told the call is up (`Voice.Bridge.chat_call/1`): it can
+  each such turn is told the call is up (`Voice.Bridge.chat_call/2`): it can
   read the call (`voice_call_context`) and may end with no reply, which its
   runner tells the companion stream and `Companion.Turns` ends with
   `turn_done`, offered only while every companion client attached reads it.

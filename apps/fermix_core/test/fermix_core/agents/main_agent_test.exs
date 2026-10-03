@@ -316,7 +316,7 @@ defmodule FermixCore.Agents.MainAgentTest do
 
   # The voice bridge Channels registers, standing in: it answers how a turn of
   # each conversation is told of a call in the chat, as the test sets it, and
-  # reports every key it is asked about.
+  # reports every key and channel it is asked about.
   defmodule LiveCallBridge do
     @name __MODULE__.State
 
@@ -325,9 +325,9 @@ defmodule FermixCore.Agents.MainAgentTest do
 
     def set(answer), do: Agent.update(@name, &%{&1 | answer: answer})
 
-    def chat_call(key) do
+    def chat_call(key, channel) do
       %{test_pid: test_pid, answer: answer} = Agent.get(@name, & &1)
-      send(test_pid, {:chat_call_asked, key})
+      send(test_pid, {:chat_call_asked, key, channel})
       answer
     end
   end
@@ -1972,13 +1972,16 @@ defmodule FermixCore.Agents.MainAgentTest do
       %{live_agent: agent_name}
     end
 
-    test "an owner's turn checked out during the call carries it, asked by its own key", ctx do
+    # The channel rides with the key: whether a turn may end with no reply is
+    # a question of the wire that runs it (M56 D9), which Channels answers.
+    test "an owner's turn checked out during the call carries it, asked by its key and channel",
+         ctx do
       msg = make_message("use this link", chat_id: "main", source_trust: :operator)
 
       {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
 
       assert turn_state.live_call == @call
-      assert_received {:chat_call_asked, {"telegram", "main", :root}}
+      assert_received {:chat_call_asked, {"telegram", "main", :root}, "telegram"}
     end
 
     test "the answer is the one at checkout, whenever the message was made", ctx do
@@ -2004,7 +2007,7 @@ defmodule FermixCore.Agents.MainAgentTest do
         MainAgent.checkout_turn_state(ctx.live_agent, voice_message("read my inbox", store))
 
       assert turn_state.live_call == nil
-      refute_received {:chat_call_asked, _key}
+      refute_received {:chat_call_asked, _key, _channel}
     end
 
     test "a guest's turn is never told of the call", ctx do
@@ -2013,7 +2016,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
 
       assert turn_state.live_call == nil
-      refute_received {:chat_call_asked, _key}
+      refute_received {:chat_call_asked, _key, _channel}
     end
 
     test "with no bridge registered no call is up", %{agent: agent} do
