@@ -14,6 +14,16 @@ Keep task examples, sample replies, and scripted jokes out of Fermix's general-p
 
 Production Fermix is managed through the macOS app; do not prescribe a user-facing `fermix` CLI for its setup or recovery. Inspect the app's daemon environment and management surface. A sandbox env allowlist grants child-process passthrough; it neither stores credentials nor imports terminal shell exports into the launchd engine. External skill credentials need an app-accessible storage and injection path.
 
+## Model lists — 2026-10-03
+
+**Neither app keeps a model list, so a list change is shipped only when both app repos have followed the engine.** The Mac app (`tezra-io/fermix-macos`) and the Linux app (`tezra-io/fermix-linux`) draw what the engine they run publishes: a provider section's `default_model` row with its options, and `providers.models.list` for the full or live listing. The Mac app runs the engine it pins; the Linux app runs the host's daemon. The only copies of a model name in either repo are the vendored management goldens and the tests that follow them.
+
+On 2026-10-03 the owner asked why the Mac app's OpenAI Codex picker lacked models the engine knows, and whether the app kept a second list. It did not, but the check found three lists that had drifted from `ModelCatalog`: OpenRouter's shipped suggestions still named Claude Fable 5, Claude Opus 4.8, GPT-5.5 and Grok 4.3 after two catalog updates that added their successors to the vendors' own lists (b7f0d563, 01954d92); Venice suggested Grok 4.6 while it lists 4.7; and the Linux repo's fixture copy, taken at 45785243, still named `gpt-6-sol` and lacked `gpt-6.1-sol` and `claude-sonnet-5-5`.
+
+- *The engine change carries its own goldens and its aggregators.* A `ModelCatalog` or `ModelListing` change regenerates the management goldens in the same commit (`protocol_contract_test` holds every golden provider section to the catalog's options). When a vendor's own list gains or retires a model, look at the OpenRouter and Venice suggestions that mirror that vendor in the same change, and say in the commit what was decided for each.
+- *Then both app repos, from a committed engine commit.* In `fermix-macos`, re-vendor `Resources/Contracts/management` with its checksums and `SOURCE.json` provenance (`scripts/verify_protocol_contract.sh --source` must say byte-identical) and update the tests that name a model; a Mac user sees the list only when `engine/PIN.json` moves to a release that carries it. In `fermix-linux`, re-copy `desktop/core/tests/fixtures/management/` byte for byte and update its `SOURCE.md`. Never hand-edit either copy, and never add a model list to either app.
+- *OpenAI Codex has no list to update.* It signs in with ChatGPT and lists what `GET /v1/models` marks `visibility: "list"` for the signed-in account on that route (`ModelListing`). That is fewer than OpenAI's own Codex client is offered on its private route: on 2026-10-03 the engine's listing held six where the Codex client on the same Mac held eight, `gpt-6-sol` and `gpt-6-luna` being the two withheld. The listing is a catalog, not an entitlement check, so a typed slug may still run. Do not close the gap by shipping a list: a shipped slug the plan refuses fails at the first turn.
+
 ## Hermetic tests
 
 **Tests must never mutate or silently depend on host/global state.** Four incidents, one family:
