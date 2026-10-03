@@ -138,6 +138,37 @@ defmodule FermixCore.Realtime.LiveChatTest do
       assert text == "You were reading the Q3 report."
     end
 
+    # M56 §4.4: a typed turn during a call may end with no reply, and the
+    # sentinel it answered is committed to the chat's history. It is no answer
+    # the voice should hear; the message it followed still is.
+    test "a reply that was exactly [SILENT] is left out, the message it followed kept" do
+      window = %{
+        messages: [user("https://x.test/lease"), assistant(" [SILENT]\n"), user("thanks")],
+        gists: []
+      }
+
+      items = LiveChat.input(window)
+
+      assert Enum.map(items, &{&1.role, hd(&1.content).text}) == [
+               {"user", "https://x.test/lease"},
+               {"user", "thanks"},
+               {"developer", LiveChat.input(%{messages: [user("x")], gists: []}) |> closing()}
+             ]
+
+      assert LiveChat.input(%{messages: [assistant("[SILENT]")], gists: []}) == []
+    end
+
+    test "[SILENT] said by the owner, or inside an answer, is ordinary text" do
+      items =
+        LiveChat.input(%{
+          messages: [user("[SILENT]"), assistant("[SILENT] is what I answer to stay quiet.")],
+          gists: []
+        })
+
+      assert [{"user", "[SILENT]"}, {"assistant", "[SILENT] is what" <> _rest}, _closing] =
+               Enum.map(items, &{&1.role, hd(&1.content).text})
+    end
+
     test "only user and assistant messages are a window's to hold" do
       for role <- ["system", "tool", "developer"] do
         assert_raise ArgumentError, ~r/user and assistant/, fn ->
@@ -218,6 +249,9 @@ defmodule FermixCore.Realtime.LiveChatTest do
   end
 
   defp user(text), do: %{role: "user", content: text, timestamp: ~U[2026-10-02 09:00:00Z]}
+
+  defp closing(items),
+    do: items |> List.last() |> Map.fetch!(:content) |> hd() |> Map.fetch!(:text)
 
   defp assistant(text),
     do: %{role: "assistant", content: text, timestamp: ~U[2026-10-02 09:00:01Z]}

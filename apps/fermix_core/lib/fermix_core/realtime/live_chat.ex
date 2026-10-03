@@ -19,6 +19,10 @@ defmodule FermixCore.Realtime.LiveChat do
   mirrored to the voice model as one quiet line each (`mirror_line/1`), so
   "use that link" said aloud has something to hand off.
 
+  A reply that was exactly `[SILENT]` (a typed turn during an earlier call
+  that ended with no reply, M56 §4.4) is left out: it answered nothing, and
+  the message it followed is kept.
+
   Anything given to the voice provider may be said aloud, so an assistant
   message stamped as Computer History content is masked against the voice
   provider's chain, the mask a turn's own history gets (`Taint.mask_for_chain/3`).
@@ -26,6 +30,7 @@ defmodule FermixCore.Realtime.LiveChat do
   omitted would tell the voice model nothing.
   """
 
+  alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Realtime.LiveText
 
@@ -129,9 +134,15 @@ defmodule FermixCore.Realtime.LiveChat do
   defp chat_items(messages) do
     messages
     |> Enum.map(&chat_message!/1)
+    |> Enum.reject(&silent_reply?/1)
     |> Taint.mask_for_chain(@live_chain)
     |> Enum.flat_map(&chat_item/1)
   end
+
+  defp silent_reply?(%{role: "assistant", content: content}),
+    do: LiveCallTurn.sentinel?(content)
+
+  defp silent_reply?(_user_message), do: false
 
   defp chat_message!(%{role: role, content: content} = message)
        when role in ["user", "assistant"] and is_binary(content),
