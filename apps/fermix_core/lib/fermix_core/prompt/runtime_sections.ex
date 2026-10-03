@@ -12,6 +12,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.Tools.SearchCredential
+  alias FermixCore.Tools.VoiceCallContext
 
   @type skill :: AgentDefinition.t()
 
@@ -250,6 +251,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
       |> Enum.reject(&(&1.metadata[:category] == :plugin))
       |> Enum.reject(&harness_when_unusable?/1)
       |> Enum.reject(&credential_gated_when_unready?/1)
+      |> Enum.reject(&call_scoped?/1)
       |> Enum.group_by(&(&1.metadata[:category] || :system))
       |> Enum.sort_by(fn {category, _caps} -> category_index(category) end)
       |> Enum.map_join("\n\n", &format_category/1)
@@ -288,6 +290,13 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   defp credential_gated_when_unready?(_capability), do: false
+
+  # A built-in offered only while a Live call in the chat is up (M56 §4.4). The
+  # catalog is cached per profile and cannot follow a call that starts and ends
+  # between turns, so it never names one; the line a typed turn is told during
+  # a call names it instead, and the wire carries its schema then.
+  defp call_scoped?(%{metadata: %{tool_module: VoiceCallContext}}), do: true
+  defp call_scoped?(_capability), do: false
 
   # The coding-harness category carries a section-level PREAMBLE line (design
   # §7.4) before its tool list — a new touchpoint, rendered only when the bucket

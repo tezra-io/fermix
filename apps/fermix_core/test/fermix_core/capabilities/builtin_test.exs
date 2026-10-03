@@ -188,7 +188,9 @@ defmodule FermixCore.Capabilities.BuiltinTest do
                "send_attachment",
                # `view_image` returns the owner's own image files, exactly as
                # `file_read` returns their text (M46 §5.1).
-               "view_image"
+               "view_image",
+               # What was said on the owner's own voice call (M56 §4.4).
+               "voice_call_context"
              ]
     end
   end

@@ -67,6 +67,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.MemoryForget,
     FermixCore.Tools.MemoryRecall,
     FermixCore.Tools.RecallActivity,
+    # Seeded unconditionally; `advertise?/1` offers it only while a Live call in
+    # the chat is up (M56 §4.4), and `execute/2` re-checks the call.
+    FermixCore.Tools.VoiceCallContext,
     FermixCore.Tools.ToolResultRecall,
     FermixCore.Tools.ScheduleJob,
     FermixCore.Tools.UpdateJob,
