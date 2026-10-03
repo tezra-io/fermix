@@ -78,11 +78,14 @@
 (* companion.sock. Its turns run in this conversation's Queue too (M56     *)
 (* D9): a phone turn waits as another sender's would, its cancel names its *)
 (* own message id (the named stop turn_queue proves), it is never offered  *)
-(* silence, and it ends on its own wire. A phone's revocation is not       *)
-(* modelled either: Turns runs it in its own mailbox as a cancel of every  *)
-(* unsettled request the device claimed, one step that marks them all and  *)
-(* stops each turn it handed off (handle_cast {:revoke_device},            *)
-(* turns.ex:296-308);                                                      *)
+(* silence, and it ends on its own wire. A delivery written through        *)
+(* Channels.Companion.send_message (the job's row) is also pushed to the   *)
+(* phones while their channel runs, after its announce                     *)
+(* (Mobile.schedule_push, the proactive row's push mobile_push models); no *)
+(* rule here reads it. A phone's revocation is not modelled either: Turns  *)
+(* runs it in its own mailbox as a cancel of every unsettled request the   *)
+(* device claimed, one step that marks them all and stops each turn it     *)
+(* handed off (handle_cast {:revoke_device}, turns.ex:296-308);            *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -135,7 +138,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ c76eab50921a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 515903248437
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ bfbb1b3bcbc5
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ d0a1ca7c444e
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 2dadf7da73c8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13

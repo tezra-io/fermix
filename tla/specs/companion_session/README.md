@@ -401,7 +401,10 @@ of an entity its rules are about. All still hold:
   turns run in this conversation's queue too (M56 D9): a phone turn waits as
   another sender's would, its cancel names its own message id (the named stop
   `turn_queue` proves), it is never offered silence, and it ends on its own
-  wire.
+  wire. A delivery written through `Channels.Companion.send_message` (the
+  job's row) is also pushed to the phones while their channel runs, after its
+  announce (`Mobile.schedule_push`, the proactive row's push `mobile_push`
+  models); no rule here reads it.
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
