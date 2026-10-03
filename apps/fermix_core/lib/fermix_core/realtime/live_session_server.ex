@@ -32,6 +32,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   delegations are cancelled through the bridge, the provider session is closed
   gracefully (bounded), the ledger is finalized, and `call_stop` telemetry
   carries WHY. `terminate/2` only releases what is still held.
+
+  A call in the chat leaves a gist and one chat row (M56 §4.2): the settle
+  closes the record with the settled cost and what the call owes the chat,
+  then hands a snapshot of what was said and the tasks to `CallGist`, under
+  the task supervisor, and goes without waiting on it. Whatever drawn from
+  Computer History reached the call marks its gist (M56 §9). A private call,
+  and one whose provider session never started, owe nothing.
   """
 
   use GenServer
@@ -39,8 +46,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.ComputerHistory.Taint
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallGist
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
@@ -265,6 +274,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # Delegations whose turn read Computer History content, as each turn's
       # runner told it before its reply (M56 §9). Forgotten as each settles.
       history_tainted: MapSet.new(),
+      # Whether anything drawn from Computer History reached this call: what
+      # it started with, a mirrored answer, a task's reply (M56 §9). Never
+      # forgotten: the call's gist inherits it.
+      call_tainted?: false,
+      # The gist's summariser seams (`CallGist.run/2`'s opts); a test names a
+      # route, the daemon names none and the primary chain is used.
+      gist_opts: Keyword.get(opts, :gist, []),
       turn_sessions: %{},
       last_activity_ms: %{},
       pending_appends: [],
@@ -495,10 +511,11 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp start_call(state) do
     with {:ok, bridge} <- resolve_bridge(state),
          {:ok, instructions} <- resolve_prompt(state),
-         {:ok, input} <- resolve_input(state, bridge),
+         {:ok, {input, input_tainted?}} <- resolve_input(state, bridge),
          {:ok, api_key} <- require_binary(state.api_key, :api_key),
          {:ok, pid} <- open_socket(state, api_key) do
-      send_session_start(%{state | voice_bridge: bridge, live_pid: pid}, instructions, input)
+      state = %{state | voice_bridge: bridge, live_pid: pid, call_tainted?: input_tainted?}
+      send_session_start(state, instructions, input)
     else
       {:error, {:provider_refused, reason}} -> refuse_start(state, reason)
       {:error, reason} -> {:error, reason, notify_error(state, reason)}
@@ -562,17 +579,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # read through the bridge before the call has a handle. A private call reads
   # none of it. A chat that cannot be read refuses the call, as a LIVE.md that
   # cannot be read does: the call does not start on half of what it was meant
-  # to know.
+  # to know. With the input, whether it gives the voice anything drawn from
+  # Computer History (M56 §9).
   defp resolve_input(state, bridge) do
     case Config.conversation(state.config) do
       "chat" -> chat_input(bridge)
-      "private" -> {:ok, []}
+      "private" -> {:ok, {[], false}}
     end
   end
 
   defp chat_input(bridge) do
     with {:ok, window} <- bridge.conversation_window(LiveChat.window_bounds()) do
-      {:ok, LiveChat.input(window)}
+      {:ok, {LiveChat.input(window), LiveChat.carries_taint?(window)}}
     end
   end
 
@@ -769,7 +787,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp mirror_chat(state, event) do
     case mirror_line(state, event) do
       {:ok, line} ->
-        send_thinking(state, nil, line)
+        state |> send_thinking(nil, line) |> mirrored_taint(event)
 
       :drop ->
         Logger.debug("voice_live: a chat #{elem(event, 0)} message was not mirrored")
@@ -785,6 +803,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp mirror_line(_state, _event), do: :drop
+
+  # An answer is mirrored stamped only while the voice may carry it, and then
+  # the call has heard something drawn from Computer History (M56 §9).
+  defp mirrored_taint(state, {:answered, message}),
+    do: %{state | call_tainted?: state.call_tainted? or Taint.tainted?(message)}
+
+  defp mirrored_taint(state, {:typed, _text}), do: state
 
   # A mute applied before `session.started` was gated locally but never reached
   # the provider — it had no session to reach. It does now.
@@ -1026,9 +1051,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp delegation_event({:activity, _event}, _record, state), do: {:noreply, state}
 
-  # Sent by the turn's own process before its reply, so it is here first.
-  defp delegation_event(:history_tainted, record, state),
-    do: {:noreply, %{state | history_tainted: MapSet.put(state.history_tainted, record.id)}}
+  # Sent by the turn's own process before its reply, so it is here first. The
+  # call keeps the mark after the task settles: its gist inherits it.
+  defp delegation_event(:history_tainted, record, state) do
+    tainted = MapSet.put(state.history_tainted, record.id)
+    {:noreply, %{state | history_tainted: tainted, call_tainted?: true}}
+  end
 
   defp delegation_event({:result, {:ok, text}}, record, state) when is_binary(text) do
     state = %{state | ledger: LiveLedger.record_backend_turn(state.ledger, %{})}
@@ -1278,9 +1306,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {seconds, state} = graceful_close(state)
     state = %{state | ledger: LiveLedger.finalize(state.ledger, seconds)}
 
-    close_record(state, reason)
+    owes = close_record(state, reason)
     notify_usage(state)
     LiveTelemetry.call_stop(telemetry_meta(state), call_measurements(state), reason)
+    leave_for_chat(state, owes)
     cancel_timers(state)
   end
 
@@ -1564,16 +1593,74 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   # Written before the final `usage` frame goes out, from the same settled
-  # ledger, so the record is the source that frame agrees with. A call that
-  # never reached `session.start` has no record to close.
-  defp close_record(%{call_record: nil}, _reason), do: :ok
+  # ledger, so the record is the source that frame agrees with, and with what
+  # the call owes the chat, which it answers. A call that never reached
+  # `session.start` has no record to close and owes nothing.
+  defp close_record(%{call_record: nil}, _reason), do: :nothing
 
   defp close_record(state, reason) do
     usage = LiveLedger.usage_payload(state.ledger)
+    owes = owes(state)
 
     state.call_record
-    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts, :nothing)
-    |> report_record("close")
+    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts, owes)
+    |> owed_once_closed(owes)
+  end
+
+  # M56 §4.2: a call in the chat owes the chat its row, and its gist when it
+  # said or handed off anything; a private call (M56 §5), and one whose
+  # provider session never started, owe nothing.
+  defp owes(%{provider_session_id: nil}), do: :nothing
+
+  defp owes(state) do
+    case Config.conversation(state.config) do
+      "private" -> :nothing
+      "chat" -> if said_anything?(state), do: :gist, else: :row
+    end
+  end
+
+  defp said_anything?(state),
+    do: not CallSpeech.empty?(state.speech) or recorded_tasks(state.call_record) != []
+
+  # A close that failed leaves no record to settle a gist or a row against.
+  defp owed_once_closed(:ok, owes), do: owes
+
+  defp owed_once_closed(failed, _owes) do
+    report_record(failed, "close")
+    :nothing
+  end
+
+  # The gist and the row are made by a task under the task supervisor, from a
+  # snapshot: the session is going, and its stop callers wait on it with no
+  # timeout. A task that cannot start leaves both owed, for the next boot.
+  defp leave_for_chat(_state, :nothing), do: :ok
+
+  defp leave_for_chat(state, owes) do
+    case CallGist.start(gist_job(state, owes), state.gist_opts) do
+      {:ok, _pid} ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "voice_live: the gist of call #{state.call_uuid} could not be started " <>
+            "(#{inspect(reason)}); the next boot writes its row"
+        )
+    end
+  end
+
+  defp gist_job(state, owes) do
+    bridge = state.voice_bridge
+
+    %{
+      call_uuid: state.call_uuid,
+      speech: state.speech,
+      tasks: recorded_tasks(state.call_record),
+      tainted?: state.call_tainted?,
+      duration_s: max(0, DateTime.diff(DateTime.utc_now(), state.started_at)),
+      gist?: owes == :gist,
+      write_row: &bridge.show/2,
+      repo_opts: state.record_opts
+    }
   end
 
   defp report_record(:ok, _action), do: :ok

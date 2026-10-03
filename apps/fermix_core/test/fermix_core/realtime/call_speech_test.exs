@@ -8,6 +8,9 @@ defmodule FermixCore.Realtime.CallSpeechTest do
 
   test "a new call has said nothing" do
     assert CallSpeech.text(CallSpeech.new()) == ""
+    assert CallSpeech.empty?(CallSpeech.new())
+    refute CallSpeech.empty?(CallSpeech.append(CallSpeech.new(), :user, "hi"))
+    assert CallSpeech.empty?(CallSpeech.append(CallSpeech.new(), :user, ""))
   end
 
   test "deltas join verbatim into speaker runs, in the order they arrived" do

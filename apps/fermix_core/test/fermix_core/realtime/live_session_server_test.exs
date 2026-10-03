@@ -226,6 +226,32 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     def close_call(_handle), do: :ok
   end
 
+  defmodule GistAdapter do
+    @moduledoc """
+    The provider a call's gist is made on (M56 §4.2), bound into the gist's
+    route so no real adapter is ever resolved: it tells the test what it was
+    sent and answers as the test says, or waits for the test to release it.
+    """
+
+    def chat(messages, _tools, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:gist_call, messages, opts})
+
+      case Keyword.fetch!(opts, :answer) do
+        {:await, answer} -> await(test_pid, answer)
+        answer -> answer
+      end
+    end
+
+    defp await(test_pid, answer) do
+      send(test_pid, {:awaiting_gist, self()})
+
+      receive do
+        :release -> answer
+      end
+    end
+  end
+
   defmodule RefusingLiveClient do
     @moduledoc """
     The provider refusing the WebSocket handshake, the way it answers a stale
@@ -946,6 +972,259 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert Repo.get_voice_call(uuid, server: repo) == {:error, :not_found}
     end
+  end
+
+  # M56 §4.2: a call in the chat leaves a gist and one chat row. The record is
+  # closed with the settled cost and what the call owes first; the gist is
+  # made by a task the session never waits on; the row is written once the
+  # gist is made or has failed.
+  describe "the gist and the call's row" do
+    @gist "You asked to book the room and it is booked for 10am. Nothing is open."
+
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-gist-#{unique}.db")
+      repo = :"live_gist_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+      original = Application.get_env(:fermix_core, :computer_history)
+
+      on_exit(fn ->
+        restore_core_env({:computer_history, if(original, do: {:ok, original}, else: :error)})
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      # History on, OpenAI not granted.
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+      %{repo: repo}
+    end
+
+    test "the record closes owing its gist and row, and the stop never waits on the gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      gist = gist_opts({:await, {:ok, %{content: @gist}}})
+      session = start_session(clock: clock, record_repo: repo, gist: gist)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      # The summariser is held: the stop still returns, and the session goes.
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+      assert_receive {:awaiting_gist, summariser}
+
+      assert {:ok, %{voice_cost_cents: cost} = closed} = Repo.get_voice_call(uuid, server: repo)
+      assert is_number(cost)
+      assert %{gist_status: "pending", row_state: "row_pending"} = closed
+      refute_received {:bridge_show, %{"event" => "ended"}, _text}
+
+      # What it summarises is the snapshot the session took as it settled.
+      assert_received {:gist_call, [_system, %{content: content}], _opts}
+      assert content =~ "user: book the room"
+      assert content =~ "- completed: The room is booked for 10am."
+
+      send(summariser, :release)
+      assert_receive {:bridge_show, call, text}, 2_000
+
+      assert %{"uuid" => ^uuid, "event" => "ended", "gist_status" => "written"} = call
+      assert call["voice_cost_cents"] == cost
+      assert text == "Voice call, under a minute\n\n" <> @gist
+
+      assert %{gist: @gist, gist_tainted: false, row_state: "row_written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a gist that fails leaves the row its task list", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo, gist: gist_opts({:error, :busy}))
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended", "gist_status" => "failed"}, text}, 2_000
+      assert text == "Voice call, under a minute\n\n- Completed: The room is booked for 10am."
+      assert %{gist: nil} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call that said nothing writes its row alone, with no model call", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended", "gist_status" => "none"}, text}, 2_000
+      assert text == "Voice call, under a minute"
+      refute_received {:gist_call, _messages, _opts}
+      assert %{gist_status: "none"} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    # M56 §5: a private call leaves no gist and no row, and nothing of it is
+    # summarised.
+    test "a private call makes no gist and writes no row", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, record_repo: repo, config: config)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert {:ok, %{gist_status: "none", row_state: "none", gist: nil}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      refute_receive {:gist_call, _messages, _opts}, 200
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    test "a call whose provider session never started writes no row", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+
+      send(session, :start_deadline)
+      assert_receive {:EXIT, ^session, {:shutdown, :provider_refused}}
+
+      assert {:ok, %{end_reason: "provider_refused", gist_status: "none", row_state: "none"}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      refute_receive {:gist_call, _messages, _opts}, 200
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    # M56 §9: provenance follows derived text. Whatever drawn from Computer
+    # History reached the call (a task's reply, a mirrored answer, what it
+    # started with) marks its gist.
+    test "a reply drawn from Computer History marks the call's gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "what was I reading", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended"}, _text}, 2_000
+
+      assert %{gist_tainted: true, gist_status: "written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "an answer drawn from Computer History mirrored into the call marks its gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+
+      answer = %{
+        role: "assistant",
+        content: "You were reading the Q3 report.",
+        history_tainted: true
+      }
+
+      :ok = LiveSessionServer.chat_answered(session, answer)
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: true} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call that started with content drawn from Computer History marks its gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+
+      FakeBridge.set_window(
+        {:ok,
+         %{
+           messages: [
+             %{
+               role: "assistant",
+               content: "You were reading the Q3 report.",
+               history_tainted: true
+             }
+           ],
+           gists: []
+         }}
+      )
+
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: true} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call nothing drawn from Computer History reached leaves an unmarked gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved."})
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: false, gist_status: "written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+  end
+
+  defp grant_openai_history do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      summarizer: :local,
+      remote_summaries: [:openai]
+    )
   end
 
   describe "mute" do
@@ -2312,7 +2591,10 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       voice_bridge: FakeBridge,
       call_registry: @call_registry,
       prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
-      unix_clock: fn -> 1_000 end
+      unix_clock: fn -> 1_000 end,
+      # Every session in this suite makes its gist on a fake: none ever calls
+      # a real provider.
+      gist: gist_opts({:ok, %{content: "You talked about the room."}})
     ]
 
     defaults
@@ -2357,6 +2639,35 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
     :ok
+  end
+
+  @gist_route %{
+    provider: :openai,
+    model: "gpt-test",
+    auth_mode: :api_key,
+    base_url: "https://api.openai.com/v1"
+  }
+
+  defp gist_opts(answer),
+    do: [routes: [{@gist_route, [adapter: GistAdapter, test_pid: self(), answer: answer]}]]
+
+  # The gist and the row are written by a task after the session has gone; a
+  # bounded wait for the record to reach what the test expects.
+  defp await_record(repo, uuid, done?, tries \\ 100)
+
+  defp await_record(repo, uuid, _done?, 0) do
+    flunk("the record never settled: #{inspect(Repo.get_voice_call(uuid, server: repo))}")
+  end
+
+  defp await_record(repo, uuid, done?, tries) do
+    {:ok, record} = Repo.get_voice_call(uuid, server: repo)
+
+    if done?.(record) do
+      record
+    else
+      Process.sleep(20)
+      await_record(repo, uuid, done?, tries - 1)
+    end
   end
 
   # The commentary appends a delegation put on the Live wire: what the voice

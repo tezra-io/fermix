@@ -38,6 +38,10 @@ defmodule FermixCore.Realtime.CallSpeech do
   @spec new() :: t()
   def new, do: %__MODULE__{}
 
+  @doc "Whether nothing has been said on the call."
+  @spec empty?(t()) :: boolean()
+  def empty?(%__MODULE__{runs: runs}), do: :queue.is_empty(runs)
+
   @doc "The bound on what `text/1` renders, the marker included."
   @spec max_bytes() :: pos_integer()
   def max_bytes, do: @max_bytes

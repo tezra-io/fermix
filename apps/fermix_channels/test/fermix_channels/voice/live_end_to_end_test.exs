@@ -49,6 +49,12 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   @call_registry Module.concat(__MODULE__, CallRegistry)
   @timeline_repo :voice_e2e_timeline_repo
   @timeline_env ~w(companion_store mobile_event_sink)a
+  @gist_route %{
+    provider: :openai,
+    model: "gpt-test",
+    auth_mode: :api_key,
+    base_url: "https://api.openai.com/v1"
+  }
 
   # The chat's timeline on this module's throwaway repo.
   defmodule E2ETimeline do
@@ -142,6 +148,12 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     @impl true
     def close_call(handle), do: Bridge.close_call(handle)
+  end
+
+  # The provider a call's gist is made on, bound into the gist's route: no
+  # real adapter is ever resolved.
+  defmodule GistAdapter do
+    def chat(_messages, _tools, opts), do: {:ok, %{content: Keyword.fetch!(opts, :gist)}}
   end
 
   defmodule StubAgent do
@@ -417,6 +429,58 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     end
   end
 
+  # M56 §4.2: the call's one row when it ends, written through the real bridge
+  # and the companion channel once its gist is made, to the Mac and the phones.
+  describe "the call's row when it ends" do
+    setup :start_timeline
+
+    test "the gist is made after the call and lands in the chat as the call's one row" do
+      Process.flag(:trap_exit, true)
+      gist = "You asked to book the room and it is booked for 10am."
+
+      session =
+        start_session(live_config(),
+          record_repo: @timeline_repo,
+          gist: [routes: [{@gist_route, [adapter: GistAdapter, gist: gist]}]]
+        )
+
+      :ok = SessionControl.call_start(session)
+      open_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: call_uuid}}
+
+      speak(session, "book the room", 1_000, 4_000)
+      delegate(session, "dg_1", 4_200)
+      assert_receive {:turn_started, _msg, turn_pid}, 5_000
+      send(turn_pid, {:proceed, "The room is booked for 10am."})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}},
+                     5_000
+
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+      assert_receive {:companion_event, %{"t" => "row", "server_seq" => seq} = mac_row}, 5_000
+      assert mac_row["text"] == "Voice call, under a minute\n\n" <> gist
+
+      assert %{"uuid" => ^call_uuid, "event" => "ended", "gist_status" => "written"} =
+               mac_row["metadata"]["call"]
+
+      assert_receive {:mobile_event, "main", %{"t" => "row", "server_seq" => ^seq}}
+
+      assert {:ok, %{messages: [%{server_seq: ^seq, proactive_key: key}]}} =
+               E2ETimeline.history_page("main", limit: 10)
+
+      assert key == "voice:#{call_uuid}:ended"
+
+      assert eventually(fn ->
+               match?(
+                 {:ok, %{row_state: "row_written", gist: ^gist}},
+                 Repo.get_voice_call(call_uuid, server: @timeline_repo)
+               )
+             end)
+    end
+  end
+
   test "cancelling a task stops the running turn and reports it to the call" do
     Process.flag(:trap_exit, true)
     session = start_session()
@@ -552,8 +616,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   defp restore_channels_env({key, :error}), do: Application.delete_env(:fermix_channels, key)
 
-  defp start_session(config \\ live_config()) do
-    opts = Keyword.put(live_session_opts(), :config, config)
+  defp start_session(config \\ live_config(), extra \\ []) do
+    opts = live_session_opts() |> Keyword.put(:config, config) |> Keyword.merge(extra)
     {:ok, session} = LiveSessionServer.start_link([companion: self()] ++ opts)
 
     # Registered AFTER the bridge binding's cleanup, so it runs BEFORE it
