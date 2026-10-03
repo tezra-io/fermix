@@ -18,6 +18,7 @@ The Fermix app's voice companion. The app talks to the daemon over `$FERMIX_HOME
   - The call's history is in memory only unless `persist_transcripts = true` (turn history then goes to the normal store and captions become `live_caption` rows); no automatic memory review runs off a voice call either way.
   - It bills by connected time, silence and mute included, so a silent call still reaches `max_estimated_cost_cents_per_session`; the agent's own turns are counted separately with their cost marked unknown. OpenAI's session limit can end a call before `max_session_minutes`.
   - Settings are fixed once a call starts; a change applies to the next call.
+  - One call at a time per daemon: starting a call from another window or Mac while one is up, or still ending, is refused with `call_in_progress`, and the call that was up carries on.
   - Its prompt is `bootstrap/main/LIVE.md` (seeded once, owner-editable, drift-checked by `fermix doctor` like `REALTIME.md`) plus a list of the agent's capability categories.
   - No screen sharing: say plainly that this engine cannot watch the screen.
 - `fermix voice status` and `fermix doctor` name the engine in force.

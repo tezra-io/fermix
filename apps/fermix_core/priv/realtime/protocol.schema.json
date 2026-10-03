@@ -209,7 +209,10 @@
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
-        "reason": { "type": "string" },
+        "reason": {
+          "type": "string",
+          "description": "The failure's code. call_in_progress refuses a call_start while another Live call is up or still settling; the connection closes after it."
+        },
         "kind": {
           "enum": [
             "update_required",

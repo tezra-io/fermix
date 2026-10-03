@@ -33,6 +33,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
@@ -109,9 +110,25 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     config = Keyword.get_lazy(opts, :config, &Config.current/0)
 
     if Config.live?(config) do
-      {:ok, initial_state(opts, config)}
+      claim_call(initial_state(opts, config))
     else
       {:stop, {:invalid_engine, config.engine}}
+    end
+  end
+
+  # One call per daemon (M56 §4.8). The claim is taken before this session exists
+  # to its caller, so a second `call_start` is refused before it can open a
+  # provider session that bills by the minute; the socket answers it
+  # `call_in_progress` and closes the connection. Held until this process exits,
+  # so a call still settling counts.
+  defp claim_call(state) do
+    case CallRegistry.claim(state.call_registry, state.call_uuid) do
+      :ok ->
+        {:ok, state}
+
+      {:error, :call_in_progress} ->
+        Logger.info("voice_live: refused a second call while one is in progress")
+        {:stop, :call_in_progress}
     end
   end
 
@@ -127,6 +144,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # The call's durable identity: the key of its record, on every frame and
       # telemetry event that names the call.
       call_uuid: DeviceIdentity.generate_uuid(),
+      call_registry: Keyword.get(opts, :call_registry, CallRegistry),
       api_key: Keyword.get(opts, :api_key),
       device_id: Keyword.get(opts, :device_id, "unknown"),
       agent_id: Keyword.get(opts, :agent_id, MemoryConfig.agent_id()),

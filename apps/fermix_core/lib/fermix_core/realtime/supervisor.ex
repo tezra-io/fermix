@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.Supervisor do
 
   use Supervisor
 
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionSupervisor
@@ -21,7 +22,10 @@ defmodule FermixCore.Realtime.Supervisor do
     socket_name = Keyword.get(opts, :socket_name, LocalVoiceSocket)
     socket_path = Keyword.get(opts, :socket_path, Config.socket_path())
 
+    # The call registry first: a Live session claims its call there from its
+    # own `init/1`.
     children = [
+      {CallRegistry, name: Keyword.get(opts, :call_registry_name, CallRegistry)},
       {SessionSupervisor, name: session_name},
       {Task.Supervisor, name: task_name},
       {LocalVoiceSocket,

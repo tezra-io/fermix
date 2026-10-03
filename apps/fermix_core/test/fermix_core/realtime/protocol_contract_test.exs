@@ -93,6 +93,20 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     end
   end
 
+  test "the one-call refusal is a published error reason with a golden row", %{schema: schema} do
+    reason = Protocol.call_in_progress()
+
+    assert reason == "call_in_progress"
+    assert schema["$defs"]["error"]["properties"]["reason"]["description"] =~ reason
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "error", "reason" => reason} in golden
+  end
+
   test "the golden Live frames carry the call UUID" do
     server_frames =
       @server_fixtures

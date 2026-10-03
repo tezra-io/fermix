@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.OpenAILiveClient
@@ -14,6 +15,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   @live_title "# LIVE.md — Live Voice Companion"
   @closed_seconds 120.5
   @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  # This module's own registry, started fresh for every test: the daemon's is
+  # under the realtime supervisor, which the suite never starts.
+  @call_registry Module.concat(__MODULE__, CallRegistry)
 
   defmodule FakeLiveClient do
     @moduledoc """
@@ -191,6 +195,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     {:ok, _bridge} = FakeBridge.start(self())
     on_exit(&FakeBridge.stop/0)
     start_supervised!(%{id: :fake_live_client, start: {FakeLiveClient, :start_agent, [self()]}})
+    start_supervised!({CallRegistry, name: @call_registry})
     clock = start_supervised!({Agent, fn -> 0 end}, id: :live_clock)
     %{clock: clock}
   end
@@ -412,6 +417,65 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  describe "one call per daemon" do
+    test "the call is in the registry under its UUID while it is up, and gone after", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: uuid}}
+
+      assert CallRegistry.lookup(@call_registry, uuid) == {:ok, session}
+      assert CallRegistry.active(@call_registry) == {:ok, %{call_uuid: uuid, session: session}}
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert CallRegistry.lookup(@call_registry, uuid) == :none
+      assert CallRegistry.active(@call_registry) == :none
+    end
+
+    test "a second session is refused while a call is up", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      first = start_session(clock: clock)
+      :ok = SessionControl.call_start(first)
+      start_provider_session(first)
+
+      assert {:error, :call_in_progress} =
+               LiveSessionServer.start_link(session_opts(clock: clock))
+
+      # The refused start touched nothing of the call that is up.
+      assert {:ok, %{session: ^first}} = CallRegistry.active(@call_registry)
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    test "a second session is refused while the first is still settling", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      first = start_session(clock: clock, close_deadline_ms: 5_000)
+      :ok = SessionControl.call_start(first)
+      start_provider_session(first)
+      FakeLiveClient.silence_close()
+
+      stopper = Task.async(fn -> SessionControl.call_stop(first) end)
+
+      # `idle` is the first thing a settle does; the settle then waits for
+      # `session.closed`, which the provider has not sent.
+      assert_receive {:realtime, %{type: "state", state: "idle"}}
+
+      assert {:error, :call_in_progress} =
+               LiveSessionServer.start_link(session_opts(clock: clock))
+
+      send(first, {:openai_live_event, {:session_closed, "close_requested", 10.0}})
+      assert :ok = Task.await(stopper)
+      assert_receive {:EXIT, ^first, {:shutdown, :call_stop}}
+
+      second = start_session(clock: clock)
+      assert {:ok, %{session: ^second}} = CallRegistry.active(@call_registry)
+    end
+  end
+
   describe "mute" do
     test "gates chunks locally before the provider acknowledges", %{clock: clock} do
       session = start_session(clock: clock)
@@ -574,8 +638,10 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
 
     test "a delegation before sufficient context waits once then asks for a repeat", %{
-      clock: clock
+      clock: clock,
+      session: setup_call
     } do
+      end_call(setup_call)
       session = start_session(clock: clock, context_wait_ms: 10)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
@@ -602,7 +668,11 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
              )
     end
 
-    test "a delegation whose context lands during the wait is submitted", %{clock: clock} do
+    test "a delegation whose context lands during the wait is submitted", %{
+      clock: clock,
+      session: setup_call
+    } do
+      end_call(setup_call)
       session = start_session(clock: clock, context_wait_ms: 50)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
@@ -1313,6 +1383,24 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   ## Helpers
 
   defp start_session(opts) do
+    {:ok, session} = LiveSessionServer.start_link(session_opts(opts))
+
+    # A session settles its call in `terminate/2`, which runs as the test
+    # process exits. Registered AFTER the bridge's own cleanup, so it runs
+    # BEFORE it (on_exit is LIFO): the fakes outlive the call they served.
+    on_exit(fn -> await_down(session) end)
+    session
+  end
+
+  # One call per daemon: a test that needs a session of its own first ends the
+  # call its describe's setup started.
+  defp end_call(session) do
+    Process.flag(:trap_exit, true)
+    :ok = SessionControl.call_stop(session)
+    assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+  end
+
+  defp session_opts(opts) do
     config = Keyword.get(opts, :config) || live_config()
 
     defaults = [
@@ -1323,23 +1411,15 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       session_scope: "voice_live:#{System.unique_integer([:positive, :monotonic])}",
       live_client: FakeLiveClient,
       voice_bridge: FakeBridge,
+      call_registry: @call_registry,
       prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
       unix_clock: fn -> 1_000 end
     ]
 
-    session_opts =
-      defaults
-      |> Keyword.merge(opts)
-      |> Keyword.update!(:clock, fn agent -> fn -> Agent.get(agent, & &1) end end)
-      |> Keyword.put(:config, config)
-
-    {:ok, session} = LiveSessionServer.start_link(session_opts)
-
-    # A session settles its call in `terminate/2`, which runs as the test
-    # process exits. Registered AFTER the bridge's own cleanup, so it runs
-    # BEFORE it (on_exit is LIFO): the fakes outlive the call they served.
-    on_exit(fn -> await_down(session) end)
-    session
+    defaults
+    |> Keyword.merge(opts)
+    |> Keyword.update!(:clock, fn agent -> fn -> Agent.get(agent, & &1) end end)
+    |> Keyword.put(:config, config)
   end
 
   # The session emits from its OWN process, so the handler cannot filter on

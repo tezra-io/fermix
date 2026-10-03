@@ -2,6 +2,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Realtime
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
   alias FermixCore.Realtime.SessionServer
@@ -35,7 +36,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
     def handle_call(:opts, _from, opts), do: {:reply, opts, opts}
   end
 
-  test "starts session supervisor and local voice socket" do
+  test "starts the call registry, session supervisor and local voice socket" do
     socket_path =
       Path.join(
         System.tmp_dir!(),
@@ -45,13 +46,15 @@ defmodule FermixCore.Realtime.SupervisorTest do
     name = :"rt_supervisor_#{System.unique_integer([:positive])}"
     socket_name = :"rt_socket_#{System.unique_integer([:positive])}"
     session_name = :"rt_sessions_#{System.unique_integer([:positive])}"
+    registry_name = :"rt_calls_#{System.unique_integer([:positive])}"
 
     {:ok, pid} =
       Realtime.Supervisor.start_link(
         name: name,
         socket_path: socket_path,
         socket_name: socket_name,
-        session_supervisor_name: session_name
+        session_supervisor_name: session_name,
+        call_registry_name: registry_name
       )
 
     on_exit(fn ->
@@ -63,6 +66,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
     assert Process.whereis(session_name)
     assert LocalVoiceSocket.active_clients(socket_name) == {:ok, 0}
     assert SessionSupervisor.active_sessions(session_name) == 0
+    assert CallRegistry.active(registry_name) == :none
   end
 
   test "supervisor shutdown removes the realtime socket path" do
@@ -76,6 +80,7 @@ defmodule FermixCore.Realtime.SupervisorTest do
     socket_name = :"rt_shutdown_socket_#{System.unique_integer([:positive])}"
     session_name = :"rt_shutdown_sessions_#{System.unique_integer([:positive])}"
     task_name = :"rt_shutdown_tasks_#{System.unique_integer([:positive])}"
+    registry_name = :"rt_shutdown_calls_#{System.unique_integer([:positive])}"
 
     previous_trap_exit = Process.flag(:trap_exit, true)
 
@@ -90,7 +95,8 @@ defmodule FermixCore.Realtime.SupervisorTest do
         socket_path: socket_path,
         socket_name: socket_name,
         session_supervisor_name: session_name,
-        task_supervisor_name: task_name
+        task_supervisor_name: task_name,
+        call_registry_name: registry_name
       )
 
     assert File.exists?(socket_path)

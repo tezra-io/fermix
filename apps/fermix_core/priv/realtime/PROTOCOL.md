@@ -169,7 +169,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `assistant_text_delta` | `text` | Incremental assistant text. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
 | `usage` | token/cost fields | Per-turn usage. Live adds `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another Live call is up (see *One call at a time*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
@@ -219,3 +219,16 @@ says the provider never reported a terminal duration, and an incomplete total is
 never overwritten with zero. A call the daemon ends itself (cost ceiling, session
 expiry, max duration, provider disconnect) sends the same `state: "idle"` and
 final `usage`, followed by `error` carrying the matching `kind`.
+
+## One call at a time
+
+The daemon holds one Live call. A `call_start` on another connection while a
+call is up, or still settling (its provider session closing and its bill being
+settled), is refused before any session starts with
+
+```json
+{"type":"error","reason":"call_in_progress"}
+```
+
+and the connection closes. The call that was up is untouched. A repeated
+`call_start` on the connection that holds the call is not a second call.

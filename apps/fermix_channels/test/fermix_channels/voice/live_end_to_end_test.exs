@@ -27,6 +27,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixChannels.Voice.Bridge
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LocalVoiceSocket
@@ -38,6 +39,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   @answer "Your calendar is clear today."
   @closed_seconds 12.0
   @spoken "what is on my calendar today"
+  # This module's own call registry: the daemon's is under the realtime
+  # supervisor, which the suite never starts.
+  @call_registry Module.concat(__MODULE__, CallRegistry)
 
   # Records what the session put on the Live wire and answers `session.close`
   # from inside the send — which runs in the session's own process, so the
@@ -176,6 +180,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     {:ok, _binding} = QueueBoundBridge.bind(queue)
     on_exit(&QueueBoundBridge.unbind/0)
     start_supervised!(%{id: :fake_live_client, start: {FakeLiveClient, :start_agent, [self()]}})
+    start_supervised!({CallRegistry, name: @call_registry})
 
     %{queue: queue}
   end
@@ -377,6 +382,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
       session_scope: "voice_live:#{System.unique_integer([:positive, :monotonic])}",
       live_client: FakeLiveClient,
       voice_bridge: QueueBoundBridge,
+      call_registry: @call_registry,
       prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
       clock: fn -> 0 end,
       unix_clock: fn -> 1_000 end,
