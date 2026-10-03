@@ -277,12 +277,23 @@ defmodule FermixChannels.Gateway do
 
     case normalize_result do
       {:ok, reply_message} ->
-        authorize_and_ingest(channel, reply_message, deps)
+        authorize_and_ingest(channel, name_conversation(channel, reply_message), deps)
 
       {:error, {:invalid_message, _field}} = error ->
         Logger.error("Dispatcher invalid message failed normalization: #{inspect(error)}")
         error
     end
+  end
+
+  # The conversation a message runs in is named here and nowhere else (M56
+  # D9): the adapter of a channel whose turns join another transport's answers
+  # it, and every other message carries none, whatever it arrived with, so
+  # `ConversationKey.from/1` believes it from here on, the command path's key
+  # included, without trusting a payload.
+  defp name_conversation(channel, %Message{} = message) do
+    if Code.ensure_loaded?(channel) and function_exported?(channel, :joined_conversation, 1),
+      do: %{message | conversation_key: channel.joined_conversation(message)},
+      else: %{message | conversation_key: nil}
   end
 
   defp authorize_and_ingest(channel, %Message{} = reply_message, deps) do

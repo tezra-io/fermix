@@ -13,8 +13,10 @@ defmodule FermixChannels.Voice.ChatMirror do
   `LiveSessionServer` drops what a call not yet up must not hear.
 
   Only the chat's own conversation is mirrored, because only it is what a
-  hand-off can read. The phone's turns run in a conversation of their own
-  until they join the chat's (M56 D9), so they are not mirrored yet.
+  hand-off can read. The phone's turns run in it too (M56 D9), so a message
+  typed on the phone is told like one typed on the Mac, and its answer from
+  its turn's outcome in `Turns`, as the Mac's is: the phone writes its own
+  reply rows, but every turn of both transports ends there, once.
 
   Nothing here may fail the turn it rides on or crash `Turns`: both functions
   answer `:ok`, and a chat that cannot be read is logged.

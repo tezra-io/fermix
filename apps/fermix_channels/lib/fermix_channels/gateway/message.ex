@@ -31,6 +31,12 @@ defmodule FermixChannels.Gateway.Message do
     # client's own CLI with the credentials and PATH it was spawned with
     # (MILESTONE_29_ACP_AGENT_SURFACE.md §8.3).
     :session_env,
+    # The conversation this message runs in when its channel's turns join
+    # another transport's (M56 D9: the phone's turns run in the Mac's chat),
+    # set ONLY by `Gateway.ingest/2`, from the adapter's `joined_conversation/1`
+    # and over anything the message carried. `ConversationKey.from/1` answers
+    # it; `nil` keys the message on its own channel, chat and thread.
+    :conversation_key,
     thread_scope: :root,
     metadata: %{},
     attachments: [],
@@ -52,6 +58,7 @@ defmodule FermixChannels.Gateway.Message do
           thread_ts: thread_id() | nil,
           request_cwd: String.t() | nil,
           session_env: %{String.t() => String.t()} | nil,
+          conversation_key: FermixCore.Agents.ConversationKey.t() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
           attachments: [map()],

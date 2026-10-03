@@ -361,6 +361,8 @@ defmodule FermixChannels.Companion.TurnsTest do
     assert {:ok, %{status: "failed"}} = request(id)
   end
 
+  # The phone's turns run in the chat's lane (M56 D9), so its stop names that
+  # lane and its own turn's message id, which no other turn there shares.
   test "the phone cancels one request's turn in the queue (STB-10)", ctx do
     id = unique()
     msg = decoded("msg", msg_payload(id, "stop me"))
@@ -369,7 +371,7 @@ defmodule FermixChannels.Companion.TurnsTest do
 
     cancel = decoded("cancel", %{"profile_id" => "main", "client_msg_id" => id})
     assert :ok = EventRouter.route(cancel, mobile_context(ctx), request_opts(ctx))
-    assert_receive {:stop_turn, {"mobile", "main", :root}, ^id}
+    assert_receive {:stop_turn, {"companion", "main", :root}, ^id}
   end
 
   describe "a revoked device (SEC-3)" do
@@ -401,7 +403,7 @@ defmodule FermixChannels.Companion.TurnsTest do
                )
 
       assert :ok = DeviceRegistry.revoke(registry, ctx.device_id)
-      assert_receive {:stop_turn, {"mobile", "main", :root}, ^running}
+      assert_receive {:stop_turn, {"companion", "main", :root}, ^running}
       assert {:ok, %{cancelled_at: %DateTime{}}} = request(waiting)
 
       late = unique()
@@ -985,9 +987,12 @@ defmodule FermixChannels.Companion.TurnsTest do
       refute_received {:"$gen_cast", {:chat, {:answered, _message}}}
     end
 
-    # The phone's turns run in a conversation of their own until they join the
-    # chat's (M56 D9): a hand-off could not read them, so they are not told.
-    test "a message typed on the phone is not told to the call", ctx do
+    # The phone's turns run in the chat's conversation (M56 D9), where a
+    # hand-off reads them, so a message typed on the phone is told to the call
+    # as it is handed off, and its answer once, as its turn completes: the
+    # phone writes its own reply rows, and `Turns` tells the call from the
+    # turn's outcome, the one place both transports' answers pass.
+    test "a message typed on the phone is told to the call, and so is its answer, once", ctx do
       :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
       id = unique()
 
@@ -999,10 +1004,20 @@ defmodule FermixChannels.Companion.TurnsTest do
                )
 
       assert_receive {:enqueued, turn}
+      assert turn.conversation_key == ctx.chat_key
+      assert_receive {:"$gen_cast", {:chat, {:typed, "from the phone"}}}
+
+      # The turn commits its answer to the chat before its outcome fires.
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "from the phone")
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Got it on the phone.")
+      assert :ok = turn.reply_fn.({:text, "Got it on the phone."})
       turn.turn_result_fn.({:completed})
       drain(ctx)
 
-      refute_received {:"$gen_cast", {:chat, _event}}
+      assert_received {:"$gen_cast",
+                       {:chat, {:answered, %{role: "assistant", content: "Got it on the phone."}}}}
+
+      refute_received {:"$gen_cast", {:chat, {:answered, _again}}}
     end
 
     # M56 §4.4: a typed message may be material for the call, and its turn may
