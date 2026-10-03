@@ -427,6 +427,17 @@ under the call's trace. A call opened from a turn may carry its own
 `parent_session` as correlation metadata, but it never nests: the call outlives
 the turn that asked for it (the meeting precedent).
 
+A delegation keeps that `session_id` and `parent_session` whichever
+conversation it runs in. Unless the call is private
+(`[fermix_core.realtime] conversation = "private"`), its hand-offs run in the
+chat's own conversation (M56 §4.1), so the events that name a conversation
+key (the history read, the loop runtime, the queue's request events) name the
+chat's, `{"companion","main",:root}`, while the message's `channel` stays
+`voice`. The trace still nests under the call, because nesting follows
+`parent_session` and never the conversation key. The request a hand-off
+persists in the chat is marked spoken in the conversation store and reaches no
+telemetry field, like every other piece of spoken content.
+
 Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
 hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |

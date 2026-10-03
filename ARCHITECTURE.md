@@ -125,7 +125,10 @@ built at init, so a provider change needs a restart.
 compaction, persisting the user message, `AgentLoop`, `[:fermix, :agent, ...]`
 telemetry, and `commit/4` after delivery. Conversation identity is
 `Agents.ConversationKey`: `{channel, chat_id, thread_scope}`, with `thread_ts`
-as the canonical thread identifier when present.
+as the canonical thread identifier when present. The one override is a trusted
+Live hand-off, which runs in the conversation its `voice_call` map names
+(`Agents.VoiceCall`, believed only on an operator message on the `voice`
+channel), so the queue lane, the history and the commit all agree.
 
 Architecture Invariant: `MainAgent` and `TurnRunner` do not know how Telegram,
 Slack, WhatsApp, Discord, Signal, ACP, mobile, voice, or CLI replies are
@@ -318,7 +321,8 @@ delivered reply into a failed turn.
 Architecture Invariant: the owner's memory is the owner's. A guest's turn is
 never sent `USER.md` or `MEMORY.md`, never starts a review, and what a guest
 says is stored marked as theirs, so no review reads it, in a shared chat
-included.
+included. A request the owner asked aloud on a Live call is stored marked
+spoken, and no review reads it either.
 
 ### `FermixCore.Prompt`
 
@@ -700,7 +704,12 @@ Current channels:
   sent after it. It runs on every boot, after the registry and `Turns` in
   `Companion.Supervisor`.
 - `Voice` turns Live-voice delegations into `voice`-channel turns
-  (`Voice.Bridge`).
+  (`Voice.Bridge`). Unless the call is private, they run in the chat's own
+  conversation (`Companion.chat_conversation_key/0`), which the bridge names
+  in the trusted `voice_call` map, so a hand-off and a typed turn share one
+  history and one queue lane; a cancel or a hang-up stops only the call's own
+  turns, by message id (`Queue.stop_turn/3`). A private call keeps a
+  conversation of its own, keyed by the call's UUID.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests

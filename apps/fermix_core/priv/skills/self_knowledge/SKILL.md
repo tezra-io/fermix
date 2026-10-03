@@ -93,7 +93,7 @@ Plugins are connected integrations that own a surface (an API, a vault) and regi
 
 ## Voice (macOS, off by default)
 
-The Fermix app's voice companion: Mac Settings > Voice > **Talk to Fermix** plus an OpenAI Platform API key (`[fermix_core.realtime] enabled`; a Codex sign-in does not authorize voice). A call starts from the app's sidebar **Pet** > **Begin voice call** and runs over `$FERMIX_HOME/realtime.sock`. The chosen model sets the engine: `openai_realtime` (default; the voice model runs tools) or `openai_live` (GPT-Live speaks, the Fermix agent acts). `screen_share` (start/stop) watches the screen only inside a Realtime call; Live has none. Detail: skill_view(name: "self-knowledge", file: "voice").
+The Fermix app's voice companion: Mac Settings > Voice > **Talk to Fermix** plus an OpenAI Platform API key (`[fermix_core.realtime] enabled`; a Codex sign-in does not authorize voice). A call starts from the app's sidebar **Pet** > **Begin voice call** and runs over `$FERMIX_HOME/realtime.sock`. The chosen model sets the engine: `openai_realtime` (default; the voice model runs tools) or `openai_live` (GPT-Live speaks, the Fermix agent acts, its tasks running in the Mac chat's conversation unless `conversation = "private"`). `screen_share` (start/stop) watches the screen only inside a Realtime call; Live has none. Detail: skill_view(name: "self-knowledge", file: "voice").
 
 ## Computer use & computer history (off by default)
 
@@ -138,7 +138,7 @@ Deeper detail loads on demand with `skill_view(name: "self-knowledge", file: "<n
 - `channel_presentation` — inbound media coalescing and empty messages, then how replies land on chat surfaces: dialect rendering, the boundary-ladder splitter, message hygiene, draft-rotation and block streaming, the ephemeral 💭 stream, and the approval-prompt buttons.
 - `mobile` — the phone channel: availability, the management surface, pairing, device revocation, reachability, APNs push, and troubleshooting.
 - `companion` — the Mac app's chat socket: trust, the shared timeline, delivery and cancel by client message id, history and search, scheduled delivery, and what it does not carry.
-- `voice` — the voice companion: turning it on, both engines, key and cost limits, the app connection, access-sensitive commands on a call, noise and echo, and screen sharing.
+- `voice` — the voice companion: turning it on, both engines, key and cost limits, which conversation a call's tasks run in, the app connection, access-sensitive commands on a call, noise and echo, and screen sharing.
 - `transcription` — speech to text: choosing a backend, keys and models, the on-device `local` backend, live streams, and failure replies.
 - `meetings` — the notetaker: turning on each lane, consent, artifacts, delivery, the summary route, and each refusal.
 - `jobs` — scheduled agent runs: every `schedule_job` field with its default and its refusal, the schedule grammar, delivery resolution and `[SILENT]`, attachments, run confinement, lifecycle, and each management verb.

@@ -40,6 +40,14 @@
         "invokes skill self_knowledge",
         "names the bot token from @BotFather /newbot and the numeric Telegram user id (from @userinfobot, not /whoami) as the two values, entered in the Mac app's Settings > Channels > Telegram or browser setup on Linux, then a restart and pressing Start (/start) in the bot's chat"
       ]
+    },
+    {
+      "name": "voice_call_uses_chat_link",
+      "prompt": "If I paste a link in the Mac chat and then ask about it out loud on a GPT-Live voice call, can Fermix use it? And can I keep calls out of the chat?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says that by default a GPT-Live call's tasks run in the Mac chat's own conversation, so a task asked aloud can read the pasted link, and that Settings > Voice > Voice calls join the chat set to No (conversation = \"private\") keeps each call apart from the chat"
+      ]
     }
   ]
 }

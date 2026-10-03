@@ -14,6 +14,7 @@ The Mac app's chat: a local, owner-only channel named `companion` that the app o
 ## Conversation and timeline
 
 - The chat is its own agent conversation: `/new` there starts a fresh session there only and never clears what the app shows.
+- A GPT-Live voice call joins that conversation unless it is private (`[fermix_core.realtime] conversation`): each task asked aloud runs in it, reads what was typed before it, and is in the history the next typed message reads (marked as spoken and never memory-reviewed). They share one turn queue, so a typed message waits for a running voice task and the reverse; cancelling one stops only that one. Voice tasks are history only: they are not timeline rows, so the app and the phone do not show them.
 - What the app shows is the profile's **timeline**, the numbered record of every message, shared with the phone's mobile channel when enabled: rows, `server_seq` numbering and the read frontier, whoever writes.
 - Delivery is at least once: each message carries a client message id the daemon claims durably before acknowledging, so a resend after a dropped connection never runs the turn twice (claims kept 24 hours). A request accepted but unfinished when the daemon stopped runs again when it next starts.
 - A slash command settles its request with its answer: one answered at once (`/help`, `/new`) never runs again at the next start, one that becomes a turn (`/ultra`) is settled by that turn, and one that answers later (`/background`, `/skills review`, `/skills approve`) posts its result to this chat when done.
