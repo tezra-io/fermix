@@ -14,6 +14,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.SendAttachment
@@ -2014,6 +2015,73 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # M56 §4.2: an owner's chat turn is told the gists of the last calls, in the
+  # leading system run beside the date note; a hand-off and a guest are not.
+  describe "the recent voice calls note" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-recent-calls-#{unique}.db")
+      repo = :"tr_recent_calls_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      opts = CallRecord.repo_opts(repo)
+      uuid = "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
+      record = CallRecord.new(uuid, "openai_live")
+      :ok = CallRecord.open(record, ~U[2026-10-03 14:05:00Z], opts)
+      usage = %{voice_cost_cents: 5.0, accounting: "complete"}
+      :ok = CallRecord.close(record, :call_stop, usage, ~U[2026-10-03 14:11:00Z], opts, :gist)
+      :ok = CallRecord.record_gist(uuid, {:ok, "You booked the room for 10am.", false}, opts)
+      %{repo: repo}
+    end
+
+    test "an owner's chat turn is told the last calls' gists, after the date note", %{repo: repo} do
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"}, memory_repo: repo)
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      note_index = Enum.find_index(system_run, &(&1.content =~ "Recent voice calls"))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(note_index)
+      assert note_index == date_index + 1
+
+      assert Enum.at(system_run, note_index).content =~
+               "- 2026-10-03 14:05 UTC: You booked the room"
+    end
+
+    test "a hand-off is not told: it is the call", %{repo: repo} do
+      {messages, _opts} =
+        run_capture_turn(voice_msg("what was the last call about"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+
+    test "a guest's turn is not told", %{repo: repo} do
+      messages =
+        capture_prompt(%{channel: "telegram", chat_id: "guest-1", source_trust: :guest},
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+
+    test "with no earlier call there is no note" do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-no-calls-#{unique}.db")
+      repo = :"tr_no_calls_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(db_path) end)
+
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"}, memory_repo: repo)
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+  end
+
   # M56 §4.4: a turn the snapshot let end with no reply, whose reply is exactly
   # the sentinel, tells its channel so (which then shows nothing) and says so on
   # its turn event. The reply itself is returned as any other, for the queue to
@@ -2650,16 +2718,18 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     run_capture_turn(msg, start_voice_store())
   end
 
-  defp run_capture_turn(msg, store) do
+  defp run_capture_turn(msg, store, state_overrides \\ []) do
     registry_name = :"tr_voice_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
 
     turn_state =
       turn_state(
-        adapter: CaptureTurnAdapter,
-        adapter_opts: [model: "mock-model", test_pid: self()],
-        capability_registry: registry_name,
-        conversation_store: store
+        [
+          adapter: CaptureTurnAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        ] ++ state_overrides
       )
 
     assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)

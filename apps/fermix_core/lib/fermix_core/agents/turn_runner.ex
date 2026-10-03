@@ -46,6 +46,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Realtime.RecentCalls
   alias FermixCore.Reply
   alias FermixCore.Telemetry
   alias FermixCore.Tools.HarnessSupport
@@ -569,6 +570,7 @@ defmodule FermixCore.Agents.TurnRunner do
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
+    messages = inject_recent_calls(messages, state, source_trust, voice_call)
     messages = inject_recent_activity(messages, context)
     messages = inject_live_call(messages, Map.get(state, :live_call))
 
@@ -676,6 +678,27 @@ defmodule FermixCore.Agents.TurnRunner do
   # Kept in the leading system run (the Anthropic adapter requires system
   # messages to lead) so the date sits with the rest of the system prompt.
   defp inject_current_date(messages), do: append_system_note(messages, CurrentDate.note())
+
+  # The gists of the last Live calls in the chat (M56 §4.2), for an owner's
+  # chat turn, never a hand-off's: a hand-off is the call, and reads the chat.
+  # The note changes only when a call ends, so it sits beside the date note
+  # in the leading system run rather than in `extra_system_messages`: that seam
+  # is spliced ahead of the prompt memory, where each call's end would break
+  # the prompt cache for USER.md and MEMORY.md too, and it is the hand-off's
+  # own addendum, decided by the turn's voice call. Nor can it live in the
+  # cached runtime context, which nothing rebuilds when a call ends.
+  defp inject_recent_calls(messages, state, :operator, :none) do
+    note =
+      RecentCalls.note(
+        Map.get(state, :memory_repo),
+        Map.get(state, :ordered_routes),
+        history_gate_opts(state)
+      )
+
+    append_system_note(messages, note)
+  end
+
+  defp inject_recent_calls(messages, _state, _trust, _voice_call), do: messages
 
   # Per-turn Recent Activity section (MILESTONE_32 §11.1), gated by the single
   # ComputerHistory.Gate — `note/1` returns nil (a no-op here) when the Gate
