@@ -186,23 +186,33 @@ A GPT-Live voice call in the chat writes rows of its own to the timeline, each
 `kind: "text"`, `role: "assistant"` and `media_refs: []`, so every client
 draws one as text. A task's result that is too long to say, or cannot be said
 (a link, code, a table), is one: the voice says a short line and the whole
-result is written here, at most 32 KB (cut at the end behind a marker). Such a
-row's `metadata.call` says what it is about:
+result is written here, at most 32 KB (cut at the end behind a marker). The
+call's own row when it ends is another (`event: "ended"`): the daemon's
+sentence, `Voice call, 6 minutes` (`under a minute` below one), then, on its
+own paragraph, the call's gist, a few sentences on what was asked, done,
+decided and left open; or, when the gist could not be made, the call's tasks,
+one a line, each its state and summary; or nothing more when the call had
+neither. It is written once the gist is made or has failed, so it always
+carries the settled cost. A private call writes no row. Such a row's
+`metadata.call` says what it is about:
 
 | Key | Type | Notes |
 |---|---|---|
 | `uuid` | UUID | The call, as `call_ready.call_uuid` names it on the realtime wire. Always present. |
-| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call. |
+| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call; `ended` the call's row when it ends. |
 | `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
 | `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
 | `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
-| `duration_s` | int ≥ 0 | The call's length. |
-| `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. |
-| `accounting` | `complete` \| `incomplete` | Whether that cost is settled. |
+| `engine` | string | The call's voice engine, `openai_live`. Present on `ended`. |
+| `duration_s` | int ≥ 0 | The call's length. Present on `ended`. |
+| `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. On `ended` when it is known. |
+| `accounting` | `complete` \| `incomplete` | Whether that cost is settled. Present on `ended`. |
+| `gist_status` | `written` \| `failed` \| `none` | What became of the call's gist: in the text, could not be made (the text lists the tasks), or none was needed (nothing was said). Present on `ended`. |
 
 No other key appears in it. A call's row is written once: a write repeated for
-the same task revision finds the row already written, and the realtime wire's
-`task.server_seq` names it, so the app can say the result is in the chat.
+the same task revision, or for the same call's end, finds the row already
+written, and the realtime wire's `task.server_seq` names a task's, so the app
+can say the result is in the chat.
 
 ## One timeline with the phone
 

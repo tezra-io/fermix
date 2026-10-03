@@ -28,9 +28,10 @@ defmodule FermixChannels.Channels.Companion do
   never shows a draft, and the runner's `:silent_reply` tells `Turns` the turn
   ends that way.
 
-  A Live call writes rows of its own through `write_call_row/3` (M56 §4.5),
-  the one write for them: a result shown in the chat while the voice says the
-  short version. Core reaches it through `Voice.Bridge`, never by name.
+  A Live call writes rows of its own through `write_call_row/3` (M56 §4.2,
+  §4.5), the one write for them: a result shown in the chat while the voice
+  says the short version, and the call's one row when it ends, its gist or
+  its task list. Core reaches it through `Voice.Bridge`, never by name.
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -262,14 +263,16 @@ defmodule FermixChannels.Channels.Companion do
   end
 
   @doc """
-  Write one row of a GPT-Live call to `profile_id`'s timeline (M56 §4.5): `text`
-  as an assistant text row with no media, its `metadata.call` the `call` map
-  (`Protocol.validate_call_metadata/1` is its shape, checked here before
-  anything is written). The row is keyed by what it is about, a result shown
-  for one task revision being `"voice:<uuid>:<task_id>:<revision>"`, so a
-  repeated write answers the row already written and announces nothing; a new
-  row is announced to the Mac and the phones like any other. `text` past 32 KB
-  is cut at the end, on a character, behind `call_row_cut_marker/0`.
+  Write one row of a GPT-Live call to `profile_id`'s timeline (M56 §4.2,
+  §4.5): `text` as an assistant text row with no media, its `metadata.call`
+  the `call` map (`Protocol.validate_call_metadata/1` is its shape, checked
+  here before anything is written). The row is keyed by what it is about, a
+  result shown for one task revision being
+  `"voice:<uuid>:<task_id>:<revision>"` and the call's row when it ends
+  `"voice:<uuid>:ended"`, so a repeated write answers the row already written
+  and announces nothing; a new row is announced to the Mac and the phones like
+  any other. `text` past 32 KB is cut at the end, on a character, behind
+  `call_row_cut_marker/0`.
 
   Answers the row, whose `server_seq` the realtime wire's `task` names.
   """
@@ -299,10 +302,13 @@ defmodule FermixChannels.Channels.Companion do
   @spec call_row_cut_marker() :: String.t()
   def call_row_cut_marker, do: @call_row_cut_marker
 
-  # Stage 5 writes a task's result shown during its call; the call's other
-  # rows take their keys with the writers that add them.
+  # A task's result shown during its call is keyed by its revision, and the
+  # call's one row when it ends by the call alone; the task events take their
+  # keys with the writers that add them.
   defp call_row_key(%{"event" => "shared"} = call),
     do: {:ok, "voice:#{call["uuid"]}:#{call["task_id"]}:#{call["revision"]}"}
+
+  defp call_row_key(%{"event" => "ended"} = call), do: {:ok, "voice:#{call["uuid"]}:ended"}
 
   defp call_row_key(%{"event" => event}), do: {:error, {:unkeyed_call_event, event}}
 

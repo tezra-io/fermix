@@ -170,6 +170,41 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     refute protocol =~ "This wire's `row` is unchanged"
   end
 
+  # M56 §4.2: the call's one row when it ends, as the Mac hears it and as a
+  # history page carries it: with its gist, and with its task list when the
+  # gist could not be made.
+  test "golden ended rows carry a call's gist or its task list, as row and history", %{
+    protocol: protocol
+  } do
+    server = jsonl(@server_fixtures)
+    ended? = &(get_in(&1, ["metadata", "call", "event"]) == "ended")
+
+    assert %{"type" => "row", "kind" => "text", "metadata" => %{"call" => call}} =
+             row = Enum.find(server, ended?)
+
+    assert :ok = Protocol.validate_call_metadata(call)
+    assert call["gist_status"] == "written"
+    assert [sentence, _gist] = String.split(row["text"], "\n\n")
+    assert sentence == "Voice call, 6 minutes"
+
+    paged =
+      server
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(ended?)
+
+    assert %{"role" => "assistant", "kind" => "text", "media_refs" => []} = paged
+    assert :ok = Protocol.validate_call_metadata(paged["metadata"]["call"])
+    assert paged["metadata"]["call"]["gist_status"] == "failed"
+    assert paged["content"] =~ ~r/\AVoice call, 2 minutes\n\n- Completed: /
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+
+    for key <- ~w(engine gist_status) do
+      assert calls =~ "| `#{key}` |", "PROTOCOL.md has no row for call.#{key}"
+    end
+  end
+
   test "the golden fixtures cover every event of the catalog by direction" do
     assert fixture_types(@client_fixtures) == MapSet.new(Protocol.client_events())
     assert fixture_types(@server_fixtures) == MapSet.new(Protocol.server_events())

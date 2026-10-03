@@ -58,7 +58,11 @@ defmodule FermixCore.Companion.Protocol do
   @call_task_events ~w(shared task_running task_done)
   @call_task_end_states ~w(completed failed cancelled timed_out)
   @call_accounting ~w(complete incomplete)
-  @call_keys ~w(uuid event task_id revision state duration_s voice_cost_cents accounting)
+  @call_gist_statuses ~w(written failed none)
+  @call_keys ~w(
+    uuid event task_id revision state duration_s voice_cost_cents accounting engine gist_status
+  )
+  @call_engine_max_bytes 64
   @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
@@ -222,10 +226,13 @@ defmodule FermixCore.Companion.Protocol do
   `metadata` (M56 §6), string keyed as the timeline stores it: `uuid` (the
   call's), `event` (`shared`, `ended`, `task_running` or `task_done`), and
   optional `task_id`, `revision`, `state` (a task's terminal state),
-  `duration_s`, `voice_cost_cents` and `accounting` (`complete` or
-  `incomplete`). A task's event names its `task_id` and `revision`, and
-  `task_done` its `state`. A key outside these is refused. The writer of a
-  call row validates here, the one place the shape is held.
+  `duration_s`, `voice_cost_cents`, `accounting` (`complete` or
+  `incomplete`), `engine` and `gist_status` (`written`, `failed` or `none`).
+  A task's event names its `task_id` and `revision`, and `task_done` its
+  `state`; `ended`, the call's one row when it ends (M56 §4.2), names its
+  `engine`, `duration_s`, `accounting` and `gist_status`. A key outside these
+  is refused. The writer of a call row validates here, the one place the
+  shape is held.
   """
   @spec validate_call_metadata(term()) :: :ok | {:error, term()}
   def validate_call_metadata(call) when is_map(call) do
@@ -238,8 +245,10 @@ defmodule FermixCore.Companion.Protocol do
          :ok <- call_field(call, "revision", &(is_integer(&1) and &1 > 0)),
          :ok <- call_field(call, "state", &(&1 in @call_task_end_states)),
          :ok <- call_field(call, "duration_s", &(is_integer(&1) and &1 >= 0)),
-         :ok <- call_field(call, "voice_cost_cents", &(is_number(&1) and &1 >= 0)) do
-      call_field(call, "accounting", &(&1 in @call_accounting))
+         :ok <- call_field(call, "voice_cost_cents", &(is_number(&1) and &1 >= 0)),
+         :ok <- call_field(call, "accounting", &(&1 in @call_accounting)),
+         :ok <- call_field(call, "engine", &call_engine?/1) do
+      call_field(call, "gist_status", &(&1 in @call_gist_statuses))
     end
   end
 
@@ -258,7 +267,11 @@ defmodule FermixCore.Companion.Protocol do
   defp call_event_fields(%{"event" => event} = call) when event in @call_task_events,
     do: call_required(call, ["task_id", "revision"])
 
-  defp call_event_fields(_call), do: :ok
+  defp call_event_fields(%{"event" => "ended"} = call),
+    do: call_required(call, ["engine", "duration_s", "accounting", "gist_status"])
+
+  defp call_engine?(engine),
+    do: is_binary(engine) and engine != "" and byte_size(engine) <= @call_engine_max_bytes
 
   defp call_required(call, keys) do
     case Enum.find(keys, &(not Map.has_key?(call, &1))) do

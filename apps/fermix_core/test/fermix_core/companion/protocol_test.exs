@@ -252,20 +252,29 @@ defmodule FermixCore.Companion.ProtocolTest do
     end
 
     test "every key of the design's call map is accepted with its type" do
-      ended = %{
-        "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
-        "event" => "ended",
-        "duration_s" => 360,
-        "voice_cost_cents" => 30.125,
-        "accounting" => "complete"
-      }
-
       done =
         Map.merge(shared_call(), %{"event" => "task_done", "state" => "timed_out"})
 
-      assert :ok = Protocol.validate_call_metadata(ended)
+      assert :ok = Protocol.validate_call_metadata(ended_call())
       assert :ok = Protocol.validate_call_metadata(%{shared_call() | "event" => "task_running"})
       assert :ok = Protocol.validate_call_metadata(done)
+    end
+
+    # M56 §4.2: the call's one row when it ends names its engine, its length,
+    # its bill's accounting and what became of its gist; the cost is absent
+    # when it is unknown.
+    test "a call's ended row names its engine, length, accounting and gist" do
+      for gist_status <- ~w(written failed none) do
+        assert :ok =
+                 Protocol.validate_call_metadata(%{ended_call() | "gist_status" => gist_status})
+      end
+
+      assert :ok = Protocol.validate_call_metadata(Map.delete(ended_call(), "voice_cost_cents"))
+
+      for key <- ~w(engine duration_s accounting gist_status) do
+        assert {:error, {:missing_field, "call." <> ^key}} =
+                 Protocol.validate_call_metadata(Map.delete(ended_call(), key))
+      end
     end
 
     test "the call and the event are required, and the event is one of four" do
@@ -300,7 +309,9 @@ defmodule FermixCore.Companion.ProtocolTest do
             {"state", "running"},
             {"duration_s", -1},
             {"voice_cost_cents", "0.5"},
-            {"accounting", "running"}
+            {"accounting", "running"},
+            {"engine", ""},
+            {"gist_status", "pending"}
           ] do
         assert {:error, {:invalid_field, "call." <> ^key}} =
                  Protocol.validate_call_metadata(Map.put(shared_call(), key, value))
@@ -313,6 +324,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
       assert {:error, {:invalid_field, "call"}} = Protocol.validate_call_metadata(nil)
     end
+  end
+
+  defp ended_call do
+    %{
+      "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "event" => "ended",
+      "engine" => "openai_live",
+      "duration_s" => 360,
+      "voice_cost_cents" => 30.125,
+      "accounting" => "complete",
+      "gist_status" => "written"
+    }
   end
 
   defp shared_call do

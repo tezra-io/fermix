@@ -135,13 +135,31 @@ defmodule FermixChannels.Channels.CompanionCallRowTest do
     refute_receive {:companion_event, _row}, 100
   end
 
-  # Stage 5 writes a result shown during the call; the other events get their
-  # keys with the stage that writes them.
-  test "an event with no row key of its own is refused" do
-    ended = %{"uuid" => @call_uuid, "event" => "ended"}
+  # M56 §4.2: the call's one row when it ends, keyed by the call alone, so a
+  # write repeated by the boot that follows a crash finds it.
+  test "a call's ended row is keyed once per call and carries its call" do
+    text = "Voice call, 6 minutes\n\nYou booked the room for 10am."
 
-    assert {:error, {:unkeyed_call_event, "ended"}} =
-             Companion.write_call_row("main", "Voice call, 6 minutes", ended)
+    assert {:ok, %{server_seq: seq, proactive_key: key, content: ^text}} =
+             Companion.write_call_row("main", text, ended_call())
+
+    assert key == "voice:#{@call_uuid}:ended"
+    assert_receive {:companion_event, %{"t" => "row", "server_seq" => ^seq} = mac_row}
+    assert mac_row["metadata"] == %{"call" => ended_call()}
+    assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
+
+    assert {:ok, %{server_seq: ^seq, content: ^text}} =
+             Companion.write_call_row("main", "Voice call, 6 minutes", ended_call())
+
+    refute_receive {:companion_event, _row}, 100
+  end
+
+  # The task events get their keys with the stage that writes them.
+  test "an event with no row key of its own is refused" do
+    running = %{shared_call() | "event" => "task_running"}
+
+    assert {:error, {:unkeyed_call_event, "task_running"}} =
+             Companion.write_call_row("main", "Still working.", running)
   end
 
   test "a text past 32 KB is cut at the end, on a character, behind a marker" do
@@ -153,6 +171,18 @@ defmodule FermixChannels.Channels.CompanionCallRowTest do
     assert String.valid?(shown)
     assert String.starts_with?(shown, "aéé")
     assert String.ends_with?(shown, Companion.call_row_cut_marker())
+  end
+
+  defp ended_call do
+    %{
+      "uuid" => @call_uuid,
+      "event" => "ended",
+      "engine" => "openai_live",
+      "duration_s" => 370,
+      "voice_cost_cents" => 30.833,
+      "accounting" => "complete",
+      "gist_status" => "written"
+    }
   end
 
   defp shared_call do
