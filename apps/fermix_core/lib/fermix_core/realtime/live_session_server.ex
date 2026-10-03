@@ -36,6 +36,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
   alias FermixCore.Realtime.DeviceIdentity
@@ -132,6 +133,26 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       when is_binary(content),
       do: GenServer.cast(session, {:chat, {:answered, message}})
 
+  @typedoc """
+  What a typed chat turn may read of the call in progress (M56 §4.4): when it
+  started and how long it has run, its tasks as its record holds them, and what
+  was said, the whole call (`CallSpeech`), never written anywhere.
+  """
+  @type context :: %{
+          call_uuid: String.t(),
+          started_at: DateTime.t(),
+          elapsed_ms: non_neg_integer(),
+          tasks: [CallRecord.task()],
+          speech: CallSpeech.t()
+        }
+
+  @doc """
+  The call's context, for `voice_call_context`. The caller bounds the wait:
+  a session settling its call answers nothing until it is done.
+  """
+  @spec call_context(GenServer.server(), timeout()) :: {:ok, context()}
+  def call_context(session, timeout), do: GenServer.call(session, :call_context, timeout)
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -180,8 +201,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # The call's durable identity: the key of its record, on every frame and
       # telemetry event that names the call.
       call_uuid: DeviceIdentity.generate_uuid(),
-      # When the call started: the claim's and the record's one start.
+      # When the call started: the claim's and the record's one start, and the
+      # same moment on this session's clock, for how long it has run.
       started_at: DateTime.utc_now(),
+      started_ms: clock.(),
       call_registry: Keyword.get(opts, :call_registry, CallRegistry),
       # The call's durable record (`CallRecord`), `nil` until the call starts.
       call_record: nil,
@@ -216,6 +239,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       closed_report: :never,
       ledger: LiveLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
       transcript: LiveTranscript.new(),
+      # The whole call's speech, for a call in the chat (M56 §4.4).
+      speech: CallSpeech.new(),
       # Where the next hand-off's exchange starts (M56 §4.1): the end of the
       # newest speech when the previous request was handed to the bridge, `nil`
       # until then (the exchange since the call started).
@@ -313,6 +338,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   def handle_call(:live_pid, _from, state), do: {:reply, state.live_pid, state}
+
+  def handle_call(:call_context, _from, state) do
+    context = %{
+      call_uuid: state.call_uuid,
+      started_at: state.started_at,
+      elapsed_ms: max(0, now(state) - state.started_ms),
+      tasks: recorded_tasks(state.call_record),
+      speech: state.speech
+    }
+
+    {:reply, {:ok, context}, state}
+  end
 
   @impl true
   def handle_cast({:chat, event}, state), do: {:noreply, mirror_chat(state, event)}
@@ -579,7 +616,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp handle_live_event({:transcript_delta, speaker, delta, start_ms, end_ms}, state) do
     state = %{
       state
-      | transcript: LiveTranscript.append(state.transcript, speaker, delta, start_ms, end_ms)
+      | transcript: LiveTranscript.append(state.transcript, speaker, delta, start_ms, end_ms),
+        speech: keep_speech(state, speaker, delta)
     }
 
     notify(state, LiveFrames.caption(Atom.to_string(speaker), delta, start_ms, end_ms))
@@ -661,6 +699,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp handle_live_event(event, state) do
     Logger.debug("voice_live: no handler for provider event #{inspect(event)}")
     {:noreply, state}
+  end
+
+  # A private call keeps only the hand-off window, as it always did (M56 §5).
+  defp keep_speech(state, speaker, delta) do
+    case Config.conversation(state.config) do
+      "chat" -> CallSpeech.append(state.speech, speaker, delta)
+      "private" -> state.speech
+    end
   end
 
   # M56 §8: a start the provider refused over its input. Before
@@ -1378,6 +1424,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     report_record(CallRecord.open(record, state.started_at, state.record_opts), "open")
     %{state | call_record: record}
   end
+
+  defp recorded_tasks(nil), do: []
+  defp recorded_tasks(%CallRecord{tasks: tasks}), do: tasks
 
   # Every task state is written as it happens, so a crash loses nothing the
   # call had already done.

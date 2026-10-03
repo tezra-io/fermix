@@ -7,11 +7,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Memory.Repo
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.LiveText
+  alias FermixCore.Realtime.LiveTranscript
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
 
@@ -1137,6 +1139,66 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       sync(session)
 
       assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
+    end
+  end
+
+  # M56 §4.4: what a typed chat turn reads of the call in progress
+  # (`voice_call_context`), from the session that holds it.
+  describe "the call's context" do
+    test "names the start, the time since, the tasks and everything said", %{clock: clock} do
+      session = listening_session(clock)
+      {:ok, %{started_at: started_at}} = CallRegistry.active(@call_registry)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+      Agent.update(clock, fn _ms -> 372_000 end)
+
+      assert {:ok, context} = LiveSessionServer.call_context(session, 1_000)
+
+      assert context.started_at == started_at
+      assert context.elapsed_ms == 372_000
+
+      assert [
+               %{
+                 "task_id" => "dg_1",
+                 "revision" => 1,
+                 "state" => "completed",
+                 "summary" => "The room is booked for 10am."
+               }
+             ] = context.tasks
+
+      assert CallSpeech.text(context.speech) == "user: book the room"
+    end
+
+    # The 128-fragment window a hand-off reads forgets the start of a long
+    # call; what the call said is kept whole, up to its byte bound.
+    test "keeps the whole call, not the hand-off window", %{clock: clock} do
+      session = listening_session(clock)
+
+      for index <- 1..200 do
+        send(
+          session,
+          {:openai_live_event,
+           {:transcript_delta, :user, " word#{index}", index * 100, index * 100 + 50}}
+        )
+      end
+
+      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert CallSpeech.text(speech) =~ ~r/^user:  word1 word2 .* word200$/
+      assert length(LiveTranscript.fragments(:sys.get_state(session).transcript)) == 128
+    end
+
+    # M56 §10: `conversation = "private"` is today's behaviour, so a private
+    # call keeps nothing of what was said beyond the hand-off window.
+    test "a private call keeps no call-long speech", %{clock: clock} do
+      session = listening_session(clock, config: live_config(conversation: "private"))
+      speak(session, "a private aside", 1_000, 2_000)
+
+      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert CallSpeech.text(speech) == ""
     end
   end
 
