@@ -41,10 +41,10 @@ defmodule FermixChannels.Channels.Companion do
 
   require Logger
 
+  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
-  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
