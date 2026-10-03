@@ -127,6 +127,35 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
     end
   end
 
+  # M56 §4.6, §7: a task that outlived its call ends after `call_stop`, and
+  # its stop says so, with the same ids and the state it reached.
+  test "a detached delegation's stop is flagged and may have timed out" do
+    LiveTelemetry.detached_delegation_stop(@meta, @delegation, "timed_out", 1_800_000, %{
+      server_seq: 51,
+      bytes: 37
+    })
+
+    assert_receive {:vl, [:fermix, :voice_live, :delegation_stop], measurements, meta}
+    assert measurements == %{duration_ms: 1_800_000}
+    assert meta.detached == true
+    assert meta.status == "timed_out"
+    assert meta.session_id == "voice_live:7"
+    assert meta.turn_session_id == "voice_delegation_7"
+    assert meta.server_seq == 51
+
+    LiveTelemetry.delegation_stop(@meta, @delegation, "completed", 10)
+    assert_receive {:vl, [:fermix, :voice_live, :delegation_stop], _measurements, on_call}
+    refute Map.has_key?(on_call, :detached)
+
+    assert_raise FunctionClauseError, fn ->
+      LiveTelemetry.delegation_stop(@meta, @delegation, "timed_out", 10)
+    end
+
+    assert_raise FunctionClauseError, fn ->
+      LiveTelemetry.detached_delegation_stop(@meta, @delegation, "running", 10, nil)
+    end
+  end
+
   test "provider_error carries a bounded reason" do
     long = String.duplicate("x", 4_000)
     LiveTelemetry.provider_error(@meta, long)

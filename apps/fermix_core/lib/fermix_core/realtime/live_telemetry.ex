@@ -37,6 +37,9 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   @call_stop_event [:fermix, :voice_live, :call_stop]
 
   @delegation_statuses ~w(completed failed cancelled)
+  # A task that outlived its call has a wall clock, which one on the call
+  # never reaches (M56 §4.6).
+  @detached_statuses ~w(completed failed cancelled timed_out)
 
   @trace_event_definitions [
     %{
@@ -185,6 +188,31 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       meta
       |> delegation_metadata(delegation)
       |> Map.put(:status, status)
+      |> put_shown(shown)
+
+    execute(@delegation_stop_event, %{duration_ms: duration_ms}, metadata)
+  end
+
+  @doc """
+  A delegation that outlived its call reached its end, after the call's
+  `call_stop` (M56 §4.6): emitted by its new owner with the call's ids and its
+  own, `detached: true`, and its terminal state, which may be `timed_out`.
+  `shown` is its done row in the chat, by `server_seq` and size, never text.
+  """
+  @spec detached_delegation_stop(
+          meta(),
+          delegation(),
+          String.t(),
+          non_neg_integer(),
+          shown() | nil
+        ) :: :ok
+  def detached_delegation_stop(meta, delegation, status, duration_ms, shown)
+      when is_map(meta) and is_map(delegation) and status in @detached_statuses and
+             is_integer(duration_ms) and duration_ms >= 0 and (is_nil(shown) or is_map(shown)) do
+    metadata =
+      meta
+      |> delegation_metadata(delegation)
+      |> Map.merge(%{status: status, detached: true})
       |> put_shown(shown)
 
     execute(@delegation_stop_event, %{duration_ms: duration_ms}, metadata)
