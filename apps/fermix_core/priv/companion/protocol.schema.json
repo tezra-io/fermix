@@ -306,7 +306,7 @@
     },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind and metadata are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
       "properties": {
         "type": { "const": "row" },
@@ -315,7 +315,9 @@
         "role": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
         "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
-        "client_msg_id": { "type": "string", "minLength": 1 }
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object" }
       }
     },
     "approval": {

@@ -10,8 +10,10 @@ defmodule FermixChannels.Companion.Fanout do
   (`FermixCore.Companion.Protocol.server_events/0`,
   `Mobile.Protocol.server_events/0`): a phone-only `link_preview` never reaches
   the Mac. A `row` is announced in the phone's shape (`Companion.Output.row/2`),
-  and the Mac hears only the fields its own `row` has always carried. The
-  sender is not left out, since every client deduplicates by `server_seq`.
+  and the Mac hears only the fields its own `row` carries: its own, and the
+  message's `kind` and `metadata` (M56 §6), never a phone's media refs or link
+  previews. The sender is not left out, since every client deduplicates by
+  `server_seq`.
 
   What is announced to everyone: every timeline row as a `row` (a user's
   message from either transport, a slash command's answer, a delivery) and
@@ -33,7 +35,7 @@ defmodule FermixChannels.Companion.Fanout do
 
   @type audience :: transport() | :all
 
-  @companion_row_fields ~w(t profile_id server_seq role text ts client_msg_id)
+  @companion_row_fields ~w(t profile_id server_seq role text ts client_msg_id kind metadata)
 
   @doc """
   Announce one logical event to the profile's watchers. Options:

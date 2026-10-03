@@ -130,6 +130,34 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert schema["$defs"]["historyMessage"] == phone_message
   end
 
+  # M56 §6: additive and optional on version 1, as a history message carries
+  # them; a Live call's row is drawn from them.
+  test "the Mac's row publishes kind and metadata, and a golden row carries a call", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    row = schema["$defs"]["row"]
+
+    for field <- ~w(kind metadata) do
+      assert row["properties"][field] == schema["$defs"]["historyMessage"]["properties"][field]
+      refute field in row["required"]
+    end
+
+    golden = @server_fixtures |> jsonl() |> Enum.find(&get_in(&1, ["metadata", "call"]))
+
+    assert %{"type" => "row", "kind" => "text", "metadata" => %{"call" => call}} = golden
+    assert :ok = Protocol.validate_call_metadata(call)
+    assert call["event"] == "shared"
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+
+    for key <- ~w(uuid event task_id revision state duration_s voice_cost_cents accounting) do
+      assert calls =~ "| `#{key}` |", "PROTOCOL.md has no row for call.#{key}"
+    end
+
+    refute protocol =~ "This wire's `row` is unchanged"
+  end
+
   test "the golden fixtures cover every event of the catalog by direction" do
     assert fixture_types(@client_fixtures) == MapSet.new(Protocol.client_events())
     assert fixture_types(@server_fixtures) == MapSet.new(Protocol.server_events())

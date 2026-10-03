@@ -1065,7 +1065,9 @@ defmodule FermixChannels.Companion.TurnsTest do
 
   # One announcer for everyone watching a profile (STB-9).
   describe "fan-out across the transports" do
-    test "a phone hears a row as the history message it renders, the Mac as always (R1-6)" do
+    # The Mac's row carries the message's kind and metadata too (M56 §6), and
+    # never a field its wire does not have (media refs, link previews).
+    test "a phone hears a row as the history message it renders, the Mac its own fields (R1-6)" do
       image = String.duplicate("c", 64)
 
       media = %{
@@ -1084,7 +1086,7 @@ defmodule FermixChannels.Companion.TurnsTest do
         client_msg_id: "phone-1",
         in_reply_to: nil,
         media_refs: [media],
-        metadata: %{"turn_id" => nil},
+        metadata: %{"turn_id" => nil, "source" => "phone"},
         link_previews: [],
         created_at: ~U[2026-09-27 09:00:00Z]
       }
@@ -1100,7 +1102,9 @@ defmodule FermixChannels.Companion.TurnsTest do
                "role" => "user",
                "text" => "look at this",
                "ts" => "2026-09-27T09:00:00Z",
-               "client_msg_id" => "phone-1"
+               "client_msg_id" => "phone-1",
+               "kind" => "media",
+               "metadata" => %{"source" => "phone"}
              }
 
       assert_receive {:mobile_event, "main", phone_row}
@@ -1114,11 +1118,14 @@ defmodule FermixChannels.Companion.TurnsTest do
                "ts" => "2026-09-27T09:00:00Z",
                "client_msg_id" => "phone-1",
                "kind" => "media",
-               "media_refs" => [media]
+               "media_refs" => [media],
+               "metadata" => %{"source" => "phone"}
              }
 
       assert {:ok, _frames} =
                MobileProtocol.encode_server_event("row", Map.delete(phone_row, "t"), 1, <<>>, [])
+
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
     end
 
     # R4-9: each user's row as its own transport writes it, through the
@@ -1159,7 +1166,7 @@ defmodule FermixChannels.Companion.TurnsTest do
              } = mac_row
 
       assert Map.keys(mac_row) |> Enum.sort() ==
-               ~w(client_msg_id profile_id role server_seq t text ts)
+               ~w(client_msg_id kind profile_id role server_seq t text ts)
 
       assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
 

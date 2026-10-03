@@ -16,7 +16,8 @@ the ones it shares (`msg`, `command`, `cancel`, `read_state`, `accepted`,
 `approval`, `approval_resolved`) through the same module. This wire adds
 `history_search`, `search_results`, and a backward cursor on `history_pull`
 and `history_page`. The phone's `row` carries more than this wire's: the whole
-history message. This wire's `row` is unchanged.
+history message. This wire's `row` carries the message's `kind` and `metadata`
+beside its own fields.
 
 ## Transport
 
@@ -153,7 +154,7 @@ in a fixed order:
 | `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn. |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?`, `kind?`, `metadata?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind` and `metadata` are the history message's, as a `history_page` carries them; a Live call's row carries `metadata.call` (see *A Live call's rows*). |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
@@ -178,6 +179,30 @@ A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain
 text around the matches, `…` where it was cut), and `ranges[]`, each
 `{start, length}` in **Unicode scalar values** of `excerpt`, one per matched
 word.
+
+### A Live call's rows
+
+A GPT-Live voice call in the chat writes rows of its own to the timeline, each
+`kind: "text"`, `role: "assistant"` and `media_refs: []`, so every client
+draws one as text. A task's result that is too long to say, or cannot be said
+(a link, code, a table), is one: the voice says a short line and the whole
+result is written here, at most 32 KB (cut at the end behind a marker). Such a
+row's `metadata.call` says what it is about:
+
+| Key | Type | Notes |
+|---|---|---|
+| `uuid` | UUID | The call, as `call_ready.call_uuid` names it on the realtime wire. Always present. |
+| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call. |
+| `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
+| `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
+| `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
+| `duration_s` | int ≥ 0 | The call's length. |
+| `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. |
+| `accounting` | `complete` \| `incomplete` | Whether that cost is settled. |
+
+No other key appears in it. A call's row is written once: a write repeated for
+the same task revision finds the row already written, and the realtime wire's
+`task.server_seq` names it, so the app can say the result is in the chat.
 
 ## One timeline with the phone
 

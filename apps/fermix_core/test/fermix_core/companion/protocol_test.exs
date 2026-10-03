@@ -224,6 +224,106 @@ defmodule FermixCore.Companion.ProtocolTest do
              Protocol.encode_server_event("row", Map.delete(row, "ts"))
   end
 
+  # M56 §6: the Mac's row carries a history message's kind and metadata, as
+  # the phone's always has.
+  test "a row may carry its kind and metadata" do
+    row = %{
+      "profile_id" => "main",
+      "server_seq" => 15,
+      "role" => "assistant",
+      "text" => "It is at https://x.test/form.",
+      "ts" => "2026-10-03T10:00:00Z",
+      "kind" => "text",
+      "metadata" => %{"call" => shared_call()}
+    }
+
+    assert {:ok, _line} = Protocol.encode_server_event("row", row)
+
+    assert {:error, {:invalid_field, "kind"}} =
+             Protocol.encode_server_event("row", %{row | "kind" => ""})
+
+    assert {:error, {:invalid_field, "metadata"}} =
+             Protocol.encode_server_event("row", %{row | "metadata" => "call"})
+  end
+
+  describe "validate_call_metadata/1" do
+    test "a result shown in the chat names the call, the event and its task" do
+      assert :ok = Protocol.validate_call_metadata(shared_call())
+    end
+
+    test "every key of the design's call map is accepted with its type" do
+      ended = %{
+        "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+        "event" => "ended",
+        "duration_s" => 360,
+        "voice_cost_cents" => 30.125,
+        "accounting" => "complete"
+      }
+
+      done =
+        Map.merge(shared_call(), %{"event" => "task_done", "state" => "timed_out"})
+
+      assert :ok = Protocol.validate_call_metadata(ended)
+      assert :ok = Protocol.validate_call_metadata(%{shared_call() | "event" => "task_running"})
+      assert :ok = Protocol.validate_call_metadata(done)
+    end
+
+    test "the call and the event are required, and the event is one of four" do
+      assert {:error, {:missing_field, "call.uuid"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "uuid"))
+
+      assert {:error, {:missing_field, "call.event"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "event"))
+
+      assert {:error, {:invalid_field, "call.event"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "event" => "spoken"})
+
+      assert {:error, {:invalid_field, "call.uuid"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "uuid" => "call-7"})
+    end
+
+    test "a task's event names the task and its revision; a task's end names its state" do
+      assert {:error, {:missing_field, "call.task_id"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "task_id"))
+
+      assert {:error, {:missing_field, "call.revision"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "revision"))
+
+      assert {:error, {:missing_field, "call.state"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "event" => "task_done"})
+    end
+
+    test "each field is refused in a shape other than its own" do
+      for {key, value} <- [
+            {"task_id", ""},
+            {"revision", 0},
+            {"state", "running"},
+            {"duration_s", -1},
+            {"voice_cost_cents", "0.5"},
+            {"accounting", "running"}
+          ] do
+        assert {:error, {:invalid_field, "call." <> ^key}} =
+                 Protocol.validate_call_metadata(Map.put(shared_call(), key, value))
+      end
+    end
+
+    test "a key the call map does not have is refused, and so is anything not a map" do
+      assert {:error, {:unknown_field, "call.text"}} =
+               Protocol.validate_call_metadata(Map.put(shared_call(), "text", "hi"))
+
+      assert {:error, {:invalid_field, "call"}} = Protocol.validate_call_metadata(nil)
+    end
+  end
+
+  defp shared_call do
+    %{
+      "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "event" => "shared",
+      "task_id" => "dg_01H9",
+      "revision" => 1
+    }
+  end
+
   test "payload validation is available to another envelope without the type key" do
     assert :ok =
              Protocol.validate_server_payload("accepted", %{

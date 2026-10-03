@@ -52,6 +52,15 @@ defmodule FermixCore.Companion.Protocol do
   # The server events a version after 1 brought; every other one is version 1.
   @server_event_versions %{"turn_done" => 2}
 
+  # A row a Live call writes carries `metadata.call` (M56 §6): what happened
+  # on the call, and which task it was about.
+  @call_events ~w(shared ended task_running task_done)
+  @call_task_events ~w(shared task_running task_done)
+  @call_task_end_states ~w(completed failed cancelled timed_out)
+  @call_accounting ~w(complete incomplete)
+  @call_keys ~w(uuid event task_id revision state duration_s voice_cost_cents accounting)
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
+
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
   # backward cursor (`before_seq`, `next_before_seq`) the mobile wire lacks.
@@ -208,6 +217,63 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  @doc """
+  Validate the `call` map a Live call's timeline row carries in its
+  `metadata` (M56 §6), string keyed as the timeline stores it: `uuid` (the
+  call's), `event` (`shared`, `ended`, `task_running` or `task_done`), and
+  optional `task_id`, `revision`, `state` (a task's terminal state),
+  `duration_s`, `voice_cost_cents` and `accounting` (`complete` or
+  `incomplete`). A task's event names its `task_id` and `revision`, and
+  `task_done` its `state`. A key outside these is refused. The writer of a
+  call row validates here, the one place the shape is held.
+  """
+  @spec validate_call_metadata(term()) :: :ok | {:error, term()}
+  def validate_call_metadata(call) when is_map(call) do
+    with :ok <- known_call_keys(call),
+         :ok <- call_required(call, ["uuid", "event"]),
+         :ok <- call_field(call, "uuid", &(is_binary(&1) and Regex.match?(@uuid, &1))),
+         :ok <- call_field(call, "event", &(&1 in @call_events)),
+         :ok <- call_event_fields(call),
+         :ok <- call_field(call, "task_id", &(is_binary(&1) and &1 != "")),
+         :ok <- call_field(call, "revision", &(is_integer(&1) and &1 > 0)),
+         :ok <- call_field(call, "state", &(&1 in @call_task_end_states)),
+         :ok <- call_field(call, "duration_s", &(is_integer(&1) and &1 >= 0)),
+         :ok <- call_field(call, "voice_cost_cents", &(is_number(&1) and &1 >= 0)) do
+      call_field(call, "accounting", &(&1 in @call_accounting))
+    end
+  end
+
+  def validate_call_metadata(_call), do: {:error, {:invalid_field, "call"}}
+
+  defp known_call_keys(call) do
+    case Enum.find(Map.keys(call), &(&1 not in @call_keys)) do
+      nil -> :ok
+      key -> {:error, {:unknown_field, "call.#{key}"}}
+    end
+  end
+
+  defp call_event_fields(%{"event" => "task_done"} = call),
+    do: call_required(call, ["task_id", "revision", "state"])
+
+  defp call_event_fields(%{"event" => event} = call) when event in @call_task_events,
+    do: call_required(call, ["task_id", "revision"])
+
+  defp call_event_fields(_call), do: :ok
+
+  defp call_required(call, keys) do
+    case Enum.find(keys, &(not Map.has_key?(call, &1))) do
+      nil -> :ok
+      key -> {:error, {:missing_field, "call." <> key}}
+    end
+  end
+
+  defp call_field(call, key, valid?) do
+    case Map.fetch(call, key) do
+      :error -> :ok
+      {:ok, value} -> if valid?.(value), do: :ok, else: {:error, {:invalid_field, "call." <> key}}
+    end
+  end
+
   # `client_hello` is transport, not chat: it has no payload rules beyond the
   # version, and its two errors are the Realtime socket's, verbatim.
   defp validate_client_event("client_hello", payload) do
@@ -322,7 +388,9 @@ defmodule FermixCore.Companion.Protocol do
   defp validate_server("row", payload) do
     with :ok <- strings(payload, ~w(profile_id role ts)),
          :ok <- positive_u64(payload, "server_seq"),
-         :ok <- binary_field(payload, "text") do
+         :ok <- binary_field(payload, "text"),
+         :ok <- optional_nonempty(payload, "kind"),
+         :ok <- optional_map(payload, "metadata") do
       optional_nonempty(payload, "client_msg_id")
     end
   end
@@ -480,6 +548,10 @@ defmodule FermixCore.Companion.Protocol do
 
   defp optional_nonempty(payload, field) do
     if Map.has_key?(payload, field), do: nonempty(payload, field), else: :ok
+  end
+
+  defp optional_map(payload, field) do
+    if is_map(Map.get(payload, field, %{})), do: :ok, else: {:error, {:invalid_field, field}}
   end
 
   defp optional_binary(payload, field) do

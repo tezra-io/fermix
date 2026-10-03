@@ -10,6 +10,7 @@
 {"type":"turn_error","turn_id":"turn-mac-3","code":"cancelled","message":"cancelled"}
 {"type":"turn_done","turn_id":"turn-mac-5"}
 {"type":"row","profile_id":"main","server_seq":15,"role":"assistant","text":"Your 9am summary: two meetings and a dentist reminder.","ts":"2026-09-25T09:00:30Z"}
+{"type":"row","profile_id":"main","server_seq":16,"role":"assistant","text":"The form is at https://x.test/form. It asks for your name, city and a dietary note.","ts":"2026-09-25T09:01:10Z","kind":"text","metadata":{"call":{"uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","event":"shared","task_id":"dg_01H9","revision":1}}}
 {"type":"approval","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","kind":"sandbox","text":"Allow reading ~/Documents?","token":"opaque-token","ttl_s":60,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
 {"type":"approval_resolved","approval_id":"sandbox-bhw-xTAySHRgYU9X7p4sNoI3EvHmKLZlouMRAn73iic","outcome":"approved"}
 {"type":"approval_resolved","approval_id":"soul-Q5h0Yb2o8b0bM6c2yXjOq7rNf3oHk6hQyq1ZkGq1c1Y","outcome":"expired"}
