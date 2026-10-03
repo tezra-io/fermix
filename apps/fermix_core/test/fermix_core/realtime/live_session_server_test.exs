@@ -1055,6 +1055,69 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # M56 §4.3: a message typed in the chat during a call, and its answer, reach
+  # the voice model as session-wide quiet context, so "use that link" said
+  # aloud has something to hand off. Channels finds the call and casts here.
+  describe "the chat mirrored into a call" do
+    test "a typed message and its answer are thinking appends for the whole session", %{
+      clock: clock
+    } do
+      session = listening_session(clock)
+
+      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
+      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved it."})
+      sync(session)
+
+      assert [typed, answered] = Enum.filter(FakeLiveClient.events(), &mirror?/1)
+
+      assert %{
+               delegation_id: nil,
+               content: "The owner typed in the chat: use https://x.test/lease"
+             } = typed
+
+      assert %{delegation_id: nil, content: "Fermix answered in the chat: Saved it."} = answered
+
+      # Tracked like every other append, so a refusal of it is explained.
+      pending = :sys.get_state(session).pending_appends
+      assert {answered.event_id, :thinking, nil} in pending
+    end
+
+    test "an answer drawn from Computer History never reaches the voice", %{clock: clock} do
+      session = listening_session(clock)
+
+      tainted = %{
+        role: "assistant",
+        content: "You were reading the Q3 report.",
+        history_tainted: true
+      }
+
+      :ok = LiveSessionServer.chat_answered(session, tainted)
+      sync(session)
+
+      assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
+    end
+
+    test "nothing is mirrored before the provider session is up", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      :ok = LiveSessionServer.chat_typed(session, "too early")
+      sync(session)
+
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    # M56 §4.4: a private call gets no mirror; the chat does not know it exists.
+    test "nothing is mirrored into a private call", %{clock: clock} do
+      session = listening_session(clock, config: live_config(conversation: "private"))
+
+      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
+      sync(session)
+
+      assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
+    end
+  end
+
   describe "delegations" do
     setup %{clock: clock} do
       session = start_session(clock: clock)
@@ -1976,6 +2039,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         }}}
     )
   end
+
+  defp mirror?(%{type: "session.thinking.append", delegation_id: nil}), do: true
+  defp mirror?(_event), do: false
 
   # The provider's answer to a start whose input it will not take, in the
   # shape its Live guide documents for a refused command.

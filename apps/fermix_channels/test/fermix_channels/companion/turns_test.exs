@@ -28,7 +28,10 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.DeviceIdentity
 
   @repo :companion_turns_test_repo
   @work_registry :companion_turns_test_work
@@ -925,6 +928,94 @@ defmodule FermixChannels.Companion.TurnsTest do
 
       assert [%{"token" => "MAC-T"}] = Approvals.pending(ctx.approvals, "main", :companion)
       assert [%{"token" => "PHONE-T"}] = Approvals.pending(ctx.approvals, "main", :mobile)
+    end
+  end
+
+  # M56 §4.3: during a Live call in the chat, a message typed in the chat and
+  # the chat's answer to it are told to the call, which this test process
+  # stands in for: it holds the claim in Core's call registry, so the casts a
+  # session would get arrive here.
+  describe "a voice call in the chat" do
+    setup do
+      start_supervised!({CallRegistry, name: CallRegistry})
+      chat_key = Companion.chat_conversation_key()
+      :ok = ConversationStore.clear(chat_key)
+      on_exit(fn -> ConversationStore.clear(chat_key) end)
+      %{chat_key: chat_key}
+    end
+
+    test "a typed message is told to the call, and so is the answer it gets", ctx do
+      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "use https://x.test/lease")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "use https://x.test/lease"}}}
+
+      # The turn commits its answer to the chat before its outcome fires.
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "use https://x.test/lease")
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Saved the lease.")
+      assert :ok = turn.reply_fn.({:text, "Saved the lease."})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "text_done"}}
+
+      assert_receive {:"$gen_cast",
+                      {:chat, {:answered, %{role: "assistant", content: "Saved the lease."}}}}
+    end
+
+    test "a turn that ends without an answer of its own tells the call nothing more", ctx do
+      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      id = unique()
+
+      assert :ok =
+               Requests.request(
+                 %{type: "msg", payload: msg_payload(id, "hello")},
+                 companion_transport(),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "hello"}}}
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "hello")
+      turn.turn_result_fn.({:failed, :provider_down})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, {:answered, _message}}}
+    end
+
+    # The phone's turns run in a conversation of their own until they join the
+    # chat's (M56 D9): a hand-off could not read them, so they are not told.
+    test "a message typed on the phone is not told to the call", ctx do
+      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      id = unique()
+
+      assert :ok =
+               EventRouter.route(
+                 decoded("msg", msg_payload(id, "from the phone")),
+                 mobile_context(ctx),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:enqueued, turn}
+      turn.turn_result_fn.({:completed})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, _event}}
+    end
+
+    test "with no call in progress nothing is told", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "no call now")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Fine.")
+      turn.turn_result_fn.({:completed})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, _event}}
     end
   end
 

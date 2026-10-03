@@ -19,6 +19,12 @@ defmodule FermixCore.Realtime.CallRegistryTest do
     assert CallRegistry.lookup(registry, @first_uuid) == {:ok, holder}
   end
 
+  # The registry runs only while voice does (`Realtime.Supervisor`), and a
+  # typed chat message asks it for a call on every turn (M56 §4.3).
+  test "with voice off, no registry runs and no call is in progress" do
+    assert CallRegistry.active(:"call_registry_not_started_#{System.unique_integer()}") == :none
+  end
+
   test "a second claim is refused while the first holder lives", %{registry: registry} do
     holder = claim_in_process(registry, @first_uuid)
 

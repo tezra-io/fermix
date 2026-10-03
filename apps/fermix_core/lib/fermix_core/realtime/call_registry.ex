@@ -45,11 +45,17 @@ defmodule FermixCore.Realtime.CallRegistry do
   # that owner's key as free. Both reads below skip a dead owner, so they never
   # name a call the claim no longer holds.
 
-  @doc "The call in progress: its UUID and its session, or `:none`."
+  @doc """
+  The call in progress: its UUID and its session, or `:none`. With voice off
+  no registry runs (`Realtime.Supervisor` is not started), and no call is in
+  progress either: Channels asks on every typed chat turn (M56 §4.3).
+  """
   @spec active(registry()) :: {:ok, %{call_uuid: String.t(), session: pid()}} | :none
   def active(registry) when is_atom(registry) do
-    case live_entry(registry, @claim_key) do
-      {session, call_uuid} -> {:ok, %{call_uuid: call_uuid, session: session}}
+    with pid when is_pid(pid) <- Process.whereis(registry),
+         {session, call_uuid} <- live_entry(registry, @claim_key) do
+      {:ok, %{call_uuid: call_uuid, session: session}}
+    else
       nil -> :none
     end
   end

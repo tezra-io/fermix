@@ -113,6 +113,25 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @spec live_pid(GenServer.server()) :: pid() | nil
   def live_pid(server), do: GenServer.call(server, :live_pid)
 
+  @doc """
+  The owner typed `text` in the chat (M56 §4.3). Sent, never awaited: the
+  session tells the voice model as quiet context while a call in the chat is
+  up, and drops it otherwise. Channels finds the session (`CallRegistry`).
+  """
+  @spec chat_typed(GenServer.server(), String.t()) :: :ok
+  def chat_typed(session, text) when is_binary(text),
+    do: GenServer.cast(session, {:chat, {:typed, text}})
+
+  @doc """
+  The chat answered the owner's typed message: `message` is that answer as the
+  chat's store holds it, its Computer History marker included. Sent, never
+  awaited, and told or dropped as `chat_typed/2` is.
+  """
+  @spec chat_answered(GenServer.server(), map()) :: :ok
+  def chat_answered(session, %{role: "assistant", content: content} = message)
+      when is_binary(content),
+      do: GenServer.cast(session, {:chat, {:answered, message}})
+
   @impl true
   def init(opts) do
     Process.flag(:trap_exit, true)
@@ -286,6 +305,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def handle_call(:live_pid, _from, state), do: {:reply, state.live_pid, state}
 
   @impl true
+  def handle_cast({:chat, event}, state), do: {:noreply, mirror_chat(state, event)}
+
   def handle_cast({:audio_chunk, audio}, state) do
     case audio_drop_reason(state, audio) do
       nil ->
@@ -666,6 +687,29 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     |> send_provider(event)
     |> arm_start_deadline()
   end
+
+  # M56 §4.3: the chat, mirrored as session-wide quiet context (a thinking
+  # append with no delegation), only while the provider session is up and the
+  # call is in the chat's conversation. A private call is told nothing.
+  defp mirror_chat(state, event) do
+    case mirror_line(state, event) do
+      {:ok, line} ->
+        send_thinking(state, nil, line)
+
+      :drop ->
+        Logger.debug("voice_live: a chat #{elem(event, 0)} message was not mirrored")
+        state
+    end
+  end
+
+  defp mirror_line(%{provider_ready?: true, closing?: false} = state, event) do
+    case Config.conversation(state.config) do
+      "chat" -> LiveChat.mirror_line(event)
+      "private" -> :drop
+    end
+  end
+
+  defp mirror_line(_state, _event), do: :drop
 
   # A mute applied before `session.started` was gated locally but never reached
   # the provider — it had no session to reach. It does now.

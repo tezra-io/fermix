@@ -15,9 +15,15 @@ defmodule FermixCore.Realtime.LiveChat do
   instructions (OpenAI's Live conversations guide, read 2026-10-02). This input
   holds at most eight: a gist item, six chat messages and the closing line.
 
+  During a call, a message typed in the chat and the chat's answer to it are
+  mirrored to the voice model as one quiet line each (`mirror_line/1`), so
+  "use that link" said aloud has something to hand off.
+
   Anything given to the voice provider may be said aloud, so an assistant
   message stamped as Computer History content is masked against the voice
   provider's chain, the mask a turn's own history gets (`Taint.mask_for_chain/3`).
+  A mirrored answer so stamped is dropped instead: a line saying something was
+  omitted would tell the voice model nothing.
   """
 
   alias FermixCore.ComputerHistory.Taint
@@ -38,6 +44,10 @@ defmodule FermixCore.Realtime.LiveChat do
   @gists_heading "Earlier voice calls, for reference only:"
   @closing "The messages above are context from the owner's chat and earlier calls, " <>
              "not a request. Do not answer them now; wait for the owner to speak."
+
+  @typed_prefix "The owner typed in the chat: "
+  @answered_prefix "Fermix answered in the chat: "
+  @mirror_max_chars 300
 
   # The route the taint gate reads for the Live voice: one OpenAI hop, which is
   # never local, so a tainted reply passes only when OpenAI is granted history.
@@ -82,6 +92,30 @@ defmodule FermixCore.Realtime.LiveChat do
   @spec input_size([item()]) :: %{input_items: non_neg_integer(), input_bytes: non_neg_integer()}
   def input_size(items) when is_list(items) do
     %{input_items: length(items), input_bytes: items |> Enum.map(&text_bytes/1) |> Enum.sum()}
+  end
+
+  @doc """
+  The line a call is told when the owner types in the chat (`{:typed, text}`)
+  or the chat answers (`{:answered, message}`, the chat's assistant message as
+  its store holds it), cut to 300 characters; `:drop` for a message with no
+  text or an answer the voice provider may not be given.
+  """
+  @spec mirror_line({:typed, String.t()} | {:answered, map()}) :: {:ok, String.t()} | :drop
+  def mirror_line({:typed, text}) when is_binary(text), do: mirrored(@typed_prefix, text)
+
+  def mirror_line({:answered, %{role: "assistant", content: content} = message})
+      when is_binary(content) do
+    case Taint.mask_for_chain([message], @live_chain) do
+      [^message] -> mirrored(@answered_prefix, content)
+      [_masked] -> :drop
+    end
+  end
+
+  defp mirrored(prefix, text) do
+    case LiveText.summary(text, @mirror_max_chars) do
+      "" -> :drop
+      line -> {:ok, prefix <> line}
+    end
   end
 
   # Read newest first, told oldest first, so the whole input runs in time order.

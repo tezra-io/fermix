@@ -28,6 +28,10 @@ defmodule FermixChannels.Companion.Turns do
     * the queue it was handed to dying (a restart loses every outcome it held)
       ends the turn the same way, with code `interrupted`.
 
+  During a Live call in the chat, a turn of the chat's own conversation is
+  told to the call as it is handed off, and its answer as it completes
+  (`Voice.ChatMirror`, M56 §4.3).
+
   This process also owns the hand-off to the queue and every stop of a turn
   handed to it, so a `cancel` is never lost between the two. `cancel` records
   its mark on the request before asking here; a hand-off reads that mark and
@@ -83,6 +87,7 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixChannels.Voice.ChatMirror
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Telemetry
 
@@ -305,6 +310,7 @@ defmodule FermixChannels.Companion.Turns do
       {:ok, false} ->
         state = track(state, turn)
         :ok = Queue.handle_message(message, turn.queue)
+        :ok = ChatMirror.typed(turn.conversation, message.content)
         state
 
       {:error, reason} ->
@@ -429,6 +435,7 @@ defmodule FermixChannels.Companion.Turns do
 
   defp finish(state, turn, {:completed}) do
     turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1))
+    :ok = ChatMirror.answered(turn.conversation)
     {settle_completed(state, turn), ended(state, turn)}
   end
 

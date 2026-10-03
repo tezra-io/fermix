@@ -168,6 +168,45 @@ defmodule FermixCore.Realtime.LiveChatTest do
     end
   end
 
+  # M56 §4.3: what is typed in the chat during a call reaches the voice model
+  # as a quiet line; the content itself is read by a hand-off, from the chat.
+  describe "mirror_line/1" do
+    test "a typed message is named as typed in the chat, cut to 300 characters" do
+      assert LiveChat.mirror_line({:typed, "use https://x.test/lease"}) ==
+               {:ok, "The owner typed in the chat: use https://x.test/lease"}
+
+      {:ok, line} = LiveChat.mirror_line({:typed, String.duplicate("a", 900)})
+      assert String.length(line) == String.length("The owner typed in the chat: ") + 300
+      assert String.ends_with?(line, "…")
+    end
+
+    test "a typed message with no text is not mirrored" do
+      assert LiveChat.mirror_line({:typed, "  \n "}) == :drop
+    end
+
+    test "the chat's answer is named as answered in the chat" do
+      assert LiveChat.mirror_line({:answered, assistant("Saved the lease.")}) ==
+               {:ok, "Fermix answered in the chat: Saved the lease."}
+    end
+
+    # E5: an answer drawn from Computer History is dropped, not masked: a line
+    # saying something was omitted tells the voice model nothing.
+    test "an answer stamped as Computer History content is dropped for OpenAI" do
+      tainted = Map.put(assistant("You were reading the Q3 report."), :history_tainted, true)
+
+      assert LiveChat.mirror_line({:answered, tainted}) == :drop
+
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      assert {:ok, "Fermix answered in the chat: You were reading the Q3 report."} =
+               LiveChat.mirror_line({:answered, tainted})
+    end
+  end
+
   describe "input_size/1" do
     test "counts the items and their text bytes, never the text itself" do
       items = LiveChat.input(%{messages: [user("héllo")], gists: []})
