@@ -17,8 +17,15 @@ defmodule FermixChannels.Voice.CallRowSweep do
   session's task does. Core's `CallSweep` closes the records a restart cut
   off mid-call; those owe no row.
 
+  A task that outlives its call (M56 §4.6) ends into the chat after its call
+  closed, owned by `Voice.Detached`; a daemon that died while it ran leaves
+  it `detached` in its closed record, with no owner. The same pass writes its
+  done row, the restart's sentence, and fails it
+  (`CallRecord.sweep_detached/3`): the row first, keyed, so a pass cut short
+  writes it again rather than twice.
+
   The cutoff is taken in `init/1`: a call this boot started is left to its
-  own session's task.
+  own session's task, and its detached tasks to this boot's owner.
 
   A `:transient` child that stops `:normal` once the pass is done: a boot
   step, not a service. The pass runs in `handle_continue/2` so a slow write
@@ -45,9 +52,15 @@ defmodule FermixChannels.Voice.CallRowSweep do
 
   @impl true
   def handle_continue(:sweep, state) do
+    repo_opts = CallRecord.repo_opts(state.repo)
+
     state.cutoff
-    |> CallRecord.sweep_rows(&Bridge.show/2, CallRecord.repo_opts(state.repo))
+    |> CallRecord.sweep_rows(&Bridge.show/2, repo_opts)
     |> report()
+
+    state.cutoff
+    |> CallRecord.sweep_detached(&Bridge.show/2, repo_opts)
+    |> report_detached()
 
     {:stop, :normal, state}
   end
@@ -70,6 +83,26 @@ defmodule FermixChannels.Voice.CallRowSweep do
     Logger.error(
       "voice_live: the boot pass over owed chat rows failed (#{inspect(reason)}); " <>
         "the next boot writes what is left"
+    )
+  end
+
+  defp report_detached({:ok, []}), do: :ok
+
+  defp report_detached({:ok, uuids}) do
+    Logger.warning(
+      "voice_live: ended the tasks a daemon restart left running after #{length(uuids)} " <>
+        "call(s): " <> Enum.join(uuids, ", ")
+    )
+
+    report_page(length(uuids))
+  end
+
+  defp report_detached({:error, :disabled}), do: :ok
+
+  defp report_detached({:error, reason}) do
+    Logger.error(
+      "voice_live: the boot pass over tasks left running after their call failed " <>
+        "(#{inspect(reason)}); the next boot ends what is left"
     )
   end
 

@@ -74,6 +74,43 @@ defmodule FermixChannels.Voice.CallRowSweepTest do
     refute_received {:companion_event, _row}
   end
 
+  # M56 §4.6, §8: a daemon that died while a task it had detached still ran
+  # left it detached in its closed record; the boot writes its done row once
+  # and fails it.
+  test "a task a dead daemon left detached gets its done row, once", %{} do
+    earlier = DateTime.add(DateTime.utc_now(), -600, :second)
+    opts = CallRecord.repo_opts(@repo)
+
+    record =
+      CallRecord.new(@gisted, "openai_live")
+      |> CallRecord.put_task("dg_1", 1, "running", %{request: "user: find parking"})
+      |> CallRecord.put_task("dg_1", 1, "detached", %{destination: "chat"})
+
+    :ok = CallRecord.open(record, earlier, opts)
+    usage = %{voice_cost_cents: 50.0, accounting: "complete"}
+    :ok = CallRecord.close(record, :call_stop, usage, DateTime.add(earlier, 60), opts, :nothing)
+
+    log = capture_log(fn -> run_sweep() end)
+    assert log =~ "ended the tasks a daemon restart left running after 1 call(s)"
+
+    assert_receive {:companion_event,
+                    %{"t" => "row", "text" => "The task stopped when Fermix restarted."} = row}
+
+    assert row["metadata"]["call"] == %{
+             "uuid" => @gisted,
+             "event" => "task_done",
+             "task_id" => "dg_1",
+             "revision" => 1,
+             "state" => "failed"
+           }
+
+    assert {:ok, %{tasks: [%{"state" => "failed", "summary" => "daemon_restarted"}]}} =
+             Repo.get_voice_call(@gisted, server: @repo)
+
+    refute capture_log(fn -> run_sweep() end) =~ "left running"
+    refute_received {:companion_event, _row}
+  end
+
   test "a call this boot started is left to its own session's gist" do
     later = DateTime.add(DateTime.utc_now(), 3_600, :second)
     owe!(@this_boot, later, :gist, [])
