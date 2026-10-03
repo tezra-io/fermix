@@ -26,8 +26,8 @@ carries.
 
 `fermix_chrome` is not one of those choices, and Settings does not offer it: it
 is the managed Chrome a task names for what only Chrome can do, which today is
-a page's WebMCP tools while the default profile runs in the Fermix app's pane
-(below). Like `fermix`, it opens a window where there is a display, and it is
+a page's WebMCP tools and a download while the default profile runs in the
+Fermix app's pane (below). Like `fermix`, it opens a window where there is a display, and it is
 never routed to the pane. It keeps its own logins like every profile, so a
 site signed in to in the pane is signed out there.
 
@@ -77,13 +77,18 @@ Chrome — the turn that saw the loss or the cancel stays that way. The next
 browser use, in a fresh turn, is decided afresh. `fermix_headless`,
 `fermix_chrome` and `selected_tab` are never routed to the pane.
 
-The pane runs no WebMCP: `webmcp` there answers `unsupported_in_fermix_app`.
+The pane runs no WebMCP tools and saves no downloads: `webmcp` and `download`
+there answer `unsupported_in_fermix_app`. On the app's current wire a
+download's start carries no source address and there is no way to cancel one,
+so the engine could vet it neither by where it comes from nor by its size, as
+it vets Chrome's, and the app refuses every download a task's page starts.
 `open`, `navigate` and `status` say which browser answered in `backend`
 (`fermix_app` for the pane, `cdp` for Chrome), so when a page offers WebMCP
-tools and the browser is the pane, the move is to open the page with
-`profile: "fermix_chrome"` rather than to try in the pane. That opens a second
-profile beside the pane task, it does not re-route it: the pane task keeps its
-browser, and a pane lost mid-task still ends that task with `host_lost`.
+tools or a file is needed from it and the browser is the pane, the move is to
+open the page with `profile: "fermix_chrome"` rather than to try in the pane.
+That opens a second profile beside the pane task, it does not re-route it: the
+pane task keeps its browser, and a pane lost mid-task still ends that task with
+`host_lost`.
 
 Limits of the managed browser:
 - Live tabs are capped: each `open` past the cap closes the oldest non-active

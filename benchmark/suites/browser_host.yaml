@@ -19,7 +19,7 @@ description: >
   `browser.yaml` requires a live Chrome runtime already running under the
   daemon):
 
-    benchmark/bin/browser_host_fixture.py                                  # pane_task, webmcp_in_chrome
+    benchmark/bin/browser_host_fixture.py      # pane_task, webmcp_in_chrome, download_in_chrome
     benchmark/bin/browser_host_fixture.py --fail-after 2 \
       --fail-reason host_unavailable --fail-message "the Mac is locked"    # lock_mid_task
     benchmark/bin/browser_host_fixture.py --cancel-after 1                 # host_cancel_mid_task
@@ -149,6 +149,54 @@ scenarios:
           results must never be penalised. Fails if it gives up because the
           app's browser cannot run the tools, invents a total, or reports that
           the page offers no tools.
+
+  - id: download_in_chrome
+    # host_readonly, stated rather than inherited: the file is a `blob:` the
+    # fixture page mints from its own loopback origin, saved into the dev
+    # daemon's own workspace downloads directory by the managed Chrome; nothing
+    # outside the workspace is written and nothing leaves the machine.
+    risk: host_readonly
+    title: "A download is done in Chrome while the default browser is the app's pane"
+    severity: normal
+    tags: [browser, browser_host, download, fixture-server]
+    cases:
+      - id: report_code_from_the_file
+        # The pane saves no downloads and answers every page with its canned
+        # Example Domain, so the report code, which is only in the saved file
+        # and is put together when the button is pressed, can only come from a
+        # Chrome that pressed it, a `download` that waited for the file, and a
+        # read of that file. The page's own record of the press beside the
+        # code is the floor; no route gate (the profile that is always Chrome
+        # is the expected move, but any Chrome profile reaching the file is the
+        # same outcome), and no reply negative, because an honest reply says
+        # the app's browser could not save it.
+        query: "Download the usage report from __EVAL_FIXTURE_URL__/report_download.html and tell me the report code written inside the file."
+        expect:
+          fixture_state:
+            - { path: report.downloaded, equals: true }
+          reply_matches: "(?<!\\d)135018(?!\\d)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports the report code from the downloaded file, 135018. The Fermix
+          app's own browser saves no downloads, so saying it used Chrome for
+          this is correct. Fails if it gives up because the app's browser
+          cannot download, invents a code, or claims to have read a file it
+          never downloaded.
+      - id: report_code_said_plainly
+        # The same floor, in the words someone actually uses.
+        query: "There's a usage report waiting at __EVAL_FIXTURE_URL__/report_download.html. Can you grab it and read me the report code?"
+        expect:
+          fixture_state:
+            - { path: report.downloaded, equals: true }
+          reply_matches: "(?<!\\d)135018(?!\\d)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Downloads the usage report and reads back its report code, 135018.
+          Saying it used Chrome because the Fermix app's own browser saves no
+          downloads is correct. Fails if it gives up, invents a code, or claims
+          a code it did not read from the downloaded file.
 
   - id: lock_mid_task
     title: "A pane that becomes unavailable mid-task is disclosed, never silently retried"
