@@ -10,6 +10,7 @@ Run: `uv run bin/test_seed_home.py`."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tomllib
@@ -303,6 +304,30 @@ def test_reset_state_refuses_a_symlinked_home(tmp_path):
     with pytest.raises(SystemExit):
         seed.reset_state(str(link))
     assert (real / "memory.db").exists()
+
+
+def test_openai_codex_copies_its_sign_in_with_chatgpt_entry(tmp_path, monkeypatch):
+    # openai_codex signs in with ChatGPT, whose entry the auth store keeps under
+    # `chatgpt`; an older Codex-client entry under `openai_codex` is never read.
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    chatgpt = {"auth_mode": "oauth_siwc", "client_id": "oaiapp_seed", "status": "ready"}
+    stale = {"auth_mode": "chatgpt", "status": "ready"}
+    (dev / "auth.json").write_text(json.dumps(
+        {"version": 2, "providers": {"chatgpt": chatgpt, "openai_codex": stale}}))
+    monkeypatch.setattr(seed, "DEV_HOME", str(dev))
+    home = tmp_path / "x-eval"
+    home.mkdir()
+
+    seed.copy_oauth_token(str(home), "openai_codex")
+
+    copied = json.loads((home / "auth.json").read_text())
+    assert copied == {"version": 2, "providers": {"chatgpt": chatgpt}}
+    assert (home / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_no_separate_chatgpt_provider_is_seeded():
+    assert "chatgpt" not in seed._OAUTH_PROFILE_KEY
 
 
 def test_browser_and_harness_state_are_part_of_the_baseline():

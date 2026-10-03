@@ -308,6 +308,41 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
     end
   end
 
+  # Shared by Codex and ChatGPT plan usage, both `store: false`: a replayed
+  # item may never point at storage that does not exist.
+  describe "replayable_output_items/1" do
+    test "drops item ids, keeps encrypted reasoning, and flattens messages to text" do
+      items = [
+        %{"type" => "reasoning", "id" => "rs_1", "encrypted_content" => "enc", "summary" => []},
+        %{"type" => "reasoning", "id" => "rs_2"},
+        %{
+          "type" => "message",
+          "id" => "msg_1",
+          "content" => [%{"type" => "output_text", "text" => "hi"}]
+        },
+        %{
+          "type" => "function_call",
+          "id" => "fc_1",
+          "call_id" => "c1",
+          "name" => "echo",
+          "arguments" => ""
+        },
+        %{"type" => "function_call", "id" => "fc_2", "name" => "no_call_id"}
+      ]
+
+      assert ResponsesShared.replayable_output_items(items) == [
+               %{"type" => "reasoning", "encrypted_content" => "enc", "summary" => []},
+               %{"role" => "assistant", "content" => "hi"},
+               %{
+                 "type" => "function_call",
+                 "call_id" => "c1",
+                 "name" => "echo",
+                 "arguments" => "{}"
+               }
+             ]
+    end
+  end
+
   describe "substitute_tool_results/2" do
     defp replayed_items do
       [

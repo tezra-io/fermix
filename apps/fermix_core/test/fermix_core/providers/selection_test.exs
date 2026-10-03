@@ -155,18 +155,20 @@ defmodule FermixCore.Providers.SelectionTest do
       refute Selection.configured?(:xai, auth_mode: :oauth)
     end
 
-    test "openai_codex needs a stored codex profile" do
+    # OpenAI Codex signs in with ChatGPT: an old Codex-client entry under the
+    # "openai_codex" key is no longer read, so it carries no turn.
+    test "openai_codex needs a ChatGPT sign-in; an old Codex-client entry is not one" do
       refute Selection.configured?(:openai_codex, [])
 
       assert :ok =
-               Store.write(:openai_codex, %{
+               Store.write("openai_codex", %{
                  auth_mode: "chatgpt",
                  tokens: %{access_token: "codex-at", refresh_token: "codex-rt"},
                  expires_at: DateTime.utc_now() |> DateTime.add(3600),
                  last_refresh: nil
                })
 
-      assert Selection.configured?(:openai_codex, [])
+      refute Selection.configured?(:openai_codex, [])
     end
 
     test "openrouter needs an api key (generic descriptor rule)" do

@@ -129,6 +129,29 @@ defmodule FermixCore.Browser.RoutingTest do
     end
   end
 
+  # The profile for what only Chrome can do, as it is configured: a usable pane
+  # does not take it, and no app is opened for it, so a page's WebMCP tools are
+  # always one `profile: "fermix_chrome"` away.
+  test "fermix_chrome is the managed Chrome beside a usable pane, and opens no app", ctx do
+    {:ok, config} = Config.current(%{launch_app: true, host_launch_timeout_ms: 50})
+    {:ok, profile, "fermix_chrome"} = Config.profile(config, "fermix_chrome")
+    test = self()
+    launcher = fn _timeout_ms -> send(test, :opened) end
+
+    listening = host(:empty)
+    :ok = HostAvailability.listening(listening, endpoint())
+
+    for host <- [host(:usable), listening] do
+      assert Routing.for_request("owner-chrome", "fermix_chrome", profile, config, @context,
+               registry: ctx.registry,
+               host_availability: host,
+               launcher: launcher
+             ) == {profile, :cdp}
+    end
+
+    refute_received :opened
+  end
+
   # The decision is the live profile's, recorded when it started: a pane task
   # whose host has since gone is still a pane task (and fails there), and a
   # Chrome task stays in Chrome when a pane appears.

@@ -27,12 +27,19 @@ defmodule FermixCore.Management.PrimaryPromotionTest do
 
   @env_keys [:providers, :agent, :personalization, :routing]
 
-  @codex_entry %{
-    auth_mode: "chatgpt",
+  # A finished Sign in with ChatGPT, with plan usage granted: how `openai_codex`
+  # is connected.
+  @chatgpt_entry %{
+    auth_mode: "oauth_siwc",
+    provider: "chatgpt",
+    client_id: "oaiapp_promotion",
+    subject: "user-promotion",
+    account: %{email: "owner@example.com"},
+    granted_scopes: ["openid", "offline_access", "chatgpt.tokens.use.direct"],
     tokens: %{access_token: "at", refresh_token: "rt"},
     expires_at: nil,
     last_refresh: nil,
-    account: %{email: "owner@example.com"}
+    status: "ready"
   }
 
   setup context do
@@ -93,31 +100,22 @@ defmodule FermixCore.Management.PrimaryPromotionTest do
   end
 
   test "a completed sign-in makes its provider primary", %{home: home, jobs: jobs} do
-    :ok = Store.write("openai_codex", @codex_entry, Path.join(home, "auth.json"))
+    auth_path = Path.join(home, "auth.json")
+    :ok = Store.write(Store.profile(:openai_codex), @chatgpt_entry, auth_path)
 
     assert {:ok, view} =
              Auth.start("openai_codex",
                jobs: jobs,
-               login: fn _opts -> {:ok, @codex_entry} end,
+               login: fn _opts -> {:ok, %{account: "owner@example.com", plan_usage: :on}} end,
+               live_model: fn :openai_codex, [] ->
+                 {:ok, %{model: "gpt-test", changed?: false}}
+               end,
                reload: fn -> :ok end
              )
 
     assert view["status"] == "completed"
     assert PrimaryConfig.primary() == {:ok, :openai_codex}
     assert provider_failures(SetupState.report()) == []
-  end
-
-  test "an adopted sign-in makes its provider primary", %{home: home, jobs: jobs} do
-    :ok = Store.write("openai_codex", @codex_entry, Path.join(home, "auth.json"))
-
-    assert {:ok, view} =
-             Auth.import_start("codex_cli",
-               jobs: jobs,
-               importer: fn -> {:ok, @codex_entry} end
-             )
-
-    assert await_completed(view, jobs)["status"] == "completed"
-    assert PrimaryConfig.primary() == {:ok, :openai_codex}
   end
 
   # After the first one, promotion is the explicit "Set primary" action. A
@@ -144,20 +142,6 @@ defmodule FermixCore.Management.PrimaryPromotionTest do
       report["readiness"]["failures"],
       &String.starts_with?(&1["component"], "provider")
     )
-  end
-
-  defp await_completed(view, jobs), do: await_completed(view, jobs, 50)
-
-  defp await_completed(view, _jobs, 0), do: view
-
-  defp await_completed(%{"status" => status} = view, _jobs, _left)
-       when status in ["completed", "failed", "timed_out", "cancelled"],
-       do: view
-
-  defp await_completed(view, jobs, attempts_left) do
-    Process.sleep(10)
-    {:ok, polled} = Jobs.get(view["job_id"], jobs)
-    await_completed(polled, jobs, attempts_left - 1)
   end
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)

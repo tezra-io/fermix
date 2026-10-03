@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.DescriptorTest do
 
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Setup.SecretPaths
 
@@ -33,9 +34,43 @@ defmodule FermixCore.Providers.DescriptorTest do
   end
 
   test "every descriptor id has catalog models with a default" do
-    for id <- Descriptor.ids() do
+    for id <- Descriptor.ids(), id != :openai_codex do
       assert [_ | _] = ModelCatalog.models_for(id)
       assert is_binary(ModelCatalog.default_model_for(id))
+    end
+  end
+
+  # M57 D1/§6.2: the account's models are discovered live, so nothing is
+  # shipped and nothing is guessed.
+  test "openai_codex ships no catalog and no default model" do
+    assert ModelCatalog.models_for(:openai_codex) == []
+    assert ModelCatalog.default_model_for(:openai_codex) == ""
+  end
+
+  # OpenAI Codex signs in with ChatGPT: one provider, labelled OpenAI Codex,
+  # on the public Responses API, with fast mode retired rather than refused.
+  test "openai_codex is an oauth-only remote provider on the public Responses API" do
+    descriptor = Descriptor.fetch!(:openai_codex)
+
+    assert descriptor.label == "OpenAI Codex"
+    assert descriptor.adapter == ChatGPTPlan
+    assert descriptor.default_base_url == "https://api.openai.com/v1"
+    assert descriptor.locality == :remote
+    assert descriptor.auth_modes == [:oauth]
+    assert descriptor.secrets == []
+    assert descriptor.setup_fields == []
+    assert descriptor.config_keys == [:default_model, :reasoning_effort, :primary]
+    assert descriptor.retired_config_keys == [:fast]
+    assert descriptor.effort?
+  end
+
+  test "no descriptor both reads and retires a key" do
+    for descriptor <- Descriptor.all() do
+      assert MapSet.disjoint?(
+               MapSet.new(descriptor.config_keys),
+               MapSet.new(descriptor.retired_config_keys)
+             ),
+             "#{descriptor.id} both reads and retires a key"
     end
   end
 

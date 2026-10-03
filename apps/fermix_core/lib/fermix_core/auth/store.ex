@@ -36,9 +36,9 @@ defmodule FermixCore.Auth.Store do
   most three attempts and two store-lock waits (about 107 s,
   `RefreshClient.worst_case_ms/0`); a sign-in is at most three single-attempt
   requests (the exchange, the account lookup, a region probe;
-  `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s), and
-  the Codex import one refresh and one write. The profile lock's threshold is
-  120 s, and `store_test.exs` ("lock bounds") holds these bounds.
+  `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s). The
+  profile lock's threshold is 120 s, and `store_test.exs` ("lock bounds")
+  holds these bounds.
 
   A file that does not parse is `{:invalid_json, byte_offset}`. The parse
   error's own `:data` is the whole file, every profile's tokens, so it never
@@ -64,7 +64,10 @@ defmodule FermixCore.Auth.Store do
           optional(:granted_scopes) => [String.t()],
           optional(:status) => String.t() | nil,
           optional(:region) => String.t() | nil,
-          optional(:region_actual) => String.t() | nil
+          optional(:region_actual) => String.t() | nil,
+          optional(:client_id) => String.t() | nil,
+          optional(:subject) => String.t() | nil,
+          optional(:earliest_refresh_at) => DateTime.t() | nil
         }
 
   @spec read(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
@@ -74,6 +77,31 @@ defmodule FermixCore.Auth.Store do
          {:ok, providers} <- providers_map(data),
          {:ok, entry} <- fetch_provider(providers, provider) do
       normalize(provider, entry)
+    else
+      {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
+      {:error, :enoent} -> {:error, :no_auth_file}
+      {:error, _reason} = err -> err
+    end
+  end
+
+  @doc """
+  Reads one profile's entry whether or not it holds a token.
+
+  A ChatGPT registration outlives its tokens: a sign-out, or a sign-in whose
+  exchange failed, keeps the issued client id and the account with no token
+  (`Auth.ChatGPT.Registration`). Only that registration's own reader uses this;
+  every reader that serves or reports a sign-in uses `read/2`, which refuses an
+  entry with no access token, so a registration with no token is never taken
+  for a signed-in account.
+  """
+  @spec read_registration(provider(), Path.t()) :: {:ok, entry()} | {:error, term()}
+  def read_registration(provider, path) when is_atom(provider) or is_binary(provider) do
+    with {:ok, raw} <- File.read(path),
+         {:ok, data} <- Jason.decode(raw),
+         {:ok, providers} <- providers_map(data),
+         {:ok, entry} <- fetch_provider(providers, provider) do
+      tokens = Map.get(entry, "tokens") || %{}
+      {:ok, normalized_entry(entry, tokens, Map.get(tokens, "access_token"))}
     else
       {:error, %Jason.DecodeError{position: at}} -> {:error, {:invalid_json, at}}
       {:error, :enoent} -> {:error, :no_auth_file}
@@ -201,9 +229,15 @@ defmodule FermixCore.Auth.Store do
 
   # The one provider -> auth-profile table. A profile name is not the provider
   # id: anthropic and xai store their OAuth entries under their own profile,
-  # so reading `auth.json` under the provider id finds nothing and reports a
-  # signed-in account as absent.
-  @auth_profiles %{openai_codex: "openai_codex", anthropic: "anthropic_oauth", xai: "xai_oauth"}
+  # and `openai_codex` signs in with ChatGPT, whose registration lives under
+  # `chatgpt` (`Auth.ChatGPT.Registration`), so reading `auth.json` under the
+  # provider id finds nothing and reports a signed-in account as absent. An
+  # entry an older build stored under `openai_codex` is no longer read.
+  @auth_profiles %{
+    openai_codex: "chatgpt",
+    anthropic: "anthropic_oauth",
+    xai: "xai_oauth"
+  }
 
   @doc """
   The auth profile a provider's credentials live under, or `nil` for a provider
@@ -340,7 +374,13 @@ defmodule FermixCore.Auth.Store do
       # The region the account itself is in, recorded beside `region` when the
       # sign-in found the two disagree. Only ever meaningful beside a
       # `wrong_region` status; `nil` says nothing was found to disagree with.
-      region_actual: Map.get(entry, "region_actual")
+      region_actual: Map.get(entry, "region_actual"),
+      # A ChatGPT registration (M57): the client OpenAI issued this home, the
+      # verified account subject, and the time before which its token set may
+      # not be refreshed. `nil` for every other provider.
+      client_id: Map.get(entry, "client_id"),
+      subject: Map.get(entry, "subject"),
+      earliest_refresh_at: parse_iso8601(Map.get(entry, "earliest_refresh_at"))
     }
   end
 
@@ -498,10 +538,24 @@ defmodule FermixCore.Auth.Store do
       |> put_serialized("status", entry_value(entry, :status))
       |> put_serialized("region", entry_value(entry, :region))
       |> put_serialized("region_actual", entry_value(entry, :region_actual))
+      |> put_serialized("client_id", entry_value(entry, :client_id))
+      |> put_serialized("subject", entry_value(entry, :subject))
+      |> put_serialized(
+        "earliest_refresh_at",
+        encode_datetime(entry_value(entry, :earliest_refresh_at))
+      )
 
-    providers = Map.put(providers, provider_key, Map.merge(existing, serialized))
-    %{"version" => @schema_version, "providers" => providers}
+    merged = existing |> drop_cleared(entry) |> Map.merge(serialized)
+    %{"version" => @schema_version, "providers" => Map.put(providers, provider_key, merged)}
   end
+
+  # A nil field keeps what is stored, except `earliest_refresh_at`: it belongs
+  # to one token set, so an entry that names it as nil (a refresh whose answer
+  # carried none, a sign-out) clears the old one.
+  defp drop_cleared(existing, %{earliest_refresh_at: nil}),
+    do: Map.delete(existing, "earliest_refresh_at")
+
+  defp drop_cleared(existing, _entry), do: existing
 
   defp remove_provider(%{"providers" => providers}, provider) when is_map(providers) do
     key = provider_key(provider)
@@ -541,9 +595,9 @@ defmodule FermixCore.Auth.Store do
   defp encode(doc), do: Jason.encode!(doc, pretty: true) <> "\n"
 
   # `Lock.with_lock/3` raises when it cannot create the lock's directory, and
-  # its owner is linked to the caller. A raise inside the Codex TokenManager
-  # restarts every later child of the top-level `:rest_for_one` tree, so the
-  # directory is made here first and a lock not taken is a tuple. Only a wedged
+  # its owner is linked to the caller. A raise inside a token manager would
+  # crash it mid-refresh with the profile's state lost, so the directory is
+  # made here first and a lock not taken is a tuple. Only a wedged
   # filesystem, timing out the owner's own calls, still exits the caller.
   # `busy` is the answer when another holder keeps the lock past the wait.
   defp lock(lock_path, opts, busy, fun) do

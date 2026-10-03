@@ -654,17 +654,24 @@ defmodule FermixCore.Management.RouterTest do
       owner = self()
 
       login = fn login_opts ->
-        :ok = Keyword.fetch!(login_opts, :oauth_opener).("https://auth.example/authorize")
+        :ok = Keyword.fetch!(login_opts, :opener).("https://auth.example/authorize")
         send(owner, {:opened, self()})
 
         receive do
-          :finish -> {:ok, %{auth_mode: "chatgpt", tokens: %{}, expires_at: nil}}
+          :finish -> {:ok, %{account: nil, plan_usage: :on}}
         end
       end
 
+      seams = [
+        login: login,
+        live_model: fn :openai_codex, [] -> {:ok, %{model: "m", changed?: false}} end,
+        reload: fn -> :ok end,
+        promote: fn _provider -> :ok end
+      ]
+
       assert {:ok, view} =
                Router.route(v2("auth.start", %{"provider" => "openai_codex"}),
-                 operation_opts: Keyword.merge(opts, login: login, reload: fn -> :ok end)
+                 operation_opts: Keyword.merge(opts, seams)
                )
 
       assert view["authorize_url"] == "https://auth.example/authorize"
@@ -699,9 +706,7 @@ defmodule FermixCore.Management.RouterTest do
       assert {:ok, %{"restart" => restart}} =
                Router.route(v2("auth.logout", %{"provider" => "openai_codex"}),
                  operation_opts:
-                   opts
-                   |> Keyword.put(:forget, fn _profile -> :ok end)
-                   |> Keyword.put(:drop_live_tokens, fn _provider, _profile -> :ok end)
+                   Keyword.put(opts, :chatgpt_logout, fn [] -> {:ok, %{revoked: true}} end)
                )
 
       assert Enum.sort(Map.keys(restart)) == ~w(reasons required)

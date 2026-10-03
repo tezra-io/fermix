@@ -1,8 +1,9 @@
 defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   @moduledoc """
   Shared item-list logic for the two OpenAI Responses-shape adapters
-  (`OpenAI.Responses` for `api.openai.com/v1/responses`, `OpenAI.Codex`
-  for `chatgpt.com/backend-api/codex/responses`).
+  (`OpenAI.Responses` for the API-key route and `OpenAI.ChatGPTPlan` for
+  OpenAI Codex's streamed ChatGPT plan route, both on
+  `api.openai.com/v1/responses`).
 
   The wire shape is identical between the two surfaces:
 
@@ -148,7 +149,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   # image(s) as a SUBSEQUENT user item carrying `input_image` parts — the same
   # encoding inbound images use. Ordering matters: outputs must immediately follow
   # their function_calls before any user item. Both OpenAI.Responses and
-  # OpenAI.Codex concatenate this list last, so both get the screenshot path.
+  # OpenAI.ChatGPTPlan concatenate this list last, so both get the screenshot path.
   @image_followup_label "Image returned by the preceding tool call:"
   @image_followup_placeholder "[image in the following message]"
   # Replaces a screenshot input item once it ages out of the retention window
@@ -189,7 +190,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   @doc """
   Keep screenshot image bytes only in the most recent `keep` screenshot input
   items of the assembled `input` list; older ones are elided to a text marker. A
-  `keep` of `nil` disables retention. Shared by the Responses and Codex adapters,
+  `keep` of `nil` disables retention. Shared by the Responses and ChatGPTPlan adapters,
   which both replay the full item list each turn.
   """
   @spec retain_screenshots([map()], non_neg_integer() | nil) :: [map()]
@@ -221,7 +222,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   IN_LOOP_CONTEXT_OVERFLOW.md §3.3). Items are never added, dropped or
   reordered; an empty map returns `input` unchanged. Applied to the replayed
   history only — the outputs a continuation appends are the loop's to
-  substitute. Shared by the Responses and Codex adapters.
+  substitute. Shared by the Responses and ChatGPTPlan adapters.
   """
   @spec substitute_tool_results([map()], ToolResultRetention.substitutions()) :: [map()]
   def substitute_tool_results(input, substitutions)
@@ -239,6 +240,78 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   defp replace_function_call_output(item, text), do: %{item | output: text}
 
+  @doc """
+  The prior turn's output items in the shape a `store: false` continuation can
+  replay: function calls without their response item ids, reasoning only when it
+  carries `encrypted_content` (an id alone points at storage that does not
+  exist), and messages as plain assistant text. Used by the streamed
+  `store: false` surface, OpenAI Codex's ChatGPT plan route.
+  """
+  @spec replayable_output_items([map()]) :: [map()]
+  def replayable_output_items(output_items) when is_list(output_items) do
+    Enum.flat_map(output_items, &replayable_output_item/1)
+  end
+
+  defp replayable_output_item(%{"type" => "function_call"} = item) do
+    with call_id when is_binary(call_id) and call_id != "" <- item["call_id"],
+         name when is_binary(name) and name != "" <- item["name"] do
+      [
+        %{
+          "type" => "function_call",
+          "call_id" => call_id,
+          "name" => name,
+          "arguments" => normalize_arguments(item["arguments"])
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "reasoning"} = item) do
+    case item["encrypted_content"] do
+      encrypted when is_binary(encrypted) and encrypted != "" ->
+        [
+          %{
+            "type" => "reasoning",
+            "encrypted_content" => encrypted,
+            "summary" => normalize_reasoning_summary(item["summary"])
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "message"} = item) do
+    case message_text(item) do
+      "" -> []
+      text -> [%{"role" => "assistant", "content" => text}]
+    end
+  end
+
+  defp replayable_output_item(_item), do: []
+
+  defp normalize_arguments(arguments) when is_binary(arguments) and arguments != "", do: arguments
+  defp normalize_arguments(arguments) when is_map(arguments), do: Jason.encode!(arguments)
+  defp normalize_arguments(_arguments), do: "{}"
+
+  defp normalize_reasoning_summary(summary) when is_list(summary), do: summary
+  defp normalize_reasoning_summary(_summary), do: []
+
+  defp message_text(%{"content" => parts}) when is_list(parts) do
+    parts
+    |> Enum.flat_map(fn
+      %{"type" => "output_text", "text" => text} when is_binary(text) -> [text]
+      %{"text" => text} when is_binary(text) -> [text]
+      _ -> []
+    end)
+    |> Enum.join("")
+  end
+
+  defp message_text(_item), do: ""
+
   @context_length_markers [
     "context_length_exceeded",
     "maximum context length",
@@ -250,7 +323,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   @doc """
   True if an OpenAI-family error `body` (a decoded map or a JSON string) is a
-  context-length / too-many-tokens error. Shared by the Codex, Responses and
+  context-length / too-many-tokens error. Shared by the ChatGPTPlan, Responses and
   Chat Completions adapters so a turn that overflows the model's context window
   surfaces a clear, actionable reason (start a fresh session / compact) instead
   of a generic API error.
@@ -412,7 +485,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   end
 
   # Image bytes ride as a base64 data URI in `image_url` (the same field a remote
-  # URL would use), the shape the Codex/Responses backend accepts.
+  # URL would use), the shape the Responses API accepts.
   defp image_part_to_responses(%{type: :image, mime_type: mime, data: data})
        when is_binary(mime) and is_binary(data),
        do: %{type: "input_image", image_url: "data:#{mime};base64,#{Base.encode64(data)}"}

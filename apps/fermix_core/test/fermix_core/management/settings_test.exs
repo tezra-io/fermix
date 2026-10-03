@@ -310,10 +310,24 @@ defmodule FermixCore.Management.SettingsTest do
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
-      for section <- ["providers.openai", "providers.openai_codex"] do
-        assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.(section) == []
-        refute "gpt-6-sol" in published.(section)
-      end
+      assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.("providers.openai") == []
+      refute "gpt-6-sol" in published.("providers.openai")
+    end
+
+    # OpenAI Codex lists the signed-in account's models live: its model row
+    # offers nothing shipped, holds the empty value until a model is chosen,
+    # and fast mode is retired, so no toggle is published.
+    test "the openai_codex section offers no shipped models and no fast toggle" do
+      Application.put_env(:fermix_core, :providers, openai_codex: [fast: true])
+      model = row("providers.openai_codex", "default_model")
+
+      assert model["options"] == []
+      assert model["value"] == ""
+
+      assert Enum.map(rows("providers.openai_codex"), & &1["key"]) == [
+               "default_model",
+               "reasoning_effort"
+             ]
     end
 
     # The explanation behind the model row's info control is the descriptor's,
@@ -1240,11 +1254,15 @@ defmodule FermixCore.Management.SettingsTest do
       assert Application.get_env(:fermix_core, :browser) == nil
     end
 
+    # `fermix_chrome` is a profile a task names for a page's WebMCP tools, not a
+    # way tasks run, so the choice neither publishes nor takes it.
     test "how tasks run takes only the managed profiles it publishes" do
-      assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
-               Settings.apply("browser", %{"browser_default_profile" => "selected_tab"})
+      for profile <- ["selected_tab", "fermix_chrome"] do
+        assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
+                 Settings.apply("browser", %{"browser_default_profile" => profile})
 
-      assert sentence == "This setting takes one of its published values."
+        assert sentence == "This setting takes one of its published values."
+      end
     end
 
     test "the browser in force is shown here and changed elsewhere" do

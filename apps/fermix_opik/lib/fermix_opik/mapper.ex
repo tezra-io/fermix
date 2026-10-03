@@ -593,6 +593,10 @@ defmodule FermixOpik.Mapper do
   @spec provider_string(atom() | String.t() | nil) :: String.t() | nil
   def provider_string(nil), do: nil
   def provider_string(:openai), do: "openai"
+  # OpenAI Codex runs on the person's ChatGPT plan (M57 §9, O6), billed to the
+  # plan, not per token; the OpenAI token prices it at what the turn would have
+  # cost on the API, and the span keeps `provider: openai_codex` for anyone
+  # separating plan-billed spend.
   def provider_string(:openai_codex), do: "openai"
   def provider_string(:anthropic), do: "anthropic"
   def provider_string(:xai), do: "xai"

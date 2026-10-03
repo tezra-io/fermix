@@ -1848,7 +1848,8 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(prompts, &(&1.key == :provider and &1.required?))
     assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
     assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
-    assert Enum.any?(prompts, &(&1.key == :fast and &1.required?))
+    # Fast mode is retired with the private Codex backend that served it.
+    refute Enum.any?(prompts, &(&1.key == :fast))
   end
 
   test "provider prompt defaults to configured provider when TOML has not persisted it yet" do
@@ -2347,7 +2348,7 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   describe "save_answers — provider/model/reasoning_effort selection" do
-    test "writes provider, default_model, reasoning_effort, and fast mode to TOML round-trip" do
+    test "writes provider, default_model and reasoning_effort to TOML round-trip" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-m410-#{System.unique_integer([:positive])}")
 
@@ -2366,8 +2367,7 @@ defmodule FermixCore.Setup.WizardTest do
         |> Wizard.save_answers(
           provider: "openai_codex",
           default_model: "gpt-5.4",
-          reasoning_effort: "medium",
-          fast: "true"
+          reasoning_effort: "medium"
         )
 
       {:ok, persisted} = ConfigStore.load_runtime_config()
@@ -2380,7 +2380,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(codex, :primary) == true
       assert Keyword.get(codex, :default_model) == "gpt-5.4"
       assert Keyword.get(codex, :reasoning_effort) == :medium
-      assert Keyword.get(codex, :fast) == true
+      refute Keyword.has_key?(codex, :fast)
     end
 
     test "default_model writes to the active provider block (per primary flag)" do

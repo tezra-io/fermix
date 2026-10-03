@@ -25,7 +25,10 @@ defmodule FermixCore.Auth.OAuthProvider do
           region: String.t() | nil,
           extra_token_params: %{optional(String.t()) => String.t()},
           public_redirect_uri: String.t() | nil,
-          region_probe: %{url: String.t(), path: [String.t()]} | nil
+          region_probe: %{url: String.t(), path: [String.t()]} | nil,
+          extra_refresh_params: %{optional(String.t()) => String.t()},
+          client_registration: :static | :register | :issued,
+          hardened_callback?: boolean()
         }
 
   @enforce_keys [
@@ -98,7 +101,20 @@ defmodule FermixCore.Auth.OAuthProvider do
     # against that answer before the grant is stored, so a mismatch is recorded
     # on the entry instead of surfacing as a refusal on the first tool call.
     # `nil` for every provider that has no regions.
-    region_probe: nil
+    region_probe: nil,
+    # Extra form fields for the REFRESH grant only. ChatGPT names its
+    # `resource` on every token request; no other provider sends any.
+    extra_refresh_params: %{},
+    # Where the client id comes from. `:static`: it is this struct's own, and
+    # the callback says nothing about it. `:register`: `client_id` is a
+    # registration entry point and the callback must name the client it issued.
+    # `:issued`: `client_id` was issued earlier; the callback may omit it but
+    # never name another.
+    client_registration: :static,
+    # The callback listener accepts only `GET` with `Host` exactly
+    # `redirect_host:port` and the exact `redirect_path`, and answers a request
+    # with a wrong or missing `state` 400 without ending the sign-in.
+    hardened_callback?: false
   ]
 
   @doc """
@@ -173,6 +189,49 @@ defmodule FermixCore.Auth.OAuthProvider do
       },
       echo_code_challenge?: true
     }
+  end
+
+  @chatgpt_resource "https://api.openai.com/v1"
+  @chatgpt_scopes ~w(openid profile email offline_access resource.invoke chatgpt.tokens.use.direct)
+
+  @doc """
+  Sign in with ChatGPT (M57). `:client_id` is the client OpenAI issued this
+  home (`nil` before the first registration, which then goes through
+  `dynamic_agent_client` with the `Fermix` name hint). The authorize request
+  also carries `:host_id` (`ext_agent_host_id`), the attempt's `:nonce`, and
+  `prompt=consent` when `:consent?` is true; a struct built only to refresh
+  needs none of them. Port 0 lets the OS choose unless `:port` pins one, and a
+  pinned port that is taken fails loud.
+  """
+  @spec chatgpt(keyword()) :: t()
+  def chatgpt(opts) when is_list(opts) do
+    client_id = Keyword.fetch!(opts, :client_id)
+
+    %__MODULE__{
+      id: :chatgpt,
+      display_name: "ChatGPT",
+      authorize_url: "https://auth.openai.com/api/accounts/authorize",
+      token_url: "https://auth.openai.com/api/accounts/oauth/token",
+      client_id: client_id || "dynamic_agent_client",
+      client_registration: if(client_id, do: :issued, else: :register),
+      redirect_host: "127.0.0.1",
+      redirect_port: Keyword.get(opts, :port, 0),
+      redirect_path: "/auth/callback",
+      scopes: @chatgpt_scopes,
+      extra_authorize_params: chatgpt_authorize_params(client_id, opts),
+      extra_token_params: %{"resource" => @chatgpt_resource},
+      extra_refresh_params: %{"resource" => @chatgpt_resource},
+      fixed_port?: true,
+      hardened_callback?: true
+    }
+  end
+
+  defp chatgpt_authorize_params(client_id, opts) do
+    %{"resource" => @chatgpt_resource}
+    |> put_present("ext_agent_host_id", Keyword.get(opts, :host_id))
+    |> put_present("nonce", Keyword.get(opts, :nonce))
+    |> put_present("agent_name_hint", if(is_nil(client_id), do: "Fermix"))
+    |> put_present("prompt", if(Keyword.get(opts, :consent?, false), do: "consent"))
   end
 
   defp generate_nonce do

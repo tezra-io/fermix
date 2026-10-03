@@ -60,7 +60,7 @@ mix format --check-formatted
 - Typespecs on all public functions.
 
 ## Docs
-Design docs live in `docs/design/`, one per milestone/feature, named for its subject. List the directory and read the relevant file; never infer a doc's status from its name (many are drafts, some gitignored). `docs/TELEMETRY_CONTRACT.md` is the one contract doc outside it.
+Design docs do not live in this repo. They live in the private repo `tezra-io/fermix-design-docs`, checked out beside this one at `../fermix-design-docs/`, one folder per repo: `fermix/` for this one, `fermix-macos/`, `fermix-linux/`, `fermix-site/`, and a new folder named for any other repo a doc is about. One doc per milestone/feature, named for its subject. Every design doc or spec you are asked for is written in that repo, in the folder for the repo it is about; commit only its files there and push to `origin main`. List the folder and read the relevant file; never infer a doc's status from its name (many are drafts). `docs/design` in this repo is only a link to `../fermix-design-docs/fermix/` (that repo's `scripts/link.sh` makes it); never create it as a real directory, and never commit a design doc here. `docs/TELEMETRY_CONTRACT.md` is the one contract doc that stays here.
 
 ## Releasing across the four repos
 An engine fix reaches a Mac user only after all four repos move, in this order; skip one and it stays unshipped while every gate is green.

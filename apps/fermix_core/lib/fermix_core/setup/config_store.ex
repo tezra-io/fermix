@@ -26,6 +26,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -1302,6 +1303,7 @@ defmodule FermixCore.Setup.ConfigStore do
           Enum.map(Descriptor.all(), fn descriptor ->
             raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
             validate_provider_section_keys!(raw, descriptor)
+            warn_retired_provider_keys(raw, descriptor)
             {descriptor.id, normalize_provider_block(raw, descriptor)}
           end),
         personalization:
@@ -1446,7 +1448,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider_value(:base_url, value), do: normalize_string(value)
   defp normalize_provider_value(:default_model, value), do: normalize_string(value)
   defp normalize_provider_value(:auth_mode, value), do: normalize_auth_mode(value)
-  defp normalize_provider_value(:fast, value), do: normalize_bool(value)
   defp normalize_provider_value(:primary, value), do: normalize_bool(value)
 
   defp normalize_provider_value(:reasoning_effort, value),
@@ -1455,13 +1456,17 @@ defmodule FermixCore.Setup.ConfigStore do
   # User-authored TOML keys outside the descriptor's allowlist raise at
   # the parse boundary — a typo'd key must never be silently dropped
   # (M12 §4; Code Rule 6). The legacy `provider = ...` key keeps its more
-  # specific migration message.
+  # specific migration message. A key the descriptor retired is accepted here
+  # (an existing config.toml must keep booting), named once by
+  # `warn_retired_provider_keys/2`, and dropped by `normalize_provider_block/2`,
+  # which reads only the live keys, so the next save writes the block without it.
   defp validate_provider_section_keys!(nil, _descriptor), do: :ok
 
   defp validate_provider_section_keys!(config, descriptor) when is_map(config) do
     if descriptor.id == :openai and has_provider_key?(config), do: raise_old_provider_layout!()
 
-    allowed = MapSet.new(descriptor.config_keys, &Atom.to_string/1)
+    allowed =
+      MapSet.new(descriptor.config_keys ++ descriptor.retired_config_keys, &Atom.to_string/1)
 
     unknown =
       config
@@ -1481,6 +1486,26 @@ defmodule FermixCore.Setup.ConfigStore do
       """
     end
   end
+
+  defp warn_retired_provider_keys(nil, _descriptor), do: :ok
+
+  defp warn_retired_provider_keys(config, descriptor) when is_map(config) do
+    present = Enum.filter(descriptor.retired_config_keys, &present_key?(config, &1))
+
+    if present != [] do
+      Logger.warning(
+        "config.toml [fermix_core.providers.#{descriptor.id}] key(s) " <>
+          "#{Enum.map_join(present, ", ", &Atom.to_string/1)} are retired: this build no " <>
+          "longer reads them, so they are ignored, and the next settings save writes the " <>
+          "file without them."
+      )
+    end
+
+    :ok
+  end
+
+  defp present_key?(config, key),
+    do: Map.has_key?(config, Atom.to_string(key)) or Map.has_key?(config, key)
 
   defp normalize_realtime(config) do
     config
@@ -2016,24 +2041,51 @@ defmodule FermixCore.Setup.ConfigStore do
   # `Media.Registry` then fails loud with the supported list. Stricter than
   # `normalize_web_search_backend/1`'s silent-nil because a mistyped media
   # backend has no keyless fallback to limp along on.
+  #
+  # A backend this build retired is not a typo: an existing config.toml that
+  # names it must keep booting. It is accepted, named once at warning with the
+  # backends that replace it, and dropped, which leaves the image tool with no
+  # backend (it refuses until one is chosen) and the next save writes the file
+  # without it (the `ComputerHistory.Config.retired_keys/0` precedent). The
+  # live set is the media registry's, never a second list maintained here.
+  @retired_image_backends ~w(openai_codex)
+
   defp normalize_image_backend(nil), do: nil
 
   defp normalize_image_backend(value) when is_atom(value),
     do: normalize_image_backend(Atom.to_string(value))
 
   defp normalize_image_backend(value) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google openai_codex) ->
+    backend = value |> String.trim() |> String.downcase()
+
+    cond do
+      backend in image_backend_names() ->
         backend
 
-      other ->
-        raise ArgumentError, """
-        config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(other)}.
+      backend in @retired_image_backends ->
+        warn_retired_image_backend(backend)
 
-        Allowed backends: google, openai, openai_codex, xai.
+      true ->
+        raise ArgumentError, """
+        config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(backend)}.
+
+        Allowed backends: #{Enum.join(image_backend_names(), ", ")}.
         Remove or fix `backend`; the daemon will not boot until this is fixed.
         """
     end
+  end
+
+  defp image_backend_names, do: :image |> MediaRegistry.providers() |> Enum.sort()
+
+  defp warn_retired_image_backend(backend) do
+    Logger.warning(
+      "config.toml [fermix_core.tools.generate_image] backend #{inspect(backend)} is retired: " <>
+        "this build no longer has it, so image generation stays off until you choose " <>
+        "#{Enum.join(image_backend_names(), ", ")} in setup, and the next settings save " <>
+        "writes the file without it."
+    )
+
+    nil
   end
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.

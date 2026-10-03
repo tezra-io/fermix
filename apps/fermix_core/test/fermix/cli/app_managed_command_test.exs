@@ -10,8 +10,10 @@ defmodule Fermix.CLI.AppManagedCommandTest do
 
   alias Fermix.CLI
   alias Fermix.CLI.AppRoute
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.ServiceCommand
+  alias Fermix.CLI.SettingsCommand
   alias Fermix.CLI.Setup
   alias Fermix.CLI.StartCommand
   alias Fermix.CLI.StopCommand
@@ -173,6 +175,55 @@ defmodule Fermix.CLI.AppManagedCommandTest do
 
     assert stderr =~ "managed by Fermix.app"
     refute stderr =~ "mutually exclusive"
+  end
+
+  # D4: settings on an app-managed home change in the app, so the verb refuses
+  # before it sends anything — the home-owner check is the first daemon contact.
+  test "settings refuses an app-managed home before any settings call" do
+    app_hello = fn -> {:ok, %{"engine" => %{"distribution_identity" => "macos_app"}}} end
+
+    for {argv, expected_stdout} <- [
+          {["set", "memory", "review_interval_hours=12"], ""},
+          {["list", "--json"], ~s({"error":{"code":"app_managed"}}\n)}
+        ] do
+      {:ok, stdout} = StringIO.open("")
+      {:ok, stderr} = StringIO.open("")
+
+      status =
+        SettingsCommand.run(argv,
+          app_managed?: fn -> HomeOwner.app_managed?(hello: app_hello) end,
+          client: fn method, _params, _opts -> flunk("settings called #{method}") end,
+          stdout: stdout,
+          stderr: stderr
+        )
+
+      {:ok, {_, out}} = StringIO.close(stdout)
+      {:ok, {_, err}} = StringIO.close(stderr)
+
+      assert status == 1
+      assert out == expected_stdout
+      assert err =~ "fermix settings:"
+      assert err =~ "managed by Fermix.app"
+      assert err =~ "Settings window"
+      refute err =~ "background service"
+    end
+  end
+
+  test "a secret typed into settings argv is still refused on an app-managed home" do
+    {:ok, stderr} = StringIO.open("")
+
+    status =
+      SettingsCommand.run(["secret", "set", "openai_api_key", "sk-test-abc123"],
+        app_managed?: fn -> true end,
+        client: fn method, _params, _opts -> flunk("settings called #{method}") end,
+        stderr: stderr
+      )
+
+    {:ok, {_, err}} = StringIO.close(stderr)
+
+    assert status == 2
+    assert err =~ "rotate it"
+    refute err =~ "sk-test-abc123"
   end
 
   test "setup opens the native setup route before any token or service work" do

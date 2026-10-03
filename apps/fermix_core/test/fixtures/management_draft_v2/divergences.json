@@ -583,6 +583,12 @@
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
     },
     {
+      "method": "settings.get:providers.openai_codex",
+      "field": "rows:fast",
+      "kind": "draft_only",
+      "why": "M57: OpenAI Codex now signs in with ChatGPT and calls the public Responses API, which has no fast mode, so the engine publishes no fast row. A `fast` key an existing config.toml still carries is accepted, named at warning and dropped. The app draws one row fewer in the section; no Swift work."
+    },
+    {
       "method": "settings.get:providers.venice",
       "field": "rows:venice_api_key",
       "kind": "engine_only",

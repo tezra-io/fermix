@@ -19,8 +19,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   end
 
   describe "models_for/1" do
-    test "returns at least one model for each known provider" do
-      for provider <- ModelCatalog.providers() do
+    test "returns at least one model for each provider that ships a catalog" do
+      for provider <- ModelCatalog.providers(), provider != :openai_codex do
         models = ModelCatalog.models_for(provider)
         assert is_list(models) and models != []
 
@@ -33,6 +33,12 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
 
+    # OpenAI Codex signs in with ChatGPT, and the account's models come live
+    # from /v1/models (M57 §6.2).
+    test "openai_codex ships none" do
+      assert ModelCatalog.models_for(:openai_codex) == []
+    end
+
     test "raises for unknown provider" do
       assert_raise FunctionClauseError, fn ->
         apply(ModelCatalog, :models_for, [:gemini])
@@ -42,28 +48,52 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "default_model_for/1" do
     test "returns the first model id in the per-provider list" do
-      for provider <- ModelCatalog.providers() do
+      for provider <- ModelCatalog.providers(), provider != :openai_codex do
         [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.default_model_for(provider) == first_id
       end
     end
 
-    test "OpenAI and Codex default to gpt-6-astra (frontier generation)" do
+    test "a provider with no shipped catalog has no default, and no slug is guessed" do
+      assert ModelCatalog.default_model_for(:openai_codex) == ""
+      assert ModelCatalog.effective_model(:openai_codex, []) == ""
+      assert ModelCatalog.effective_model(:openai_codex, default_model: "") == ""
+
+      assert ModelCatalog.effective_model(:openai_codex, default_model: "gpt-6.1-sol") ==
+               "gpt-6.1-sol"
+    end
+
+    # The plan route serves the public API's models, so a listed slug takes the
+    # openai catalog's window; a slug neither knows takes the unknown-model one.
+    test "an openai_codex slug takes the openai catalog's window" do
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6.1-sol") ==
+               ModelCatalog.context_window_for(:openai, "gpt-6.1-sol")
+
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") ==
+               ModelCatalog.context_window_for(:openai, "gpt-5.5")
+
+      assert ModelCatalog.context_window_for(:openai_codex, "gpt-plan-unlisted",
+               unknown_model_telemetry: false
+             ) == 100_000
+    end
+
+    test "the openai catalog's facts never make an openai_codex slug a known model" do
+      refute ModelCatalog.known_model?(:openai_codex, "gpt-5.5")
+    end
+
+    test "OpenAI defaults to gpt-6-astra (frontier generation)" do
       assert ModelCatalog.default_model_for(:openai) == "gpt-6-astra"
-      assert ModelCatalog.default_model_for(:openai_codex) == "gpt-6-astra"
     end
 
     test "xAI defaults to grok-4.7 (head = newest generation)" do
       assert ModelCatalog.default_model_for(:xai) == "grok-4.7"
     end
 
-    test "GPT-6.1 Sol and GPT-6 Luna follow Astra on both OpenAI routes, and GPT-6 Sol is gone" do
-      for provider <- [:openai, :openai_codex] do
-        assert ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna" | _rest] =
-                 Enum.map(ModelCatalog.models_for(provider), & &1.id)
+    test "GPT-6.1 Sol and GPT-6 Luna follow Astra on OpenAI, and GPT-6 Sol is gone" do
+      assert ["gpt-6-astra", "gpt-6.1-sol", "gpt-6-luna" | _rest] =
+               Enum.map(ModelCatalog.models_for(:openai), & &1.id)
 
-        refute ModelCatalog.known_model?(provider, "gpt-6-sol")
-      end
+      refute ModelCatalog.known_model?(:openai, "gpt-6-sol")
     end
 
     test "Claude Opus 5.5 is offered without moving the Anthropic default" do
@@ -116,23 +146,9 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "context_window_for/2" do
     test "returns cataloged context windows for known models" do
-      # Direct-API entries carry the published window; the Codex column carries
-      # the cache's max_context_window (the ceiling that path stretches to).
+      # Direct-API entries carry the published window.
       assert ModelCatalog.context_window_for(:openai, "gpt-5.5") == 1_050_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.4-mini") == 400_000
-      # 5.5/5.4-mini are 272k on Codex, NOT the 400k this catalog used to
-      # claim: 0.85 * 400_000 = 340_000 deferred compaction past the real
-      # window, so a long turn hit the provider limit before compacting.
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") == 272_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.4") == 272_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.4-mini") == 272_000
-      # The current generation stretches to 872k on Codex.
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-astra") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6.1-sol") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6-luna") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-sol") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-terra") == 872_000
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.6-luna") == 872_000
       # Astra's direct-API entry is a derived compaction budget, not its real
       # 1,050,000 window: 0.85 * 320_000 = 272_000, exactly the input-token
       # boundary above which OpenAI reprices the full request at 2x/1.5x.
@@ -251,7 +267,6 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "vision?/2" do
     test "vision-capable catalog models return true" do
-      assert ModelCatalog.vision?(:openai_codex, "gpt-5.5")
       assert ModelCatalog.vision?(:openai, "gpt-5.5")
       assert ModelCatalog.vision?(:anthropic, "claude-opus-4-8")
       assert ModelCatalog.vision?(:xai, "grok-4.3")
@@ -274,14 +289,12 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.5") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.4-mini") == :xhigh
-      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6-astra") == nil
-      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6-astra") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-6.1-sol") == nil
-      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-sol") == nil
-      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6-luna") == nil
       assert ModelCatalog.model_effort_ceiling(:openai, "gpt-5.6-sol") == nil
-      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.6-sol") == nil
+      # OpenAI Codex serves the public API's models: their caps are openai's.
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-5.5") == :xhigh
+      assert ModelCatalog.model_effort_ceiling(:openai_codex, "gpt-6.1-sol") == nil
       # xhigh arrived with Grok 4.6: 4.6+ is uncapped, every older Grok tops
       # out at :high.
       assert ModelCatalog.model_effort_ceiling(:xai, "grok-4.7") == nil
@@ -298,19 +311,16 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
       refute :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.5")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6-astra")
-      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-astra")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-6.1-sol")
-      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-luna")
       assert :max in ModelCatalog.effort_levels_for(:openai, "gpt-5.6-sol")
-      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-5.6-sol")
+      assert :max in ModelCatalog.effort_levels_for(:openai_codex, "gpt-6-astra")
     end
 
     test "clamp_effort/3 caps to the model ceiling, then the provider ceiling" do
       # gpt-5.5 caps :max down to its :xhigh model ceiling; the current
       # generation keeps :max.
       assert ModelCatalog.clamp_effort(:openai, "gpt-5.5", :max) == :xhigh
-      assert ModelCatalog.clamp_effort(:openai_codex, "gpt-5.5", :max) == :xhigh
-      assert ModelCatalog.clamp_effort(:openai_codex, "gpt-6-astra", :max) == :max
+      assert ModelCatalog.clamp_effort(:openai, "gpt-6-astra", :max) == :max
       assert ModelCatalog.clamp_effort(:openai, "gpt-5.6-sol", :max) == :max
       # grok-4.6 reaches xhigh, the xai provider ceiling; an older Grok caps at
       # its own :high, which is what xAI would have downgraded :xhigh to anyway.
@@ -326,7 +336,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "known_model?/2" do
     test "matches catalog entries and rejects unknowns" do
-      for provider <- ModelCatalog.providers() do
+      for provider <- ModelCatalog.providers(), provider != :openai_codex do
         [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.known_model?(provider, first_id)
       end
@@ -403,22 +413,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.provider_for_model("grok-4.3") == :xai
     end
 
-    test "a slug shared across catalogs resolves to the first provider in catalog order" do
-      # gpt-5.5 is in both :openai_codex and :openai; providers/0 lists codex first.
-      assert ModelCatalog.provider_for_model("gpt-5.5") == :openai_codex
-      assert ModelCatalog.provider_for_model("gpt-6-astra") == :openai_codex
-    end
-
-    test "the Codex and direct-OpenAI lists carry the same slugs" do
-      # RoutingOverrides.validate_pairing/3 raises at config-parse time when a
-      # slug the catalog knows under one provider is pinned to the other, so a
-      # model added to only one of these two lists turns a legitimate
-      # provider/model pin into a hard boot crash. Whole-surface invariant: a
-      # model added later either joins both lists or fails here.
-      codex = ModelCatalog.models_for(:openai_codex) |> MapSet.new(& &1.id)
-      direct = ModelCatalog.models_for(:openai) |> MapSet.new(& &1.id)
-
-      assert codex == direct
+    # OpenAI Codex ships no catalog, so an OpenAI slug is owned by the API-key
+    # provider alone.
+    test "an OpenAI slug resolves to the API-key provider" do
+      assert ModelCatalog.provider_for_model("gpt-5.5") == :openai
+      assert ModelCatalog.provider_for_model("gpt-6-astra") == :openai
     end
 
     test "an unknown slug is nil" do

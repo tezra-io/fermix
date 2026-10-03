@@ -1,6 +1,7 @@
 defmodule FermixCore.ReadinessTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -73,6 +74,26 @@ defmodule FermixCore.ReadinessTest do
                report.failures,
                &(&1.detail_key == "provider:missing_credentials:anthropic" and &1.gating)
              )
+    end
+
+    # OpenAI Codex's way in is Sign in with ChatGPT, so its row names the
+    # sign-in's own standing (here: never signed in) rather than a generic
+    # "configure" line or a terminal command.
+    test "an OpenAI Codex primary with no sign-in gates with the sign-in's own sentence" do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("readiness-codex")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :providers, openai_codex: [primary: true])
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+
+      failure =
+        Enum.find(
+          Readiness.report().failures,
+          &(&1.detail_key == "provider:missing_credentials:openai_codex")
+        )
+
+      assert failure.gating
+      assert failure.action == ChatGPT.failure_sentence(:not_signed_in)
     end
 
     # The first boot seeds personalization from the machine (`Setup.HomeSeeder`),
@@ -257,7 +278,7 @@ defmodule FermixCore.ReadinessTest do
       assert Enum.any?(report.failures, &(&1.component == "personalization" and not &1.gating))
     end
 
-    test "openai_codex readiness uses Codex auth and does not require an OpenAI API key" do
+    test "openai_codex readiness uses the ChatGPT sign-in and does not require an OpenAI API key" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
@@ -275,13 +296,7 @@ defmodule FermixCore.ReadinessTest do
 
       Application.put_env(:fermix_channels, :telegram, enabled: false)
 
-      assert :ok =
-               Store.write(:openai_codex, %{
-                 auth_mode: "chatgpt",
-                 tokens: %{access_token: "codex-at", refresh_token: "codex-rt"},
-                 expires_at: DateTime.utc_now() |> DateTime.add(3600),
-                 last_refresh: nil
-               })
+      assert :ok = Store.write("chatgpt", chatgpt_registration())
 
       report = Readiness.report()
 
@@ -729,6 +744,24 @@ defmodule FermixCore.ReadinessTest do
   defp seed_ready_home do
     Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
     Application.put_env(:fermix_core, :personalization, seeded_personalization())
+  end
+
+  # A Sign in with ChatGPT registration that can carry a turn: signed in, with
+  # plan usage granted (`Auth.ChatGPT.route_status/1` reads it as connected).
+  defp chatgpt_registration do
+    %{
+      auth_mode: "oauth_siwc",
+      provider: "chatgpt",
+      client_id: "oaiapp_R1",
+      subject: "user-sub-1",
+      account: %{email: "ada@example.test"},
+      granted_scopes:
+        ~w(chatgpt.tokens.use.direct email offline_access openid profile resource.invoke),
+      tokens: %{access_token: "AT-0", refresh_token: "RT-0"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
   end
 
   defp seeded_personalization do

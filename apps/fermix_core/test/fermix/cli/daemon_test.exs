@@ -1078,6 +1078,19 @@ defmodule Fermix.CLI.DaemonTest do
       assert_receive {:forget_signed_out, "github:primary"}
     end
 
+    # `fermix auth logout` signs `openai_codex` out of ChatGPT, whose sign-in
+    # lives under the `chatgpt` profile, and names that profile to the daemon.
+    test "has the daemon let go of the ChatGPT sign-in a CLI logout cleared", ctx do
+      assert {:ok, %{"status" => "ok"}} =
+               Client.request("auth_forget",
+                 params: %{"profile" => "chatgpt"},
+                 socket_path: ctx.forget_socket,
+                 timeout: 1_000
+               )
+
+      assert_receive {:forget_signed_out, "chatgpt"}
+    end
+
     test "refuses a profile it cannot name, and lets go of nothing", ctx do
       oversized = String.duplicate("p", 257)
 

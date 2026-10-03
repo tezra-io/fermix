@@ -7,7 +7,7 @@ defmodule FermixCore.Harness.Vendors do
   operator's own CLI config — never a network call, never a keychain read:
 
     * **codex** — `~/.codex/auth.json` (or `Config.codex_home`) must carry a
-      non-empty refresh token (`Auth.CodexImport.codex_available?/1`).
+      non-empty refresh token (`codex_signed_in?/1`).
     * **claude** — `~/.claude` (or `Config.claude_config_dir`): a
       `.credentials.json` file means authenticated; the dir alone means
       `:unverified` (macOS stores credentials in the keychain, which is not read
@@ -19,7 +19,6 @@ defmodule FermixCore.Harness.Vendors do
   `:supervised`, and the config-dir overrides to stay hermetic.
   """
 
-  alias FermixCore.Auth.CodexImport
   alias FermixCore.CommandRunner
   alias FermixCore.Harness.Config
   alias FermixCore.Harness.Identity
@@ -135,6 +134,22 @@ defmodule FermixCore.Harness.Vendors do
     }
   end
 
+  @doc """
+  Whether a Codex CLI sign-in file carries a non-empty refresh token: the
+  network-free sign-in state of the Codex CLI's own login, which `codex_run`
+  uses. Never refreshes, never reads past the file.
+  """
+  @spec codex_signed_in?(Path.t()) :: boolean()
+  def codex_signed_in?(auth_path) when is_binary(auth_path) do
+    with {:ok, raw} <- File.read(auth_path),
+         {:ok, %{"tokens" => %{"refresh_token" => token}}} when is_binary(token) and token != "" <-
+           Jason.decode(raw) do
+      true
+    else
+      _absent_or_unreadable -> false
+    end
+  end
+
   defp cli("codex"), do: "codex"
   defp cli("claude"), do: "claude"
 
@@ -160,7 +175,7 @@ defmodule FermixCore.Harness.Vendors do
   defp auth_state("codex", opts) do
     auth_path = Path.join(codex_home(opts), "auth.json")
 
-    if CodexImport.codex_available?(auth_path), do: :authenticated, else: :absent
+    if codex_signed_in?(auth_path), do: :authenticated, else: :absent
   end
 
   defp auth_state("claude", opts) do

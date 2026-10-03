@@ -55,6 +55,18 @@ defmodule Fermix.CLI.HomeOwner do
       "Use the app's background service controls."
   end
 
+  @doc """
+  The sentence `fermix settings` prints on an app-managed home.
+
+  Settings are not a service control, so the sentence names the window the
+  operator changes them in instead.
+  """
+  @spec settings_refusal_sentence() :: String.t()
+  def settings_refusal_sentence do
+    "this Fermix home is managed by Fermix.app, so its settings change in the app's " <>
+      "Settings window."
+  end
+
   defp marker_says_app_managed?(opts) do
     marker? = Keyword.get(opts, :marker?, &EngineOwner.app_managed_marker?/1)
     marker?.(opts)

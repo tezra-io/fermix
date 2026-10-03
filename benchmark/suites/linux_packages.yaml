@@ -184,3 +184,101 @@ scenarios:
           that only that account can read. Mentions that `fermix doctor` shows
           which store is in use. Does not invent a keyring package to install as
           the only answer, and does not describe the file store as automatic.
+
+  # SETTINGS FROM A TERMINAL. On a packaged server reached over SSH there is no
+  # browser and no app, and general knowledge says "edit the config file" or
+  # "pass the key as a flag". The two scenarios below gate on the one literal a
+  # correct answer contains, `fermix settings` (and `fermix settings set` for a
+  # plain value). The secret cases also refuse the secret-as-an-argument forms:
+  # `secret set ID <value>` / `secret set ID=<value>`, where the value is a
+  # quoted string, a `$VAR`, an angle-bracket placeholder, a `tvly-`/`sk-` key
+  # or a Telegram-style `123:` token, and `settings set SECTION KEY=<value>` for
+  # a key ending in `api_key`, `_token` or `_secret`. It leaves alone the forms a
+  # correct answer prints: the bare id, `--stdin`, a trailing comment, prose
+  # after the id, and the `secret_store=file` remedy. Whether the key is typed
+  # at a prompt or piped is the rubric's to judge.
+  - id: headless_secret_entry
+    title: "A packaged server over SSH takes a new key through a prompt or a pipe, never an argument"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, settings, secrets, self-knowledge]
+    cases:
+      - id: web_search_key_over_ssh
+        query: >
+          Fermix runs from the .deb on a headless Debian server I only reach
+          over SSH, no browser anywhere near it. My Tavily key for web search
+          got rotated and I have the new one copied. How do I swap it in from
+          the terminal?
+        expect:
+          reply_matches: 'fermix\s+settings'
+          reply_not_matches: 'secret[ \t]+set[ \t]+[\w:.-]+(?:=|[ \t]+(?:<|["''$]|tvly-|sk-|\d+:))|settings[ \t]+set[ \t]+[\w.-]+[ \t]+[\w:.-]*(?:api_key|_token|_secret)=[^\s`]'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Gives `fermix settings secret set tavily_api_key` (or says to read the
+          exact id from `fermix settings show web_search`), with the new key
+          typed at a prompt that does not echo it or piped in with `--stdin`.
+          The key itself never appears on a command line in the reply: not as
+          an argument to `fermix settings`, not as a `fermix setup` flag. Does
+          not send the user to browser setup or to paste the key into
+          `config.toml`, and does not answer with the Mac app's Settings panes.
+      - id: telegram_token_rotated_on_vps
+        query: >
+          I had to regenerate my Telegram bot token in BotFather. My Fermix is
+          the rpm install on a Fedora VPS: SSH only, no desktop, no browser.
+          What do I run to give it the new token?
+        expect:
+          reply_matches: 'fermix\s+settings'
+          reply_not_matches: 'secret[ \t]+set[ \t]+[\w:.-]+(?:=|[ \t]+(?:<|["''$]|tvly-|sk-|\d+:))|settings[ \t]+set[ \t]+[\w.-]+[ \t]+[\w:.-]*(?:api_key|_token|_secret)=[^\s`]'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Gives `fermix settings secret set telegram_bot_token`, with the token
+          typed at a prompt that does not echo it or piped in with `--stdin`;
+          the token itself never appears on a command line in the reply. Says
+          `fermix restart` makes Telegram use the new token, because channel
+          settings are read when Fermix starts. Does not suggest an environment
+          variable for the token, browser setup, or a hand edit of
+          `config.toml`.
+
+  - id: headless_setting_change
+    title: "A packaged server over SSH changes a provider value with `fermix settings set`, then restarts"
+    severity: normal
+    risk: host_readonly
+    tags: [linux-packages, settings, self-knowledge]
+    cases:
+      - id: default_model_over_ssh
+        query: >
+          My Fermix is the .deb install on a headless Ubuntu box I manage over
+          SSH. It talks to OpenAI with an API key, and I want it to use a
+          different OpenAI model by default. There's no browser on that
+          machine. How do I change the model from the terminal?
+        expect:
+          reply_matches: 'fermix\s+settings\s+set\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Changes the OpenAI provider's default model with `fermix settings set
+          providers.openai default_model=<model>`, optionally after `fermix
+          settings show providers.openai` to see the current value and the
+          suggested models, and says to run `fermix restart` afterwards because
+          provider settings are read when Fermix starts. Does not make a hand
+          edit of `config.toml` or browser setup the answer, and does not invent
+          a command or flag that does not exist.
+      - id: reasoning_effort_over_ssh
+        query: >
+          Fermix is running on my Fedora server from the rpm, signed in with my
+          ChatGPT account. Replies take ages and I'd rather it think less hard
+          by default. I only have SSH to that box. How do I turn that down?
+        expect:
+          reply_matches: 'fermix\s+settings\s+set\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Lowers the ChatGPT (OpenAI Codex) provider's reasoning effort with
+          `fermix settings set providers.openai_codex reasoning_effort=<lower
+          value>`, or turns on its fast mode with `fast=true` in the same
+          section, optionally after `fermix settings show providers.openai_codex`
+          to see the choices, and says `fermix restart` applies it. Does not
+          tell the user to switch to another provider, and does not invent a
+          command or flag that does not exist.

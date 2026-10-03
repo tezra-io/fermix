@@ -99,8 +99,14 @@ BUNDLED_SKILLS_DIR = os.path.join(os.path.dirname(BENCH_DIR), "apps", "fermix_co
 MCP_STATE_DIR = "eval-mcp"
 # Primary provider id -> its key in the Fermix auth store ($FERMIX_HOME/auth.json),
 # for OAuth providers whose token must be copied into the disposable home.
+# openai_codex signs in with ChatGPT, whose entry lives under `chatgpt`. Its access
+# tokens last one hour and its refresh token rotates on every use: a run that
+# outlives the copied access token refreshes in the eval home, and the dev home's
+# copy is then refused as reused, so the dev home must sign in again. The copied
+# entry carries the registration's issued client id; the eval home gets no host id
+# file, because only a sign-in needs one.
 _OAUTH_PROFILE_KEY = {
-    "openai_codex": "openai_codex",
+    "openai_codex": "chatgpt",
     "anthropic": "anthropic_oauth",
     "xai": "xai_oauth",
 }
@@ -336,8 +342,9 @@ def copy_oauth_token(home: str, pid: str) -> None:
 
     OAuth tokens are home-scoped ($FERMIX_HOME/auth.json), not host-global — a
     fresh home has none. We only READ the dev store; the eval daemon writes any
-    refresh to its own copy. A current token (valid hours out) is used as-is, so
-    a normal short run never refreshes and never rotates the shared refresh token.
+    refresh to its own copy. A current token is used as-is, so a run shorter than
+    its life never refreshes and never rotates the shared refresh token (an
+    openai_codex token lives one hour; see _OAUTH_PROFILE_KEY).
     """
     key = _OAUTH_PROFILE_KEY.get(pid)
     if key is None:

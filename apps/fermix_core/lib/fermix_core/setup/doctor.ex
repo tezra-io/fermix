@@ -17,11 +17,9 @@ defmodule FermixCore.Setup.Doctor do
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
-  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Capabilities, as: ComputerUseCapabilities
@@ -34,7 +32,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.RouteResolver
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
@@ -143,11 +143,10 @@ defmodule FermixCore.Setup.Doctor do
   @openai_default_url "https://api.openai.com/v1/responses"
   # The host both voice engines dial. Listing models is free and sends no prompt.
   @openai_models_url "https://api.openai.com/v1/models"
-  @codex_default_url "https://chatgpt.com/backend-api/codex/responses"
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   # xAI base_url is a ROOT (the adapter appends /responses); the probe must
   # do the same so a configured/overlaid root base_url hits the same URL the
-  # runtime does. Codex/OpenAI/Anthropic keep full default URLs because their
+  # runtime does. OpenAI/Anthropic keep full default URLs because their
   # blocks don't persist a base_url through setup.
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
@@ -170,6 +169,11 @@ defmodule FermixCore.Setup.Doctor do
     {"network", :network}
   ]
   @default_probe_timeout_ms 5_000
+  # The OpenAI Codex probe is a real streamed turn (its ChatGPT plan route
+  # accepts no `max_output_tokens`), so its idle window is a turn's, not a
+  # 1-token probe's.
+  @codex_probe_timeout_ms 30_000
+  @codex_surface "OpenAI Codex"
   # Operator-facing remedies for the on-device transcription backend. The
   # "cannot be installed here" sentences belong to the installer modules (they
   # own the reason) and are rendered verbatim; these two cover the ordinary
@@ -270,15 +274,34 @@ defmodule FermixCore.Setup.Doctor do
   access token is stale (well past expiry — `TokenExpiry.stale?/1`), i.e. dormant
   and likely needing re-auth. No network. Shared by `fermix doctor` and the web
   setup doctor pane so both define "stale" the same way.
+
+  Only profiles Fermix still reads are reported: a provider's auth profile
+  (`Store.profile/1`) and a plugin's own profile. An entry stored under a bare
+  provider id is one an older build wrote (the Codex-client grant under
+  `openai_codex`, whose provider now signs in under `chatgpt`); nothing reads it,
+  so asking to renew it would send the operator after a credential that does
+  nothing. The entry itself is left where it is.
   """
   @spec stale_token_profiles() :: {:ok, [String.t()]} | {:error, term()}
   def stale_token_profiles do
     with {:ok, profiles} <- Store.list_profiles() do
-      {:ok, profiles |> Enum.filter(&stale_profile?/1) |> Enum.map(&elem(&1, 0)) |> Enum.sort()}
+      {:ok,
+       profiles
+       |> Enum.filter(fn {profile, _entry} -> read_profile?(profile) end)
+       |> Enum.filter(&stale_profile?/1)
+       |> Enum.map(&elem(&1, 0))
+       |> Enum.sort()}
     end
   end
 
   defp stale_profile?({_profile, entry}), do: TokenExpiry.stale?(entry.expires_at)
+
+  # A provider's profile is read whatever it is named; any other name that is a
+  # provider id is a leftover, and every remaining name is a plugin's profile.
+  defp read_profile?(profile) do
+    profile in Enum.map(Store.profiled_providers(), &Store.profile/1) or
+      profile not in Enum.map(ModelCatalog.providers(), &Atom.to_string/1)
+  end
 
   @doc """
   Computer-use OS-permission state for the operator surfaces (`fermix doctor` and
@@ -933,35 +956,67 @@ defmodule FermixCore.Setup.Doctor do
 
   defp bearer_from_api_key(value), do: {:ok, value}
 
+  # One tiny turn through the route and the adapter themselves (M57 §7.4), so
+  # probe-green means route-green: the route refuses a sign-in that cannot carry
+  # a turn (not signed in, plan usage off, reconnect needed) or a missing model
+  # with its own sentence, and the adapter's refusals map to theirs, each to its
+  # own line. The adapter emits the provider call through
+  # `Providers.Telemetry.emit_call/3`. `:chatgpt_route_status`, `:access_token`
+  # and `:token_server` are injectable.
   defp probe_codex(opts) do
-    config = provider_config(:openai_codex)
+    case codex_route(opts) do
+      {:ok, {route_key, adapter_opts}} ->
+        start = System.monotonic_time(:millisecond)
 
-    case require_codex_token(opts) do
-      {:error, _} = err ->
-        err
+        [%{role: "system", content: "ping"}, %{role: "user", content: "."}]
+        |> ChatGPTPlan.chat([], codex_probe_opts(adapter_opts, opts))
+        |> classify_codex(route_key.model, start)
 
-      {:ok, token} ->
-        url = base_url(config, :openai_codex, @codex_default_url)
-        model = ModelCatalog.effective_model(:openai_codex, config)
+      {:error, sentence} ->
+        {:error, {:misconfigured, sentence}}
+    end
+  end
 
-        body = %{
-          model: model,
-          input: [
-            %{type: "message", role: "user", content: [%{type: "input_text", text: "."}]}
-          ],
-          instructions: "ping",
-          store: false,
-          stream: true
-        }
+  defp codex_route(opts) do
+    route_opts =
+      opts
+      |> Keyword.take([:chatgpt_route_status, :access_token, :token_server])
+      |> Keyword.put(:provider, :openai_codex)
 
-        headers = [
-          {"authorization", "Bearer #{token}"},
-          {"openai-beta", "responses=experimental"},
-          {"originator", "pi"},
-          {"content-type", "application/json"}
-        ]
+    {:ok, RouteResolver.resolve!(route_opts)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
 
-        do_post(:openai_codex, url, body, headers, model, "chatgpt.com Codex OAuth", opts)
+  defp codex_probe_opts(adapter_opts, opts) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, @codex_probe_timeout_ms)
+
+    adapter_opts
+    |> Keyword.put(:req_options, probe_req_options(Keyword.put(opts, :timeout_ms, timeout_ms)))
+    |> Keyword.put(:agent, "doctor")
+    |> Keyword.put(:session_id, Keyword.get(opts, :session_id))
+  end
+
+  defp classify_codex({:ok, _turn}, model, start),
+    do: {:ok, %{provider: :openai_codex, model: model, latency_ms: elapsed_ms(start)}}
+
+  defp classify_codex({:error, reason}, _model, _start) do
+    case {reason, ChatGPTPlan.refusal_sentence(reason)} do
+      {{:provider_error, %{kind: kind}}, sentence}
+      when kind in [:auth, :plan_not_eligible, :invalid_request] and is_binary(sentence) ->
+        {:error, {:auth_scope_mismatch, @codex_surface, sentence}}
+
+      {{:provider_error, _error}, sentence} when is_binary(sentence) ->
+        {:error, {:misconfigured, sentence}}
+
+      {{:provider_error, %{status: status, message: message}}, nil} when is_integer(status) ->
+        {:error, {:server_error, status, message}}
+
+      {{:provider_transport_error, %{reason: transport_reason}}, nil} ->
+        {:error, {:network, transport_reason}}
+
+      {other, nil} ->
+        {:error, {:network, other}}
     end
   end
 
@@ -1419,7 +1474,6 @@ defmodule FermixCore.Setup.Doctor do
   # must shadow the generic "subscription" entry).
   @auth_hints [
     {"api.openai.com", "API key is missing the api.responses.write scope or has been revoked"},
-    {"Codex", "Codex OAuth token rejected — re-import via `fermix setup --import-codex`"},
     {"Grok subscription",
      "SpaceXAI subscription token rejected — reconnect via `fermix auth login --provider xai` " <>
        "(a 403 can mean the Grok plan lacks API access)"},
@@ -1453,51 +1507,6 @@ defmodule FermixCore.Setup.Doctor do
   defp base_url(config, _provider, default) do
     Keyword.get(config, :base_url, default)
   end
-
-  defp require_codex_token(opts) do
-    cond do
-      manager = Keyword.get(opts, :token_manager) ->
-        TokenManager.get_token(manager)
-
-      Keyword.has_key?(opts, :fermix_auth_path) ->
-        CodexToken.get_token(opts)
-
-      Process.whereis(TokenManager) ->
-        TokenManager.get_token(TokenManager)
-
-      true ->
-        CodexToken.get_token(opts)
-    end
-    |> classify_token()
-  end
-
-  defp classify_token({:ok, token}) when is_binary(token) and token != "", do: {:ok, token}
-  defp classify_token({:ok, _}), do: {:error, {:misconfigured, "Codex token is empty"}}
-
-  defp classify_token({:error, :no_auth_file}),
-    do:
-      {:error,
-       {:misconfigured, "Codex token missing; run `fermix auth login`, then restart the daemon."}}
-
-  defp classify_token({:error, {:provider_missing, :openai_codex}}),
-    do:
-      {:error,
-       {:misconfigured, "Codex token missing; run `fermix auth login`, then restart the daemon."}}
-
-  defp classify_token({:error, :no_token}),
-    do:
-      {:error,
-       {:misconfigured,
-        "TokenManager has no Codex token loaded; run `fermix auth login`, then restart the daemon."}}
-
-  defp classify_token({:error, :auth_invalidated}),
-    do:
-      {:error,
-       {:misconfigured,
-        "Codex OAuth token was invalidated; run `fermix auth login`, then restart the daemon."}}
-
-  defp classify_token({:error, reason}),
-    do: {:error, {:misconfigured, "Codex token unavailable: #{inspect(reason)}"}}
 
   defp elapsed_ms(start), do: System.monotonic_time(:millisecond) - start
 end

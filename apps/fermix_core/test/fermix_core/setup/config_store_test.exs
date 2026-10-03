@@ -408,6 +408,176 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(providers[:openai], :primary) == false
   end
 
+  # M57 §5: `[fermix_core.providers.openai_codex]` carries `primary`,
+  # `default_model` and `reasoning_effort` and nothing else (the config
+  # round-trip pitfall: seeded with the normalized app-env shapes).
+  test "save/load round-trips the openai_codex provider block" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    block = [default_model: "gpt-6.1-sol", reasoning_effort: :high, primary: true]
+
+    snapshot = %{
+      fermix_core: [providers: [openai_codex: block]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.openai_codex]"
+    assert contents =~ ~s(default_model = "gpt-6.1-sol")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert Enum.sort(loaded.fermix_core[:providers][:openai_codex]) == Enum.sort(block)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+
+    assert reloaded.fermix_core[:providers][:openai_codex] ==
+             loaded.fermix_core[:providers][:openai_codex]
+  end
+
+  for key <- ["api_key", "base_url", "auth_mode"] do
+    test "an openai_codex block with #{key} refuses to load" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      File.mkdir_p!(tmp_home)
+
+      File.write!(
+        Path.join(tmp_home, "config.toml"),
+        "[fermix_core.providers.openai_codex]\n#{unquote(key)} = \"x\"\n"
+      )
+
+      assert_raise ArgumentError,
+                   ~r/\[fermix_core.providers.openai_codex\] has unknown key\(s\): #{unquote(key)}/,
+                   fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end
+    end
+  end
+
+  # Fast mode and the Codex image backend are retired, and the owner's dev and
+  # prod config.toml carry exactly this today: it must keep booting. Each is
+  # accepted at parse, named once at warning, and dropped, and the next save
+  # writes the file without it.
+  @retired_toml """
+  [fermix_core.providers.openai_codex]
+  default_model = "gpt-5.5"
+  fast = true
+  primary = true
+  reasoning_effort = "high"
+
+  [fermix_core.tools.generate_image]
+  backend = "openai_codex"
+  """
+
+  describe "retired fast key and openai_codex image backend" do
+    setup do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      File.mkdir_p!(tmp_home)
+      %{config_path: Path.join(tmp_home, "config.toml")}
+    end
+
+    test "load accepts both, names each at warning, and drops them", %{config_path: path} do
+      File.write!(path, @retired_toml)
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, loaded} = result
+
+      assert Enum.sort(loaded.fermix_core[:providers][:openai_codex]) ==
+               Enum.sort(default_model: "gpt-5.5", reasoning_effort: :high, primary: true)
+
+      assert Keyword.get(loaded.fermix_core[:tools], :generate_image) == []
+
+      assert log =~ "[fermix_core.providers.openai_codex] key(s) fast are retired"
+      assert log =~ ~s(backend "openai_codex" is retired)
+      assert log =~ "google, openai, xai"
+    end
+
+    test "a save after the load writes the file without them, and the next load is silent",
+         %{config_path: path} do
+      File.write!(path, @retired_toml)
+
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert :ok = ConfigStore.save_snapshot(loaded)
+
+      contents = File.read!(path)
+      assert contents =~ "[fermix_core.providers.openai_codex]"
+      assert contents =~ ~s(default_model = "gpt-5.5")
+      assert contents =~ "primary = true"
+      assert contents =~ ~s(reasoning_effort = "high")
+      refute contents =~ "fast ="
+      refute contents =~ ~s(backend = "openai_codex")
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, reloaded} = result
+      assert reloaded.fermix_core[:providers] == loaded.fermix_core[:providers]
+      assert Keyword.get(reloaded.fermix_core[:tools], :generate_image, []) == []
+      refute log =~ "retired"
+    end
+
+    test "the retired backend leaves the model in place, with no backend",
+         %{config_path: path} do
+      File.write!(path, """
+      [fermix_core.tools.generate_image]
+      backend = "openai_codex"
+      model = "gpt-image-2"
+      """)
+
+      {{:ok, loaded}, _log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert loaded.fermix_core[:tools][:generate_image] == [model: "gpt-image-2"]
+    end
+
+    # A config with neither key reads exactly as before, with nothing named.
+    test "a config with neither key loads, saves and reloads unchanged and silent",
+         %{config_path: path} do
+      File.write!(path, """
+      [fermix_core.providers.openai_codex]
+      default_model = "gpt-5.5"
+      primary = true
+      reasoning_effort = "high"
+
+      [fermix_core.tools.generate_image]
+      backend = "openai"
+      model = "gpt-image-2"
+      """)
+
+      {result, log} =
+        with_log(fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end)
+
+      assert {:ok, loaded} = result
+      refute log =~ "retired"
+
+      assert Enum.sort(loaded.fermix_core[:providers][:openai_codex]) ==
+               Enum.sort(default_model: "gpt-5.5", reasoning_effort: :high, primary: true)
+
+      assert Enum.sort(loaded.fermix_core[:tools][:generate_image]) ==
+               Enum.sort(backend: "openai", model: "gpt-image-2")
+
+      assert :ok = ConfigStore.save_snapshot(loaded)
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+      assert reloaded == loaded
+    end
+  end
+
   test "missing primary stays absent and a non-boolean primary is dropped" do
     snapshot = %{
       fermix_core: [
@@ -641,7 +811,6 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   primary = true
   reasoning_effort = "high"
   default_model = "gpt-5.6-terra"
-  fast = false
 
   [fermix_core.providers.ollama]
   base_url = "http://localhost:11434/v1"
@@ -3233,7 +3402,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert contents =~ ~s(reasoning_effort = "high")
     assert contents =~ "[fermix_core.providers.openai_codex]"
     assert contents =~ ~s(reasoning_effort = "xhigh")
-    assert contents =~ "fast = true"
+    refute contents =~ "fast ="
     refute contents =~ "store ="
     assert contents =~ "[fermix_core.providers.anthropic]"
     assert contents =~ ~s(default_model = "claude-opus-4-8")
@@ -3248,7 +3417,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     openai_codex = Keyword.get(providers, :openai_codex, [])
     assert Keyword.get(openai_codex, :default_model) == "gpt-5.5"
     assert Keyword.get(openai_codex, :reasoning_effort) == :xhigh
-    assert Keyword.get(openai_codex, :fast) == true
+    refute Keyword.has_key?(openai_codex, :fast)
     refute Keyword.has_key?(openai_codex, :store)
 
     anthropic = Keyword.get(providers, :anthropic, [])

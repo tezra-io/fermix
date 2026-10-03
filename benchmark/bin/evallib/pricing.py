@@ -456,21 +456,28 @@ UNPRICED_PENDING_RATE: dict[str, str] = {
 }
 
 
+# The adapters of the ChatGPT-plan route: "chatgpt_plan" is OpenAI Codex's
+# (Sign in with ChatGPT), "codex" the retired Codex-client adapter that older
+# spans still carry.
+_CODEX_ROUTE_ADAPTERS = frozenset({"chatgpt_plan", "codex"})
+
+
 def provider_route(provider: str, adapter: str | None) -> str:
     """The billing route a span belongs to.
 
-    The ONLY adapter value that selects a route is the literal "codex", which
-    marks the ChatGPT-subscription OAuth path. Every other adapter — including
-    values that happen to read like provider tokens ("openai", "openai_codex")
-    and the 852 adapter-less spans a census found on realtime and legacy
-    modules — leaves the route as the span's own `provider`, so nothing is
-    promoted to a metered API route by a field that was never a route selector.
+    The ONLY adapter values that select a route are the literals in
+    `_CODEX_ROUTE_ADAPTERS`, which mark the ChatGPT-plan OAuth path. Every other
+    adapter — including values that happen to read like provider tokens
+    ("openai", "openai_codex") and the 852 adapter-less spans a census found on
+    realtime and legacy modules — leaves the route as the span's own `provider`,
+    so nothing is promoted to a metered API route by a field that was never a
+    route selector.
     """
     if not isinstance(provider, str) or not provider:
         raise ValueError(f"provider_route: provider must be a non-empty string, got {provider!r}")
     if adapter is not None and not isinstance(adapter, str):
         raise TypeError(f"provider_route: adapter must be a string or None, got {adapter!r}")
-    return "openai_codex" if adapter == "codex" else provider
+    return "openai_codex" if adapter in _CODEX_ROUTE_ADAPTERS else provider
 
 
 def classification(route: str, model: str) -> str:

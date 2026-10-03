@@ -56,6 +56,7 @@ defmodule FermixCore.Providers.Descriptor do
           auth_modes: [auth_mode(), ...],
           secrets: [atom()],
           config_keys: [atom(), ...],
+          retired_config_keys: [atom()],
           setup_fields: [setup_field()],
           effort?: boolean(),
           model_info: String.t() | nil,
@@ -85,28 +86,40 @@ defmodule FermixCore.Providers.Descriptor do
     :setup_fields,
     :effort?,
     :model_info,
+    retired_config_keys: [],
     default_req_options: []
   ]
 
   # `config_keys` order = the persisted TOML key order (the normalizer
-  # builds blocks in this sequence). `auth_modes` carries a single element
-  # for single-mode providers; `length > 1` is what gates the web
-  # auth-mode picker. `:routed` keeps `Adapter.for_route/1`'s
-  # Responses-vs-ChatCompletions split for direct OpenAI.
+  # builds blocks in this sequence). `retired_config_keys` are keys a persisted
+  # block may still carry from an earlier release: the config store accepts
+  # them at parse, names them at warning and drops them, so the next save
+  # writes the block without them (the `ComputerHistory.Config.retired_keys/0`
+  # precedent). `auth_modes` carries a single element for single-mode
+  # providers; `length > 1` is what gates the web auth-mode picker. `:routed`
+  # keeps `Adapter.for_route/1`'s Responses-vs-ChatCompletions split for
+  # direct OpenAI.
   #
   # Raw maps here (structs of a module cannot be built in its own module
   # attributes); materialized via `struct!/2` below so `@enforce_keys`
   # still validates every entry at compile time.
   @raw_descriptors [
+    # OpenAI Codex (M57): Sign in with ChatGPT, so the person's ChatGPT plan
+    # pays for turns on the public Responses API. One auth mode, no secret and
+    # no base_url key: the registration and tokens live in auth.json, and the
+    # model list is discovered from the account rather than shipped. First in
+    # the failover order. `fast` is retired with the private Codex backend
+    # that served it.
     %{
       id: :openai_codex,
-      label: "OpenAI Codex (ChatGPT)",
-      adapter: FermixCore.Providers.OpenAI.Codex,
-      default_base_url: "https://chatgpt.com/backend-api/codex/responses",
+      label: "OpenAI Codex",
+      adapter: FermixCore.Providers.OpenAI.ChatGPTPlan,
+      default_base_url: "https://api.openai.com/v1",
       locality: :remote,
       auth_modes: [:oauth],
       secrets: [],
-      config_keys: [:default_model, :reasoning_effort, :fast, :primary],
+      config_keys: [:default_model, :reasoning_effort, :primary],
+      retired_config_keys: [:fast],
       setup_fields: [],
       effort?: true
     },

@@ -183,8 +183,7 @@ defmodule FermixChannels.Gateway.MediaDownload do
   # Public only so the cleanup can be tested: neither failure it handles is
   # reachable from ExUnit. `IO.binwrite/2` fails on ENOSPC and `File.close/1` on
   # a device error; every filesystem failure a test can produce deterministically
-  # lands on `File.open/2` instead, before a file exists. Same `@doc false` seam
-  # as `FermixCore.Providers.OpenAI.Codex.receive_timeout_for/1`.
+  # lands on `File.open/2` instead, before a file exists.
   @doc false
   @spec write_result(:ok | {:error, term()}, :ok | {:error, term()}, String.t()) ::
           {:ok, String.t()} | {:error, term()}

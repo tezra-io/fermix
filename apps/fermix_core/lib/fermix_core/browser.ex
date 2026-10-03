@@ -206,7 +206,31 @@ defmodule FermixCore.Browser do
 
   defp validate_args("webmcp", args), do: validate_webmcp_args(args)
 
+  defp validate_args("download", args), do: validate_download_args(args)
+
   defp validate_args(_action, _args), do: :ok
+
+  # `download` collects a file something else started; it reads `timeout_ms`
+  # and nothing else. These three read as "click this", "fetch this" and "save
+  # it here", and a call carrying one would wait out its whole budget for a
+  # download nobody began, so it is refused here with the move that starts one.
+  @download_starters ~w(ref url path)
+
+  defp validate_download_args(args) do
+    case Enum.filter(@download_starters, &(not is_nil(Map.get(args, &1)))) do
+      [] -> :ok
+      given -> {:error, Error.new("invalid_arg", download_shape(given))}
+    end
+  end
+
+  defp download_shape(given) do
+    names = Enum.map_join(given, ", ", &"`#{&1}`")
+
+    "download takes no #{names}: it clicks nothing, fetches nothing and names no file. " <>
+      "Start the download with an `act` click on its link or button (or a `navigate` to " <>
+      "the file), then call `download` to collect it; the result's `path` is where it " <>
+      "was saved."
+  end
 
   # The two ops and what each one reads, in the shape `@wait_modes` uses below:
   # an argument-starved call is told which op it meant and what that op needs,

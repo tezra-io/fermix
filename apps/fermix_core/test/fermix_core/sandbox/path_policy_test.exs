@@ -280,6 +280,7 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
       "memory.db-journal",
       "auth.json.broken.1767225600",
       "auth.json.tmp.7",
+      "chatgpt_host.json",
       "config.toml.pre-m5"
     ]
 

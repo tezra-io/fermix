@@ -737,10 +737,29 @@ defmodule FermixCore.Browser.ProfileServerGuardsTest do
     begin_download(pid, "G3", "https://example.com/small.csv", "small.csv")
     progress(pid, "G3", "completed", 120, 120)
 
-    assert {:ok, %{"guid" => "G3", "suggested_filename" => "small.csv"}} =
+    # A download that finished before the call is handed back at once, saved
+    # under its guid in the owner's downloads directory, with the site's name
+    # beside it.
+    assert {:ok, %{"guid" => "G3", "suggested_filename" => "small.csv", "path" => path}} =
              req(pid, "download", %{"timeout_ms" => 500})
 
+    assert path == download_path("G3")
+
     refute_receive {:cdp, _owner, "Browser.cancelDownload", _params}, 50
+  end
+
+  # `download` starts nothing, so a wait that ends empty says how one starts.
+  test "a download nobody started times out with the move that starts one" do
+    {:ok, config} = Config.current(allow_private_network: false)
+    pid = start_page("https://example.com", config, :guards_download_none)
+    assert {:ok, _} = req(pid, "start")
+
+    assert {:error, %Error{code: "timeout", message: message}} =
+             req(pid, "download", %{"timeout_ms" => 50})
+
+    assert message =~ "`download` starts nothing"
+    assert message =~ "`act` click"
+    assert message =~ "`timeout_ms`"
   end
 
   defp download_path(guid) do

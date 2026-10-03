@@ -8,7 +8,7 @@ On a Mac, production Fermix is `Fermix.app`: it carries the engine, runs it as a
 - A Homebrew formula user moves with `fermix migrate-to-app` (below), not by installing the cask beside the formula.
 
 1. Open Fermix > **Set up Fermix** (**Use an existing Fermix home…** to keep a home other than `~/.fermix`). If macOS asks, **Open Login Items settings**, turn Fermix on; setup carries on by itself.
-2. **Connect your AI**: **Sign in** (ChatGPT/Codex, opens the browser), **Import Codex sign-in** or **Import Claude Code sign-in** (a sign-in already on this Mac), **Add setup token** (Anthropic, from `claude setup-token`), or **Add key…** > provider > paste > **Verify and save**. Then **Continue**.
+2. **Connect your AI**: **Sign in** (OpenAI Codex with ChatGPT, opens the browser), **Import Claude Code sign-in** (a sign-in already on this Mac; Import Codex sign-in is no longer supported), **Add setup token** (Anthropic, from `claude setup-token`), or **Add key…** > provider > paste > **Verify and save**. Then **Continue**.
 3. **About you**: **Your name**, **Time zone**, **Style** (Concise, Balanced, Detailed), **Call the assistant**. They start from the Mac's own settings. **Continue**.
 4. Fermix restarts and shows **Fermix is live**. Next: **Connect Telegram, Slack or Discord** (Settings > Channels), or **Turn on the voice companion**.
 

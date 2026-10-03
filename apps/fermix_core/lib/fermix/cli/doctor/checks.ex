@@ -3085,10 +3085,17 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp validate_routing_model(%{provider: provider, model: model})
        when is_atom(provider) and not is_nil(provider) and is_binary(model) do
-    if ModelCatalog.known_model?(provider, model) do
-      :ok
-    else
-      {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
+    cond do
+      ModelCatalog.known_model?(provider, model) ->
+        :ok
+
+      # A provider that ships no catalog (OpenAI Codex lists the signed-in
+      # account's models live) has nothing to check a slug against here.
+      ModelCatalog.models_for(provider) == [] ->
+        :ok
+
+      true ->
+        {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
     end
   end
 

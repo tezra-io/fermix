@@ -393,7 +393,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
         |> Enum.map(&Row.option(&1.id, &1.label))
 
       assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
-      assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
+      assert_holds_offered_model(row, result["id"])
     end
   end
 
@@ -422,6 +422,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert Enum.find(golden["rows"], &(&1["key"] == "realtime_conversation")) ==
              Enum.find(live["rows"], &(&1["key"] == "realtime_conversation"))
   end
+
+  # A provider whose models are discovered live (OpenAI Codex) ships no catalog,
+  # so its section offers nothing and holds the empty value until one is chosen.
+  defp assert_holds_offered_model(%{"options" => [], "value" => value}, id),
+    do: assert(value == "", id)
+
+  defp assert_holds_offered_model(row, id),
+    do: assert(Enum.any?(row["options"], &(&1["value"] == row["value"])), id)
 
   # Every kind and format a row may carry is pinned to the module, so a kind
   # added in Elixir fails here rather than reaching a client that cannot render
@@ -925,7 +933,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # owned by the case's own task supervisor and stops with it.
   defp blocking_login do
     fn login_opts ->
-      :ok = Keyword.fetch!(login_opts, :oauth_opener).("https://auth.example/authorize")
+      :ok = Keyword.fetch!(login_opts, :opener).("https://auth.example/authorize")
       block()
     end
   end

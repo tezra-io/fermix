@@ -12,6 +12,7 @@ defmodule FermixCore.Readiness do
   checks yet.
   """
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
@@ -315,11 +316,17 @@ defmodule FermixCore.Readiness do
     missing_credentials(:openai, "Add the OpenAI API key in Providers settings.")
   end
 
+  # OpenAI Codex's way in is Sign in with ChatGPT, whose standing has its own
+  # sentence (not signed in, plan usage off, reconnect), so the row says which
+  # one it is.
   defp missing_credentials_action(:openai_codex, _block) do
-    missing_credentials(
-      :openai_codex,
-      "Import your Codex sign-in: run `fermix setup --import-codex`."
-    )
+    sentence =
+      case ChatGPT.route_status() do
+        {:error, reason} -> ChatGPT.failure_sentence(reason)
+        :ok -> "Configure the OpenAI Codex provider in Providers settings."
+      end
+
+    missing_credentials(:openai_codex, sentence)
   end
 
   defp missing_credentials_action(:anthropic, block) do

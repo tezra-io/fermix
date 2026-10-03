@@ -19,7 +19,6 @@ defmodule FermixCore.Management.Detect do
   """
 
   alias FermixCore.Auth.AnthropicLogin
-  alias FermixCore.Auth.CodexImport
   alias FermixCore.Harness.Vendors
   alias FermixCore.Meetings.SidecarInstaller
   alias FermixCore.Providers.ModelListing
@@ -104,7 +103,7 @@ defmodule FermixCore.Management.Detect do
   end
 
   defp probe("codex_cli", opts) do
-    {source(opts, :codex_cli, &CodexImport.codex_available?/0), nil}
+    {source(opts, :codex_cli, &codex_cli_signed_in?/0), nil}
   end
 
   defp probe("ollama", opts) do
@@ -132,6 +131,9 @@ defmodule FermixCore.Management.Detect do
   end
 
   defp ollama_models, do: ModelListing.live_models(:ollama, [])
+
+  defp codex_cli_signed_in?,
+    do: Vendors.codex_signed_in?(Path.join(System.user_home!(), ".codex/auth.json"))
 
   defp harness_detections do
     detector =

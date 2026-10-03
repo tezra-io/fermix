@@ -33,38 +33,24 @@ defmodule FermixCore.Providers.ModelCatalog do
   @unknown_model_default_ctx 100_000
   @default_max_output_tokens 8_192
 
-  # Same models, two access routes with different effective windows, keyed per
-  # provider so the window follows the auth path automatically (see
-  # models_for/1). This field is the compaction denominator
+  # OpenAI Codex ships no catalog (M57 §6.2): it signs in with ChatGPT, the
+  # models a signed-in account may call come live from `GET /v1/models`
+  # (`ModelListing`), they differ by plan and workspace, and that list is a
+  # catalog rather than an entitlement check. Shipping a default here would name
+  # a slug the account may not have, so the provider has none until one is
+  # chosen (`Setup.LiveModel.ensure/2` picks the first listed one after a
+  # sign-in), and the route refuses until then. A slug it runs with takes the
+  # unknown-model rule (`context_window_for/3`).
+  @openai_codex []
+
+  # The OpenAI API models. `context_window` is the compaction denominator
   # (`context_tokens / context_window >= compaction.threshold`, default 0.85 —
-  # see `TurnRunner`), NOT a declared capability, so neither column is a
-  # straight copy of a published number. astra = frontier (default); GPT-6.1
-  # sol and GPT-6 luna = the generation's cheaper frontier/fast pair; the gpt-5.6
+  # see `TurnRunner`), NOT a declared capability, so it is not a straight copy
+  # of a published number. astra = frontier (default); GPT-6.1 sol and GPT-6
+  # luna = the generation's cheaper frontier/fast pair; the gpt-5.6
   # sol/terra/luna = frontier/balanced/fast of the prior generation.
   #
-  # Codex column: the cache's `max_context_window` — the ceiling that path
-  # stretches to — deliberately NOT its `context_window`, which is the Codex
-  # CLI's own working budget (272k for every current model, which is why these
-  # numbers do not match what `codex` shows you). Real traffic corroborates the
-  # larger figure: this machine's rollout logs hold single requests of 652,640
-  # (sol) and 630,446 (astra) prompt tokens that the Codex path served. A
-  # ChatGPT subscription bills no per-token rate, so running deeper costs usage
-  # allowance, not dollars. Source: `~/.codex/models_cache.json`. [verify] on
-  # every addition AND periodically: it is a live cache whose numbers move, and
-  # an overstated window defers compaction past the provider's hard limit —
-  # 5.5/5.4-mini read 400_000 here long after the cache had them at 272k, so a
-  # turn would have blown the real window before compaction fired at 340k.
-  #
-  # gpt-5.4 is the one Codex entry the source does not cover: it dropped out of
-  # the cache entirely after 2026-08-12, where it last read
-  # `max_context_window` 1_000_000 (not 272k like its 5.5 sibling). Its 272_000
-  # is therefore INFERRED, chosen because it is the only value safe under both
-  # hypotheses — understating merely compacts early, while restoring the
-  # archived 1_000_000 would overstate badly if 5.4 in fact followed 5.5 down.
-  # A [verify] pass will not find this model; decide whether the Codex path
-  # still serves it at all before touching the number.
-  #
-  # Direct-API column: the published window from
+  # Windows: the published window from
   # developers.openai.com/api/docs/models/<id> for gpt-5.5, gpt-5.4 and
   # gpt-5.4-mini only. The other six are deliberate deviations, because every
   # current model reprices a request above 272k INPUT tokens at 2x input/cache
@@ -99,33 +85,6 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Codex-only `ultra` level (maximum reasoning plus automatic task delegation)
   # is a Codex-harness mode rather than a `reasoning.effort` wire value, so it
   # is deliberately absent from `ReasoningEffort`.
-  @openai_codex [
-    %Entry{id: "gpt-6-astra", label: "GPT-6 Astra (default, latest)", context_window: 872_000},
-    %Entry{id: "gpt-6.1-sol", label: "GPT-6.1 Sol", context_window: 872_000},
-    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 872_000},
-    %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 872_000},
-    %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 872_000},
-    %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 872_000},
-    %Entry{
-      id: "gpt-5.5",
-      label: "GPT-5.5",
-      context_window: 272_000,
-      max_reasoning_effort: :xhigh
-    },
-    %Entry{
-      id: "gpt-5.4",
-      label: "GPT-5.4",
-      context_window: 272_000,
-      max_reasoning_effort: :xhigh
-    },
-    %Entry{
-      id: "gpt-5.4-mini",
-      label: "GPT-5.4 mini (faster, cheaper)",
-      context_window: 272_000,
-      max_reasoning_effort: :xhigh
-    }
-  ]
-
   @openai [
     %Entry{
       id: "gpt-6-astra",
@@ -416,10 +375,18 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:venice), do: @venice
   def models_for(:ollama), do: @ollama
 
+  @doc """
+  The catalog's default model for `provider`: its first entry. A provider whose
+  models are discovered rather than shipped (`openai_codex`) has no default and
+  answers `""`, the "no model chosen yet" value the management protocol already
+  carries; its route refuses that value rather than guess a slug.
+  """
   @spec default_model_for(provider()) :: String.t()
   def default_model_for(provider) do
-    [%Entry{id: id} | _] = models_for(provider)
-    id
+    case models_for(provider) do
+      [%Entry{id: id} | _rest] -> id
+      [] -> ""
+    end
   end
 
   @doc """
@@ -427,7 +394,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   or the catalog default while it names none. The one resolver behind the
   setup row, the settings Model row, the overview, Doctor's probe and the
   route, so a provider that has just been signed in shows the model it will
-  call, and every surface names the same one.
+  call, and every surface names the same one. A provider with no shipped
+  catalog (`openai_codex`) answers `""` until a model is chosen.
   """
   @spec effective_model(provider(), keyword()) :: String.t()
   def effective_model(provider, block) when is_list(block) do
@@ -560,6 +528,12 @@ defmodule FermixCore.Providers.ModelCatalog do
   # use context_window_for/2, which wraps this and emits on a miss. Returns nil
   # for providers outside the catalog (e.g. direct-adapter `:mock`) so callers
   # degrade to their default instead of raising on models_for/1.
+  # OpenAI Codex lists the signed-in account's models live, and its plan route
+  # serves the public API's models, so a slug's window and effort ceiling are
+  # the `openai` catalog's. Only per-model facts read through here: the model
+  # list and `known_model?/2` stay the live listing's.
+  defp find_entry(:openai_codex, model_id), do: find_entry(:openai, model_id)
+
   defp find_entry(provider, model_id) do
     if provider in Descriptor.ids() do
       Enum.find(models_for(provider), &(&1.id == model_id))
