@@ -526,6 +526,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       speak(session, "book the room", 1_000, 4_000)
       send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
       assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      # The fake bridge reports the submit from inside it, before the session
+      # writes the task as running: wait for the session to finish the event.
+      sync(session)
 
       assert record_tasks(repo, uuid) == [
                %{
@@ -623,6 +626,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       speak(session, "book the room", 1_000, 4_000)
       send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
       assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      sync(session)
 
       Process.exit(session, :kill)
       assert_receive {:EXIT, ^session, :killed}

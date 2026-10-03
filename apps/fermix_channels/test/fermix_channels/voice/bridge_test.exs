@@ -17,6 +17,7 @@ defmodule FermixChannels.Voice.BridgeTest do
   alias FermixChannels.Voice.Bridge
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.LivePrompt
 
   # Stands in for `MainAgent.checkout_turn_state/2`: the snapshot only has to
@@ -97,7 +98,7 @@ defmodule FermixChannels.Voice.BridgeTest do
     }
   end
 
-  defp uuid, do: FermixCore.Realtime.DeviceIdentity.generate_uuid()
+  defp uuid, do: DeviceIdentity.generate_uuid()
 
   defp callbacks do
     test_pid = self()

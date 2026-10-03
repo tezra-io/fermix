@@ -11,6 +11,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Temporal.Access
@@ -2449,7 +2450,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     repo = :"tr_spoken_repo_#{unique}"
     store = :"tr_spoken_store_#{unique}"
 
-    start_supervised!({FermixCore.Memory.Repo, name: repo, enabled: true, database_path: db_path},
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path},
       id: repo
     )
 
@@ -2471,7 +2472,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       kind: "chat_message"
     }
 
-    case FermixCore.Memory.Repo.get_messages(selector, server: repo) do
+    case Repo.get_messages(selector, server: repo) do
       {:ok, rows} when length(rows) == expected ->
         rows
 
