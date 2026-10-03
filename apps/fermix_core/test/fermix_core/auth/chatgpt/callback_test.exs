@@ -155,6 +155,8 @@ defmodule FermixCore.Auth.ChatGPT.CallbackTest do
       assert response =~ "HTTP/1.1 200 OK"
       assert response =~ "Cache-Control: no-store"
       assert response =~ "Referrer-Policy: no-referrer"
+      assert response =~ "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'"
+      assert response =~ "<h1>Return to Fermix</h1>"
     end
   end
 

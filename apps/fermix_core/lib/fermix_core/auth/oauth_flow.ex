@@ -23,6 +23,7 @@ defmodule FermixCore.Auth.OAuthFlow do
   """
 
   alias FermixCore.Auth.Browser
+  alias FermixCore.Auth.CallbackPage
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
@@ -737,18 +738,9 @@ defmodule FermixCore.Auth.OAuthFlow do
   defp vendor_code(error), do: if(Regex.match?(@vendor_code, error), do: error, else: "unknown")
 
   # The browser is answered before the code is exchanged and the account
-  # verified, so the page cannot know the outcome: it says the sign-in reached
-  # Fermix and where the result shows, never that it succeeded.
+  # verified, so the page cannot know the outcome (`CallbackPage`).
   defp send_response(conn, {:ok, _callback}) do
-    body = """
-    <!doctype html><html><body style="font-family:system-ui;margin:40px">
-    <h2>Return to Fermix</h2>
-    <p>Fermix received your sign-in and is finishing it. You can close this tab;
-    the result shows where you started the sign-in.</p>
-    </body></html>
-    """
-
-    :gen_tcp.send(conn, http_response(200, "OK", body))
+    :gen_tcp.send(conn, http_response(200, "OK", CallbackPage.render(:received)))
   end
 
   defp send_response(conn, {:retry, _reason}) do
@@ -756,25 +748,12 @@ defmodule FermixCore.Auth.OAuthFlow do
   end
 
   defp send_response(conn, {:reject, status, _reason}) do
-    body = """
-    <!doctype html><html><body style="font-family:system-ui;margin:40px">
-    <h2>Not part of this Fermix sign-in</h2>
-    <p>Return to Fermix and finish the sign-in from there.</p>
-    </body></html>
-    """
-
+    body = CallbackPage.render(:not_this_sign_in)
     :gen_tcp.send(conn, http_response(status, status_text(status), body))
   end
 
   defp send_response(conn, {:error, _reason}) do
-    body = """
-    <!doctype html><html><body style="font-family:system-ui;margin:40px">
-    <h2>Fermix login failed</h2>
-    <p>Return to the terminal — the error details are printed there.</p>
-    </body></html>
-    """
-
-    :gen_tcp.send(conn, http_response(400, "Bad Request", body))
+    :gen_tcp.send(conn, http_response(400, "Bad Request", CallbackPage.render(:failed)))
   end
 
   defp status_text(400), do: "Bad Request"
@@ -782,7 +761,10 @@ defmodule FermixCore.Auth.OAuthFlow do
   defp status_text(405), do: "Method Not Allowed"
 
   # The callback page is never cached and never leaks its address (the code
-  # and state are in it) as a referrer.
+  # and state are in it) as a referrer. It runs nothing and loads nothing: its
+  # only allowance is its own inline style.
+  @page_csp "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+
   defp http_response(status, status_text, body) do
     [
       "HTTP/1.1 ",
@@ -796,6 +778,7 @@ defmodule FermixCore.Auth.OAuthFlow do
       "\r\n",
       "Cache-Control: no-store\r\n",
       "Referrer-Policy: no-referrer\r\n",
+      "Content-Security-Policy: #{@page_csp}\r\n",
       "Connection: close\r\n",
       "\r\n",
       body
