@@ -656,7 +656,10 @@ Current channels:
   `FermixCore.Acp.Identity`.
 - `Companion` serves the Mac app's chat on `FERMIX_HOME/companion.sock`
   whenever the daemon runs (`Companion.Endpoint`, one `Companion.Connection` per
-  client). Its trust is the 0600 socket, so it runs as the local operator.
+  client). Its trust is the 0600 socket, so it runs as the local operator. A
+  delivery it writes (a job's result, `send_to_channel`), unlike a reply, is
+  pushed to the phones while their channel runs, as the phone's own deliveries
+  are, since the two draw one timeline.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from

@@ -33,9 +33,9 @@ Every row is announced live to connected clients the moment it is written, whoev
 
 ## Scheduled delivery
 
-`schedule_job` with `delivery_mode: "origin"` from this chat, or from the phone, whose turns run in it, delivers each run's result into the companion timeline, written whether or not the app is connected, announced to any connected client, and caught up by the history read on the next connect. From another chat, use `delivery_mode: "channel"` with `delivery_target: {platform: "companion", chat_id: "main"}`. A final response of exactly `[SILENT]` delivers nothing.
+`schedule_job` with `delivery_mode: "origin"` from this chat, or from the phone, whose turns run in it, delivers each run's result into the companion timeline, written whether or not the app is connected, announced to any connected client, pushed to the phone while its channel runs and no device has the chat open or the row read, and caught up by the history read on the next connect. From another chat, use `delivery_mode: "channel"` with `delivery_target: {platform: "companion", chat_id: "main"}`. A final response of exactly `[SILENT]` delivers nothing.
 
-`send_to_channel` with `channel: "companion"` writes a text into this chat from any owner turn, a GPT-Live task included ("put that in my chat"): one assistant row, told to the app and the phones like a delivery, and a retry in the same turn is that row again. `channel: "mobile"` is the same row with a push to the phone, offered only while the phone channel runs. A coding run started from this chat, or from a task of a call in it, reports back here when it ends, as a message the agent answers.
+`send_to_channel` with `channel: "companion"` writes a text into this chat from any owner turn, a GPT-Live task included ("put that in my chat"): one assistant row, told to the app and the phones like a delivery and pushed to a phone that is away while its channel runs, and a retry in the same turn is that row again. `channel: "mobile"` is the same row and push with link previews, offered only while the phone channel runs. A coding run started from this chat, or from a task of a call in it, reports back here when it ends, as a message the agent answers.
 
 ## What it does not carry
 
