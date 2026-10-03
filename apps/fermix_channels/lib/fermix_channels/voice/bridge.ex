@@ -25,9 +25,11 @@ defmodule FermixChannels.Voice.Bridge do
   - **The conversation.** Every delegation of one call shares the conversation
     key `{"voice", call_id, :root}`, which is what makes the queue serialize
     them — the session allows one active and one pending delegation, and the
-    queue enforces the same shape. It also means `cancel/2` stops the call's
-    active turn and clears its pending FIFO; the session's `LiveDelegation` is
-    the authority on which delegations exist.
+    queue enforces the same shape. Each delegation runs as the queue turn
+    named by its message id, `voice-delegation-<id>-<revision>`, and `cancel/2`
+    and `close_call/1` stop those turns by name (`Queue.stop_turn/3`), never
+    the conversation, so nothing else waiting in it is touched (M56 §4.1); the
+    session's `LiveDelegation` is the authority on which delegations exist.
   - **The routing entries.** One Registry key per call plus one per delegation,
     all owned by the session process, released by `close_call/1` (or by the
     session dying). They are what the channel adapter's closures read, and
@@ -69,8 +71,12 @@ defmodule FermixChannels.Voice.Bridge do
           queue: GenServer.server()
         }
 
-  @typedoc "What `submit/3` hands back; the session passes it to `cancel/2`."
-  @type task_ref :: {ConversationKey.t(), delegation_id :: String.t()}
+  @typedoc """
+  What `submit/3` hands back; the session passes it to `cancel/2`. The
+  conversation the turn runs in and the turn's own message id, which the queue
+  stops it by.
+  """
+  @type task_ref :: {ConversationKey.t(), message_id :: String.t()}
 
   @doc """
   Open one call: claim the call id, then stand up the history it will run on.
@@ -111,9 +117,12 @@ defmodule FermixChannels.Voice.Bridge do
   end
 
   @doc """
-  Cancel a delegation by stopping the call's conversation. The queue hands the
-  killed turn's channel a `{:cancelled}` outcome, and THAT is what reaches the
-  session — so there is exactly one place a delegation is answered from.
+  Cancel a delegation by stopping its own queue turn, named by the message id
+  it was ingested under. A running turn is killed and a waiting one dropped;
+  either way the queue hands the turn's channel a `{:cancelled}` outcome, and
+  THAT is what reaches the session — so there is exactly one place a delegation
+  is answered from. Every other turn of the conversation, running or waiting,
+  is left alone.
 
   A cancel that races an enqueue the queue has not processed yet finds nothing
   to stop; the turn then completes normally and answers with its result. A turn
@@ -122,11 +131,11 @@ defmodule FermixChannels.Voice.Bridge do
   """
   @impl true
   @spec cancel(handle(), task_ref()) :: :ok | {:error, term()}
-  def cancel(%{call_id: call_id, queue: queue}, {conversation_key, delegation_id})
-      when is_tuple(conversation_key) and is_binary(delegation_id) do
-    {:ok, outcome} = Queue.stop_conversation(conversation_key, queue)
+  def cancel(%{call_id: call_id, queue: queue}, {conversation_key, message_id})
+      when is_tuple(conversation_key) and is_binary(message_id) do
+    {:ok, outcome} = Queue.stop_turn(conversation_key, message_id, queue)
 
-    Logger.info("voice bridge cancelled #{call_id}/#{delegation_id}: #{inspect(outcome)}")
+    Logger.info("voice bridge cancelled #{call_id}/#{message_id}: #{inspect(outcome)}")
 
     :ok
   end
@@ -136,9 +145,11 @@ defmodule FermixChannels.Voice.Bridge do
   history.
 
   Unregistering before the stop is what makes a late answer a DROPPED answer —
-  the closures have no route the moment the call is closed. The stop still
-  writes its marker into the call's own store (the queue resolves the store from
-  the message), which is why the store is released last.
+  the closures have no route the moment the call is closed. The work is the
+  turns the call registered, each stopped by its own message id; the
+  conversation they run in is never stopped. A stop still writes its marker
+  into the call's own store (the queue resolves the store from the message),
+  which is why the store is released last.
   """
   @impl true
   @spec close_call(handle()) :: :ok
@@ -150,11 +161,12 @@ defmodule FermixChannels.Voice.Bridge do
         queue: queue
       })
       when is_pid(owner) and is_boolean(persist?) do
+    turns = registered_turns(call_id)
     unregister_all(call_id)
-    {:ok, outcome} = Queue.stop_conversation(conversation_key(call_id), queue)
+    outcomes = Enum.map(turns, &stop_turn(conversation_key(call_id), &1, queue))
     stop_store(store, persist?)
 
-    Logger.info("voice bridge closed call #{call_id}: #{inspect(outcome)}")
+    Logger.info("voice bridge closed call #{call_id}: #{inspect(outcomes)}")
     :ok
   end
 
@@ -214,6 +226,22 @@ defmodule FermixChannels.Voice.Bridge do
     |> Enum.each(&Registry.unregister(registry, &1))
   end
 
+  # The queue turn of every delegation the call registered, by message id: one
+  # per delegation, at its latest revision, since a correction replaces its
+  # entry. A turn that already ended answers `:not_found` to its stop.
+  defp registered_turns(call_id) do
+    registry = Voice.registry()
+
+    for {^call_id, delegation_id} = key <- Registry.keys(registry, self()),
+        %{revision: revision} <- Registry.values(registry, key, self()),
+        do: delegation_message_id(%{delegation_id: delegation_id, revision: revision})
+  end
+
+  defp stop_turn(conversation_key, message_id, queue) do
+    {:ok, outcome} = Queue.stop_turn(conversation_key, message_id, queue)
+    {message_id, outcome}
+  end
+
   defp owned_by_call?(call_id, call_id), do: true
   defp owned_by_call?({call_id, _delegation_id}, call_id), do: true
   defp owned_by_call?(_key, _call_id), do: false
@@ -256,7 +284,7 @@ defmodule FermixChannels.Voice.Bridge do
 
     case Gateway.ingest([message], channel: Voice, agent: Queue, agent_server: queue) do
       :ok ->
-        {:ok, {ConversationKey.from(message), request.delegation_id}}
+        {:ok, {ConversationKey.from(message), message.id}}
 
       {:error, reason} ->
         Registry.unregister(Voice.registry(), {call_id, request.delegation_id})

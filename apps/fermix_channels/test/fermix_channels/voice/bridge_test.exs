@@ -100,6 +100,35 @@ defmodule FermixChannels.Voice.BridgeTest do
     }
   end
 
+  # The same, each result tagged with the delegation it answers, for a test
+  # that holds two delegations at once.
+  defp callbacks(delegation_id) do
+    test_pid = self()
+
+    %{
+      progress: fn _text -> :ok end,
+      activity: fn _event -> :ok end,
+      result: fn outcome -> send(test_pid, {:result, delegation_id, outcome}) && :ok end
+    }
+  end
+
+  # A turn that is not the call's own, queued in the conversation the call's
+  # hand-offs run in.
+  defp other_turn(handle, id) do
+    {channel, chat_id, :root} = Bridge.conversation_key(handle.call_id)
+
+    %{
+      id: id,
+      channel: channel,
+      chat_id: chat_id,
+      sender: "owner",
+      content: "typed",
+      source_trust: :operator,
+      metadata: %{},
+      reply_fn: fn _part -> :ok end
+    }
+  end
+
   defp request(overrides \\ %{}) do
     Map.merge(
       %{
@@ -173,7 +202,9 @@ defmodule FermixChannels.Voice.BridgeTest do
     test "the delegation reaches the queue as a trusted operator voice turn", ctx do
       handle = open(ctx)
 
-      assert {:ok, {conversation_key, "d-1"}} = Bridge.submit(handle, request(), callbacks())
+      assert {:ok, {conversation_key, "voice-delegation-d-1-1"}} =
+               Bridge.submit(handle, request(), callbacks())
+
       assert conversation_key == {"voice", handle.call_id, :root}
 
       assert_receive {:turn_started, msg, _pid}, 5_000
@@ -293,8 +324,59 @@ defmodule FermixChannels.Voice.BridgeTest do
 
     test "a cancel with nothing running is reported, not an error", ctx do
       handle = open(ctx)
+      {:ok, task_ref} = Bridge.submit(handle, request(), callbacks())
+      assert_receive {:turn_started, _msg, turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:result, {:ok, _text}}, 5_000
 
-      assert :ok = Bridge.cancel(handle, {Bridge.conversation_key(handle.call_id), "d-1"})
+      assert :ok = Bridge.cancel(handle, task_ref)
+
+      Bridge.close_call(handle)
+    end
+
+    # M56 §4.1: a cancel names the one queue turn the hand-off runs as
+    # (`voice-delegation-<id>-<rev>`), so it can never end another turn of the
+    # conversation it runs in or clear what waits there.
+    test "a cancel stops the named hand-off and leaves the turn waiting behind it", ctx do
+      handle = open(ctx)
+      {:ok, first} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, first_pid}, 5_000
+
+      {:ok, second} =
+        Bridge.submit(handle, request(%{delegation_id: "d-2"}), callbacks("d-2"))
+
+      assert {_key, "voice-delegation-d-1-1"} = first
+      assert {_key, "voice-delegation-d-2-1"} = second
+
+      assert :ok = Bridge.cancel(handle, first)
+
+      assert_receive {:result, "d-1", {:cancelled}}, 5_000
+      refute Process.alive?(first_pid)
+
+      # The waiting hand-off was not cleared: it starts and answers.
+      assert_receive {:turn_started, %{id: "voice-delegation-d-2-1"}, second_pid}, 5_000
+      send(second_pid, {:proceed, :reply})
+      assert_receive {:result, "d-2", {:ok, _text}}, 5_000
+
+      Bridge.close_call(handle)
+    end
+
+    test "a cancel of a waiting hand-off leaves the running one alone", ctx do
+      handle = open(ctx)
+      {:ok, _first} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, first_pid}, 5_000
+
+      {:ok, second} =
+        Bridge.submit(handle, request(%{delegation_id: "d-2"}), callbacks("d-2"))
+
+      assert :ok = Bridge.cancel(handle, second)
+
+      assert_receive {:result, "d-2", {:cancelled}}, 5_000
+      assert Process.alive?(first_pid)
+
+      send(first_pid, {:proceed, :reply})
+      assert_receive {:result, "d-1", {:ok, _text}}, 5_000
+      refute_receive {:turn_started, %{id: "voice-delegation-d-2-1"}, _pid}, 200
 
       Bridge.close_call(handle)
     end
@@ -311,6 +393,22 @@ defmodule FermixChannels.Voice.BridgeTest do
       send(turn_pid, {:proceed, :reply})
 
       refute_receive {:result, _outcome}, 300
+    end
+
+    # M56 §4.1: the close stops the turns the call registered, by name, never
+    # the conversation they run in, so another turn waiting there still runs.
+    test "closing the call stops its hand-offs and nothing else waiting beside them", ctx do
+      handle = open(ctx)
+      {:ok, _ref} = Bridge.submit(handle, request(), callbacks())
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, hand_off_pid}, 5_000
+
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "other-1"))
+
+      Bridge.close_call(handle)
+
+      refute Process.alive?(hand_off_pid)
+      assert_receive {:turn_started, %{id: "other-1"}, other_pid}, 5_000
+      send(other_pid, {:proceed, :reply})
     end
 
     test "every routing entry for the call is released", ctx do

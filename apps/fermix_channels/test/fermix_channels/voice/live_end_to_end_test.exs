@@ -290,11 +290,12 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   # The companion's connection (`LocalVoiceSocket`'s handler) drives the session
   # through `SessionControl`, and on this rail a cancel or a hang-up reaches the
-  # Queue's conversation stop, which answers only once the Queue is free. The
-  # Queue is held suspended only until the session's stop is seen waiting in its
-  # mailbox: no test waits out a production call budget. What tells a wait with
-  # no budget from a budget not used up yet is the call itself, so each test
-  # traces the handler's call and reads the timeout it carries.
+  # Queue's stop of the hand-off's turn, which answers only once the Queue is
+  # free. The Queue is held suspended only until the session's stop is seen
+  # waiting in its mailbox: no test waits out a production call budget. What
+  # tells a wait with no budget from a budget not used up yet is the call
+  # itself, so each test traces the handler's call and reads the timeout it
+  # carries.
   describe "a voice connection whose Queue is busy" do
     setup :start_voice_socket
 
@@ -477,10 +478,10 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   defp task_frame?(frame, id, status),
     do: match?(%{"type" => "task", "delegation_id" => ^id, "status" => ^status}, frame)
 
-  # The session's conversation stop is in the Queue's mailbox, waiting.
+  # The session's stop of a hand-off's turn is in the Queue's mailbox, waiting.
   defp queued_stop?(queue, session) do
     {:messages, messages} = Process.info(queue, :messages)
-    Enum.any?(messages, &match?({:"$gen_call", {^session, _}, {:stop_conversation, _key}}, &1))
+    Enum.any?(messages, &match?({:"$gen_call", {^session, _}, {:stop_turn, _key, _id}}, &1))
   end
 
   # `from`'s call carrying `request` is in `pid`'s mailbox, waiting.
