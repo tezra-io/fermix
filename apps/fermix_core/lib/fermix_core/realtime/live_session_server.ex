@@ -148,9 +148,17 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # to its caller, so a second `call_start` is refused before it can open a
   # provider session that bills by the minute; the socket answers it
   # `call_in_progress` and closes the connection. Held until this process exits,
-  # so a call still settling counts.
+  # so a call still settling counts. It names the call's conversation and start,
+  # so a typed chat turn can tell a call in the chat from a private one without
+  # asking this process (M56 §4.4).
   defp claim_call(state) do
-    case CallRegistry.claim(state.call_registry, state.call_uuid) do
+    call = %{
+      call_uuid: state.call_uuid,
+      conversation: Config.conversation(state.config),
+      started_at: state.started_at
+    }
+
+    case CallRegistry.claim(state.call_registry, call) do
       :ok ->
         {:ok, state}
 
@@ -172,6 +180,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # The call's durable identity: the key of its record, on every frame and
       # telemetry event that names the call.
       call_uuid: DeviceIdentity.generate_uuid(),
+      # When the call started: the claim's and the record's one start.
+      started_at: DateTime.utc_now(),
       call_registry: Keyword.get(opts, :call_registry, CallRegistry),
       # The call's durable record (`CallRecord`), `nil` until the call starts.
       call_record: nil,
@@ -1365,7 +1375,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # a database hiccup must not end the conversation it records.
   defp open_record(state) do
     record = CallRecord.new(state.call_uuid, state.config.engine)
-    report_record(CallRecord.open(record, DateTime.utc_now(), state.record_opts), "open")
+    report_record(CallRecord.open(record, state.started_at, state.record_opts), "open")
     %{state | call_record: record}
   end
 

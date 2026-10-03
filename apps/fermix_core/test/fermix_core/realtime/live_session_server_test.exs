@@ -639,13 +639,31 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:realtime, %{type: "call_ready", call_uuid: uuid}}
 
       assert CallRegistry.lookup(@call_registry, uuid) == {:ok, session}
-      assert CallRegistry.active(@call_registry) == {:ok, %{call_uuid: uuid, session: session}}
+
+      assert {:ok, %{call_uuid: ^uuid, conversation: "chat", session: ^session}} =
+               CallRegistry.active(@call_registry)
 
       :ok = SessionControl.call_stop(session)
       assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
 
       assert CallRegistry.lookup(@call_registry, uuid) == :none
       assert CallRegistry.active(@call_registry) == :none
+    end
+
+    # M56 §4.4: whoever reads the call in progress tells a call in the chat
+    # from a private one, and when it started, without asking the session.
+    test "the claim names the call's conversation and its start", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      before = DateTime.utc_now()
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+
+      assert {:ok, %{conversation: "private", started_at: started_at, session: ^session}} =
+               CallRegistry.active(@call_registry)
+
+      assert DateTime.compare(started_at, before) in [:gt, :eq]
+      assert DateTime.compare(started_at, DateTime.utc_now()) in [:lt, :eq]
+      end_call(session)
     end
 
     test "a second session is refused while a call is up", %{clock: clock} do
@@ -711,8 +729,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok = SessionControl.call_start(session)
       uuid = :sys.get_state(session).call_uuid
 
-      assert {:ok, %{engine: "openai_live", ended_at: nil, tasks: []}} =
+      assert {:ok, %{engine: "openai_live", ended_at: nil, tasks: [], started_at: started_at}} =
                Repo.get_voice_call(uuid, server: repo)
+
+      # The record starts when the claim does: the call has one start.
+      assert {:ok, %{started_at: claimed_at}} = CallRegistry.active(@call_registry)
+      assert {:ok, ^claimed_at, 0} = DateTime.from_iso8601(started_at)
 
       start_provider_session(session)
       speak(session, "book the room", 1_000, 4_000)

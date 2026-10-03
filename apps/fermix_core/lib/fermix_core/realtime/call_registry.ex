@@ -15,11 +15,22 @@ defmodule FermixCore.Realtime.CallRegistry do
   Both keys belong to the session process and last exactly as long as it does:
   through its settle, so a call still settling counts, and no longer, however it
   ends. A crashed session releases them with no code of its own.
+
+  The claim carries what a reader of the call in progress needs without asking
+  the session: its UUID, its `conversation` (`"chat"` or `"private"`, M56 §5),
+  so a private call is never taken for the chat's, and when it started.
   """
 
   @claim_key :live_call
 
   @type registry :: atom()
+
+  @typedoc "What a claim holds: the call's identity, its conversation and its start."
+  @type call :: %{
+          call_uuid: String.t(),
+          conversation: String.t(),
+          started_at: DateTime.t()
+        }
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) when is_list(opts) do
@@ -31,10 +42,14 @@ defmodule FermixCore.Realtime.CallRegistry do
 
   `{:error, :call_in_progress}` while another process holds the claim.
   """
-  @spec claim(registry(), String.t()) :: :ok | {:error, :call_in_progress}
-  def claim(registry, call_uuid)
-      when is_atom(registry) and is_binary(call_uuid) and call_uuid != "" do
-    case Registry.register(registry, @claim_key, call_uuid) do
+  @spec claim(registry(), call()) :: :ok | {:error, :call_in_progress}
+  def claim(
+        registry,
+        %{call_uuid: call_uuid, conversation: conversation, started_at: %DateTime{}} = call
+      )
+      when is_atom(registry) and is_binary(call_uuid) and call_uuid != "" and
+             conversation in ["chat", "private"] do
+    case Registry.register(registry, @claim_key, call) do
       {:ok, _owner} -> register_call(registry, call_uuid)
       {:error, {:already_registered, _holder}} -> {:error, :call_in_progress}
     end
@@ -46,15 +61,23 @@ defmodule FermixCore.Realtime.CallRegistry do
   # name a call the claim no longer holds.
 
   @doc """
-  The call in progress: its UUID and its session, or `:none`. With voice off
+  The call in progress, its claim and its session, or `:none`. With voice off
   no registry runs (`Realtime.Supervisor` is not started), and no call is in
   progress either: Channels asks on every typed chat turn (M56 §4.3).
   """
-  @spec active(registry()) :: {:ok, %{call_uuid: String.t(), session: pid()}} | :none
+  @spec active(registry()) ::
+          {:ok,
+           %{
+             call_uuid: String.t(),
+             conversation: String.t(),
+             started_at: DateTime.t(),
+             session: pid()
+           }}
+          | :none
   def active(registry) when is_atom(registry) do
     with pid when is_pid(pid) <- Process.whereis(registry),
-         {session, call_uuid} <- live_entry(registry, @claim_key) do
-      {:ok, %{call_uuid: call_uuid, session: session}}
+         {session, call} <- live_entry(registry, @claim_key) do
+      {:ok, Map.put(call, :session, session)}
     else
       nil -> :none
     end

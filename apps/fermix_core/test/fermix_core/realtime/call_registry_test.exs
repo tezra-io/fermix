@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.CallRegistryTest do
 
   @first_uuid "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
   @second_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+  @started_at ~U[2026-10-03 14:05:00Z]
 
   setup do
     registry = :"call_registry_#{System.unique_integer([:positive])}"
@@ -15,8 +16,24 @@ defmodule FermixCore.Realtime.CallRegistryTest do
   test "a claim names the call in progress and registers its UUID", %{registry: registry} do
     holder = claim_in_process(registry, @first_uuid)
 
-    assert CallRegistry.active(registry) == {:ok, %{call_uuid: @first_uuid, session: holder}}
+    assert CallRegistry.active(registry) ==
+             {:ok,
+              %{
+                call_uuid: @first_uuid,
+                conversation: "chat",
+                started_at: @started_at,
+                session: holder
+              }}
+
     assert CallRegistry.lookup(registry, @first_uuid) == {:ok, holder}
+  end
+
+  # M56 §4.4: a private call is not the chat's, and whoever reads the call in
+  # progress can tell without asking its session.
+  test "the claim says which conversation the call is in", %{registry: registry} do
+    assert :ok = CallRegistry.claim(registry, call(@first_uuid, "private"))
+    assert {:ok, %{conversation: "private", session: session}} = CallRegistry.active(registry)
+    assert session == self()
   end
 
   # The registry runs only while voice does (`Realtime.Supervisor`), and a
@@ -28,7 +45,7 @@ defmodule FermixCore.Realtime.CallRegistryTest do
   test "a second claim is refused while the first holder lives", %{registry: registry} do
     holder = claim_in_process(registry, @first_uuid)
 
-    assert {:error, :call_in_progress} = CallRegistry.claim(registry, @second_uuid)
+    assert {:error, :call_in_progress} = CallRegistry.claim(registry, call(@second_uuid))
     assert CallRegistry.lookup(registry, @second_uuid) == :none
     assert {:ok, %{session: ^holder}} = CallRegistry.active(registry)
   end
@@ -41,7 +58,7 @@ defmodule FermixCore.Realtime.CallRegistryTest do
     for index <- 1..20 do
       spawn(fn ->
         uuid = "00000000-0000-4000-8000-#{String.pad_leading(Integer.to_string(index), 12, "0")}"
-        send(test_pid, {:claimed, CallRegistry.claim(registry, uuid)})
+        send(test_pid, {:claimed, CallRegistry.claim(registry, call(uuid))})
 
         hold_claim()
       end)
@@ -62,8 +79,9 @@ defmodule FermixCore.Realtime.CallRegistryTest do
     assert CallRegistry.active(registry) == :none
     assert CallRegistry.lookup(registry, @first_uuid) == :none
 
-    assert :ok = CallRegistry.claim(registry, @second_uuid)
-    assert CallRegistry.active(registry) == {:ok, %{call_uuid: @second_uuid, session: self()}}
+    assert :ok = CallRegistry.claim(registry, call(@second_uuid))
+    assert {:ok, %{call_uuid: @second_uuid, session: session}} = CallRegistry.active(registry)
+    assert session == self()
   end
 
   # A holder process that claims and then waits, so the claim outlives the call
@@ -73,7 +91,7 @@ defmodule FermixCore.Realtime.CallRegistryTest do
 
     holder =
       spawn(fn ->
-        send(test_pid, {:claimed, CallRegistry.claim(registry, uuid)})
+        send(test_pid, {:claimed, CallRegistry.claim(registry, call(uuid))})
 
         hold_claim()
       end)
@@ -81,6 +99,9 @@ defmodule FermixCore.Realtime.CallRegistryTest do
     assert receive_claim() == :ok
     holder
   end
+
+  defp call(uuid, conversation \\ "chat"),
+    do: %{call_uuid: uuid, conversation: conversation, started_at: @started_at}
 
   # Bounded, so a holder never outlives its test by more than a moment.
   defp hold_claim do

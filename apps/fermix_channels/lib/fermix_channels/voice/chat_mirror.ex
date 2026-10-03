@@ -8,9 +8,9 @@ defmodule FermixChannels.Voice.ChatMirror do
   chat's conversation. `Companion.Turns` calls `typed/2` as it hands a chat
   turn to the queue and `answered/1` as that turn completes, so a slash command
   answered without a turn, or a request cancelled before it was queued, is
-  never told. The call is found in Core's registry and told through
-  `LiveSessionServer`, which drops what a private call, or a call not yet up,
-  must not hear.
+  never told. The call is found in Core's registry, whose claim says whether
+  it is in the chat, so a private call is never told and its chat never read;
+  `LiveSessionServer` drops what a call not yet up must not hear.
 
   Only the chat's own conversation is mirrored, because only it is what a
   hand-off can read. The phone's turns run in a conversation of their own
@@ -54,7 +54,7 @@ defmodule FermixChannels.Voice.ChatMirror do
 
   defp chat_call(key) do
     with true <- key == Companion.chat_conversation_key(),
-         {:ok, %{session: session}} <- CallRegistry.active(CallRegistry) do
+         {:ok, %{session: session, conversation: "chat"}} <- CallRegistry.active(CallRegistry) do
       {:ok, session}
     else
       _no_call -> :none

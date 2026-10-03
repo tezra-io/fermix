@@ -945,7 +945,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     end
 
     test "a typed message is told to the call, and so is the answer it gets", ctx do
-      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
       id = unique()
       msg = %{type: "msg", payload: msg_payload(id, "use https://x.test/lease")}
 
@@ -966,7 +966,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     end
 
     test "a turn that ends without an answer of its own tells the call nothing more", ctx do
-      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
       id = unique()
 
       assert :ok =
@@ -988,7 +988,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     # The phone's turns run in a conversation of their own until they join the
     # chat's (M56 D9): a hand-off could not read them, so they are not told.
     test "a message typed on the phone is not told to the call", ctx do
-      :ok = CallRegistry.claim(CallRegistry, DeviceIdentity.generate_uuid())
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
       id = unique()
 
       assert :ok =
@@ -1000,6 +1000,23 @@ defmodule FermixChannels.Companion.TurnsTest do
 
       assert_receive {:enqueued, turn}
       turn.turn_result_fn.({:completed})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, _event}}
+    end
+
+    # M56 §4.4: the chat does not know a private call exists.
+    test "a private call is told nothing, and the chat is not read for it", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("private"))
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "a private aside")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Noted.")
+      assert :ok = turn.reply_fn.({:text, "Noted."})
+      turn.turn_result_fn.({:completed})
+      assert_receive {:companion_event, %{"t" => "text_done"}}
       drain(ctx)
 
       refute_received {:"$gen_cast", {:chat, _event}}
@@ -1226,6 +1243,14 @@ defmodule FermixChannels.Companion.TurnsTest do
 
   # The application repo outlives a run, so every request id is new.
   defp unique, do: "e2e-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+  # The claim a Live session takes, held by this test process in its stead.
+  defp call_in(conversation),
+    do: %{
+      call_uuid: DeviceIdentity.generate_uuid(),
+      conversation: conversation,
+      started_at: DateTime.utc_now()
+    }
 
   defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_channels, key, value)
   defp restore_env({key, :error}), do: Application.delete_env(:fermix_channels, key)
