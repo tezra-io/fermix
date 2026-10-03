@@ -59,6 +59,7 @@ defmodule FermixChannels.Companion.Connection do
   # line a client reads.
   @max_page_bytes 60 * 1_024
   @handover_timeout_ms 5_000
+  @task_not_running_message "No task of that call is still running under that revision."
 
   # The closed vocabulary of `error.reason` this socket sends, besides
   # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's),
@@ -474,6 +475,11 @@ defmodule FermixChannels.Companion.Connection do
 
   defp error_fields(reason) when reason in @named_reasons,
     do: %{"reason" => Atom.to_string(reason)}
+
+  # A cancel by `task_ref` that names no GPT-Live task still running under
+  # exactly those ids (M56 §4.6): its own sentence, the connection kept.
+  defp error_fields(:task_not_running),
+    do: %{"reason" => "request_failed", "message" => @task_not_running_message}
 
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.

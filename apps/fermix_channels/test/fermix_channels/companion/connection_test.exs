@@ -687,6 +687,37 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert %{"type" => "error", "reason" => "unsupported_profile"} = recv(client)
   end
 
+  # M56 §4.6: a version 2 cancel naming a GPT-Live task that outlived its
+  # call; one not running under exactly those ids is refused with a sentence,
+  # and the connection stays open.
+  test "a cancel naming a task that is not running is refused and the connection kept", ctx do
+    client = hello(ctx.socket_path, 2)
+
+    task_ref = %{
+      "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "task_id" => "dg_1",
+      "revision" => 1
+    }
+
+    send_line(client, %{
+      "type" => "cancel",
+      "profile_id" => "main",
+      "client_msg_id" => "mac-9",
+      "task_ref" => task_ref
+    })
+
+    assert recv(client) == %{
+             "type" => "error",
+             "reason" => "request_failed",
+             "message" => "No task of that call is still running under that revision."
+           }
+
+    refute_received {:turns_cancel, _profile, _id}
+
+    send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+    assert %{"type" => "read_state"} = recv(client)
+  end
+
   test "protocol violations are answered once and close the connection", ctx do
     oversized = hello(ctx.socket_path)
     :ok = :gen_tcp.send(oversized, String.duplicate("x", 65_537))

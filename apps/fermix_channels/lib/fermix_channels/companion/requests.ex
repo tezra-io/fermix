@@ -9,7 +9,9 @@ defmodule FermixChannels.Companion.Requests do
   runs twice), fenced to one attempt per boot by the request coordinator,
   written to the timeline as the user's row, and ingested through the Gateway.
   History, search and read state are reads and one monotonic write over the
-  same timeline, and a `cancel` stops one request's turn.
+  same timeline, and a `cancel` stops one request's turn, or, with a
+  `task_ref` (companion protocol 2), the one GPT-Live task that outlived its
+  call those ids name (M56 §4.6).
 
   `Companion.Turns` is the Gateway's agent for both transports, so a request
   that becomes a turn is handed to the queue through it and settled by it from
@@ -53,6 +55,7 @@ defmodule FermixChannels.Companion.Requests do
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixChannels.Voice.Detached
   alias FermixCore.Companion.Timeline
   alias FermixCore.Telemetry
 
@@ -143,8 +146,20 @@ defmodule FermixChannels.Companion.Requests do
   untouched. Nothing is answered here: the turn ends on the wire from its
   outcome, a `turn_error` (code `cancelled`), or its `text_done` when it had
   already finished.
+
+  A cancel with a `task_ref` (M56 §4.6) names no request: it stops the turn of
+  the GPT-Live task that outlived its call under exactly those ids, through
+  its owner, `Voice.Detached`, which alone knows the task still runs. Its
+  acknowledgement is the task's done row; any other ids are refused
+  (`{:error, :task_not_running}`), the client told on its open connection.
   """
   @spec cancel(map(), keyword()) :: :ok | {:error, term()}
+  def cancel(%{"task_ref" => task_ref} = payload, opts) when is_map(task_ref) and is_list(opts) do
+    with {:ok, _profile} <- profile(payload) do
+      Detached.cancel(detached(opts), task_ref)
+    end
+  end
+
   def cancel(payload, opts) when is_map(payload) and is_list(opts) do
     with {:ok, profile} <- profile(payload),
          {:ok, client_id} <- required(payload, "client_msg_id") do
@@ -726,6 +741,7 @@ defmodule FermixChannels.Companion.Requests do
 
   defp store(opts), do: Keyword.get(opts, :store, Timeline)
   defp settlement_owner(opts), do: Keyword.get(opts, :settlement_owner, Turns)
+  defp detached(opts), do: Keyword.get(opts, :detached, Detached)
   defp gateway(opts), do: Keyword.get(opts, :gateway, Gateway)
   defp coordinator(opts), do: Keyword.get(opts, :coordinator, RequestCoordinator)
   defp approvals(opts), do: Keyword.get(opts, :approvals, Approvals.server())
