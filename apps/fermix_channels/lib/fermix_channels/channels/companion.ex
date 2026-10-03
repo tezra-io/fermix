@@ -12,8 +12,9 @@ defmodule FermixChannels.Channels.Companion do
   `Companion.Output` (the same writes and events the mobile adapter makes) and
   broadcasts the logical events to every connection watching the profile,
   through the `registry/0` those connections join after their handshake. A row
-  it writes reaches the phones too (`Companion.Fanout`); an approval stays on
-  this socket, the only transport its token resolves from. A turn's replies
+  it writes reaches the phones too (`Companion.Fanout`), and a delivery is
+  pushed to them while their channel runs; an approval stays on this socket,
+  the only transport its token resolves from. A turn's replies
   and its ending go through `Companion.Turns`, which writes and announces them
   only once the queue fires the turn's outcome.
 
@@ -43,9 +44,11 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Companion.Protocol
@@ -253,7 +256,9 @@ defmodule FermixChannels.Channels.Companion do
   Write one reply or delivery to the timeline and announce it. A request's
   output is fenced by its attempt, a proactive delivery is deduplicated by its
   key, and anything else (a scheduled job's result) is a plain row; whether or
-  not a client is connected, the row is the delivery.
+  not a client is connected, the row is the delivery. A delivery, one that
+  answers no request, is pushed to the phones as well while their channel
+  runs (M56 D9), as one through the phone's own channel is.
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -266,6 +271,7 @@ defmodule FermixChannels.Channels.Companion do
              {:ok, {status, row}} <-
                Output.persist_text(store(), profile_id, text, Map.new(opts)) do
           announce_written(status, profile_id, row)
+          push_delivered(status, profile_id, row, opts)
           {:ok, status}
         end
       end)
@@ -355,6 +361,21 @@ defmodule FermixChannels.Channels.Companion do
     do: Fanout.announce(profile, Output.row(profile, row))
 
   defp announce_written(:existing, _profile, _row), do: :ok
+
+  # The phone and the Mac draw one timeline (M56 D9), so a delivery written
+  # here reaches the phones as one through the phone's own channel does: its
+  # row is pushed while the phone tree runs, and the phone's rule decides from
+  # there (no push to a connected device, nor for a row already read), so an
+  # owner watching the Mac is not pinged. A reply to a request (a slash
+  # command's answer) is its client's, and a row the store deduplicated was
+  # pushed when it was written: neither is pushed.
+  defp push_delivered(:created, profile, row, opts) do
+    if is_nil(Keyword.get(opts, :in_reply_to)) and MobileSupervisor.running?(),
+      do: Mobile.schedule_push(profile, row.server_seq),
+      else: :ok
+  end
+
+  defp push_delivered(:existing, _profile, _row, _opts), do: :ok
 
   # One durable timeline row is one delivered outbound message; a row the store
   # deduplicated was counted when it was created.

@@ -11,6 +11,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Delivery.ChannelSend
 
   @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
 
@@ -106,6 +107,13 @@ defmodule FermixChannels.Channels.CompanionTest do
     def fail_client_request(profile, client_id, attempt, fields, _opts) do
       send(:companion_adapter_test, {:failed, profile, client_id, attempt, fields})
       {:ok, %{status: "failed"}}
+    end
+
+    # The page a push reads its preview from: the one row the test wrote.
+    def history_page(profile, opts) do
+      seq = Keyword.fetch!(opts, :after_seq) + 1
+      row = %{profile_id: profile, server_seq: seq, content: "your 9am summary"}
+      {:ok, %{messages: [row]}}
     end
 
     # A request is cancelled when the test recorded a cancel on it.
@@ -564,6 +572,84 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
   end
 
+  # M56 D9: the phone and the Mac draw one timeline, and a delivery to it
+  # through this channel reaches the phones as one through the phone's own
+  # channel does: its row is pushed while the phone tree runs, and the
+  # phone's rule decides from there (no push to a connected device, nor for a
+  # row already read).
+  describe "a delivery to the chat and the phones" do
+    setup do
+      test_pid = self()
+      env = ~w(mobile_store mobile_push mobile_push_launcher)a
+      previous = Map.new(env, &{&1, Application.fetch_env(:fermix_channels, &1)})
+      Application.put_env(:fermix_channels, :mobile_store, StoreStub)
+
+      Application.put_env(:fermix_channels, :mobile_push, fn profile, seq, preview ->
+        send(test_pid, {:push_notify, profile, seq, preview})
+        {:ok, %{status: :sent, sent: 1}}
+      end)
+
+      Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {key, {:ok, value}} -> Application.put_env(:fermix_channels, key, value)
+          {key, :error} -> Application.delete_env(:fermix_channels, key)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "is pushed once while the phone tree runs" do
+      start_phone_tree()
+
+      assert :ok = Companion.send_message("main", "your 9am summary", [])
+
+      assert_receive {:push_notify, "main", 41, "your 9am summary"}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    # A scheduled job's result reaches the chat through the shared send.
+    test "a job delivered to the chat is pushed once while the phone tree runs" do
+      start_phone_tree()
+
+      assert :ok =
+               ChannelSend.send("companion", "main", "your 9am summary", [],
+                 channels: %{"companion" => Companion}
+               )
+
+      assert_receive {:push_notify, "main", 41, "your 9am summary"}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    test "is pushed to nobody while the phone tree is down" do
+      assert :ok = Companion.send_message("main", "your 9am summary", [])
+
+      assert_receive {:append, "main", _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    test "a delivery the store already holds under its key is not pushed again" do
+      start_phone_tree()
+
+      assert :ok = Companion.send_message("main", "your 9am summary", proactive_key: "job-1")
+
+      assert_receive {:proactive, "main", "job-1", _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    # A reply to a request is its client's answer, not a delivery.
+    test "a slash command's answer is not pushed" do
+      start_phone_tree()
+
+      assert :ok = Companion.build_text_reply(request_message()).("Approved.")
+
+      assert_receive {:client_output, "main", "mac-1", 3, _key, _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+  end
+
   test "tool activity and approvals reach the profile, with no null fields", %{
     approvals: approvals
   } do
@@ -633,6 +719,15 @@ defmodule FermixChannels.Channels.CompanionTest do
       chat_id: "main",
       reply_target: "main",
       metadata: %{client_msg_id: "mac-1", companion_attempt: 3, turn_id: "turn-mac-1"}
+    })
+  end
+
+  # The phone tree runs while its supervisor's name is registered.
+  defp start_phone_tree do
+    start_supervised!(%{
+      id: :phone_tree,
+      start:
+        {Agent, :start_link, [fn -> :phone_tree end, [name: FermixChannels.Mobile.Supervisor]]}
     })
   end
 
