@@ -5,13 +5,13 @@ The `browser` tool drives Chromium over CDP. Which browser it drives is the
 
 ## The managed profile (the default)
 
-`fermix`, `fermix_visible` and `fermix_headless` are Fermix's own browser
-instances, in its own profile directory, with its own logins. This is the
-default and the right answer for almost everything: it opens and closes tabs, it
-redirects downloads into the workspace, it reads and clears cookies, and nobody
-else is using it.
+`fermix`, `fermix_visible`, `fermix_headless` and `fermix_chrome` are Fermix's
+own browser instances, in its own profile directory, with its own logins. This
+is the default and the right answer for almost everything: it opens and closes
+tabs, it redirects downloads into the workspace, it reads and clears cookies,
+and nobody else is using it.
 
-Which of the three a call without `profile` uses is `[fermix_core.browser]
+Which of the first three a call without `profile` uses is `[fermix_core.browser]
 default_profile`, the person's "how tasks run" choice: `fermix` (the shipped
 default) runs in a window wherever there is a display and in the background on
 a server without one, `fermix_headless` always runs in the background, and
@@ -23,6 +23,13 @@ before closing the oldest one a task is not using; it applies from the browser's
 next start. `allowed_hosts` and `launch_app` (both below) are the section's
 other keys; `default_profile` refuses `selected_tab` and any name no profile
 carries.
+
+`fermix_chrome` is not one of those choices, and Settings does not offer it: it
+is the managed Chrome a task names for what only Chrome can do, which today is
+a page's WebMCP tools while the default profile runs in the Fermix app's pane
+(below). Like `fermix`, it opens a window where there is a display, and it is
+never routed to the pane. It keeps its own logins like every profile, so a
+site signed in to in the pane is signed out there.
 
 ## Which browser the managed profiles launch
 
@@ -67,8 +74,16 @@ that answers `cancelled` — the pane itself is fine, so say it was cancelled,
 not that the browser went away. Every later browser call in the same turn
 answers that same sentence too, rather than quietly starting a fresh task on
 Chrome — the turn that saw the loss or the cancel stays that way. The next
-browser use, in a fresh turn, is decided afresh. `fermix_headless` and
-`selected_tab` are never routed to the pane.
+browser use, in a fresh turn, is decided afresh. `fermix_headless`,
+`fermix_chrome` and `selected_tab` are never routed to the pane.
+
+The pane runs no WebMCP: `webmcp` there answers `unsupported_in_fermix_app`.
+`open`, `navigate` and `status` say which browser answered in `backend`
+(`fermix_app` for the pane, `cdp` for Chrome), so when a page offers WebMCP
+tools and the browser is the pane, the move is to open the page with
+`profile: "fermix_chrome"` rather than to try in the pane. That opens a second
+profile beside the pane task, it does not re-route it: the pane task keeps its
+browser, and a pane lost mid-task still ends that task with `host_lost`.
 
 Limits of the managed browser:
 - Live tabs are capped: each `open` past the cap closes the oldest non-active

@@ -50,7 +50,7 @@ defmodule FermixCore.Browser.HostServerTest do
     defaults = [owner_key: "owner-pane", profile_name: "fermix", profile: @pane, config: config]
     spec = {ProfileServer, Keyword.merge(defaults, opts)}
 
-    start_supervised!(Supervisor.child_spec(spec, restart: :temporary))
+    start_supervised!(Supervisor.child_spec(spec, restart: :temporary, id: make_ref()))
   end
 
   # An isolated host, attached to a fake connection and reporting available.
@@ -125,11 +125,38 @@ defmodule FermixCore.Browser.HostServerTest do
     pid = start_server(backend: UpBackend, test_pid: self())
 
     assert {:error, %Error{code: "unsupported_in_fermix_app"} = error} = req(pid, "webmcp")
-    assert error.message =~ "snapshot"
     refute_received {:backend_asked, :webmcp}
+
+    # The next move, either way: the profile that is always Chrome for the
+    # page's own tools, or the pane's own snapshot and act without them.
+    assert error.message =~ ~s(profile: "fermix_chrome")
+    assert error.message =~ "snapshot"
 
     assert {:ok, _} = req(pid, "snapshot")
     assert_received {:backend_asked, :snapshot}
+  end
+
+  # Which browser a task is in decides whether a page's WebMCP tools run there,
+  # so the profile's status and the two results that first show a page say it,
+  # before anything is refused. One vocabulary, the backend label the registry
+  # records, so a Chrome result names its browser too.
+  test "status, open and navigate name the browser, and no other result does" do
+    for {mode, label} <- [fermix_app: "fermix_app", managed: "cdp"] do
+      pid = start_server(backend: UpBackend, test_pid: self(), profile: %{@pane | mode: mode})
+
+      for action <- ~w(start open navigate) do
+        assert {:ok, %{"backend" => ^label}} = req(pid, action, %{"url" => "about:blank"})
+      end
+
+      assert %{"backend" => ^label} = ProfileServer.status(pid)
+
+      for action <-
+            ~w(snapshot tabs focus close screenshot pdf console dialog cookies storage upload
+               download act) do
+        assert {:ok, result} = req(pid, action)
+        refute Map.has_key?(result, "backend"), "`#{action}` names the browser"
+      end
+    end
   end
 
   # ── a task on the host ───────────────────────────────────────────────────
@@ -158,6 +185,7 @@ defmodule FermixCore.Browser.HostServerTest do
 
     assert {:ok, result} = req(pid, "open", %{"url" => "about:blank"})
     assert result["target"] == "h1:t1"
+    assert result["backend"] == "fermix_app"
     assert result["page"] == "changed"
     assert result["snapshot"] =~ "<browser_page_content>"
     assert [{"tab.open", _payload}] = FakeBrowserHostConnection.requests(connection)

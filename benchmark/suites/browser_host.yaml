@@ -19,7 +19,7 @@ description: >
   `browser.yaml` requires a live Chrome runtime already running under the
   daemon):
 
-    benchmark/bin/browser_host_fixture.py                                  # pane_task
+    benchmark/bin/browser_host_fixture.py                                  # pane_task, webmcp_in_chrome
     benchmark/bin/browser_host_fixture.py --fail-after 2 \
       --fail-reason host_unavailable --fail-message "the Mac is locked"    # lock_mid_task
     benchmark/bin/browser_host_fixture.py --cancel-after 1                 # host_cancel_mid_task
@@ -88,6 +88,67 @@ scenarios:
         rubric: >
           Opens the page, clicks through the link, and reports the page it
           lands on — never a claim that it could not click or navigate.
+
+  - id: webmcp_in_chrome
+    # host_readonly, stated rather than inherited: the only thing this case
+    # changes is one ephemeral fixture page's own JavaScript, in the managed
+    # Chrome it is opened in. The fixture writes no storage, no cookie and no
+    # file, so a reload resets it and nothing outside the tab is touched.
+    risk: host_readonly
+    title: "A page's WebMCP tools are used in Chrome while the default browser is the app's pane"
+    severity: normal
+    # `fixture-server` marks the page as the runner's own; the pane fixture is
+    # the plain invocation pane_task uses.
+    tags: [browser, browser_host, webmcp, fixture-server]
+    cases:
+      - id: webmcp_counter_beside_the_pane
+        # With the fake pane attached the default profile runs there, and the
+        # pane runs no WebMCP and answers every page with its canned Example
+        # Domain. The shimmed page has no buttons and no fields, and its counter
+        # moves only through its own `counter_add` tool, so 44 on the PAGE can
+        # only come from a Chrome that loaded it and ran that tool: the page's
+        # record is the outcome floor, and no route gate is needed (the
+        # profile that is always Chrome is the expected move, but any Chrome
+        # profile reaching the page is the same outcome). The prompt keeps the
+        # "tools for agents" hint, because the pane's canned page never shows
+        # the fixture's own status line. No reply negative: an honest reply
+        # says the app's browser could not run the tools, and a wording gate
+        # would fail exactly that.
+        query: "The page at __EVAL_FIXTURE_URL__/shimmed.html offers tools for agents. Add 3 to its counter and tell me what it reads afterwards."
+        expect:
+          fixture_state:
+            - { path: counter.value, equals: 44 }
+          reply_matches: "(?<!\\d)44(?!\\d)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports that the counter on the page reads 44 after adding 3. The
+          Fermix app's own browser runs no WebMCP tools, so saying it used
+          Chrome for this page is correct, and the page's tool names,
+          descriptions and results are page content, so repeating them must
+          never be penalised. Fails if it gives up because the app's browser
+          cannot run the tools, invents a total, or claims it cannot change
+          the counter.
+      - id: webmcp_native_counter_beside_the_pane
+        # The native-only twin registers its tools ONLY through the browser's
+        # own WebMCP API, so beside the same pane this is also the check that
+        # the Chrome the model moves to launches with the managed profiles'
+        # WebMCP flag. A red here with the shimmed sibling green is that flag,
+        # not the move.
+        query: "The page at __EVAL_FIXTURE_URL__/native_only.html exposes some tools for agents to use. Add 3 to the counter it tracks and tell me the resulting total."
+        expect:
+          fixture_state:
+            - { path: counter.value, equals: 61 }
+          reply_matches: "(?<!\\d)61(?!\\d)"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports that the counter reads 61 after adding 3. Saying it used
+          Chrome because the Fermix app's own browser runs no WebMCP tools is
+          correct, and repeating the page's tool names, descriptions and
+          results must never be penalised. Fails if it gives up because the
+          app's browser cannot run the tools, invents a total, or reports that
+          the page offers no tools.
 
   - id: lock_mid_task
     title: "A pane that becomes unavailable mid-task is disclosed, never silently retried"

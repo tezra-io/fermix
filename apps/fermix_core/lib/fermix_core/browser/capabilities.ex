@@ -145,9 +145,12 @@ defmodule FermixCore.Browser.Capabilities do
       "for that."
   end
 
+  # The pane has no WebMCP, and the next move is a choice the model makes: the
+  # profile that is always Chrome, or the pane's own snapshot and act.
   defp app_sentence(:webmcp) do
-    "The Fermix app's browser does not run a page's own WebMCP tools. Read the page with " <>
-      "`snapshot` and drive it with `act`."
+    "The Fermix app's browser does not run a page's own WebMCP tools. To use them, open " <>
+      ~s(the page with `profile: "fermix_chrome"`, which is always Chrome. When they are ) <>
+      "not needed, read the page with `snapshot` and drive it with `act`."
   end
 
   defp app_sentence(capability) do

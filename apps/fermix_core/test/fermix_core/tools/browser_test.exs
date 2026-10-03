@@ -82,6 +82,30 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  # The app's pane runs no WebMCP, and a model that learns so only from the
+  # refusal stays in the pane and clicks. Every surface the model reads names the
+  # field that says which browser it is in and the profile that is always Chrome.
+  describe "steering a page's WebMCP tools out of the app's pane" do
+    test "both halves of the prompt name the pane, `backend` and fermix_chrome" do
+      for surface <- [Browser.description(), Browser.when_to_use()] do
+        assert surface =~ ~s(profile: "fermix_chrome")
+        assert surface =~ "`backend`"
+        assert surface =~ "`fermix_app`"
+        assert surface =~ "`cdp`"
+        assert surface =~ "signed in"
+      end
+    end
+
+    test "the profile argument and the pane's refusal tag name fermix_chrome" do
+      assert Browser.parameters().properties.profile.description =~ "`fermix_chrome`"
+
+      %{description: description} =
+        Enum.find(Browser.failure_modes(), &(&1.tag == "unsupported_in_fermix_app"))
+
+      assert description =~ ~s(profile: "fermix_chrome")
+    end
+  end
+
   describe "parameters/0" do
     test "returns flat JSON Schema with action as required" do
       params = Browser.parameters()
