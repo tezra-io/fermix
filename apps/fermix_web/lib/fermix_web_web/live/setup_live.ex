@@ -4,6 +4,7 @@ defmodule FermixWebWeb.SetupLive do
   alias Fermix.CLI.Service
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.AnthropicLogin
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.OAuthProviders
@@ -209,6 +210,10 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:codex_auth_url, nil)
       |> assign(:xai_auth_tasks, %{})
       |> assign(:xai_auth_url, nil)
+      |> assign(:chatgpt_auth_task, nil)
+      |> assign(:chatgpt_auth_url, nil)
+      |> assign(:chatgpt_notice?, false)
+      |> assign(:chatgpt_signing_out?, false)
       |> assign(:plugin_auth_tasks, %{})
       |> assign(:plugin_auth_url, nil)
       |> assign(:plugin_install_tasks, %{})
@@ -312,7 +317,7 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_event("codex_login", _params, socket) do
     if codex_auth_running?(socket.assigns.codex_auth_tasks) do
-      {:noreply, flash_info(socket, "ChatGPT sign-in is already open.")}
+      {:noreply, flash_info(socket, "Codex sign-in is already open.")}
     else
       {:noreply, start_codex_auth(socket)}
     end
@@ -323,6 +328,30 @@ defmodule FermixWebWeb.SetupLive do
       {:noreply, flash_info(socket, "Grok sign-in is already open.")}
     else
       {:noreply, start_xai_auth(socket)}
+    end
+  end
+
+  def handle_event("chatgpt_login", _params, socket) do
+    if socket.assigns.chatgpt_auth_task do
+      {:noreply, flash_info(socket, "ChatGPT sign-in is already open.")}
+    else
+      {:noreply, start_chatgpt_auth(socket)}
+    end
+  end
+
+  def handle_event("chatgpt_cancel", _params, socket) do
+    {:noreply, cancel_chatgpt_auth(socket)}
+  end
+
+  def handle_event("chatgpt_paste", %{"callback_url" => url}, socket) when is_binary(url) do
+    {:noreply, paste_chatgpt_callback(socket, String.trim(url))}
+  end
+
+  def handle_event("chatgpt_logout", _params, socket) do
+    if socket.assigns.chatgpt_signing_out? do
+      {:noreply, socket}
+    else
+      {:noreply, start_chatgpt_logout(socket)}
     end
   end
 
@@ -875,7 +904,7 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply,
      socket
      |> assign(:codex_auth_url, url)
-     |> flash_info("Opening ChatGPT sign-in.")
+     |> flash_info("Opening Codex sign-in.")
      |> push_event("codex-auth-open", %{url: url})}
   end
 
@@ -895,6 +924,10 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_info({:clear_xai_auth_url, url}, socket) do
     {:noreply, maybe_clear_xai_auth_url(socket, url)}
+  end
+
+  def handle_info({:chatgpt_auth_url, url}, socket) do
+    {:noreply, show_chatgpt_auth_url(socket, url)}
   end
 
   def handle_info({:plugin_auth_url, name, url}, socket) do
@@ -1042,6 +1075,14 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :meetbot_signin, failed(meetbot_signin_error(reason)))}
   end
 
+  def handle_async(:chatgpt_logout, {:ok, result}, socket) do
+    {:noreply, finish_chatgpt_logout(socket, result)}
+  end
+
+  def handle_async(:chatgpt_logout, {:exit, reason}, socket) do
+    {:noreply, finish_chatgpt_logout(socket, {:error, reason})}
+  end
+
   @impl true
   def render(assigns) do
     ~H"""
@@ -1060,6 +1101,15 @@ defmodule FermixWebWeb.SetupLive do
       xai_auth={@xai_auth}
       xai_auth_running?={xai_auth_running?(@xai_auth_tasks)}
       xai_auth_url={@xai_auth_url}
+      chatgpt_auth={
+        chatgpt_auth_view(
+          @chatgpt_auth,
+          @chatgpt_auth_task,
+          @chatgpt_auth_url,
+          @chatgpt_notice?,
+          @chatgpt_signing_out?
+        )
+      }
       anthropic_auth={@anthropic_auth}
       anthropic_import_available?={@anthropic_import_available?}
       doctor_probe_running?={@doctor_probe_running?}
@@ -1135,6 +1185,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
     |> assign(:codex_auth, codex_auth_summary())
     |> assign(:xai_auth, xai_auth_summary())
+    |> assign(:chatgpt_auth, ChatGPT.summary())
     |> assign(:anthropic_auth, anthropic_auth_summary())
     |> assign(:anthropic_import_available?, anthropic_import_available?(snapshot))
     |> assign(:realtime_form, build_realtime_form(snapshot))
@@ -3460,12 +3511,12 @@ defmodule FermixWebWeb.SetupLive do
         run_codex_login(parent)
       end)
 
-    tasks = Map.put(socket.assigns.codex_auth_tasks, task.ref, %{display_name: "ChatGPT"})
+    tasks = Map.put(socket.assigns.codex_auth_tasks, task.ref, %{display_name: "Codex"})
 
     socket
     |> assign(:codex_auth_tasks, tasks)
     |> assign(:codex_auth_url, nil)
-    |> flash_info("Opening ChatGPT sign-in.")
+    |> flash_info("Opening Codex sign-in.")
   end
 
   defp run_codex_login(parent) do
@@ -3506,6 +3557,9 @@ defmodule FermixWebWeb.SetupLive do
       Map.has_key?(socket.assigns.xai_auth_tasks, ref) ->
         finish_xai_auth_task(socket, ref, result)
 
+      chatgpt_auth_ref?(socket, ref) ->
+        finish_chatgpt_auth_task(socket, ref, result)
+
       true ->
         finish_codex_auth_task(socket, ref, result)
     end
@@ -3540,6 +3594,9 @@ defmodule FermixWebWeb.SetupLive do
 
       Map.has_key?(socket.assigns.xai_auth_tasks, ref) ->
         fail_xai_auth_task(socket, ref, reason)
+
+      chatgpt_auth_ref?(socket, ref) ->
+        fail_chatgpt_auth_task(socket, reason)
 
       true ->
         fail_codex_auth_task(socket, ref, reason)
@@ -3745,6 +3802,211 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   defp xai_auth_summary, do: oauth_profile_summary(Store.profile(:xai))
+
+  # --- Sign in with ChatGPT (M57): plan usage as a provider ------------------
+  # Run like the Codex sign-in, one at a time. `Auth.ChatGPT` owns every rule
+  # (consent, the plan scope, revocation, the sentences); this orchestrates.
+
+  @chatgpt_no_models "ChatGPT is connected, but it listed no models for this account."
+
+  defp chatgpt_auth_view(summary, task, url, notice?, signing_out?) do
+    Map.merge(summary, %{
+      running?: task != nil,
+      url: url,
+      notice?: notice?,
+      signing_out?: signing_out?
+    })
+  end
+
+  defp start_chatgpt_auth(socket) do
+    parent = self()
+    runner = chatgpt_login_runner()
+
+    task =
+      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
+        runner.(opener: chatgpt_auth_opener(parent), puts: fn _message -> :ok end)
+      end)
+
+    socket
+    |> assign(:chatgpt_auth_task, task)
+    |> assign(:chatgpt_auth_url, nil)
+    |> flash_info("Opening ChatGPT sign-in.")
+  end
+
+  defp chatgpt_login_runner do
+    Application.get_env(:fermix_web, :chatgpt_login_runner, &ChatGPT.login/1)
+  end
+
+  defp chatgpt_logout_runner do
+    Application.get_env(:fermix_web, :chatgpt_logout_runner, &ChatGPT.logout/1)
+  end
+
+  defp chatgpt_auth_opener(parent) do
+    fn url ->
+      send(parent, {:chatgpt_auth_url, url})
+      :ok
+    end
+  end
+
+  # The link is shown while the sign-in that minted it waits: a url from an
+  # attempt cancelled meanwhile opens nothing.
+  defp show_chatgpt_auth_url(%{assigns: %{chatgpt_auth_task: nil}} = socket, _url), do: socket
+
+  defp show_chatgpt_auth_url(socket, url) do
+    socket
+    |> assign(:chatgpt_auth_url, url)
+    |> push_event("chatgpt-auth-open", %{url: url})
+  end
+
+  defp paste_chatgpt_callback(socket, ""),
+    do: flash_error(socket, "Paste the address your browser ended on.")
+
+  defp paste_chatgpt_callback(%{assigns: %{chatgpt_auth_task: nil}} = socket, _url),
+    do: flash_error(socket, "No ChatGPT sign-in is waiting. Continue with ChatGPT first.")
+
+  defp paste_chatgpt_callback(socket, url) do
+    :ok = ChatGPT.paste_callback(socket.assigns.chatgpt_auth_task.pid, url)
+    flash_info(socket, "Checking the pasted address.")
+  end
+
+  # A reply that landed before the cancel is the sign-in's real outcome, and a
+  # sign-in that died on its own failed; only a live one is cancelled.
+  defp cancel_chatgpt_auth(%{assigns: %{chatgpt_auth_task: nil}} = socket), do: socket
+
+  defp cancel_chatgpt_auth(socket) do
+    outcome = Task.shutdown(socket.assigns.chatgpt_auth_task, :brutal_kill)
+    socket = clear_chatgpt_auth(socket)
+
+    case outcome do
+      {:ok, result} -> finish_chatgpt_auth(socket, result)
+      {:exit, reason} -> finish_chatgpt_auth(socket, {:error, reason})
+      nil -> flash_info(socket, "ChatGPT sign-in cancelled.")
+    end
+  end
+
+  defp chatgpt_auth_ref?(%{assigns: %{chatgpt_auth_task: %Task{ref: ref}}}, ref), do: true
+  defp chatgpt_auth_ref?(_socket, _ref), do: false
+
+  defp finish_chatgpt_auth_task(socket, ref, result) do
+    Process.demonitor(ref, [:flush])
+    socket |> clear_chatgpt_auth() |> finish_chatgpt_auth(result)
+  end
+
+  defp fail_chatgpt_auth_task(socket, reason) do
+    socket |> clear_chatgpt_auth() |> finish_chatgpt_auth({:error, reason})
+  end
+
+  # Every end of a sign-in re-reads the registration, so the card shows what
+  # the attempt left behind whichever way it ended.
+  defp clear_chatgpt_auth(socket) do
+    socket
+    |> assign(:chatgpt_auth_task, nil)
+    |> assign(:chatgpt_auth_url, nil)
+    |> assign(:chatgpt_auth, ChatGPT.summary())
+  end
+
+  # Plan usage granted: ChatGPT becomes primary (the Codex and Grok exception,
+  # O7) and gets a model, because its route refuses the empty one.
+  defp finish_chatgpt_auth(socket, {:ok, %{plan_usage: :on}}) do
+    model = ensure_chatgpt_model(socket.assigns.report.wizard)
+
+    socket
+    |> assign(:chatgpt_notice?, true)
+    |> connect_oauth_provider(:chatgpt, "ChatGPT connected.")
+    |> show_chatgpt_model(model)
+  end
+
+  # Signed in without plan usage: shown, but never primary (D7).
+  defp finish_chatgpt_auth(socket, {:ok, %{plan_usage: :off}}) do
+    refresh_report_preserving_provider_form(socket, ChatGPT.failure_sentence(:plan_usage_off))
+  end
+
+  defp finish_chatgpt_auth(socket, {:error, reason}),
+    do: flash_error(socket, ChatGPT.failure_sentence(reason))
+
+  defp ensure_chatgpt_model(wizard) do
+    block = provider_block(wizard.config_snapshot, :chatgpt)
+
+    case ModelCatalog.effective_model(:chatgpt, block) do
+      "" -> persist_first_chatgpt_model(wizard)
+      _chosen -> :kept
+    end
+  end
+
+  defp persist_first_chatgpt_model(wizard) do
+    with {:ok, slug} <- first_chatgpt_model(),
+         {:ok, _report} <- save_chatgpt_model(wizard, slug) do
+      {:ok, slug}
+    end
+  end
+
+  # The account's own list, in the server's order. Nothing is guessed when the
+  # list cannot be read or is empty.
+  defp first_chatgpt_model do
+    case model_listing_impl().live_models(:chatgpt, []) do
+      {:ok, [%{id: slug} | _rest]} ->
+        {:ok, slug}
+
+      {:ok, []} ->
+        {:error, @chatgpt_no_models}
+
+      {:error, sentence} ->
+        {:error, "ChatGPT is connected, but its models could not be listed: #{sentence}"}
+    end
+  end
+
+  defp save_chatgpt_model(wizard, slug) do
+    case Wizard.save_answers(wizard, edit_provider: "chatgpt", default_model: slug) do
+      {:ok, report} ->
+        {:ok, report}
+
+      {:error, reason} ->
+        {:error,
+         "ChatGPT is connected, but its model was not saved: #{format_config_error(reason)}"}
+    end
+  end
+
+  defp show_chatgpt_model(socket, :kept), do: socket
+  defp show_chatgpt_model(socket, {:error, sentence}), do: flash_error(socket, sentence)
+
+  # The preserved form still carries the empty model the sign-in started from.
+  defp show_chatgpt_model(socket, {:ok, slug}) do
+    case socket.assigns.provider_form do
+      %{provider: :chatgpt} = form ->
+        assign(socket, :provider_form, %{form | default_model: slug})
+
+      _other ->
+        socket
+    end
+  end
+
+  defp start_chatgpt_logout(socket) do
+    runner = chatgpt_logout_runner()
+
+    socket
+    |> assign(:chatgpt_signing_out?, true)
+    |> start_async(:chatgpt_logout, fn -> runner.([]) end)
+  end
+
+  defp finish_chatgpt_logout(socket, result) do
+    socket
+    |> assign(:chatgpt_signing_out?, false)
+    |> chatgpt_logout_outcome(result)
+  end
+
+  defp chatgpt_logout_outcome(socket, {:ok, %{revoked: revoked?}}) do
+    message =
+      if revoked?,
+        do: "Signed out of ChatGPT.",
+        else: ChatGPT.failure_sentence(:revoke_not_confirmed)
+
+    socket
+    |> assign(:chatgpt_notice?, false)
+    |> refresh_report_preserving_provider_form(message)
+  end
+
+  defp chatgpt_logout_outcome(socket, {:error, reason}),
+    do: flash_error(socket, ChatGPT.failure_sentence(reason))
 
   # --- Anthropic setup-token / Claude Code import (synchronous, no loopback) -
 

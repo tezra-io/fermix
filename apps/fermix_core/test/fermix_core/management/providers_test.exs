@@ -263,6 +263,37 @@ defmodule FermixCore.Management.ProvidersTest do
       assert is_integer(measurements.duration_ms)
     end
 
+    # The ChatGPT probe runs through the adapter, which emits the call itself;
+    # a second event from the wrapper would count one call twice.
+    test "a ChatGPT probe gets the job's session id and the wrapper emits nothing", %{
+      jobs: jobs
+    } do
+      handler = :"chatgpt_probe_telemetry_#{System.unique_integer([:positive])}"
+      owner = self()
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          send(owner, {:provider_call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      probe = fn :chatgpt, opts ->
+        send(owner, {:probe_session, Keyword.fetch!(opts, :session_id)})
+        {:ok, %{model: "gpt-plan", latency_ms: 2}}
+      end
+
+      assert {:ok, started} = Providers.probe_start("chatgpt", jobs: jobs, probe: probe)
+      job_id = started["job_id"]
+
+      assert_receive {:probe_session, ^job_id}
+      refute_receive {:provider_call, %{session_id: ^job_id}}, 200
+    end
+
     test "a second probe of the same provider is refused as busy", %{jobs: jobs} do
       owner = self()
 

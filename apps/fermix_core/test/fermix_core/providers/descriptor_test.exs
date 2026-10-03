@@ -3,6 +3,7 @@ defmodule FermixCore.Providers.DescriptorTest do
 
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.ReasoningEffort
   alias FermixCore.Setup.SecretPaths
 
@@ -10,6 +11,7 @@ defmodule FermixCore.Providers.DescriptorTest do
   test "ids/0 returns the canonical ordered provider list" do
     assert Descriptor.ids() == [
              :openai_codex,
+             :chatgpt,
              :openai,
              :anthropic,
              :xai,
@@ -33,10 +35,36 @@ defmodule FermixCore.Providers.DescriptorTest do
   end
 
   test "every descriptor id has catalog models with a default" do
-    for id <- Descriptor.ids() do
+    for id <- Descriptor.ids(), id != :chatgpt do
       assert [_ | _] = ModelCatalog.models_for(id)
       assert is_binary(ModelCatalog.default_model_for(id))
     end
+  end
+
+  # M57 D1/§6.2: the account's models are discovered live, so nothing is
+  # shipped and nothing is guessed.
+  test "chatgpt ships no catalog and no default model" do
+    assert ModelCatalog.models_for(:chatgpt) == []
+    assert ModelCatalog.default_model_for(:chatgpt) == ""
+  end
+
+  test "chatgpt is an oauth-only remote provider on the public Responses API" do
+    descriptor = Descriptor.fetch!(:chatgpt)
+
+    assert descriptor.label == "ChatGPT"
+    assert descriptor.adapter == ChatGPTPlan
+    assert descriptor.default_base_url == "https://api.openai.com/v1"
+    assert descriptor.locality == :remote
+    assert descriptor.auth_modes == [:oauth]
+    assert descriptor.secrets == []
+    assert descriptor.setup_fields == []
+    assert descriptor.config_keys == [:default_model, :reasoning_effort, :primary]
+    assert descriptor.effort?
+  end
+
+  # D9: "ChatGPT" names one thing in the UI, so the Codex door drops it.
+  test "openai_codex is labelled OpenAI Codex" do
+    assert Descriptor.fetch!(:openai_codex).label == "OpenAI Codex"
   end
 
   test "every descriptor secret exists in the SecretPaths registry" do

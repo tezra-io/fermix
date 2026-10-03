@@ -34,7 +34,9 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.PrimaryConfig
+  alias FermixCore.Providers.RouteResolver
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
@@ -47,6 +49,7 @@ defmodule FermixCore.Setup.Doctor do
   @type provider ::
           :openai
           | :openai_codex
+          | :chatgpt
           | :anthropic
           | :xai
           | :openrouter
@@ -170,6 +173,10 @@ defmodule FermixCore.Setup.Doctor do
     {"network", :network}
   ]
   @default_probe_timeout_ms 5_000
+  # The ChatGPT probe is a real streamed turn (the route accepts no
+  # `max_output_tokens`), so its idle window is a turn's, not a 1-token probe's.
+  @chatgpt_probe_timeout_ms 30_000
+  @chatgpt_surface "ChatGPT plan usage"
   # Operator-facing remedies for the on-device transcription backend. The
   # "cannot be installed here" sentences belong to the installer modules (they
   # own the reason) and are rendered verbatim; these two cover the ordinary
@@ -199,6 +206,7 @@ defmodule FermixCore.Setup.Doctor do
   def probe_provider(provider, opts \\ [])
   def probe_provider(:openai, opts), do: probe_openai(opts)
   def probe_provider(:openai_codex, opts), do: probe_codex(opts)
+  def probe_provider(:chatgpt, opts), do: probe_chatgpt(opts)
   def probe_provider(:anthropic, opts), do: probe_anthropic(opts)
   def probe_provider(:xai, opts), do: probe_xai(opts)
   def probe_provider(:openrouter, opts), do: probe_openrouter(opts)
@@ -962,6 +970,69 @@ defmodule FermixCore.Setup.Doctor do
         ]
 
         do_post(:openai_codex, url, body, headers, model, "chatgpt.com Codex OAuth", opts)
+    end
+  end
+
+  # One tiny turn through the route and the adapter themselves (M57 §7.4), so
+  # probe-green means route-green: the route refuses a sign-in that cannot carry
+  # a turn (not signed in, plan usage off, reconnect needed) or a missing model
+  # with its own sentence, and the adapter's refusals map to theirs. The adapter
+  # emits the provider call through `Providers.Telemetry.emit_call/3`.
+  # `:chatgpt_route_status`, `:access_token` and `:token_server` are injectable.
+  defp probe_chatgpt(opts) do
+    case chatgpt_route(opts) do
+      {:ok, {route_key, adapter_opts}} ->
+        start = System.monotonic_time(:millisecond)
+
+        [%{role: "system", content: "ping"}, %{role: "user", content: "."}]
+        |> ChatGPTPlan.chat([], chatgpt_probe_opts(adapter_opts, opts))
+        |> classify_chatgpt(route_key.model, start)
+
+      {:error, sentence} ->
+        {:error, {:misconfigured, sentence}}
+    end
+  end
+
+  defp chatgpt_route(opts) do
+    route_opts =
+      opts
+      |> Keyword.take([:chatgpt_route_status, :access_token, :token_server])
+      |> Keyword.put(:provider, :chatgpt)
+
+    {:ok, RouteResolver.resolve!(route_opts)}
+  rescue
+    error in ArgumentError -> {:error, Exception.message(error)}
+  end
+
+  defp chatgpt_probe_opts(adapter_opts, opts) do
+    timeout_ms = Keyword.get(opts, :timeout_ms, @chatgpt_probe_timeout_ms)
+
+    adapter_opts
+    |> Keyword.put(:req_options, probe_req_options(Keyword.put(opts, :timeout_ms, timeout_ms)))
+    |> Keyword.put(:agent, "doctor")
+    |> Keyword.put(:session_id, Keyword.get(opts, :session_id))
+  end
+
+  defp classify_chatgpt({:ok, _turn}, model, start),
+    do: {:ok, %{provider: :chatgpt, model: model, latency_ms: elapsed_ms(start)}}
+
+  defp classify_chatgpt({:error, reason}, _model, _start) do
+    case {reason, ChatGPTPlan.refusal_sentence(reason)} do
+      {{:provider_error, %{kind: kind}}, sentence}
+      when kind in [:auth, :plan_not_eligible, :invalid_request] and is_binary(sentence) ->
+        {:error, {:auth_scope_mismatch, @chatgpt_surface, sentence}}
+
+      {{:provider_error, _error}, sentence} when is_binary(sentence) ->
+        {:error, {:misconfigured, sentence}}
+
+      {{:provider_error, %{status: status, message: message}}, nil} when is_integer(status) ->
+        {:error, {:server_error, status, message}}
+
+      {{:provider_transport_error, %{reason: transport_reason}}, nil} ->
+        {:error, {:network, transport_reason}}
+
+      {other, nil} ->
+        {:error, {:network, other}}
     end
   end
 

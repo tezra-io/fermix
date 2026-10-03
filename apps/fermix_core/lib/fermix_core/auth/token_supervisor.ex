@@ -5,6 +5,7 @@ defmodule FermixCore.Auth.TokenSupervisor do
 
   use Supervisor
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
@@ -336,6 +337,15 @@ defmodule FermixCore.Auth.TokenSupervisor do
           {:ok, Store.entry()} | {:error, term()}
   def refresh_entry("openai_codex", entry, req_options),
     do: CodexToken.refresh_entry(entry, Store.path(), req_options)
+
+  # ChatGPT reads its own refusals (terminal codes, another account); this
+  # path records them as every other profile's are.
+  def refresh_entry(auth_profile, %{provider: "chatgpt"} = entry, req_options) do
+    case ChatGPT.Refresh.refresh_entry(auth_profile, entry, Store.path(), req_options) do
+      {:error, {:reconnect_needed, _kind}} -> mark_reauthorization_required(auth_profile, entry)
+      result -> result
+    end
+  end
 
   def refresh_entry(
         auth_profile,

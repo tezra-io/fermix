@@ -144,6 +144,10 @@ window.addEventListener("phx:codex-auth-open", ({detail}) => {
   openAuthUrl(detail?.url)
 })
 
+window.addEventListener("phx:chatgpt-auth-open", ({detail}) => {
+  openAuthUrl(detail?.url)
+})
+
 window.addEventListener("phx:xai-auth-open", ({detail}) => {
   openAuthUrl(detail?.url)
 })

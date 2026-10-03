@@ -1,6 +1,7 @@
 defmodule FermixCore.ReadinessTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -73,6 +74,25 @@ defmodule FermixCore.ReadinessTest do
                report.failures,
                &(&1.detail_key == "provider:missing_credentials:anthropic" and &1.gating)
              )
+    end
+
+    # ChatGPT's way in is a sign-in, so its row names the sign-in's own standing
+    # (here: never signed in) rather than a generic "configure" line.
+    test "a ChatGPT primary with no sign-in gates with the sign-in's own sentence" do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("readiness-chatgpt")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :providers, chatgpt: [primary: true])
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+
+      failure =
+        Enum.find(
+          Readiness.report().failures,
+          &(&1.detail_key == "provider:missing_credentials:chatgpt")
+        )
+
+      assert failure.gating
+      assert failure.action == ChatGPT.failure_sentence(:not_signed_in)
     end
 
     # The first boot seeds personalization from the machine (`Setup.HomeSeeder`),

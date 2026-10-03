@@ -12,6 +12,7 @@ defmodule FermixCore.Readiness do
   checks yet.
   """
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
@@ -345,6 +346,18 @@ defmodule FermixCore.Readiness do
   # that fixes it, not the environment variable behind it: the failure already
   # carries the pane that owns the fix, and naming a shell variable in a native
   # attention row tells the operator to leave the app.
+  # ChatGPT's way in is a sign-in whose standing has its own sentence (not
+  # signed in, plan usage off, reconnect), so the row says which one it is.
+  defp missing_credentials_action(:chatgpt, _block) do
+    sentence =
+      case ChatGPT.route_status() do
+        {:error, reason} -> ChatGPT.failure_sentence(reason)
+        :ok -> "Configure the ChatGPT provider in Providers settings."
+      end
+
+    missing_credentials(:chatgpt, sentence)
+  end
+
   defp missing_credentials_action(provider, _block) do
     descriptor = Descriptor.fetch!(provider)
 

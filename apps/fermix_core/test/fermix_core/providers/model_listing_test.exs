@@ -1,13 +1,16 @@
 defmodule FermixCore.Providers.ModelListingTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Providers.ModelListing
 
   describe "live?/1" do
-    test "only ollama, openrouter and venice have live listings" do
+    test "only ollama, openrouter, venice and chatgpt have live listings" do
       assert ModelListing.live?(:ollama)
       assert ModelListing.live?(:openrouter)
       assert ModelListing.live?(:venice)
+      assert ModelListing.live?(:chatgpt)
+      refute ModelListing.live?(:openai_codex)
       refute ModelListing.live?(:openai)
       refute ModelListing.live?(:anthropic)
     end
@@ -217,6 +220,137 @@ defmodule FermixCore.Providers.ModelListingTest do
                ModelListing.live_models(:venice, req_options: [plug: {Req.Test, __MODULE__}])
 
       assert reason =~ "HTTP 503"
+    end
+  end
+
+  # M57 §6.2: the signed-in account's own catalog, read with its bearer, in a
+  # shape that is not the standard model list.
+  describe "live_models/2 — :chatgpt" do
+    defmodule ChatGPTTokens do
+      @moduledoc false
+      def get_token("chatgpt"), do: {:ok, "served-token"}
+    end
+
+    defp signed_in(_opts), do: :ok
+
+    defp chatgpt_opts(extra \\ []) do
+      Keyword.merge(
+        [
+          chatgpt_route_status: &signed_in/1,
+          access_token: "plan-token",
+          req_options: [plug: {Req.Test, __MODULE__}]
+        ],
+        extra
+      )
+    end
+
+    defp chatgpt_model(slug, name, visibility),
+      do: %{"slug" => slug, "display_name" => name, "visibility" => visibility}
+
+    test "keeps the listed models in the server's order, slug as id and name as label" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        assert conn.request_path == "/v1/models"
+        assert ["Bearer plan-token"] = Plug.Conn.get_req_header(conn, "authorization")
+
+        Req.Test.json(conn, %{
+          "models" => [
+            chatgpt_model("gpt-6.1-sol", "GPT-6.1 Sol", "list"),
+            chatgpt_model("internal-eval", "Internal", "hide"),
+            chatgpt_model("gpt-6-luna", "GPT-6 Luna", "list"),
+            chatgpt_model("", "", "hide")
+          ]
+        })
+      end)
+
+      assert {:ok, models} = ModelListing.live_models(:chatgpt, chatgpt_opts())
+
+      assert models == [
+               %{id: "gpt-6.1-sol", label: "GPT-6.1 Sol", context_window: nil},
+               %{id: "gpt-6-luna", label: "GPT-6 Luna", context_window: nil}
+             ]
+    end
+
+    test "the bearer comes from the token server's chatgpt profile" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        assert ["Bearer served-token"] = Plug.Conn.get_req_header(conn, "authorization")
+        Req.Test.json(conn, %{"models" => [chatgpt_model("gpt-6-luna", "GPT-6 Luna", "list")]})
+      end)
+
+      opts = chatgpt_opts(token_server: ChatGPTTokens) |> Keyword.delete(:access_token)
+
+      assert {:ok, [%{id: "gpt-6-luna"}]} = ModelListing.live_models(:chatgpt, opts)
+    end
+
+    for {label, entry} <- [
+          {"an empty slug", %{"slug" => "", "display_name" => "X", "visibility" => "list"}},
+          {"a missing name", %{"slug" => "gpt-x", "visibility" => "list"}},
+          {"an over-long name",
+           %{
+             "slug" => "gpt-x",
+             "display_name" => String.duplicate("a", 201),
+             "visibility" => "list"
+           }}
+        ] do
+      test "a listed entry with #{label} fails the listing" do
+        entry = unquote(Macro.escape(entry))
+
+        Req.Test.stub(__MODULE__, fn conn ->
+          Req.Test.json(conn, %{
+            "models" => [chatgpt_model("gpt-6-luna", "GPT-6 Luna", "list"), entry]
+          })
+        end)
+
+        assert {:error, reason} = ModelListing.live_models(:chatgpt, chatgpt_opts())
+        assert reason =~ "no usable slug or name"
+      end
+    end
+
+    test "the standard list shape is not this route's and fails" do
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, %{"object" => "list", "data" => [%{"id" => "gpt-6-luna"}]})
+      end)
+
+      assert {:error, reason} = ModelListing.live_models(:chatgpt, chatgpt_opts())
+      assert reason =~ "unexpected response"
+    end
+
+    test "a refused listing says so, with no catalog answer" do
+      Req.Test.stub(__MODULE__, fn conn -> Plug.Conn.send_resp(conn, 401, "{}") end)
+
+      assert {:error, reason} = ModelListing.live_models(:chatgpt, chatgpt_opts())
+      assert reason =~ "HTTP 401"
+    end
+
+    test "a sign-in that cannot carry a turn refuses with its own sentence" do
+      opts = chatgpt_opts(chatgpt_route_status: fn [] -> {:error, :plan_usage_off} end)
+
+      assert ModelListing.live_models(:chatgpt, opts) ==
+               {:error, ChatGPT.failure_sentence(:plan_usage_off)}
+    end
+
+    test "the listing is a provider call on the chatgpt credential" do
+      test_pid = self()
+      handler_id = "chatgpt-listing-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          if self() == test_pid, do: send(test_pid, {:call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        Req.Test.json(conn, %{"models" => [chatgpt_model("gpt-6-luna", "GPT-6 Luna", "list")]})
+      end)
+
+      assert {:ok, _models} = ModelListing.live_models(:chatgpt, chatgpt_opts())
+
+      assert_receive {:call,
+                      %{provider: :chatgpt, adapter: :model_listing, status: :ok, models_count: 1}}
     end
   end
 

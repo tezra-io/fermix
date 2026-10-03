@@ -408,6 +408,58 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(providers[:openai], :primary) == false
   end
 
+  # M57 §5: `[fermix_core.providers.chatgpt]` carries `primary`,
+  # `default_model` and `reasoning_effort` and nothing else (the config
+  # round-trip pitfall: seeded with the normalized app-env shapes).
+  test "save/load round-trips the chatgpt provider block" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    block = [default_model: "gpt-6.1-sol", reasoning_effort: :high, primary: true]
+
+    snapshot = %{
+      fermix_core: [providers: [chatgpt: block]],
+      fermix_channels: [],
+      fermix_web: []
+    }
+
+    assert :ok = ConfigStore.save_snapshot(snapshot)
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ "[fermix_core.providers.chatgpt]"
+    assert contents =~ ~s(default_model = "gpt-6.1-sol")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert Enum.sort(loaded.fermix_core[:providers][:chatgpt]) == Enum.sort(block)
+
+    assert :ok = ConfigStore.save_snapshot(loaded)
+    assert {:ok, reloaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    assert reloaded.fermix_core[:providers][:chatgpt] == loaded.fermix_core[:providers][:chatgpt]
+  end
+
+  for key <- ["api_key", "base_url", "auth_mode", "fast"] do
+    test "a chatgpt block with #{key} refuses to load" do
+      tmp_home =
+        Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+      System.put_env("FERMIX_HOME", tmp_home)
+      File.mkdir_p!(tmp_home)
+
+      File.write!(
+        Path.join(tmp_home, "config.toml"),
+        "[fermix_core.providers.chatgpt]\n#{unquote(key)} = \"x\"\n"
+      )
+
+      assert_raise ArgumentError,
+                   ~r/\[fermix_core.providers.chatgpt\] has unknown key\(s\): #{unquote(key)}/,
+                   fn -> ConfigStore.load_runtime_config(resolve_secrets: false) end
+    end
+  end
+
   test "missing primary stays absent and a non-boolean primary is dropped" do
     snapshot = %{
       fermix_core: [
@@ -642,6 +694,10 @@ defmodule FermixCore.Setup.ConfigStoreTest do
   reasoning_effort = "high"
   default_model = "gpt-5.6-terra"
   fast = false
+
+  [fermix_core.providers.chatgpt]
+  default_model = "gpt-6.1-sol"
+  reasoning_effort = "medium"
 
   [fermix_core.providers.ollama]
   base_url = "http://localhost:11434/v1"

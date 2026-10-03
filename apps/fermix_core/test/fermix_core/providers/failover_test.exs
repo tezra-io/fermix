@@ -76,6 +76,45 @@ defmodule FermixCore.Providers.FailoverTest do
     end
   end
 
+  # M57 §4.5: a plan usage limit fails over only to a fallback the person
+  # configured (O4); refusals that are setup facts never do, because a fallback
+  # would hide them.
+  defp plan_error(code, status) do
+    {:provider_error, error} =
+      Error.api(:chatgpt, :chatgpt_plan, status, %{"error" => %{"code" => code}})
+
+    {:provider_error, Map.put(error, :auth_mode, :oauth)}
+  end
+
+  describe "eligible?/1 — ChatGPT plan usage" do
+    test "the usage limit is eligible, before the stream and mid-stream" do
+      assert Failover.eligible?(plan_error("subscription_sharing_usage_limit_exceeded", 429))
+      assert Failover.eligible?(plan_error("subscription_sharing_usage_limit_exceeded", 200))
+    end
+
+    test "an unavailable usage check is eligible" do
+      assert Failover.eligible?(plan_error("subscription_sharing_usage_unavailable", 503))
+    end
+
+    test "a plain 429 rate limit stays eligible" do
+      assert Failover.eligible?(plan_error(nil, 429))
+    end
+
+    for code <- [
+          "subscription_sharing_user_not_eligible",
+          "subscription_sharing_v2_client_not_enabled",
+          "subscription_sharing_unsupported_capability",
+          "subscription_sharing_route_not_supported",
+          "chatpass_v2_scope_not_authorized",
+          "chatpass_v2_invalid_authorization_context"
+        ] do
+      test "#{code} is not eligible" do
+        refute Failover.eligible?(plan_error(unquote(code), 403))
+        refute Failover.eligible?(plan_error(unquote(code), 400))
+      end
+    end
+  end
+
   describe "run_chain/3" do
     defp route(provider, model) do
       {%{provider: provider, model: model, auth_mode: :api_key, base_url: "https://x/v1"},

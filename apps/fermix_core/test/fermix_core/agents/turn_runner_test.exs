@@ -1789,6 +1789,106 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # M57 §8: each ChatGPT plan refusal is its own sentence, and the vendor's own
+  # words follow it. Built the way the adapter builds them (oauth-tagged).
+  describe "error_reply/1 — ChatGPT plan usage" do
+    @usage_limit "Your ChatGPT plan's usage limit for Fermix is reached. Review your plan or " <>
+                   "Fermix's limit in ChatGPT settings: https://chatgpt.com/settings/usage"
+
+    defp plan_error(status, code, extra \\ %{}, stage \\ :before_response) do
+      body = %{"error" => Map.merge(%{"code" => code, "message" => "Vendor says no."}, extra)}
+
+      {:provider_error, error} =
+        ProviderError.api(:chatgpt, :chatgpt_plan, status, body,
+          provider_words: "Vendor says no.",
+          stage: stage
+        )
+
+      {:provider_error, Map.put(error, :auth_mode, :oauth)}
+    end
+
+    test "the usage limit names the settings page and no reset time, before or mid-stream" do
+      for {status, stage} <- [{429, :before_response}, {200, :mid_stream}] do
+        reply =
+          TurnRunner.error_reply(
+            plan_error(status, "subscription_sharing_usage_limit_exceeded", %{}, stage)
+          )
+
+        assert reply == @usage_limit <> " ChatGPT said: \"Vendor says no.\""
+        refute reply =~ "Try again in"
+      end
+    end
+
+    test "an unavailable usage check asks to try again shortly" do
+      for code <- [
+            "subscription_sharing_usage_unavailable",
+            "subscription_sharing_user_unavailable"
+          ] do
+        assert TurnRunner.error_reply(plan_error(503, code)) =~
+                 "ChatGPT could not check your plan's usage right now. Try again shortly."
+      end
+    end
+
+    test "an ineligible account is not called an authentication failure" do
+      reply = TurnRunner.error_reply(plan_error(403, "subscription_sharing_user_not_eligible"))
+
+      assert reply =~
+               "This ChatGPT account or workspace can't use its plan in Fermix. " <>
+                 "ChatGPT Plus and Pro plans can."
+
+      refute reply =~ "authentication failed"
+    end
+
+    test "a sign-in OpenAI has not enabled says so" do
+      assert TurnRunner.error_reply(plan_error(403, "subscription_sharing_v2_client_not_enabled")) =~
+               "OpenAI has not enabled plan usage for Fermix's sign-in."
+    end
+
+    test "an unsupported capability names the param the route refused" do
+      reply =
+        TurnRunner.error_reply(
+          plan_error(400, "subscription_sharing_unsupported_capability", %{"param" => "tools"})
+        )
+
+      assert reply =~ "ChatGPT refused part of this request (`tools`)."
+    end
+
+    test "an unsupported route says the plan does not cover the request type" do
+      assert TurnRunner.error_reply(plan_error(403, "subscription_sharing_route_not_supported")) =~
+               "ChatGPT plan usage does not cover this request type."
+    end
+
+    test "an invalid user after the refresh asks for a new sign-in" do
+      assert TurnRunner.error_reply(plan_error(401, "subscription_sharing_invalid_user")) =~
+               "Your ChatGPT connection needs to be renewed. Sign in again."
+    end
+
+    test "a bare detail refusal is quoted as it came, not called a sign-in fault" do
+      {:provider_error, error} =
+        ProviderError.api(:chatgpt, :chatgpt_plan, 403, ~s({"detail":"Region not served."}),
+          provider_words: "Region not served."
+        )
+
+      reply = TurnRunner.error_reply({:provider_error, Map.put(error, :auth_mode, :oauth)})
+
+      assert reply ==
+               "ChatGPT refused the request (HTTP 403). ChatGPT said: \"Region not served.\""
+    end
+
+    test "a scheduled job gets the same sentence" do
+      reason = plan_error(429, "subscription_sharing_usage_limit_exceeded")
+
+      assert TurnRunner.error_reply(reason, surface: :job) == TurnRunner.error_reply(reason)
+    end
+
+    test "after a failover chain the last ChatGPT refusal keeps its sentence" do
+      last = plan_error(403, "subscription_sharing_user_not_eligible")
+
+      assert TurnRunner.error_reply({:all_routes_failed, [{:openai, :ignored}, {:chatgpt, last}]}) =~
+               "can't use its plan in Fermix"
+    end
+  end
+
   # In-loop compaction: an overflow inside a turn is not fixed by /new or
   # /compact (resending repeats it), and a scheduled job has no "message" and no
   # chat to type a command into, so the surface picks the advice.

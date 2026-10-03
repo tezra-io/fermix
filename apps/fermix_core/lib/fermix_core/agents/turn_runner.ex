@@ -44,6 +44,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Reply
   alias FermixCore.Telemetry
@@ -322,6 +323,9 @@ defmodule FermixCore.Agents.TurnRunner do
     cond do
       context_length_error?(reason) ->
         context_length_reply(surface)
+
+      reply = chatgpt_plan_reply(reason) ->
+        reply
 
       auth_error?(reason) ->
         auth_reply(reason)
@@ -846,6 +850,32 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp auth_reply(_reason) do
     "Authentication failed — run `fermix auth login` from the host and try again."
+  end
+
+  # ChatGPT plan usage names each refusal (M57 §8), and those sentences come
+  # before the auth and status clauses: a plan refusal answered with a 403 is
+  # not a stale credential. The vendor's own words follow the sentence. A 401
+  # or 403 with no sentence of its own (a bare `{"detail": ...}` before the
+  # stream) is quoted as it came rather than called a sign-in fault.
+  defp chatgpt_plan_reply({:provider_error, %{provider: :chatgpt} = error} = reason) do
+    case ChatGPTPlan.refusal_sentence(reason) do
+      nil -> chatgpt_words_reply(error)
+      sentence -> sentence <> chatgpt_words_suffix(error)
+    end
+  end
+
+  defp chatgpt_plan_reply(_reason), do: nil
+
+  defp chatgpt_words_reply(%{kind: :auth, status: status} = error) when status in [401, 403],
+    do: "ChatGPT refused the request (HTTP #{status})." <> chatgpt_words_suffix(error)
+
+  defp chatgpt_words_reply(_error), do: nil
+
+  defp chatgpt_words_suffix(error) do
+    case Map.get(error, :provider_words) do
+      words when is_binary(words) and words != "" -> " ChatGPT said: \"#{words}\""
+      _absent -> ""
+    end
   end
 
   defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do

@@ -49,8 +49,10 @@ section (the Mac Images pane's key row), with `GEMINI_API_KEY` as the fallback.
 Any other key in the section stops the daemon from booting.
 
 **`openai_codex`** needs no API key: it generates `gpt-image-2` through the
-ChatGPT subscription sign-in (billed to the subscription), over an experimental,
-undocumented Codex surface; a plan without it answers `auth_failed`. Generate
+Codex sign-in (billed to the ChatGPT subscription), over an experimental,
+undocumented Codex surface; a plan without it answers `auth_failed`. Sign in
+with ChatGPT (the `chatgpt` provider) cannot generate images: its route has no
+image tool. Generate
 and edit, no `mask`. The model that carries the image tool is fixed internally,
 not a setting.
 

@@ -1,10 +1,12 @@
 defmodule FermixCore.Providers.RouteResolverTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Anthropic.Messages, as: AnthropicMessages
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ChatCompletions
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.OpenAI.Codex
   alias FermixCore.Providers.OpenAI.Responses
   alias FermixCore.Providers.RouteResolver
@@ -665,6 +667,93 @@ defmodule FermixCore.Providers.RouteResolverTest do
         refute Keyword.has_key?(opts, :store)
       after
         Application.put_env(:fermix_core, :providers, original_providers)
+      end
+    end
+  end
+
+  # M57 §4.5/D7: the route asks the sign-in where it stands first, and refuses
+  # with the facade's own sentence. The status check is injected so these
+  # tests never read an auth store.
+  defp signed_in(_opts), do: :ok
+
+  describe "resolve!/1 — chatgpt" do
+    test "a usable sign-in routes to ChatGPTPlan through the chatgpt token profile" do
+      Application.put_env(:fermix_core, :providers,
+        chatgpt: [default_model: "gpt-6.1-sol", reasoning_effort: "high"]
+      )
+
+      {route_key, opts} =
+        RouteResolver.resolve!(provider: :chatgpt, chatgpt_route_status: &signed_in/1)
+
+      assert route_key == %{
+               provider: :chatgpt,
+               model: "gpt-6.1-sol",
+               auth_mode: :oauth,
+               base_url: "https://api.openai.com/v1"
+             }
+
+      assert Adapter.for_route(route_key) == ChatGPTPlan
+      assert opts[:token_server] == FermixCore.Auth.TokenSupervisor
+      assert opts[:auth_profile] == "chatgpt"
+      assert opts[:model] == "gpt-6.1-sol"
+      assert opts[:reasoning_effort] == "high"
+      refute Keyword.has_key?(opts, :api_key)
+      refute Keyword.has_key?(opts, :fast)
+    end
+
+    test "an explicit model and access token flow into the route" do
+      {route_key, opts} =
+        RouteResolver.resolve!(
+          provider: :chatgpt,
+          model: "gpt-6-luna",
+          access_token: "plan-token",
+          chatgpt_route_status: &signed_in/1
+        )
+
+      assert route_key.model == "gpt-6-luna"
+      assert opts[:access_token] == "plan-token"
+    end
+
+    for reason <- [:not_signed_in, :plan_usage_off, :reconnect_needed] do
+      test "#{reason} refuses with the sign-in's own sentence" do
+        reason = unquote(reason)
+        expected = ChatGPT.failure_sentence(reason)
+
+        error =
+          assert_raise ArgumentError, fn ->
+            RouteResolver.resolve!(
+              provider: :chatgpt,
+              model: "gpt-6.1-sol",
+              chatgpt_route_status: fn [] -> {:error, reason} end
+            )
+          end
+
+        assert Exception.message(error) == expected
+      end
+    end
+
+    test "no chosen model refuses instead of guessing a slug" do
+      assert_raise ArgumentError, ~r/No ChatGPT model is chosen yet/, fn ->
+        RouteResolver.resolve!(provider: :chatgpt, chatgpt_route_status: &signed_in/1)
+      end
+    end
+
+    test "the standing is checked before the model, so an unsigned home names the sign-in" do
+      error =
+        assert_raise ArgumentError, fn ->
+          RouteResolver.resolve!(
+            provider: :chatgpt,
+            chatgpt_route_status: fn [] -> {:error, :not_signed_in} end
+          )
+        end
+
+      assert Exception.message(error) ==
+               ChatGPT.failure_sentence(:not_signed_in)
+    end
+
+    test "openai with auth_mode :oauth is still refused" do
+      assert_raise ArgumentError, ~r/api_key auth only/, fn ->
+        RouteResolver.resolve!(provider: :openai, auth_mode: :oauth)
       end
     end
   end

@@ -239,6 +239,78 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   defp replace_function_call_output(item, text), do: %{item | output: text}
 
+  @doc """
+  The prior turn's output items in the shape a `store: false` continuation can
+  replay: function calls without their response item ids, reasoning only when it
+  carries `encrypted_content` (an id alone points at storage that does not
+  exist), and messages as plain assistant text. Shared by the two streamed
+  `store: false` surfaces, Codex and ChatGPT plan usage.
+  """
+  @spec replayable_output_items([map()]) :: [map()]
+  def replayable_output_items(output_items) when is_list(output_items) do
+    Enum.flat_map(output_items, &replayable_output_item/1)
+  end
+
+  defp replayable_output_item(%{"type" => "function_call"} = item) do
+    with call_id when is_binary(call_id) and call_id != "" <- item["call_id"],
+         name when is_binary(name) and name != "" <- item["name"] do
+      [
+        %{
+          "type" => "function_call",
+          "call_id" => call_id,
+          "name" => name,
+          "arguments" => normalize_arguments(item["arguments"])
+        }
+      ]
+    else
+      _ -> []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "reasoning"} = item) do
+    case item["encrypted_content"] do
+      encrypted when is_binary(encrypted) and encrypted != "" ->
+        [
+          %{
+            "type" => "reasoning",
+            "encrypted_content" => encrypted,
+            "summary" => normalize_reasoning_summary(item["summary"])
+          }
+        ]
+
+      _ ->
+        []
+    end
+  end
+
+  defp replayable_output_item(%{"type" => "message"} = item) do
+    case message_text(item) do
+      "" -> []
+      text -> [%{"role" => "assistant", "content" => text}]
+    end
+  end
+
+  defp replayable_output_item(_item), do: []
+
+  defp normalize_arguments(arguments) when is_binary(arguments) and arguments != "", do: arguments
+  defp normalize_arguments(arguments) when is_map(arguments), do: Jason.encode!(arguments)
+  defp normalize_arguments(_arguments), do: "{}"
+
+  defp normalize_reasoning_summary(summary) when is_list(summary), do: summary
+  defp normalize_reasoning_summary(_summary), do: []
+
+  defp message_text(%{"content" => parts}) when is_list(parts) do
+    parts
+    |> Enum.flat_map(fn
+      %{"type" => "output_text", "text" => text} when is_binary(text) -> [text]
+      %{"text" => text} when is_binary(text) -> [text]
+      _ -> []
+    end)
+    |> Enum.join("")
+  end
+
+  defp message_text(_item), do: ""
+
   @context_length_markers [
     "context_length_exceeded",
     "maximum context length",

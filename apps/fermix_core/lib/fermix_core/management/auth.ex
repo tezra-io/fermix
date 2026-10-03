@@ -17,10 +17,12 @@ defmodule FermixCore.Management.Auth do
   entry alone is not a sign-out: the token manager keeps the access and refresh
   tokens in memory and would keep serving turns as that account until the token
   expired, while every surface reported the operator signed out. Nothing is
-  revoked upstream.
+  revoked upstream, except for ChatGPT: its sign-out revokes the session at
+  OpenAI and keeps the registration, so the next sign-in reuses it (M57 §6.3).
   """
 
   alias FermixCore.Auth.AnthropicLogin
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexImport
   alias FermixCore.Auth.CodexLogin
@@ -134,8 +136,7 @@ defmodule FermixCore.Management.Auth do
   @spec logout(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def logout(provider, opts \\ []) when is_binary(provider) and is_list(opts) do
     with {:ok, id, profile} <- fetch_signed_in(provider),
-         :ok <- forget(profile, opts),
-         :ok <- drop_live_tokens(provider, profile, opts),
+         :ok <- sign_out(id, provider, profile, opts),
          :ok <- revert_route(id, opts) do
       {:ok, %{"restart" => Settings.restart()}}
     end
@@ -342,6 +343,24 @@ defmodule FermixCore.Management.Auth do
     case Enum.find(Store.profiled_providers(), &(Atom.to_string(&1) == provider)) do
       nil -> {:error, {:invalid_params, "provider", "This daemon has no such provider."}}
       id -> {:ok, id}
+    end
+  end
+
+  # ChatGPT's own sign-out revokes upstream, clears the tokens but keeps the
+  # registration, and drops the live tokens; deleting its entry would lose the
+  # issued client id and leave the session live at OpenAI.
+  defp sign_out(:chatgpt, _provider, _profile, opts) do
+    logout = Keyword.get(opts, :chatgpt_logout, &ChatGPT.logout/1)
+
+    case logout.([]) do
+      {:ok, %{revoked: _revoked}} -> :ok
+      {:error, reason} -> refuse("the ChatGPT sign-in could not be removed", reason)
+    end
+  end
+
+  defp sign_out(_id, provider, profile, opts) do
+    with :ok <- forget(profile, opts) do
+      drop_live_tokens(provider, profile, opts)
     end
   end
 

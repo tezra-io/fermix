@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.DoctorTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
@@ -684,6 +685,180 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:error, {:misconfigured, message}} = Doctor.probe_provider(:ollama)
       assert message =~ "no base_url configured"
+    end
+  end
+
+  # M57 §7.4: one tiny turn through the route and the adapter, and a distinct
+  # line for each standing the person can act on. The sign-in's standing is
+  # injected, so no auth store is read.
+  describe "probe_provider/2 — :chatgpt" do
+    @plan_surface "ChatGPT plan usage"
+
+    defp signed_in(_opts), do: :ok
+
+    defp chatgpt_probe(plug, extra \\ []) do
+      Doctor.probe_provider(
+        :chatgpt,
+        Keyword.merge(
+          [
+            chatgpt_route_status: &signed_in/1,
+            access_token: "plan-token",
+            req_options: [plug: plug]
+          ],
+          extra
+        )
+      )
+    end
+
+    defp sse(body) do
+      fn conn ->
+        conn
+        |> Plug.Conn.put_resp_header("content-type", "text/event-stream")
+        |> Plug.Conn.send_resp(200, body)
+      end
+    end
+
+    defp completed_sse do
+      Enum.map_join(
+        [
+          %{
+            "type" => "response.output_item.done",
+            "output_index" => 0,
+            "item" => %{
+              "type" => "message",
+              "content" => [%{"type" => "output_text", "text" => "OK"}]
+            }
+          },
+          %{
+            "type" => "response.completed",
+            "response" => %{"usage" => %{"input_tokens" => 3, "output_tokens" => 1}}
+          }
+        ],
+        fn event -> "data: " <> Jason.encode!(event) <> "\n\n" end
+      )
+    end
+
+    defp refusal(status, code) do
+      fn conn ->
+        Plug.Conn.send_resp(
+          conn,
+          status,
+          Jason.encode!(%{"error" => %{"code" => code, "message" => "refused"}})
+        )
+      end
+    end
+
+    test "ok: a completed turn through the adapter, bearer only, the model the route runs" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      plug = fn conn ->
+        assert conn.request_path == "/v1/responses"
+        assert ["Bearer plan-token"] = Plug.Conn.get_req_header(conn, "authorization")
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+        assert decoded["model"] == "gpt-6.1-sol"
+        assert decoded["store"] == false
+        assert decoded["stream"] == true
+        refute Map.has_key?(decoded, "max_output_tokens")
+        sse(completed_sse()).(conn)
+      end
+
+      assert {:ok, %{provider: :chatgpt, model: "gpt-6.1-sol", latency_ms: ms}} =
+               chatgpt_probe(plug)
+
+      assert is_integer(ms)
+    end
+
+    for reason <- [:not_signed_in, :plan_usage_off, :reconnect_needed] do
+      test "#{reason} is its own line, without a request" do
+        reason = unquote(reason)
+        put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+        plug = fn _conn -> flunk("the probe must not call ChatGPT") end
+
+        assert chatgpt_probe(plug, chatgpt_route_status: fn [] -> {:error, reason} end) ==
+                 {:error, {:misconfigured, ChatGPT.failure_sentence(reason)}}
+      end
+    end
+
+    test "no chosen model is its own line, without a request" do
+      plug = fn _conn -> flunk("the probe must not call ChatGPT") end
+
+      assert {:error, {:misconfigured, line}} = chatgpt_probe(plug)
+      assert line =~ "No ChatGPT model is chosen yet"
+    end
+
+    test "a revoked connection (401 after the refresh) asks for a new sign-in" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      assert chatgpt_probe(refusal(401, "subscription_sharing_invalid_user")) ==
+               {:error,
+                {:auth_scope_mismatch, @plan_surface,
+                 "Your ChatGPT connection needs to be renewed. Sign in again."}}
+    end
+
+    test "an ineligible account is its own line" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      assert {:error, {:auth_scope_mismatch, @plan_surface, line}} =
+               chatgpt_probe(refusal(403, "subscription_sharing_user_not_eligible"))
+
+      assert line =~ "can't use its plan in Fermix"
+    end
+
+    test "an unsupported route is its own line" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      assert {:error, {:auth_scope_mismatch, @plan_surface, line}} =
+               chatgpt_probe(refusal(403, "subscription_sharing_route_not_supported"))
+
+      assert line == "ChatGPT plan usage does not cover this request type."
+    end
+
+    test "the usage limit is its own line, before the stream and mid-stream" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      mid_stream =
+        sse(
+          "data: " <>
+            Jason.encode!(%{
+              "type" => "response.failed",
+              "response" => %{"error" => %{"code" => "subscription_sharing_usage_limit_exceeded"}}
+            }) <> "\n\n"
+        )
+
+      for plug <- [refusal(429, "subscription_sharing_usage_limit_exceeded"), mid_stream] do
+        assert {:error, {:misconfigured, line}} = chatgpt_probe(plug)
+        assert line =~ "usage limit for Fermix is reached"
+        assert line =~ "https://chatgpt.com/settings/usage"
+      end
+    end
+
+    test "any other refusal reports its status" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+
+      assert {:error, {:server_error, 500, _message}} =
+               chatgpt_probe(fn conn -> Plug.Conn.send_resp(conn, 500, "{}") end)
+    end
+
+    test "the probe is one provider call through the adapter's emitter" do
+      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      test_pid = self()
+      handler_id = "doctor-chatgpt-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          if self() == test_pid, do: send(test_pid, {:call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
+
+      assert {:ok, _probe} = chatgpt_probe(sse(completed_sse()))
+      assert_receive {:call, %{provider: :chatgpt, agent: "doctor", status: :ok}}
+      refute_receive {:call, _metadata}, 50
     end
   end
 

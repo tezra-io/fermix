@@ -589,6 +589,10 @@ defmodule FermixOpik.Mapper do
   def provider_string(nil), do: nil
   def provider_string(:openai), do: "openai"
   def provider_string(:openai_codex), do: "openai"
+  # ChatGPT plan usage (M57 §9, O6) is billed to the plan, not per token; the
+  # OpenAI token prices it at what the turn would have cost on the API, and the
+  # span keeps `provider: chatgpt` for anyone separating plan-billed spend.
+  def provider_string(:chatgpt), do: "openai"
   def provider_string(:anthropic), do: "anthropic"
   def provider_string(:xai), do: "xai"
   # Explicit clauses pin the Opik pricing tokens for the M12 providers —

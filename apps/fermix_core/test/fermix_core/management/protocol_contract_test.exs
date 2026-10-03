@@ -392,9 +392,17 @@ defmodule FermixCore.Management.ProtocolContractTest do
         |> Enum.map(&Row.option(&1.id, &1.label))
 
       assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
-      assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
+      assert_holds_offered_model(row, result["id"])
     end
   end
+
+  # A provider whose models are discovered live (ChatGPT) ships no catalog, so
+  # its section offers nothing and holds the empty value until one is chosen.
+  defp assert_holds_offered_model(%{"options" => [], "value" => value}, id),
+    do: assert(value == "", id)
+
+  defp assert_holds_offered_model(row, id),
+    do: assert(Enum.any?(row["options"], &(&1["value"] == row["value"])), id)
 
   # Every kind and format a row may carry is pinned to the module, so a kind
   # added in Elixir fails here rather than reaching a client that cannot render

@@ -348,6 +348,32 @@ defmodule FermixCore.Management.AuthTest do
       assert_receive :reverted
     end
 
+    # Deleting the chatgpt entry would lose the issued client id and leave the
+    # session live at OpenAI: its own sign-out revokes and keeps the registration.
+    test "ChatGPT signs out through its own revoking sign-out, never a delete" do
+      owner = self()
+
+      logout = fn [] ->
+        send(owner, :chatgpt_signed_out)
+        {:ok, %{revoked: true}}
+      end
+
+      assert {:ok, result} =
+               Auth.logout("chatgpt",
+                 chatgpt_logout: logout,
+                 forget: fn _profile -> flunk("the chatgpt registration must not be deleted") end,
+                 drop_live_tokens: fn _provider, _profile -> flunk("its sign-out drops them") end
+               )
+
+      assert_receive :chatgpt_signed_out
+      assert Map.keys(result) == ["restart"]
+    end
+
+    test "a ChatGPT sign-out that fails is refused with a sentence" do
+      assert {:error, _refusal} =
+               Auth.logout("chatgpt", chatgpt_logout: fn [] -> {:error, :profile_busy} end)
+    end
+
     test "a single-mode provider has no route to revert", %{drop: drop} do
       route = fn _provider, _mode -> flunk("a single-mode provider has no route to revert") end
 

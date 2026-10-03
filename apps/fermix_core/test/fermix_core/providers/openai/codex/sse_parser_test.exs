@@ -10,7 +10,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
                "usage" => %{},
                "model" => nil,
                "status" => nil,
-               "failure" => nil
+               "failure" => nil,
+               "terminal_event" => nil
              }
     end
 
@@ -67,6 +68,22 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
       result = SSEParser.parse(sse)
       assert result["status"] == "failed"
       assert result["failure"] == %{"code" => "rate_limit_exceeded", "message" => "slow down"}
+    end
+
+    # A stream `error` event and `response.failed` both read "failed"; the event
+    # that ended the stream is what tells them apart (M57 §6.1).
+    test "the terminal event names which event ended the stream" do
+      for {type, line} <- [
+            {"response.completed", ~s({"type":"response.completed","response":{}})},
+            {"response.failed", ~s({"type":"response.failed","response":{"status":"failed"}})},
+            {"response.incomplete",
+             ~s({"type":"response.incomplete","response":{"status":"incomplete"}})},
+            {"error", ~s({"type":"error","code":"x"})}
+          ] do
+        assert SSEParser.parse("data: #{line}\n\n")["terminal_event"] == type
+      end
+
+      assert SSEParser.parse("")["terminal_event"] == nil
     end
 
     # The pairing matters more than either half: a cut stream reports NO terminal

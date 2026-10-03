@@ -7,6 +7,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     test "lists the catalog providers in fallback order" do
       assert ModelCatalog.providers() == [
                :openai_codex,
+               :chatgpt,
                :openai,
                :anthropic,
                :xai,
@@ -19,8 +20,8 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   end
 
   describe "models_for/1" do
-    test "returns at least one model for each known provider" do
-      for provider <- ModelCatalog.providers() do
+    test "returns at least one model for each provider that ships a catalog" do
+      for provider <- ModelCatalog.providers(), provider != :chatgpt do
         models = ModelCatalog.models_for(provider)
         assert is_list(models) and models != []
 
@@ -33,6 +34,11 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
 
+    # The account's models come live from /v1/models (M57 §6.2).
+    test "chatgpt ships none" do
+      assert ModelCatalog.models_for(:chatgpt) == []
+    end
+
     test "raises for unknown provider" do
       assert_raise FunctionClauseError, fn ->
         apply(ModelCatalog, :models_for, [:gemini])
@@ -42,10 +48,25 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "default_model_for/1" do
     test "returns the first model id in the per-provider list" do
-      for provider <- ModelCatalog.providers() do
+      for provider <- ModelCatalog.providers(), provider != :chatgpt do
         [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.default_model_for(provider) == first_id
       end
+    end
+
+    test "a provider with no shipped catalog has no default, and no slug is guessed" do
+      assert ModelCatalog.default_model_for(:chatgpt) == ""
+      assert ModelCatalog.effective_model(:chatgpt, []) == ""
+      assert ModelCatalog.effective_model(:chatgpt, default_model: "") == ""
+
+      assert ModelCatalog.effective_model(:chatgpt, default_model: "gpt-6.1-sol") ==
+               "gpt-6.1-sol"
+    end
+
+    test "an uncatalogued chatgpt slug takes the unknown-model window" do
+      assert ModelCatalog.context_window_for(:chatgpt, "gpt-6.1-sol",
+               unknown_model_telemetry: false
+             ) == 100_000
     end
 
     test "OpenAI and Codex default to gpt-6-astra (frontier generation)" do
@@ -326,7 +347,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
 
   describe "known_model?/2" do
     test "matches catalog entries and rejects unknowns" do
-      for provider <- ModelCatalog.providers() do
+      for provider <- ModelCatalog.providers(), provider != :chatgpt do
         [%ModelCatalog.Entry{id: first_id} | _] = ModelCatalog.models_for(provider)
         assert ModelCatalog.known_model?(provider, first_id)
       end

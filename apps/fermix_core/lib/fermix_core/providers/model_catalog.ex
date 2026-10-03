@@ -22,6 +22,7 @@ defmodule FermixCore.Providers.ModelCatalog do
   @type provider ::
           :openai
           | :openai_codex
+          | :chatgpt
           | :anthropic
           | :xai
           | :openrouter
@@ -125,6 +126,15 @@ defmodule FermixCore.Providers.ModelCatalog do
       max_reasoning_effort: :xhigh
     }
   ]
+
+  # ChatGPT plan usage ships no catalog (M57 §6.2): the models a signed-in
+  # account may call come live from `GET /v1/models` (`ModelListing`), they
+  # differ by plan and workspace, and that list is a catalog rather than an
+  # entitlement check. Shipping a default here would name a slug the account
+  # may not have, so the provider has none until the person picks one, and the
+  # route refuses until then. A slug it runs with takes the unknown-model rule
+  # (`context_window_for/3`) until a recorded window is added here.
+  @chatgpt []
 
   @openai [
     %Entry{
@@ -408,6 +418,7 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   @spec models_for(provider()) :: [entry()]
   def models_for(:openai_codex), do: @openai_codex
+  def models_for(:chatgpt), do: @chatgpt
   def models_for(:openai), do: @openai
   def models_for(:anthropic), do: @anthropic
   def models_for(:xai), do: @xai
@@ -416,10 +427,18 @@ defmodule FermixCore.Providers.ModelCatalog do
   def models_for(:venice), do: @venice
   def models_for(:ollama), do: @ollama
 
+  @doc """
+  The catalog's default model for `provider`: its first entry. A provider whose
+  models are discovered rather than shipped (`chatgpt`) has no default and
+  answers `""`, the "no model chosen yet" value the management protocol already
+  carries; its route refuses that value rather than guess a slug.
+  """
   @spec default_model_for(provider()) :: String.t()
   def default_model_for(provider) do
-    [%Entry{id: id} | _] = models_for(provider)
-    id
+    case models_for(provider) do
+      [%Entry{id: id} | _rest] -> id
+      [] -> ""
+    end
   end
 
   @doc """
@@ -427,7 +446,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   or the catalog default while it names none. The one resolver behind the
   setup row, the settings Model row, the overview, Doctor's probe and the
   route, so a provider that has just been signed in shows the model it will
-  call, and every surface names the same one.
+  call, and every surface names the same one. A provider with no shipped
+  catalog (`chatgpt`) answers `""` until a model is chosen.
   """
   @spec effective_model(provider(), keyword()) :: String.t()
   def effective_model(provider, block) when is_list(block) do

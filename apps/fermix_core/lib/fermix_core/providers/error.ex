@@ -5,6 +5,11 @@ defmodule FermixCore.Providers.Error do
   Provider adapters return structured errors so agent replies and traces can
   distinguish auth, quota, rate-limit, outage, and transport failures without
   parsing provider-specific log strings.
+
+  `:plan_not_eligible` is ChatGPT plan usage refusing the signed-in account or
+  workspace (or Fermix's sign-in) outright, and `:invalid_request` is that route
+  refusing the request itself. Neither is a credential fault, and neither is
+  failover-eligible: both are setup facts a fallback would only hide.
   """
 
   @empty_body_message "The response body was empty, so the provider gave no reason for this status."
@@ -37,6 +42,9 @@ defmodule FermixCore.Providers.Error do
           # them (OpenAI/Codex usage limits); nil otherwise.
           optional(:resets_at) => non_neg_integer() | nil,
           optional(:plan_type) => String.t() | nil,
+          # The request field the provider named when it refused part of the
+          # body (`error.param`); present only when the body carried one.
+          optional(:param) => String.t(),
           # The server's own declared-failure sentence, set explicitly by the
           # call site (never parsed out of :message) so channel replies can
           # quote the provider verbatim; nil otherwise.
@@ -71,7 +79,8 @@ defmodule FermixCore.Providers.Error do
        plan_type: plan_type(decoded),
        provider_words: Keyword.get(opts, :provider_words),
        stage: stage_opt(opts)
-     }}
+     }
+     |> maybe_put(:param, error_param(decoded))}
   end
 
   @doc """
@@ -155,11 +164,34 @@ defmodule FermixCore.Providers.Error do
   def provider_label(:openai_codex), do: "Codex"
   def provider_label(:anthropic), do: "Anthropic"
   def provider_label(:xai), do: "SpaceXAI"
+  def provider_label(:chatgpt), do: "ChatGPT"
   def provider_label(provider), do: provider |> to_string() |> String.replace("_", " ")
+
+  # Sign in with ChatGPT plan usage names every refusal with a stable code
+  # (M57 §8; the protocol reference §7.2, including the DevKit's `_v2_`
+  # aliases). The code decides the kind whatever the status says: a usage limit
+  # arrives as a 429 before the stream and inside `response.failed` (an intact
+  # 200) after it, and both are the same verdict.
+  @code_kinds %{
+    "subscription_sharing_usage_limit_exceeded" => :quota,
+    "subscription_sharing_usage_unavailable" => :provider_unavailable,
+    "subscription_sharing_user_unavailable" => :provider_unavailable,
+    "subscription_sharing_v2_user_unavailable" => :provider_unavailable,
+    "subscription_sharing_user_not_eligible" => :plan_not_eligible,
+    "subscription_sharing_v2_user_not_eligible" => :plan_not_eligible,
+    "subscription_sharing_v2_client_not_enabled" => :plan_not_eligible,
+    "subscription_sharing_unsupported_capability" => :invalid_request,
+    "subscription_sharing_route_not_supported" => :invalid_request,
+    "subscription_sharing_v2_route_not_supported" => :invalid_request,
+    "subscription_sharing_invalid_user" => :auth,
+    "subscription_sharing_v2_invalid_user" => :auth
+  }
 
   defp api_kind(status, code, message) do
     text = String.downcase("#{code || ""} #{message}")
-    account_kind(status, text) || availability_kind(status, text) || :provider
+
+    Map.get(@code_kinds, code) || account_kind(status, text) ||
+      availability_kind(status, text) || :provider
   end
 
   # Account-level verdicts take precedence: a 429 whose body says
@@ -290,6 +322,13 @@ defmodule FermixCore.Providers.Error do
   defp resets_at(body) when is_map(body) do
     case error_object(body) do
       error when is_map(error) -> number_value(error, "resets_at", :resets_at)
+      _other -> nil
+    end
+  end
+
+  defp error_param(body) when is_map(body) do
+    case error_object(body) do
+      error when is_map(error) -> string_value(error, "param", :param)
       _other -> nil
     end
   end

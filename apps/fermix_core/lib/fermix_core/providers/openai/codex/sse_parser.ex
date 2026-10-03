@@ -13,6 +13,10 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # empty output list as empty text, so both shapes render as a valid empty turn.
   # `"failure"` carries the terminal event's own account of why (`error` or
   # `incomplete_details`), which used to be dropped by the catch-all.
+  # `"terminal_event"` names the event that set `"status"` (`response.completed`,
+  # `response.failed`, `error`, ...), because a stream-level `error` event and a
+  # `response.failed` both read `"failed"` and are different outcomes to a caller
+  # that reports them apart (ChatGPT plan usage, M57 §6.1).
   #
   # Two entry points:
   #
@@ -101,6 +105,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
             model: nil,
             status: nil,
             failure: nil,
+            terminal_event: nil,
             leftover: "",
             overflowed?: false,
             delta_callback: nil
@@ -253,7 +258,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
       state
       | usage: resp["usage"] || state.usage,
         model: resp["model"] || state.model,
-        status: resp["status"] || "completed"
+        status: resp["status"] || "completed",
+        terminal_event: type
     }
   end
 
@@ -271,13 +277,14 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
         # caller now RETURNS that turn when output arrived — so its usage has to be
         # real, not the zero an absent map renders as.
         usage: resp["usage"] || state.usage,
-        model: resp["model"] || state.model
+        model: resp["model"] || state.model,
+        terminal_event: type
     }
   end
 
   # A stream-level error carries its payload inline rather than under "response".
   defp reduce_event(%{"type" => "error"} = event, state),
-    do: %{state | status: "failed", failure: Map.delete(event, "type")}
+    do: %{state | status: "failed", failure: Map.delete(event, "type"), terminal_event: "error"}
 
   defp reduce_event(_event, state), do: state
 
@@ -375,7 +382,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
       "usage" => state.usage,
       "model" => state.model,
       "status" => state.status,
-      "failure" => state.failure
+      "failure" => state.failure,
+      "terminal_event" => state.terminal_event
     }
   end
 

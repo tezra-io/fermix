@@ -277,6 +277,7 @@ defmodule FermixCore.Tools.SubagentsTest do
       assert props.provider.enum ==
                [
                  "openai_codex",
+                 "chatgpt",
                  "openai",
                  "anthropic",
                  "xai",

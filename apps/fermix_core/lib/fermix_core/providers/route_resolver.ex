@@ -12,10 +12,15 @@ defmodule FermixCore.Providers.RouteResolver do
     * `:openai_codex` — explicit Codex (ChatGPT Plus) surface. Uses a
       different URL, body, and streaming shape.
     * `:anthropic` — Anthropic Messages route key.
+    * `:chatgpt` — ChatGPT plan usage (M57): the public Responses API on the
+      signed-in account's plan, served by the `chatgpt` token profile. Refused
+      while the registration cannot carry a turn (not signed in, plan usage
+      off, reconnect needed) or no model has been chosen.
 
   Codex OAuth is **only** selected via explicit `provider: :openai_codex`.
   """
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
@@ -30,6 +35,8 @@ defmodule FermixCore.Providers.RouteResolver do
   @default_codex_base_url "https://chatgpt.com/backend-api/codex/responses"
   @default_anthropic_base_url "https://api.anthropic.com/v1"
   @default_xai_base_url "https://api.x.ai/v1"
+  @chatgpt_no_model "No ChatGPT model is chosen yet. Pick one from your plan's model list " <>
+                      "in Fermix's provider settings."
 
   @type resolution :: {Adapter.route_key(), keyword()}
 
@@ -42,6 +49,7 @@ defmodule FermixCore.Providers.RouteResolver do
         :openai_codex -> resolve_codex!(opts)
         :anthropic -> resolve_anthropic!(opts)
         :xai -> resolve_xai!(opts)
+        :chatgpt -> resolve_chatgpt!(opts)
         other -> resolve_descriptor!(other, opts)
       end
 
@@ -323,6 +331,50 @@ defmodule FermixCore.Providers.RouteResolver do
     |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:xai, opts))
     |> maybe_put(:req_options, Keyword.get(opts, :req_options))
   end
+
+  # The standing check runs first so a route that cannot carry a turn refuses
+  # with the sentence the person can act on, before any model or token read.
+  # `:chatgpt_route_status` replaces `Auth.ChatGPT.route_status/1` (tests).
+  defp resolve_chatgpt!(opts) do
+    refuse_unusable_chatgpt!(Keyword.get(opts, :chatgpt_route_status, &ChatGPT.route_status/1))
+
+    config =
+      case Config.provider(:chatgpt) do
+        {:ok, cfg} -> cfg
+        {:error, :not_configured} -> []
+      end
+
+    model = Keyword.get(opts, :model) || ModelCatalog.effective_model(:chatgpt, config)
+    refuse_unchosen_chatgpt_model!(model)
+
+    base_url =
+      Keyword.get(opts, :base_url) || Descriptor.fetch!(:chatgpt).default_base_url
+
+    route_key = %{provider: :chatgpt, model: model, auth_mode: :oauth, base_url: base_url}
+
+    adapter_opts =
+      [
+        model: model,
+        base_url: base_url,
+        token_server: Keyword.get(opts, :token_server, TokenSupervisor),
+        auth_profile: Store.profile(:chatgpt)
+      ]
+      |> maybe_put(:access_token, Keyword.get(opts, :access_token))
+      |> maybe_put(:reasoning_effort, resolve_reasoning_effort(:chatgpt, opts))
+      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
+
+    {route_key, adapter_opts}
+  end
+
+  defp refuse_unusable_chatgpt!(route_status) when is_function(route_status, 1) do
+    case route_status.([]) do
+      :ok -> :ok
+      {:error, reason} -> raise ArgumentError, ChatGPT.failure_sentence(reason)
+    end
+  end
+
+  defp refuse_unchosen_chatgpt_model!(""), do: raise(ArgumentError, @chatgpt_no_model)
+  defp refuse_unchosen_chatgpt_model!(model) when is_binary(model), do: :ok
 
   defp parse_anthropic_auth_mode!(mode), do: parse_auth_mode!(:anthropic, mode)
 

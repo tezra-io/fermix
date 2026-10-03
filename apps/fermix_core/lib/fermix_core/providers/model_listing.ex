@@ -2,11 +2,12 @@ defmodule FermixCore.Providers.ModelListing do
   @moduledoc """
   Live model discovery for setup surfaces (M12 follow-up).
 
-  Three providers can answer "which models can I actually use right now?"
+  Four providers can answer "which models can I actually use right now?"
   better than the static catalog: Ollama (only the locally installed
-  models matter), OpenRouter (the upstream catalog moves weekly) and
-  Venice (a moving catalog whose per-model privacy tier is what the
-  person picks by — M49 §3.3). The static `ModelCatalog` stays
+  models matter), OpenRouter (the upstream catalog moves weekly), Venice
+  (a moving catalog whose per-model privacy tier is what the person picks
+  by — M49 §3.3) and ChatGPT (the signed-in account's plan decides, and
+  nothing is shipped for it — M57 §6.2). The static `ModelCatalog` stays
   authoritative for wizard defaults and
   context-window budgeting; this module only feeds setup-time pickers and
   the Ollama server-detection banner. One signal only: the configured URL
@@ -15,12 +16,18 @@ defmodule FermixCore.Providers.ModelListing do
   timeouts — never on the turn path.
   """
 
+  alias FermixCore.Auth.ChatGPT
+  alias FermixCore.Auth.Store
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Config
   alias FermixCore.Net.Egress
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.Telemetry, as: ProviderTelemetry
 
   @receive_timeout_ms 2_000
+  # The DevKit's bound on a listed model's display name (M57 protocol §5.3).
+  @max_display_name_length 200
 
   @type live_model :: %{
           id: String.t(),
@@ -33,6 +40,7 @@ defmodule FermixCore.Providers.ModelListing do
   def live?(:ollama), do: true
   def live?(:openrouter), do: true
   def live?(:venice), do: true
+  def live?(:chatgpt), do: true
   def live?(provider) when is_atom(provider), do: false
 
   @doc """
@@ -41,8 +49,11 @@ defmodule FermixCore.Providers.ModelListing do
   public upstream catalog (`GET <base>/models`), tool-capable models only,
   newest first; Venice lists its text catalog
   (`GET <base>/models?type=text`, public), tool-capable models only, by
-  family then newest. `base_url:`/`req_options:` are injectable; defaults come
-  from the provider's config block, then its descriptor.
+  family then newest. ChatGPT lists the signed-in account's catalog
+  (`GET <base>/models` with its bearer), `visibility == "list"` entries in
+  the server's order, and refuses while the sign-in cannot carry a turn.
+  `base_url:`/`req_options:` are injectable; defaults come from the
+  provider's config block, then its descriptor.
   """
   @spec live_models(atom(), keyword()) :: {:ok, [live_model()]} | {:error, String.t()}
   def live_models(:ollama, opts) do
@@ -76,6 +87,26 @@ defmodule FermixCore.Providers.ModelListing do
     end
   end
 
+  # ChatGPT plan usage (M57 §6.2): the signed-in account's own catalog, read
+  # with its bearer. Not the standard list shape: `{"models": [{slug,
+  # display_name, visibility}]}`. Only `visibility == "list"` entries are for
+  # display, in the server's order. A listed entry without a usable slug or
+  # name fails the whole listing (the DevKit's `invalid_model_catalog`): a
+  # picker that silently drops rows would hide a changed contract.
+  def live_models(:chatgpt, opts) do
+    url = resolved_base_url(:chatgpt, opts) <> "/models"
+    started = System.monotonic_time(:millisecond)
+
+    result =
+      with {:ok, bearer} <- chatgpt_bearer(opts),
+           {:ok, body} <- get_json(url, [{:bearer, bearer} | opts]) do
+        chatgpt_entries(body, url)
+      end
+
+    emit_chatgpt_listing(result, System.monotonic_time(:millisecond) - started)
+    result
+  end
+
   def live_models(provider, _opts) when is_atom(provider) do
     raise ArgumentError,
           "no live model listing for #{inspect(provider)}; check live?/1 before calling"
@@ -107,6 +138,79 @@ defmodule FermixCore.Providers.ModelListing do
       {:ok, config} -> config
       {:error, :not_configured} -> []
     end
+  end
+
+  # `:chatgpt_route_status` and `:token_server` replace the auth facade and the
+  # token supervisor (tests); `:access_token` skips the token server entirely.
+  defp chatgpt_bearer(opts) do
+    route_status = Keyword.get(opts, :chatgpt_route_status, &ChatGPT.route_status/1)
+
+    case route_status.([]) do
+      :ok -> chatgpt_token(opts)
+      {:error, reason} -> {:error, ChatGPT.failure_sentence(reason)}
+    end
+  end
+
+  defp chatgpt_token(opts) do
+    case Keyword.get(opts, :access_token) do
+      token when is_binary(token) and token != "" ->
+        {:ok, token}
+
+      _absent ->
+        server = Keyword.get(opts, :token_server, TokenSupervisor)
+
+        case server.get_token(Store.profile(:chatgpt)) do
+          {:ok, token} when is_binary(token) and token != "" -> {:ok, token}
+          other -> {:error, "no ChatGPT access token is available (#{inspect(other)})"}
+        end
+    end
+  end
+
+  defp chatgpt_entries(%{"models" => models}, url) when is_list(models) do
+    models
+    |> Enum.filter(&match?(%{"visibility" => "list"}, &1))
+    |> Enum.with_index()
+    |> Enum.reduce_while({:ok, []}, fn {model, index}, {:ok, acc} ->
+      case chatgpt_entry(model) do
+        {:ok, entry} ->
+          {:cont, {:ok, [entry | acc]}}
+
+        :error ->
+          {:halt, {:error, "listed model #{index} from #{url} has no usable slug or name"}}
+      end
+    end)
+    |> case do
+      {:ok, entries} -> {:ok, Enum.reverse(entries)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp chatgpt_entries(_body, url), do: {:error, "unexpected response from #{url}"}
+
+  defp chatgpt_entry(%{"slug" => slug, "display_name" => name})
+       when is_binary(slug) and slug != "" and is_binary(name) and name != "" do
+    if String.length(name) <= @max_display_name_length do
+      {:ok, %{id: slug, label: name, context_window: catalog_window(:chatgpt, slug)}}
+    else
+      :error
+    end
+  end
+
+  defp chatgpt_entry(_model), do: :error
+
+  # The listing is a call on the person's ChatGPT credential, so it rides the
+  # provider-call stream like the turns do (M57 §9). It has no run, so it
+  # carries no session id.
+  defp emit_chatgpt_listing(result, duration_ms) do
+    metadata =
+      case result do
+        {:ok, models} -> %{status: :ok, models_count: length(models)}
+        {:error, reason} -> %{status: :error, error: reason}
+      end
+
+    metadata
+    |> Map.merge(%{provider: :chatgpt, adapter: :model_listing, agent: "model_listing"})
+    |> ProviderTelemetry.emit_call(max(duration_ms, 0))
   end
 
   defp ollama_entries(models) do
@@ -230,6 +334,7 @@ defmodule FermixCore.Providers.ModelListing do
         url: url,
         method: :get,
         retry: false,
+        headers: bearer_headers(Keyword.get(opts, :bearer)),
         receive_timeout: Keyword.get(opts, :receive_timeout_ms, @receive_timeout_ms)
       )
       |> Req.merge(Keyword.get(opts, :req_options, []))
@@ -255,6 +360,11 @@ defmodule FermixCore.Providers.ModelListing do
         {:error, "request to #{url} failed: #{inspect(reason)}"}
     end
   end
+
+  defp bearer_headers(nil), do: []
+
+  defp bearer_headers(bearer) when is_binary(bearer),
+    do: [{"authorization", "Bearer " <> bearer}, {"accept", "application/json"}]
 
   defp presence(value) when is_binary(value) and value != "", do: value
   defp presence(_value), do: nil

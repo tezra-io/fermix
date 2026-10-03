@@ -11,6 +11,7 @@ defmodule FermixCore.Auth.TokenManager do
 
   use GenServer
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
   alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
@@ -262,14 +263,22 @@ defmodule FermixCore.Auth.TokenManager do
   # A single one-shot timer per token, re-armed whenever the token changes.
   defp schedule_proactive_refresh(state) do
     if is_reference(state.refresh_timer), do: Process.cancel_timer(state.refresh_timer)
-    %{state | refresh_timer: arm_refresh(state.expires_at, state.refresh_margin_ms)}
+    not_before = state.entry && Map.get(state.entry, :earliest_refresh_at)
+    %{state | refresh_timer: arm_refresh(state.expires_at, state.refresh_margin_ms, not_before)}
   end
 
-  defp arm_refresh(nil, _margin_ms), do: nil
+  defp arm_refresh(nil, _margin_ms, _not_before), do: nil
 
-  defp arm_refresh(%DateTime{} = expires_at, margin_ms) do
-    delay = DateTime.diff(expires_at, DateTime.utc_now(), :millisecond) - margin_ms
-    if delay > 0, do: Process.send_after(self(), :proactive_refresh, delay), else: nil
+  # A token set that names the earliest time it may be refreshed (ChatGPT's
+  # `earliest_refresh_at`) is never refreshed proactively before it.
+  defp arm_refresh(%DateTime{} = expires_at, margin_ms, not_before) do
+    now = DateTime.utc_now()
+    delay = DateTime.diff(expires_at, now, :millisecond) - margin_ms
+    held = if is_struct(not_before, DateTime), do: DateTime.diff(not_before, now, :millisecond)
+
+    if delay > 0,
+      do: Process.send_after(self(), :proactive_refresh, max(delay, held || 0)),
+      else: nil
   end
 
   defp do_refresh(%{refresh_token: nil} = state) do
@@ -322,6 +331,12 @@ defmodule FermixCore.Auth.TokenManager do
   # entry that is gone was signed out since it loaded them.
   defp stored_entry_error({:provider_missing, _provider} = reason), do: {:signed_out, reason}
   defp stored_entry_error(:no_auth_file), do: {:signed_out, :no_auth_file}
+
+  # An entry left with no token is a sign-out that keeps its registration
+  # (ChatGPT's): there is no stored sign-in to refresh either.
+  defp stored_entry_error({:invalid_auth_entry, _provider, :missing_access_token} = reason),
+    do: {:signed_out, reason}
+
   defp stored_entry_error(reason), do: {:error, reason}
 
   defp refresh_outcome(state, entry) do
@@ -346,6 +361,12 @@ defmodule FermixCore.Auth.TokenManager do
             "Recover with `fermix auth login`, then restart the daemon."
         )
 
+        permanently_refused(state, entry)
+
+      # A grant whose refresher read the refusal itself (ChatGPT's terminal
+      # codes, or a refresh that named another account).
+      {:error, {:reconnect_needed, kind}} ->
+        Logger.error("TokenManager: #{state.auth_profile} needs a new sign-in (#{kind})")
         permanently_refused(state, entry)
 
       {:error, reason} ->
@@ -501,6 +522,10 @@ defmodule FermixCore.Auth.TokenManager do
 
   defp refresh_entry("openai_codex", entry, path, req_options) do
     CodexToken.refresh_entry(entry, path, req_options)
+  end
+
+  defp refresh_entry(auth_profile, %{provider: "chatgpt"} = entry, path, req_options) do
+    ChatGPT.Refresh.refresh_entry(to_string(auth_profile), entry, path, req_options)
   end
 
   defp refresh_entry(

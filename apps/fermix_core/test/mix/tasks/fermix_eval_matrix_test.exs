@@ -14,10 +14,19 @@ defmodule Mix.Tasks.Fermix.Eval.MatrixTest do
     end
 
     test "each provider lists models with the catalog default first" do
-      for provider <- Matrix.matrix() do
+      for provider <- Matrix.matrix(), provider.id != :chatgpt do
         assert provider.models != [], "#{provider.id} has no models"
         assert provider.default_model == hd(provider.models).id
       end
+    end
+
+    # ChatGPT plan usage ships no catalog (M57 §6.2): its models are the
+    # signed-in account's, so it adds no config to the sweep.
+    test "chatgpt contributes no catalog configs and no default" do
+      chatgpt = Enum.find(Matrix.matrix(), &(&1.id == :chatgpt))
+
+      assert chatgpt.models == []
+      assert chatgpt.default_model == ""
     end
 
     test "carries the descriptor auth/effort metadata, not a hand-copied list" do

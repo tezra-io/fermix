@@ -62,7 +62,10 @@ defmodule FermixCore.Auth.RefreshClient do
   @type tokens :: %{
           access_token: String.t(),
           refresh_token: String.t() | nil,
-          expires_at: DateTime.t() | nil
+          expires_at: DateTime.t() | nil,
+          scope: String.t() | nil,
+          id_token: String.t() | nil,
+          earliest_refresh_at: term()
         }
 
   @spec refresh(String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
@@ -136,11 +139,15 @@ defmodule FermixCore.Auth.RefreshClient do
   end
 
   defp do_refresh(%OAuthProvider{} = provider, refresh_token, req_options, sleep, attempt) do
+    # `extra_refresh_params` sits under the grant's own fields, so a provider
+    # definition can add what its endpoint requires (ChatGPT's `resource`) but
+    # never rewrite the grant or the client.
     body =
-      %{
+      provider.extra_refresh_params
+      |> Map.merge(%{
         "grant_type" => "refresh_token",
         "refresh_token" => refresh_token
-      }
+      })
       |> Map.merge(OAuthProvider.body_credentials(provider))
       |> URI.encode_query()
 
@@ -225,11 +232,16 @@ defmodule FermixCore.Auth.RefreshClient do
           JwtClaims.expires_at(access)
       end
 
+    # `scope`, `id_token` and `earliest_refresh_at` as the provider sent them:
+    # only a ChatGPT refresh reads them (`Auth.ChatGPT.Refresh`).
     {:ok,
      %{
        access_token: access,
        refresh_token: body["refresh_token"],
-       expires_at: expires_at
+       expires_at: expires_at,
+       scope: body["scope"],
+       id_token: body["id_token"],
+       earliest_refresh_at: body["earliest_refresh_at"]
      }}
   end
 

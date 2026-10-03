@@ -56,10 +56,10 @@ defmodule FermixCore.Management.Settings.Tools do
     "openai" => "OpenAI",
     "xai" => "SpaceXAI",
     "google" => "Google",
-    "openai_codex" => "ChatGPT"
+    "openai_codex" => "OpenAI Codex"
   }
 
-  # ChatGPT signs in through the Codex provider and has no key of its own.
+  # The Codex backend signs in through the Codex provider and has no key of its own.
   @image_secrets %{
     "openai" => :openai_api_key,
     "xai" => :xai_api_key,

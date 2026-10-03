@@ -107,6 +107,13 @@ defmodule FermixCore.Management.Providers do
     end
   end
 
+  # ChatGPT's probe is a real adapter call that emits its own provider event, so
+  # the job's id goes to it as the session and the wrapper adds none: one
+  # metered call, one event.
+  defp probe(probe, :chatgpt, job_id, probe_opts) do
+    probe_outcome(probe.(:chatgpt, Keyword.put(probe_opts, :session_id, job_id)))
+  end
+
   defp probe(probe, id, job_id, probe_opts) do
     started = System.monotonic_time(:millisecond)
     result = probe.(id, probe_opts)

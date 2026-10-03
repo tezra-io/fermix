@@ -99,10 +99,16 @@ BUNDLED_SKILLS_DIR = os.path.join(os.path.dirname(BENCH_DIR), "apps", "fermix_co
 MCP_STATE_DIR = "eval-mcp"
 # Primary provider id -> its key in the Fermix auth store ($FERMIX_HOME/auth.json),
 # for OAuth providers whose token must be copied into the disposable home.
+# chatgpt (Sign in with ChatGPT) access tokens last one hour and its refresh token
+# rotates on every use: a run that outlives the copied access token refreshes in the
+# eval home, and the dev home's copy is then refused as reused, so the dev home must
+# sign in again. The copied entry carries the registration's issued client id; the
+# eval home gets no host id file, because only a sign-in needs one.
 _OAUTH_PROFILE_KEY = {
     "openai_codex": "openai_codex",
     "anthropic": "anthropic_oauth",
     "xai": "xai_oauth",
+    "chatgpt": "chatgpt",
 }
 # Providers whose api_key the daemon reads from an environment variable at boot
 # (config/runtime.exs); the explicit/CI mode supports exactly these + ollama.

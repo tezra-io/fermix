@@ -100,13 +100,30 @@ defmodule FermixCore.Providers.Descriptor do
   @raw_descriptors [
     %{
       id: :openai_codex,
-      label: "OpenAI Codex (ChatGPT)",
+      label: "OpenAI Codex",
       adapter: FermixCore.Providers.OpenAI.Codex,
       default_base_url: "https://chatgpt.com/backend-api/codex/responses",
       locality: :remote,
       auth_modes: [:oauth],
       secrets: [],
       config_keys: [:default_model, :reasoning_effort, :fast, :primary],
+      setup_fields: [],
+      effort?: true
+    },
+    # Sign in with ChatGPT (M57): the person's ChatGPT plan pays for turns on
+    # the public Responses API. One auth mode, no secret and no base_url key:
+    # the registration and tokens live in auth.json, and the model list is
+    # discovered from the account rather than shipped. Placed straight after
+    # Codex, before the API-key `openai`, in the failover order (§4.5).
+    %{
+      id: :chatgpt,
+      label: "ChatGPT",
+      adapter: FermixCore.Providers.OpenAI.ChatGPTPlan,
+      default_base_url: "https://api.openai.com/v1",
+      locality: :remote,
+      auth_modes: [:oauth],
+      secrets: [],
+      config_keys: [:default_model, :reasoning_effort, :primary],
       setup_fields: [],
       effort?: true
     },

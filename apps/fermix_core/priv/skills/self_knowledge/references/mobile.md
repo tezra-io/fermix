@@ -44,7 +44,7 @@ Hand-edit only: `streaming` (draft streaming is the default) and `max_media_byte
 
 - All paired phones share the `main` conversation, and the Mac app's chat reads the same timeline, so reconnects, a second phone and the Mac see the same history; every row is announced live to each connected device. The phone queues offline messages and resends them by client message id; the host deduplicates and resynchronizes with a monotonic cursor. Read state is shared and never passes the newest row.
 - Text, tool activity, photos and documents both ways, voice notes, slash commands and the command palette, link previews (stored with their row), reactions, and approve/deny cards (including an access-sensitive plugin command, run once approved). Voice notes use the configured transcription backend; this is not realtime voice, and phone calls are not supported.
-- A reply streams into a live draft only on a streaming provider route (Codex today); otherwise it arrives whole when the turn ends.
+- A reply streams into a live draft only on a streaming provider route (Codex and ChatGPT today); otherwise it arrives whole when the turn ends.
 - An event over one frame arrives in parts, up to 1 MiB; a longer reply is cut there and marked truncated on the phone while the stored row keeps it whole. A history page holds at most 256 KiB and its cursor pulls the rest.
 - The phone's Stop cancels one request by its client message id (running, waiting or not yet queued); `/stop` still stops everything.
 - Reactions reach only a connected phone; they are not stored.
