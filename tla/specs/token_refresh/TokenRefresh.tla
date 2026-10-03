@@ -82,7 +82,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_login.ex @ 0337bd553071
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ d81c71a108d7
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ e580e287fec4
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 9ad843585b2f
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 0fcf7b0f738b
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 5ff12322ebe3
