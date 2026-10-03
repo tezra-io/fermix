@@ -611,8 +611,7 @@ defmodule FermixCore.Agents.MainAgent do
   defp provider_name(FermixCore.Providers.OpenAI), do: :openai
   defp provider_name(FermixCore.Providers.OpenAI.Responses), do: :openai
   defp provider_name(FermixCore.Providers.OpenAI.ChatCompletions), do: :openai
-  defp provider_name(FermixCore.Providers.OpenAI.Codex), do: :openai_codex
-  defp provider_name(FermixCore.Providers.OpenAI.ChatGPTPlan), do: :chatgpt
+  defp provider_name(FermixCore.Providers.OpenAI.ChatGPTPlan), do: :openai_codex
   defp provider_name(FermixCore.Providers.Anthropic.Messages), do: :anthropic
   defp provider_name(FermixCore.Providers.XAI.Responses), do: :xai
 

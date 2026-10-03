@@ -10,16 +10,14 @@ defmodule FermixCore.Setup.Runtime do
   and the packaged CLI binary.
   """
 
-  alias FermixCore.Auth.CodexImport
-  alias FermixCore.Auth.CodexLogin
-  alias FermixCore.Auth.CodexToken
-  alias FermixCore.Auth.Store, as: AuthStore
-  alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.ChatGPT
+  alias FermixCore.Auth.ChatGPT.TerminalLogin
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.Wizard
@@ -38,7 +36,6 @@ defmodule FermixCore.Setup.Runtime do
                    :provider,
                    :default_model,
                    :reasoning_effort,
-                   :fast,
                    :realtime_enabled,
                    :realtime_api_key,
                    :realtime_model,
@@ -99,79 +96,16 @@ defmodule FermixCore.Setup.Runtime do
 
       report.status == :ready and provided_answers(opts) == [] and
         Wizard.prompts(report.wizard) == [] and
-        not Keyword.get(opts, :reconfigure, false) and
-          not Keyword.get(opts, :import_codex, false) ->
+          not Keyword.get(opts, :reconfigure, false) ->
         seed_and_print(report, puts)
 
       true ->
-        with {:ok, opts} <- maybe_choose_file_store(report, opts, puts, prompt),
-             {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
-          # Re-fetch the report — the codex import may have satisfied
-          # the active provider check, leaving fewer required answers.
+        with {:ok, opts} <- maybe_choose_file_store(report, opts, puts, prompt) do
+          # Re-fetch the report: choosing the file store may have saved an answer.
           {:ok, refreshed} = load_report()
-          save_and_print(refreshed, opts ++ extras, puts, prompt)
+          save_and_print(refreshed, opts, puts, prompt)
         end
     end
-  end
-
-  defp maybe_import_codex(report, opts, puts, prompt) do
-    cond do
-      Keyword.get(opts, :import_codex, false) ->
-        run_codex_import(opts, puts)
-
-      not provider_missing?(report) ->
-        {:ok, []}
-
-      Keyword.get(opts, :openai_api_key) not in [nil, ""] ->
-        {:ok, []}
-
-      selected_provider(opts) not in [nil, :openai_codex] ->
-        # The user explicitly chose a non-codex provider (e.g. xai, anthropic).
-        # Importing ChatGPT tokens from the Codex CLI is only relevant to
-        # `openai_codex`, so don't probe ~/.codex or prompt for it — mirror the
-        # `openai_api_key` guard above. (`nil` = no explicit selection yet, e.g.
-        # a bare interactive setup or `--import-codex`, which still offers it.)
-        {:ok, []}
-
-      not CodexImport.codex_available?(codex_path(opts)) ->
-        {:ok, []}
-
-      true ->
-        case ask_yes_no(prompt, "Import OpenAI tokens from existing Codex CLI? [Y/n]: ", true) do
-          true -> run_codex_import(opts, puts)
-          false -> {:ok, []}
-        end
-    end
-  end
-
-  defp run_codex_import(opts, puts) do
-    import_opts =
-      []
-      |> maybe_put(:codex_path, Keyword.get(opts, :codex_auth_path))
-      |> maybe_put(:fermix_path, Keyword.get(opts, :fermix_auth_path))
-      |> maybe_put(:req_options, Keyword.get(opts, :req_options))
-
-    case CodexImport.import_tokens(import_opts) do
-      {:ok, _entry} ->
-        puts.("Imported OpenAI tokens from Codex CLI.")
-        {:ok, [provider: "openai_codex"]}
-
-      {:error, reason} ->
-        {:error, "codex import failed: #{reason_text(reason)}"}
-    end
-  end
-
-  # Another Fermix process held the Codex profile lock past the wait, and
-  # nothing was spent: the one reason with a sentence of its own.
-  defp reason_text(:profile_busy), do: AuthStore.busy_sentence()
-  defp reason_text(reason), do: inspect(reason)
-
-  defp provider_missing?(%{failures: failures}) do
-    Enum.any?(failures, &(&1.component in ["provider:openai", "provider:openai_codex"]))
-  end
-
-  defp codex_path(opts) do
-    Keyword.get(opts, :codex_auth_path, Path.join(System.user_home!(), ".codex/auth.json"))
   end
 
   defp ask_yes_no(prompt, label, default_yes) do
@@ -338,31 +272,22 @@ defmodule FermixCore.Setup.Runtime do
         {:ok, report}
 
       selected_codex_provider?(Keyword.get(opts, :provider)) or active_provider() == :openai_codex ->
-        ensure_codex_token(report, opts, puts)
+        ensure_chatgpt_sign_in(report, opts, puts)
 
       true ->
         {:ok, report}
     end
   end
 
-  defp ensure_codex_token(report, opts, puts) do
-    token_opts =
-      []
-      |> maybe_put(:fermix_auth_path, Keyword.get(opts, :fermix_auth_path))
-      |> maybe_put(:refresh_req_options, Keyword.get(opts, :refresh_req_options))
+  # `openai_codex` signs in with ChatGPT. A registration the route can use is
+  # kept; every other standing (none, plan usage off, a grant to renew) is what
+  # a sign-in fixes.
+  defp ensure_chatgpt_sign_in(report, opts, puts) do
+    status_opts = maybe_put([], :fermix_path, Keyword.get(opts, :fermix_auth_path))
 
-    case CodexToken.get_token(token_opts) do
-      {:ok, _token} ->
-        {:ok, report}
-
-      {:error, reason} when reason in [:no_auth_file] ->
-        run_codex_login(opts, puts)
-
-      {:error, {:provider_missing, :openai_codex}} ->
-        run_codex_login(opts, puts)
-
-      {:error, reason} ->
-        {:error, "codex token unavailable: #{inspect(reason)}"}
+    case ChatGPT.route_status(status_opts) do
+      :ok -> {:ok, report}
+      {:error, _not_usable} -> run_chatgpt_login(opts, puts)
     end
   end
 
@@ -445,13 +370,13 @@ defmodule FermixCore.Setup.Runtime do
   end
 
   defp ask_codex_recovery?(prompt) do
-    ask_yes_no(prompt, "Codex OAuth token rejected. Start ChatGPT OAuth login now? [Y/n]: ", true)
+    ask_yes_no(prompt, "The ChatGPT sign-in was rejected. Sign in again now? [Y/n]: ", true)
   end
 
   defp continue_codex_recovery(true, surface, hint, probe_opts, opts, puts) do
-    puts.("Codex OAuth token rejected; starting ChatGPT OAuth login.")
+    puts.("The ChatGPT sign-in was rejected; signing in again.")
 
-    with {:ok, _report} <- run_codex_login(opts, puts) do
+    with {:ok, _report} <- run_chatgpt_login(opts, puts) do
       rerun_codex_probe(probe_opts, surface, hint, puts)
     end
   end
@@ -470,53 +395,64 @@ defmodule FermixCore.Setup.Runtime do
         {:error, "auth probe failed for #{surface}: #{hint}"}
 
       {:error, reason} ->
-        {:error, "auth probe failed after Codex OAuth login: #{inspect(reason)}"}
+        {:error, "auth probe failed after the ChatGPT sign-in: #{inspect(reason)}"}
     end
   end
 
-  defp run_codex_login(opts, puts) do
-    puts.("Opening ChatGPT OAuth login for openai_codex.")
+  # The terminal's ChatGPT sign-in, shared with `fermix auth login`: it also
+  # takes the address a browser on another computer ended on, pasted here. A
+  # sign-in stops the `chatgpt` token manager, so the probe after it loads the
+  # new grant. A grant without plan usage is one the route refuses.
+  defp run_chatgpt_login(opts, puts) do
+    puts.("Signing in with ChatGPT for openai_codex.")
 
-    login_opts =
-      []
-      |> maybe_put(:fermix_auth_path, Keyword.get(opts, :fermix_auth_path))
-      |> maybe_put(:no_browser, Keyword.get(opts, :no_browser))
-      |> maybe_put(:oauth_opener, Keyword.get(opts, :oauth_opener))
-      |> maybe_put(:oauth_port, Keyword.get(opts, :oauth_port) || Keyword.get(opts, :port))
-      |> maybe_put(:oauth_timeout_ms, Keyword.get(opts, :oauth_timeout_ms))
-      |> maybe_put(:timeout, Keyword.get(opts, :timeout))
-      |> maybe_put(:oauth_req_options, Keyword.get(opts, :oauth_req_options))
-      |> Keyword.put(:puts, puts)
+    case TerminalLogin.run(terminal_login_opts(opts, puts)) do
+      {:ok, %{plan_usage: :on, account: account}} ->
+        puts.("Signed in to ChatGPT#{if account, do: " as #{account}"}.")
+        :ok = ensure_live_model(opts, puts)
+        load_report()
 
-    case CodexLogin.login(login_opts) do
-      {:ok, _entry} ->
-        puts.("Stored ChatGPT OAuth credentials for openai_codex.")
-
-        with :ok <- reload_token_manager_if_running() do
-          load_report()
-        end
+      {:ok, %{plan_usage: :off}} ->
+        {:error, ChatGPT.failure_sentence(:plan_usage_off)}
 
       {:error, reason} ->
-        {:error, "codex oauth login failed: #{reason_text(reason)}"}
+        {:error, ChatGPT.failure_sentence(reason)}
     end
   end
 
-  # The supervised TokenManager (started when provider is :openai_codex)
-  # caches the loaded access token in memory. After a fresh OAuth login
-  # writes new tokens to disk, push them into the GenServer so the
-  # finalize probe — and any subsequent provider call — sees the new
-  # credentials instead of the rejected ones.
-  defp reload_token_manager_if_running do
-    case Process.whereis(TokenManager) do
-      nil ->
+  # `:chatgpt_login`, `:read_line` and `:browser` are test seams.
+  defp terminal_login_opts(opts, puts) do
+    []
+    |> maybe_put(:fermix_path, Keyword.get(opts, :fermix_auth_path))
+    |> maybe_put(:no_browser, Keyword.get(opts, :no_browser))
+    |> maybe_put(:port, Keyword.get(opts, :port))
+    |> maybe_put(:timeout_ms, timeout_ms(Keyword.get(opts, :timeout)))
+    |> maybe_put(:login, Keyword.get(opts, :chatgpt_login))
+    |> maybe_put(:read_line, Keyword.get(opts, :read_line))
+    |> maybe_put(:browser, Keyword.get(opts, :browser))
+    |> Keyword.put(:puts, puts)
+  end
+
+  defp timeout_ms(seconds) when is_integer(seconds) and seconds > 0, do: seconds * 1_000
+  defp timeout_ms(_unset), do: nil
+
+  # The configured model must be one the account lists (`Setup.LiveModel`). A
+  # listing that fails leaves the model as it is and says so; the sign-in stands.
+  defp ensure_live_model(opts, puts) do
+    ensure = Keyword.get(opts, :live_model, &LiveModel.ensure/2)
+
+    case ensure.(:openai_codex, []) do
+      {:ok, %{model: model, changed?: true}} ->
+        puts.("Default model set to #{model}, the first one your ChatGPT account lists.")
+
+      {:ok, %{changed?: false}} ->
         :ok
 
-      _pid ->
-        case TokenManager.reload(TokenManager) do
-          {:ok, _token} -> :ok
-          {:error, reason} -> {:error, "token manager reload failed: #{inspect(reason)}"}
-        end
+      {:error, sentence} ->
+        puts.("The default model was not checked against your ChatGPT account. #{sentence}")
     end
+
+    :ok
   end
 
   defp selected_codex_provider?(:openai_codex), do: true
@@ -535,17 +471,7 @@ defmodule FermixCore.Setup.Runtime do
   end
 
   defp collect_answers(report, opts, prompt) do
-    provided = opts |> provided_answers() |> default_codex_fast()
-
-    collect_answers(report, opts, prompt, provided, MapSet.new())
-  end
-
-  defp default_codex_fast(answers) do
-    if Keyword.get(answers, :fast) == nil and selected_provider(answers) == :openai_codex do
-      Keyword.put(answers, :fast, false)
-    else
-      answers
-    end
+    collect_answers(report, opts, prompt, provided_answers(opts), MapSet.new())
   end
 
   defp collect_answers(report, opts, prompt, answers, seen_keys) do
@@ -611,10 +537,6 @@ defmodule FermixCore.Setup.Runtime do
           :error -> false
         end
     end
-  end
-
-  defp irrelevant_prompt?(%{key: :fast}, answers) do
-    selected_provider(answers) not in [nil, :openai_codex]
   end
 
   defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do

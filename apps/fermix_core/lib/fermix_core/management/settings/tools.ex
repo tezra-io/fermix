@@ -55,11 +55,9 @@ defmodule FermixCore.Management.Settings.Tools do
   @image_labels %{
     "openai" => "OpenAI",
     "xai" => "SpaceXAI",
-    "google" => "Google",
-    "openai_codex" => "OpenAI Codex"
+    "google" => "Google"
   }
 
-  # The Codex backend signs in through the Codex provider and has no key of its own.
   @image_secrets %{
     "openai" => :openai_api_key,
     "xai" => :xai_api_key,

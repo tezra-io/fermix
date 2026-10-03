@@ -79,8 +79,7 @@ defmodule FermixCore.Management.Settings.Providers do
 
     auth_mode_row(descriptor, block, restart) ++
       Enum.map(descriptor.setup_fields, &field_row(descriptor, &1, block, snapshot, restart)) ++
-      [model_row(descriptor, block, restart)] ++
-      effort_row(descriptor, block, restart) ++ fast_row(descriptor, block, restart)
+      [model_row(descriptor, block, restart)] ++ effort_row(descriptor, block, restart)
   end
 
   defp auth_mode_row(descriptor, block, restart) do
@@ -144,22 +143,8 @@ defmodule FermixCore.Management.Settings.Providers do
     ]
   end
 
-  defp fast_row(descriptor, block, restart) do
-    if :fast in descriptor.config_keys do
-      [
-        Row.new("fast", :toggle, "Fast mode",
-          footer: "Answers sooner and reasons less.",
-          value: Source.boolean(block, :fast, false),
-          restart: restart
-        )
-      ]
-    else
-      []
-    end
-  end
-
   # An empty option list is the truthful answer for a provider whose models are
-  # discovered rather than shipped (Ollama, OpenRouter). The client asks
+  # discovered rather than shipped (OpenAI Codex). The client asks
   # `providers.models.list` for those; it never invents a catalog.
   defp model_options(id) do
     Enum.map(ModelCatalog.models_for(id), &Row.option(&1.id, &1.label))

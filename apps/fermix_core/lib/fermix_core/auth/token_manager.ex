@@ -1,19 +1,16 @@
 defmodule FermixCore.Auth.TokenManager do
   @moduledoc """
-  Manages OAuth tokens for local auth profiles.
+  Manages the OAuth tokens of one local auth profile.
 
   Reads from the Fermix-owned `~/.fermix/auth.json` store and refreshes
-  before expiry. Codex CLI bootstrap was removed in M4.8 Stage 3 — the
-  one-time `~/.codex` import lives in `FermixCore.Auth.CodexImport`,
-  invoked explicitly by the setup wizard, and the resulting tokens
-  land in `Auth.Store` under the `openai_codex` provider scope.
+  before expiry. Every manager is a child of `Auth.TokenSupervisor`, which
+  starts one per profile on first use and names it by that profile.
   """
 
   use GenServer
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
-  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
@@ -33,14 +30,12 @@ defmodule FermixCore.Auth.TokenManager do
   # --- Client API ---
 
   @spec start_link(keyword()) :: GenServer.on_start()
-  def start_link(opts \\ []) do
-    {name, opts} = Keyword.pop(opts, :name, __MODULE__)
+  def start_link(opts) when is_list(opts) do
+    {name, opts} = Keyword.pop!(opts, :name)
     GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @spec get_token(GenServer.server() | String.t()) :: {:ok, String.t()} | {:error, term()}
-  def get_token(server \\ __MODULE__)
-
   def get_token(auth_profile) when is_binary(auth_profile),
     do: TokenSupervisor.get_token(auth_profile)
 
@@ -49,8 +44,6 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @spec refresh(GenServer.server() | String.t()) :: {:ok, String.t()} | {:error, term()}
-  def refresh(server \\ __MODULE__)
-
   def refresh(auth_profile) when is_binary(auth_profile),
     do: TokenSupervisor.refresh(auth_profile)
 
@@ -59,7 +52,6 @@ defmodule FermixCore.Auth.TokenManager do
   end
 
   @spec reload(GenServer.server() | String.t()) :: {:ok, String.t()} | {:error, term()}
-  def reload(server \\ __MODULE__)
   def reload(auth_profile) when is_binary(auth_profile), do: TokenSupervisor.reload(auth_profile)
 
   def reload(server) do
@@ -76,12 +68,10 @@ defmodule FermixCore.Auth.TokenManager do
   `reload/1` after a fresh sign-in is what brings it back.
   """
   @spec forget(GenServer.server() | String.t()) :: :ok
-  def forget(server \\ __MODULE__)
   def forget(auth_profile) when is_binary(auth_profile), do: TokenSupervisor.forget(auth_profile)
   def forget(server), do: GenServer.call(server, :forget)
 
   @spec status(GenServer.server() | String.t()) :: {:ok, map()} | {:error, term()}
-  def status(server \\ __MODULE__)
   def status(auth_profile) when is_binary(auth_profile), do: TokenSupervisor.status(auth_profile)
 
   def status(server) do
@@ -123,7 +113,7 @@ defmodule FermixCore.Auth.TokenManager do
   def init(opts) do
     fermix_path = Keyword.get(opts, :fermix_auth_path, Store.path())
     req_options = Keyword.get(opts, :req_options, [])
-    auth_profile = Keyword.get(opts, :auth_profile, :openai_codex)
+    auth_profile = Keyword.fetch!(opts, :auth_profile)
 
     state = %{
       auth_profile: auth_profile,
@@ -287,8 +277,8 @@ defmodule FermixCore.Auth.TokenManager do
 
   # One refresher of this profile at a time, across processes and VMs: the
   # entry is read, refreshed and its outcome written under the profile lock
-  # (`Store.with_profile_lock/3`), so a CLI VM or the Codex image backend never
-  # presents the refresh token this refresh is consuming, and a logout never
+  # (`Store.with_profile_lock/3`), so a CLI VM never presents the refresh
+  # token this refresh is consuming, and a logout never
   # lands inside it. The manager's own state and the token-file projection
   # change only after the lock is released.
   defp do_refresh(state) do
@@ -378,11 +368,9 @@ defmodule FermixCore.Auth.TokenManager do
   # not its status reached the store. A status write that failed (logged by
   # mark_reauthorization_required/3) is this caller's answer.
   defp permanently_refused(state, entry) do
-    refusal = permanent_reason(state.auth_profile)
-
     case mark_reauthorization_required(state.auth_profile, entry, state.fermix_path) do
-      :ok -> {:refused, refusal}
-      {:error, reason} -> {:refused, refusal, reason}
+      :ok -> {:refused, :reauthorization_required}
+      {:error, reason} -> {:refused, :reauthorization_required, reason}
     end
   end
 
@@ -412,7 +400,7 @@ defmodule FermixCore.Auth.TokenManager do
         expires_at: nil,
         entry: nil,
         refresh_timer: nil,
-        refusal: permanent_reason(state.auth_profile)
+        refusal: :reauthorization_required
     })
   end
 
@@ -507,21 +495,13 @@ defmodule FermixCore.Auth.TokenManager do
 
   # Refresh from the newest persisted entry, not the in-memory copy. Another
   # refresher (a CLI/doctor probe, or a prior refresh) may have rotated the
-  # refresh token in the store; Codex invalidates the whole session if a
+  # refresh token in the store; a provider may revoke the whole session when a
   # rotated (consumed) refresh token is reused, so always start from disk. A
   # failed read is the answer: there is no in-memory fallback to refresh from.
   defp latest_entry(state) do
     with {:ok, entry} <- Store.read(state.auth_profile, state.fermix_path) do
       {:ok, Map.merge(state.entry || %{}, entry)}
     end
-  end
-
-  defp refresh_entry(:openai_codex, entry, path, req_options) do
-    CodexToken.refresh_entry(entry, path, req_options)
-  end
-
-  defp refresh_entry("openai_codex", entry, path, req_options) do
-    CodexToken.refresh_entry(entry, path, req_options)
   end
 
   defp refresh_entry(auth_profile, %{provider: "chatgpt"} = entry, path, req_options) do
@@ -602,13 +582,6 @@ defmodule FermixCore.Auth.TokenManager do
         status: "ready"
     }
   end
-
-  defp permanent_reason(:openai_codex), do: :auth_invalidated
-  defp permanent_reason("openai_codex"), do: :auth_invalidated
-  defp permanent_reason(_auth_profile), do: :reauthorization_required
-
-  defp mark_reauthorization_required(:openai_codex, _entry, _path), do: :ok
-  defp mark_reauthorization_required("openai_codex", _entry, _path), do: :ok
 
   defp mark_reauthorization_required(auth_profile, entry, path) do
     case Store.write(auth_profile, %{entry | status: "reauthorization_required"}, path) do

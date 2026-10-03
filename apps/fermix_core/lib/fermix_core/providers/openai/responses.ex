@@ -24,7 +24,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
   Wire-shape conversion (tool list, item-list `input`, item-list
   `output` parsing, `call_id` fallback) lives in `OpenAI.ResponsesShared`
-  and is shared with `OpenAI.Codex`. Only the URL, headers, and the
+  and is shared with `OpenAI.ChatGPTPlan`. Only the URL, headers, and the
   fact that this surface is non-streaming differ here.
   """
 

@@ -120,12 +120,13 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
-  # The signed-in account's live model list, in the server's order (M57 §6.2).
-  defmodule ChatGPTListing do
-    def live?(:chatgpt), do: true
+  # OpenAI Codex's live model list for the signed-in account, in the server's
+  # order (M57 §6.2).
+  defmodule CodexListing do
+    def live?(:openai_codex), do: true
     def live?(_provider), do: false
 
-    def live_models(:chatgpt, _opts) do
+    def live_models(:openai_codex, _opts) do
       {:ok,
        [
          %{id: "gpt-plan-alpha", label: "Plan Alpha", context_window: nil},
@@ -134,11 +135,11 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
-  defmodule ChatGPTListingDown do
-    def live?(:chatgpt), do: true
+  defmodule CodexListingDown do
+    def live?(:openai_codex), do: true
     def live?(_provider), do: false
 
-    def live_models(:chatgpt, _opts),
+    def live_models(:openai_codex, _opts),
       do: {:error, "unexpected response from https://api.openai.test/v1/models"}
   end
 
@@ -157,7 +158,6 @@ defmodule FermixWebWeb.SetupLiveTest do
     oauth = Application.get_env(:fermix_core, :oauth, %{})
     plugin_auth_runner = Application.get_env(:fermix_web, :plugin_auth_runner)
     plugin_auth_url_timeout_ms = Application.get_env(:fermix_web, :plugin_auth_url_timeout_ms)
-    codex_login_runner = Application.get_env(:fermix_web, :codex_login_runner)
     xai_login_runner = Application.get_env(:fermix_web, :xai_login_runner)
     chatgpt_login_runner = Application.get_env(:fermix_web, :chatgpt_login_runner)
     chatgpt_logout_runner = Application.get_env(:fermix_web, :chatgpt_logout_runner)
@@ -228,7 +228,6 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_core, :oauth, %{})
     Application.delete_env(:fermix_web, :plugin_auth_runner)
     Application.delete_env(:fermix_web, :plugin_auth_url_timeout_ms)
-    Application.delete_env(:fermix_web, :codex_login_runner)
     Application.delete_env(:fermix_web, :xai_login_runner)
     Application.delete_env(:fermix_web, :chatgpt_login_runner)
     Application.delete_env(:fermix_web, :chatgpt_logout_runner)
@@ -263,7 +262,6 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :oauth, oauth)
       restore_env(:fermix_web, :plugin_auth_runner, plugin_auth_runner)
       restore_env(:fermix_web, :plugin_auth_url_timeout_ms, plugin_auth_url_timeout_ms)
-      restore_env(:fermix_web, :codex_login_runner, codex_login_runner)
       restore_env(:fermix_web, :xai_login_runner, xai_login_runner)
       restore_env(:fermix_web, :chatgpt_login_runner, chatgpt_login_runner)
       restore_env(:fermix_web, :chatgpt_logout_runner, chatgpt_logout_runner)
@@ -1377,51 +1375,6 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Provider saved."
       assert html =~ "Voice companion"
-    end
-
-    test "Codex OAuth badge warns 'Reconnect needed' when the stored token is stale", %{
-      conn: conn
-    } do
-      Store.write(:openai_codex, %{
-        auth_mode: "chatgpt",
-        provider: "openai",
-        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
-        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
-        last_refresh: nil,
-        status: "ready"
-      })
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
-        |> render_change()
-
-      assert html =~ "Reconnect needed"
-    end
-
-    test "Codex OAuth badge shows 'Connected' when the stored token is fresh", %{conn: conn} do
-      Store.write(:openai_codex, %{
-        auth_mode: "chatgpt",
-        provider: "openai",
-        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
-        expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
-        last_refresh: nil,
-        status: "ready"
-      })
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
-        |> render_change()
-
-      assert html =~ "Connected"
-      assert html =~ "Reconnect Codex"
-      refute html =~ "Reconnect needed"
-      refute html =~ "Reconnect ChatGPT"
     end
 
     test "provider pane offers canonical reasoning effort levels (xhigh, not minimal)", %{
@@ -3425,7 +3378,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # openai (effort-capable) shows the panel…
       assert html =~ "Model behavior"
 
-      # …openrouter and ollama (no effort, no fast) hide it entirely.
+      # …openrouter and ollama (no effort) hide it entirely.
       for provider <- ["openrouter", "ollama"] do
         html =
           view
@@ -3802,182 +3755,6 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert contents =~ "[fermix_core.providers.xai]"
     end
 
-    test "submitting persists Codex fast mode as a boolean", %{
-      conn: conn,
-      tmp_home: tmp_home
-    } do
-      {:ok, view, _html} = live(conn, "/setup")
-
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]",
-          provider_form: %{
-            provider: "openai_codex",
-            default_model: "gpt-5.5",
-            reasoning_effort: "high"
-          }
-        )
-        |> render_change()
-
-      assert html =~ "Fast mode"
-
-      view
-      |> form("form[phx-submit=\"save_provider\"]",
-        provider_form: %{
-          provider: "openai_codex",
-          default_model: "gpt-5.5",
-          reasoning_effort: "high",
-          fast: "true"
-        }
-      )
-      |> render_submit()
-
-      assert render(view) =~ "Provider saved."
-
-      providers = Application.get_env(:fermix_core, :providers, [])
-      codex = Keyword.get(providers, :openai_codex, [])
-
-      assert Keyword.get(codex, :fast) == true
-
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "[fermix_core.providers.openai_codex]"
-      assert contents =~ "fast = true"
-    end
-
-    # D9: "ChatGPT" names only Sign in with ChatGPT; the Codex door says Codex.
-    test "selecting Codex offers the Codex OAuth login", %{conn: conn} do
-      {:ok, view, _html} = live(conn, "/setup")
-
-      html =
-        view
-        |> form("form[phx-submit=\"save_provider\"]",
-          provider_form: %{
-            provider: "openai_codex",
-            default_model: "gpt-5.5",
-            reasoning_effort: "high"
-          }
-        )
-        |> render_change()
-
-      assert html =~ "Sign in with Codex"
-      assert html =~ "Codex OAuth"
-      refute html =~ "Sign in with ChatGPT"
-      refute html =~ "ChatGPT OAuth"
-      assert html =~ ~s(phx-click="codex_login")
-      assert html =~ ~s(data-auth-trigger="true")
-    end
-
-    test "Codex OAuth login persists through the secure auth store", %{conn: conn} do
-      parent = self()
-
-      Application.put_env(:fermix_web, :codex_login_runner, fn opts ->
-        Keyword.fetch!(opts, :oauth_opener).("https://auth.openai.test/codex")
-        entry = codex_auth_entry()
-        :ok = Store.write(:openai_codex, entry)
-        send(parent, {:codex_login_started, Keyword.keys(opts)})
-        {:ok, entry}
-      end)
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      view
-      |> form("form[phx-submit=\"save_provider\"]",
-        provider_form: %{
-          provider: "openai_codex",
-          default_model: "gpt-5.5",
-          reasoning_effort: "high"
-        }
-      )
-      |> render_change()
-
-      html = view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
-      assert html =~ "Opening Codex sign-in"
-      assert_receive {:codex_login_started, keys}
-      assert :oauth_opener in keys
-
-      html = render_until(view, "Codex OAuth connected.")
-      assert html =~ "Codex OAuth connected."
-      assert html =~ "Connected"
-      refute html =~ "https://auth.openai.test/codex"
-
-      assert {:ok, entry} = Store.read(:openai_codex)
-      assert entry.auth_mode == "chatgpt"
-      assert entry.tokens.access_token == "codex_access_token"
-    end
-
-    # A sign-in that meets another Fermix process refreshing or signing in the
-    # same account refuses before it spends anything; the flash says to retry
-    # rather than showing the reason's atom.
-    test "a Codex sign-in refused by a busy profile says to try again", %{conn: conn} do
-      Application.put_env(:fermix_web, :codex_login_runner, fn _opts ->
-        {:error, :profile_busy}
-      end)
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      view
-      |> form("form[phx-submit=\"save_provider\"]",
-        provider_form: %{
-          provider: "openai_codex",
-          default_model: "gpt-5.5",
-          reasoning_effort: "high"
-        }
-      )
-      |> render_change()
-
-      view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
-
-      html = render_until(view, "Try again shortly.")
-
-      assert html =~
-               "Another Fermix process is refreshing or signing in to this account. " <>
-                 "Try again shortly."
-
-      refute html =~ "profile_busy"
-    end
-
-    test "Codex OAuth completion marks it primary without an explicit save", %{
-      conn: conn,
-      tmp_home: tmp_home
-    } do
-      parent = self()
-
-      Application.put_env(:fermix_web, :codex_login_runner, fn opts ->
-        Keyword.fetch!(opts, :oauth_opener).("https://auth.openai.test/codex")
-        entry = codex_auth_entry()
-        :ok = Store.write(:openai_codex, entry)
-        send(parent, {:codex_login_started, Keyword.keys(opts)})
-        {:ok, entry}
-      end)
-
-      {:ok, view, _html} = live(conn, "/setup")
-
-      # Select Codex and complete OAuth — but never submit "Save provider".
-      view
-      |> form("form[phx-submit=\"save_provider\"]",
-        provider_form: %{
-          provider: "openai_codex",
-          default_model: "gpt-5.5",
-          reasoning_effort: "high"
-        }
-      )
-      |> render_change()
-
-      view |> element(~s|button[phx-click="codex_login"]|) |> render_click()
-      assert_receive {:codex_login_started, _keys}
-      render_until(view, "Codex OAuth connected.")
-
-      # Regression: connecting Codex must leave it the primary provider so the
-      # end-of-setup probe (PrimaryConfig.primary) resolves to it. Previously the
-      # flag was set only by a later save carrying provider=openai_codex, so a
-      # connect-then-probe flow reported "provider not configured".
-      assert PrimaryConfig.primary() == {:ok, :openai_codex}
-
-      contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "[fermix_core.providers.openai_codex]"
-      assert contents =~ "primary = true"
-    end
-
     test "shows the API key / OAuth picker for xAI and anthropic", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
@@ -4104,24 +3881,38 @@ defmodule FermixWebWeb.SetupLiveTest do
     |> Keyword.get(:auth_mode)
   end
 
-  describe "Sign in with ChatGPT card (M57)" do
+  describe "OpenAI Codex card: Sign in with ChatGPT (M57)" do
     test "not connected offers Continue with ChatGPT and keeps the model picker closed", %{
       conn: conn
     } do
-      {view, html} = open_chatgpt_card(conn)
+      {view, html} = open_codex_card(conn)
 
+      assert html =~ "Configuring OpenAI Codex"
       assert html =~ "Use your ChatGPT plan in Fermix."
       assert has_element?(view, ~s(button[phx-click="chatgpt_login"]), "Continue with ChatGPT")
       assert html =~ "Connect ChatGPT with plan usage on to choose a model"
       refute html =~ ~s(name="provider_form[default_model]")
+      # The Codex-client sign-in, its import and Fast mode are gone.
+      refute html =~ "Sign in with Codex"
+      refute html =~ "codex_login"
+      refute html =~ "Import Codex"
+      refute html =~ "Fast mode"
+      refute html =~ ~s(name="provider_form[fast]")
+    end
+
+    test "the provider list has OpenAI Codex and no separate ChatGPT provider", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup?tab=provider")
+
+      assert has_element?(view, ~s(input[name="provider_form[provider]"][value="openai_codex"]))
+      refute has_element?(view, ~s(input[name="provider_form[provider]"][value="chatgpt"]))
     end
 
     test "connected with plan usage shows the account, Manage usage, the live picker and Sign out",
          %{conn: conn} do
       :ok = Store.write("chatgpt", chatgpt_entry())
-      Application.put_env(:fermix_web, :model_listing_impl, ChatGPTListing)
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
 
-      {view, html} = open_chatgpt_card(conn)
+      {view, html} = open_codex_card(conn)
 
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
 
@@ -4145,7 +3936,7 @@ defmodule FermixWebWeb.SetupLiveTest do
           chatgpt_entry(%{granted_scopes: ~w(openid profile email offline_access)})
         )
 
-      {view, html} = open_chatgpt_card(conn)
+      {view, html} = open_codex_card(conn)
 
       assert html =~ "signed in. ChatGPT plan usage is off."
 
@@ -4162,7 +3953,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "a refused refresh asks to reconnect", %{conn: conn} do
       :ok = Store.write("chatgpt", chatgpt_entry(%{status: "reauthorization_required"}))
 
-      {view, html} = open_chatgpt_card(conn)
+      {view, html} = open_codex_card(conn)
 
       assert html =~ "Your ChatGPT connection needs to be renewed."
       assert has_element?(view, ~s(button[phx-click="chatgpt_login"]), "Reconnect to ChatGPT")
@@ -4181,7 +3972,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         waiting_runner(parent, authorize_url)
       )
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
 
       html = view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
       assert html =~ "Opening ChatGPT sign-in."
@@ -4191,7 +3982,11 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       html = render(view)
       assert html =~ "Waiting for your browser"
-      assert html =~ "copy the address from its address bar and paste it here."
+
+      assert html =~
+               "If your browser shows that it can&#39;t reach 127.0.0.1, copy the address " <>
+                 "from its address bar and paste it here."
+
       assert has_element?(view, ~s(a[href="#{authorize_url}"]), "Open sign-in")
       assert has_element?(view, ~s(button[phx-click="chatgpt_cancel"]), "Cancel")
 
@@ -4210,7 +4005,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         waiting_runner(self(), "https://auth.openai.test/authorize")
       )
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
       assert_receive {:chatgpt_login_started, _task_pid, _keys}
 
@@ -4225,7 +4020,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         waiting_runner(self(), "https://auth.openai.test/authorize")
       )
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
       assert_receive {:chatgpt_login_started, task_pid, _keys}
       monitor = Process.monitor(task_pid)
@@ -4237,62 +4032,87 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert_receive {:DOWN, ^monitor, :process, ^task_pid, :killed}
     end
 
-    test "a sign-in with plan usage makes ChatGPT primary, picks its first model and shows the notice",
+    test "a sign-in with plan usage sets the first listed model, makes OpenAI Codex primary and shows the notice",
          %{conn: conn, tmp_home: tmp_home} do
-      Application.put_env(:fermix_web, :model_listing_impl, ChatGPTListing)
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
       Application.put_env(:fermix_web, :chatgpt_login_runner, signing_in_runner(chatgpt_entry()))
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
-      html = render_until(view, "ChatGPT connected.", 80)
+      html = render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
 
       assert html =~ "Eligible usage in Fermix uses your ChatGPT plan."
       assert html =~ "mara@example.test · Connected · Using ChatGPT plan"
       assert html =~ ~s(value="gpt-plan-alpha")
-      assert PrimaryConfig.primary() == {:ok, :chatgpt}
+      assert PrimaryConfig.primary() == {:ok, :openai_codex}
 
       contents = File.read!(Path.join(tmp_home, "config.toml"))
-      assert contents =~ "[fermix_core.providers.chatgpt]"
+      assert contents =~ "[fermix_core.providers.openai_codex]"
       assert contents =~ ~s(default_model = "gpt-plan-alpha")
       assert contents =~ "primary = true"
+      refute contents =~ "providers.chatgpt"
     end
 
-    test "a sign-in with plan usage keeps a model already chosen", %{
+    test "a sign-in with plan usage keeps a model the account lists", %{
       conn: conn,
       tmp_home: tmp_home
     } do
-      # The default listing seam raises when called: a chosen model needs no list.
-      Application.put_env(:fermix_core, :providers, chatgpt: [default_model: "gpt-plan-beta"])
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-plan-beta"]
+      )
+
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
       Application.put_env(:fermix_web, :chatgpt_login_runner, signing_in_runner(chatgpt_entry()))
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
-      render_until(view, "ChatGPT connected.", 80)
+      html = render_until(view, "OpenAI Codex connected.", 80)
 
-      assert PrimaryConfig.primary() == {:ok, :chatgpt}
+      refute html =~ "Its model is now"
+      assert PrimaryConfig.primary() == {:ok, :openai_codex}
       contents = File.read!(Path.join(tmp_home, "config.toml"))
       assert contents =~ ~s(default_model = "gpt-plan-beta")
       refute contents =~ "gpt-plan-alpha"
     end
 
-    test "a model list that cannot be read is shown and the picker stays open", %{conn: conn} do
-      Application.put_env(:fermix_web, :model_listing_impl, ChatGPTListingDown)
+    test "a sign-in with plan usage replaces a model the account does not list", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      Application.put_env(:fermix_core, :providers,
+        openai_codex: [default_model: "gpt-5.5-codex"]
+      )
+
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
       Application.put_env(:fermix_web, :chatgpt_login_runner, signing_in_runner(chatgpt_entry()))
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
+      view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
+      render_until(view, "OpenAI Codex connected. Its model is now gpt-plan-alpha.", 80)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(default_model = "gpt-plan-alpha")
+      refute contents =~ "gpt-5.5-codex"
+    end
+
+    test "a model list that cannot be read is shown and the picker stays open", %{conn: conn} do
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListingDown)
+      Application.put_env(:fermix_web, :chatgpt_login_runner, signing_in_runner(chatgpt_entry()))
+
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
       html =
         render_until(
           view,
-          "ChatGPT is connected, but its models could not be listed: unexpected response",
+          "OpenAI Codex is connected, but its models could not be listed: unexpected response",
           80
         )
 
-      assert PrimaryConfig.primary() == {:ok, :chatgpt}
+      assert PrimaryConfig.primary() == {:ok, :openai_codex}
       assert html =~ ~s(name="provider_form[default_model]")
-      assert Keyword.get(chatgpt_block(), :default_model) == nil
+      assert Keyword.get(codex_block(), :default_model) == nil
     end
 
     test "a sign-in without plan usage neither becomes primary nor picks a model", %{
@@ -4307,7 +4127,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         signing_in_runner(entry, :off)
       )
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
       html =
@@ -4320,10 +4140,10 @@ defmodule FermixWebWeb.SetupLiveTest do
              )
 
       refute html =~ "Eligible usage in Fermix uses your ChatGPT plan."
-      refute PrimaryConfig.primary() == {:ok, :chatgpt}
+      refute PrimaryConfig.primary() == {:ok, :openai_codex}
 
       case File.read(Path.join(tmp_home, "config.toml")) do
-        {:ok, contents} -> refute contents =~ "providers.chatgpt"
+        {:ok, contents} -> refute contents =~ "providers.openai_codex"
         {:error, :enoent} -> :ok
       end
     end
@@ -4333,7 +4153,7 @@ defmodule FermixWebWeb.SetupLiveTest do
         {:error, :callback_timeout}
       end)
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
 
       html =
@@ -4343,12 +4163,32 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ "callback_timeout"
     end
 
+    # A sign-in that meets another Fermix process refreshing or signing in the
+    # same account refuses before it spends anything; the flash says to retry
+    # rather than showing the reason's atom.
+    test "a sign-in refused by a busy profile says to try again", %{conn: conn} do
+      Application.put_env(:fermix_web, :chatgpt_login_runner, fn _opts ->
+        {:error, :profile_busy}
+      end)
+
+      {view, _html} = open_codex_card(conn)
+      view |> element(~s(button[phx-click="chatgpt_login"])) |> render_click()
+
+      html = render_until(view, "Try again shortly.")
+
+      assert html =~
+               "Another Fermix process is refreshing or signing in to this account. " <>
+                 "Try again shortly."
+
+      refute html =~ "profile_busy"
+    end
+
     test "Sign out that ChatGPT confirmed returns the card to Continue", %{conn: conn} do
-      Application.put_env(:fermix_web, :model_listing_impl, ChatGPTListing)
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
       :ok = Store.write("chatgpt", chatgpt_entry())
       Application.put_env(:fermix_web, :chatgpt_logout_runner, signing_out_runner(self(), true))
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_logout"])) |> render_click()
 
       assert_receive {:chatgpt_logout, []}
@@ -4357,11 +4197,11 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "Sign out that ChatGPT did not confirm says where to disconnect", %{conn: conn} do
-      Application.put_env(:fermix_web, :model_listing_impl, ChatGPTListing)
+      Application.put_env(:fermix_web, :model_listing_impl, CodexListing)
       :ok = Store.write("chatgpt", chatgpt_entry())
       Application.put_env(:fermix_web, :chatgpt_logout_runner, signing_out_runner(self(), false))
 
-      {view, _html} = open_chatgpt_card(conn)
+      {view, _html} = open_codex_card(conn)
       view |> element(~s(button[phx-click="chatgpt_logout"])) |> render_click()
 
       assert_receive {:chatgpt_logout, []}
@@ -4370,23 +4210,27 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Continue with ChatGPT"
     end
 
-    test "the Codex image backend is labelled Codex, not ChatGPT", %{conn: conn} do
+    test "the media pane offers no Codex image backend", %{conn: conn} do
       {:ok, view, _html} = live(conn, "/setup")
 
       html = view |> element("button[phx-value-tab=\"media\"]") |> render_click()
 
-      assert html =~ "OpenAI Codex"
-      assert html =~ "gpt-image via your Codex sign-in"
-      refute html =~ "ChatGPT"
+      for backend <- ~w(openai xai google) do
+        assert has_element?(view, ~s(input[name="image_form[backend]"][value="#{backend}"]))
+      end
+
+      refute has_element?(view, ~s(input[name="image_form[backend]"][value="openai_codex"]))
+      refute html =~ "Codex sign-in"
+      refute html =~ "no API key"
     end
   end
 
-  defp open_chatgpt_card(conn) do
+  defp open_codex_card(conn) do
     {:ok, view, _html} = live(conn, "/setup")
 
     html =
       view
-      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "chatgpt"})
+      |> form("form[phx-submit=\"save_provider\"]", provider_form: %{provider: "openai_codex"})
       |> render_change()
 
     {view, html}
@@ -4444,10 +4288,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
   end
 
-  defp chatgpt_block do
+  defp codex_block do
     :fermix_core
     |> Application.get_env(:providers, [])
-    |> Keyword.get(:chatgpt, [])
+    |> Keyword.get(:openai_codex, [])
   end
 
   describe "Personalization form" do
@@ -4721,14 +4565,12 @@ defmodule FermixWebWeb.SetupLiveTest do
       Req.Test.set_req_test_to_shared()
       stub_setup_doctor_probe()
 
-      Store.write(:openai_codex, %{
-        auth_mode: "chatgpt",
-        provider: "openai",
-        tokens: %{access_token: "cx-at", refresh_token: "cx-rt"},
-        expires_at: DateTime.add(DateTime.utc_now(), -7200, :second),
-        last_refresh: nil,
-        status: "ready"
-      })
+      # OpenAI Codex's sign-in lives under the `chatgpt` profile.
+      :ok =
+        Store.write(
+          "chatgpt",
+          chatgpt_entry(%{expires_at: DateTime.add(DateTime.utc_now(), -7200, :second)})
+        )
 
       Application.put_env(:fermix_core, :providers,
         openai: [api_key: "sk-live-test", default_model: "gpt-5.5"]
@@ -4744,7 +4586,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       html = view |> element("button", "Run probe") |> render_click()
 
       assert html =~ "Auth tokens"
-      assert html =~ "Reconnect needed: openai_codex"
+      assert html =~ "Reconnect needed: chatgpt"
     end
   end
 
@@ -6034,16 +5876,6 @@ defmodule FermixWebWeb.SetupLiveTest do
     |> render_click()
 
     view
-  end
-
-  defp codex_auth_entry do
-    %{
-      auth_mode: "chatgpt",
-      tokens: %{access_token: "codex_access_token", refresh_token: "codex_refresh_token"},
-      expires_at: DateTime.utc_now() |> DateTime.add(3600),
-      last_refresh: DateTime.utc_now(),
-      status: "ready"
-    }
   end
 
   defp stub_setup_doctor_probe do

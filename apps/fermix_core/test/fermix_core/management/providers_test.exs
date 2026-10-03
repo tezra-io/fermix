@@ -263,12 +263,12 @@ defmodule FermixCore.Management.ProvidersTest do
       assert is_integer(measurements.duration_ms)
     end
 
-    # The ChatGPT probe runs through the adapter, which emits the call itself;
-    # a second event from the wrapper would count one call twice.
-    test "a ChatGPT probe gets the job's session id and the wrapper emits nothing", %{
+    # The OpenAI Codex probe runs through the adapter, which emits the call
+    # itself; a second event from the wrapper would count one call twice.
+    test "an OpenAI Codex probe gets the job's session id and the wrapper emits nothing", %{
       jobs: jobs
     } do
-      handler = :"chatgpt_probe_telemetry_#{System.unique_integer([:positive])}"
+      handler = :"codex_probe_telemetry_#{System.unique_integer([:positive])}"
       owner = self()
 
       :telemetry.attach(
@@ -282,12 +282,12 @@ defmodule FermixCore.Management.ProvidersTest do
 
       on_exit(fn -> :telemetry.detach(handler) end)
 
-      probe = fn :chatgpt, opts ->
+      probe = fn :openai_codex, opts ->
         send(owner, {:probe_session, Keyword.fetch!(opts, :session_id)})
         {:ok, %{model: "gpt-plan", latency_ms: 2}}
       end
 
-      assert {:ok, started} = Providers.probe_start("chatgpt", jobs: jobs, probe: probe)
+      assert {:ok, started} = Providers.probe_start("openai_codex", jobs: jobs, probe: probe)
       job_id = started["job_id"]
 
       assert_receive {:probe_session, ^job_id}

@@ -3,7 +3,6 @@ defmodule FermixCore.Setup.DoctorTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Setup.Doctor
   alias FermixCore.Transcription.Local.ModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
@@ -66,34 +65,6 @@ defmodule FermixCore.Setup.DoctorTest do
 
   defp tmp_dir do
     Path.join(System.tmp_dir!(), "fermix_doctor_#{System.unique_integer([:positive])}")
-  end
-
-  defp future_iso8601(seconds) do
-    DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
-  end
-
-  defp write_codex_auth(dir, access_token, refresh_token \\ "refresh-token") do
-    File.mkdir_p!(dir)
-    path = Path.join(dir, "auth.json")
-
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "version" => 1,
-        "providers" => %{
-          "openai_codex" => %{
-            "auth_mode" => "chatgpt",
-            "tokens" => %{
-              "access_token" => access_token,
-              "refresh_token" => refresh_token
-            },
-            "expires_at" => future_iso8601(3600)
-          }
-        }
-      })
-    )
-
-    path
   end
 
   describe "computer_use_permissions/0" do
@@ -688,17 +659,18 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # M57 §7.4: one tiny turn through the route and the adapter, and a distinct
-  # line for each standing the person can act on. The sign-in's standing is
-  # injected, so no auth store is read.
-  describe "probe_provider/2 — :chatgpt" do
-    @plan_surface "ChatGPT plan usage"
+  # M57 §7.4: OpenAI Codex signs in with ChatGPT, so its probe is one tiny turn
+  # through the route and the adapter, and a distinct line for each standing
+  # the person can act on. The sign-in's standing is injected, so no auth store
+  # is read.
+  describe "probe_provider/2 — :openai_codex" do
+    @plan_surface "OpenAI Codex"
 
     defp signed_in(_opts), do: :ok
 
     defp chatgpt_probe(plug, extra \\ []) do
       Doctor.probe_provider(
-        :chatgpt,
+        :openai_codex,
         Keyword.merge(
           [
             chatgpt_route_status: &signed_in/1,
@@ -749,7 +721,7 @@ defmodule FermixCore.Setup.DoctorTest do
     end
 
     test "ok: a completed turn through the adapter, bearer only, the model the route runs" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       plug = fn conn ->
         assert conn.request_path == "/v1/responses"
@@ -763,7 +735,7 @@ defmodule FermixCore.Setup.DoctorTest do
         sse(completed_sse()).(conn)
       end
 
-      assert {:ok, %{provider: :chatgpt, model: "gpt-6.1-sol", latency_ms: ms}} =
+      assert {:ok, %{provider: :openai_codex, model: "gpt-6.1-sol", latency_ms: ms}} =
                chatgpt_probe(plug)
 
       assert is_integer(ms)
@@ -772,7 +744,7 @@ defmodule FermixCore.Setup.DoctorTest do
     for reason <- [:not_signed_in, :plan_usage_off, :reconnect_needed] do
       test "#{reason} is its own line, without a request" do
         reason = unquote(reason)
-        put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+        put_provider(:openai_codex, default_model: "gpt-6.1-sol")
         plug = fn _conn -> flunk("the probe must not call ChatGPT") end
 
         assert chatgpt_probe(plug, chatgpt_route_status: fn [] -> {:error, reason} end) ==
@@ -784,11 +756,11 @@ defmodule FermixCore.Setup.DoctorTest do
       plug = fn _conn -> flunk("the probe must not call ChatGPT") end
 
       assert {:error, {:misconfigured, line}} = chatgpt_probe(plug)
-      assert line =~ "No ChatGPT model is chosen yet"
+      assert line =~ "No OpenAI Codex model is chosen yet"
     end
 
     test "a revoked connection (401 after the refresh) asks for a new sign-in" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       assert chatgpt_probe(refusal(401, "subscription_sharing_invalid_user")) ==
                {:error,
@@ -797,7 +769,7 @@ defmodule FermixCore.Setup.DoctorTest do
     end
 
     test "an ineligible account is its own line" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       assert {:error, {:auth_scope_mismatch, @plan_surface, line}} =
                chatgpt_probe(refusal(403, "subscription_sharing_user_not_eligible"))
@@ -806,7 +778,7 @@ defmodule FermixCore.Setup.DoctorTest do
     end
 
     test "an unsupported route is its own line" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       assert {:error, {:auth_scope_mismatch, @plan_surface, line}} =
                chatgpt_probe(refusal(403, "subscription_sharing_route_not_supported"))
@@ -815,7 +787,7 @@ defmodule FermixCore.Setup.DoctorTest do
     end
 
     test "the usage limit is its own line, before the stream and mid-stream" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       mid_stream =
         sse(
@@ -834,16 +806,16 @@ defmodule FermixCore.Setup.DoctorTest do
     end
 
     test "any other refusal reports its status" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
 
       assert {:error, {:server_error, 500, _message}} =
                chatgpt_probe(fn conn -> Plug.Conn.send_resp(conn, 500, "{}") end)
     end
 
     test "the probe is one provider call through the adapter's emitter" do
-      put_provider(:chatgpt, default_model: "gpt-6.1-sol")
+      put_provider(:openai_codex, default_model: "gpt-6.1-sol")
       test_pid = self()
-      handler_id = "doctor-chatgpt-#{System.unique_integer([:positive])}"
+      handler_id = "doctor-codex-#{System.unique_integer([:positive])}"
 
       :telemetry.attach(
         handler_id,
@@ -857,91 +829,8 @@ defmodule FermixCore.Setup.DoctorTest do
       on_exit(fn -> :telemetry.detach(handler_id) end)
 
       assert {:ok, _probe} = chatgpt_probe(sse(completed_sse()))
-      assert_receive {:call, %{provider: :chatgpt, agent: "doctor", status: :ok}}
+      assert_receive {:call, %{provider: :openai_codex, agent: "doctor", status: :ok}}
       refute_receive {:call, _metadata}, 50
-    end
-  end
-
-  describe "probe_provider/2 — :openai_codex" do
-    test "uses bearer token from Auth.Store without a running TokenManager" do
-      dir = tmp_dir()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-
-      auth_path = write_codex_auth(dir, "store-bearer-xyz")
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-
-      plug = fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        decoded = Jason.decode!(body)
-
-        assert decoded["stream"] == true
-        assert decoded["store"] == false
-        refute Map.has_key?(decoded, "max_output_tokens")
-        assert ["Bearer store-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
-        Plug.Conn.send_resp(conn, 200, "{}")
-      end
-
-      assert {:ok, %{provider: :openai_codex, model: "gpt-5.5"}} =
-               Doctor.probe_provider(:openai_codex,
-                 fermix_auth_path: auth_path,
-                 req_options: [plug: plug]
-               )
-    end
-
-    test "uses a running TokenManager instead of refreshing directly from disk" do
-      dir = tmp_dir()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-
-      auth_path = write_codex_auth(dir, "manager-bearer-xyz")
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-      manager = :"doctor_token_manager_#{System.unique_integer([:positive])}"
-
-      start_supervised!({TokenManager, [name: manager, fermix_auth_path: auth_path]}, id: manager)
-      FermixTestSupport.SafeRm.rm!(auth_path)
-
-      plug = fn conn ->
-        assert ["Bearer manager-bearer-xyz"] = Plug.Conn.get_req_header(conn, "authorization")
-        Plug.Conn.send_resp(conn, 200, "{}")
-      end
-
-      assert {:ok, %{provider: :openai_codex, model: "gpt-5.5"}} =
-               Doctor.probe_provider(:openai_codex,
-                 token_manager: manager,
-                 req_options: [plug: plug]
-               )
-    end
-
-    test "returns misconfigured when Auth.Store has no token" do
-      dir = tmp_dir()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-
-      assert {:error, {:misconfigured, message}} =
-               Doctor.probe_provider(:openai_codex,
-                 fermix_auth_path: Path.join(dir, "missing-auth.json")
-               )
-
-      assert message =~ "Codex token"
-    end
-
-    test "returns auth_scope_mismatch on 401 with codex-specific hint" do
-      dir = tmp_dir()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-
-      auth_path = write_codex_auth(dir, "oauth-stale")
-      put_provider(:openai_codex, default_model: "gpt-5.5")
-
-      plug = fn conn -> Plug.Conn.send_resp(conn, 401, "unauthorized") end
-
-      assert {:error, {:auth_scope_mismatch, surface, hint}} =
-               Doctor.probe_provider(:openai_codex,
-                 fermix_auth_path: auth_path,
-                 req_options: [plug: plug]
-               )
-
-      assert surface =~ "Codex"
-      assert hint =~ "fermix setup --import-codex"
     end
   end
 
@@ -2000,10 +1889,22 @@ defmodule FermixCore.Setup.DoctorTest do
 
     test "returns only the stale profile names, sorted" do
       :ok = Store.write("xai_oauth", token_entry(-7200))
-      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write("chatgpt", token_entry(-7200))
+      :ok = Store.write("github:primary", token_entry(-7200))
       :ok = Store.write("gmail:primary", token_entry(3600))
 
-      assert {:ok, ["openai_codex", "xai_oauth"]} = Doctor.stale_token_profiles()
+      assert {:ok, ["chatgpt", "github:primary", "xai_oauth"]} = Doctor.stale_token_profiles()
+    end
+
+    # OpenAI Codex now signs in under the `chatgpt` profile, so an old
+    # Codex-client grant left under the provider id is read by nothing: it is
+    # not reported as stale, and the sweep leaves it in auth.json.
+    test "a leftover entry under a provider id is not reported, and is kept" do
+      :ok = Store.write("openai_codex", token_entry(-7200))
+      :ok = Store.write("anthropic_oauth", token_entry(-7200))
+
+      assert {:ok, ["anthropic_oauth"]} = Doctor.stale_token_profiles()
+      assert {:ok, %{tokens: %{access_token: "at"}}} = Store.read("openai_codex")
     end
 
     test "propagates a read error instead of swallowing it", %{home: home} do

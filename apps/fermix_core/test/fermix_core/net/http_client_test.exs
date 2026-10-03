@@ -137,20 +137,12 @@ defmodule FermixCore.Net.HttpClientTest do
     pools = FermixCore.Application.finch_pools()
 
     assert pools[:default][:conn_max_idle_time] == 15_000
-    assert pools["https://chatgpt.com"][:conn_max_idle_time] == 15_000
-    assert pools["https://chatgpt.com"][:conn_opts] == [transport_opts: [timeout: 5_000]]
   end
 
-  test "the chatgpt.com pool reaps idle pool processes off the request path" do
-    # Finch's default pool_max_idle_time is :infinity: a pool process lives
-    # forever holding sockets a peer may have RST'd, and their teardown is paid
-    # by the next checkout. Reaping an idle pool process (Finch stops it and
-    # auto-starts a fresh one on the next request) moves that teardown off the
-    # request path. Pinned because Finch exposes no way to read pool config back.
-    pools = FermixCore.Application.finch_pools()
-
-    assert pools["https://chatgpt.com"][:pool_max_idle_time] == 60_000
-    assert pools[:default][:pool_max_idle_time] == nil
+  # The chatgpt.com pool served the private Codex backend, which is gone:
+  # `openai_codex` calls the public API on the shared pool.
+  test "no pool is kept for chatgpt.com" do
+    refute Map.has_key?(FermixCore.Application.finch_pools(), "https://chatgpt.com")
   end
 
   test "web-search hosts ride the shared hardened pool with their fail-fast connect budget" do
@@ -187,7 +179,6 @@ defmodule FermixCore.Net.HttpClientTest do
     pools = FermixCore.Application.finch_pools()
 
     assert pools[:default][:count] == 2
-    assert pools["https://chatgpt.com"][:count] == 2
   end
 
   describe "the outbound proxy" do

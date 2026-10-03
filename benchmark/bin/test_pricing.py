@@ -61,8 +61,14 @@ def test_codex_adapter_is_its_own_route():
     assert pricing.provider_route("openai", "codex") == "openai_codex"
 
 
+def test_the_sign_in_with_chatgpt_adapter_is_the_codex_route():
+    # OpenAI Codex signs in with ChatGPT; the Opik exporter reports it as
+    # provider "openai" with adapter "chatgpt_plan", billed to the person's plan.
+    assert pricing.provider_route("openai", "chatgpt_plan") == "openai_codex"
+
+
 def test_non_codex_adapters_leave_the_provider_as_the_route():
-    # Only the literal "codex" selects a route. An adapter that reads like a
+    # Only the codex-route literals select a route. An adapter that reads like a
     # provider token must not promote a span onto some other route.
     assert pricing.provider_route("openai", "responses") == "openai"
     assert pricing.provider_route("openai", "openai") == "openai"
@@ -843,7 +849,10 @@ def test_every_pending_rate_names_a_real_route_and_says_why():
 # --- coverage invariants (derived from live sources, not hand-listed) -------
 
 _CATALOG_PATH = ("apps/fermix_core/lib/fermix_core/providers/model_catalog.ex")
-_CATALOG_PROVIDERS = ("openai_codex", "openai", "anthropic", "xai", "openrouter",
+# openai_codex is absent: it signs in with ChatGPT and ships no catalog (its
+# models are listed live per account), so there is nothing to extract for it.
+# Its observed routes stay covered by _SPAN_CENSUS below.
+_CATALOG_PROVIDERS = ("openai", "anthropic", "xai", "openrouter",
                       "mistral", "venice", "ollama")
 
 
@@ -863,7 +872,7 @@ def _catalog_models() -> dict[str, list[str]]:
         f"parsed {sorted(parsed)} from {_CATALOG_PATH} — the extraction is stale, "
         "not the catalog"
     )
-    assert "gpt-5.6-sol" in parsed["openai_codex"], parsed["openai_codex"]
+    assert "gpt-5.6-sol" in parsed["openai"], parsed["openai"]
     assert "claude-opus-4-8" in parsed["anthropic"], parsed["anthropic"]
     assert sum(len(ids) for ids in parsed.values()) >= 30, parsed
     return parsed

@@ -287,8 +287,11 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
      home-scoped in `$FERMIX_HOME/auth.json`, so a fresh home has none. The seed
      copies just that provider's entry from `~/.fermix-dev/auth.json` into the
      disposable home (`0600`). It only *reads* the dev store; the eval daemon writes
-     any refresh to its own copy, and a current token (valid hours out) is used
-     as-is, so a normal short run never refreshes or rotates the shared token.
+     any refresh to its own copy, and a current token is used as-is, so a run
+     shorter than its life never refreshes or rotates the shared token.
+     `openai_codex` signs in with ChatGPT: its entry is the `chatgpt` key, its
+     access token lives one hour and its refresh token rotates on every use, so a
+     run that refreshes in the eval home leaves the dev home to sign in again.
    - **API-key providers** keep `profile = "fermix-dev"` plus a `@keyring` sentinel,
      so the existing `fermix:fermix-dev:<ENV>` keychain entry resolves unchanged.
 
@@ -484,8 +487,9 @@ mix fermix.eval.matrix        # JSON: every provider + its curated models
    ```
 
    ⚠️ Exactly one provider may have `primary = true` — the daemon refuses to boot
-   with two. If the new primary is an **OAuth** provider (`openai_codex`,
-   `anthropic`, `xai`), also copy its entry from `~/.fermix-dev/auth.json` into
+   with two. If the new primary is an **OAuth** provider (`openai_codex`, whose
+   entry is the `chatgpt` key, `anthropic`, `xai`), also copy its entry from
+   `~/.fermix-dev/auth.json` into
    `~/.fermix-capability-eval/auth.json` (`0600`) — OAuth tokens are home-scoped, so
    a hand-managed eval home has none. (`capability-auto` does this automatically for
    the dev primary.) API-key providers just need `profile = "fermix-dev"` +

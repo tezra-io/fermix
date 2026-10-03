@@ -36,7 +36,7 @@ defmodule FermixCore.Providers.ErrorTest do
     end
   end
 
-  # M57 §8: ChatGPT plan usage names its refusals with stable codes, and the
+  # M57 §8: OpenAI Codex's ChatGPT plan usage names its refusals with stable codes, and the
   # code decides the kind whether it arrives before the stream (its own HTTP
   # status) or inside `response.failed` on an intact 200.
   describe "api/5 on ChatGPT plan usage codes" do
@@ -57,7 +57,7 @@ defmodule FermixCore.Providers.ErrorTest do
 
         for http_status <- [unquote(status), 200] do
           assert {:provider_error, %{kind: unquote(kind), code: unquote(code)}} =
-                   ProviderError.api(:chatgpt, :chatgpt_plan, http_status, body)
+                   ProviderError.api(:openai_codex, :chatgpt_plan, http_status, body)
         end
       end
     end
@@ -67,15 +67,15 @@ defmodule FermixCore.Providers.ErrorTest do
         "error" => %{
           "code" => "subscription_sharing_unsupported_capability",
           "message" => "unsupported",
-          "param" => "service_tier"
+          "param" => "truncation"
         }
       }
 
-      assert {:provider_error, %{param: "service_tier"}} =
-               ProviderError.api(:chatgpt, :chatgpt_plan, 400, body)
+      assert {:provider_error, %{param: "truncation"}} =
+               ProviderError.api(:openai_codex, :chatgpt_plan, 400, body)
 
       {:provider_error, error} =
-        ProviderError.api(:chatgpt, :chatgpt_plan, 400, %{"error" => %{"code" => "x"}})
+        ProviderError.api(:openai_codex, :chatgpt_plan, 400, %{"error" => %{"code" => "x"}})
 
       refute Map.has_key?(error, :param)
     end
@@ -84,15 +84,15 @@ defmodule FermixCore.Providers.ErrorTest do
       body = ~s({"detail":"subscription_sharing_user_not_eligible: plan usage is off"})
 
       assert {:provider_error, %{code: nil, kind: :auth, message: message}} =
-               ProviderError.api(:chatgpt, :chatgpt_plan, 403, body,
+               ProviderError.api(:openai_codex, :chatgpt_plan, 403, body,
                  provider_words: "plan usage is off"
                )
 
       assert message =~ "plan usage is off"
     end
 
-    test "the provider label is ChatGPT" do
-      assert ProviderError.provider_label(:chatgpt) == "ChatGPT"
+    test "the provider label is Codex" do
+      assert ProviderError.provider_label(:openai_codex) == "Codex"
     end
   end
 

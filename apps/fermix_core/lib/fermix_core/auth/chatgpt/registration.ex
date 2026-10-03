@@ -23,7 +23,8 @@ defmodule FermixCore.Auth.ChatGPT.Registration do
 
   require Logger
 
-  @profile "chatgpt"
+  # `openai_codex` signs in with ChatGPT; `Auth.Store` owns the profile name.
+  @profile Store.profile(:openai_codex)
   @plan_scope "chatgpt.tokens.use.direct"
   @auth_mode "oauth_siwc"
   # The statuses a token manager writes on a grant that can no longer renew.

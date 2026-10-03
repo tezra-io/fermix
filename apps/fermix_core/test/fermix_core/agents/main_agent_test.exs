@@ -1114,15 +1114,15 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert error_msg =~ "fermix auth login"
     end
 
-    test "sends an auth-specific reply when the Codex refresh chain fails", %{agent: agent} do
-      # The Codex adapter returns a residual structured :auth error once its
-      # internal refresh+retry is exhausted (no more {:auth_invalidated, _}).
+    test "sends a sign-in reply when the OpenAI Codex refresh chain fails", %{agent: agent} do
+      # OpenAI Codex signs in with ChatGPT; its adapter returns a residual
+      # structured :auth error once its one refresh+retry is exhausted.
       MockProvider.set_responses([
         {:error,
          ProviderError.auth(
            :openai_codex,
-           :codex,
-           "Codex auth invalidated; refresh exhausted"
+           :chatgpt_plan,
+           "OpenAI Codex auth invalidated; refresh exhausted"
          )}
       ])
 
@@ -1130,7 +1130,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
-      assert error_msg =~ "Authentication failed"
+      assert error_msg == "Your ChatGPT connection needs to be renewed. Sign in again."
     end
 
     test "uses thread-aware conversation identity", %{

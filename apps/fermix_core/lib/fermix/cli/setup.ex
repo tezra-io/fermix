@@ -26,7 +26,6 @@ defmodule Fermix.CLI.Setup do
     provider: :string,
     default_model: :string,
     reasoning_effort: :string,
-    fast: :boolean,
     realtime_enabled: :boolean,
     realtime_api_key: :string,
     realtime_model: :string,
@@ -62,7 +61,6 @@ defmodule Fermix.CLI.Setup do
     reconfigure: :boolean,
     migrate_secrets: :boolean,
     secret_store: :string,
-    import_codex: :boolean,
     no_browser: :boolean,
     skip_probe: :boolean,
     port: :integer,
@@ -271,7 +269,7 @@ defmodule Fermix.CLI.Setup do
   defp provided_setup_answers?(opts), do: Runtime.provided_answers(opts) != []
 
   defp terminal_action?(opts) do
-    Enum.any?([:print_state, :reconfigure, :migrate_secrets, :import_codex], fn key ->
+    Enum.any?([:print_state, :reconfigure, :migrate_secrets], fn key ->
       Keyword.get(opts, key, false)
     end)
   end

@@ -7,7 +7,6 @@ defmodule FermixCore.Providers.RouteResolverTest do
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ChatCompletions
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
-  alias FermixCore.Providers.OpenAI.Codex
   alias FermixCore.Providers.OpenAI.Responses
   alias FermixCore.Providers.RouteResolver
 
@@ -49,51 +48,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert Adapter.for_route(route_key) == ChatCompletions
     end
 
-    test ":openai_codex provider forces oauth and routes to Codex" do
-      {route_key, _opts} =
-        RouteResolver.resolve!(
-          provider: :openai_codex,
-          model: "gpt-5",
-          base_url: "https://chatgpt.com/backend-api/codex/responses"
-        )
-
-      assert route_key.provider == :openai_codex
-      assert route_key.auth_mode == :oauth
-      assert Adapter.for_route(route_key) == Codex
-    end
-
-    test ":openai_codex defaults to gpt-6-astra when no model is configured" do
-      {route_key, opts} =
-        RouteResolver.resolve!(
-          provider: :openai_codex,
-          access_token: "tok"
-        )
-
-      assert route_key.model == "gpt-6-astra"
-      assert opts[:model] == "gpt-6-astra"
-    end
-
-    test "caps :max to gpt-5.5's :xhigh ceiling but keeps :max for gpt-5.6-sol" do
-      {_key, gpt55} =
-        RouteResolver.resolve!(
-          provider: :openai_codex,
-          model: "gpt-5.5",
-          reasoning_effort: :max,
-          access_token: "tok"
-        )
-
-      assert gpt55[:reasoning_effort] == :xhigh
-
-      {_key, sol} =
-        RouteResolver.resolve!(
-          provider: :openai_codex,
-          model: "gpt-5.6-sol",
-          reasoning_effort: :max,
-          access_token: "tok"
-        )
-
-      assert sol[:reasoning_effort] == :max
-
+    test "caps :max to gpt-5.5's :xhigh ceiling on the OpenAI API route" do
       {_key, api} =
         RouteResolver.resolve!(
           provider: :openai,
@@ -116,7 +71,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
       assert opts[:model] == ModelCatalog.default_model_for(:openai)
     end
 
-    test ":openai rejects auth_mode :oauth; Codex OAuth is a separate provider" do
+    test ":openai rejects auth_mode :oauth; the ChatGPT sign-in is a separate provider" do
       assert_raise ArgumentError, ~r/use provider: :openai_codex/, fn ->
         RouteResolver.resolve!(
           provider: :openai,
@@ -456,10 +411,14 @@ defmodule FermixCore.Providers.RouteResolverTest do
 
         # Opts omit :provider — must pick up :openai_codex from agent app env.
         {route_key, _opts} =
-          RouteResolver.resolve!(model: "gpt-5", access_token: "tok")
+          RouteResolver.resolve!(
+            model: "gpt-5",
+            access_token: "tok",
+            chatgpt_route_status: fn [] -> :ok end
+          )
 
         assert route_key.provider == :openai_codex
-        assert Adapter.for_route(route_key) == Codex
+        assert Adapter.for_route(route_key) == ChatGPTPlan
       after
         Application.put_env(:fermix_core, :agent, original_agent)
         Application.put_env(:fermix_core, :providers, original_providers)
@@ -608,7 +567,11 @@ defmodule FermixCore.Providers.RouteResolverTest do
         )
 
         {_route_key, opts} =
-          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+          RouteResolver.resolve!(
+            provider: :openai_codex,
+            model: "gpt-5",
+            chatgpt_route_status: &signed_in/1
+          )
 
         assert opts[:reasoning_effort] == :xhigh
       after
@@ -616,7 +579,9 @@ defmodule FermixCore.Providers.RouteResolverTest do
       end
     end
 
-    test "Codex resolver reads fast mode from the openai_codex config block" do
+    # Fast mode is retired: a `fast` left in a running daemon's block is never
+    # carried to the adapter, so no request can ask for a service tier.
+    test "Codex resolver carries no fast mode, even when the block still holds one" do
       original_providers = Application.get_env(:fermix_core, :providers, [])
 
       try do
@@ -626,27 +591,14 @@ defmodule FermixCore.Providers.RouteResolverTest do
         )
 
         {_route_key, opts} =
-          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+          RouteResolver.resolve!(
+            provider: :openai_codex,
+            model: "gpt-5",
+            fast: true,
+            chatgpt_route_status: &signed_in/1
+          )
 
-        assert opts[:fast] == true
-      after
-        Application.put_env(:fermix_core, :providers, original_providers)
-      end
-    end
-
-    test "explicit Codex fast mode overrides the openai_codex config block" do
-      original_providers = Application.get_env(:fermix_core, :providers, [])
-
-      try do
-        Application.put_env(:fermix_core, :providers,
-          openai: [],
-          openai_codex: [fast: true]
-        )
-
-        {_route_key, opts} =
-          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5", fast: false)
-
-        assert opts[:fast] == false
+        refute Keyword.has_key?(opts, :fast)
       after
         Application.put_env(:fermix_core, :providers, original_providers)
       end
@@ -662,7 +614,11 @@ defmodule FermixCore.Providers.RouteResolverTest do
         )
 
         {_route_key, opts} =
-          RouteResolver.resolve!(provider: :openai_codex, model: "gpt-5")
+          RouteResolver.resolve!(
+            provider: :openai_codex,
+            model: "gpt-5",
+            chatgpt_route_status: &signed_in/1
+          )
 
         refute Keyword.has_key?(opts, :store)
       after
@@ -676,17 +632,17 @@ defmodule FermixCore.Providers.RouteResolverTest do
   # tests never read an auth store.
   defp signed_in(_opts), do: :ok
 
-  describe "resolve!/1 — chatgpt" do
+  describe "resolve!/1 — openai_codex (Sign in with ChatGPT)" do
     test "a usable sign-in routes to ChatGPTPlan through the chatgpt token profile" do
       Application.put_env(:fermix_core, :providers,
-        chatgpt: [default_model: "gpt-6.1-sol", reasoning_effort: "high"]
+        openai_codex: [default_model: "gpt-6.1-sol", reasoning_effort: "high"]
       )
 
       {route_key, opts} =
-        RouteResolver.resolve!(provider: :chatgpt, chatgpt_route_status: &signed_in/1)
+        RouteResolver.resolve!(provider: :openai_codex, chatgpt_route_status: &signed_in/1)
 
       assert route_key == %{
-               provider: :chatgpt,
+               provider: :openai_codex,
                model: "gpt-6.1-sol",
                auth_mode: :oauth,
                base_url: "https://api.openai.com/v1"
@@ -704,7 +660,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
     test "an explicit model and access token flow into the route" do
       {route_key, opts} =
         RouteResolver.resolve!(
-          provider: :chatgpt,
+          provider: :openai_codex,
           model: "gpt-6-luna",
           access_token: "plan-token",
           chatgpt_route_status: &signed_in/1
@@ -722,7 +678,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
         error =
           assert_raise ArgumentError, fn ->
             RouteResolver.resolve!(
-              provider: :chatgpt,
+              provider: :openai_codex,
               model: "gpt-6.1-sol",
               chatgpt_route_status: fn [] -> {:error, reason} end
             )
@@ -733,8 +689,8 @@ defmodule FermixCore.Providers.RouteResolverTest do
     end
 
     test "no chosen model refuses instead of guessing a slug" do
-      assert_raise ArgumentError, ~r/No ChatGPT model is chosen yet/, fn ->
-        RouteResolver.resolve!(provider: :chatgpt, chatgpt_route_status: &signed_in/1)
+      assert_raise ArgumentError, ~r/No OpenAI Codex model is chosen yet/, fn ->
+        RouteResolver.resolve!(provider: :openai_codex, chatgpt_route_status: &signed_in/1)
       end
     end
 
@@ -742,7 +698,7 @@ defmodule FermixCore.Providers.RouteResolverTest do
       error =
         assert_raise ArgumentError, fn ->
           RouteResolver.resolve!(
-            provider: :chatgpt,
+            provider: :openai_codex,
             chatgpt_route_status: fn [] -> {:error, :not_signed_in} end
           )
         end

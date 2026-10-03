@@ -21,9 +21,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
-  attr :codex_auth, :map, required: true
-  attr :codex_auth_running?, :boolean, required: true
-  attr :codex_auth_url, :string, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -134,9 +131,6 @@ defmodule FermixWebWeb.SetupLive.Components do
               active_tab={@active_tab}
               embed?={@embed?}
               channels_form={@channels_form}
-              codex_auth={@codex_auth}
-              codex_auth_running?={@codex_auth_running?}
-              codex_auth_url={@codex_auth_url}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -291,9 +285,6 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
-  attr :codex_auth, :map, required: true
-  attr :codex_auth_running?, :boolean, required: true
-  attr :codex_auth_url, :string, default: nil
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -434,13 +425,6 @@ defmodule FermixWebWeb.SetupLive.Components do
                 live_models={@live_models}
               />
               <.provider_plain_fields provider_form={@provider_form} />
-              <.codex_auth_field
-                provider_form={@provider_form}
-                codex_auth={@codex_auth}
-                codex_auth_running?={@codex_auth_running?}
-                codex_auth_url={@codex_auth_url}
-                embed?={@embed?}
-              />
               <.chatgpt_auth_field
                 provider_form={@provider_form}
                 chatgpt_auth={@chatgpt_auth}
@@ -479,7 +463,7 @@ defmodule FermixWebWeb.SetupLive.Components do
       <%!-- The ChatGPT paste field sits inside the provider form, so it joins this
             form through its `form` attribute: forms cannot nest. --%>
       <form
-        :if={@provider_form.provider == :chatgpt and @chatgpt_auth.running?}
+        :if={@provider_form.provider == :openai_codex and @chatgpt_auth.running?}
         id="chatgpt-paste-form"
         phx-submit="chatgpt_paste"
       >
@@ -578,7 +562,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp provider_connection?(provider), do: provider in Descriptor.ids()
 
   # Hide the "Model behavior" panel when the provider has no behavior
-  # knobs (no reasoning effort; the codex fast toggle rides effort? too).
+  # knobs (no reasoning effort).
   defp provider_behavior?(provider), do: Descriptor.fetch!(provider).effort?
 
   attr :provider, :atom, required: true
@@ -816,92 +800,22 @@ defmodule FermixWebWeb.SetupLive.Components do
     """
   end
 
-  attr :provider_form, :map, required: true
-  attr :codex_auth, :map, required: true
-  attr :codex_auth_running?, :boolean, required: true
-  attr :codex_auth_url, :string, default: nil
-  attr :embed?, :boolean, default: false
+  defp oauth_badge_class(_auth, true), do: "badge badge-warning badge-sm"
 
-  defp codex_auth_field(assigns) do
-    ~H"""
-    <section
-      :if={@provider_form.provider == :openai_codex}
-      data-codex-auth-panel="true"
-      class="rounded-field border border-base-300 bg-base-200/40 p-3"
-    >
-      <div class="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <p class="text-sm font-medium">Codex OAuth</p>
-          <p class="mt-1 text-xs leading-5 text-base-content/60">
-            Codex uses browser login and stores credentials in the Fermix auth store.
-          </p>
-        </div>
-        <span class={codex_auth_badge_class(@codex_auth, @codex_auth_running?)}>
-          {codex_auth_badge_label(@codex_auth, @codex_auth_running?)}
-        </span>
-      </div>
-
-      <p :if={@codex_auth.account} class="mt-2 truncate text-xs text-base-content/55">
-        Account: {@codex_auth.account}
-      </p>
-
-      <p :if={@codex_auth.error} class="mt-2 text-xs text-error">
-        Auth store error: {@codex_auth.error}
-      </p>
-
-      <div class="mt-3 flex flex-wrap items-center gap-2">
-        <button
-          type="button"
-          class="btn btn-outline btn-sm"
-          phx-click="codex_login"
-          data-auth-trigger="true"
-          disabled={@codex_auth_running?}
-        >
-          <.icon name="hero-key" class="size-4" />
-          {codex_auth_button_label(@codex_auth, @codex_auth_running?)}
-        </button>
-      </div>
-
-      <.browser_signin_caption embed?={@embed?} />
-
-      <div
-        :if={@codex_auth_url}
-        class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
-      >
-        <span>If the Codex tab did not open, use the fallback link.</span>
-        <a
-          class="link link-primary font-medium"
-          href={@codex_auth_url}
-          target="_blank"
-          rel="noreferrer"
-        >
-          Open sign-in
-        </a>
-      </div>
-    </section>
-    """
-  end
-
-  defp codex_auth_badge_class(_auth, true), do: "badge badge-warning badge-sm"
-
-  defp codex_auth_badge_class(%{connected?: true, stale?: true}, false),
+  defp oauth_badge_class(%{connected?: true, stale?: true}, false),
     do: "badge badge-warning badge-sm"
 
-  defp codex_auth_badge_class(%{connected?: true}, false), do: "badge badge-success badge-sm"
-  defp codex_auth_badge_class(_auth, false), do: "badge badge-warning badge-sm"
+  defp oauth_badge_class(%{connected?: true}, false), do: "badge badge-success badge-sm"
+  defp oauth_badge_class(_auth, false), do: "badge badge-warning badge-sm"
 
-  defp codex_auth_badge_label(_auth, true), do: "Waiting"
-  defp codex_auth_badge_label(%{connected?: true, stale?: true}, false), do: "Reconnect needed"
-  defp codex_auth_badge_label(%{connected?: true}, false), do: "Connected"
-  defp codex_auth_badge_label(_auth, false), do: "Needs auth"
+  defp oauth_badge_label(_auth, true), do: "Waiting"
+  defp oauth_badge_label(%{connected?: true, stale?: true}, false), do: "Reconnect needed"
+  defp oauth_badge_label(%{connected?: true}, false), do: "Connected"
+  defp oauth_badge_label(_auth, false), do: "Needs auth"
 
-  defp codex_auth_button_label(_auth, true), do: "Waiting for login"
-  defp codex_auth_button_label(%{connected?: true}, false), do: "Reconnect Codex"
-  defp codex_auth_button_label(_auth, false), do: "Sign in with Codex"
-
-  # ChatGPT's models come only from the signed-in account's live list, so the
-  # picker opens once that list can be read; every other provider always has one.
-  defp model_picker_open?(:chatgpt, %{state: state}), do: state == :connected
+  # OpenAI Codex's models come only from the signed-in account's live list, so
+  # the picker opens once that list can be read; every other provider always has one.
+  defp model_picker_open?(:openai_codex, %{state: state}), do: state == :connected
   defp model_picker_open?(_provider, _chatgpt_auth), do: true
 
   @chatgpt_usage_url "https://chatgpt.com/settings/usage"
@@ -910,13 +824,14 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :chatgpt_auth, :map, required: true
   attr :embed?, :boolean, default: false
 
-  # Sign in with ChatGPT (M57 §7.1): one card, five states. `chatgpt_auth` is
-  # `Auth.ChatGPT.summary/1` plus the sign-in in flight (`running?`, `url`), the
-  # one-time plan notice (`notice?`) and a sign-out in flight (`signing_out?`).
+  # OpenAI Codex signs in with ChatGPT (M57 §7.1): one card, five states.
+  # `chatgpt_auth` is `Auth.ChatGPT.summary/1` plus the sign-in in flight
+  # (`running?`, `url`), the one-time plan notice (`notice?`) and a sign-out in
+  # flight (`signing_out?`).
   defp chatgpt_auth_field(assigns) do
     ~H"""
     <section
-      :if={@provider_form.provider == :chatgpt}
+      :if={@provider_form.provider == :openai_codex}
       data-chatgpt-auth-panel="true"
       class="rounded-field border border-base-300 bg-base-200/40 p-3"
     >
@@ -1134,8 +1049,8 @@ defmodule FermixWebWeb.SetupLive.Components do
             Grok uses browser login and stores credentials in the Fermix auth store.
           </p>
         </div>
-        <span class={codex_auth_badge_class(@xai_auth, @xai_auth_running?)}>
-          {codex_auth_badge_label(@xai_auth, @xai_auth_running?)}
+        <span class={oauth_badge_class(@xai_auth, @xai_auth_running?)}>
+          {oauth_badge_label(@xai_auth, @xai_auth_running?)}
         </span>
       </div>
 
@@ -1194,8 +1109,8 @@ defmodule FermixWebWeb.SetupLive.Components do
             Claude Code login.
           </p>
         </div>
-        <span class={codex_auth_badge_class(@anthropic_auth, false)}>
-          {codex_auth_badge_label(@anthropic_auth, false)}
+        <span class={oauth_badge_class(@anthropic_auth, false)}>
+          {oauth_badge_label(@anthropic_auth, false)}
         </span>
       </div>
 
@@ -1242,7 +1157,6 @@ defmodule FermixWebWeb.SetupLive.Components do
           :if={effort_provider?(@provider_form.provider)}
           provider_form={@provider_form}
         />
-        <.codex_fast_field provider_form={@provider_form} />
       </div>
     </section>
     """
@@ -1280,32 +1194,6 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp effort_levels(provider, model) do
     provider |> ModelCatalog.effort_levels_for(model) |> Enum.map(&Atom.to_string/1)
-  end
-
-  attr :provider_form, :map, required: true
-
-  defp codex_fast_field(assigns) do
-    ~H"""
-    <label
-      :if={@provider_form.provider == :openai_codex}
-      class="flex items-start gap-3 rounded-field border border-base-300 bg-base-100 p-3"
-    >
-      <input type="hidden" name="provider_form[fast]" value="false" />
-      <input
-        type="checkbox"
-        name="provider_form[fast]"
-        value="true"
-        checked={@provider_form.fast == true}
-        class="toggle toggle-primary mt-1"
-      />
-      <span>
-        <span class="block text-sm font-medium">Fast mode</span>
-        <span class="block text-xs text-base-content/60">
-          Use priority processing when Codex supports it. This may consume credits faster.
-        </span>
-      </span>
-    </label>
-    """
   end
 
   defp realtime_pane(assigns) do
@@ -1882,12 +1770,6 @@ defmodule FermixWebWeb.SetupLive.Components do
               description="Gemini image · needs a Gemini key"
               checked={@image_form.backend == :google}
             />
-            <.image_backend_option
-              value="openai_codex"
-              label={provider_label(:openai_codex)}
-              description="gpt-image via your Codex sign-in · no API key"
-              checked={@image_form.backend == :openai_codex}
-            />
           </div>
         </fieldset>
 
@@ -1920,15 +1802,6 @@ defmodule FermixWebWeb.SetupLive.Components do
             />
             <p :if={@image_form.google_api_key_set} class="text-sm text-success">
               Already configured. Leave blank to keep it, or paste a new key to replace it.
-            </p>
-          </div>
-
-          <div
-            :if={@image_form.backend == :openai_codex and !@image_form.codex_connected}
-            class="space-y-2"
-          >
-            <p class="text-sm text-warning">
-              Connect OpenAI Codex on the Providers tab first.
             </p>
           </div>
 

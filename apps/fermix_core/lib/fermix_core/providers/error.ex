@@ -6,10 +6,11 @@ defmodule FermixCore.Providers.Error do
   distinguish auth, quota, rate-limit, outage, and transport failures without
   parsing provider-specific log strings.
 
-  `:plan_not_eligible` is ChatGPT plan usage refusing the signed-in account or
-  workspace (or Fermix's sign-in) outright, and `:invalid_request` is that route
-  refusing the request itself. Neither is a credential fault, and neither is
-  failover-eligible: both are setup facts a fallback would only hide.
+  `:plan_not_eligible` is OpenAI Codex's ChatGPT plan usage refusing the
+  signed-in account or workspace (or Fermix's sign-in) outright, and
+  `:invalid_request` is that route refusing the request itself. Neither is a
+  credential fault, and neither is failover-eligible: both are setup facts a
+  fallback would only hide.
   """
 
   @empty_body_message "The response body was empty, so the provider gave no reason for this status."
@@ -38,10 +39,6 @@ defmodule FermixCore.Providers.Error do
           :code => String.t() | nil,
           :message => String.t(),
           :stage => stage(),
-          # Present on rate-limit/quota errors when the provider body carried
-          # them (OpenAI/Codex usage limits); nil otherwise.
-          optional(:resets_at) => non_neg_integer() | nil,
-          optional(:plan_type) => String.t() | nil,
           # The request field the provider named when it refused part of the
           # body (`error.param`); present only when the body carried one.
           optional(:param) => String.t(),
@@ -75,8 +72,6 @@ defmodule FermixCore.Providers.Error do
        kind: api_kind(status, code, message),
        code: code,
        message: message,
-       resets_at: resets_at(decoded),
-       plan_type: plan_type(decoded),
        provider_words: Keyword.get(opts, :provider_words),
        stage: stage_opt(opts)
      }
@@ -164,10 +159,9 @@ defmodule FermixCore.Providers.Error do
   def provider_label(:openai_codex), do: "Codex"
   def provider_label(:anthropic), do: "Anthropic"
   def provider_label(:xai), do: "SpaceXAI"
-  def provider_label(:chatgpt), do: "ChatGPT"
   def provider_label(provider), do: provider |> to_string() |> String.replace("_", " ")
 
-  # Sign in with ChatGPT plan usage names every refusal with a stable code
+  # OpenAI Codex's ChatGPT plan usage names every refusal with a stable code
   # (M57 §8; the protocol reference §7.2, including the DevKit's `_v2_`
   # aliases). The code decides the kind whatever the status says: a usage limit
   # arrives as a 429 before the stream and inside `response.failed` (an intact
@@ -311,38 +305,16 @@ defmodule FermixCore.Providers.Error do
     end
   end
 
-  # Some backends (e.g. the ChatGPT Codex endpoint) return a bare top-level
-  # `{"detail": "..."}` with no nested `"error"` object — surface that string
-  # instead of collapsing to a bare "HTTP <status>".
+  # Some backends (e.g. the ChatGPT plan route before its stream) return a bare
+  # top-level `{"detail": "..."}` with no nested `"error"` object — surface
+  # that string instead of collapsing to a bare "HTTP <status>".
   defp body_message(body) do
     string_value(body, "message", :message) || string_value(body, "detail", :detail)
-  end
-
-  # Unix-seconds reset time from an OpenAI/Codex usage-limit body, if present.
-  defp resets_at(body) when is_map(body) do
-    case error_object(body) do
-      error when is_map(error) -> number_value(error, "resets_at", :resets_at)
-      _other -> nil
-    end
   end
 
   defp error_param(body) when is_map(body) do
     case error_object(body) do
       error when is_map(error) -> string_value(error, "param", :param)
-      _other -> nil
-    end
-  end
-
-  defp plan_type(body) when is_map(body) do
-    case error_object(body) do
-      error when is_map(error) -> string_value(error, "plan_type", :plan_type)
-      _other -> nil
-    end
-  end
-
-  defp number_value(map, string_key, atom_key) do
-    case Map.get(map, string_key, Map.get(map, atom_key)) do
-      value when is_number(value) and value >= 0 -> value
       _other -> nil
     end
   end

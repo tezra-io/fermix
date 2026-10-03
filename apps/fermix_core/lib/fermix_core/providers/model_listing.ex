@@ -6,8 +6,8 @@ defmodule FermixCore.Providers.ModelListing do
   better than the static catalog: Ollama (only the locally installed
   models matter), OpenRouter (the upstream catalog moves weekly), Venice
   (a moving catalog whose per-model privacy tier is what the person picks
-  by — M49 §3.3) and ChatGPT (the signed-in account's plan decides, and
-  nothing is shipped for it — M57 §6.2). The static `ModelCatalog` stays
+  by — M49 §3.3) and OpenAI Codex (it signs in with ChatGPT, the account's
+  plan decides, and nothing is shipped for it — M57 §6.2). The static `ModelCatalog` stays
   authoritative for wizard defaults and
   context-window budgeting; this module only feeds setup-time pickers and
   the Ollama server-detection banner. One signal only: the configured URL
@@ -40,7 +40,7 @@ defmodule FermixCore.Providers.ModelListing do
   def live?(:ollama), do: true
   def live?(:openrouter), do: true
   def live?(:venice), do: true
-  def live?(:chatgpt), do: true
+  def live?(:openai_codex), do: true
   def live?(provider) when is_atom(provider), do: false
 
   @doc """
@@ -49,7 +49,7 @@ defmodule FermixCore.Providers.ModelListing do
   public upstream catalog (`GET <base>/models`), tool-capable models only,
   newest first; Venice lists its text catalog
   (`GET <base>/models?type=text`, public), tool-capable models only, by
-  family then newest. ChatGPT lists the signed-in account's catalog
+  family then newest. OpenAI Codex lists the signed-in account's catalog
   (`GET <base>/models` with its bearer), `visibility == "list"` entries in
   the server's order, and refuses while the sign-in cannot carry a turn.
   `base_url:`/`req_options:` are injectable; defaults come from the
@@ -87,14 +87,14 @@ defmodule FermixCore.Providers.ModelListing do
     end
   end
 
-  # ChatGPT plan usage (M57 §6.2): the signed-in account's own catalog, read
+  # OpenAI Codex on a ChatGPT plan (M57 §6.2): the signed-in account's own catalog, read
   # with its bearer. Not the standard list shape: `{"models": [{slug,
   # display_name, visibility}]}`. Only `visibility == "list"` entries are for
   # display, in the server's order. A listed entry without a usable slug or
   # name fails the whole listing (the DevKit's `invalid_model_catalog`): a
   # picker that silently drops rows would hide a changed contract.
-  def live_models(:chatgpt, opts) do
-    url = resolved_base_url(:chatgpt, opts) <> "/models"
+  def live_models(:openai_codex, opts) do
+    url = resolved_base_url(:openai_codex, opts) <> "/models"
     started = System.monotonic_time(:millisecond)
 
     result =
@@ -159,7 +159,7 @@ defmodule FermixCore.Providers.ModelListing do
       _absent ->
         server = Keyword.get(opts, :token_server, TokenSupervisor)
 
-        case server.get_token(Store.profile(:chatgpt)) do
+        case server.get_token(Store.profile(:openai_codex)) do
           {:ok, token} when is_binary(token) and token != "" -> {:ok, token}
           other -> {:error, "no ChatGPT access token is available (#{inspect(other)})"}
         end
@@ -190,7 +190,7 @@ defmodule FermixCore.Providers.ModelListing do
   defp chatgpt_entry(%{"slug" => slug, "display_name" => name})
        when is_binary(slug) and slug != "" and is_binary(name) and name != "" do
     if String.length(name) <= @max_display_name_length do
-      {:ok, %{id: slug, label: name, context_window: catalog_window(:chatgpt, slug)}}
+      {:ok, %{id: slug, label: name, context_window: catalog_window(:openai_codex, slug)}}
     else
       :error
     end
@@ -209,7 +209,7 @@ defmodule FermixCore.Providers.ModelListing do
       end
 
     metadata
-    |> Map.merge(%{provider: :chatgpt, adapter: :model_listing, agent: "model_listing"})
+    |> Map.merge(%{provider: :openai_codex, adapter: :model_listing, agent: "model_listing"})
     |> ProviderTelemetry.emit_call(max(duration_ms, 0))
   end
 

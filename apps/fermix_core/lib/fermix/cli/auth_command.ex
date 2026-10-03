@@ -2,25 +2,34 @@ defmodule Fermix.CLI.AuthCommand do
   @moduledoc """
   `fermix auth` — manage provider OAuth credentials.
 
-  Subcommands (default provider is Codex; `--provider anthropic` targets
-  the Claude subscription profile `anthropic_oauth`):
+  Subcommands (the default provider is codex, `openai_codex`, which signs in
+  with ChatGPT; `--provider anthropic` targets the Claude subscription profile
+  `anthropic_oauth`, `--provider xai` the Grok one):
 
-    * `login` — Codex: native Authorization Code + PKCE flow against
-      `auth.openai.com`. Anthropic: `--setup-token TOKEN`,
-      `--import-claude-code`, or the `CLAUDE_CODE_OAUTH_TOKEN` env var.
+    * `login` — codex: Sign in with ChatGPT in the browser. A computer with no
+      browser prints the address; open it on another computer and paste back
+      the address that browser ended on (`Auth.ChatGPT.TerminalLogin`).
+      Anthropic: `--setup-token TOKEN`, `--import-claude-code`, or the
+      `CLAUDE_CODE_OAUTH_TOKEN` env var. xai: the browser PKCE flow.
     * `status` — prints what is currently stored.
-    * `logout` — removes the stored credentials, then tells a running daemon
-      to drop the tokens it still holds for them.
+    * `logout` — removes the stored credentials (codex: revokes the ChatGPT
+      session, clears its tokens and keeps the registration), then tells a
+      running daemon to drop the tokens it still holds for them.
 
-  After `login`, restart the daemon so the running `TokenManager` reloads the
-  new token state.
+  After `login`, restart the daemon so its token manager reloads the new token
+  state.
+
+  `run/2` takes test seams: `:login`, `:read_line` and `:browser` for the
+  ChatGPT sign-in (`TerminalLogin.run/1`), and `:logout` for its sign-out.
   """
 
   alias Fermix.CLI.Daemon.Client, as: DaemonClient
   alias FermixCore.Auth.AnthropicLogin
-  alias FermixCore.Auth.CodexLogin
+  alias FermixCore.Auth.ChatGPT
+  alias FermixCore.Auth.ChatGPT.TerminalLogin
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.XAILogin
+  alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.Wizard
 
   @login_switches [
@@ -36,45 +45,81 @@ defmodule Fermix.CLI.AuthCommand do
   # its answers, not a second table.
   @anthropic_profile Store.profile(:anthropic)
   @xai_profile Store.profile(:xai)
+  @codex_profile Store.profile(:openai_codex)
+  @seams [:login, :read_line, :browser, :logout, :live_model]
 
-  @spec run([String.t()]) :: non_neg_integer()
-  def run(argv) when is_list(argv) do
+  @spec run([String.t()], keyword()) :: non_neg_integer()
+  def run(argv, seams \\ []) when is_list(argv) and is_list(seams) do
+    seams = Keyword.take(seams, @seams)
+
     case argv do
       [] -> usage()
-      ["login" | rest] -> login(rest)
+      ["login" | rest] -> login(rest, seams)
       ["status" | rest] -> status(rest)
-      ["logout" | rest] -> logout(rest)
+      ["logout" | rest] -> logout(rest, seams)
       [unknown | _] -> unknown_subcommand(unknown)
     end
   end
 
-  defp login(argv) do
+  defp login(argv, seams) do
     case OptionParser.parse(argv, strict: @login_switches) do
-      {opts, [], []} -> dispatch_login(Keyword.get(opts, :provider), opts)
+      {opts, [], []} -> dispatch_login(Keyword.get(opts, :provider), opts, seams)
       {_opts, _args, invalid} -> invalid_options(invalid, "login")
     end
   end
 
-  defp dispatch_login(nil, opts), do: do_login(opts)
-  defp dispatch_login("codex", opts), do: do_login(opts)
-  defp dispatch_login("anthropic", opts), do: anthropic_login(opts)
-  defp dispatch_login("xai", opts), do: xai_login(opts)
+  defp dispatch_login(nil, opts, seams), do: chatgpt_login(opts, seams)
+  defp dispatch_login("codex", opts, seams), do: chatgpt_login(opts, seams)
+  defp dispatch_login("anthropic", opts, _seams), do: anthropic_login(opts)
+  defp dispatch_login("xai", opts, _seams), do: xai_login(opts)
 
-  defp dispatch_login(other, _opts),
+  defp dispatch_login(other, _opts, _seams),
     do: error("unknown login provider #{inspect(other)}; expected codex, anthropic, or xai")
 
-  defp do_login(opts) do
+  # codex signs in with ChatGPT. A grant without plan usage is stored but the
+  # route refuses it, so it is reported as the failure it is.
+  defp chatgpt_login(opts, seams) do
     login_opts =
-      []
-      |> maybe_set_no_browser(Keyword.get(opts, :no_browser, false))
+      seams
+      |> Keyword.take([:login, :read_line, :browser])
+      |> Keyword.put(:no_browser, Keyword.get(opts, :no_browser, false))
       |> maybe_put(:port, Keyword.get(opts, :port))
-      |> maybe_put(:timeout, Keyword.get(opts, :timeout))
+      |> maybe_put(:timeout_ms, timeout_ms(Keyword.get(opts, :timeout)))
 
-    case CodexLogin.login(login_opts) do
-      {:ok, tokens} -> persist(tokens)
-      {:error, reason} -> error("login failed: #{reason_text(reason)}")
+    case TerminalLogin.run(login_opts) do
+      {:ok, %{plan_usage: :on, account: account}} -> signed_in(account, seams)
+      {:ok, %{plan_usage: :off}} -> error(ChatGPT.failure_sentence(:plan_usage_off))
+      {:error, reason} -> error("login failed: #{ChatGPT.failure_sentence(reason)}")
     end
   end
+
+  defp signed_in(account, seams) do
+    IO.puts("Signed in to ChatGPT#{account_suffix(account)}. Tokens saved to #{Store.path()}.")
+    ensure_live_model(seams)
+    IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
+    0
+  end
+
+  # The configured model must be one the account lists (`Setup.LiveModel`); a
+  # listing that fails leaves the model as it is and says so, and the sign-in
+  # stands.
+  defp ensure_live_model(seams) do
+    ensure = Keyword.get(seams, :live_model, &LiveModel.ensure/2)
+
+    case ensure.(:openai_codex, []) do
+      {:ok, %{model: model, changed?: true}} ->
+        IO.puts("Default model set to #{model}, the first one your ChatGPT account lists.")
+
+      {:ok, %{changed?: false}} ->
+        :ok
+
+      {:error, sentence} ->
+        IO.puts("The default model was not checked against your ChatGPT account. #{sentence}")
+    end
+  end
+
+  defp account_suffix(nil), do: ""
+  defp account_suffix(account), do: " as #{account}"
 
   defp anthropic_login(opts) do
     cond do
@@ -163,16 +208,10 @@ defmodule Fermix.CLI.AuthCommand do
   defp timeout_ms(seconds) when is_integer(seconds) and seconds > 0, do: seconds * 1_000
   defp timeout_ms(_other), do: nil
 
-  # `:no_browser` tells CodexLogin/OAuthFlow to print the URL instead of
+  # `:no_browser` tells XAILogin/OAuthFlow to print the URL instead of
   # launching a browser. Omitting it lets OAuthFlow use its OS default.
   defp maybe_set_no_browser(opts, true), do: Keyword.put(opts, :no_browser, true)
   defp maybe_set_no_browser(opts, false), do: opts
-
-  defp persist(_entry) do
-    IO.puts("Logged in. Tokens saved to #{Store.path()}.")
-    IO.puts("Restart the daemon to pick up new credentials: `fermix restart`.")
-    0
-  end
 
   defp status(argv) do
     case OptionParser.parse(argv, strict: @provider_switches) do
@@ -182,6 +221,7 @@ defmodule Fermix.CLI.AuthCommand do
   end
 
   defp do_status({:error, message}), do: error(message)
+  defp do_status({:ok, @codex_profile}), do: chatgpt_status()
 
   defp do_status({:ok, profile}) do
     case Store.read(profile) do
@@ -206,21 +246,75 @@ defmodule Fermix.CLI.AuthCommand do
     end
   end
 
-  defp logout(argv) do
+  # The registration's state, never its tokens. Plan usage that is off and a
+  # grant that needs renewing are signed in and still refused, so each says so.
+  defp chatgpt_status do
+    case ChatGPT.summary() do
+      %{state: :not_connected} ->
+        IO.puts("not logged in (no ChatGPT sign-in in #{Store.path()})")
+
+      %{state: state, account: account} ->
+        IO.puts("provider: openai_codex (Sign in with ChatGPT)")
+        IO.puts("account: #{account || "n/a"}")
+        IO.puts("state: #{state}")
+        chatgpt_state_note(state)
+    end
+
+    0
+  end
+
+  defp chatgpt_state_note(:plan_off), do: IO.puts(ChatGPT.failure_sentence(:plan_usage_off))
+  defp chatgpt_state_note(:reconnect), do: IO.puts(ChatGPT.failure_sentence(:reconnect_needed))
+  defp chatgpt_state_note(:connected), do: :ok
+
+  defp logout(argv, seams) do
     case OptionParser.parse(argv, strict: @provider_switches) do
-      {opts, [], []} -> do_logout(profile_for(Keyword.get(opts, :provider)))
+      {opts, [], []} -> do_logout(profile_for(Keyword.get(opts, :provider)), seams)
       {_opts, _args, invalid} -> invalid_options(invalid, "logout")
     end
   end
 
-  defp do_logout({:error, message}), do: error(message)
+  defp do_logout({:error, message}, _seams), do: error(message)
+  defp do_logout({:ok, @codex_profile}, seams), do: chatgpt_logout(seams)
+  defp do_logout({:ok, profile}, _seams), do: delete_logout(profile)
+
+  # ChatGPT's own sign-out revokes the session upstream, clears the tokens and
+  # keeps the registration, so the next sign-in reuses it; a revoke OpenAI did
+  # not confirm still signs this computer out, and says where to finish.
+  defp chatgpt_logout(seams) do
+    path = Store.path()
+    logout = Keyword.get(seams, :logout, &ChatGPT.logout/1)
+
+    case ChatGPT.summary() do
+      %{state: :not_connected} ->
+        IO.puts("Already logged out (no ChatGPT sign-in in #{path}).")
+        tell_daemon(0, @codex_profile, "no ChatGPT sign-in was stored in #{path}")
+
+      %{state: _signed_in} ->
+        logout.([])
+        |> chatgpt_logged_out(path)
+    end
+  end
+
+  defp chatgpt_logged_out({:ok, %{revoked: true}}, path) do
+    IO.puts("Logged out of ChatGPT. Cleared its tokens in #{path}.")
+    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}")
+  end
+
+  defp chatgpt_logged_out({:ok, %{revoked: false}}, path) do
+    IO.puts(ChatGPT.failure_sentence(:revoke_not_confirmed))
+    tell_daemon(0, @codex_profile, "cleared the ChatGPT tokens in #{path}")
+  end
+
+  defp chatgpt_logged_out({:error, reason}, _path),
+    do: error("logout failed: #{ChatGPT.failure_sentence(reason)}")
 
   # The logout is the same whether or not a daemon runs: the entry is deleted
   # here. A running daemon still holds the account's tokens in memory, so it is
   # then told to let go of them, the way the plugin verbs ask it to re-apply
   # their config. With no daemon there is nothing to tell and nothing more is
   # printed.
-  defp do_logout({:ok, profile}) do
+  defp delete_logout(profile) do
     path = Store.path()
 
     case Store.delete_provider(profile, path) do
@@ -282,8 +376,8 @@ defmodule Fermix.CLI.AuthCommand do
     end
   end
 
-  defp profile_for(nil), do: {:ok, :openai_codex}
-  defp profile_for("codex"), do: {:ok, :openai_codex}
+  defp profile_for(nil), do: {:ok, @codex_profile}
+  defp profile_for("codex"), do: {:ok, @codex_profile}
   defp profile_for("anthropic"), do: {:ok, @anthropic_profile}
   defp profile_for("xai"), do: {:ok, @xai_profile}
 
@@ -329,9 +423,11 @@ defmodule Fermix.CLI.AuthCommand do
       fermix auth status  [--provider codex|anthropic|xai]
       fermix auth logout  [--provider codex|anthropic|xai]
 
-    The default provider is codex (ChatGPT Plus). Anthropic login also
-    accepts a CLAUDE_CODE_OAUTH_TOKEN environment variable; xai opens a
-    browser for the Grok Build subscription PKCE flow.
+    The default provider is codex (OpenAI Codex), which signs in with
+    ChatGPT. With no browser on this computer, open the printed address on
+    another one and paste back the address that browser ended on. Anthropic
+    login also accepts a CLAUDE_CODE_OAUTH_TOKEN environment variable; xai
+    opens a browser for the Grok Build subscription PKCE flow.
     """)
 
     2

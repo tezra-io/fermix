@@ -2,6 +2,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
 
   # Fields the plan-usage route refuses (M57 D5; protocol reference §5.4).
@@ -176,7 +177,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
 
       assert body == %{
                "model" => "gpt-6.1-sol",
-               "instructions" => "You are Fermix.",
+               "instructions" => ModelOverlays.apply_codex("You are Fermix."),
                "store" => false,
                "stream" => true,
                "input" => [
@@ -227,6 +228,21 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
       assert [%{"role" => "user"}] = body["input"]
     end
 
+    # OpenAI Codex keeps the Codex/GPT-5 behavior contract: appended at the end
+    # of the instructions (the prefix stays cacheable), and present even when
+    # the conversation carries no system message.
+    test "the instructions end with the Codex behavior contract, even with no system message" do
+      stub = stub_id()
+      capture_request(stub)
+
+      assert {:ok, _turn} =
+               ChatGPTPlan.chat([%{role: "user", content: "Hi"}], [], opts(stub))
+
+      assert_receive {:request, _path, _headers, body}
+      assert body["instructions"] == ModelOverlays.apply_codex("You are a helpful AI assistant.")
+      assert body["instructions"] =~ "<tool_discipline>"
+    end
+
     test ":none effort omits reasoning" do
       body =
         ChatGPTPlan.request_body(%{model: "m", input: [], tools: []}, reasoning_effort: :none)
@@ -266,7 +282,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
                )
 
       assert_receive {:request, _path, _headers, body}
-      assert body["instructions"] == "You are Fermix."
+      assert body["instructions"] == ModelOverlays.apply_codex("You are Fermix.")
 
       assert [
                %{"type" => "additional_tools"},
@@ -293,7 +309,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
       assert turn.usage.completion_tokens == 2
 
       assert_receive {:call, %{duration_ms: _}, metadata}
-      assert metadata.provider == :chatgpt
+      assert metadata.provider == :openai_codex
       assert metadata.adapter == :chatgpt_plan
       assert metadata.auth_mode == :oauth
       assert metadata.status == :ok
@@ -350,7 +366,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
         assert error.kind == unquote(kind)
         assert error.code == unquote(code)
         assert error.stage == :mid_stream
-        assert error.provider == :chatgpt
+        assert error.provider == :openai_codex
         assert error.auth_mode == :oauth
         assert error.provider_words == "ChatGPT says #{unquote(code)}"
       end
@@ -564,7 +580,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
   end
 
   defp plan_error(kind, fields \\ %{}) do
-    {:provider_error, Map.merge(%{provider: :chatgpt, kind: kind, code: nil}, fields)}
+    {:provider_error, Map.merge(%{provider: :openai_codex, kind: kind, code: nil}, fields)}
   end
 
   describe "refusal_sentence/1" do
@@ -592,9 +608,9 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
       assert ChatGPTPlan.refusal_sentence(
                plan_error(:invalid_request, %{
                  code: "subscription_sharing_unsupported_capability",
-                 param: "service_tier"
+                 param: "truncation"
                })
-             ) == "ChatGPT refused part of this request (`service_tier`)."
+             ) == "ChatGPT refused part of this request (`truncation`)."
 
       assert ChatGPTPlan.refusal_sentence(
                plan_error(:invalid_request, %{code: "subscription_sharing_route_not_supported"})
@@ -607,7 +623,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlanTest do
     test "a usage limit names no reset time" do
       sentence =
         ChatGPTPlan.refusal_sentence(
-          plan_error(:quota, %{code: "subscription_sharing_usage_limit_exceeded", resets_at: 1})
+          plan_error(:quota, %{code: "subscription_sharing_usage_limit_exceeded"})
         )
 
       refute sentence =~ "Try again in"

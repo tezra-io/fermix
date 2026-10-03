@@ -27,6 +27,30 @@ defmodule FermixCore.Auth.StoreTest do
     DateTime.utc_now() |> DateTime.add(seconds, :second) |> DateTime.to_iso8601()
   end
 
+  # `openai_codex` signs in with ChatGPT, so its sign-in lives under the
+  # registration's profile, and an entry an older build stored under the
+  # provider id is left in place and never read for it.
+  describe "profile/1" do
+    test "maps openai_codex to the ChatGPT registration and knows no chatgpt provider" do
+      assert Store.profile(:openai_codex) == "chatgpt"
+      assert Store.profile(:chatgpt) == nil
+      assert Store.profiled_providers() == [:anthropic, :openai_codex, :xai]
+    end
+
+    test "an old Codex-client entry is kept but never read as the openai_codex sign-in" do
+      path = tmp_path()
+      old = %{auth_mode: "chatgpt", tokens: %{access_token: "old_at", refresh_token: "old_rt"}}
+
+      :ok =
+        Store.write("openai_codex", Map.merge(old, %{expires_at: nil, last_refresh: nil}), path)
+
+      assert {:error, {:provider_missing, "chatgpt"}} =
+               Store.read(Store.profile(:openai_codex), path)
+
+      assert {:ok, %{tokens: %{access_token: "old_at"}}} = Store.read("openai_codex", path)
+    end
+  end
+
   describe "read/2" do
     test "returns no_auth_file when file is missing" do
       assert {:error, :no_auth_file} = Store.read(:openai, tmp_path())
@@ -816,9 +840,7 @@ defmodule FermixCore.Auth.StoreTest do
 
     # A sign-in holds the profile lock from before it spends anything to its
     # write: at most three requests (the code exchange, the account lookup and
-    # a region probe), each one bounded attempt, then one store-lock wait. The
-    # Codex import's section is one refresh and one write, inside the bound
-    # above.
+    # a region probe), each one bounded attempt, then one store-lock wait.
     test "a sign-in finishes inside the profile lock's stale threshold" do
       bounds = RefreshClient.request_bounds()
       assert Keyword.fetch!(bounds, :retry) == false

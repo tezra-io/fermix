@@ -799,6 +799,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "effort=low"
     end
 
+    # OpenAI Codex lists the signed-in account's models live, so there is no
+    # catalog to hold a pinned slug against: any slug passes here and the live
+    # route answers for it.
+    test "ok for a model pinned to OpenAI Codex, which ships no catalog" do
+      Application.put_env(:fermix_core, :routing,
+        subagent_provider: "openai_codex",
+        subagent_model: "gpt-plan-one"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "provider=openai_codex, model=gpt-plan-one"
+    end
+
     test "fails on a typo'd cron provider" do
       Application.put_env(:fermix_core, :routing, cron_provider: "anthropi")
       result = Checks.routing_overrides()
@@ -2553,12 +2567,21 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "warns and names only the stale profiles" do
-      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write(Store.profile(:openai_codex), token_entry(-7200))
       :ok = Store.write("gmail:primary", token_entry(3600))
 
       assert %{status: :warn, detail: detail} = Checks.auth_token_expiry()
-      assert detail =~ "openai_codex"
+      assert detail =~ Store.profile(:openai_codex)
       refute detail =~ "gmail:primary"
+    end
+
+    # The old Codex-client grant still sits under the bare `openai_codex` key in
+    # an upgraded auth.json, but nothing reads it any more, so it is no stale
+    # token of Fermix's.
+    test "ignores the old Codex-client entry nothing reads any more" do
+      :ok = Store.write("openai_codex", token_entry(-7200))
+
+      assert %{status: :ok} = Checks.auth_token_expiry()
     end
   end
 

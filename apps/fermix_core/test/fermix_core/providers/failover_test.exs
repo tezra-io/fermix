@@ -81,12 +81,12 @@ defmodule FermixCore.Providers.FailoverTest do
   # would hide them.
   defp plan_error(code, status) do
     {:provider_error, error} =
-      Error.api(:chatgpt, :chatgpt_plan, status, %{"error" => %{"code" => code}})
+      Error.api(:openai_codex, :chatgpt_plan, status, %{"error" => %{"code" => code}})
 
     {:provider_error, Map.put(error, :auth_mode, :oauth)}
   end
 
-  describe "eligible?/1 — ChatGPT plan usage" do
+  describe "eligible?/1 — OpenAI Codex on a ChatGPT plan" do
     test "the usage limit is eligible, before the stream and mid-stream" do
       assert Failover.eligible?(plan_error("subscription_sharing_usage_limit_exceeded", 429))
       assert Failover.eligible?(plan_error("subscription_sharing_usage_limit_exceeded", 200))

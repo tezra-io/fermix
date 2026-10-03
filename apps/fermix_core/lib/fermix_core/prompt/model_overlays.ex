@@ -11,8 +11,9 @@ defmodule FermixCore.Prompt.ModelOverlays do
   Overlays are incident-derived (the hermes gate): a family gets one only for
   observed failure modes. Currently only the Codex/GPT-5 family carries one —
   tool-call discipline and completion gating, adapted from OpenClaw's
-  field-tested GPT-5 behavior contract — applied by the Codex adapter, which
-  is inherently that family's surface. Well-behaved families get nothing.
+  field-tested GPT-5 behavior contract — applied by OpenAI Codex's adapter
+  (`OpenAI.ChatGPTPlan`), which is inherently that family's surface.
+  Well-behaved families get nothing.
   """
 
   @codex_overlay """

@@ -228,6 +228,11 @@ defmodule FermixCore.Providers.RoutingOverrides do
       ModelCatalog.known_model?(provider, model) ->
         :ok
 
+      # A provider that ships no catalog (OpenAI Codex lists the signed-in
+      # account's models live) has nothing to mis-pair a slug against.
+      ModelCatalog.models_for(provider) == [] ->
+        :ok
+
       is_nil(ModelCatalog.provider_for_model(model)) ->
         :ok
 

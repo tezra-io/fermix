@@ -6,7 +6,7 @@
 
 | Pane | Holds |
 |---|---|
-| Providers | each provider's sign-in or key, **Model**, **Reasoning effort**, **Fast mode**, **Details…** > **Use as primary**; Model behavior > **Sub-agent model** |
+| Providers | each provider's sign-in or key, **Model**, **Reasoning effort**, **Details…** > **Use as primary**; Model behavior > **Sub-agent model** |
 | Personality | About you: **Your name**, **Time zone**, **Style**, **Call the assistant**; **Suggest new skills from tasks you repeat** |
 | Memory | **Compact a conversation at**, **Review memory every** |
 | Channels | each chat channel; Editors > **Accept editor connections** (ACP) |
@@ -27,7 +27,7 @@
 
 Reads and changes the same sections the Mac panes show, through the running service, which checks every key before it writes any, so a refusal saves nothing.
 
-- `fermix settings` lists the sections: `providers.<provider>` (`openai_codex`, `chatgpt`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `ollama`), `routing`, `personalization`, `memory`, `channels.<channel>`, `editors`, `channels.mobile`, `realtime`, `transcription`, `meetings`, `computer_use`, `computer_history`, `harness`, `web_search`, `generate_image`, `sandbox`, `browser`, `secrets`.
+- `fermix settings` lists the sections: `providers.<provider>` (`openai_codex`, `openai`, `anthropic`, `xai`, `openrouter`, `mistral`, `venice`, `ollama`), `routing`, `personalization`, `memory`, `channels.<channel>`, `editors`, `channels.mobile`, `realtime`, `transcription`, `meetings`, `computer_use`, `computer_history`, `harness`, `web_search`, `generate_image`, `sandbox`, `browser`, `secrets`.
 - `fermix settings show SECTION [--info]` prints each key, its value and whether it needs a restart. `fermix settings set SECTION KEY=VALUE [KEY=VALUE...]` changes keys (`true`/`false`, a number, a comma-separated list, or text; `KEY=` empties a text value or list), e.g. `fermix settings set providers.openai default_model=<model>`. A refused value prints the daemon's own sentence. Rows that follow a choice (web search, images, voice) appear only once that choice is saved, so set the choice in its own `set` first.
 - **Secrets are never arguments** (one would sit in `ps` and shell history): `fermix settings secret set ID` prompts with no echo, or `... | fermix settings secret set ID --stdin` reads it piped. `show` prints the exact ID on every secret row (`openai_api_key`, `tavily_api_key`, `telegram_bot_token`, …); `env:NAME` stores a command's own variable (see `sandbox_env`), `plugin:<name>` a plugin token, `anthropic_setup_token` a `claude setup-token`. A secret typed as an argument is refused (exit 2) and should be rotated. `fermix settings secret clear ID` forgets one.
 - `fermix settings primary` lists providers (configured, primary); `fermix settings primary PROVIDER` makes one primary.
@@ -48,7 +48,7 @@ Reads and changes the same sections the Mac panes show, through the running serv
 | `[fermix_core.routing]` | `subagent_*`, `cron_*`, `meeting_*` (`model`, `provider`, `reasoning_effort`) |
 | `[fermix_core.tools.web_search]` | backend and its keys |
 | `[fermix_core.tools.tool_search]` | `enabled` (tool-schema deferral; on when absent) |
-| `[fermix_core.tools.generate_image]` | `backend` (`openai`, `xai`, `google`, `openai_codex`), `model`, `size`, `google_api_key`; nothing else |
+| `[fermix_core.tools.generate_image]` | `backend` (`openai`, `xai`, `google`; a retired `openai_codex` is dropped at load with a warning), `model`, `size`, `google_api_key`; nothing else |
 | `[fermix_core.browser]` | `allowed_hosts`, `default_profile` (how tasks run), `max_tabs`, `launch_app` (may the engine open the Fermix app for its browser pane; on by default only inside the app) |
 | `[fermix_core.compaction]` | `enabled`, `threshold`, `reasoning_effort` |
 | `[fermix_core.network]` | `proxy` (`http://host:port`), `proxy_bypass` (list of hosts or `.suffix` entries); nothing else, see Outbound proxy below. Set with `fermix setup --proxy` on Linux |

@@ -33,26 +33,6 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
   end
 
-  describe "authorize_url/1" do
-    test "includes every required Codex/ChatGPT-Plus param" do
-      pkce = OAuthFlow.generate_pkce()
-      url = OAuthFlow.authorize_url(pkce)
-
-      assert String.starts_with?(url, "https://auth.openai.com/oauth/authorize?")
-      query = url |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
-
-      assert query["response_type"] == "code"
-      assert query["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
-      assert query["redirect_uri"] == "http://localhost:1455/auth/callback"
-      assert query["scope"] == "openid profile email offline_access"
-      assert query["code_challenge"] == pkce.code_challenge
-      assert query["code_challenge_method"] == "S256"
-      assert query["state"] == pkce.state
-      assert query["codex_cli_simplified_flow"] == "true"
-      assert query["id_token_add_organizations"] == "true"
-    end
-  end
-
   describe "parse_callback_path/2" do
     test "extracts code when state matches" do
       assert {:ok, "abc"} =
@@ -82,56 +62,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
   end
 
-  describe "exchange_code/3" do
-    test "POSTs the form body and parses tokens on 200" do
-      plug = fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        params = URI.decode_query(body)
-
-        assert params["grant_type"] == "authorization_code"
-        assert params["code"] == "the-code"
-        assert params["client_id"] == "app_EMoamEEZ73f0CkXaXp7hrann"
-        assert params["redirect_uri"] == "http://localhost:1455/auth/callback"
-        assert params["code_verifier"] == "the-verifier"
-
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(
-          200,
-          Jason.encode!(%{
-            "access_token" => "AT",
-            "refresh_token" => "RT",
-            "id_token" => "IT",
-            "expires_in" => 3600
-          })
-        )
-      end
-
-      assert {:ok, tokens} = OAuthFlow.exchange_code("the-code", "the-verifier", plug: plug)
-      assert tokens.access_token == "AT"
-      assert tokens.refresh_token == "RT"
-      assert tokens.id_token == "IT"
-      assert %DateTime{} = tokens.expires_at
-    end
-
-    test "returns error string on non-200" do
-      plug = fn conn -> Plug.Conn.send_resp(conn, 400, "bad code") end
-
-      assert {:error, "Token exchange failed (400): " <> _} =
-               OAuthFlow.exchange_code("bad", "v", plug: plug)
-    end
-
-    test "returns :invalid_token_response when access_token is missing" do
-      plug = fn conn ->
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(200, Jason.encode!(%{"refresh_token" => "RT"}))
-      end
-
-      assert {:error, :invalid_token_response} =
-               OAuthFlow.exchange_code("c", "v", plug: plug)
-    end
-
+  describe "exchange_code/5" do
     test "echoes the code challenge for providers that re-validate PKCE at exchange" do
       provider = OAuthProvider.xai()
 
@@ -448,7 +379,9 @@ defmodule FermixCore.Auth.OAuthFlowTest do
     end
   end
 
-  describe "start_loopback/1 (integration)" do
+  # A client whose id is its own and whose listener is not hardened (xAI, the
+  # plugins' providers): the callback is read from the request line alone.
+  describe "start_loopback/2 — a static client (integration)" do
     test "completes the full handshake when a synthetic callback is delivered" do
       port = pick_free_port()
       parent = self()
@@ -482,8 +415,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       end
 
       assert {:ok, tokens} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end,
@@ -525,8 +457,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       end
 
       assert {:ok, %{access_token: "AT"}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end,
@@ -539,35 +470,37 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       opener = fn _url -> :ok end
 
       assert {:error, :callback_timeout} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 200,
                  puts: fn _ -> :ok end
                )
     end
 
-    test "surfaces opener failure instead of waiting for callback timeout" do
+    test "an opener that fails prints the address, and the wait goes on" do
       port = pick_free_port()
+      parent = self()
 
-      assert {:error, {:opener_failed, :browser_missing, url}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+      assert {:error, :callback_timeout} =
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: fn _url -> {:error, :browser_missing} end,
                  timeout_ms: 200,
-                 puts: fn _ -> :ok end
+                 puts: fn line -> send(parent, {:printed, line}) end
                )
 
-      assert String.starts_with?(url, "https://auth.openai.com/oauth/authorize?")
+      assert_received {:printed,
+                       "Open this URL in your browser to sign in:\n  " <>
+                         "https://auth.example.test/authorize?" <> _query}
     end
 
-    test "surfaces listen failure when the port is already bound" do
+    # A client registered with its exact redirect URI cannot move to another
+    # port, so a taken one fails loud instead of falling back.
+    test "surfaces a taken fixed port instead of waiting" do
       port = pick_free_port()
       {:ok, blocker} = :gen_tcp.listen(port, [:binary, ip: {127, 0, 0, 1}, reuseaddr: true])
 
-      assert {:error, {:listen_failed, ^port, :eaddrinuse}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+      assert {:error, {:port_in_use, ^port}} =
+               OAuthFlow.start_loopback(%{static_provider(port) | fixed_port?: true},
                  opener: fn _ -> :ok end,
                  timeout_ms: 200,
                  puts: fn _ -> :ok end
@@ -594,8 +527,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       end
 
       assert {:ok, %{access_token: "AT"}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end,
@@ -621,8 +553,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       end
 
       assert {:ok, %{access_token: "AT"}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end,
@@ -659,8 +590,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       end
 
       assert {:ok, %{access_token: "AT"}} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end,
@@ -683,8 +613,7 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       # timeout_ms is generous; a genuine callback-validation error must return
       # immediately rather than being retried until the deadline.
       assert {:error, :state_mismatch} =
-               OAuthFlow.start_loopback(
-                 port: port,
+               OAuthFlow.start_loopback(static_provider(port),
                  opener: opener,
                  timeout_ms: 5_000,
                  puts: fn _ -> :ok end
@@ -797,6 +726,19 @@ defmodule FermixCore.Auth.OAuthFlowTest do
       assert_receive {:connected, {:ok, socket}}, 1_000
       :gen_tcp.close(socket)
     end
+  end
+
+  defp static_provider(port) do
+    %OAuthProvider{
+      id: :test_static,
+      authorize_url: "https://auth.example.test/authorize",
+      token_url: "https://auth.example.test/token",
+      client_id: "test-client",
+      redirect_host: "127.0.0.1",
+      redirect_port: port,
+      redirect_path: "/auth/callback",
+      scopes: ["openid"]
+    }
   end
 
   defp pick_free_port do

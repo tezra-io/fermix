@@ -1,9 +1,9 @@
 defmodule FermixCore.Setup.RuntimeTest do
   use ExUnit.Case, async: false
 
-  alias FermixCore.Auth.CodexToken
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store, as: AuthStore
-  alias FermixCore.Auth.TokenManager
+  alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Memory.Repo, as: MemoryRepo
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Runtime
@@ -159,44 +159,6 @@ defmodule FermixCore.Setup.RuntimeTest do
     :ok
   end
 
-  defp write_codex_auth(home, refresh_token \\ "codex_rt") do
-    path = Path.join(home, "codex_auth.json")
-
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "auth_mode" => "chatgpt",
-        "tokens" => %{"access_token" => "codex_at", "refresh_token" => refresh_token}
-      })
-    )
-
-    path
-  end
-
-  defp write_fermix_codex_auth(home, access_token) do
-    path = Path.join(home, "auth.json")
-
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "version" => 1,
-        "providers" => %{
-          "openai_codex" => %{
-            "auth_mode" => "chatgpt",
-            "tokens" => %{
-              "access_token" => access_token,
-              "refresh_token" => "fermix_rt"
-            },
-            "expires_at" =>
-              DateTime.utc_now() |> DateTime.add(3600, :second) |> DateTime.to_iso8601()
-          }
-        }
-      })
-    )
-
-    path
-  end
-
   # The mobile channel ships feature-flagged: `[fermix_channels.mobile] enabled
   # = true` in config.toml is the only enable path, so a terminal setup run must
   # ask nothing about it and must never turn it on or write APNs credentials —
@@ -322,73 +284,8 @@ defmodule FermixCore.Setup.RuntimeTest do
     FermixTestSupport.SafeRm.rm_rf!(tmp_home)
   end
 
-  defp pick_free_port do
-    {:ok, socket} = :gen_tcp.listen(0, [:binary, ip: {127, 0, 0, 1}])
-    {:ok, port} = :inet.port(socket)
-    :gen_tcp.close(socket)
-    port
-  end
-
   defp read_runtime_config!(path) do
     Config.Reader.read!(path, env: :test)
-  end
-
-  defp oauth_opener(port, test_pid) do
-    fn url ->
-      send(test_pid, {:oauth_opened, url})
-
-      Task.start(fn ->
-        state =
-          url
-          |> URI.parse()
-          |> Map.fetch!(:query)
-          |> URI.decode_query()
-          |> Map.fetch!("state")
-
-        deliver_callback(port, "/auth/callback?code=AUTHCODE&state=#{state}")
-      end)
-
-      :ok
-    end
-  end
-
-  defp deliver_callback(port, path) do
-    {:ok, conn} = :gen_tcp.connect(~c"127.0.0.1", port, [:binary, active: false])
-
-    request = "GET #{path} HTTP/1.1\r\nHost: localhost:#{port}\r\nConnection: close\r\n\r\n"
-    :ok = :gen_tcp.send(conn, request)
-    {:ok, _resp} = :gen_tcp.recv(conn, 0, 5_000)
-    :gen_tcp.close(conn)
-  end
-
-  def success_plug(conn) do
-    conn
-    |> Plug.Conn.put_resp_content_type("application/json")
-    |> Plug.Conn.send_resp(
-      200,
-      Jason.encode!(%{
-        "access_token" => "imported_at",
-        "refresh_token" => "imported_rt",
-        "expires_in" => 3600
-      })
-    )
-  end
-
-  def failure_plug(conn) do
-    Plug.Conn.send_resp(conn, 500, "boom")
-  end
-
-  def oauth_exchange_plug(conn) do
-    conn
-    |> Plug.Conn.put_resp_content_type("application/json")
-    |> Plug.Conn.send_resp(
-      200,
-      Jason.encode!(%{
-        "access_token" => "oauth_at",
-        "refresh_token" => "oauth_rt",
-        "expires_in" => 3600
-      })
-    )
   end
 
   defp puts_collector do
@@ -398,6 +295,51 @@ defmodule FermixCore.Setup.RuntimeTest do
   end
 
   defp puts_lines(agent), do: agent |> Agent.get(& &1) |> Enum.reverse()
+
+  # The answers that choose `openai_codex` with its model and effort, on this
+  # home's auth file, plus the case's seams.
+  defp codex_answers(home, seams) do
+    Keyword.merge(
+      [
+        provider: "openai_codex",
+        default_model: "gpt-5.5",
+        reasoning_effort: "high",
+        fermix_auth_path: Path.join(home, "auth.json"),
+        read_line: typed([]),
+        browser: fn _url -> flunk("no browser opens in a test") end
+      ],
+      seams
+    )
+  end
+
+  # Answers `lines` in order, then end of input, as standard input would.
+  defp typed(lines) do
+    {:ok, agent} = Agent.start_link(fn -> lines end)
+
+    fn ->
+      Agent.get_and_update(agent, fn
+        [] -> {:eof, []}
+        [line | rest] -> {line, rest}
+      end)
+    end
+  end
+
+  # A finished Sign in with ChatGPT with plan usage granted. No refresh token,
+  # so nothing in the case can reach OpenAI to renew it.
+  defp usable_chatgpt do
+    %{
+      auth_mode: "oauth_siwc",
+      provider: "chatgpt",
+      client_id: "oaiapp_setup",
+      subject: "user-setup",
+      account: %{email: "owner@example.com"},
+      granted_scopes: ["openid", "offline_access", "chatgpt.tokens.use.direct"],
+      tokens: %{access_token: "setup_at", refresh_token: nil},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
+  end
 
   describe "personalization defaults" do
     # The default is the machine's own zone (`Setup.MachineFacts`), which the
@@ -503,422 +445,143 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Enum.any?(lines, &String.contains?(&1, "auth probe inconclusive"))
       assert Enum.any?(lines, &String.contains?(&1, "503"))
     end
-
-    test "openai_codex probe uses Fermix auth store without TokenManager" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = write_fermix_codex_auth(home, "runtime_store_at")
-      {puts, collector} = puts_collector()
-
-      probe_plug = fn conn ->
-        assert ["Bearer runtime_store_at"] = Plug.Conn.get_req_header(conn, "authorization")
-        Plug.Conn.send_resp(conn, 200, "{}")
-      end
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   provider: "openai_codex",
-                   default_model: "gpt-5.5",
-                   reasoning_effort: "high",
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-                   fermix_auth_path: auth_path,
-                   req_options: [plug: probe_plug]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
-      refute Enum.any?(lines, &String.contains?(&1, "auth probe skipped"))
-    end
-
-    test "selecting openai_codex starts native OAuth when Fermix has no token" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = Path.join(home, "auth.json")
-      port = pick_free_port()
-      {puts, collector} = puts_collector()
-
-      probe_plug = fn conn ->
-        assert ["Bearer oauth_at"] = Plug.Conn.get_req_header(conn, "authorization")
-        Plug.Conn.send_resp(conn, 200, "{}")
-      end
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   provider: "openai_codex",
-                   default_model: "gpt-5.5",
-                   reasoning_effort: "high",
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-                   fermix_auth_path: auth_path,
-                   oauth_port: port,
-                   oauth_opener: oauth_opener(port, self()),
-                   oauth_timeout_ms: 5_000,
-                   oauth_req_options: [plug: &__MODULE__.oauth_exchange_plug/1],
-                   req_options: [plug: probe_plug]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert_received {:oauth_opened, url}
-      assert url =~ "https://auth.openai.com/oauth/authorize?"
-
-      data = auth_path |> File.read!() |> Jason.decode!()
-      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "oauth_at"
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "Opening ChatGPT OAuth login"))
-      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
-    end
-
-    test "openai_codex refresh errors do not auto-launch OAuth" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = Path.join(home, "auth.json")
-
-      File.write!(
-        auth_path,
-        Jason.encode!(%{
-          "version" => 1,
-          "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
-              "tokens" => %{"access_token" => "expired_at", "refresh_token" => nil},
-              "expires_at" =>
-                DateTime.utc_now() |> DateTime.add(-60, :second) |> DateTime.to_iso8601()
-            }
-          }
-        })
-      )
-
-      {puts, _collector} = puts_collector()
-
-      assert {:error, :no_refresh_token} = CodexToken.get_token(fermix_auth_path: auth_path)
-
-      result =
-        Runtime.run(
-          [
-            provider: "openai_codex",
-            default_model: "gpt-5.5",
-            reasoning_effort: "high",
-            codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-            fermix_auth_path: auth_path,
-            oauth_opener: fn url ->
-              send(self(), {:oauth_opened, url})
-              :ok
-            end,
-            oauth_timeout_ms: 10
-          ],
-          puts: puts,
-          prompt: fn _ -> "" end
-        )
-
-      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
-      assert Keyword.get(env_codex, :primary) == true
-
-      assert {:error, message} = result
-
-      assert message =~ "codex token unavailable"
-      assert message =~ ":no_refresh_token"
-      refute_received {:oauth_opened, _url}
-    end
-
-    test "rejected openai_codex token triggers native OAuth and retries the probe" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = write_fermix_codex_auth(home, "stale_at")
-      port = pick_free_port()
-      {puts, collector} = puts_collector()
-      {:ok, seen_tokens} = Agent.start_link(fn -> [] end)
-
-      probe_plug = fn conn ->
-        [authorization] = Plug.Conn.get_req_header(conn, "authorization")
-        Agent.update(seen_tokens, &[authorization | &1])
-
-        case authorization do
-          "Bearer stale_at" -> Plug.Conn.send_resp(conn, 401, "unauthorized")
-          "Bearer oauth_at" -> Plug.Conn.send_resp(conn, 200, "{}")
-        end
-      end
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   provider: "openai_codex",
-                   default_model: "gpt-5.5",
-                   reasoning_effort: "high",
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-                   fermix_auth_path: auth_path,
-                   oauth_port: port,
-                   oauth_opener: oauth_opener(port, self()),
-                   oauth_timeout_ms: 5_000,
-                   oauth_req_options: [plug: &__MODULE__.oauth_exchange_plug/1],
-                   req_options: [plug: probe_plug]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert_received {:oauth_opened, _url}
-      assert Agent.get(seen_tokens, &Enum.reverse/1) == ["Bearer stale_at", "Bearer oauth_at"]
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "Codex OAuth token rejected"))
-      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
-    end
-
-    test "OAuth recovery reloads a running TokenManager so the retry probe sees fresh tokens" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = write_fermix_codex_auth(home, "stale_at")
-      port = pick_free_port()
-      {puts, collector} = puts_collector()
-      {:ok, seen_tokens} = Agent.start_link(fn -> [] end)
-
-      probe_plug = fn conn ->
-        [authorization] = Plug.Conn.get_req_header(conn, "authorization")
-        Agent.update(seen_tokens, &[authorization | &1])
-
-        case authorization do
-          "Bearer stale_at" -> Plug.Conn.send_resp(conn, 401, "unauthorized")
-          "Bearer oauth_at" -> Plug.Conn.send_resp(conn, 200, "{}")
-        end
-      end
-
-      # Start TokenManager pointing at the same auth file the wizard writes.
-      # In production the daemon supervises TokenManager when provider is
-      # :openai_codex, and the wizard's recovery flow must keep its
-      # in-memory cache in sync with the post-OAuth on-disk tokens.
-      start_supervised!({TokenManager, fermix_auth_path: auth_path})
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   provider: "openai_codex",
-                   default_model: "gpt-5.5",
-                   reasoning_effort: "high",
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-                   fermix_auth_path: auth_path,
-                   oauth_port: port,
-                   oauth_opener: oauth_opener(port, self()),
-                   oauth_timeout_ms: 5_000,
-                   oauth_req_options: [plug: &__MODULE__.oauth_exchange_plug/1],
-                   req_options: [plug: probe_plug]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert_received {:oauth_opened, _url}
-      assert Agent.get(seen_tokens, &Enum.reverse/1) == ["Bearer stale_at", "Bearer oauth_at"]
-      assert {:ok, "oauth_at"} = TokenManager.get_token(TokenManager)
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "auth probe: openai_codex/gpt-5.5"))
-    end
-
-    test "rejected openai_codex token asks before starting OAuth recovery" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      auth_path = write_fermix_codex_auth(home, "stale_at")
-      {puts, _collector} = puts_collector()
-
-      probe_plug = fn conn -> Plug.Conn.send_resp(conn, 401, "unauthorized") end
-
-      assert {:error, message} =
-               Runtime.run(
-                 [
-                   provider: "openai_codex",
-                   default_model: "gpt-5.5",
-                   reasoning_effort: "high",
-                   fermix_auth_path: auth_path,
-                   # Isolate the codex-import probe so it never stats the host's
-                   # real ~/.codex/auth.json (provider:openai is unconfigured here,
-                   # so maybe_import_codex would otherwise reach the host fallback).
-                   # The prompt "n" already declines the import, so the outcome is
-                   # unchanged — this just keeps the test strictly host-independent.
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
-                   oauth_opener: fn url ->
-                     send(self(), {:oauth_opened, url})
-                     :ok
-                   end,
-                   oauth_timeout_ms: 10,
-                   req_options: [plug: probe_plug]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "n" end
-               )
-
-      assert message =~ "auth probe failed"
-      assert message =~ "Codex"
-      refute_received {:oauth_opened, _url}
-    end
   end
 
-  describe "--import-codex" do
-    test "imports tokens, persists to fermix store, and selects openai_codex" do
+  # `openai_codex` signs in with ChatGPT through the terminal sign-in `fermix
+  # auth login` runs (`Auth.ChatGPT.TerminalLogin`), so a line typed at its
+  # prompt reaches it as a pasted address. Every seam is injected: no browser
+  # opens, no standard input is read and nothing reaches OpenAI. The stand-in
+  # sign-in stores nothing, so setup is not ready after it and no probe runs.
+  describe "the openai_codex sign-in step" do
+    test "with no sign-in, setup signs in with a pasted address, then checks the model" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-
       prepare(home)
-      codex_path = write_codex_auth(home)
-      fermix_auth = Path.join(home, "auth.json")
-
-      {puts, collector} = puts_collector()
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   import_codex: true,
-                   codex_auth_path: codex_path,
-                   fermix_auth_path: fermix_auth,
-                   req_options: [plug: &__MODULE__.success_plug/1]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert {:ok, raw} = File.read(fermix_auth)
-      data = Jason.decode!(raw)
-      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
-
-      providers = Application.get_env(:fermix_core, :providers, [])
-      refute Keyword.has_key?(providers[:openai], :auth_mode)
-
-      env_codex = Application.get_env(:fermix_core, :providers, [])[:openai_codex] || []
-      assert Keyword.get(env_codex, :primary) == true
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
-    end
-
-    test "explicit --import-codex re-runs when openai_codex is already selected" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-
-      prepare(home)
-
-      Application.put_env(:fermix_core, :providers,
-        openai: [],
-        openai_codex: [default_model: "gpt-5.5", reasoning_effort: :medium]
-      )
-
-      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
-
-      codex_path = write_codex_auth(home, "fresh_codex_rt")
-      fermix_auth = Path.join(home, "auth.json")
-
-      {puts, collector} = puts_collector()
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   import_codex: true,
-                   codex_auth_path: codex_path,
-                   fermix_auth_path: fermix_auth,
-                   req_options: [plug: &__MODULE__.success_plug/1],
-                   skip_probe: true
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert {:ok, raw} = File.read(fermix_auth)
-      data = Jason.decode!(raw)
-      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "imported_at"
-      assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "imported_rt"
-
-      lines = puts_lines(collector)
-      assert Enum.any?(lines, &String.contains?(&1, "Imported OpenAI tokens"))
-    end
-
-    test "surfaces an error when refresh fails" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-
-      prepare(home)
-      codex_path = write_codex_auth(home)
-      fermix_auth = Path.join(home, "auth.json")
-
-      {puts, _collector} = puts_collector()
-
-      assert {:error, message} =
-               Runtime.run(
-                 [
-                   import_codex: true,
-                   codex_auth_path: codex_path,
-                   fermix_auth_path: fermix_auth,
-                   req_options: [plug: &__MODULE__.failure_plug/1]
-                 ],
-                 puts: puts,
-                 prompt: fn _ -> "" end
-               )
-
-      assert message =~ "codex import failed"
-      refute File.exists?(fermix_auth)
-    end
-
-    # The import spends the Codex CLI's refresh token, so a Codex profile
-    # another Fermix process keeps busy refuses it first, and setup says to
-    # retry rather than printing the reason's atom. The test shortens the lock's
-    # wait.
-    test "a busy Codex profile refuses the import with the try-again sentence", ctx do
-      FermixTestSupport.ProfileLockWait.shorten!(ctx)
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-
-      prepare(home)
-      codex_path = write_codex_auth(home)
-      fermix_auth = Path.join(home, "auth.json")
-      File.write!(AuthStore.profile_lock_path(:openai_codex, fermix_auth), "0 x\n")
       parent = self()
+      pasted = "http://127.0.0.1:1455/auth/callback?code=C&state=S"
 
-      token_endpoint = fn conn ->
-        send(parent, :token_endpoint_called)
-        success_plug(conn)
+      login = fn opts ->
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.openai.com/api/accounts/authorize")
+
+        receive do
+          {:chatgpt_callback, url} -> send(parent, {:pasted, url})
+        after
+          2_000 -> flunk("no pasted address reached the sign-in")
+        end
+
+        {:ok, %{account: "owner@example.com", plan_usage: :on}}
       end
 
+      live_model = fn provider, opts ->
+        send(parent, {:live_model, provider, opts})
+        {:ok, %{model: "gpt-live", changed?: true}}
+      end
+
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 codex_answers(home,
+                   no_browser: true,
+                   chatgpt_login: login,
+                   read_line: typed(["  #{pasted}\n"]),
+                   live_model: live_model
+                 ),
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      assert_received {:pasted, ^pasted}
+      assert_received {:live_model, :openai_codex, []}
+
+      lines = puts_lines(collector)
+      assert "Signing in with ChatGPT for openai_codex." in lines
+      assert Enum.any?(lines, &(&1 =~ "Open this address in a browser to sign in to ChatGPT:"))
+      assert "Or paste the address your browser ended on:" in lines
+      assert "Signed in to ChatGPT as owner@example.com." in lines
+      assert "Default model set to gpt-live, the first one your ChatGPT account lists." in lines
+    end
+
+    test "a model list that cannot be read is said, and setup goes on" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      {puts, collector} = puts_collector()
+
+      assert :ok =
+               Runtime.run(
+                 codex_answers(home,
+                   chatgpt_login: fn _opts -> {:ok, %{account: nil, plan_usage: :on}} end,
+                   live_model: fn :openai_codex, [] -> {:error, "No models were listed."} end
+                 ),
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+
+      lines = puts_lines(collector)
+      assert "Signed in to ChatGPT." in lines
+
+      assert ("The default model was not checked against your ChatGPT account. " <>
+                "No models were listed.") in lines
+    end
+
+    test "a sign-in without plan usage fails setup with what to turn on" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
       {puts, _collector} = puts_collector()
 
-      setup =
-        Task.async(fn ->
-          Runtime.run(
-            [
-              import_codex: true,
-              codex_auth_path: codex_path,
-              fermix_auth_path: fermix_auth,
-              req_options: [plug: token_endpoint]
-            ],
-            puts: puts,
-            prompt: fn _ -> "" end
-          )
-        end)
+      assert {:error, sentence} =
+               Runtime.run(
+                 codex_answers(home,
+                   chatgpt_login: fn _opts -> {:ok, %{account: nil, plan_usage: :off}} end,
+                   live_model: fn _provider, _opts ->
+                     flunk("no model check without plan usage")
+                   end
+                 ),
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
 
-      assert {:ok, {:error, message}} =
-               Task.yield(setup, 15_000) || Task.shutdown(setup, :brutal_kill)
+      assert sentence == ChatGPT.failure_sentence(:plan_usage_off)
+    end
 
-      assert message ==
-               "codex import failed: Another Fermix process is refreshing or signing in " <>
-                 "to this account. Try again shortly."
+    test "a failed sign-in fails setup with the sign-in's own sentence" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      {puts, _collector} = puts_collector()
 
-      refute_received :token_endpoint_called
-      refute File.exists?(fermix_auth)
+      assert {:error, "Sign-in was cancelled in the browser."} =
+               Runtime.run(
+                 codex_answers(home, chatgpt_login: fn _opts -> {:error, :access_denied} end),
+                 puts: puts,
+                 prompt: fn _ -> "" end
+               )
+    end
+
+    # A registration the route can use needs no sign-in. Setup is then ready,
+    # so its probe runs, through the plug; what it answers is the probe's own.
+    test "a usable ChatGPT sign-in starts no new one" do
+      home = tmp_home()
+      profile = AuthStore.profile(:openai_codex)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
+      prepare(home)
+      :ok = TokenSupervisor.stop_profile(profile)
+      :ok = AuthStore.write(profile, usable_chatgpt(), Path.join(home, "auth.json"))
+      {puts, collector} = puts_collector()
+
+      Runtime.run(
+        codex_answers(home,
+          chatgpt_login: fn _opts -> flunk("a usable sign-in needs no new one") end,
+          req_options: [plug: fn conn -> Plug.Conn.send_resp(conn, 503, "{}") end]
+        ),
+        puts: puts,
+        prompt: fn _ -> "" end
+      )
+
+      refute "Signing in with ChatGPT for openai_codex." in puts_lines(collector)
     end
   end
 
@@ -945,7 +608,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       })
     end
 
-    defp locked_run(home, prompt) do
+    defp locked_run(prompt) do
       lock_keyring!()
       {puts, collector} = puts_collector()
 
@@ -955,7 +618,6 @@ defmodule FermixCore.Setup.RuntimeTest do
             telegram_bot_token: "123:abc",
             telegram_owner_user_id: "42",
             openai_api_key: "sk-x",
-            codex_auth_path: Path.join(home, "missing_codex_auth.json"),
             skip_probe: true
           ],
           puts: puts,
@@ -974,7 +636,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       # The wizard's other questions take a blank answer; only the consent
       # question is answered yes.
       {result, collector} =
-        locked_run(home, fn label ->
+        locked_run(fn label ->
           send(test_pid, {:prompt, label})
           if label =~ "Store secrets in that folder", do: "y", else: ""
         end)
@@ -999,7 +661,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       prepare(home)
 
       {result, _collector} =
-        locked_run(home, fn label ->
+        locked_run(fn label ->
           if label =~ "Store secrets in that folder", do: "n", else: ""
         end)
 
@@ -1027,7 +689,6 @@ defmodule FermixCore.Setup.RuntimeTest do
                    telegram_bot_token: "123:abc",
                    telegram_owner_user_id: "42",
                    openai_api_key: "sk-x",
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
                    skip_probe: true
                  ],
                  puts: puts,
@@ -1069,7 +730,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       [telegram_bot_token: "123:abc", telegram_owner_user_id: "42", openai_api_key: "sk-x"]
     end
 
-    defp store_run(home, opts, store_answer) do
+    defp store_run(opts, store_answer) do
       test_pid = self()
       {puts, collector} = puts_collector()
 
@@ -1080,8 +741,7 @@ defmodule FermixCore.Setup.RuntimeTest do
 
       result =
         Runtime.run(
-          opts ++
-            [codex_auth_path: Path.join(home, "missing_codex_auth.json"), skip_probe: true],
+          opts ++ [skip_probe: true],
           puts: puts,
           prompt: prompt
         )
@@ -1103,7 +763,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       prepare(home)
       no_keyring!()
 
-      {result, printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "")
+      {result, printed, prompts} = store_run([display?: false] ++ channel_answers(), "")
 
       assert :ok = result
       assert [first | _] = prompts
@@ -1129,7 +789,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       Application.put_env(:fermix_core, :agent, name: "fermix")
       no_keyring!()
 
-      {_result, _printed, prompts} = store_run(home, [display?: false], "")
+      {_result, _printed, prompts} = store_run([display?: false], "")
 
       assert [first | rest] = prompts
       assert first == "Store secrets in that folder? [Y/n]"
@@ -1143,7 +803,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       prepare(home)
       no_keyring!()
 
-      {result, _printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "n")
+      {result, _printed, prompts} = store_run([display?: false] ++ channel_answers(), "n")
 
       assert {:error, sentence} = result
       assert sentence =~ "could not be saved: this machine has no keyring client"
@@ -1162,7 +822,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       prepare(home)
       no_keyring!()
 
-      {result, _printed, prompts} = store_run(home, [display?: true] ++ channel_answers(), "")
+      {result, _printed, prompts} = store_run([display?: true] ++ channel_answers(), "")
 
       assert {:error, _sentence} = result
       assert "Store secrets in that folder from now on? [y/N]: " in prompts
@@ -1174,7 +834,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
       prepare(home)
 
-      {result, _printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "")
+      {result, _printed, prompts} = store_run([display?: false] ++ channel_answers(), "")
 
       assert :ok = result
       refute Enum.any?(prompts, &(&1 =~ "Store secrets in that folder"))
@@ -1188,7 +848,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       no_keyring!()
 
       {result, _printed, prompts} =
-        store_run(home, [display?: false, secret_store: "keyring"] ++ channel_answers(), "")
+        store_run([display?: false, secret_store: "keyring"] ++ channel_answers(), "")
 
       assert {:error, sentence} = result
       assert sentence =~ "could not be saved"
@@ -1270,12 +930,6 @@ defmodule FermixCore.Setup.RuntimeTest do
                    image_backend: "google",
                    image_model: "gemini-2.5-flash-image",
                    google_api_key: "gm-key",
-                   # No provider key is seeded here, so without a nonexistent codex
-                   # auth path `maybe_import_codex` would probe the operator's REAL
-                   # ~/.codex/auth.json and fire a live OAuth token refresh during
-                   # `mix test` (banned host-credential access). Point it at a
-                   # missing tmp path so the probe short-circuits.
-                   codex_auth_path: Path.join(home, "missing_codex_auth.json"),
                    skip_probe: true
                  ],
                  puts: puts,
@@ -1469,7 +1123,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
-      assert Keyword.get(codex_block, :fast) == false
+      refute Keyword.has_key?(codex_block, :fast)
     end
 
     test "non-interactive xai run persists the api key, provider, model, and effort" do
@@ -1501,50 +1155,6 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(xai_block, :api_key) == "xai-key"
       assert Keyword.get(xai_block, :default_model) == "grok-4.3"
       assert Keyword.get(xai_block, :reasoning_effort) == :high
-    end
-
-    test "explicitly selecting a non-codex provider suppresses the Codex import even with a Codex auth file present" do
-      home = tmp_home()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
-      prepare(home)
-
-      # A real, importable Codex auth file: codex_available?/1 returns true, so the
-      # only thing standing between this xai run and a live token import is the
-      # selected-provider guard under test.
-      codex_path = write_codex_auth(home)
-      test_pid = self()
-
-      # If the import ever fires, run_codex_import -> RefreshClient.refresh hits
-      # this plug. An xai run must never reach it: a non-codex provider selection
-      # suppresses the import outright.
-      refresh_spy = fn conn ->
-        send(test_pid, :codex_refresh_called)
-        __MODULE__.success_plug(conn)
-      end
-
-      {puts, _collector} = puts_collector()
-
-      assert :ok =
-               Runtime.run(
-                 [
-                   provider: "xai",
-                   xai_api_key: "xai-key",
-                   default_model: "grok-4.3",
-                   reasoning_effort: "high",
-                   skip_probe: true,
-                   codex_auth_path: codex_path,
-                   req_options: [plug: refresh_spy]
-                 ],
-                 puts: puts,
-                 # Blank answers: the import prompt would default to YES pre-fix.
-                 prompt: fn _ -> "" end
-               )
-
-      refute_received :codex_refresh_called
-
-      assert {:ok, snapshot} = ConfigStore.load_runtime_config()
-      xai_block = snapshot.fermix_core |> Keyword.get(:providers, []) |> Keyword.get(:xai, [])
-      assert Keyword.get(xai_block, :primary) == true
     end
 
     test "provided channel flags do not suppress missing provider/model prompts" do
@@ -1598,7 +1208,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Enum.any?(labels, &String.starts_with?(&1, "Provider"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Default model"))
       assert Enum.any?(labels, &String.starts_with?(&1, "Reasoning effort"))
-      assert Enum.any?(labels, &String.starts_with?(&1, "Codex fast mode"))
+      refute Enum.any?(labels, &String.starts_with?(&1, "Codex fast mode"))
 
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       agent = snapshot.fermix_core |> Keyword.get(:agent, [])
@@ -1609,9 +1219,12 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(codex_block, :primary) == true
       assert Keyword.get(codex_block, :default_model) == "gpt-5.5"
       assert Keyword.get(codex_block, :reasoning_effort) == :high
-      assert Keyword.get(codex_block, :fast) == false
+      refute Keyword.has_key?(codex_block, :fast)
     end
 
+    # `openai_codex` ships no catalog model: the one it runs comes from the
+    # account's own list once it signs in with ChatGPT (`Setup.LiveModel`), so
+    # a blank model answer stores none.
     test "blank model and effort answers use the selected provider defaults" do
       home = tmp_home()
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
@@ -1655,7 +1268,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       codex_block = Keyword.get(providers, :openai_codex, [])
 
       assert Keyword.get(codex_block, :primary) == true
-      assert Keyword.get(codex_block, :default_model) == "gpt-6-astra"
+      assert Keyword.get(codex_block, :default_model) == nil
       assert Keyword.get(codex_block, :reasoning_effort) == :high
     end
 

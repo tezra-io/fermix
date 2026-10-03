@@ -1,10 +1,13 @@
 defmodule FermixCore.Auth.ChatGPT do
   @moduledoc """
-  Sign in with ChatGPT: the `chatgpt` provider's registration, sign-in, sign-out
-  and standing (M57). The one surface the web setup, the provider route and the
-  doctor read; the OAuth details live behind it:
+  Sign in with ChatGPT: how the `openai_codex` provider signs in (M57), with its
+  registration, sign-in, sign-out and standing. The one surface the web setup,
+  the management sign-in, the terminal, the provider route and the doctor read;
+  the OAuth details live behind it:
 
     * `ChatGPT.Login`: the browser sign-in and its redeem order.
+    * `ChatGPT.TerminalLogin`: the same sign-in from a terminal, which also
+      takes a pasted address.
     * `ChatGPT.Logout`: revoke upstream, clear the tokens, keep the registration.
     * `ChatGPT.Refresh`: the token managers' refresh of the `chatgpt` profile.
     * `ChatGPT.Registration`: the stored entry and what it means.

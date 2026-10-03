@@ -1,21 +1,8 @@
 defmodule FermixCore.Auth.OAuthFlow do
   @moduledoc """
-  Native OAuth Authorization Code + PKCE loopback flows.
-
-  The zero-argument flow mirrors the Codex CLI / RustyClaw contract:
-
-    * `client_id` `app_EMoamEEZ73f0CkXaXp7hrann`
-    * `redirect_uri` `http://localhost:1455/auth/callback`
-    * scopes `openid profile email offline_access`
-    * `codex_cli_simplified_flow=true` and `id_token_add_organizations=true`
-      (required to mint tokens that work against the
-      `chatgpt.com/backend-api/codex` Responses surface)
-
-  Fermix runs its own authorization grant — separate from Codex CLI's — so
-  the refresh chain is independent. This avoids the `refresh_token_reused`
-  race that occurs when two tools share a refresh token.
-
-  `start_loopback/2` accepts provider metadata for first-party plugins.
+  Native OAuth Authorization Code + PKCE loopback flows, for the provider an
+  `Auth.OAuthProvider` describes: xAI, the plugins' providers, and Sign in with
+  ChatGPT (`await_authorization/2`, whose caller exchanges the code itself).
 
   The exchange spends the authorization code, so a sign-in passes `:redeem`: a
   function given the exchange (a zero-arity function) that takes the profile
@@ -45,12 +32,6 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   require Logger
 
-  @client_id "app_EMoamEEZ73f0CkXaXp7hrann"
-  @authorize_url "https://auth.openai.com/oauth/authorize"
-  @token_url "https://auth.openai.com/oauth/token"
-  @redirect_uri "http://localhost:1455/auth/callback"
-  @redirect_port 1455
-  @scopes "openid profile email offline_access"
   @default_timeout_ms 300_000
   # A loopback catcher reads the request line with a non-buffering raw recv, so
   # the request can arrive split across reads — accumulate up to a full line,
@@ -104,35 +85,6 @@ defmodule FermixCore.Auth.OAuthFlow do
   @vendor_code ~r/\A[a-z0-9_.]{1,64}\z/
   @issued_client_id ~r/\A[a-zA-Z0-9_-]{1,200}\z/
 
-  @spec start_loopback(loopback_opts()) :: {:ok, term()} | {:error, term()}
-  def start_loopback(opts \\ []) when is_list(opts) do
-    port = Keyword.get(opts, :port, @redirect_port)
-    timeout_ms = Keyword.get(opts, :timeout_ms, @default_timeout_ms)
-    opener = Keyword.get(opts, :opener, &open_browser/1)
-    req_options = Keyword.get(opts, :req_options, [])
-    puts = Keyword.get(opts, :puts, &IO.puts/1)
-    redeem = Keyword.get(opts, :redeem, &exchange_only/1)
-
-    pkce = generate_pkce()
-    url = authorize_url(pkce)
-    spec = static_callback_spec(pkce.state)
-
-    case listen(port) do
-      {:ok, listener} ->
-        result =
-          with :ok <- announce_and_open(puts, opener, url),
-               {:ok, %{code: code}} <- await_callback(listener, spec, timeout_ms, opts) do
-            redeem.(codex_exchange(code, pkce.code_verifier, req_options))
-          end
-
-        :ok = :gen_tcp.close(listener)
-        result
-
-      {:error, _reason} = err ->
-        err
-    end
-  end
-
   @spec start_loopback(OAuthProvider.t(), loopback_opts()) :: {:ok, term()} | {:error, term()}
   def start_loopback(%OAuthProvider{} = provider, opts) when is_list(opts) do
     redeem = Keyword.get(opts, :redeem, &exchange_only/1)
@@ -182,9 +134,6 @@ defmodule FermixCore.Auth.OAuthFlow do
   defp exchange_only(exchange), do: exchange.()
 
   # The exchange `:redeem` is handed: nothing is spent until it is called.
-  defp codex_exchange(code, code_verifier, req_options),
-    do: fn -> exchange_code(code, code_verifier, req_options) end
-
   defp provider_exchange(provider, authorization, opts),
     do: fn -> exchange_with_userinfo(provider, authorization, opts) end
 
@@ -205,23 +154,6 @@ defmodule FermixCore.Auth.OAuthFlow do
     code_challenge = :crypto.hash(:sha256, code_verifier) |> Base.url_encode64(padding: false)
     state = random_base64url(24)
     %{code_verifier: code_verifier, code_challenge: code_challenge, state: state}
-  end
-
-  @spec authorize_url(pkce()) :: String.t()
-  def authorize_url(%{code_challenge: code_challenge, state: state}) do
-    params = [
-      {"response_type", "code"},
-      {"client_id", @client_id},
-      {"redirect_uri", @redirect_uri},
-      {"scope", @scopes},
-      {"code_challenge", code_challenge},
-      {"code_challenge_method", "S256"},
-      {"state", state},
-      {"codex_cli_simplified_flow", "true"},
-      {"id_token_add_organizations", "true"}
-    ]
-
-    @authorize_url <> "?" <> URI.encode_query(params)
   end
 
   @spec authorize_url(OAuthProvider.t(), pkce(), String.t()) :: String.t()
@@ -251,40 +183,6 @@ defmodule FermixCore.Auth.OAuthFlow do
     case String.split(path, "?", parts: 2) do
       [_path, query] -> parse_callback_query(query, expected_state)
       [_path] -> {:error, :missing_code}
-    end
-  end
-
-  @spec exchange_code(String.t(), String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
-  def exchange_code(code, code_verifier, req_options \\ [])
-      when is_binary(code) and is_binary(code_verifier) do
-    body =
-      URI.encode_query(%{
-        "grant_type" => "authorization_code",
-        "code" => code,
-        "client_id" => @client_id,
-        "redirect_uri" => @redirect_uri,
-        "code_verifier" => code_verifier
-      })
-
-    request =
-      Req.new(
-        [
-          url: @token_url,
-          method: :post,
-          body: body,
-          headers: [{"content-type", "application/x-www-form-urlencoded"}]
-        ] ++ RefreshClient.request_bounds()
-      )
-
-    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
-      {:ok, %{status: 200, body: body}} ->
-        parse_token_response(body)
-
-      {:ok, %{status: status, body: body}} ->
-        {:error, "Token exchange failed (#{status}): #{Redaction.format(body)}"}
-
-      {:error, reason} ->
-        {:error, reason}
     end
   end
 
@@ -472,32 +370,13 @@ defmodule FermixCore.Auth.OAuthFlow do
     "http://#{provider.redirect_host}:#{port}#{provider.redirect_path}"
   end
 
-  defp announce_and_open(puts, nil, url) do
-    puts.("Open this URL in your browser to sign in:\n  #{url}")
-    :ok
-  end
-
-  defp announce_and_open(puts, opener, url) when is_function(opener, 1) do
-    puts.("Opening browser to ChatGPT login...")
-
-    case opener.(url) do
-      :ok ->
-        :ok
-
-      {:error, reason} ->
-        Logger.warning("OAuthFlow: opener failed (#{Redaction.format(reason)}); printing URL")
-        puts.("Open this URL in your browser to sign in:\n  #{url}")
-        {:error, {:opener_failed, reason, url}}
-    end
-  end
-
   defp announce_and_open_optional(puts, nil, url) do
     puts.("Open this URL in your browser to sign in:\n  #{url}")
     :ok
   end
 
   defp announce_and_open_optional(puts, opener, url) when is_function(opener, 1) do
-    puts.("Opening browser for plugin authorization...")
+    puts.("Starting the browser sign-in...")
 
     case opener.(url) do
       :ok ->
@@ -528,9 +407,6 @@ defmodule FermixCore.Auth.OAuthFlow do
       client_id: provider.client_id
     }
   end
-
-  defp static_callback_spec(state),
-    do: %{state: state, hardened?: false, host: nil, path: nil, registration: :static}
 
   # The acceptor answers the browser in its own process and sends the first
   # request that settles the attempt, so this process can also take a pasted

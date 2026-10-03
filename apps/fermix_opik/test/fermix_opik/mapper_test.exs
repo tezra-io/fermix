@@ -269,10 +269,9 @@ defmodule FermixOpik.MapperTest do
 
   test "provider_string maps every Fermix provider to an Opik pricing token" do
     assert Mapper.provider_string(:openai) == "openai"
+    # OpenAI Codex on a ChatGPT plan prices as the API turn it stands in for
+    # (M57 O6); the span's own `provider` field still says openai_codex.
     assert Mapper.provider_string(:openai_codex) == "openai"
-    # ChatGPT plan usage prices as the API turn it stands in for (M57 O6); the
-    # span's own `provider` field still says chatgpt.
-    assert Mapper.provider_string(:chatgpt) == "openai"
     assert Mapper.provider_string(:anthropic) == "anthropic"
     assert Mapper.provider_string(:xai) == "xai"
     assert Mapper.provider_string(:openrouter) == "openrouter"

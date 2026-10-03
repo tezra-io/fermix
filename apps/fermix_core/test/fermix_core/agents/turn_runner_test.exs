@@ -1478,26 +1478,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
-    test "rate-limit reply names the reset window when the body carried resets_at" do
-      resets_at = System.system_time(:second) + 1800
-
-      reply =
-        TurnRunner.error_reply(
-          ProviderError.api(:openai_codex, :codex, 429, %{
-            "error" => %{
-              "code" => "usage_limit_reached",
-              "plan_type" => "Plus",
-              "resets_at" => resets_at
-            }
-          })
-        )
-
-      assert reply =~ "usage limit"
-      assert reply =~ "plus plan"
-      assert reply =~ ~r/~\d+ min/
-    end
-
-    test "rate-limit reply falls back to generic text without a reset time" do
+    test "rate-limit reply is the generic retry text" do
       reply =
         TurnRunner.error_reply(
           ProviderError.api(:openai, :openai, 429, %{"error" => %{"message" => "slow down"}})
@@ -1600,20 +1581,23 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert reply =~ "fermix auth login --provider xai"
     end
 
-    test "keeps the re-login hint for Codex OAuth auth failures" do
+    # OpenAI Codex signs in with ChatGPT, so a 401 that survived the refresh
+    # asks for that sign-in again rather than naming a terminal command.
+    test "an OpenAI Codex auth failure asks for a new ChatGPT sign-in" do
       reply =
         TurnRunner.error_reply(
           {:provider_error,
            %{
              provider: :openai_codex,
-             adapter: :codex,
+             adapter: :chatgpt_plan,
              status: 401,
              kind: :auth,
-             message: "token expired"
+             message: "token expired",
+             auth_mode: :oauth
            }}
         )
 
-      assert reply =~ "fermix auth login"
+      assert reply == "Your ChatGPT connection needs to be renewed. Sign in again."
     end
 
     test "maps provider rate limits to an actionable retry message" do
@@ -1789,9 +1773,10 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
-  # M57 §8: each ChatGPT plan refusal is its own sentence, and the vendor's own
-  # words follow it. Built the way the adapter builds them (oauth-tagged).
-  describe "error_reply/1 — ChatGPT plan usage" do
+  # M57 §8: each refusal of OpenAI Codex's ChatGPT plan route is its own
+  # sentence, and the vendor's own words follow it. Built the way the adapter
+  # builds them (oauth-tagged).
+  describe "error_reply/1 — OpenAI Codex on a ChatGPT plan" do
     @usage_limit "Your ChatGPT plan's usage limit for Fermix is reached. Review your plan or " <>
                    "Fermix's limit in ChatGPT settings: https://chatgpt.com/settings/usage"
 
@@ -1799,7 +1784,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       body = %{"error" => Map.merge(%{"code" => code, "message" => "Vendor says no."}, extra)}
 
       {:provider_error, error} =
-        ProviderError.api(:chatgpt, :chatgpt_plan, status, body,
+        ProviderError.api(:openai_codex, :chatgpt_plan, status, body,
           provider_words: "Vendor says no.",
           stage: stage
         )
@@ -1865,7 +1850,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     test "a bare detail refusal is quoted as it came, not called a sign-in fault" do
       {:provider_error, error} =
-        ProviderError.api(:chatgpt, :chatgpt_plan, 403, ~s({"detail":"Region not served."}),
+        ProviderError.api(:openai_codex, :chatgpt_plan, 403, ~s({"detail":"Region not served."}),
           provider_words: "Region not served."
         )
 
@@ -1884,7 +1869,9 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     test "after a failover chain the last ChatGPT refusal keeps its sentence" do
       last = plan_error(403, "subscription_sharing_user_not_eligible")
 
-      assert TurnRunner.error_reply({:all_routes_failed, [{:openai, :ignored}, {:chatgpt, last}]}) =~
+      assert TurnRunner.error_reply(
+               {:all_routes_failed, [{:openai, :ignored}, {:openai_codex, last}]}
+             ) =~
                "can't use its plan in Fermix"
     end
   end

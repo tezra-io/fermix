@@ -125,10 +125,10 @@ defmodule FermixCore.Auth.RefreshClientTest do
 
     defp recorded_sleep(parent), do: fn ms -> send(parent, {:retry_sleep, ms}) end
 
-    # The Codex path and the provider path, each with its own fresh options.
+    # A built-in provider and a plugin provider, each with its own fresh options.
     defp both_paths(options) do
       [
-        {:codex, fn -> RefreshClient.refresh("old_rt", options.()) end},
+        {:xai, fn -> RefreshClient.refresh(OAuthProvider.xai(), "old_rt", options.()) end},
         {:plugin, fn -> RefreshClient.refresh(provider("github"), "old_rt", options.()) end}
       ]
     end
@@ -210,9 +210,13 @@ defmodule FermixCore.Auth.RefreshClientTest do
       end
     end
 
-    test "both refresh paths bound pool checkout, connect and receive" do
-      assert {:ok, _tokens} = RefreshClient.refresh("old_rt", adapter: recording_adapter(self()))
-      assert_received {:request_options, codex}
+    test "a built-in and a plugin provider bound pool checkout, connect and receive" do
+      assert {:ok, _tokens} =
+               RefreshClient.refresh(OAuthProvider.xai(), "old_rt",
+                 adapter: recording_adapter(self())
+               )
+
+      assert_received {:request_options, builtin}
 
       assert {:ok, _tokens} =
                RefreshClient.refresh(provider("github"), "old_rt",
@@ -221,7 +225,7 @@ defmodule FermixCore.Auth.RefreshClientTest do
 
       assert_received {:request_options, plugin}
 
-      for options <- [codex, plugin] do
+      for options <- [builtin, plugin] do
         assert Map.get(options, :pool_timeout) == 5_000
         assert Map.get(options, :connect_options) == [timeout: 10_000]
         assert Map.get(options, :receive_timeout) == 15_000

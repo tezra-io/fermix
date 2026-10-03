@@ -6,7 +6,6 @@ defmodule FermixCore.Auth.TokenSupervisor do
   use Supervisor
 
   alias FermixCore.Auth.ChatGPT
-  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
@@ -21,7 +20,6 @@ defmodule FermixCore.Auth.TokenSupervisor do
   @dynamic_supervisor FermixCore.Auth.TokenDynamicSupervisor
   @stop_wait_attempts 10
   @stop_wait_ms 10
-  @codex_profile Store.profile(:openai_codex)
 
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) do
@@ -136,28 +134,19 @@ defmodule FermixCore.Auth.TokenSupervisor do
   the `auth_forget` request a tree-less CLI VM sends after its own
   (`fermix auth logout`, `fermix plugins auth logout`).
 
-  The caller deleted the stored entry; this VM may still hold the tokens. The
-  manager serving the profile drops them, and deletes its plugin child's token
-  file, through `forget/1`. A child of this supervisor is then stopped, so its
-  next use starts a fresh manager from auth.json and serves a sign-in made
-  after the logout instead of refusing it. The Codex profile's manager is the
-  top-level `TokenManager`, which this supervisor does not own: it is only told
-  to forget, and a restart (or a reload after the next sign-in) brings it back.
-  Never starts a manager, and a manager that stopped between its lookup and
-  the call held nothing, so that is `:ok` too.
+  The caller deleted the stored entry (or, for ChatGPT, cleared its tokens);
+  this VM may still hold the tokens. The manager serving the profile drops
+  them, and deletes its plugin child's token file, through `forget/1`. The
+  child is then stopped, so its next use starts a fresh manager from auth.json
+  and serves a sign-in made after the logout instead of refusing it. Never
+  starts a manager, and a manager that stopped between its lookup and the call
+  held nothing, so that is `:ok` too.
 
   A `get_token` call queued on a child at the moment it is stopped exits in its
   caller instead of answering `{:error, :reauthorization_required}`: a window
   of one message.
   """
   @spec forget_signed_out(String.t()) :: :ok
-  def forget_signed_out(@codex_profile) do
-    case Process.whereis(TokenManager) do
-      nil -> :ok
-      pid -> forget_live(fn -> TokenManager.forget(pid) end)
-    end
-  end
-
   def forget_signed_out(auth_profile) when is_binary(auth_profile) and auth_profile != "" do
     :ok = forget_live(fn -> forget(auth_profile) end)
     stop_profile(auth_profile)
@@ -335,9 +324,6 @@ defmodule FermixCore.Auth.TokenSupervisor do
   @doc false
   @spec refresh_entry(String.t(), Store.entry(), keyword()) ::
           {:ok, Store.entry()} | {:error, term()}
-  def refresh_entry("openai_codex", entry, req_options),
-    do: CodexToken.refresh_entry(entry, Store.path(), req_options)
-
   # ChatGPT reads its own refusals (terminal codes, another account); this
   # path records them as every other profile's are.
   def refresh_entry(auth_profile, %{provider: "chatgpt"} = entry, req_options) do

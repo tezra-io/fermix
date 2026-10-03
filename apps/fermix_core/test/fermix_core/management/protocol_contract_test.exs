@@ -396,8 +396,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
     end
   end
 
-  # A provider whose models are discovered live (ChatGPT) ships no catalog, so
-  # its section offers nothing and holds the empty value until one is chosen.
+  # A provider whose models are discovered live (OpenAI Codex) ships no catalog,
+  # so its section offers nothing and holds the empty value until one is chosen.
   defp assert_holds_offered_model(%{"options" => [], "value" => value}, id),
     do: assert(value == "", id)
 
@@ -906,7 +906,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # owned by the case's own task supervisor and stops with it.
   defp blocking_login do
     fn login_opts ->
-      :ok = Keyword.fetch!(login_opts, :oauth_opener).("https://auth.example/authorize")
+      :ok = Keyword.fetch!(login_opts, :opener).("https://auth.example/authorize")
       block()
     end
   end

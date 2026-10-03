@@ -656,7 +656,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParserTest do
       assert body["model"] == text
     end
 
-    # `overflowed?` is the flag `Codex.collect_sse/3` reads to return
+    # `overflowed?` is the flag `ChatGPTPlan`'s collector reads to return
     # `{:halt, acc}`. The cap bounds memory only; without a reader that stops
     # the transfer the request never returns at all, so the flag has to survive
     # into the state the collector inspects — not just clear the buffer.

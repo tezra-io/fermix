@@ -36,9 +36,9 @@ defmodule FermixCore.Auth.Store do
   most three attempts and two store-lock waits (about 107 s,
   `RefreshClient.worst_case_ms/0`); a sign-in is at most three single-attempt
   requests (the exchange, the account lookup, a region probe;
-  `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s), and
-  the Codex import one refresh and one write. The profile lock's threshold is
-  120 s, and `store_test.exs` ("lock bounds") holds these bounds.
+  `RefreshClient.request_bounds/0`) and one store-lock wait (about 98 s). The
+  profile lock's threshold is 120 s, and `store_test.exs` ("lock bounds")
+  holds these bounds.
 
   A file that does not parse is `{:invalid_json, byte_offset}`. The parse
   error's own `:data` is the whole file, every profile's tokens, so it never
@@ -229,13 +229,14 @@ defmodule FermixCore.Auth.Store do
 
   # The one provider -> auth-profile table. A profile name is not the provider
   # id: anthropic and xai store their OAuth entries under their own profile,
-  # so reading `auth.json` under the provider id finds nothing and reports a
-  # signed-in account as absent.
+  # and `openai_codex` signs in with ChatGPT, whose registration lives under
+  # `chatgpt` (`Auth.ChatGPT.Registration`), so reading `auth.json` under the
+  # provider id finds nothing and reports a signed-in account as absent. An
+  # entry an older build stored under `openai_codex` is no longer read.
   @auth_profiles %{
-    openai_codex: "openai_codex",
+    openai_codex: "chatgpt",
     anthropic: "anthropic_oauth",
-    xai: "xai_oauth",
-    chatgpt: "chatgpt"
+    xai: "xai_oauth"
   }
 
   @doc """
@@ -594,9 +595,9 @@ defmodule FermixCore.Auth.Store do
   defp encode(doc), do: Jason.encode!(doc, pretty: true) <> "\n"
 
   # `Lock.with_lock/3` raises when it cannot create the lock's directory, and
-  # its owner is linked to the caller. A raise inside the Codex TokenManager
-  # restarts every later child of the top-level `:rest_for_one` tree, so the
-  # directory is made here first and a lock not taken is a tuple. Only a wedged
+  # its owner is linked to the caller. A raise inside a token manager would
+  # crash it mid-refresh with the profile's state lost, so the directory is
+  # made here first and a lock not taken is a tuple. Only a wedged
   # filesystem, timing out the owner's own calls, still exits the caller.
   # `busy` is the answer when another holder keeps the lock past the wait.
   defp lock(lock_path, opts, busy, fun) do

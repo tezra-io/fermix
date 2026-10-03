@@ -4,7 +4,7 @@ defmodule FermixCore.Providers.AdapterTest do
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Anthropic.Messages, as: AnthropicMessages
   alias FermixCore.Providers.OpenAI.ChatCompletions
-  alias FermixCore.Providers.OpenAI.Codex
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.OpenAI.Responses
 
   describe "has_image_content?/1" do
@@ -28,13 +28,13 @@ defmodule FermixCore.Providers.AdapterTest do
   end
 
   describe "for_route/1" do
-    test "openai_codex provider routes to Codex regardless of model" do
+    test "openai_codex provider routes to ChatGPTPlan regardless of model" do
       assert Adapter.for_route(%{
                provider: :openai_codex,
                model: "gpt-5",
                auth_mode: :oauth,
-               base_url: "https://chatgpt.com/backend-api/codex"
-             }) == Codex
+               base_url: "https://api.openai.com/v1"
+             }) == ChatGPTPlan
     end
 
     test "openai + gpt model on api.openai.com routes to Responses" do

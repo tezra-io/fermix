@@ -92,7 +92,7 @@ redacting logger, attaches telemetry, and starts the core tree under
 
 1. command hosting, `FermixCore.TaskSupervisor`, the `FermixCore.Finch` HTTP
    pool, and `Trace`
-2. `Auth.TokenSupervisor`, plus the Codex token manager when Codex is routable
+2. `Auth.TokenSupervisor`
 3. `Browser.Supervisor`
 4. `Capabilities.Registry` and its seeders (built-ins, sandbox commands, the
    plugin installer and plugin tools), then `SkillRegistry`
@@ -160,14 +160,17 @@ snapshot built when the loop starts, never hard-coded in the loop.
 `Providers.Adapter` is the provider behaviour (`chat/3`, `continue/3`,
 `to_provider_tools/1`, `parse_tool_calls/1`, `parse_response/1`, and optional
 `supports_streaming?/0`). The static `Providers.Descriptor` registry is the
-single source of truth for the supported providers: `openai_codex` (Codex
-OAuth), OpenAI (API key), Anthropic (API key or subscription OAuth), xAI (API
-key or Grok OAuth, shown as SpaceXAI), OpenRouter, Mistral, Venice, and a
-keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
+single source of truth for the supported providers: `openai_codex` (OpenAI
+Codex, Sign in with ChatGPT on the person's plan), OpenAI (API key), Anthropic
+(API key or subscription OAuth), xAI (API key or Grok OAuth, shown as
+SpaceXAI), OpenRouter, Mistral, Venice, and a keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
 config keys, and whether the provider supports reasoning effort. Adapters
-include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.Codex`,
-`Anthropic.Messages`, and `XAI.Responses`; OpenAI is `:routed` (model +
-base_url pick Responses vs ChatCompletions).
+include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan`
+(OpenAI Codex on the public Responses API), `Anthropic.Messages`, and
+`XAI.Responses`; OpenAI is `:routed` (model + base_url pick Responses vs
+ChatCompletions). OpenAI Codex ships no model catalog: `ModelListing` reads the
+signed-in account's list, and after a sign-in `Setup.LiveModel` sets the
+configured model to the first listed one when the list does not have it.
 
 `Selection` builds the primary-plus-fallback chain (at most one provider may be
 marked `primary`), `RouteResolver` resolves a route to `{route_key,
@@ -189,10 +192,10 @@ secret overlay in `config/runtime.exs`, not a sweep of hand-maintained lists.
 
 `Auth` owns OAuth credentials for providers and plugins. `Auth.Store` keeps
 versioned per-provider profiles in `FERMIX_HOME/auth.json`, written atomically
-with mode 0600. Login flows are per vendor (`CodexLogin` and `OAuthFlow` with a
-loopback listener, `CodexImport`, `AnthropicLogin`, `XAILogin`, and plugin
-providers through `OAuthProviders`), and `TokenSupervisor` runs one
-`TokenManager` per profile.
+with mode 0600. Login flows are per vendor (`Auth.ChatGPT`, Sign in with ChatGPT
+for `openai_codex`, under the `chatgpt` profile; `OAuthFlow` with a loopback
+listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
+`OAuthProviders`), and `TokenSupervisor` runs one `TokenManager` per profile.
 
 `Net.HttpClient` sends outbound HTTP on the shared `FermixCore.Finch` pool,
 retrying once on a stale socket and never on a timeout. `Net.Egress` decides how

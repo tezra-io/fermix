@@ -6,12 +6,10 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
-  alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.OAuthProviders
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenExpiry
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -49,6 +47,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Doctor
+  alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.MachineFacts
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
@@ -116,7 +115,7 @@ defmodule FermixWebWeb.SetupLive do
   @oauth_client_providers ~w(google github notion x slack tesla)
   # Derived from the descriptor registry: every provider setup field plus
   # each multi-auth-mode provider's auth_mode answer (M12 §6.2).
-  @provider_restart_keys [:provider, :default_model, :reasoning_effort, :fast] ++
+  @provider_restart_keys [:provider, :default_model, :reasoning_effort] ++
                            Enum.flat_map(
                              FermixCore.Providers.Descriptor.all(),
                              fn descriptor -> Enum.map(descriptor.setup_fields, & &1.key) end
@@ -206,8 +205,6 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:doctor_probe_running?, false)
       |> assign(:restarting, false)
       |> assign(:restart_pending?, false)
-      |> assign(:codex_auth_tasks, %{})
-      |> assign(:codex_auth_url, nil)
       |> assign(:xai_auth_tasks, %{})
       |> assign(:xai_auth_url, nil)
       |> assign(:chatgpt_auth_task, nil)
@@ -276,7 +273,6 @@ defmodule FermixWebWeb.SetupLive do
           |> maybe_put_string(:edit_provider, params["provider"])
           |> maybe_put_string(:default_model, params["default_model"])
           |> maybe_put_string(:reasoning_effort, params["reasoning_effort"])
-          |> maybe_put_string(:fast, params["fast"])
           |> put_provider_field_answers(params)
           |> put_auth_mode_answer(params["provider"], params["auth_mode"])
           |> put_subagent_model_answer(params)
@@ -312,14 +308,6 @@ defmodule FermixWebWeb.SetupLive do
        )}
     else
       {:noreply, socket}
-    end
-  end
-
-  def handle_event("codex_login", _params, socket) do
-    if codex_auth_running?(socket.assigns.codex_auth_tasks) do
-      {:noreply, flash_info(socket, "Codex sign-in is already open.")}
-    else
-      {:noreply, start_codex_auth(socket)}
     end
   end
 
@@ -898,20 +886,6 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   @impl true
-  def handle_info({:codex_auth_url, url}, socket) do
-    Process.send_after(self(), {:clear_codex_auth_url, url}, plugin_auth_url_timeout_ms())
-
-    {:noreply,
-     socket
-     |> assign(:codex_auth_url, url)
-     |> flash_info("Opening Codex sign-in.")
-     |> push_event("codex-auth-open", %{url: url})}
-  end
-
-  def handle_info({:clear_codex_auth_url, url}, socket) do
-    {:noreply, maybe_clear_codex_auth_url(socket, url)}
-  end
-
   def handle_info({:xai_auth_url, url}, socket) do
     Process.send_after(self(), {:clear_xai_auth_url, url}, plugin_auth_url_timeout_ms())
 
@@ -1095,9 +1069,6 @@ defmodule FermixWebWeb.SetupLive do
       memory_form={@memory_form}
       personalization_form={@personalization_form}
       harness_setup={@harness_setup}
-      codex_auth={@codex_auth}
-      codex_auth_running?={codex_auth_running?(@codex_auth_tasks)}
-      codex_auth_url={@codex_auth_url}
       xai_auth={@xai_auth}
       xai_auth_running?={xai_auth_running?(@xai_auth_tasks)}
       xai_auth_url={@xai_auth_url}
@@ -1183,7 +1154,6 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:provider_form, provider_form)
     |> assign_model_sources(provider_form)
     |> assign(:provider_statuses, build_provider_statuses(snapshot))
-    |> assign(:codex_auth, codex_auth_summary())
     |> assign(:xai_auth, xai_auth_summary())
     |> assign(:chatgpt_auth, ChatGPT.summary())
     |> assign(:anthropic_auth, anthropic_auth_summary())
@@ -1543,7 +1513,6 @@ defmodule FermixWebWeb.SetupLive do
       subagent_model: Map.get(params, "subagent_model", current.subagent_model),
       reasoning_effort:
         parse_effort_field(Map.get(params, "reasoning_effort"), current.reasoning_effort),
-      fast: parse_fast_field(Map.get(params, "fast"), current.fast),
       auth_mode: parse_auth_mode_field(Map.get(params, "auth_mode"), current.auth_mode),
       # Carry the plain setup fields (e.g. Ollama's base_url) across an in-place
       # edit; without this the re-render drops them and the input blanks out,
@@ -1576,7 +1545,6 @@ defmodule FermixWebWeb.SetupLive do
       default_model: ModelCatalog.effective_model(provider, provider_block),
       subagent_model: routing_subagent_model(snapshot),
       reasoning_effort: Keyword.get(provider_block, :reasoning_effort, default_effort(provider)),
-      fast: Keyword.get(provider_block, :fast, false),
       auth_mode: Keyword.get(provider_block, :auth_mode, :api_key),
       field_values: plain_field_values(provider, provider_block)
     }
@@ -1848,8 +1816,7 @@ defmodule FermixWebWeb.SetupLive do
       model: image_model_or_default(Keyword.get(generate_image, :model), options, default),
       openai_api_key_set: provider_api_key_set?(snapshot, :openai),
       xai_api_key_set: provider_api_key_set?(snapshot, :xai),
-      google_api_key_set: secret_set?(generate_image, :google_api_key),
-      codex_connected: codex_auth_summary().connected?
+      google_api_key_set: secret_set?(generate_image, :google_api_key)
     }
   end
 
@@ -3503,46 +3470,6 @@ defmodule FermixWebWeb.SetupLive do
 
   defp plugin_install_names(tasks), do: tasks |> Map.values() |> Enum.map(& &1.name)
 
-  defp start_codex_auth(socket) do
-    parent = self()
-
-    task =
-      Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, fn ->
-        run_codex_login(parent)
-      end)
-
-    tasks = Map.put(socket.assigns.codex_auth_tasks, task.ref, %{display_name: "Codex"})
-
-    socket
-    |> assign(:codex_auth_tasks, tasks)
-    |> assign(:codex_auth_url, nil)
-    |> flash_info("Opening Codex sign-in.")
-  end
-
-  defp run_codex_login(parent) do
-    result =
-      codex_login_runner().(
-        oauth_opener: codex_auth_opener(parent),
-        puts: fn _message -> :ok end
-      )
-
-    with {:ok, entry} <- result,
-         :ok <- reload_codex_token_manager() do
-      {:ok, entry}
-    end
-  end
-
-  defp codex_login_runner do
-    Application.get_env(:fermix_web, :codex_login_runner, &CodexLogin.login/1)
-  end
-
-  defp codex_auth_opener(parent) do
-    fn url ->
-      send(parent, {:codex_auth_url, url})
-      :ok
-    end
-  end
-
   defp finish_task(socket, ref, result) do
     cond do
       Map.has_key?(socket.assigns.plugin_install_tasks, ref) ->
@@ -3561,25 +3488,13 @@ defmodule FermixWebWeb.SetupLive do
         finish_chatgpt_auth_task(socket, ref, result)
 
       true ->
-        finish_codex_auth_task(socket, ref, result)
+        socket
     end
   end
 
   defp finish_known_plugin_auth(socket, ref, task, tasks, result) do
     Process.demonitor(ref, [:flush])
     finish_plugin_auth(socket, task, tasks, result)
-  end
-
-  defp finish_codex_auth_task(socket, ref, result) do
-    case Map.pop(socket.assigns.codex_auth_tasks, ref) do
-      {nil, _tasks} -> socket
-      {task, tasks} -> finish_known_codex_auth(socket, ref, task, tasks, result)
-    end
-  end
-
-  defp finish_known_codex_auth(socket, ref, task, tasks, result) do
-    Process.demonitor(ref, [:flush])
-    finish_codex_auth(socket, task, tasks, result)
   end
 
   defp fail_task(socket, ref, reason) do
@@ -3599,33 +3514,8 @@ defmodule FermixWebWeb.SetupLive do
         fail_chatgpt_auth_task(socket, reason)
 
       true ->
-        fail_codex_auth_task(socket, ref, reason)
+        socket
     end
-  end
-
-  defp fail_codex_auth_task(socket, ref, reason) do
-    case Map.pop(socket.assigns.codex_auth_tasks, ref) do
-      {nil, _tasks} -> socket
-      {task, tasks} -> fail_codex_auth(socket, task, tasks, reason)
-    end
-  end
-
-  defp finish_codex_auth(socket, task, tasks, {:ok, _entry}) do
-    socket
-    |> assign(:codex_auth_tasks, tasks)
-    |> assign(:codex_auth_url, nil)
-    |> connect_oauth_provider(:openai_codex, "#{task.display_name} OAuth connected.")
-  end
-
-  defp finish_codex_auth(socket, task, tasks, {:error, reason}) do
-    fail_codex_auth(socket, task, tasks, reason)
-  end
-
-  defp fail_codex_auth(socket, task, tasks, reason) do
-    socket
-    |> assign(:codex_auth_tasks, tasks)
-    |> assign(:codex_auth_url, nil)
-    |> flash_error(sign_in_failure(task.display_name, reason))
   end
 
   # A completed OAuth connection in setup means the user chose this provider, so
@@ -3658,62 +3548,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign_model_sources(provider_form)
   end
 
-  defp codex_auth_running?(tasks), do: map_size(tasks) > 0
-
-  defp maybe_clear_codex_auth_url(socket, url) do
-    if socket.assigns.codex_auth_url == url do
-      assign(socket, :codex_auth_url, nil)
-    else
-      socket
-    end
-  end
-
-  defp codex_auth_summary do
-    case Store.read(:openai_codex) do
-      {:ok, entry} ->
-        %{
-          connected?: true,
-          stale?: TokenExpiry.stale?(entry.expires_at),
-          account: codex_account_label(entry),
-          error: nil
-        }
-
-      {:error, reason} ->
-        %{connected?: false, account: nil, error: codex_auth_error(reason)}
-    end
-  rescue
-    error in ArgumentError ->
-      %{connected?: false, account: nil, error: Exception.message(error)}
-  end
-
-  defp codex_auth_error(:no_auth_file), do: nil
-  defp codex_auth_error({:provider_missing, _provider}), do: nil
-  defp codex_auth_error(reason), do: Redaction.format(reason)
-
-  defp codex_account_label(%{account: %{email: email}}) when is_binary(email) and email != "",
-    do: email
-
-  defp codex_account_label(%{account: %{display_name: name}})
-       when is_binary(name) and name != "",
-       do: name
-
-  defp codex_account_label(_entry), do: nil
-
-  defp reload_codex_token_manager do
-    case Process.whereis(TokenManager) do
-      nil -> :ok
-      _pid -> reload_running_codex_token_manager()
-    end
-  end
-
-  defp reload_running_codex_token_manager do
-    case TokenManager.reload(TokenManager) do
-      {:ok, _token} -> :ok
-      {:error, reason} -> {:error, {:token_manager_reload_failed, reason}}
-    end
-  end
-
-  # --- xAI (Grok) loopback OAuth — mirrors the Codex flow -------------------
+  # --- xAI (Grok) loopback OAuth ---------------------------------------------
 
   defp start_xai_auth(socket) do
     parent = self()
@@ -3803,11 +3638,10 @@ defmodule FermixWebWeb.SetupLive do
 
   defp xai_auth_summary, do: oauth_profile_summary(Store.profile(:xai))
 
-  # --- Sign in with ChatGPT (M57): plan usage as a provider ------------------
-  # Run like the Codex sign-in, one at a time. `Auth.ChatGPT` owns every rule
-  # (consent, the plan scope, revocation, the sentences); this orchestrates.
-
-  @chatgpt_no_models "ChatGPT is connected, but it listed no models for this account."
+  # --- Sign in with ChatGPT (M57): how OpenAI Codex signs in -----------------
+  # One sign-in at a time. `Auth.ChatGPT` owns every rule (consent, the plan
+  # scope, revocation, the sentences) and `Setup.LiveModel` the model check;
+  # this orchestrates.
 
   defp chatgpt_auth_view(summary, task, url, notice?, signing_out?) do
     Map.merge(summary, %{
@@ -3905,18 +3739,19 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:chatgpt_auth, ChatGPT.summary())
   end
 
-  # Plan usage granted: ChatGPT becomes primary (the Codex and Grok exception,
-  # O7) and gets a model, because its route refuses the empty one.
+  # Plan usage granted: OpenAI Codex gets a model its live list offers, because
+  # its route refuses one it cannot run, then becomes primary (the OAuth
+  # exception, O7).
   defp finish_chatgpt_auth(socket, {:ok, %{plan_usage: :on}}) do
-    model = ensure_chatgpt_model(socket.assigns.report.wizard)
+    model = ensure_codex_model(socket.assigns.report.wizard)
 
     socket
     |> assign(:chatgpt_notice?, true)
-    |> connect_oauth_provider(:chatgpt, "ChatGPT connected.")
-    |> show_chatgpt_model(model)
+    |> connect_oauth_provider(:openai_codex, codex_connected_message(model))
+    |> show_codex_model(model)
   end
 
-  # Signed in without plan usage: shown, but never primary (D7).
+  # Signed in without plan usage: shown, but never primary and no model (D7).
   defp finish_chatgpt_auth(socket, {:ok, %{plan_usage: :off}}) do
     refresh_report_preserving_provider_form(socket, ChatGPT.failure_sentence(:plan_usage_off))
   end
@@ -3924,55 +3759,26 @@ defmodule FermixWebWeb.SetupLive do
   defp finish_chatgpt_auth(socket, {:error, reason}),
     do: flash_error(socket, ChatGPT.failure_sentence(reason))
 
-  defp ensure_chatgpt_model(wizard) do
-    block = provider_block(wizard.config_snapshot, :chatgpt)
-
-    case ModelCatalog.effective_model(:chatgpt, block) do
-      "" -> persist_first_chatgpt_model(wizard)
-      _chosen -> :kept
-    end
+  # The web's listing seam feeds the one model check every sign-in door runs.
+  defp ensure_codex_model(wizard) do
+    impl = model_listing_impl()
+    LiveModel.ensure(:openai_codex, listing: &impl.live_models/2, wizard: wizard)
   end
 
-  defp persist_first_chatgpt_model(wizard) do
-    with {:ok, slug} <- first_chatgpt_model(),
-         {:ok, _report} <- save_chatgpt_model(wizard, slug) do
-      {:ok, slug}
-    end
-  end
+  defp codex_connected_message({:ok, %{changed?: true, model: slug}}),
+    do: "#{codex_label()} connected. Its model is now #{slug}."
 
-  # The account's own list, in the server's order. Nothing is guessed when the
-  # list cannot be read or is empty.
-  defp first_chatgpt_model do
-    case model_listing_impl().live_models(:chatgpt, []) do
-      {:ok, [%{id: slug} | _rest]} ->
-        {:ok, slug}
+  defp codex_connected_message(_model), do: "#{codex_label()} connected."
 
-      {:ok, []} ->
-        {:error, @chatgpt_no_models}
+  defp codex_label, do: Descriptor.fetch!(:openai_codex).label
 
-      {:error, sentence} ->
-        {:error, "ChatGPT is connected, but its models could not be listed: #{sentence}"}
-    end
-  end
+  defp show_codex_model(socket, {:error, sentence}), do: flash_error(socket, sentence)
+  defp show_codex_model(socket, {:ok, %{changed?: false}}), do: socket
 
-  defp save_chatgpt_model(wizard, slug) do
-    case Wizard.save_answers(wizard, edit_provider: "chatgpt", default_model: slug) do
-      {:ok, report} ->
-        {:ok, report}
-
-      {:error, reason} ->
-        {:error,
-         "ChatGPT is connected, but its model was not saved: #{format_config_error(reason)}"}
-    end
-  end
-
-  defp show_chatgpt_model(socket, :kept), do: socket
-  defp show_chatgpt_model(socket, {:error, sentence}), do: flash_error(socket, sentence)
-
-  # The preserved form still carries the empty model the sign-in started from.
-  defp show_chatgpt_model(socket, {:ok, slug}) do
+  # The preserved form still carries the model the sign-in started from.
+  defp show_codex_model(socket, {:ok, %{changed?: true, model: slug}}) do
     case socket.assigns.provider_form do
-      %{provider: :chatgpt} = form ->
+      %{provider: :openai_codex} = form ->
         assign(socket, :provider_form, %{form | default_model: slug})
 
       _other ->
@@ -4037,21 +3843,24 @@ defmodule FermixWebWeb.SetupLive do
     current_provider(snapshot) == :anthropic and anthropic_login_impl().claude_code_available?()
   end
 
-  # Shared connected/error read for the oauth profiles, with the same gating as
-  # codex_auth_summary: a missing auth file or missing provider is "not
-  # connected, no error".
+  # Shared connected/error read for the oauth profiles: a missing auth file or
+  # missing provider is "not connected, no error".
   defp oauth_profile_summary(profile) do
     case Store.read(profile) do
       {:ok, entry} ->
         %{connected?: true, stale?: TokenExpiry.stale?(entry.expires_at), error: nil}
 
       {:error, reason} ->
-        %{connected?: false, error: codex_auth_error(reason)}
+        %{connected?: false, error: oauth_store_error(reason)}
     end
   rescue
     error in ArgumentError ->
       %{connected?: false, error: Exception.message(error)}
   end
+
+  defp oauth_store_error(:no_auth_file), do: nil
+  defp oauth_store_error({:provider_missing, _provider}), do: nil
+  defp oauth_store_error(reason), do: Redaction.format(reason)
 
   defp parse_auth_mode_field("api_key", _default), do: :api_key
   defp parse_auth_mode_field("oauth", _default), do: :oauth
@@ -4158,10 +3967,6 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
-  defp parse_fast_field("true", _default), do: true
-  defp parse_fast_field("false", _default), do: false
-  defp parse_fast_field(_field, default), do: default
-
   defp parse_sandbox_mode("strict", _default), do: :strict
   defp parse_sandbox_mode("standard", _default), do: :standard
   defp parse_sandbox_mode("open", _default), do: :open
@@ -4199,8 +4004,6 @@ defmodule FermixWebWeb.SetupLive do
   defp normalize_image_backend("openai"), do: :openai
   defp normalize_image_backend("xai"), do: :xai
   defp normalize_image_backend("google"), do: :google
-  defp normalize_image_backend(:openai_codex), do: :openai_codex
-  defp normalize_image_backend("openai_codex"), do: :openai_codex
   defp normalize_image_backend(_value), do: :openai
 
   # Transcription has no keyless default; the form defaults to OpenAI (most

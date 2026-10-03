@@ -23,7 +23,7 @@ defmodule FermixCore.Providers.ReasoningEffort do
   """
 
   @type level :: :none | :low | :medium | :high | :xhigh | :max
-  @type provider :: :openai | :openai_codex | :chatgpt | :anthropic | :xai
+  @type provider :: :openai | :openai_codex | :anthropic | :xai
   @type mapping :: :omit | {:ok, String.t()} | {:error, {:unsupported, atom(), atom()}}
 
   @levels [:none, :low, :medium, :high, :xhigh, :max]
@@ -38,9 +38,6 @@ defmodule FermixCore.Providers.ReasoningEffort do
   @provider_levels %{
     openai: [:none, :low, :medium, :high, :xhigh, :max],
     openai_codex: [:none, :low, :medium, :high, :xhigh, :max],
-    # ChatGPT plan usage serves the same OpenAI reasoning models over the public
-    # Responses API, so it takes the OpenAI vocabulary (M57 D5).
-    chatgpt: [:none, :low, :medium, :high, :xhigh, :max],
     anthropic: [:low, :medium, :high, :xhigh, :max],
     xai: [:none, :low, :medium, :high, :xhigh]
   }

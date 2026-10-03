@@ -310,10 +310,24 @@ defmodule FermixCore.Management.SettingsTest do
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
-      for section <- ["providers.openai", "providers.openai_codex"] do
-        assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.(section) == []
-        refute "gpt-6-sol" in published.(section)
-      end
+      assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.("providers.openai") == []
+      refute "gpt-6-sol" in published.("providers.openai")
+    end
+
+    # OpenAI Codex lists the signed-in account's models live: its model row
+    # offers nothing shipped, holds the empty value until a model is chosen,
+    # and fast mode is retired, so no toggle is published.
+    test "the openai_codex section offers no shipped models and no fast toggle" do
+      Application.put_env(:fermix_core, :providers, openai_codex: [fast: true])
+      model = row("providers.openai_codex", "default_model")
+
+      assert model["options"] == []
+      assert model["value"] == ""
+
+      assert Enum.map(rows("providers.openai_codex"), & &1["key"]) == [
+               "default_model",
+               "reasoning_effort"
+             ]
     end
 
     # The explanation behind the model row's info control is the descriptor's,

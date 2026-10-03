@@ -790,10 +790,8 @@ defmodule FermixCore.Agents.TurnRunner do
     do: Map.put(metadata, :output, Telemetry.preview(response))
 
   # See `error_reply/2` for the auth-vs-generic mapping these patterns drive.
-  # (The Codex `{:auth_invalidated, _}`/`{:refresh_failed, _}` tuples are gone —
-  # the adapter now returns structured `{:provider_error, %{kind: :auth}}`.)
+  # Adapters return structured `{:provider_error, %{kind: :auth}}`.
   defp auth_error?(:no_auth_file), do: true
-  defp auth_error?(:auth_invalidated), do: true
   defp auth_error?(:refresh_failed), do: true
   defp auth_error?(:invalid_grant), do: true
   defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
@@ -804,7 +802,7 @@ defmodule FermixCore.Agents.TurnRunner do
   defp auth_error?(reason) when is_binary(reason) do
     String.match?(
       reason,
-      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file|auth_invalidated)\b/i
+      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file)\b/i
     )
   end
 
@@ -852,12 +850,12 @@ defmodule FermixCore.Agents.TurnRunner do
     "Authentication failed — run `fermix auth login` from the host and try again."
   end
 
-  # ChatGPT plan usage names each refusal (M57 §8), and those sentences come
-  # before the auth and status clauses: a plan refusal answered with a 403 is
-  # not a stale credential. The vendor's own words follow the sentence. A 401
-  # or 403 with no sentence of its own (a bare `{"detail": ...}` before the
-  # stream) is quoted as it came rather than called a sign-in fault.
-  defp chatgpt_plan_reply({:provider_error, %{provider: :chatgpt} = error} = reason) do
+  # OpenAI Codex's ChatGPT plan route names each refusal (M57 §8), and those
+  # sentences come before the auth and status clauses: a plan refusal answered
+  # with a 403 is not a stale credential. The vendor's own words follow the
+  # sentence. A 401 or 403 with no sentence of its own (a bare `{"detail": ...}`
+  # before the stream) is quoted as it came rather than called a sign-in fault.
+  defp chatgpt_plan_reply({:provider_error, %{provider: :openai_codex} = error} = reason) do
     case ChatGPTPlan.refusal_sentence(reason) do
       nil -> chatgpt_words_reply(error)
       sentence -> sentence <> chatgpt_words_suffix(error)
@@ -879,14 +877,12 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do
-    usage_limit_reply(error) ||
-      "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
+    "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
   end
 
   defp provider_error_reply({:provider_error, %{kind: :quota} = error}) do
-    usage_limit_reply(error) ||
-      "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
-        "billing, or model access, then retry."
+    "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
+      "billing, or model access, then retry."
   end
 
   # When the server declared its failure in words (`provider_words`, set
@@ -913,7 +909,7 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # A 200 the server itself declared terminal while delivering neither text nor a
-  # tool call (`Codex.undelivered_error/2`, `code: "empty_response"`). The status
+  # tool call (`code: "empty_response"`). The status
   # floor below would render it "returned HTTP 200", which reads as a transport
   # fault that did not happen; the provider's own sentence is the diagnosis.
   defp provider_error_reply({:provider_error, %{code: "empty_response"} = error}) do
@@ -945,23 +941,6 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   defp provider_error_reply(_reason), do: nil
-
-  # Friendly usage-limit message when the provider's 429 body carried a reset
-  # time (OpenAI/Codex). Best-effort and provider-agnostic — nil when no reset
-  # is available, so the caller falls back to its generic text.
-  defp usage_limit_reply(%{resets_at: resets_at} = error) when is_number(resets_at) do
-    mins = max(0, round((resets_at * 1000 - System.system_time(:millisecond)) / 60_000))
-
-    "You've hit your #{provider_label(error)} usage limit#{plan_suffix(error)}. " <>
-      "Try again in ~#{mins} min."
-  end
-
-  defp usage_limit_reply(_error), do: nil
-
-  defp plan_suffix(%{plan_type: plan}) when is_binary(plan) and plan != "",
-    do: " (#{String.downcase(plan)} plan)"
-
-  defp plan_suffix(_error), do: ""
 
   defp provider_label(error) when is_map(error) do
     error

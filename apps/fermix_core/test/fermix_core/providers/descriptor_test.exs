@@ -11,7 +11,6 @@ defmodule FermixCore.Providers.DescriptorTest do
   test "ids/0 returns the canonical ordered provider list" do
     assert Descriptor.ids() == [
              :openai_codex,
-             :chatgpt,
              :openai,
              :anthropic,
              :xai,
@@ -35,7 +34,7 @@ defmodule FermixCore.Providers.DescriptorTest do
   end
 
   test "every descriptor id has catalog models with a default" do
-    for id <- Descriptor.ids(), id != :chatgpt do
+    for id <- Descriptor.ids(), id != :openai_codex do
       assert [_ | _] = ModelCatalog.models_for(id)
       assert is_binary(ModelCatalog.default_model_for(id))
     end
@@ -43,15 +42,17 @@ defmodule FermixCore.Providers.DescriptorTest do
 
   # M57 D1/§6.2: the account's models are discovered live, so nothing is
   # shipped and nothing is guessed.
-  test "chatgpt ships no catalog and no default model" do
-    assert ModelCatalog.models_for(:chatgpt) == []
-    assert ModelCatalog.default_model_for(:chatgpt) == ""
+  test "openai_codex ships no catalog and no default model" do
+    assert ModelCatalog.models_for(:openai_codex) == []
+    assert ModelCatalog.default_model_for(:openai_codex) == ""
   end
 
-  test "chatgpt is an oauth-only remote provider on the public Responses API" do
-    descriptor = Descriptor.fetch!(:chatgpt)
+  # OpenAI Codex signs in with ChatGPT: one provider, labelled OpenAI Codex,
+  # on the public Responses API, with fast mode retired rather than refused.
+  test "openai_codex is an oauth-only remote provider on the public Responses API" do
+    descriptor = Descriptor.fetch!(:openai_codex)
 
-    assert descriptor.label == "ChatGPT"
+    assert descriptor.label == "OpenAI Codex"
     assert descriptor.adapter == ChatGPTPlan
     assert descriptor.default_base_url == "https://api.openai.com/v1"
     assert descriptor.locality == :remote
@@ -59,12 +60,18 @@ defmodule FermixCore.Providers.DescriptorTest do
     assert descriptor.secrets == []
     assert descriptor.setup_fields == []
     assert descriptor.config_keys == [:default_model, :reasoning_effort, :primary]
+    assert descriptor.retired_config_keys == [:fast]
     assert descriptor.effort?
   end
 
-  # D9: "ChatGPT" names one thing in the UI, so the Codex door drops it.
-  test "openai_codex is labelled OpenAI Codex" do
-    assert Descriptor.fetch!(:openai_codex).label == "OpenAI Codex"
+  test "no descriptor both reads and retires a key" do
+    for descriptor <- Descriptor.all() do
+      assert MapSet.disjoint?(
+               MapSet.new(descriptor.config_keys),
+               MapSet.new(descriptor.retired_config_keys)
+             ),
+             "#{descriptor.id} both reads and retires a key"
+    end
   end
 
   test "every descriptor secret exists in the SecretPaths registry" do

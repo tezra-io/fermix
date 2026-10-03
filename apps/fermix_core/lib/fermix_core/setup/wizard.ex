@@ -48,7 +48,6 @@ defmodule FermixCore.Setup.Wizard do
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
-          | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
           | {:proxy, String.t()}
           | {:proxy_bypass, [String.t()] | String.t()}
@@ -131,7 +130,6 @@ defmodule FermixCore.Setup.Wizard do
     :provider,
     :default_model,
     :reasoning_effort,
-    :fast,
     :realtime_enabled,
     :computer_use_enabled,
     :computer_history_enabled
@@ -243,10 +241,6 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp reconfigure_offered?(%{key: :fast}, persisted) do
-    chosen_provider(persisted) == :openai_codex
-  end
-
   defp reconfigure_offered?(_prompt, _persisted), do: true
 
   defp prompt_specs(%WizardState{} = state) do
@@ -276,7 +270,6 @@ defmodule FermixCore.Setup.Wizard do
     provider_block = provider_config(persisted, prompt_provider)
     model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
     effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
-    fast_unset? = prompt_provider == :openai_codex and not Keyword.has_key?(provider_block, :fast)
 
     field_unset =
       for descriptor <- Descriptor.all(), field <- descriptor.setup_fields, into: %{} do
@@ -291,7 +284,6 @@ defmodule FermixCore.Setup.Wizard do
       provider_unset?: provider_unset?,
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
-      fast_unset?: fast_unset?,
       field_unset: field_unset,
       realtime_api_key_unset?: canonical_openai_api_key_unpersisted?(persisted),
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
@@ -325,12 +317,6 @@ defmodule FermixCore.Setup.Wizard do
           required?:
             (context.provider_unset? or Descriptor.fetch!(context.prompt_provider).effort?) and
               context.effort_unset?
-        },
-        %{
-          key: :fast,
-          label: "Codex fast mode? (yes/no; blank = no)",
-          default: false,
-          required?: context.provider_unset? or context.fast_unset?
         }
       ]
   end
@@ -753,7 +739,7 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp commit_answers(state, answers) do
-    # Model/effort/fast writes target the provider being EDITED (the web pane's
+    # Model/effort writes target the provider being EDITED (the web pane's
     # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
     # have to promote it. Falls back to the active/primary provider when unset (CLI).
     target = edit_provider_target(answers)
@@ -774,7 +760,6 @@ defmodule FermixCore.Setup.Wizard do
       |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
       |> put_harness_approved(Keyword.get(answers, :harness_approved))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
-      |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -1086,7 +1071,7 @@ defmodule FermixCore.Setup.Wizard do
   # "Newly configured" = a pre/post eligibility diff against the persisted
   # TOML snapshot (docs/design/MULTI_PROVIDER_FAILOVER.md §2). Runs in the
   # save_answers pipeline AFTER credential/auth-mode answers are applied
-  # (so OAuth auth-mode flips are seen) and BEFORE the model/effort/fast
+  # (so OAuth auth-mode flips are seen) and BEFORE the model/effort
   # writers (so a newly promoted provider receives its fields — §4). An
   # explicit provider answer disables it (put_primary_selection already
   # chose). The CLI login path (`set_provider_auth_mode`) has no promotion
@@ -1540,21 +1525,6 @@ defmodule FermixCore.Setup.Wizard do
     for descriptor <- Descriptor.all(), descriptor.effort?, do: descriptor.id
   end
 
-  defp put_fast(snapshot, nil, _target), do: snapshot
-  defp put_fast(snapshot, "", _target), do: snapshot
-
-  defp put_fast(snapshot, value, target) do
-    fast = parse_fast!(value)
-    provider = target || active_provider(snapshot)
-
-    if provider == :openai_codex do
-      update_provider_block(snapshot, provider, :fast, fast)
-    else
-      raise ArgumentError,
-            "fast mode applies to :openai_codex provider only; selected provider is #{inspect(provider)}"
-    end
-  end
-
   defp edit_provider_target(answers) do
     case Keyword.get(answers, :edit_provider) do
       value when value in [nil, ""] -> nil
@@ -1591,23 +1561,7 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp parse_fast!(value) when is_boolean(value), do: value
-
-  defp parse_fast!(value) when is_binary(value) do
-    normalized = value |> String.trim() |> String.downcase()
-
-    cond do
-      normalized in @realtime_true_values -> true
-      normalized in @realtime_false_values -> false
-      true -> raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
-    end
-  end
-
-  defp parse_fast!(value) do
-    raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
-  end
-
-  # Which provider block receives model/effort/fast writes. Re-anchored on
+  # Which provider block receives model/effort writes. Re-anchored on
   # the primary flag (mark_primary_provider runs earlier in the save
   # pipeline); the legacy agent.provider key remains readable as migration
   # input until the first flag write removes it.
@@ -2183,7 +2137,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_image_backend(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google openai_codex) -> backend
+      backend when backend in ~w(openai xai google) -> backend
       invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
     end
   end

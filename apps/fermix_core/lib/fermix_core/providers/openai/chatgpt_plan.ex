@@ -1,13 +1,16 @@
 defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
   @moduledoc """
-  ChatGPT plan usage (Sign in with ChatGPT, M57 D5): the public Responses API
-  at `api.openai.com/v1/responses`, billed to the signed-in person's ChatGPT
-  plan.
+  OpenAI Codex (`:openai_codex`) on the person's ChatGPT plan (Sign in with
+  ChatGPT, M57 D5): the public Responses API at `api.openai.com/v1/responses`,
+  billed to the signed-in person's ChatGPT plan.
 
   The wire is the Responses item list `ResponsesShared` already speaks
   (instructions split out of `input`, function tools, `function_call` parsing,
-  `function_call_output` replay) and the stream is read by the Codex SSE
-  parser. What this route narrows:
+  `function_call_output` replay) and the stream is read by the shared SSE
+  parser (`OpenAI.Codex.SSEParser`). Its instructions end with the Codex/GPT-5
+  family behavior contract (`Prompt.ModelOverlays.apply_codex/1`, M10 P3),
+  appended once at the end so the composed prefix stays byte-stable for
+  caching. What this route narrows:
 
     * Every request is `store: false, stream: true` with `input` as an array,
       and history is replayed inline (`ResponsesShared.replayable_output_items/1`).
@@ -17,15 +20,16 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
       items").
     * Reasoning (`effort`, `summary: "auto"`) and
       `include: ["reasoning.encrypted_content"]` ride only when an effort is
-      set, as on Codex.
+      set.
     * Never sent: `temperature`, `top_p`, `max_output_tokens`, `metadata`,
       `user`, `truncation`, `background`, `previous_response_id`,
-      `service_tier`. There is no fast mode on this route.
+      `service_tier` (the route refuses each).
     * Headers: the bearer, `content-type` and `accept: text/event-stream`. No
-      `originator`, account-id or beta header.
+      account-id or beta header.
 
-  Auth: a bearer from the token server's `chatgpt` profile (or an explicit
-  `:access_token`). A 401 refreshes once and retries once; a 401 alone never
+  Auth: a bearer from the token server under the provider's auth profile
+  (`Store.profile(:openai_codex)`, passed as `:auth_profile`) or an explicit
+  `:access_token`. A 401 refreshes once and retries once; a 401 alone never
   marks the account revoked.
 
   Only `response.completed` is a delivered turn. `response.failed`,
@@ -41,6 +45,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Net.HttpClient
+  alias FermixCore.Prompt.ModelOverlays
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.Codex.SSEParser
   alias FermixCore.Providers.OpenAI.ResponsesShared
@@ -48,9 +53,10 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
   require Logger
 
-  @provider :chatgpt
+  @provider :openai_codex
   @adapter :chatgpt_plan
   @default_base_url "https://api.openai.com/v1"
+  @default_instructions "You are a helpful AI assistant."
   @provider_words_limit 300
 
   @impl true
@@ -64,7 +70,8 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
       request = %{
         model: Keyword.fetch!(opts, :model),
-        instructions: instructions,
+        # The behavior contract goes at the END, so the prefix stays cacheable.
+        instructions: ModelOverlays.apply_codex(instructions || @default_instructions),
         input: input,
         tools: tools,
         capabilities: capabilities,
@@ -224,7 +231,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
     end
   end
 
-  # Between-chunk window, as on Codex: the deepest efforts can stay silent for
+  # Between-chunk window: the deepest efforts can stay silent for
   # over a minute while the model thinks. An explicit req_options
   # receive_timeout still wins (`Req.merge/2` applies it after this).
   defp receive_timeout_for(%{reasoning: %{effort: effort}}) when effort in ["xhigh", "max"],
@@ -272,7 +279,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
           ProviderError.auth(
             @provider,
             @adapter,
-            "ChatGPTPlan requires :access_token or :auth_profile"
+            "OpenAI Codex requires :access_token or :auth_profile"
           )
 
         log_error(error)
@@ -337,7 +344,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
         attempt(body, {:static, fresh}, req_options, turn_state)
 
       {:error, reason} ->
-        Logger.warning("ChatGPT plan token refresh after a 401 failed: #{inspect(reason)}")
+        Logger.warning("OpenAI Codex token refresh after a 401 failed: #{inspect(reason)}")
         wire
     end
   end
@@ -372,7 +379,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
       end
     )
     |> Req.merge(req_options)
-    |> HttpClient.request("ChatGPT plan")
+    |> HttpClient.request("OpenAI Codex")
     |> finalize(:counters.get(bytes_seen, 1))
   end
 
@@ -386,7 +393,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
   end
 
   # The parser's leftover ceiling bounds memory; halting bounds the transfer
-  # (a trickling peer never trips an idle window). Codex precedent.
+  # (a trickling peer never trips an idle window).
   defp sse_step(%SSEParser{overflowed?: true} = state, req, response),
     do: {:halt, {req, Req.Response.put_private(response, :chatgpt_sse_state, state)}}
 
@@ -434,7 +441,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
   defp handle_response({:bearer_unavailable, reason}, _turn_state) do
     error =
-      ProviderError.auth(@provider, @adapter, "No ChatGPT access token: #{inspect(reason)}")
+      ProviderError.auth(@provider, @adapter, "No OpenAI Codex access token: #{inspect(reason)}")
 
     log_error(error)
     {:error, tag_oauth(error)}
@@ -450,7 +457,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
     if ResponsesShared.context_length_error?(body) do
-      Logger.error("ChatGPT plan refused the request as too long for the context window")
+      Logger.error("OpenAI Codex refused the request as too long for the context window")
       {:error, :context_length_exceeded}
     else
       api_error(status, body, provider_words: vendor_words(body), stage: :before_response)
@@ -461,7 +468,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
     error =
       ProviderError.transport(@provider, @adapter, reason,
         stage: stage,
-        message: "ChatGPT plan transport error (#{stage}): #{inspect(reason)}"
+        message: "OpenAI Codex transport error (#{stage}): #{inspect(reason)}"
       )
 
     log_error(error)
@@ -469,26 +476,26 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
   end
 
   # A Finch pool-checkout timeout comes back as a bare RuntimeError: nothing was
-  # sent, so it is the typed `:connection_unavailable` (Codex precedent). Every
+  # sent, so it is the typed `:connection_unavailable`. Every
   # other RuntimeError is a bug and stays bare.
   defp handle_response({:error, %RuntimeError{} = reason}, _turn_state) do
     if HttpClient.connection_unavailable?(reason) do
       error =
         ProviderError.transport(@provider, @adapter, :connection_unavailable,
           stage: :before_response,
-          message: "ChatGPT plan could not obtain an HTTP connection; nothing was sent."
+          message: "OpenAI Codex could not obtain an HTTP connection; nothing was sent."
         )
 
       log_error(error)
       {:error, error}
     else
-      Logger.error("ChatGPT plan request failed: #{inspect(reason)}")
+      Logger.error("OpenAI Codex request failed: #{inspect(reason)}")
       {:error, reason}
     end
   end
 
   defp handle_response({:error, reason}, _turn_state) do
-    Logger.error("ChatGPT plan request failed: #{inspect(reason)}")
+    Logger.error("OpenAI Codex request failed: #{inspect(reason)}")
     {:error, reason}
   end
 
@@ -512,7 +519,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
     do: declared_failure(parsed, "response.failed")
 
   # A completed response that produced no output item delivered nothing; it
-  # is an error, never an empty success (Codex's `empty_response` precedent).
+  # is an error, never an empty success (`code: "empty_response"`).
   defp completed(parsed, turn_state) do
     {:ok, turn} = build_turn(parsed, turn_state)
 
@@ -665,7 +672,7 @@ defmodule FermixCore.Providers.OpenAI.ChatGPTPlan do
 
   defp log_error({_tag, error}) do
     Logger.error(
-      "ChatGPT plan call failed: kind=#{error.kind} code=#{inspect(Map.get(error, :code))} " <>
+      "OpenAI Codex call failed: kind=#{error.kind} code=#{inspect(Map.get(error, :code))} " <>
         "stage=#{error.stage} — #{error.message}"
     )
   end

@@ -1,8 +1,10 @@
 defmodule FermixCore.Management.AuthTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
-  alias FermixCore.Auth.CodexImport
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Management.Auth
@@ -16,6 +18,10 @@ defmodule FermixCore.Management.AuthTest do
     last_refresh: nil,
     account: %{email: "owner@example.com"}
   }
+
+  # What the ChatGPT sign-in answers once plan usage is granted.
+  @signed_in %{account: "owner@example.com", plan_usage: :on}
+  @kept_model {:ok, %{model: "gpt-test", changed?: false}}
 
   setup context do
     tasks = :"auth_tasks_#{:erlang.phash2(context.test)}"
@@ -34,11 +40,11 @@ defmodule FermixCore.Management.AuthTest do
       owner = self()
 
       login = fn opts ->
-        :ok = Keyword.fetch!(opts, :oauth_opener).("https://auth.example/authorize?state=opaque")
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.example/authorize?state=opaque")
         send(owner, {:opened, self()})
 
         receive do
-          :finish -> {:ok, @entry}
+          :finish -> {:ok, @signed_in}
         end
       end
 
@@ -46,6 +52,7 @@ defmodule FermixCore.Management.AuthTest do
                Auth.start("openai_codex",
                  jobs: jobs,
                  login: login,
+                 live_model: fn :openai_codex, [] -> @kept_model end,
                  reload: fn -> :ok end,
                  promote: fn _provider -> :ok end
                )
@@ -123,11 +130,11 @@ defmodule FermixCore.Management.AuthTest do
       owner = self()
 
       login = fn opts ->
-        :ok = Keyword.fetch!(opts, :oauth_opener).("https://auth.example/authorize")
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.example/authorize")
         send(owner, :opened)
 
         receive do
-          :finish -> {:ok, @entry}
+          :finish -> {:ok, @signed_in}
         end
       end
 
@@ -135,6 +142,98 @@ defmodule FermixCore.Management.AuthTest do
       assert_receive :opened
 
       assert {:error, {:busy, "auth"}} = Auth.start("openai_codex", jobs: jobs, login: login)
+    end
+
+    # `openai_codex` signs in with ChatGPT: its sign-in answers the account and
+    # plan usage, the model is checked against the account's own list, and
+    # only then is the connection completed and promoted.
+    test "openai_codex signs in with ChatGPT, checks the model, then connects", %{jobs: jobs} do
+      owner = self()
+
+      login = fn opts ->
+        send(owner, {:login, Keyword.keys(opts)})
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.openai.com/api/accounts/authorize")
+        {:ok, @signed_in}
+      end
+
+      live_model = fn provider, opts ->
+        send(owner, {:live_model, provider, opts})
+        {:ok, %{model: "gpt-test", changed?: true}}
+      end
+
+      assert {:ok, view} =
+               Auth.start("openai_codex",
+                 jobs: jobs,
+                 login: login,
+                 live_model: live_model,
+                 reload: fn -> reply(owner, :reloaded) end,
+                 promote: fn provider -> reply(owner, {:promoted, provider}) end
+               )
+
+      assert {:ok, done} = terminal(jobs, view["job_id"])
+      assert done["status"] == "completed"
+      assert done["result"] == %{"account_label" => "owner@example.com"}
+
+      assert_received {:login, keys}
+      assert Enum.sort(keys) == [:opener, :puts]
+      assert_received {:live_model, :openai_codex, []}
+      assert_received :reloaded
+      assert_received {:promoted, :openai_codex}
+    end
+
+    # The account is connected whether or not its model list could be read, so
+    # a listing that failed is logged and the sign-in still completes.
+    test "a model list that cannot be read does not fail the sign-in", %{jobs: jobs} do
+      owner = self()
+
+      {done, log} =
+        with_log(fn ->
+          assert {:ok, view} =
+                   Auth.start("openai_codex",
+                     jobs: jobs,
+                     login: fn _opts -> {:ok, @signed_in} end,
+                     live_model: fn :openai_codex, [] -> {:error, "No models were listed."} end,
+                     reload: fn -> :ok end,
+                     promote: fn provider -> reply(owner, {:promoted, provider}) end
+                   )
+
+          assert {:ok, done} = terminal(jobs, view["job_id"])
+          done
+        end)
+
+      assert done["status"] == "completed"
+      assert_received {:promoted, :openai_codex}
+      assert log =~ "the ChatGPT model list was not read: No models were listed."
+    end
+
+    # A grant without plan usage is one the route refuses: no model check, no
+    # promotion, and the job says what to turn on.
+    test "a ChatGPT sign-in without plan usage is not a connection", %{jobs: jobs} do
+      refuse = fn _provider -> flunk("a grant the route refuses must not be promoted") end
+
+      assert {:ok, view} =
+               Auth.start("openai_codex",
+                 jobs: jobs,
+                 login: fn _opts -> {:ok, %{account: "owner@example.com", plan_usage: :off}} end,
+                 live_model: fn _provider, _opts -> flunk("no model check without plan usage") end,
+                 promote: refuse
+               )
+
+      assert {:ok, done} = terminal(jobs, view["job_id"])
+      assert done["status"] == "failed"
+      assert done["failure"]["sentence"] == ChatGPT.failure_sentence(:plan_usage_off)
+    end
+
+    # The sign-in's own refusals are worded once, by `Auth.ChatGPT`.
+    test "a ChatGPT refusal fails the job with the sign-in's own sentence", %{jobs: jobs} do
+      for reason <- [:access_denied, :account_mismatch, :callback_timeout] do
+        assert {:ok, view} =
+                 Auth.start("openai_codex", jobs: jobs, login: fn _opts -> {:error, reason} end)
+
+        assert {:ok, done} = terminal(jobs, view["job_id"])
+        assert done["status"] == "failed"
+        assert done["failure"]["sentence"] == ChatGPT.failure_sentence(reason)
+      end
     end
 
     # The browser half finished and the token request after it got no answer.
@@ -202,22 +301,6 @@ defmodule FermixCore.Management.AuthTest do
              }
     end
 
-    test "a Codex import reports the provider it adopted", %{jobs: jobs} do
-      importer = fn -> {:ok, Map.delete(@entry, :account)} end
-
-      assert {:ok, started} =
-               Auth.import_start("codex_cli",
-                 jobs: jobs,
-                 importer: importer,
-                 reload: fn -> :ok end,
-                 promote: fn _provider -> :ok end
-               )
-
-      assert {:ok, done} = terminal(jobs, started["job_id"])
-
-      assert done["result"] == %{"provider" => "openai_codex", "account_label" => nil}
-    end
-
     test "an import with nothing to adopt fails with the daemon's sentence", %{jobs: jobs} do
       importer = fn -> {:error, :not_found} end
 
@@ -228,52 +311,18 @@ defmodule FermixCore.Management.AuthTest do
       assert done["failure"]["sentence"] == "No existing sign-in was found on this Mac."
     end
 
-    # The real importer, through the job the app starts. The import spends the
-    # Codex CLI's refresh token, so a Codex profile another process keeps busy
-    # (a live refresh, or a lockfile a dead VM left) must refuse before that and
-    # inside the job's budget, and say what to do. It used to refresh first and
-    # then wait out the stale lock past the job's 60 s, losing both sessions.
-    test "a Codex import that meets a busy profile refuses before it spends anything", %{
-      jobs: jobs
-    } do
-      dir = FermixTestSupport.SafeRm.make_tmp_dir!("mgmt-codex-import-busy")
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-      codex_path = Path.join(dir, "codex_auth.json")
-      File.write!(codex_path, Jason.encode!(%{"tokens" => %{"refresh_token" => "codex_rt"}}))
-      fermix_path = Path.join(dir, "auth.json")
-      File.write!(Store.profile_lock_path(:openai_codex, fermix_path), "0 a-refresh\n")
-      owner = self()
+    # `codex_cli` is still a source the contract names. `openai_codex` signs in
+    # with ChatGPT now, so the import is refused by field with the way in,
+    # before any job starts.
+    test "a Codex CLI import is refused with the sentence that names the way in", %{jobs: jobs} do
+      assert {:error, {:invalid_params, "source", sentence}} =
+               Auth.import_start("codex_cli", jobs: jobs, importer: fn -> flunk("no import") end)
 
-      token_endpoint = fn conn ->
-        send(owner, :token_endpoint_called)
+      assert sentence ==
+               "Importing a Codex sign-in is no longer supported. Sign in with ChatGPT instead."
 
-        conn
-        |> Plug.Conn.put_resp_content_type("application/json")
-        |> Plug.Conn.send_resp(
-          200,
-          Jason.encode!(%{"access_token" => "at", "refresh_token" => "rt", "expires_in" => 3600})
-        )
-      end
-
-      importer = fn ->
-        CodexImport.import_tokens(
-          codex_path: codex_path,
-          fermix_path: fermix_path,
-          req_options: [plug: token_endpoint]
-        )
-      end
-
-      assert {:ok, started} = Auth.import_start("codex_cli", jobs: jobs, importer: importer)
-      assert {:ok, done} = terminal(jobs, started["job_id"], 1_500)
-
-      assert done["status"] == "failed"
-
-      assert done["failure"]["sentence"] ==
-               "Another Fermix process is refreshing or signing in to this account. " <>
-                 "Try again shortly."
-
-      refute_received :token_endpoint_called
-      refute File.exists?(fermix_path)
+      assert Copy.violations(sentence, :prose) == []
+      assert {:ok, []} = Jobs.list(jobs)
     end
 
     test "an unknown source is refused by field", %{jobs: jobs} do
@@ -295,12 +344,18 @@ defmodule FermixCore.Management.AuthTest do
     test "forgets the stored session and answers with the restart state", %{drop: drop} do
       owner = self()
 
-      forget = fn "openai_codex" ->
+      forget = fn "xai_oauth" ->
         send(owner, :forgotten)
         :ok
       end
 
-      assert {:ok, result} = Auth.logout("openai_codex", forget: forget, drop_live_tokens: drop)
+      assert {:ok, result} =
+               Auth.logout("xai",
+                 forget: forget,
+                 set_auth_mode: fn :xai, :api_key -> {:ok, %{}} end,
+                 drop_live_tokens: drop
+               )
+
       assert_receive :forgotten
       assert Map.keys(result) == ["restart"]
       assert %{"required" => _required, "reasons" => _reasons} = result["restart"]
@@ -348,70 +403,77 @@ defmodule FermixCore.Management.AuthTest do
       assert_receive :reverted
     end
 
-    # Deleting the chatgpt entry would lose the issued client id and leave the
-    # session live at OpenAI: its own sign-out revokes and keeps the registration.
-    test "ChatGPT signs out through its own revoking sign-out, never a delete" do
+    # `openai_codex` signs in with ChatGPT. Deleting its entry would lose the
+    # issued client id and leave the session live at OpenAI: its own sign-out
+    # revokes and keeps the registration, and it has no route to revert.
+    test "openai_codex signs out through ChatGPT's revoking sign-out, never a delete" do
       owner = self()
 
       logout = fn [] ->
         send(owner, :chatgpt_signed_out)
-        {:ok, %{revoked: true}}
+        {:ok, %{revoked: false}}
       end
 
       assert {:ok, result} =
-               Auth.logout("chatgpt",
+               Auth.logout("openai_codex",
                  chatgpt_logout: logout,
-                 forget: fn _profile -> flunk("the chatgpt registration must not be deleted") end,
-                 drop_live_tokens: fn _provider, _profile -> flunk("its sign-out drops them") end
+                 forget: fn _profile -> flunk("the ChatGPT registration must not be deleted") end,
+                 drop_live_tokens: fn _provider, _profile -> flunk("its sign-out drops them") end,
+                 set_auth_mode: fn _provider, _mode -> flunk("a single-mode provider") end
                )
 
       assert_receive :chatgpt_signed_out
       assert Map.keys(result) == ["restart"]
     end
 
-    test "a ChatGPT sign-out that fails is refused with a sentence" do
-      assert {:error, _refusal} =
-               Auth.logout("chatgpt", chatgpt_logout: fn [] -> {:error, :profile_busy} end)
+    test "a ChatGPT sign-out that fails is refused" do
+      {result, log} =
+        with_log(fn ->
+          Auth.logout("openai_codex", chatgpt_logout: fn [] -> {:error, :profile_busy} end)
+        end)
+
+      assert {:error, {:unavailable, "auth"}} = result
+      assert log =~ "the ChatGPT sign-in could not be removed"
     end
 
-    test "a single-mode provider has no route to revert", %{drop: drop} do
-      route = fn _provider, _mode -> flunk("a single-mode provider has no route to revert") end
-
-      assert {:ok, _result} =
-               Auth.logout("openai_codex",
-                 forget: fn _profile -> :ok end,
-                 set_auth_mode: route,
-                 drop_live_tokens: drop
-               )
+    # There is no `chatgpt` provider: its sign-in is `openai_codex`'s.
+    test "the retired chatgpt provider has no sign-in to remove" do
+      assert {:error, {:invalid_params, "provider", "This daemon has no such provider."}} =
+               Auth.logout("chatgpt", chatgpt_logout: fn [] -> flunk("not a provider") end)
     end
 
     # Forgetting a session that is already gone is the state the caller asked
     # for, not a failure.
     test "signing out twice is not an error", %{drop: drop} do
+      route = fn :xai, :api_key -> {:ok, %{}} end
+
       assert {:ok, _result} =
-               Auth.logout("openai_codex",
+               Auth.logout("xai",
                  forget: fn _profile -> {:error, :no_auth_file} end,
+                 set_auth_mode: route,
                  drop_live_tokens: drop
                )
 
       assert {:ok, _again} =
-               Auth.logout("openai_codex",
-                 forget: fn _profile -> {:error, {:provider_missing, "openai_codex"}} end,
+               Auth.logout("xai",
+                 forget: fn _profile -> {:error, {:provider_missing, "xai_oauth"}} end,
+                 set_auth_mode: route,
                  drop_live_tokens: drop
                )
     end
 
-    # TOKEN-4 (tla/specs/token_refresh, check 13): a sign-out during the Codex
+    # TOKEN-4 (tla/specs/token_refresh, check 13): a sign-out during the
     # manager's own refresh was undone when that refresh renamed its rotation
     # after the delete; `forget` only queued behind it. The delete now takes
     # the profile lock, so it waits for the refresh, deletes after it, and
     # `forget` finds the manager idle.
-    test "a sign-out waits for the Codex refresh in flight, and sticks" do
+    test "a sign-out waits for the refresh in flight, and sticks" do
       dir = FermixTestSupport.SafeRm.make_tmp_dir!("auth-logout-race")
       on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
       path = Path.join(dir, "auth.json")
       expires_at = DateTime.add(DateTime.utc_now(), 3600, :second)
-      :ok = Store.write(:openai_codex, %{@entry | expires_at: expires_at}, path)
+      entry = Map.put(%{@entry | expires_at: expires_at}, :provider, "xai")
+      :ok = Store.write("xai_oauth", entry, path)
       owner = self()
 
       plug = fn conn ->
@@ -436,7 +498,8 @@ defmodule FermixCore.Management.AuthTest do
       name = :"auth_logout_race_#{System.unique_integer([:positive])}"
 
       start_supervised!(
-        {TokenManager, name: name, fermix_auth_path: path, req_options: [plug: plug]}
+        {TokenManager,
+         name: name, auth_profile: "xai_oauth", fermix_auth_path: path, req_options: [plug: plug]}
       )
 
       refresh = Task.async(fn -> TokenManager.refresh(name) end)
@@ -449,10 +512,13 @@ defmodule FermixCore.Management.AuthTest do
         result
       end
 
-      drop = fn "openai_codex", _profile -> TokenManager.forget(name) end
+      drop = fn "xai", _profile -> TokenManager.forget(name) end
+      route = fn :xai, :api_key -> {:ok, %{}} end
 
       logout =
-        Task.async(fn -> Auth.logout("openai_codex", forget: forget, drop_live_tokens: drop) end)
+        Task.async(fn ->
+          Auth.logout("xai", forget: forget, drop_live_tokens: drop, set_auth_mode: route)
+        end)
 
       assert_receive :deleting
       refute_receive :deleted, 300
@@ -460,8 +526,8 @@ defmodule FermixCore.Management.AuthTest do
       send(plug_pid, :release)
       assert {:ok, "new_at"} = Task.await(refresh)
       assert {:ok, _result} = Task.await(logout)
-      assert {:error, {:provider_missing, :openai_codex}} = Store.read(:openai_codex, path)
-      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      assert {:error, {:provider_missing, "xai_oauth"}} = Store.read("xai_oauth", path)
+      assert {:error, :reauthorization_required} = TokenManager.get_token(name)
     end
 
     test "a provider with no stored sign-in at all is refused by field" do
@@ -573,7 +639,7 @@ defmodule FermixCore.Management.AuthTest do
   # failed with `reason`, followed to its terminal view.
   defp failed_sign_in(jobs, reason) do
     login = fn opts ->
-      :ok = Keyword.fetch!(opts, :oauth_opener).("https://auth.example/authorize")
+      :ok = Keyword.fetch!(opts, :opener).("https://auth.example/authorize")
       {:error, reason}
     end
 
@@ -581,6 +647,11 @@ defmodule FermixCore.Management.AuthTest do
     assert {:ok, done} = terminal(jobs, view["job_id"])
     assert done["status"] == "failed"
     done
+  end
+
+  defp reply(owner, message) do
+    send(owner, message)
+    :ok
   end
 
   defp terminal(jobs, job_id, attempts \\ 200)

@@ -5,7 +5,6 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
   import ExUnit.CaptureLog, only: [with_log: 1]
 
   alias FermixCore.Auth.Store
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixTestSupport.SafeRm
@@ -182,20 +181,23 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
       assert {:ok, "fresh_at"} = TokenSupervisor.get_token(profile)
     end
 
-    test "tells the top-level Codex manager to forget, and leaves it running" do
-      assert Process.whereis(TokenManager) == nil
-      :ok = Store.write("openai_codex", %{anthropic_entry() | provider: "openai"})
+    # `openai_codex` signs in with ChatGPT, and its profile has no manager of
+    # its own outside this supervisor: a sign-out lets go of its child as it
+    # does every other profile's.
+    test "lets go of the ChatGPT profile's child like any other" do
+      profile = Store.profile(:openai_codex)
+      # A manager another case left would serve that case's home.
+      :ok = TokenSupervisor.stop_profile(profile)
+      on_exit(fn -> TokenSupervisor.stop_profile(profile) end)
+      :ok = Store.write(profile, chatgpt_entry())
 
-      manager =
-        start_supervised!({TokenManager, name: TokenManager, fermix_auth_path: Store.path()})
+      assert {:ok, "chatgpt_at"} = TokenSupervisor.get_token(profile)
+      [{manager, _value}] = Registry.lookup(FermixCore.Auth.TokenRegistry, profile)
+      down = Process.monitor(manager)
 
-      assert {:ok, "old_at"} = TokenManager.get_token(TokenManager)
-
-      :ok = Store.delete_provider("openai_codex")
-      assert :ok = TokenSupervisor.forget_signed_out("openai_codex")
-
-      assert {:error, :auth_invalidated} = TokenManager.get_token(TokenManager)
-      assert Process.alive?(manager)
+      :ok = Store.delete_provider(profile)
+      assert :ok = TokenSupervisor.forget_signed_out(profile)
+      assert_receive {:DOWN, ^down, :process, ^manager, _reason}
     end
 
     test "starts no manager for a profile nothing holds" do
@@ -218,13 +220,6 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
 
       assert :ok = TokenSupervisor.forget_signed_out(profile)
     end
-
-    test "a Codex manager that is gone by the time it is called held nothing" do
-      assert Process.whereis(TokenManager) == nil
-      gone_on_call(fn -> Process.register(self(), TokenManager) end)
-
-      assert :ok = TokenSupervisor.forget_signed_out("openai_codex")
-    end
   end
 
   # A stand-in manager, registered by `register`, that exits `:noproc` on the
@@ -245,6 +240,20 @@ defmodule FermixCore.Auth.TokenSupervisorTest do
     on_exit(fn -> Process.exit(stand_in, :kill) end)
     assert_receive {:stand_in_registered, ^stand_in}
     stand_in
+  end
+
+  defp chatgpt_entry do
+    %{
+      auth_mode: "oauth_siwc",
+      provider: "chatgpt",
+      client_id: "oaiapp_test",
+      subject: "user-test",
+      granted_scopes: ["openid", "offline_access", "chatgpt.tokens.use.direct"],
+      tokens: %{access_token: "chatgpt_at", refresh_token: "chatgpt_rt"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
   end
 
   defp google_entry(access_token) do

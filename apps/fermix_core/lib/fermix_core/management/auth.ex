@@ -10,25 +10,25 @@ defmodule FermixCore.Management.Auth do
 
   An import is a job for the same reason: reading Claude Code's credentials can
   raise the macOS keychain prompt, which waits for a human. Tokens never transit
-  the app either way; only an account label ever crosses the wire.
+  the app either way; only an account label ever crosses the wire. `codex_cli`
+  is still a source the contract names, and it is refused: `openai_codex` signs
+  in with ChatGPT, and a Codex CLI sign-in is no longer adopted.
 
   Signing out forgets the local session, drops the tokens the RUNNING daemon
   holds for it, and reverts the route that made it live. Deleting the stored
   entry alone is not a sign-out: the token manager keeps the access and refresh
   tokens in memory and would keep serving turns as that account until the token
   expired, while every surface reported the operator signed out. Nothing is
-  revoked upstream, except for ChatGPT: its sign-out revokes the session at
-  OpenAI and keeps the registration, so the next sign-in reuses it (M57 §6.3).
+  revoked upstream, except for `openai_codex`, which signs in with ChatGPT: its
+  sign-out revokes the session at OpenAI and keeps the registration, so the
+  next sign-in reuses it (M57 §6.3).
   """
 
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.ClientRejection
-  alias FermixCore.Auth.CodexImport
-  alias FermixCore.Auth.CodexLogin
   alias FermixCore.Auth.Redaction
   alias FermixCore.Auth.Store
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Auth.XAILogin
   alias FermixCore.Management.Jobs
@@ -36,6 +36,7 @@ defmodule FermixCore.Management.Auth do
   alias FermixCore.Plugins.Auth, as: PluginAuth
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry, as: PluginRegistry
+  alias FermixCore.Setup.LiveModel
   alias FermixCore.Setup.Wizard
 
   require Logger
@@ -45,6 +46,8 @@ defmodule FermixCore.Management.Auth do
   # `auth.import.start` and a setup token through `secret.set`.
   @browser_flows ~w(openai_codex xai)
   @import_sources ~w(claude_code codex_cli)
+  @codex_import_retired "Importing a Codex sign-in is no longer supported. " <>
+                          "Sign in with ChatGPT instead."
   # A plugin signs in the same way, addressed by the one prefix the contract
   # publishes for it. The plugin's own OAuth client, scopes and loopback port
   # are the manifest's and the operator's; nothing about them is repeated here.
@@ -119,9 +122,17 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
-  @doc "Adopts a sign-in this Mac already has, from Claude Code or the Codex CLI."
+  @doc """
+  Adopts a sign-in this Mac already has, from Claude Code. The Codex CLI is
+  refused by field with the sentence that names the way in instead.
+  """
   @spec import_start(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
-  def import_start(source, opts \\ []) when is_binary(source) and is_list(opts) do
+  def import_start(source, opts \\ [])
+
+  def import_start("codex_cli", opts) when is_list(opts),
+    do: {:error, {:invalid_params, "source", @codex_import_retired}}
+
+  def import_start(source, opts) when is_binary(source) and is_list(opts) do
     if source in @import_sources do
       start_import(source, opts)
     else
@@ -160,14 +171,16 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
+  # `openai_codex` signs in with ChatGPT, whose sign-in answers the account and
+  # whether plan usage was granted rather than the stored entry.
   defp sign_in_run("openai_codex", opts) do
-    login = Keyword.get(opts, :login, &CodexLogin.login/1)
+    login = Keyword.get(opts, :login, &ChatGPT.login/1)
 
     fn _job_id, report ->
       report.({:phase, "binding"})
 
-      login.(oauth_opener: opener(report), puts: &silent/1)
-      |> then(&finish_codex(&1, report, opts))
+      login.(opener: opener(report), puts: &silent/1)
+      |> then(&finish_chatgpt(&1, report, opts))
     end
   end
 
@@ -205,16 +218,39 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
-  defp finish_codex({:ok, entry}, report, opts) do
+  # A grant without plan usage is one the route refuses, so it is no connection.
+  # With it, the model is checked against the account's own list before the
+  # connection completes as every other one does.
+  defp finish_chatgpt({:ok, %{plan_usage: :on, account: account}}, report, opts) do
     report.({:phase, "verifying"})
+    :ok = ensure_live_model(opts)
 
     with :ok <- complete_connection(:openai_codex, opts) do
-      {:ok, %{"account_label" => Store.account_label(entry)}}
+      {:ok, %{"account_label" => account}}
     end
   end
 
-  defp finish_codex({:error, reason}, _report, _opts),
-    do: {:error, {:unavailable, sign_in_sentence(reason)}}
+  defp finish_chatgpt({:ok, %{plan_usage: :off}}, _report, _opts),
+    do: {:error, {:unavailable, ChatGPT.failure_sentence(:plan_usage_off)}}
+
+  defp finish_chatgpt({:error, reason}, _report, _opts),
+    do: {:error, {:unavailable, chatgpt_sentence(reason)}}
+
+  # A configured model the account does not list is replaced by one it does
+  # (`Setup.LiveModel`). The job result has no field a client renders for a
+  # listing that failed, so that is logged and the sign-in still completes: the
+  # account is connected either way.
+  defp ensure_live_model(opts) do
+    ensure = Keyword.get(opts, :live_model, &LiveModel.ensure/2)
+
+    case ensure.(:openai_codex, []) do
+      {:ok, %{model: _model}} ->
+        :ok
+
+      {:error, sentence} ->
+        Logger.warning("management auth: the ChatGPT model list was not read: #{sentence}")
+    end
+  end
 
   # A stored token is inert until the route selects it, so connecting and
   # switching the route are one operation: reporting success without the second
@@ -261,9 +297,7 @@ defmodule FermixCore.Management.Auth do
   end
 
   # Claude Code's credentials live in the macOS keychain, and reading them can
-  # raise the allow prompt, so that phase is named. The Codex CLI's live in a
-  # file it wrote, so the import names no phase rather than borrowing a sentence
-  # about a keychain it never touches.
+  # raise the allow prompt, so that phase is named.
   defp import_run("claude_code", opts) do
     importer = Keyword.get(opts, :importer, &AnthropicLogin.import_claude_code/0)
 
@@ -271,12 +305,6 @@ defmodule FermixCore.Management.Auth do
       report.({:phase, "reading_keychain"})
       finish_import(:anthropic, importer.(), report, opts)
     end
-  end
-
-  defp import_run("codex_cli", opts) do
-    importer = Keyword.get(opts, :importer, &CodexImport.import_tokens/0)
-
-    fn _job_id, report -> finish_import(:openai_codex, importer.(), report, opts) end
   end
 
   defp finish_import(provider, {:ok, entry}, report, opts) do
@@ -346,10 +374,11 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
-  # ChatGPT's own sign-out revokes upstream, clears the tokens but keeps the
-  # registration, and drops the live tokens; deleting its entry would lose the
-  # issued client id and leave the session live at OpenAI.
-  defp sign_out(:chatgpt, _provider, _profile, opts) do
+  # `openai_codex` signs in with ChatGPT, whose own sign-out revokes upstream,
+  # clears the tokens but keeps the registration, and drops the live tokens;
+  # deleting its entry would lose the issued client id and leave the session
+  # live at OpenAI.
+  defp sign_out(:openai_codex, _provider, _profile, opts) do
     logout = Keyword.get(opts, :chatgpt_logout, &ChatGPT.logout/1)
 
     case logout.([]) do
@@ -378,24 +407,14 @@ defmodule FermixCore.Management.Auth do
     end
   end
 
-  # Two managers can hold one profile's tokens: the top-level `TokenManager`
-  # started with the tree, which serves the Codex profile, and a per-profile
-  # child under `TokenSupervisor` for anthropic and xai. A sign-out reaches the
-  # one that serves the provider being signed out, and starts neither.
+  # The profile's manager under `TokenSupervisor` holds its tokens. A sign-out
+  # reaches it when it runs, and never starts one.
   defp drop_live_tokens(provider, profile, opts) do
     drop = Keyword.get(opts, :drop_live_tokens, &drop_tokens/2)
     drop.(provider, profile)
   end
 
-  defp drop_tokens("openai_codex", _profile), do: forget_default_manager()
   defp drop_tokens(_provider, profile), do: TokenSupervisor.forget(profile)
-
-  defp forget_default_manager do
-    case Process.whereis(TokenManager) do
-      nil -> :ok
-      pid -> TokenManager.forget(pid)
-    end
-  end
 
   defp revert_route(id, opts) when id in @reverting_providers do
     case set_auth_mode(opts).(id, :api_key) do
@@ -414,13 +433,6 @@ defmodule FermixCore.Management.Auth do
   defp refuse(what, reason) do
     Logger.error("management auth: #{what}: #{format(reason)}")
     {:error, {:unavailable, "auth"}}
-  end
-
-  defp reload_token_manager(:openai_codex) do
-    case Process.whereis(TokenManager) do
-      nil -> :ok
-      pid -> reload_result(TokenManager.reload(pid))
-    end
   end
 
   defp reload_token_manager(provider) do
@@ -442,6 +454,33 @@ defmodule FermixCore.Management.Auth do
   defp plugin_sentence({:oauth_client_rejected, detail}), do: ClientRejection.sentence(detail)
 
   defp plugin_sentence(reason), do: sign_in_sentence(reason)
+
+  # The ChatGPT sign-in's own refusals are worded once, by `Auth.ChatGPT`, so
+  # the browser door and the app say the same thing. The network, the store and
+  # the listener keep this module's sentences, and a vendor code is never
+  # repeated as prose.
+  @chatgpt_refusals [
+    :access_denied,
+    :client_mismatch,
+    :account_mismatch,
+    :registration_incomplete,
+    :identity_verification_unavailable,
+    :invalid_id_token,
+    :callback_timeout,
+    :invalid_token_response,
+    :missing_code,
+    :invalid_callback
+  ]
+
+  defp chatgpt_sentence(reason) when reason in @chatgpt_refusals,
+    do: ChatGPT.failure_sentence(reason)
+
+  defp chatgpt_sentence({:token_exchange_failed, detail} = reason) do
+    log("ChatGPT refused the sign-in code", detail)
+    ChatGPT.failure_sentence(reason)
+  end
+
+  defp chatgpt_sentence(reason), do: sign_in_sentence(reason)
 
   defp sign_in_sentence({:port_in_use, port}),
     do: "Port #{port} is already in use, so the sign-in reply could not be received."
@@ -484,11 +523,10 @@ defmodule FermixCore.Management.Auth do
     "The sign-in could not be completed. See the daemon log."
   end
 
-  # The absent case in the three spellings that reach it: an injected importer's
-  # `:not_found`, and the atom each of the two real importers answers with.
-  defp import_sentence(absent)
-       when absent in [:not_found, :no_claude_code_credentials, :no_codex_auth],
-       do: "No existing sign-in was found on this Mac."
+  # The absent case in the two spellings that reach it: an injected importer's
+  # `:not_found`, and the atom the Claude Code importer answers with.
+  defp import_sentence(absent) when absent in [:not_found, :no_claude_code_credentials],
+    do: "No existing sign-in was found on this Mac."
 
   defp import_sentence(:claude_code_credentials_expired),
     do: "The sign-in on this Mac has expired, so there was nothing to adopt."
@@ -496,13 +534,8 @@ defmodule FermixCore.Management.Auth do
   # Refused before the other tool's token was spent, so it is still signed in.
   defp import_sentence(:profile_busy), do: Store.busy_sentence()
 
-  defp import_sentence(unreadable)
-       when unreadable in [
-              :claude_code_credentials_invalid,
-              :codex_auth_invalid_json,
-              :codex_auth_missing_refresh_token
-            ],
-       do: "The sign-in on this Mac could not be read, so there was nothing to adopt."
+  defp import_sentence(:claude_code_credentials_invalid),
+    do: "The sign-in on this Mac could not be read, so there was nothing to adopt."
 
   defp import_sentence(reason) do
     log("the sign-in could not be imported", reason)
