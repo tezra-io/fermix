@@ -36,7 +36,7 @@
 (* Only the daemon-to-client side of a socket is a queue: a Connection's   *)
 (* mailbox, then the socket, in order (what it writes outside the step     *)
 (* that produced it reaches it as {:companion_event, _},                   *)
-(* connection.ex:147-148). A client event, the Connection's handling of    *)
+(* connection.ex:153-154). A client event, the Connection's handling of    *)
 (* it, and the request worker, Repo and Queue calls it makes are one step, *)
 (* up to the worker's casts into Turns (the hand-off during ingest, the    *)
 (* settlement once ingest returned). Nothing distinct is lost: a client    *)
@@ -46,6 +46,17 @@
 (* own process with one mailbox: hand-offs, settlements, cancels and the   *)
 (* Queue's outcomes reach it in order, and a worker's two casts reach it   *)
 (* in the order the worker sent them.                                      *)
+(*                                                                         *)
+(* A turn of the chat during a GPT-Live call may end with no reply (M56     *)
+(* 4.4): its runner tells Turns before the reply arrives (Turns.silent,    *)
+(* from the turn's own process), the reply, exactly [SILENT], is dropped,  *)
+(* no row is written and the turn ends with turn_done, which only a        *)
+(* version 2 client is sent (connection.ex write_in_version). Whether the   *)
+(* turn may end so is frozen when it starts (MainAgent at checkout, through *)
+(* Voice.Bridge.chat_call and Companion.every_client_reads?): only while    *)
+(* every client joined then declared version 2. Each client's version is   *)
+(* fixed here (V1Clients); turn_done itself is read by no client rule, so   *)
+(* it is not put on the wire.                                              *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (* - text_delta, tool_event, turn_started, read_state: live-only, never in *)
@@ -63,7 +74,7 @@
 (* companion.sock. A phone's revocation is not modelled either: Turns runs *)
 (* it in its own mailbox as a cancel of every unsettled request the device *)
 (* claimed, one step that marks them all and stops each turn it handed off *)
-(* (handle_cast {:revoke_device}, turns.ex:273-285);                       *)
+(* (handle_cast {:revoke_device}, turns.ex:296-308);                       *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -87,7 +98,7 @@
 (* a /skills review or approval) defers its request, which settles when    *)
 (* the command reports;                                                    *)
 (* - the peer check at the hand-over (handle_info(:socket_handover),       *)
-(* connection.ex:120-127): a client the daemon cannot place is sent        *)
+(* connection.ex:126-133): a client the daemon cannot place is sent        *)
 (* error{unidentified_client} and closed before a line is read, which it   *)
 (* sees as a drop before server_hello; the caller it places rides on each  *)
 (* turn (metadata.caller) and decides only what the turn's tools may do;   *)
@@ -103,21 +114,24 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 3d7da3eb0233
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 89f4c1ba3395
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 6e33d189d304
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ f85236885710
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 721f8a43246f
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ e53c2a581752
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ 7309598811f2
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message @ 96eace0c6784
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message,build_raw_stream_callback,every_client_reads? @ 6dc74ad29fd0
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ d0a1ca7c444e
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 2dadf7da73c8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ c010abc02f52
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 2db5517fdaee
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_normal,tell_silent @ 315e701bd51c
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS
@@ -146,6 +160,10 @@ CONSTANTS
     SettlesCanFail,         \* the settlement of a request answered without a turn fails:
                             \* its completion write returns an error or exits, or the
                             \* request path's settle code raises
+    SilentTurns,            \* a GPT-Live call in the chat is up, so a turn the snapshot
+                            \* lets end with no reply may answer exactly [SILENT] (M56 4.4)
+    V1Clients,              \* the clients that declared companion protocol 1, a subset of
+                            \* Clients: they clear a turn only on text_done or turn_error
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off only by the checks that show a rule needs it.
     OutboxResend,        \* the client keeps every typed message until accepted and sends
@@ -160,21 +178,21 @@ CONSTANTS
                          \* page says more and on a gap, and applies a live row only at
                          \* cursor + 1 (PROTOCOL.md "Keeping a client's timeline")
     SubscribeBeforePull, \* the Connection joins the registry before it writes
-                         \* server_hello (join, connection.ex:252-262)
+                         \* server_hello (join, connection.ex:258-268)
     PageWrittenInReadStep, \* the Connection writes history_page to the socket in the step
-                         \* that read it (read_opts, connection.ex:520-524); FALSE sends it
+                         \* that read it (read_opts, connection.ex:534-538); FALSE sends it
                          \* through its own mailbox, behind live rows sent meanwhile
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
-                         \* connection.ex:508-509) and a delivery's (announce_written,
-                         \* channels/companion.ex:225-226), both built by Output.row and
+                         \* connection.ex:522-523) and a delivery's (announce_written,
+                         \* channels/companion.ex:266-267), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
                          \* sandbox.ex:521-530)
     ResendsPendingApprovals, \* the Connection writes every card still waiting right
                          \* after server_hello, in the step that joined the registry
-                         \* (join, send_pending_approvals, connection.ex:252-277, from
+                         \* (join, send_pending_approvals, connection.ex:258-283, from
                          \* Approvals.pending, approvals.ex:112-115); FALSE: a card goes
                          \* out once, live
     DropsCardsAtHello,   \* when server_hello arrives the client drops every approval card
@@ -189,12 +207,12 @@ CONSTANTS
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
                          \* requests.ex:148-158; cancel_request, mobile_sql.ex:546-565);
                          \* Turns reads the mark and enqueues in one step (hand_off,
-                         \* turns.ex:305-320) and sends every stop itself, after its
-                         \* enqueue (turns.ex:226-229, stop_in_queue :416-427). FALSE is
+                         \* turns.ex:328-343) and sends every stop itself, after its
+                         \* enqueue (turns.ex:242-246, stop_in_queue :449-460). FALSE is
                          \* the old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the cancel writes nothing (Requests.cancel,
-                         \* requests.ex:148-158; finish, fail, turns.ex:432-445)
+                         \* requests.ex:148-158; finish, fail, turns.ex:465-492)
     SettleAfterIngest,   \* once ingest returned, the request worker casts the request's
                          \* settlement to Turns (settle_after_ingest,
                          \* requests.ex:288-292); FALSE is the code before: a message the
@@ -202,22 +220,26 @@ CONSTANTS
                          \* boot ran it again
     SettleUnlessHandedOff, \* Turns settles that request only if no turn was handed off
                          \* for it (handle_cast {:settle_unless_handed_off},
-                         \* turns.ex:262-268); FALSE completes it regardless, as the code
+                         \* turns.ex:288-294); FALSE completes it regardless, as the code
                          \* before did for every command, so a command that became a turn
                          \* (/ultra) had its reply refused
     FailsUnsettled,      \* a settlement that fails fails the request once for its attempt
                          \* and tells its client error{request_failed, client_msg_id}
-                         \* (settle_inline, run_settle, turns.ex:334-369; fail_attempt,
+                         \* (settle_inline, run_settle, turns.ex:361-396; fail_attempt,
                          \* report_failure, requests.ex:325-345, through the
                          \* transport's report_failure, which the Connection writes as
-                         \* a failed worker's error, connection.ex:496-503,
-                         \* :153-154); FALSE only logs
+                         \* a failed worker's error, connection.ex:510-517,
+                         \* :159-160); FALSE only logs
                          \* the failure: the request stays running, and the next boot
                          \* runs the command again
-    SeqAssignedOnInsert  \* server_seq comes from the per-profile counter inside the one
+    SeqAssignedOnInsert, \* server_seq comes from the per-profile counter inside the one
                          \* transactional Repo call that inserts the row (append_in_tx,
                          \* mobile_sql.ex:737-743); FALSE: a writer reads the counter,
                          \* then inserts in a second call
+    SilenceGate          \* a turn may end with no reply only if every client joined when
+                         \* it started declared version 2 (MainAgent.live_call ->
+                         \* Voice.Bridge.chat_call -> Companion.every_client_reads?, frozen
+                         \* at checkout); FALSE offers silence whoever is joined
 
 VARIABLES
     \* each client (the Protocol's client rules)
@@ -238,7 +260,7 @@ VARIABLES
     accepted,   \* claimed client_msg_ids (mobile_client_requests)
     marked,     \* requests carrying a cancel mark (cancelled_at)
     ends,       \* ends[m]: the endings written for m's turn, in order: "done"
-                \* (text_done) or "cancelled" (turn_error)
+                \* (text_done), "cancelled" (turn_error) or "quiet" (turn_done)
     cancelAsked,\* messages a cancel reached the daemon for
     turnsBox,   \* Companion.Turns' mailbox: hand-offs, settlements, cancels, outcomes
     appr,       \* the approval token and its card: "none", "pending", "resolved",
@@ -252,6 +274,8 @@ VARIABLES
     turn,       \* turn[m]: "none", "queued", "running", "claimed" (committed, holds
                 \* its outcome), "ended"
     handed,     \* handed[m]: turns handed to the Queue for m
+    quietOk,    \* quietOk[m]: m's turn may end with no reply, frozen when it started
+    watchers,   \* watchers[m]: the clients joined when m's turn started
     \* the timeline and the job reporting back
     tl,         \* the rows: the server_seq of each, in insertion order
     job,        \* "idle", "read" (read the counter; SeqAssignedOnInsert off),
@@ -275,7 +299,7 @@ client   == <<link, composed, outbox, sentOn, view, pulling, prompt, resent>>
 conn     == <<wire, sub, reading>>
 turns    == <<accepted, marked, ends, cancelAsked, turnsBox, appr, applied>>
 reqs     == <<settled, known>>
-queue    == <<qpending, turn, handed>>
+queue    == <<qpending, turn, handed, quietOk, watchers>>
 store    == <<tl, job, jobSeq, dseq>>
 env      == <<dropsLeft, cancelsLeft>>
 obs      == <<answeredBy, dupWhileRunning, cancelEarly, refused, told>>
@@ -300,7 +324,7 @@ Page == [rows : Seq(Nat), more : BOOLEAN]
 DownEvents ==
     ({"hello_ok", "appr", "resolved"} \X {None}) \cup ({"acc"} \X Msgs)
     \cup ({"row"} \X Nat) \cup ({"page"} \X Page)
-TurnsEvents == {"handoff", "settle", "cancel", "completed", "cancelled"} \X Msgs
+TurnsEvents == {"handoff", "settle", "cancel", "completed", "quiet", "cancelled"} \X Msgs
 
 TypeOK ==
     /\ link \in [Clients -> {"down", "hello", "up"}]
@@ -315,7 +339,7 @@ TypeOK ==
     /\ sub \in [Clients -> {"no", "joining", "yes"}]
     /\ \A c \in Clients : reading[c] \in Page \cup {None}
     /\ accepted \subseteq Msgs /\ marked \subseteq Msgs
-    /\ \A m \in Msgs : ends[m] \in Seq({"done", "cancelled"})
+    /\ \A m \in Msgs : ends[m] \in Seq({"done", "cancelled", "quiet"})
     /\ cancelAsked \subseteq Msgs
     /\ turnsBox \in Seq(TurnsEvents)
     /\ appr \in {"none", "pending", "resolved", "expired"}
@@ -324,6 +348,8 @@ TypeOK ==
     /\ qpending \in Seq(Msgs)
     /\ turn \in [Msgs -> {"none", "queued", "running", "claimed", "ended"}]
     /\ handed \in [Msgs -> Nat]
+    /\ quietOk \in [Msgs -> BOOLEAN]
+    /\ watchers \in [Msgs -> SUBSET Clients]
     /\ tl \in Seq(Nat)
     /\ job \in {"idle", "read", "written", "done"}
     /\ jobSeq \in Nat /\ dseq \in Nat
@@ -345,7 +371,7 @@ Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:44-64) -> Channels.Companion.broadcast
-\* (channels/companion.ex:105-108, dispatch :245-249): one send to every
+\* (channels/companion.ex:135-138, dispatch :292-296): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
 \* wire's row has. A row and a text_done are both a live row here.
@@ -364,11 +390,11 @@ PagesAfter(a) ==
         least == IF PagesCanBeCut /\ most > 1 THEN 1 ELSE most
     IN {[rows |-> SubSeq(later, 1, k), more |-> Len(later) > k] : k \in least..most}
 
-\* history_pull on connection c (dispatch, connection.ex:232-233 ->
+\* history_pull on connection c (dispatch, connection.ex:238-239 ->
 \* Requests.history): the Repo read, in the step the client sends the pull;
 \* `w` is c's mailbox and socket as that step left them. With
 \* PageWrittenInReadStep the page is written to the socket in this step
-\* (read_opts -> send_event, connection.ex:520-524, :436-440), ahead of any
+\* (read_opts -> send_event, connection.ex:534-538, :450-454), ahead of any
 \* live row sent after the read; without it, it goes through the mailbox in a
 \* later step (SendPage). Without SubscribeBeforePull the Connection joins the
 \* registry after its first page (Join).
@@ -379,14 +405,27 @@ Pull(c, w, a) ==
           ELSE wire' = [wire EXCEPT ![c] = w] /\ reading' = [reading EXCEPT ![c] = pg]
     /\ sub' = IF sub[c] = "no" THEN [sub EXCEPT ![c] = "joining"] ELSE sub
 
+\* The turn's checkout (MainAgent.turn_state, frozen into its snapshot):
+\* whether it may end with no reply, which with SilenceGate it may only while
+\* no version 1 client is joined, and who is joined to watch it. Only with
+\* SilentTurns: otherwise nothing of it is read, and the state space is the
+\* one before.
+Snapshot(m) ==
+    IF SilentTurns
+    THEN LET joined == {c \in Clients : sub[c] = "yes"}
+         IN /\ quietOk' = [quietOk EXCEPT ![m] = SilenceGate => joined \cap V1Clients = {}]
+            /\ watchers' = [watchers EXCEPT ![m] = joined]
+    ELSE UNCHANGED <<quietOk, watchers>>
+
 \* maybe_start_next_request (queue.ex:317-325), run by every Queue callback
 \* that can free the slot or fill the queue: with the waiting turns p and the
 \* turn states t that callback left, start the head of p if no turn is alive
 \* (OneTurnAtATime), or at once without it.
 StartNext(p, t) ==
     IF p /= <<>> /\ (OneTurnAtATime => \A x \in Msgs : t[x] \notin Live)
-    THEN turn' = [t EXCEPT ![Head(p)] = "running"] /\ qpending' = Tail(p)
-    ELSE turn' = t /\ qpending' = p
+    THEN /\ turn' = [t EXCEPT ![Head(p)] = "running"] /\ qpending' = Tail(p)
+         /\ Snapshot(Head(p))
+    ELSE turn' = t /\ qpending' = p /\ UNCHANGED <<quietOk, watchers>>
 
 \* Whether a settlement of a request answered without a turn completes it:
 \* always, unless SettlesCanFail.
@@ -419,7 +458,7 @@ StopTurn(m, box) ==
 
 -----------------------------------------------------------------------------
 (* The request path: a Connection's request worker (request_job,           *)
-(* connection.ex:346-358) runs Companion.Requests.request                   *)
+(* connection.ex:352-364) runs Companion.Requests.request                   *)
 
 \* The worker's casts into Turns' mailbox, in the order it sends them: the
 \* hand-off during ingest, unless the gateway answered inline, then the
@@ -443,15 +482,15 @@ Casts(m) ==
 \*  - an attempt appends the user's row (append_client_message, keyed by
 \*    client_msg_id: an existing row is returned, not written again), and a
 \*    row it created is announced to every connection (after_user_append ->
-\*    announce_user_row, requests.ex:403-407, connection.ex:508-509);
+\*    announce_user_row, requests.ex:403-407, connection.ex:522-523);
 \*  - Gateway.ingest calls Companion.Turns.handle_message, which casts the
-\*    hand-off into Turns' mailbox and returns (turns.ex:123-128). A slash
+\*    hand-off into Turns' mailbox and returns (turns.ex:131-136). A slash
 \*    command the gateway answers inline hands nothing off;
 \*  - once ingest returned, the worker moves the coordinator's fence onto
 \*    Turns (handoff_settlement, requests.ex:306-323; not modelled) and casts
 \*    the settlement to Turns, with how to complete the request, fail it and
 \*    tell its client (settle_after_ingest, settle_unless_handed_off,
-\*    requests.ex:288-302 -> Turns.settle_unless_handed_off, turns.ex:151-165).
+\*    requests.ex:288-302 -> Turns.settle_unless_handed_off, turns.ex:159-173).
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
@@ -468,12 +507,12 @@ OnMsg(c, m) ==
     /\ UNCHANGED <<sub, reading, settled, known, queue, job, jobSeq, dseq, answeredBy,
                    cancelEarly, refused, told>>
 
-\* cancel{client_msg_id} (dispatch, connection.ex:229-230 -> Requests.cancel,
+\* cancel{client_msg_id} (dispatch, connection.ex:235-236 -> Requests.cancel,
 \* requests.ex:148-158), in the Connection's own step.
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
 \*    settled, in one Repo call (cancel_request, mobile_sql.ex:546-565;
 \*    settled for one that has, not_found for one never claimed), then Turns
-\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:173-176).
+\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:181-184).
 \*  - Otherwise the old code: the Connection calls Queue.stop_turn itself,
 \*    which finds nothing for a request not yet handed off.
 \*  - Without OutcomeEndsTurn the Connection also writes turn_error{cancelled}
@@ -555,10 +594,11 @@ Resend(m) ==
 \* The client connects: the Endpoint starts its Connection and hands it the
 \* socket (accept_connection, start_connection, hand_over, endpoint.ex:218-268;
 \* @max_clients 4, two here). The client sends client_hello; the Connection
-\* joins the registry (SubscribeBeforePull), then writes server_hello straight
+\* joins the registry under the version that hello declared, which a turn's
+\* silence decision reads (SubscribeBeforePull), then writes server_hello straight
 \* to the socket, and right behind it every card still waiting
 \* (ResendsPendingApprovals; hello, join, send_pending_approvals,
-\* connection.ex:245-277). The store keeps a card before it announces it, in
+\* connection.ex:251-283). The store keeps a card before it announces it, in
 \* one step (Approvals.announce, approvals.ex:79-88, :130-134), and the
 \* Connection joins before it reads the kept cards, so however the two
 \* interleave, a connection gets the
@@ -575,7 +615,7 @@ Connect(c) ==
     /\ UNCHANGED <<composed, outbox, sentOn, view, pulling, prompt, resent, reading, turns,
                    reqs, queue, store, env, obs>>
 
-\* The connection drops. The Connection exits (connection.ex:140) with its
+\* The connection drops. The Connection exits (connection.ex:146) with its
 \* mailbox; its registry entry goes with it. A request worker it started runs
 \* on, since it is not linked, so a claimed request still settles. The client
 \* keeps its outbox, its view, and any approval card it shows until its next
@@ -688,45 +728,49 @@ Join(c) ==
 (* Companion.Turns: one process, one mailbox                                *)
 
 \* Turns handles its next message:
-\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:255-260 -> hand_off
-\*    :302-315): with CancelMarksRequest it reads the request's mark
-\*    (cancel_recorded, get_client_request, :318-326) and, in the same step,
+\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:273-278 -> hand_off
+\*    :328-343): with CancelMarksRequest it reads the request's mark
+\*    (cancel_recorded, get_client_request, :345-353) and, in the same step,
 \*    ends a marked request with one turn_error{cancelled} and settles it
-\*    failed (fail, :440-445), never enqueued; otherwise it tracks the turn
+\*    failed (fail, :487-492), never enqueued; otherwise it tracks the turn
 \*    and enqueues it (Queue.handle_message; the Queue's handle_cast is
 \*    folded in). Either way Turns now knows the request (tracked, or in its
 \*    `ended` list);
-\*  - a settlement (handle_cast {:settle_unless_handed_off, ...}, :262-268):
+\*  - a settlement (handle_cast {:settle_unless_handed_off, ...}, :288-294):
 \*    with SettleUnlessHandedOff it runs only if Turns knows no hand-off of
 \*    the request; otherwise regardless. It completes the request
-\*    (settle_inline, run_settle, :334-369 -> Requests.settle_inline,
+\*    (settle_inline, run_settle, :361-396 -> Requests.settle_inline,
 \*    requests.ex:411-422). A completion that fails (SettlesCanFail) is,
 \*    with FailsUnsettled, followed by one failure write for the attempt and
 \*    by error{request_failed, client_msg_id} to the Connection that ran the
 \*    request (Requests.fail_attempt, report_failure, requests.ex:325-345,
 \*    through the transport's report_failure, request_failure_reporter,
-\*    connection.ex:496-503, which the Connection writes as a failed
-\*    worker's error, :153-154). That report is best effort
+\*    connection.ex:510-517, which the Connection writes as a failed
+\*    worker's error, :159-160). That report is best effort
 \*    and no client rule reads it, so it is only observed here (told).
 \*    Without FailsUnsettled the failure is only logged and the request
 \*    stays running;
-\*  - a cancel (handle_call {:cancel, ...}, turns.ex:226-229 -> stop :403-408,
-\*    stop_in_queue :416-427): Queue.stop_turn for a turn it handed off,
+\*  - a cancel (handle_call {:cancel, ...}, turns.ex:242-246 -> stop :436-441,
+\*    stop_in_queue :449-460): Queue.stop_turn for a turn it handed off,
 \*    sent after its own enqueue, so it cannot overtake it. Turns waits for
 \*    the answer with no timeout and the Queue answers however busy it is, so
 \*    the Queue's stop is folded into this step; for any other message the
 \*    stop finds nothing. A Queue gone before or during the stop exits the
 \*    call, which stop_in_queue catches, and its :DOWN ends the turn as
 \*    interrupted (not modelled);
-\*  - {:completed} (outcome/2, :242-252 -> finish/3, :432-435): each held
+\*  - {:completed} (outcome/2, :260-270 -> finish/3, :465-470): each held
 \*    reply is written as a row, fenced to the running attempt (one Repo
-\*    call), and announced as text_done{server_seq} (write_reply, :453-472),
-\*    then the request is completed (settle_completed, :476-488); one reply
+\*    call), and announced as text_done{server_seq} (write_reply, :500-519),
+\*    then the request is completed (settle_completed, :523-535); one reply
 \*    here. A request already settled refuses the write as a stale attempt
 \*    (append_client_output_in_tx, ensure_running_attempt,
 \*    mobile_sql.ex:1142-1152): no row and no text_done;
+\*  - {:completed} of a turn its runner said ends with no reply (handle_cast
+\*    {:silent, ...}, its [SILENT] reply dropped, silent_ending?): no row,
+\*    the request completed, and turn_done to the version 2 clients
+\*    (announce_no_reply); turn_done is live-only, as turn_error is;
 \*  - {:cancelled}: the request is settled failed and one turn_error is
-\*    announced (fail, :440-445); turn_error is live-only.
+\*    announced (fail, :487-492); turn_error is live-only.
 TurnsNext ==
     /\ turnsBox /= <<>>
     /\ LET ev == Head(turnsBox)
@@ -739,7 +783,7 @@ TurnsNext ==
                        THEN /\ ends' = [ends EXCEPT ![m] = Append(@, "cancelled")]
                             /\ settled' = settled \cup {m}
                             /\ turn' = [turn EXCEPT ![m] = "ended"]
-                            /\ UNCHANGED <<qpending, handed>>
+                            /\ UNCHANGED <<qpending, handed, quietOk, watchers>>
                        ELSE /\ handed' = [handed EXCEPT ![m] = @ + 1]
                             /\ StartNext(Append(qpending, m), [turn EXCEPT ![m] = "queued"])
                             /\ UNCHANGED <<ends, settled>>
@@ -757,6 +801,11 @@ TurnsNext ==
                [] ev[1] = "cancel" ->
                     /\ StopTurn(m, rest)
                     /\ UNCHANGED <<ends, settled, known, handed, refused, told>>
+               [] ev[1] = "quiet" ->
+                    /\ turnsBox' = rest
+                    /\ ends' = [ends EXCEPT ![m] = Append(@, "quiet")]
+                    /\ settled' = settled \cup {m}
+                    /\ UNCHANGED <<known, queue, refused, told>>
                [] ev[1] = "completed" ->
                     /\ turnsBox' = rest
                     /\ IF m \in settled
@@ -785,7 +834,7 @@ TurnsNext ==
 \* gateway stores a pending token (store_pending_grant, sandbox.ex:198-210)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
-\* card's end with (send_approval, channels/companion.ex:180-183 ->
+\* card's end with (send_approval, channels/companion.ex:221-224 ->
 \* Approvals.announce, approvals.ex:79-88, :130-134). The turn does not wait
 \* for it.
 Ask(m) ==
@@ -813,22 +862,28 @@ Expire ==
 Claim(m) ==
     /\ turn[m] = "running"
     /\ turn' = [turn EXCEPT ![m] = "claimed"]
-    /\ UNCHANGED <<client, conn, turns, reqs, qpending, handed, store, env, obs>>
+    /\ UNCHANGED <<client, conn, turns, reqs, qpending, handed, quietOk, watchers, store, env,
+                   obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:208-210, through build_turn_result, channels/companion.ex:160-164)
+\* turns.ex:225-227, through build_turn_result, channels/companion.ex:201-205)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
-\* turn (folded in: nothing else can act on the dead turn in between).
+\* turn (folded in: nothing else can act on the dead turn in between). A turn
+\* its snapshot let end with no reply may have answered exactly [SILENT]: its
+\* runner's word to Turns (TurnRunner.tell_silent -> Turns.silent) and its
+\* reply and outcome come from its one process, in that order, so they are
+\* one event here, "quiet".
 Finish(m) ==
     /\ turn[m] = "claimed"
-    /\ turnsBox' = Append(turnsBox, <<"completed", m>>)
+    /\ \E quiet \in IF SilentTurns /\ quietOk[m] THEN BOOLEAN ELSE {FALSE} :
+          turnsBox' = Append(turnsBox, <<IF quiet THEN "quiet" ELSE "completed", m>>)
     /\ StartNext(qpending, [turn EXCEPT ![m] = "ended"])
     /\ UNCHANGED <<client, conn, accepted, marked, ends, cancelAsked, appr, applied, handed,
                    reqs, store, env, obs>>
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:194-207)                        *)
+(* job's own process (channels/companion.ex:235-248)                        *)
 
 \* Without SeqAssignedOnInsert the job reads the counter first.
 JobRead ==
@@ -848,7 +903,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:225-226).
+\* (channels/companion.ex:266-267).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"
@@ -877,6 +932,8 @@ Init ==
     /\ qpending = <<>>
     /\ turn = [m \in Msgs |-> "none"]
     /\ handed = [m \in Msgs |-> 0]
+    /\ quietOk = [m \in Msgs |-> FALSE]
+    /\ watchers = [m \in Msgs |-> {}]
     /\ tl = <<>> /\ job = "idle" /\ jobSeq = 0 /\ dseq = 0
     /\ dropsLeft = MaxDrops /\ cancelsLeft = MaxCancels
     /\ answeredBy = {} /\ dupWhileRunning = FALSE /\ cancelEarly = {} /\ refused = {}
@@ -1022,6 +1079,14 @@ OneTurnOnTheWire == Cardinality({m \in Msgs : turn[m] \in Live}) <= 1
 OnlyNamedTurnCancelled ==
     \A m \in Msgs : "cancelled" \in Range(ends[m]) => m \in cancelAsked
 
+\* PROTOCOL.md "Version 2": a turn ends with no reply only while every
+\* connection attached declared version 2, since a version 1 client clears a
+\* turn only on text_done or turn_error and would show it thinking. Read as:
+\* no turn that ended with turn_done had a version 1 client watching when it
+\* started.
+NoTurnLeftThinking ==
+    \A m \in Msgs : "quiet" \in Range(ends[m]) => watchers[m] \cap V1Clients = {}
+
 -----------------------------------------------------------------------------
 (* WITNESSES: each is violated when its scenario is reachable. *)
 
@@ -1050,6 +1115,9 @@ Witness_CancelBeforeHandOff == cancelEarly = {}
 \* A request answered without a turn could not be settled, so it was failed
 \* and the client that sent it was told.
 Witness_SettleFailed == told = {}
+
+\* A turn ends with no reply, turn_done, with a client watching it.
+Witness_QuietTurn == ~(\E m \in Msgs : "quiet" \in Range(ends[m]) /\ watchers[m] /= {})
 
 \* A page cut to fit its byte budget reaches a client: fewer rows than its
 \* limit, and more to pull.
