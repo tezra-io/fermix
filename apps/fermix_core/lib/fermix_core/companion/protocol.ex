@@ -22,11 +22,17 @@ defmodule FermixCore.Companion.Protocol do
   daemon replies `server_hello` with the inclusive `{min_version, max_version}`
   range it supports (an N/N-1 window derived from one constant). See
   `PROTOCOL.md` for the state machine and the rollout order.
+
+  Version 2 adds `turn_done`, the ending of a turn that wrote no reply (M56
+  §4.4). A client on version 1 would show such a turn as thinking until the
+  next one began, so a server event names the version that brought it
+  (`server_event_version/1`) and a connection is never sent one newer than the
+  version its hello declared.
   """
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 1
+  @protocol_version 2
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -39,9 +45,12 @@ defmodule FermixCore.Companion.Protocol do
 
   @client_events ~w(client_hello msg command cancel history_pull history_search read_state)
   @server_events ~w(
-    server_hello accepted turn_started text_delta tool_event text_done turn_error row approval
-    approval_resolved read_state history_page search_results error
+    server_hello accepted turn_started text_delta tool_event text_done turn_error turn_done row
+    approval approval_resolved read_state history_page search_results error
   )
+
+  # The server events a version after 1 brought; every other one is version 1.
+  @server_event_versions %{"turn_done" => 2}
 
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
@@ -71,6 +80,7 @@ defmodule FermixCore.Companion.Protocol do
     "tool_event" => ~w(turn_id tool phase),
     "text_done" => ~w(turn_id server_seq text),
     "turn_error" => ~w(turn_id code message),
+    "turn_done" => ~w(turn_id),
     "row" => ~w(profile_id server_seq role text ts),
     "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
     "approval_resolved" => ~w(approval_id outcome),
@@ -97,6 +107,17 @@ defmodule FermixCore.Companion.Protocol do
   @doc "Ordered server event catalog."
   @spec server_events() :: [String.t()]
   def server_events, do: @server_events
+
+  @doc """
+  The protocol version that brought server event `type`: a connection whose
+  hello declared an older one is never sent it.
+  """
+  @spec server_event_version(String.t()) :: pos_integer()
+  def server_event_version(type) when is_binary(type) do
+    if type in @server_events,
+      do: Map.get(@server_event_versions, type, 1),
+      else: raise(ArgumentError, "unknown companion server event #{inspect(type)}")
+  end
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -295,6 +316,8 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   defp validate_server("turn_error", payload), do: strings(payload, ~w(turn_id code message))
+
+  defp validate_server("turn_done", payload), do: nonempty(payload, "turn_id")
 
   defp validate_server("row", payload) do
     with :ok <- strings(payload, ~w(profile_id role ts)),

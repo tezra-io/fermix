@@ -54,9 +54,28 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `1` |
+| `protocol_version` (companion declares) | `2` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `1` |
+| daemon `max_version` | `2` |
+
+### Version 2: a turn that ends with no reply
+
+Version 2 adds one server event, `turn_done { turn_id }`: the turn completed and
+wrote no reply, so no `text_done` ends it. It happens during a GPT-Live voice
+call in the chat, where a message typed may be material for the call rather
+than a request, and the agent may answer it with nothing. A version 1 client
+clears a turn only on `text_done` or `turn_error`, so it would show such a turn
+as thinking until the next one began. So the daemon:
+
+- sends a server event only to a connection whose `client_hello` declared the
+  version that brought it, so `turn_done` reaches version 2 connections only
+  (the schema names that version as `x-since-version`);
+- lets a turn end with no reply only while every connection attached declared
+  version 2. With a version 1 client attached the agent is told to answer
+  briefly instead, and its answer ends the turn with `text_done` as always.
+
+A version 1 client is served as before and never sees `turn_done`. Every
+version 1 event, field and rule holds unchanged on version 2.
 
 ## Handshake state machine
 
@@ -133,6 +152,7 @@ in a fixed order:
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
 | `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
+| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
 | `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
@@ -175,8 +195,8 @@ as their own `row`, which carries the whole history message, and the reply of
 a turn started here reaches them as a `row` too, since they never saw that
 turn start. What crosses the two transports is the timeline and the read
 frontier. A turn's stream and its ending (`turn_started`, `text_delta`,
-`tool_event`, `text_done`, `turn_error`) stay with the transport that ran the
-turn, and so do approvals, whose token resolves only there (see
+`tool_event`, `text_done`, `turn_error`, `turn_done`) stay with the transport
+that ran the turn, and so do approvals, whose token resolves only there (see
 *Approvals*).
 
 `server_seq` is assigned inside the write that stores the row, from a
@@ -256,6 +276,10 @@ daemon's turn queue:
 
 - it completed: each reply part is written to the timeline then, and sent as
   a `text_done` at its row, replacing the draft;
+- it completed and wrote no reply (version 2): one `turn_done`, and nothing of
+  its draft is kept. Only a turn the agent was told it may leave unanswered
+  ends this way, and only while every connection speaks version 2 (see
+  *Version 2*); no `text_delta` carries the reply it did not write;
 - it was cancelled or failed: one `turn_error` (`cancelled`, or the failure's
   code), and nothing of its draft is kept;
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
@@ -263,9 +287,9 @@ daemon's turn queue:
 - the request could not be handed to the turn queue: one `turn_error` with
   code `turn_failed`.
 
-`turn_error` is live-only and carries no seq: a cancelled or failed message
-leaves its user's row (announced as a `row` when it was written) with no
-answer after it. `cancel` names the request whose turn to stop, whichever
+`turn_error` and `turn_done` are live-only and carry no seq: a cancelled or
+failed message, or one that ended with no reply, leaves its user's row
+(announced as a `row` when it was written) with no answer after it. `cancel` names the request whose turn to stop, whichever
 client sent it and whether it runs or still waits; it never stops another
 turn, and the daemon never answers it itself. It is recorded on the request
 before anything else, so a cancel that arrives after `accepted` but before
@@ -325,8 +349,8 @@ is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 1 }
-daemon -> companion:  server_hello { min_version: 1, max_version: 1 }
+companion -> daemon:  client_hello { protocol_version: 2 }
+daemon -> companion:  server_hello { min_version: 1, max_version: 2 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }

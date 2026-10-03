@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 1
-    assert Protocol.supported_version_range() == {1, 1}
+    assert Protocol.protocol_version() == 2
+    assert Protocol.supported_version_range() == {1, 2}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -13,7 +13,31 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                row approval approval_resolved read_state history_page search_results error)
+                turn_done row approval approval_resolved read_state history_page search_results
+                error)
+  end
+
+  # M56 §6: a turn that ends with no reply needs a frame an older client would
+  # not survive, so it goes only to a connection that declared version 2.
+  test "every server event names the version that brought it, turn_done version 2" do
+    assert Protocol.server_event_version("turn_done") == 2
+
+    for type <- Protocol.server_events() -- ["turn_done"] do
+      assert Protocol.server_event_version(type) == 1, "#{type} is not a version 1 event"
+    end
+
+    refute "turn_done" in Protocol.shared_server_events()
+  end
+
+  test "turn_done names the turn it ends and nothing else" do
+    assert {:ok, line} = Protocol.encode_server_event("turn_done", %{"turn_id" => "turn-mac-1"})
+    assert Jason.decode!(line) == %{"type" => "turn_done", "turn_id" => "turn-mac-1"}
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_event("turn_done", %{})
+
+    assert {:error, {:invalid_field, "turn_id"}} =
+             Protocol.encode_server_event("turn_done", %{"turn_id" => ""})
   end
 
   test "the shared chat events are a subset of both catalogs" do
@@ -25,10 +49,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally" do
+  test "negotiates directionally, version 1 and version 2 both accepted" do
     assert :ok = Protocol.negotiate(1)
+    assert :ok = Protocol.negotiate(2)
     assert {:error, :client_too_old} = Protocol.negotiate(0)
-    assert {:error, :client_too_new} = Protocol.negotiate(2)
+    assert {:error, :client_too_new} = Protocol.negotiate(3)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -112,18 +137,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 1})
+             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 2})
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 2})
+             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 1})
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do

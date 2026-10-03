@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 1,
-  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-protocol-version": 2,
+  "x-supported-version-range": { "min": 1, "max": 2 },
   "x-max-line-bytes": 65536,
   "$defs": {
     "clientEvent": {
@@ -67,6 +67,7 @@
             "tool_event",
             "text_done",
             "turn_error",
+            "turn_done",
             "row",
             "approval",
             "approval_resolved",
@@ -105,6 +106,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "turn_error" } } },
           "then": { "$ref": "#/$defs/turn_error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "turn_done" } } },
+          "then": { "$ref": "#/$defs/turn_done" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "row" } } },
@@ -287,6 +292,16 @@
         "turn_id": { "type": "string", "minLength": 1 },
         "code": { "type": "string", "minLength": 1 },
         "message": { "type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512 }
+      }
+    },
+    "turn_done": {
+      "type": "object",
+      "description": "Version 2. The turn completed and wrote no reply: it ends the turn's draft with nothing kept. Live-only, like turn_error, and sent only to a connection whose hello declared version 2.",
+      "x-since-version": 2,
+      "required": ["type", "turn_id"],
+      "properties": {
+        "type": { "const": "turn_done" },
+        "turn_id": { "type": "string", "minLength": 1 }
       }
     },
     "row": {

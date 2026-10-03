@@ -148,11 +148,46 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     client = connect(path)
     send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
-    assert recv(client) == %{"type" => "server_hello", "min_version" => 1, "max_version" => 1}
+    assert recv(client) == %{"type" => "server_hello", "min_version" => 1, "max_version" => 2}
 
     send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
+  end
+
+  # M56 §6: version 2 adds `turn_done`, and version 1 is still served. Each
+  # connection is known by the version its hello declared, so the daemon can
+  # tell whether any client attached would hang on a turn with no reply.
+  test "a version 1 and a version 2 client are both served, each known by its version", ctx do
+    old = hello(ctx.socket_path, 1)
+    new = hello(ctx.socket_path, 2)
+
+    versions =
+      ctx.registry
+      |> Registry.lookup("main")
+      |> Enum.map(fn {_connection, version} -> version end)
+      |> Enum.sort()
+
+    assert versions == [1, 2]
+
+    for client <- [old, new] do
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+  end
+
+  test "turn_done reaches a version 2 client only; a version 1 client never sees it", ctx do
+    old = hello(ctx.socket_path, 1)
+    new = hello(ctx.socket_path, 2)
+
+    :ok = Companion.broadcast("main", Output.turn_done("turn-quiet"), ctx.registry)
+
+    done = %{"t" => "text_done", "turn_id" => "turn-next", "server_seq" => 3, "text" => "Hi"}
+    :ok = Companion.broadcast("main", done, ctx.registry)
+
+    assert recv(new) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
+    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
+    assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(old)
   end
 
   # FEAT-2: a client that was not connected when an approval went out gets it
@@ -234,15 +269,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 2})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 2,
+             "client_version" => 3,
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            }
 
     assert closed?(client)
@@ -587,7 +622,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # error builder, as a failed worker is; at boot recovery nobody is waiting.
   test "a request's late failure is told in this socket's own error", ctx do
     client = hello(ctx.socket_path)
-    [{connection, nil}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 1}] = Registry.lookup(ctx.registry, "main")
 
     assert :ok = Connection.transport(connection).report_failure.("mac-late", {:exit, :timeout})
 
@@ -604,7 +639,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   test "turn events reach the socket, and each stream snapshot is sent as its unsent suffix",
        ctx do
     client = hello(ctx.socket_path)
-    [{connection, nil}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 1}] = Registry.lookup(ctx.registry, "main")
 
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hel"}})
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hello"}})
@@ -819,9 +854,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
     forward(test_pid)
   end
 
-  defp hello(path) do
+  defp hello(path, version \\ 1) do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => version})
     assert %{"type" => "server_hello"} = recv(client)
     client
   end

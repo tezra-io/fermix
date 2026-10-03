@@ -93,6 +93,14 @@ defmodule FermixChannels.Companion.Output do
       "detail" => event |> inspect() |> Text.truncate_utf8(@max_tool_detail_bytes)
     }
 
+  @doc """
+  A turn that completed and wrote no reply (companion protocol 2, M56 §4.4):
+  its ending, for the connections that streamed it.
+  """
+  @spec turn_done(String.t()) :: event()
+  def turn_done(turn_id) when is_binary(turn_id) and turn_id != "",
+    do: %{"t" => "turn_done", "turn_id" => turn_id}
+
   @doc "A turn's terminal failure, `cancelled` included."
   @spec turn_error(String.t(), term()) :: event()
   def turn_error(turn_id, reason),

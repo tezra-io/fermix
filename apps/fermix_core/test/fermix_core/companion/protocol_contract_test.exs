@@ -46,6 +46,16 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert schema["x-max-line-bytes"] == Protocol.max_line_bytes()
   end
 
+  # A client below an event's version is never sent it (M56 §6), so the
+  # export names that version where it is not 1, as the module does.
+  test "each server event def names the version that brought it", %{schema: schema} do
+    for type <- Protocol.server_events() do
+      assert Map.get(schema["$defs"][type], "x-since-version", 1) ==
+               Protocol.server_event_version(type),
+             "#{type} names a different version than the protocol module"
+    end
+  end
+
   test "every per-event def is reachable from a discriminator" do
     raw = File.read!(@schema_path)
     schema = Jason.decode!(raw)

@@ -1,4 +1,4 @@
-{"type":"client_hello","protocol_version":1}
+{"type":"client_hello","protocol_version":2}
 {"type":"msg","client_msg_id":"mac-1","profile_id":"main","text":"What is on my calendar today?","attach_ids":[]}
 {"type":"command","client_msg_id":"mac-2","profile_id":"main","name":"confirm","args":"opaque-token"}
 {"type":"cancel","profile_id":"main","client_msg_id":"mac-3"}
