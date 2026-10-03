@@ -444,6 +444,26 @@ defmodule FermixOpik.AggregationTest do
     refute Enum.any?(spans, &String.starts_with?(&1.name, "stream:"))
   end
 
+  # M56 §4.4: a chat turn during a voice call may end with no reply; the turn's
+  # root says so, so a turn that answered nothing reads as chosen, not lost.
+  test "a turn that ended with no reply says so on its root" do
+    {_state, closed} =
+      run([
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 9},
+         %{
+           channel: :companion,
+           chat_id: "main",
+           sender: "Companion owner",
+           session_id: "main-56",
+           agent: "main",
+           silent: true
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.silent == true
+  end
+
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
   # failed turn — carried no input, no status and nothing filterable, so a reader
   # could only find it by eyeballing output text.

@@ -438,6 +438,15 @@ chat's, `{"companion","main",:root}`, while the message's `channel` stays
 persists in the chat is marked spoken in the conversation store and reaches no
 telemetry field, like every other piece of spoken content.
 
+A message typed in the chat while a call in the chat is up is an ordinary
+chat turn (`main-*` session, M56 §4.4): it is told the call is up and may end
+with no reply. Its `[:fermix, :agent, :message]` event carries `silent`, a
+boolean, `true` only when the turn ended that way (its snapshot allowed it and
+its reply was exactly `[SILENT]`); the Opik root carries it in its metadata.
+`voice_call_context`, the tool such a turn reads the call with, emits through
+`Tools.Telemetry.exec/5` like every tool, with `tasks` and `speech_bytes` and
+no output preview: what was said reaches no field.
+
 Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
 hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |

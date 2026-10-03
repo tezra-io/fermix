@@ -226,7 +226,9 @@ defmodule FermixOpik.Aggregation do
           chat_id: Map.get(meta, :chat_id),
           sender: Map.get(meta, :sender),
           iterations: Map.get(meas, :iterations),
-          total_tokens: Map.get(meas, :total_tokens)
+          total_tokens: Map.get(meas, :total_tokens),
+          # A chat turn during a voice call that ended with no reply (M56 §4.4).
+          silent: Map.get(meta, :silent)
         })
     })
   end
