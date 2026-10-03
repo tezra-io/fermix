@@ -447,6 +447,25 @@ its reply was exactly `[SILENT]`); the Opik root carries it in its metadata.
 `Tools.Telemetry.exec/5` like every tool, with `tasks` and `speech_bytes` and
 no output preview: what was said reaches no field.
 
+`send_to_channel` (M56 §4.7) sends a text to the owner's own inbox on a
+channel they name, from any owner turn and from a call's task alike. Its one
+exec event carries `channel` (the name asked for, at most 64 bytes),
+`text_bytes` and `outcome`, one of `sent`, `invalid_args`, `text_too_long`,
+`unsupported_delivery_platform`, `invalid_delivery_adapter`, `no_owner_inbox`
+and `delivery_failed`, and no input preview: the text, which may have been
+said aloud, reaches no field. The output preview is the result's sentence,
+which names channels and never the text. The send itself is a channel delivery
+and counts as the channel's own outbound message point.
+
+A coding run a task of a call in the chat launches (M56 §4.7) is a harness run
+like any other, and so a **root** of its own (`harness_<id>`, never nested:
+it outlives the turn that launched it, and the call's run closed at
+`call_stop` long before the run ends). Its `origin_session_id` is the task's
+`voice_delegation_<n>`, whose own `parent_session` is the call: that is how a
+run is tied to the call that asked for it, through the turn, as correlation.
+Its completion re-enters the chat as an ordinary companion turn (`main-*`),
+also a root of its own.
+
 Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
 detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |

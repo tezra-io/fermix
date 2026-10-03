@@ -266,7 +266,8 @@ and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 `memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs;
 dated events and
 reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
-`react`); `generate_image`, `request_directory_access`, and `tool_help`.
+`react`, and `send_to_channel` to the owner's own inbox on a channel they name);
+`generate_image`, `request_directory_access`, and `tool_help`.
 `computer_use`, the coding-harness tools, and the meeting tools are registered
 only when their feature is ready.
 
@@ -414,7 +415,8 @@ reminder text without a model.
 `Delivery` is the shared outbound layer. `ChannelSend` makes one bounded send
 through the adapter named in `[:fermix_core, :jobs, :delivery_channels]`, so core
 never compile-depends on channels, and `OwnerInbox` is the one resolver for the
-owner's inbox.
+owner's inbox, the first one or the one on a named platform (a transport only
+the owner reaches names its own through its adapter's `owner_inbox/0`).
 
 Architecture Invariant: a delivery destination is resolved once, at acceptance,
 and stored on the row; send time resolves only the adapter. A send watched by
@@ -723,8 +725,12 @@ Current channels:
   in the trusted `voice_call` map, so a hand-off and a typed turn share one
   history and one queue lane; a cancel or a hang-up stops only the call's own
   turns, by message id (`Queue.stop_turn/3`). A private call keeps a
-  conversation of its own, keyed by the call's UUID. While a call in the chat
-  is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
+  conversation of its own, keyed by the call's UUID. A hand-off runs on the
+  operator surface less what a call cannot deliver, one list per mode read by
+  the voice model's prompt and the hand-off alike
+  (`VoiceCall.excluded_categories/1`): a call in the chat may start a coding
+  run, which reports back into the chat, and a private call may not. While a
+  call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
   answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
   each such turn is told the call is up (`Voice.Bridge.chat_call/1`): it can
   read the call (`voice_call_context`) and may end with no reply, which its

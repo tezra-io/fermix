@@ -35,6 +35,8 @@ Every row is announced live to connected clients the moment it is written, whoev
 
 `schedule_job` with `delivery_mode: "origin"` from this chat delivers each run's result into the companion timeline, written whether or not the app is connected, announced to any connected client, and caught up by the history read on the next connect. From another chat, use `delivery_mode: "channel"` with `delivery_target: {platform: "companion", chat_id: "main"}`. A final response of exactly `[SILENT]` delivers nothing.
 
+`send_to_channel` with `channel: "companion"` writes a text into this chat from any owner turn, a GPT-Live task included ("put that in my chat"): one assistant row, told to the app and the phones like a delivery, and a retry in the same turn is that row again. `channel: "mobile"` is the same row with a push to the phone, offered only while the phone channel runs. A coding run started from this chat, or from a task of a call in it, reports back here when it ends, as a message the agent answers.
+
 ## What it does not carry
 
 Attachments do not travel on it yet: a message with attachments is refused, and a file or image sent into this chat (`send_attachment`, an image delivery) is refused rather than written as a row the app could not fetch, so answer in text there. Voice uses the realtime socket, not this one.

@@ -72,6 +72,14 @@
         "invokes skill self_knowledge",
         "says a call in the chat leaves a gist (a few sentences on what was asked, done, decided and still open) made after the call ends, shown in the chat as one row for the call (Voice call, N minutes, with the gist, or the task list if it could not be made), and given to the next call and to the owner's chat turns; that the gist is the call's record, not a memory fact, no transcript is kept, and a private call leaves nothing"
       ]
+    },
+    {
+      "name": "voice_call_sends_and_codes",
+      "prompt": "On a GPT-Live voice call, can I ask Fermix to send something to my Telegram, or to get a coding agent working on my repo?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says a task asked aloud sends the text with send_to_channel to the owner's own inbox on the channel named (never another chat; a channel with no owner inbox is refused, not swapped) and says where it went, and that in a call in the chat a task can start a coding run that keeps going after the call and reports back into the Mac chat, while a private call cannot start one"
+      ]
     }
   ]
 }
