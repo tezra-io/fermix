@@ -725,6 +725,12 @@ Current channels:
   read the call (`voice_call_context`) and may end with no reply, which its
   runner tells the companion stream and `Companion.Turns` ends with
   `turn_done`, offered only while every companion client attached reads it.
+  What a hand-off's answer cannot say aloud is shown in the chat: the Live
+  session writes it through `VoiceBridge.show/2`, which `Voice.Bridge`
+  answers with `Companion.write_call_row/3`, the one write for a call's rows
+  (deduplicated per task revision, `metadata.call` validated by
+  `Companion.Protocol`); a reply its runner told the voice adapter is drawn
+  from Computer History is shown and never said unless OpenAI may carry it.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests

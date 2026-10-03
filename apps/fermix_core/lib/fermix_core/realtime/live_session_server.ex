@@ -20,6 +20,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       enforced on a local tick as well as on provider snapshots, because a
       silent call still costs money.
 
+  A hand-off's reply is said as one line, and in a call in the chat what
+  cannot be said (a link, code, a table, a long answer) is shown in the chat
+  through the bridge, the voice told so only once the row is written
+  (`LiveText.split/2`, M56 §4.5). A reply its turn said is drawn from Computer
+  History is shown, never said, unless OpenAI may carry it (M56 §9); a private
+  call shows nothing.
+
   Every terminal exit — hang-up, ceiling, expiry, max duration, disconnect —
   runs one settle path: the companion is told the call is idle, in-flight
   delegations are cancelled through the bridge, the provider session is closed
@@ -1310,7 +1317,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # Teardown has to finish even when the bridge process is already gone: the
   # ledger, the `call_stop` telemetry and the companion's final frames are what
   # is left of the call, and losing them to a dead peer is a worse outcome than
-  # a logged close failure. Reported, never silent.
+  # a logged close failure. A result shown in the chat is the same: a write
+  # that raised or exited is a write that failed, and the call goes on.
+  # Reported, never silent.
   defp bridge_call(fun) do
     fun.()
   rescue
