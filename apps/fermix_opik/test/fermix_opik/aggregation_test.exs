@@ -2197,6 +2197,83 @@ defmodule FermixOpik.AggregationTest do
     end
   end
 
+  @voice_gist_start [:fermix, :voice_gist, :run_start]
+  @voice_gist_complete [:fermix, :voice_gist, :run_complete]
+  @voice_gist_error [:fermix, :voice_gist, :run_error]
+  @voice_gist_session "voice_gist:6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+
+  # The emitter's own metadata shape (FermixCore.Realtime.GistTelemetry),
+  # mirrored by hand like `voice_live_meta/1`.
+  defp voice_gist_meta(extra) do
+    Map.merge(
+      %{
+        agent: "voice_gist",
+        session_id: @voice_gist_session,
+        call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+      },
+      extra
+    )
+  end
+
+  # M56 §7: a call's gist is made after the call's run closed, so it is a root
+  # of its own, nesting only its own provider call, never under the call.
+  describe "a call's gist" do
+    test "the reporter subscribes to every voice_gist event" do
+      for event <- [@voice_gist_start, @voice_gist_complete, @voice_gist_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a gist is one root trace nesting its summarising call, closed with its sizes" do
+      {_state, closed} =
+        run([
+          {@voice_live_stop, %{voice_seconds: 62}, voice_live_meta(%{reason: "call_stop"})},
+          {@voice_gist_start, %{},
+           voice_gist_meta(%{tasks: 2, speech_bytes: 900, input_bytes: 1_100, tainted: false})},
+          {[:fermix, :provider, :call], %{duration_ms: 1_800},
+           %{
+             provider: :openai,
+             model: "gpt-5",
+             status: :ok,
+             agent: "voice_gist",
+             session_id: @voice_gist_session,
+             tokens: %{prompt: 300, completion: 80}
+           }},
+          {@voice_gist_complete, %{duration_ms: 2_000, gist_bytes: 310},
+           voice_gist_meta(%{status: "written"})}
+        ])
+
+      gist = Enum.find(closed, &(&1.trace.name == @voice_gist_session))
+      assert %{trace: trace, spans: spans} = gist
+      assert trace.tags == ["voice_gist"]
+      assert trace.metadata.call_uuid == "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+      assert trace.metadata.status == "written"
+      assert trace.metadata.gist_bytes == 310
+      assert trace.metadata.input_bytes == 1_100
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.trace_id == trace.id
+
+      wrapper = span_named(spans, @voice_gist_session)
+      refute Map.has_key?(wrapper, :parent_span_id)
+    end
+
+    # Without the prefix clause an error arriving with no opener would mint a
+    # root `infer_kind/1` reads as `:subagent`.
+    test "a gist that failed with no opener still closes as a voice_gist root, failed" do
+      {_state, closed} =
+        run([
+          {@voice_gist_error, %{count: 1, duration_ms: 60_000},
+           voice_gist_meta(%{status: "failed", error: "timeout"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["voice_gist"]
+      assert trace.metadata.status == "failed"
+      assert trace.error_info.message == "timeout"
+    end
+  end
+
   @cu_start [:fermix, :computer_use, :session_start]
   @cu_complete [:fermix, :computer_use, :session_complete]
   @cu_error [:fermix, :computer_use, :session_error]
