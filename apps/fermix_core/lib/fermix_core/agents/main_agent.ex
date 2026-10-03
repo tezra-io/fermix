@@ -38,6 +38,7 @@ defmodule FermixCore.Agents.MainAgent do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.SessionSupervisor
+  alias FermixCore.Realtime.VoiceBridge
   alias FermixCore.Reply
   alias FermixCore.Telemetry
 
@@ -157,6 +158,10 @@ defmodule FermixCore.Agents.MainAgent do
       memory_store: Keyword.get(opts, :memory_store, Store),
       memory_repo: Keyword.get(opts, :memory_repo, Config.repo_server(opts)),
       memory_reviewer: Keyword.get(opts, :memory_reviewer, Reviewer),
+      # The bridge a typed turn asks whether a call in the chat is up (M56
+      # §4.4). `nil` resolves the one Channels registers, at each checkout:
+      # Channels boots after this process.
+      voice_bridge: Keyword.get(opts, :voice_bridge),
       memory_agent_id: Config.agent_id(opts),
       memory_owner_id: Config.owner_id(opts),
       review_interval_hours: Config.review_interval_hours(opts),
@@ -390,9 +395,32 @@ defmodule FermixCore.Agents.MainAgent do
       # (MILESTONE_32 "snapshotted once per turn"): the section injection, the
       # recall tool gates, and the commit-time taint stamp all read this one
       # decision, so a mid-turn config flip cannot split them.
-      computer_history_gate: gate
+      computer_history_gate: gate,
+      # The Live call in the chat as this turn is told of it (M56 §4.4), frozen
+      # HERE, so a message that waited in the queue is judged when it runs and
+      # the line, the silent ending and its telemetry read one answer.
+      live_call: live_call(state, msg, voice_call)
     }
   end
+
+  # Only an owner's turn of the chat is told, and a hand-off never is: it is
+  # the call's own turn, and runs in the chat's conversation by its key
+  # override. Channels answers from the call registry and the companion
+  # clients attached; with no bridge registered no call can be up.
+  defp live_call(state, msg, :none) do
+    with :operator <- Map.get(msg, :source_trust),
+         {:ok, bridge} <- voice_bridge(state),
+         {:ok, call} <- bridge.chat_call(ConversationKey.from(msg)) do
+      call
+    else
+      _not_told -> nil
+    end
+  end
+
+  defp live_call(_state, _msg, {:ok, _voice_call}), do: nil
+
+  defp voice_bridge(%{voice_bridge: nil}), do: VoiceBridge.resolve()
+  defp voice_bridge(%{voice_bridge: bridge}) when is_atom(bridge), do: {:ok, bridge}
 
   defp conversation_store(_state, {:ok, %{conversation_store: store}}), do: store
   defp conversation_store(state, :none), do: state.conversation_store

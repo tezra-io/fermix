@@ -1932,9 +1932,58 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # M56 §4.4: a typed chat turn during a Live call in the chat is told the call
+  # is up, in the leading system run where the date note goes, only while the
+  # snapshot MainAgent froze at checkout names the call.
+  describe "a typed turn during a call in the chat" do
+    @started_at ~U[2026-10-03 14:05:00Z]
+
+    test "is told the call is up, that it may be material, and how to stay silent" do
+      messages =
+        capture_prompt(%{channel: "companion", chat_id: "main"},
+          live_call: %{started_at: @started_at, silence_allowed?: true}
+        )
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      line_index = Enum.find_index(system_run, &(&1.content =~ "voice call"))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(line_index)
+      assert line_index > date_index
+
+      line = Enum.at(system_run, line_index).content
+      assert line =~ "started at 14:05 UTC"
+      assert line =~ "material for the call"
+      assert line =~ "Reply in writing when"
+      assert line =~ "exactly [SILENT]"
+      assert line =~ "`voice_call_context`"
+    end
+
+    # M56 §6: an older companion client would show a turn with no reply as
+    # thinking, so with one attached silence is never offered.
+    test "with an older client attached it is told to answer briefly, never silence" do
+      messages =
+        capture_prompt(%{channel: "companion", chat_id: "main"},
+          live_call: %{started_at: @started_at, silence_allowed?: false}
+        )
+
+      line = Enum.find(messages, &(&1.content =~ "voice call")).content
+      assert line =~ "started at 14:05 UTC"
+      assert line =~ "briefly"
+      refute line =~ "SILENT"
+    end
+
+    test "with no call up there is no line" do
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"})
+
+      refute Enum.any?(messages, &(&1.content =~ "voice call"))
+      refute Enum.any?(messages, &(&1.content =~ "SILENT"))
+    end
+  end
+
   # Drive one real turn through TurnRunner and return the message list the
   # provider adapter actually received.
-  defp capture_prompt(msg_overrides) do
+  defp capture_prompt(msg_overrides, state_overrides \\ []) do
     registry_name = :"tr_prompt_reg_#{System.unique_integer([:positive])}"
     store_name = :"tr_prompt_store_#{System.unique_integer([:positive])}"
 
@@ -1960,10 +2009,12 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     turn_state =
       turn_state(
-        adapter: CapturePromptAdapter,
-        adapter_opts: [model: "mock-model", test_pid: self()],
-        capability_registry: registry_name,
-        conversation_store: store
+        [
+          adapter: CapturePromptAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        ] ++ state_overrides
       )
 
     assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)

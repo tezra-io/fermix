@@ -314,6 +314,24 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
   end
 
+  # The voice bridge Channels registers, standing in: it answers how a turn of
+  # each conversation is told of a call in the chat, as the test sets it, and
+  # reports every key it is asked about.
+  defmodule LiveCallBridge do
+    @name __MODULE__.State
+
+    def start(test_pid, answer),
+      do: Agent.start_link(fn -> %{test_pid: test_pid, answer: answer} end, name: @name)
+
+    def set(answer), do: Agent.update(@name, &%{&1 | answer: answer})
+
+    def chat_call(key) do
+      %{test_pid: test_pid, answer: answer} = Agent.get(@name, & &1)
+      send(test_pid, {:chat_call_asked, key})
+      answer
+    end
+  end
+
   defmodule ReviewProbe do
     @state :main_agent_review_probe
 
@@ -1923,6 +1941,93 @@ defmodule FermixCore.Agents.MainAgentTest do
 
       assert_receive {:reply, "Nothing new"}, 5_000
       refute_receive {:memory_review_started, _opts, _pid}, 200
+    end
+  end
+
+  # M56 §4.4: a message typed in the chat during a Live call in the chat is told
+  # that the call is up. The daemon decides from its own registry, through the
+  # bridge, never from the message, and freezes the answer into the snapshot
+  # at checkout: a message that waited in the queue is judged when it runs.
+  describe "a typed turn during a call in the chat" do
+    @call %{started_at: ~U[2026-10-03 14:05:00Z], silence_allowed?: true}
+
+    setup ctx do
+      {:ok, _bridge} = LiveCallBridge.start(self(), {:ok, @call})
+      agent_name = :"live_call_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             skill_registry: ctx.skill_registry,
+             conversation_store: ctx.conv_store,
+             task_supervisor: ctx.task_supervisor,
+             voice_bridge: LiveCallBridge
+           ]},
+          id: agent_name
+        )
+
+      %{live_agent: agent_name}
+    end
+
+    test "an owner's turn checked out during the call carries it, asked by its own key", ctx do
+      msg = make_message("use this link", chat_id: "main", source_trust: :operator)
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert turn_state.live_call == @call
+      assert_received {:chat_call_asked, {"telegram", "main", :root}}
+    end
+
+    test "the answer is the one at checkout, whenever the message was made", ctx do
+      msg = make_message("queued before the call", source_trust: :operator)
+      LiveCallBridge.set(:none)
+      {:ok, before_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      LiveCallBridge.set({:ok, @call})
+      {:ok, during_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      LiveCallBridge.set(:none)
+      {:ok, after_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert before_call.live_call == nil
+      assert during_call.live_call == @call
+      assert after_call.live_call == nil
+    end
+
+    test "a hand-off is the call's own turn, never told of it", ctx do
+      store = start_voice_store()
+
+      {:ok, turn_state, _cache} =
+        MainAgent.checkout_turn_state(ctx.live_agent, voice_message("read my inbox", store))
+
+      assert turn_state.live_call == nil
+      refute_received {:chat_call_asked, _key}
+    end
+
+    test "a guest's turn is never told of the call", ctx do
+      msg = make_message("hello", source_trust: :guest)
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert turn_state.live_call == nil
+      refute_received {:chat_call_asked, _key}
+    end
+
+    test "with no bridge registered no call is up", %{agent: agent} do
+      registered = Application.get_env(:fermix_core, :voice_bridge)
+      Application.delete_env(:fermix_core, :voice_bridge)
+
+      on_exit(fn ->
+        if registered, do: Application.put_env(:fermix_core, :voice_bridge, registered)
+      end)
+
+      msg = make_message("hello", source_trust: :operator)
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(agent, msg)
+
+      assert turn_state.live_call == nil
     end
   end
 

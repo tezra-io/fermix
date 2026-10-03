@@ -29,6 +29,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.IterationLimits
+  alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
@@ -566,6 +567,7 @@ defmodule FermixCore.Agents.TurnRunner do
     messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
     messages = inject_recent_activity(messages, context)
+    messages = inject_live_call(messages, Map.get(state, :live_call))
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
     # orchestrator): the tag unlocks the wider `subagents` caps via
@@ -661,6 +663,12 @@ defmodule FermixCore.Agents.TurnRunner do
   # denies it or there is no activity yet.
   defp inject_recent_activity(messages, context),
     do: append_system_note(messages, RecentActivity.note(context))
+
+  # A typed chat turn during a Live call in the chat (M56 §4.4): the line exists
+  # only while the call the snapshot froze does, and goes last in the leading
+  # system run, so a call costs the prompt cache two breaks, not one per turn.
+  defp inject_live_call(messages, live_call),
+    do: append_system_note(messages, LiveCallTurn.note(live_call))
 
   # Per-channel presentation posture (CHANNEL_LONGFORM_PRESENTATION §7). A pure
   # function of the channel and chat type — both `ConversationKey`-stable — so
