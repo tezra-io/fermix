@@ -12,6 +12,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Realtime.LiveText
 
   @title "# LIVE.md — Live Voice Companion"
+  @voice_in_chat_suite Path.expand("../../../../../benchmark/suites/voice_in_chat.yaml", __DIR__)
 
   setup do
     bootstrap_dir =
@@ -363,6 +364,21 @@ defmodule FermixCore.Realtime.LivePromptTest do
     test "no other conversation has an addendum" do
       assert_raise FunctionClauseError, fn -> LivePrompt.backend_addendum("shared") end
     end
+
+    # The eval drives a hand-off's turn with the addendum in front of the
+    # spoken exchange, since no driver can mint a trusted voice turn: its copy
+    # must be the one a call in the chat sends, or the eval grades a prompt the
+    # product no longer has.
+    test "every addendum the voice_in_chat eval carries is the one a call in the chat sends" do
+      suite = one_spaced(File.read!(@voice_in_chat_suite))
+      addendum = one_spaced(LivePrompt.backend_addendum("chat"))
+      opening = "This task comes from an ongoing voice conversation."
+
+      copies = length(String.split(suite, opening)) - 1
+
+      assert copies > 0
+      assert length(String.split(suite, addendum)) - 1 == copies
+    end
   end
 
   describe "eligible_capabilities/1" do
@@ -433,6 +449,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
       :nomatch -> flunk("missing from the prompt: #{inspect(part)}")
     end
   end
+
+  defp one_spaced(text), do: text |> String.split() |> Enum.join(" ")
 
   defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_core, key, value)
   defp restore_env({key, :error}), do: Application.delete_env(:fermix_core, key)
