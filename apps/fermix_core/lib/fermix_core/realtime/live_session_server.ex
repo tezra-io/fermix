@@ -533,7 +533,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp resolve_prompt(state) do
     with {:ok, live_md} <- LivePrompt.load(state.agent_id),
-         {:ok, context} <- LivePrompt.context(state.agent_id) do
+         {:ok, context} <- LivePrompt.context(state.agent_id, Config.conversation(state.config)) do
       capabilities = LivePrompt.eligible_capabilities(state.capability_registry)
       {:ok, LivePrompt.compose(live_md, capabilities, context)}
     end

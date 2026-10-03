@@ -258,7 +258,8 @@ defmodule FermixChannels.Voice.BridgeTest do
       assert voice_call.turn_session_id == "voice_delegation_1"
       assert voice_call.conversation_store == handle.store
       assert voice_call.persist? == false
-      assert voice_call.prompt_addendum == LivePrompt.backend_addendum()
+      # A private call shows nothing in the chat, so its addendum is today's.
+      assert voice_call.prompt_addendum == LivePrompt.backend_addendum("private")
       assert ConversationKey.from(msg) == {"voice", handle.call_uuid, :root}
       assert conversation_key == ConversationKey.from(msg)
 
@@ -280,6 +281,8 @@ defmodule FermixChannels.Voice.BridgeTest do
       assert msg.source_trust == :operator
       assert msg.metadata.voice_call.conversation_key == Companion.chat_conversation_key()
       assert msg.metadata.voice_call.conversation_store == ConversationStore
+      # The reply may part into a line said and a result shown (M56 §4.5).
+      assert msg.metadata.voice_call.prompt_addendum == LivePrompt.backend_addendum("chat")
       assert ConversationKey.from(msg) == Companion.chat_conversation_key()
       assert task_key == Companion.chat_conversation_key()
 

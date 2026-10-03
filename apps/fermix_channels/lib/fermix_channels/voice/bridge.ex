@@ -90,6 +90,7 @@ defmodule FermixChannels.Voice.Bridge do
   @type handle :: %{
           call_id: String.t(),
           call_uuid: String.t(),
+          conversation: String.t(),
           conversation_key: ConversationKey.t(),
           store: GenServer.server(),
           owner: pid(),
@@ -298,6 +299,7 @@ defmodule FermixChannels.Voice.Bridge do
     %{
       call_id: call.call_id,
       call_uuid: call.call_uuid,
+      conversation: call.conversation,
       conversation_key: conversation_key,
       store: store,
       owner: self(),
@@ -421,7 +423,7 @@ defmodule FermixChannels.Voice.Bridge do
           revision: request.revision,
           turn_session_id: request.turn_session_id,
           conversation_store: store,
-          prompt_addendum: LivePrompt.backend_addendum(),
+          prompt_addendum: LivePrompt.backend_addendum(handle.conversation),
           persist?: persist?
         }
       },

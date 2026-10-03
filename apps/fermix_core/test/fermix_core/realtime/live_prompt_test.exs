@@ -9,6 +9,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Prompt.Defaults
   alias FermixCore.Prompt.VoicePresence
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Realtime.LiveText
 
   @title "# LIVE.md — Live Voice Companion"
 
@@ -30,12 +31,14 @@ defmodule FermixCore.Realtime.LivePromptTest do
   end
 
   # What a call is told about the owner when nothing is known: the date only.
+  # A private call, so nothing about the chat is added either.
   @bare %{
     agent_id: "main",
     assistant_name: nil,
     personalization: [],
     date_note: "Current date: Friday, 2026-10-02 (UTC).",
-    prompt_memory: %{user: nil, memory: nil}
+    prompt_memory: %{user: nil, memory: nil},
+    conversation: "private"
   }
 
   describe "compose/2" do
@@ -153,6 +156,28 @@ defmodule FermixCore.Realtime.LivePromptTest do
       refute prompt =~ ": x"
     end
 
+    # M56 §4.5: the voice learns from the generated capability section, not
+    # from LIVE.md, that a result it cannot say is put in the chat, and only
+    # in a call whose results can be.
+    test "a call in the chat is told after the tools that results it cannot say go to the chat" do
+      prompt =
+        LivePrompt.compose(@title, [capability("web_search", :web)], %{
+          @bare
+          | conversation: "chat"
+        })
+
+      assert prompt =~ "Backend tools:\n- Web: web_search\n\n"
+      [_before, after_tools] = String.split(prompt, "- Web: web_search", parts: 2)
+      assert after_tools =~ "in the owner's chat"
+      assert after_tools =~ "never say a result is there otherwise"
+    end
+
+    test "a private call is told nothing about the chat" do
+      prompt = LivePrompt.compose(@title, [capability("web_search", :web)], @bare)
+
+      refute prompt =~ "chat"
+    end
+
     test "with nothing set there is no name line, no owner block and no memory frame" do
       prompt = LivePrompt.compose(@title, [], @bare)
 
@@ -242,9 +267,10 @@ defmodule FermixCore.Realtime.LivePromptTest do
       File.write!(Path.join([memory_dir, agent_id, "USER.md"]), "- Likes short answers\n")
       File.write!(Path.join([memory_dir, agent_id, "MEMORY.md"]), "- Car is a Model 3\n")
 
-      assert {:ok, context} = LivePrompt.context(agent_id)
+      assert {:ok, context} = LivePrompt.context(agent_id, "chat")
 
       assert context.agent_id == agent_id
+      assert context.conversation == "chat"
       assert context.assistant_name == "Nova"
       assert context.personalization == [user_name: "Sujeeth", timezone: "UTC"]
       assert context.date_note == CurrentDate.note()
@@ -260,7 +286,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       Application.delete_env(:fermix_core, :personalization)
 
       assert {:ok, %{assistant_name: nil, personalization: [], prompt_memory: memory}} =
-               LivePrompt.context(agent_id)
+               LivePrompt.context(agent_id, "private")
 
       assert memory == %{user: nil, memory: nil}
     end
@@ -301,14 +327,41 @@ defmodule FermixCore.Realtime.LivePromptTest do
     end
   end
 
-  describe "backend_addendum/0" do
-    test "is a stable non-empty string naming the voice conversation" do
-      addendum = LivePrompt.backend_addendum()
+  describe "backend_addendum/1" do
+    test "is a stable non-empty string naming the voice conversation, for either call" do
+      for conversation <- ~w(chat private) do
+        addendum = LivePrompt.backend_addendum(conversation)
 
-      assert is_binary(addendum)
-      assert addendum =~ "voice conversation"
-      assert byte_size(addendum) > 200
-      assert addendum == LivePrompt.backend_addendum()
+        assert addendum =~ "voice conversation"
+        assert addendum =~ "Do not treat partial speech"
+        assert byte_size(addendum) > 200
+        assert addendum == LivePrompt.backend_addendum(conversation)
+      end
+    end
+
+    # M56 §4.5: the reply is spoken, so it opens with a line to say, and what
+    # cannot be said follows the one delimiter line, for Fermix to show in the
+    # chat and tell the voice about.
+    test "a call in the chat asks for a line to say and the rest after the delimiter" do
+      addendum = LivePrompt.backend_addendum("chat")
+
+      assert addendum =~ "one short line to say"
+      assert addendum =~ "a line that is exactly #{LiveText.shown_delimiter()}"
+      assert addendum =~ "owner's chat"
+      refute addendum =~ "result view"
+    end
+
+    # M56 §5: a private call is today's behaviour in full, its addendum included.
+    test "a private call keeps its wording, with no delimiter and nothing shown" do
+      addendum = LivePrompt.backend_addendum("private")
+
+      assert addendum =~ "Keep the portion sent to\nthe voice model concise"
+      refute addendum =~ LiveText.shown_delimiter()
+      refute addendum =~ "chat"
+    end
+
+    test "no other conversation has an addendum" do
+      assert_raise FunctionClauseError, fn -> LivePrompt.backend_addendum("shared") end
     end
   end
 

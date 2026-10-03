@@ -6,7 +6,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   documents. The FRONTEND prompt is `LIVE.md` — the owner-editable, versioned
   bootstrap resource — plus a compact list of the backend's capability
   categories, so the voice model knows what Fermix can be asked to do without
-  ever seeing a tool schema. The BACKEND addendum (`backend_addendum/0`) rides
+  ever seeing a tool schema. The BACKEND addendum (`backend_addendum/1`) rides
   along on Live-origin Core turns only; it never mutates the shared prompt
   that text conversations use.
 
@@ -36,6 +36,7 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Prompt.VoicePresence
+  alias FermixCore.Realtime.LiveText
 
   require Logger
 
@@ -62,8 +63,15 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   @backend_heading "Backend tools:"
 
-  # Design §6.3, verbatim.
-  @backend_addendum """
+  # M56 §4.5: told, after the capability names, only to a call whose results
+  # can be shown in the chat.
+  @shown_in_chat "Fermix puts a result that is too long to say, or cannot be said (a link, " <>
+                   "code, a table), in the owner's chat and tells you when it has. Then you may " <>
+                   "tell the owner it is in the chat; never say a result is there otherwise."
+
+  # The backend addendum's rules for the task itself, the same for every call
+  # (M41 §6.3).
+  @addendum_task """
   This task comes from an ongoing voice conversation. Read the supplied speaker
   labels, timestamps, current task revision, and verified state. Fragments may
   arrive late and may contain recognition errors. Do not treat partial speech,
@@ -72,7 +80,11 @@ defmodule FermixCore.Realtime.LivePrompt do
   Use Fermix's normal tools, policies, and confirmation flow. Apply the latest
   confirmed correction. Recheck task state before a consequential action. A
   request to stop speaking alone does not cancel work.
+  """
 
+  # A private call's reply, M41 §6.3 verbatim: a private call is today's
+  # behaviour in full (M56 §5).
+  @addendum_private_reply """
   Return what is verified: result, pending work, failure, or a necessary question.
   Include exact identifiers and units when relevant. Keep the portion sent to
   the voice model concise; retain full outputs and artifacts for the result view.
@@ -80,32 +92,42 @@ defmodule FermixCore.Realtime.LivePrompt do
   credentials, and do not instruct the voice model to promise unverified success.
   """
 
+  @addendum_chat_reply """
+  Return what is verified: result, pending work, failure, or a necessary question.
+  Include exact identifiers and units when relevant. Report cancellation only when
+  confirmed. Do not reveal internal reasoning or credentials, and do not instruct
+  the voice model to promise unverified success.
+  """
+
   @typedoc """
-  What a call starts knowing about the owner (`context/1`): the configured
-  assistant name (`nil` when unset), the personalization config as it stands,
-  the date note a turn carries, and the memory files as `PromptFiles` reads
-  them.
+  What a call starts knowing (`context/2`): the configured assistant name
+  (`nil` when unset), the personalization config as it stands, the date note a
+  turn carries, the memory files as `PromptFiles` reads them, and the call's
+  conversation (`"chat"` or `"private"`, M56 §5), which says whether a result
+  can be shown in the chat.
   """
   @type context :: %{
           agent_id: String.t(),
           assistant_name: String.t() | nil,
           personalization: keyword(),
           date_note: String.t(),
-          prompt_memory: PromptFiles.prompt_memory()
+          prompt_memory: PromptFiles.prompt_memory(),
+          conversation: String.t()
         }
 
   @doc """
   The Live frontend instructions, in this order: `live_md`, the pet the owner
   talks to (`VoicePresence`), the assistant's name, the owner's details that
-  are set, the date, the memory files in their memory-context frame, and the
-  backend tool categories available on this call.
+  are set, the date, the memory files in their memory-context frame, the
+  backend tool categories available on this call, and, for a call in the
+  chat, that a result it cannot say is put in the chat (M56 §4.5).
 
   Bounded by `instructions_max_bytes/0`: past it MEMORY.md is left out, then
   USER.md, and the omission is logged. Nothing else is cut, so a `live_md`
   that alone passes the bound is sent whole.
   """
   @spec compose(String.t(), [Capability.t()], context()) :: String.t()
-  def compose(live_md, capabilities, %{prompt_memory: %{}} = context)
+  def compose(live_md, capabilities, %{prompt_memory: %{}, conversation: conversation} = context)
       when is_binary(live_md) and is_list(capabilities) do
     leading =
       Enum.reject(
@@ -119,13 +141,16 @@ defmodule FermixCore.Realtime.LivePrompt do
         &is_nil/1
       )
 
-    tools = @backend_heading <> "\n" <> capability_lines(capabilities)
+    tools = [
+      @backend_heading <> "\n" <> capability_lines(capabilities),
+      shown_in_chat(conversation)
+    ]
 
     fits? = fn memory ->
-      byte_size(join(leading ++ [memory, tools])) <= @instructions_max_bytes
+      byte_size(join(leading ++ [memory | tools])) <= @instructions_max_bytes
     end
 
-    join(leading ++ [memory_block(context, fits?), tools])
+    join(leading ++ [memory_block(context, fits?) | tools])
   end
 
   @doc "The byte bound on the whole Live instructions (4 bytes a token, half the provider's ceiling)."
@@ -133,13 +158,14 @@ defmodule FermixCore.Realtime.LivePrompt do
   def instructions_max_bytes, do: @instructions_max_bytes
 
   @doc """
-  What a call is told about the owner, read as it starts: the configured name
+  What a call is told, read as it starts: the configured name
   (`IdentityName.configured_name/0`), `[fermix_core.personalization]`, today's
-  date note (`CurrentDate.note/0`) and `USER.md` and `MEMORY.md` for
-  `agent_id`.
+  date note (`CurrentDate.note/0`), `USER.md` and `MEMORY.md` for `agent_id`,
+  and the call's `conversation`.
   """
-  @spec context(String.t()) :: {:ok, context()} | {:error, term()}
-  def context(agent_id) when is_binary(agent_id) do
+  @spec context(String.t(), String.t()) :: {:ok, context()} | {:error, term()}
+  def context(agent_id, conversation)
+      when is_binary(agent_id) and conversation in ["chat", "private"] do
     with {:ok, prompt_memory} <- PromptFiles.load(agent_id) do
       {:ok,
        %{
@@ -147,7 +173,8 @@ defmodule FermixCore.Realtime.LivePrompt do
          assistant_name: IdentityName.configured_name(),
          personalization: Application.get_env(:fermix_core, :personalization, []),
          date_note: CurrentDate.note(),
-         prompt_memory: prompt_memory
+         prompt_memory: prompt_memory,
+         conversation: conversation
        }}
     end
   end
@@ -164,10 +191,35 @@ defmodule FermixCore.Realtime.LivePrompt do
   end
 
   @doc """
-  The system text appended to a Live-origin Core turn (design §6.3).
+  The system text appended to a Live-origin Core turn (M41 §6.3), for the
+  call's `conversation` (`Config.conversation/1`, which the bridge is given
+  with the call). Two configurations, picked here:
+
+    * `"chat"`: the reply is spoken, so it opens with one short line to say,
+      and what cannot be said follows one line that is exactly
+      `LiveText.shown_delimiter/0`, for the session to show in the chat
+      (M56 §4.5, `LiveText.split/2`);
+    * `"private"`: today's wording, verbatim, since a private call shows
+      nothing (M56 §5).
   """
-  @spec backend_addendum() :: String.t()
-  def backend_addendum, do: String.trim(@backend_addendum)
+  @spec backend_addendum(String.t()) :: String.t()
+  def backend_addendum("chat") do
+    join([
+      String.trim(@addendum_task),
+      String.trim(@addendum_chat_reply),
+      """
+      Your reply is spoken aloud. Open it with one short line to say. When there
+      is more than can be said (a link, code, a table, a list, a long answer),
+      put a line that is exactly #{LiveText.shown_delimiter()} after that line and the full
+      result after it: Fermix shows that part in the owner's chat and tells the
+      voice it is there, so the short line need not say where it is.
+      """
+      |> String.trim()
+    ])
+  end
+
+  def backend_addendum("private"),
+    do: join([String.trim(@addendum_task), String.trim(@addendum_private_reply)])
 
   @doc """
   The capabilities a Live call may name to the voice model: operator trust,
@@ -236,6 +288,10 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   defp separator_bytes([]), do: 0
   defp separator_bytes(_kept), do: 1
+
+  # A private call shows nothing in the chat (M56 §5), so it is told nothing.
+  defp shown_in_chat("chat"), do: @shown_in_chat
+  defp shown_in_chat("private"), do: nil
 
   # `LIVE.md`'s template still says "You are Fermix"; this line, read after it,
   # is what a renamed assistant answers to.
