@@ -385,7 +385,8 @@ defmodule FermixOpik.TraceFile do
       :reason,
       :max_duration_ms,
       :server_seq,
-      :shown_bytes
+      :shown_bytes,
+      :detached
     ])
   end
 

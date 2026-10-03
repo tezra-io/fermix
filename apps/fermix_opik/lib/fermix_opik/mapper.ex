@@ -351,7 +351,8 @@ defmodule FermixOpik.Mapper do
           status: stringify(Map.get(metadata, :status)),
           reason: stringify(Map.get(metadata, :reason)),
           server_seq: Map.get(metadata, :server_seq),
-          shown_bytes: Map.get(metadata, :shown_bytes)
+          shown_bytes: Map.get(metadata, :shown_bytes),
+          detached: Map.get(metadata, :detached)
         })
     }
     |> drop_nil()

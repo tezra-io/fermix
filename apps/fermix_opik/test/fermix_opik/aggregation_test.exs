@@ -2181,6 +2181,49 @@ defmodule FermixOpik.AggregationTest do
       assert trace.name == "voice_live:1"
     end
 
+    # M56 §4.6: a task that outlived its call stops after the call's root
+    # shipped at call_stop, emitted by its new owner. Attached while the call's
+    # run is open, it never opens a run of its own: on a closed or forgotten
+    # call it would be an empty phantom root.
+    test "a detached delegation's stop never mints a root of its own" do
+      detached_stop =
+        {@voice_live_delegation_stop, %{duration_ms: 1_800_000},
+         voice_live_meta(%{
+           delegation_id: "dlg_9",
+           revision: 1,
+           turn_session_id: @voice_delegation_session,
+           status: "timed_out",
+           detached: true
+         })}
+
+      {state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_stop, %{voice_seconds: 62, accounting_complete: 1},
+           voice_live_meta(%{reason: "call_stop"})},
+          detached_stop
+        ])
+
+      assert [%{trace: %{name: "voice_live:1"}}] = closed
+      assert state.traces == %{}
+
+      {forgotten, none} = run([detached_stop])
+      assert none == []
+      assert forgotten.traces == %{}
+      refute Map.has_key?(forgotten.sessions, @voice_live_call)
+
+      {open, []} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          detached_stop
+        ])
+
+      [%{spans: spans}] = Map.values(open.traces)
+      stopped = span_named(spans, "voice_live:delegation_stop")
+      assert stopped.metadata.detached == true
+      assert stopped.metadata.status == "timed_out"
+    end
+
     # Without the prefix clause a call_stop that arrived after a daemon restart
     # would mint a root `infer_kind/1` reads as `:subagent` — the phantom-root
     # shape the computer-history clause exists to prevent.

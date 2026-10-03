@@ -614,6 +614,25 @@ defmodule FermixOpik.Aggregation do
     end
   end
 
+  # A delegation that outlived its call (M56 §4.6) stops after the call's
+  # call_stop shipped its root, emitted by the task's new owner: attached only
+  # while the call's run is open, never opening one, which would ship as an
+  # empty phantom root. The stop stays in the JSONL trace stream either way.
+  def apply_event(
+        state,
+        [:fermix, :voice_live, :delegation_stop],
+        meas,
+        %{detached: true} = meta,
+        at
+      ) do
+    attach_if_open(
+      state,
+      meta,
+      at,
+      &Mapper.voice_live_span(meta, meas, Keyword.put(&1, :phase, :delegation_stop))
+    )
+  end
+
   # Point spans for the call's lifecycle. A `provider_error` is deliberately NOT
   # terminal: a Live moderation refusal cuts the audio and the session keeps
   # running, so closing the trace here would truncate the rest of the call.
