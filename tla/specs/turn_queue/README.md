@@ -20,9 +20,10 @@ messages covers the interleavings that matter.
   which `Companion.Turns` sends, or a Live call's cancel or hang-up, which
   `Voice.Bridge` sends for the call's own hand-off by its message id
   (`voice-delegation-<id>-<revision>`). Several senders share that
-  conversation (a call's hand-offs run in the chat's unless the call is
-  private, M56), so a stop can name a waiting message while another turn
-  runs, and it can arrive after its own turn ended.
+  conversation (the Mac's and the phone's turns run in the chat's one lane,
+  M56 D9, and so do a call's hand-offs unless the call is private, M56 §4.1),
+  so a stop can name a waiting message while another sender's turn runs, and
+  it can arrive after its own turn ended.
 - `TasksCanCrash`: the turn task dies at any step. Its own code raises or
   exits, or a linked helper exits: the typing loop (`typing.ex:24`, linked
   until `with_indicator` returns) or DraftStream (`draft_stream.ex:182`,
