@@ -11,9 +11,11 @@ defmodule FermixChannels.Voice.BridgeTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Realtime.LivePrompt
 
@@ -75,20 +77,27 @@ defmodule FermixChannels.Voice.BridgeTest do
     %{queue: queue}
   end
 
+  # Private unless a test says otherwise: most of what this suite pins (the
+  # store's lifetime, routing, cancels) is the same in both modes, and the
+  # private mode is the one with a store of its own to watch.
   defp open(ctx, opts \\ []) do
-    call_id = Keyword.get(opts, :call_id, "voice_live_#{System.unique_integer([:positive])}")
-
-    {:ok, handle} =
-      Bridge.open_call(%{
-        call_id: call_id,
-        device_id: "device-1",
-        persist?: Keyword.get(opts, :persist?, false),
-        session_scope: "voice_live:1",
-        agent_server: ctx.queue
-      })
-
+    {:ok, handle} = Bridge.open_call(call(ctx, opts))
     handle
   end
+
+  defp call(ctx, opts) do
+    %{
+      call_id: Keyword.get(opts, :call_id, "voice_live_#{System.unique_integer([:positive])}"),
+      call_uuid: Keyword.get(opts, :call_uuid, uuid()),
+      conversation: Keyword.get(opts, :conversation, "private"),
+      device_id: "device-1",
+      persist?: Keyword.get(opts, :persist?, false),
+      session_scope: "voice_live:1",
+      agent_server: ctx.queue
+    }
+  end
+
+  defp uuid, do: FermixCore.Realtime.DeviceIdentity.generate_uuid()
 
   defp callbacks do
     test_pid = self()
@@ -115,7 +124,7 @@ defmodule FermixChannels.Voice.BridgeTest do
   # A turn that is not the call's own, queued in the conversation the call's
   # hand-offs run in.
   defp other_turn(handle, id) do
-    {channel, chat_id, :root} = Bridge.conversation_key(handle.call_id)
+    {channel, chat_id, :root} = handle.conversation_key
 
     %{
       id: id,
@@ -186,15 +195,37 @@ defmodule FermixChannels.Voice.BridgeTest do
       handle = open(ctx, call_id: "voice_live_dup")
 
       assert {:error, {:call_already_open, _pid}} =
-               Bridge.open_call(%{
-                 call_id: "voice_live_dup",
-                 device_id: "device-2",
-                 persist?: false,
-                 session_scope: "voice_live:2",
-                 agent_server: ctx.queue
-               })
+               Bridge.open_call(call(ctx, call_id: "voice_live_dup"))
 
       Bridge.close_call(handle)
+    end
+
+    # M56 §4.1: the call joins the chat. It opens no store; its hand-offs run on
+    # the durable store, in the conversation the Mac app's turns run in.
+    test "a chat call opens no store and runs in the chat's conversation", ctx do
+      handle = open(ctx, conversation: "chat")
+
+      assert handle.store == ConversationStore
+      assert handle.conversation_key == Companion.chat_conversation_key()
+      assert handle.conversation_key == {"companion", "main", :root}
+
+      Bridge.close_call(handle)
+      assert Process.alive?(Process.whereis(ConversationStore))
+    end
+
+    # The call id is a counter that restarts with the daemon, so a private
+    # call's conversation is keyed by its UUID: a later call that reuses the id
+    # never inherits the earlier call's history (M56 §15).
+    test "a private call's conversation is keyed by its UUID, not its call id", ctx do
+      first = open(ctx, call_id: "voice_live:1", persist?: true)
+      Bridge.close_call(first)
+      second = open(ctx, call_id: "voice_live:1", persist?: true)
+
+      assert first.conversation_key == {"voice", first.call_uuid, :root}
+      assert second.conversation_key == {"voice", second.call_uuid, :root}
+      refute first.conversation_key == second.conversation_key
+
+      Bridge.close_call(second)
     end
   end
 
@@ -205,7 +236,7 @@ defmodule FermixChannels.Voice.BridgeTest do
       assert {:ok, {conversation_key, "voice-delegation-d-1-1"}} =
                Bridge.submit(handle, request(), callbacks())
 
-      assert conversation_key == {"voice", handle.call_id, :root}
+      assert conversation_key == {"voice", handle.call_uuid, :root}
 
       assert_receive {:turn_started, msg, _pid}, 5_000
       assert msg.channel == "voice"
@@ -215,10 +246,38 @@ defmodule FermixChannels.Voice.BridgeTest do
 
       voice_call = msg.metadata.voice_call
       assert voice_call.call_id == handle.call_id
+      assert voice_call.call_uuid == handle.call_uuid
+      assert voice_call.conversation_key == {"voice", handle.call_uuid, :root}
       assert voice_call.turn_session_id == "voice_delegation_1"
       assert voice_call.conversation_store == handle.store
       assert voice_call.persist? == false
       assert voice_call.prompt_addendum == LivePrompt.backend_addendum()
+      assert ConversationKey.from(msg) == {"voice", handle.call_uuid, :root}
+      assert conversation_key == ConversationKey.from(msg)
+
+      Bridge.close_call(handle)
+    end
+
+    # The message stays on the voice channel with the call as its chat, so the
+    # trust gate, the voice adapter and commands-off are unchanged; only the
+    # conversation the trusted map names moves (M56 §4.1, option B).
+    test "a chat call's hand-off is a trusted voice turn in the chat's conversation", ctx do
+      handle = open(ctx, conversation: "chat")
+
+      assert {:ok, {task_key, "voice-delegation-d-1-1"}} =
+               Bridge.submit(handle, request(), callbacks())
+
+      assert_receive {:turn_started, msg, turn_pid}, 5_000
+      assert msg.channel == "voice"
+      assert msg.chat_id == handle.call_id
+      assert msg.source_trust == :operator
+      assert msg.metadata.voice_call.conversation_key == Companion.chat_conversation_key()
+      assert msg.metadata.voice_call.conversation_store == ConversationStore
+      assert ConversationKey.from(msg) == Companion.chat_conversation_key()
+      assert task_key == Companion.chat_conversation_key()
+
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:result, {:ok, _text}}, 5_000
 
       Bridge.close_call(handle)
     end
@@ -439,12 +498,83 @@ defmodule FermixChannels.Voice.BridgeTest do
     end
   end
 
+  # M56 §4.1: a chat call's hand-offs and the owner's typed turns share one
+  # conversation, so one queue lane: they never run at once, and a stop of
+  # either names its own turn and leaves the other running or waiting.
+  describe "a hand-off in the chat's lane" do
+    test "waits behind a typed turn, and its cancel leaves that turn running", ctx do
+      handle = open(ctx, conversation: "chat")
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "typed-1"))
+      assert_receive {:turn_started, %{id: "typed-1"}, typed_pid}, 5_000
+
+      {:ok, hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+      refute_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, _pid}, 200
+
+      assert :ok = Bridge.cancel(handle, hand_off)
+      assert_receive {:result, "d-1", {:cancelled}}, 5_000
+      assert Process.alive?(typed_pid)
+
+      send(typed_pid, {:proceed, :reply})
+      refute_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, _pid}, 200
+      Bridge.close_call(handle)
+    end
+
+    test "a typed turn's own stop leaves the running hand-off to answer", ctx do
+      handle = open(ctx, conversation: "chat")
+      {:ok, _hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, hand_off_pid}, 5_000
+
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "typed-1"))
+
+      assert {:ok, :dequeued} =
+               Queue.stop_turn(Companion.chat_conversation_key(), "typed-1", ctx.queue)
+
+      assert Process.alive?(hand_off_pid)
+      send(hand_off_pid, {:proceed, :reply})
+      assert_receive {:result, "d-1", {:ok, _text}}, 5_000
+
+      Bridge.close_call(handle)
+    end
+
+    test "a cancelled hand-off hands the lane to the typed turn behind it", ctx do
+      handle = open(ctx, conversation: "chat")
+      {:ok, hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, hand_off_pid}, 5_000
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "typed-1"))
+
+      assert :ok = Bridge.cancel(handle, hand_off)
+
+      assert_receive {:result, "d-1", {:cancelled}}, 5_000
+      refute Process.alive?(hand_off_pid)
+      assert_receive {:turn_started, %{id: "typed-1"}, typed_pid}, 5_000
+      send(typed_pid, {:proceed, :reply})
+
+      Bridge.close_call(handle)
+    end
+
+    test "closing the call leaves the chat's queued messages to run", ctx do
+      handle = open(ctx, conversation: "chat")
+      {:ok, _hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, hand_off_pid}, 5_000
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "typed-1"))
+      :ok = Queue.enqueue(ctx.queue, other_turn(handle, "typed-2"))
+
+      Bridge.close_call(handle)
+
+      refute Process.alive?(hand_off_pid)
+      assert_receive {:turn_started, %{id: "typed-1"}, typed_pid}, 5_000
+      send(typed_pid, {:proceed, :reply})
+      assert_receive {:turn_started, %{id: "typed-2"}, second_pid}, 5_000
+      send(second_pid, {:proceed, :reply})
+    end
+  end
+
   describe "conversation isolation" do
     test "a concurrent text conversation shares no history with the call", ctx do
       handle = open(ctx)
       global = Process.whereis(ConversationStore)
       chat_key = {"telegram", "chat-voice-isolation", :root}
-      call_key = Bridge.conversation_key(handle.call_id)
+      call_key = handle.conversation_key
 
       ConversationStore.add_message(chat_key, "user", "text conversation", server: global)
 

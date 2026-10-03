@@ -1024,6 +1024,8 @@ defmodule FermixChannels.Gateway.QueueTest do
   defp voice_call(call_id, store) do
     %{
       call_id: call_id,
+      call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+      conversation_key: {"voice", call_id, :root},
       delegation_id: "d-1",
       revision: 1,
       turn_session_id: "voice_delegation_1",

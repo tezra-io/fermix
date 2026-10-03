@@ -588,7 +588,7 @@ defmodule FermixCore.Agents.TurnRunner do
       end)
 
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
-    persist_user_message(conversation_key, msg, state)
+    persist_user_message(conversation_key, msg, state, voice_call)
 
     run_normal(loop_opts, context, msg, start)
   end
@@ -945,7 +945,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp provider_message(_error), do: "Check provider logs and retry."
 
-  defp persist_user_message(conversation_key, msg, state) do
+  defp persist_user_message(conversation_key, msg, state, voice_call) do
     ConversationStore.add_message(
       conversation_key,
       "user",
@@ -954,14 +954,26 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: user_message_metadata(msg)
+      metadata: user_message_metadata(msg, voice_call)
     )
+  end
+
+  # A Live hand-off's request is stored as what it is (M56 §4.1, D10): asked
+  # aloud and possibly misheard, on the call its UUID names, so the memory
+  # review never reads it while history and compaction do. The trusted
+  # `voice_call` map is the turn's context, not the message's: it carries the
+  # store, the routing ids, the 1 KB backend addendum and a key tuple JSON
+  # cannot hold, so it is never stored.
+  defp user_message_metadata(msg, {:ok, %{call_uuid: call_uuid}}) do
+    msg.metadata
+    |> Map.delete(:voice_call)
+    |> Map.merge(%{spoken: true, call_uuid: call_uuid})
   end
 
   # What a guest says is marked as theirs where it is stored, so the memory
   # review — which reads a conversation's user messages — never distils it into
   # the owner's memory, in a shared chat included.
-  defp user_message_metadata(msg) do
+  defp user_message_metadata(msg, :none) do
     metadata = Map.get(msg, :metadata)
 
     case profile_trust(Map.get(msg, :source_trust)) do

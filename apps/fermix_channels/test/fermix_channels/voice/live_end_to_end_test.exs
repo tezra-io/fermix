@@ -22,11 +22,14 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
@@ -194,7 +197,14 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     open_provider_session(session)
 
-    assert_receive {:realtime, %{type: "call_ready", engine: "openai_live", call_id: call_id}}
+    assert_receive {:realtime,
+                    %{
+                      type: "call_ready",
+                      engine: "openai_live",
+                      call_id: call_id,
+                      call_uuid: call_uuid
+                    }}
+
     assert_receive {:realtime, %{type: "state", state: "listening"}}
 
     speak(session, @spoken, 1_000, 4_000)
@@ -209,16 +219,20 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     assert {:ok, voice_call} = VoiceCall.from_message(msg)
     assert voice_call.call_id == call_id
+    assert voice_call.call_uuid == call_uuid
     assert voice_call.delegation_id == "dg_1"
     assert voice_call.revision == 1
     assert voice_call.turn_session_id =~ ~r/^voice_delegation_\d+$/
     assert voice_call.persist? == false
-    assert is_pid(voice_call.conversation_store)
+    # An unset `conversation` joins the chat (M56 §4.1): the turn runs in the
+    # chat's conversation on the durable store, the queue lane a typed turn
+    # takes.
+    assert voice_call.conversation_store == ConversationStore
+    assert voice_call.conversation_key == Companion.chat_conversation_key()
+    assert ConversationKey.from(msg) == Companion.chat_conversation_key()
     # The correlation the trace nests on, and the attended-origin label, both
     # derived by Core from this real message.
     assert TurnRunner.computer_use_origin(msg) == :voice
-
-    store = voice_call.conversation_store
 
     # --- The turn's answer really did become speech ---
     send(turn_pid, {:proceed, @answer})
@@ -255,9 +269,37 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
 
-    refute Process.alive?(store), "the ephemeral call store must be released on call stop"
     assert Registry.lookup(Voice.registry(), call_id) == []
     assert Registry.lookup(Voice.registry(), {call_id, "dg_1"}) == []
+  end
+
+  # `conversation = "private"` is the call's own conversation as before, keyed
+  # by the call's UUID and released when the call ends.
+  test "a private call runs in a conversation of its own, released when it ends" do
+    Process.flag(:trap_exit, true)
+    session = start_session(live_config(conversation: "private"))
+
+    :ok = SessionControl.call_start(session)
+    open_provider_session(session)
+    assert_receive {:realtime, %{type: "call_ready", call_id: call_id, call_uuid: call_uuid}}
+
+    speak(session, @spoken, 1_000, 4_000)
+    delegate(session, "dg_1", 4_200)
+
+    assert_receive {:turn_started, msg, turn_pid}, 5_000
+    assert {:ok, voice_call} = VoiceCall.from_message(msg)
+    assert is_pid(voice_call.conversation_store)
+    assert ConversationKey.from(msg) == {"voice", call_uuid, :root}
+
+    store = voice_call.conversation_store
+    send(turn_pid, {:proceed, @answer})
+    assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}, 5_000
+
+    assert :ok = SessionControl.call_stop(session)
+    assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+    refute Process.alive?(store), "the ephemeral call store must be released on call stop"
+    assert Registry.lookup(Voice.registry(), call_id) == []
   end
 
   test "cancelling a task stops the running turn and reports it to the call" do
@@ -366,8 +408,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   # --- Helpers ---
 
-  defp start_session do
-    {:ok, session} = LiveSessionServer.start_link([companion: self()] ++ live_session_opts())
+  defp start_session(config \\ live_config()) do
+    opts = Keyword.put(live_session_opts(), :config, config)
+    {:ok, session} = LiveSessionServer.start_link([companion: self()] ++ opts)
 
     # Registered AFTER the bridge binding's cleanup, so it runs BEFORE it
     # (on_exit is LIFO): the fakes outlive the call they served.
@@ -514,15 +557,17 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     end
   end
 
-  defp live_config do
+  defp live_config(extra \\ []) do
     Config.normalize(
-      enabled: true,
-      engine: "openai_live",
-      model: "gpt-live-1",
-      voice: "marin",
-      max_session_minutes: 15,
-      max_estimated_cost_cents_per_session: 100,
-      persist_transcripts: false
+      [
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        max_session_minutes: 15,
+        max_estimated_cost_cents_per_session: 100,
+        persist_transcripts: false
+      ] ++ extra
     )
   end
 

@@ -338,7 +338,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
 
-      assert_receive {:bridge_open_call, %{call_id: call_id, persist?: false}}
+      assert_receive {:bridge_open_call, %{call_id: call_id, persist?: false} = call}
 
       assert_receive {:realtime,
                       %{
@@ -351,6 +351,20 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
                       }}
 
       assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      # The bridge is told the call's durable identity and, the setting being
+      # unset, that its hand-offs join the chat (M56 §4.1, §5).
+      assert call.call_uuid == :sys.get_state(session).call_uuid
+      assert call.conversation == "chat"
+    end
+
+    test "a private call opens its bridge call as private", %{clock: clock} do
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, config: config)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert_receive {:bridge_open_call, %{conversation: "private"}}
     end
 
     test "expires_at shorter than max_session_minutes wins", %{clock: clock} do
@@ -1630,7 +1644,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       voice: "marin",
       max_session_minutes: 15,
       max_estimated_cost_cents_per_session: Keyword.get(opts, :cost_cents, 100),
-      persist_transcripts: Keyword.get(opts, :persist_transcripts, false)
+      persist_transcripts: Keyword.get(opts, :persist_transcripts, false),
+      conversation: Keyword.get(opts, :conversation)
     )
   end
 

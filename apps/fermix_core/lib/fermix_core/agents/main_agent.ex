@@ -352,8 +352,9 @@ defmodule FermixCore.Agents.MainAgent do
     # routes, the taint masks, a subagent's inherited chain) takes that one value
     # from here.
     gate = TurnRunner.computer_history_gate(msg, state.ordered_routes, gate_opts(state))
-    # `:none` on every non-voice turn. A Live delegation runs against the
-    # call-owned store (ephemeral unless the call persists) and skips memory
+    # `:none` on every non-voice turn. A Live delegation runs against the store
+    # its call names (the durable one when it joins the chat, M56 §4.1, or a
+    # private call's own, ephemeral unless the call persists) and skips memory
     # review, both frozen HERE with the rest of the snapshot so a mid-call
     # change cannot split the turn's history from its review decision (M41 §5.2).
     voice_call = VoiceCall.from_message(msg)

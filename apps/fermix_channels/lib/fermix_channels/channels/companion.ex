@@ -66,6 +66,14 @@ defmodule FermixChannels.Channels.Companion do
   @spec conversation_key(String.t()) :: {String.t(), String.t(), :root}
   def conversation_key(profile_id) when is_binary(profile_id), do: {@channel, profile_id, :root}
 
+  @doc """
+  The owner's chat: the conversation the Mac app's turns run in, and the one a
+  Live call's hand-offs join unless the call is private (M56 §4.1). Named here,
+  where the channel and its profile live, so Core never spells either.
+  """
+  @spec chat_conversation_key() :: {String.t(), String.t(), :root}
+  def chat_conversation_key, do: conversation_key(@profile)
+
   @doc "Normalize a decoded `msg` or `command` into a gateway message."
   @spec parse_event(event()) :: {:ok, [Message.t()]} | {:error, term()}
   def parse_event(event) do

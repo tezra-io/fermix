@@ -1973,6 +1973,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   # --- Voice delegations (MILESTONE_41_OPENAI_LIVE_VOICE.md §7) ---
 
   @voice_addendum "This task comes from an ongoing voice conversation."
+  @call_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+  # A private call's own conversation, keyed by the call's UUID, and the
+  # chat's, which a call joins unless it is private (M56 §4.1).
+  @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
+  @chat_key {"companion", "main", :root}
 
   describe "voice delegations" do
     test "the turn carries the session's turn id and the call as parent_session" do
@@ -2038,14 +2043,93 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert "main-" <> _rest = Keyword.fetch!(opts, :session_id)
     end
 
-    test "the turn's history lands in the store the snapshot names" do
+    test "the turn's history lands in the store the snapshot names, under the call's key" do
       store = start_voice_store()
-      key = {"voice", "voice_live_42", :root}
 
       run_voice_turn(store: store)
 
       assert [%{role: "user", content: "what is on my calendar"}] =
-               ConversationStore.get_history(key, server: store)
+               ConversationStore.get_history(@private_key, server: store)
+
+      assert ConversationStore.get_history({"voice", "voice_live_42", :root}, server: store) == []
+    end
+
+    # M56 §4.1: a hand-off in the chat's conversation is a turn of that
+    # conversation, so what the owner typed before it is in its history.
+    test "a hand-off in the chat's conversation reads what was typed there before it" do
+      store = start_voice_store()
+      typed = "here is the brief: https://example.com/brief"
+      :ok = ConversationStore.add_message(@chat_key, "user", typed, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "Got it.", server: store)
+
+      {messages, _opts} = run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content == typed))
+      assert %{role: "user", content: "user: open the link I sent"} = List.last(messages)
+    end
+
+    test "a typed turn after a hand-off sees its request and its reply" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      hand_off = chat_hand_off("user: what is on my calendar")
+      {_messages, _opts} = run_capture_turn(hand_off, store)
+
+      assert :ok =
+               TurnRunner.commit(
+                 hand_off,
+                 commit_state(store),
+                 "Your calendar is clear.",
+                 0
+               )
+
+      typed = %{
+        channel: "companion",
+        chat_id: "main",
+        sender: "owner",
+        content: "and tomorrow?",
+        source_trust: :operator,
+        metadata: %{}
+      }
+
+      {messages, _opts} = run_capture_turn(typed, store)
+      contents = Enum.map(messages, & &1.content)
+
+      assert "user: what is on my calendar" in contents
+      assert "Your calendar is clear." in contents
+    end
+
+    # The request is stored as what it is: asked aloud, possibly misheard, on
+    # the call named by its UUID, and kind `chat_message`, the only kind the
+    # store reloads. The trusted map is turn context (the store, the routing
+    # ids, the 1 KB addendum, a key tuple JSON cannot hold) and is not stored.
+    test "the persisted request is a chat message marked spoken, with its call" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert [row] = await_rows(repo, @chat_key, 1)
+      assert row.kind == "chat_message"
+      assert row.role == "user"
+      assert row.content == "user: open the link I sent"
+
+      assert row.metadata == %{
+               "source" => "voice",
+               "user_id" => "voice",
+               "chat_type" => "private",
+               "spoken" => true,
+               "call_uuid" => @call_uuid
+             }
+    end
+
+    test "a private call's request is stored the same way, under the call's own key" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(voice_msg("what is on my calendar"), store)
+
+      assert [row] = await_rows(repo, @private_key, 1)
+      assert row.kind == "chat_message"
+      assert %{"spoken" => true, "call_uuid" => @call_uuid} = row.metadata
+      refute Map.has_key?(row.metadata, "voice_call")
     end
 
     test "the delegation is built without the categories a call cannot deliver" do
@@ -2304,9 +2388,69 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   defp forged_voice_call, do: %{source: :telegram, voice_call: voice_call()}
 
+  defp chat_hand_off(content) do
+    put_in(voice_msg(content), [:metadata, :voice_call, :conversation_key], @chat_key)
+  end
+
+  # What `commit/4` reads beyond the run's snapshot: no review (MainAgent
+  # freezes `memory_review?: false` for a hand-off) and no MainAgent to tell.
+  defp commit_state(store) do
+    turn_state(
+      adapter: CaptureTurnAdapter,
+      adapter_opts: [model: "mock-model", test_pid: self()],
+      capability_registry: nil,
+      conversation_store: store,
+      memory_review?: false,
+      main_agent_server: nil
+    )
+  end
+
+  defp start_durable_store do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-tr-spoken-#{unique}.db")
+    repo = :"tr_spoken_repo_#{unique}"
+    store = :"tr_spoken_store_#{unique}"
+
+    start_supervised!({FermixCore.Memory.Repo, name: repo, enabled: true, database_path: db_path},
+      id: repo
+    )
+
+    start_supervised!({ConversationStore, name: store, max_messages: 128, repo: repo}, id: store)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    %{repo: repo, store: store}
+  end
+
+  defp await_rows(repo, {channel, chat_id, thread_scope}, expected, attempts \\ 100) do
+    selector = %{
+      agent_id: "main",
+      channel: channel,
+      chat_id: chat_id,
+      thread_scope: to_string(thread_scope),
+      kind: "chat_message"
+    }
+
+    case FermixCore.Memory.Repo.get_messages(selector, server: repo) do
+      {:ok, rows} when length(rows) == expected ->
+        rows
+
+      _other when attempts > 0 ->
+        Process.sleep(10)
+        await_rows(repo, {channel, chat_id, thread_scope}, expected, attempts - 1)
+
+      other ->
+        flunk("expected #{expected} persisted rows, got #{inspect(other)}")
+    end
+  end
+
   defp voice_call do
     %{
       call_id: "voice_live_42",
+      call_uuid: @call_uuid,
+      conversation_key: @private_key,
       delegation_id: "d-1",
       revision: 1,
       turn_session_id: "voice_delegation_7",

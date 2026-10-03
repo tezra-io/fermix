@@ -1235,6 +1235,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp open_bridge_call(state) do
     call = %{
       call_id: state.call_id,
+      call_uuid: state.call_uuid,
+      conversation: Config.conversation(state.config),
       device_id: state.device_id,
       persist?: state.config.persist_transcripts?,
       session_scope: state.call_id

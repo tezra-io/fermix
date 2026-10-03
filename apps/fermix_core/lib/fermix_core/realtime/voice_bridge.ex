@@ -18,9 +18,16 @@ defmodule FermixCore.Realtime.VoiceBridge do
   calls its own callers wait on with no timeout (`SessionControl`).
   """
 
-  @typedoc "One voice call, opened once per `call_start` and closed once per `call_stop`."
+  @typedoc """
+  One voice call, opened once per `call_start` and closed once per `call_stop`.
+  `call_uuid` is its durable identity; `conversation` (`"chat"` or `"private"`,
+  M56 §5) says whether its hand-offs run in the chat's conversation or in one of
+  the call's own.
+  """
   @type call :: %{
           call_id: String.t(),
+          call_uuid: String.t(),
+          conversation: String.t(),
           device_id: String.t(),
           persist?: boolean(),
           session_scope: String.t()

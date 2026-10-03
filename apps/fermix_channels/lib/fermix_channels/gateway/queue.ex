@@ -757,12 +757,14 @@ defmodule FermixChannels.Gateway.Queue do
     :exit, _reason -> :skipped
   end
 
-  # Which store holds the turn's history. A Live voice delegation runs on its
-  # call-owned store (ephemeral unless the call persists), so its marker must
-  # close the orphaned user turn THERE — writing it to the global store would
-  # leave the call's own history dangling and put a voice fragment in the
-  # durable conversation (M41 §5.2). One seam, read by both marker sites; every
-  # other channel resolves to the store this queue was started with.
+  # Which store holds the turn's history. A Live voice delegation runs on the
+  # store its call names: the durable one when it joins the chat (M56 §4.1), or
+  # a private call's own (ephemeral unless the call persists), so its marker
+  # must close the orphaned user turn THERE — writing a private call's to the
+  # global store would leave the call's own history dangling and put a voice
+  # fragment in the durable conversation (M41 §5.2). One seam, read by both
+  # marker sites; every other channel resolves to the store this queue was
+  # started with.
   defp marker_store(default_store, msg) when is_map(msg) do
     case VoiceCall.from_message(msg) do
       {:ok, %{conversation_store: store}} -> store

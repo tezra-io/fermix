@@ -12,24 +12,38 @@ defmodule FermixChannels.Voice.Bridge do
   production ingress — so it is authorized, queued, and run by the same
   `TurnRunner` a chat message is, with the same sandbox gates and the same
   single-flight FIFO. What makes it a VOICE turn is one trusted map on the
-  message's metadata (`FermixCore.Agents.VoiceCall`), which names the call's
-  store, its trace session, and the backend prompt addendum.
+  message's metadata (`FermixCore.Agents.VoiceCall`), which names the
+  conversation the turn runs in and its store, the call and its trace session,
+  and the backend prompt addendum. The message itself stays on the `voice`
+  channel with the call id as its chat, so authorization, commands off, the
+  voice adapter and that trust gate are the same in both modes below.
 
-  Three lifetimes, all call-scoped:
+  The call's `conversation` (M56 §5) picks where its hand-offs run:
 
-  - **The store.** A non-persisting call runs on its own in-memory
-    `ConversationStore` (`repo: nil`, 128 messages), started here and linked to
-    the session, so nothing a caller says reaches the durable history and the
-    whole thing is released when the call ends. A persisting call uses the
-    global store, exactly like a chat conversation.
-  - **The conversation.** Every delegation of one call shares the conversation
-    key `{"voice", call_id, :root}`, which is what makes the queue serialize
-    them — the session allows one active and one pending delegation, and the
-    queue enforces the same shape. Each delegation runs as the queue turn
-    named by its message id, `voice-delegation-<id>-<revision>`, and `cancel/2`
-    and `close_call/1` stop those turns by name (`Queue.stop_turn/3`), never
-    the conversation, so nothing else waiting in it is touched (M56 §4.1); the
-    session's `LiveDelegation` is the authority on which delegations exist.
+  - **`"chat"`** (the default): in the chat's own conversation,
+    `Channels.Companion.chat_conversation_key/0`, on the durable store every
+    typed turn uses. The call opens no store. A hand-off then reads what was
+    typed before it, a typed turn reads the hand-offs before it, and the two
+    share one queue lane, so neither runs beside the other (M56 §4.1).
+  - **`"private"`**: in a conversation of the call's own, keyed by its UUID,
+    `{"voice", call_uuid, :root}`. A non-persisting call runs it on its own
+    in-memory `ConversationStore` (`repo: nil`, 128 messages), started here and
+    linked to the session, so nothing a caller says reaches the durable history
+    and the whole thing is released when the call ends. A persisting call uses
+    the global store. The key is the UUID, not the call id, because the call id
+    restarts with the daemon and a later call must never inherit an earlier
+    one's history.
+
+  Two lifetimes are call-scoped either way:
+
+  - **The turns.** The queue serializes one call's delegations in their
+    conversation — the session allows one active and one pending delegation,
+    and the queue enforces the same shape. Each delegation runs as the queue
+    turn named by its message id, `voice-delegation-<id>-<revision>`, and
+    `cancel/2` and `close_call/1` stop those turns by name
+    (`Queue.stop_turn/3`), never the conversation, so nothing else running or
+    waiting in it is touched (M56 §4.1); the session's `LiveDelegation` is the
+    authority on which delegations exist.
   - **The routing entries.** One Registry key per call plus one per delegation,
     all owned by the session process, released by `close_call/1` (or by the
     session dying). They are what the channel adapter's closures read, and
@@ -41,6 +55,7 @@ defmodule FermixChannels.Voice.Bridge do
 
   require Logger
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
@@ -62,9 +77,12 @@ defmodule FermixChannels.Voice.Bridge do
   unless the caller named another, the same injection seam
   `Channels.Acp.Peer` takes as `agent_server`. It is resolved ONCE, at open,
   so every delegation, cancel and close of one call reaches the same scheduler.
+  `conversation_key` and `store` are resolved once too, from the call's mode.
   """
   @type handle :: %{
           call_id: String.t(),
+          call_uuid: String.t(),
+          conversation_key: ConversationKey.t(),
           store: GenServer.server(),
           owner: pid(),
           persist?: boolean(),
@@ -79,19 +97,24 @@ defmodule FermixChannels.Voice.Bridge do
   @type task_ref :: {ConversationKey.t(), message_id :: String.t()}
 
   @doc """
-  Open one call: claim the call id, then stand up the history it will run on.
+  Open one call: claim the call id, then name the conversation its hand-offs
+  run in and stand up the history it needs.
 
   Registration comes FIRST so a second session cannot half-open the same call
   and leave an orphaned store behind; a failed store start releases the claim.
   """
   @impl true
   @spec open_call(VoiceBridge.call()) :: {:ok, handle()} | {:error, term()}
-  def open_call(%{call_id: call_id, persist?: persist?} = call)
-      when is_binary(call_id) and call_id != "" and is_boolean(persist?) do
+  def open_call(
+        %{call_id: call_id, call_uuid: call_uuid, conversation: conversation, persist?: persist?} =
+          call
+      )
+      when is_binary(call_id) and call_id != "" and is_binary(call_uuid) and call_uuid != "" and
+             conversation in ["chat", "private"] and is_boolean(persist?) do
     queue = Map.get(call, :agent_server, Queue)
 
     case Registry.register(Voice.registry(), call_id, %{persist?: persist?}) do
-      {:ok, _owner} -> open_store(call_id, persist?, queue)
+      {:ok, _owner} -> open_conversation(call, queue)
       {:error, {:already_registered, pid}} -> {:error, {:call_already_open, pid}}
     end
   end
@@ -155,51 +178,63 @@ defmodule FermixChannels.Voice.Bridge do
   @spec close_call(handle()) :: :ok
   def close_call(%{
         call_id: call_id,
+        conversation_key: conversation_key,
         store: store,
         owner: owner,
-        persist?: persist?,
         queue: queue
       })
-      when is_pid(owner) and is_boolean(persist?) do
+      when is_pid(owner) do
     turns = registered_turns(call_id)
     unregister_all(call_id)
-    outcomes = Enum.map(turns, &stop_turn(conversation_key(call_id), &1, queue))
-    stop_store(store, persist?)
+    outcomes = Enum.map(turns, &stop_turn(conversation_key, &1, queue))
+    stop_store(store)
 
     Logger.info("voice bridge closed call #{call_id}: #{inspect(outcomes)}")
     :ok
   end
 
-  @doc "The conversation every delegation of `call_id` runs in."
-  @spec conversation_key(String.t()) :: ConversationKey.t()
-  def conversation_key(call_id) when is_binary(call_id) do
-    ConversationKey.from(%{channel: Voice.channel(), chat_id: call_id})
-  end
-
   # --- Call lifetime ---
+
+  # The chat's own conversation on the durable store every typed turn uses: the
+  # call opens no store of its own (M56 §4.1).
+  defp open_conversation(%{conversation: "chat"} = call, queue),
+    do: {:ok, handle(call, Companion.chat_conversation_key(), ConversationStore, queue)}
+
+  defp open_conversation(%{conversation: "private", call_uuid: call_uuid} = call, queue) do
+    key = {Voice.channel(), call_uuid, :root}
+
+    case private_store(call.persist?) do
+      {:ok, store} -> {:ok, handle(call, key, store, queue)}
+      {:error, reason} -> release_claim(call.call_id, reason)
+    end
+  end
 
   # `name: nil` starts an ANONYMOUS store, addressed by pid — the global name
   # belongs to the durable conversation store. Linked to the caller (the Live
   # session), so a session that dies without closing leaves no orphan; a store
   # that dies takes the call with it, which is honest: a call that lost its
   # history cannot answer the next delegation from context.
-  defp open_store(call_id, false, queue) do
-    case ConversationStore.start_link(
-           name: nil,
-           repo: nil,
-           max_messages: @ephemeral_max_messages
-         ) do
-      {:ok, store} -> {:ok, handle(call_id, store, false, queue)}
-      {:error, reason} -> release_claim(call_id, reason)
-    end
+  defp private_store(false) do
+    ConversationStore.start_link(name: nil, repo: nil, max_messages: @ephemeral_max_messages)
   end
 
-  defp open_store(call_id, true, queue),
-    do: {:ok, handle(call_id, ConversationStore, true, queue)}
+  defp private_store(true), do: {:ok, ConversationStore}
 
-  defp handle(call_id, store, persist?, queue) do
-    Logger.info("voice bridge opened call #{call_id} (persist?: #{persist?})")
-    %{call_id: call_id, store: store, owner: self(), persist?: persist?, queue: queue}
+  defp handle(call, conversation_key, store, queue) do
+    Logger.info(
+      "voice bridge opened call #{call.call_id} in #{inspect(conversation_key)} " <>
+        "(persist?: #{call.persist?})"
+    )
+
+    %{
+      call_id: call.call_id,
+      call_uuid: call.call_uuid,
+      conversation_key: conversation_key,
+      store: store,
+      owner: self(),
+      persist?: call.persist?,
+      queue: queue
+    }
   end
 
   defp release_claim(call_id, reason) do
@@ -207,11 +242,13 @@ defmodule FermixChannels.Voice.Bridge do
     {:error, {:conversation_store_unavailable, reason}}
   end
 
-  defp stop_store(_store, true), do: :ok
-
-  defp stop_store(store, false) when is_pid(store) do
+  # Only a store the call started is the call's to release; the durable store
+  # holds every conversation.
+  defp stop_store(store) when is_pid(store) do
     if Process.alive?(store), do: GenServer.stop(store, :normal), else: :ok
   end
+
+  defp stop_store(_durable_store), do: :ok
 
   # `Registry.keys/2` answers with every key this process registered, which is
   # the call id plus one entry per delegation it submitted. Bounded by the
@@ -279,12 +316,15 @@ defmodule FermixChannels.Voice.Bridge do
     end
   end
 
+  # The task ref names the conversation from the handle: before ingest the
+  # message has no trust level, so `ConversationKey.from/1` would not yet
+  # believe its `voice_call` and would answer the voice channel's own key.
   defp ingest_delegation(%{call_id: call_id, queue: queue} = handle, request) do
     message = build_message(handle, request)
 
     case Gateway.ingest([message], channel: Voice, agent: Queue, agent_server: queue) do
       :ok ->
-        {:ok, {ConversationKey.from(message), message.id}}
+        {:ok, {handle.conversation_key, message.id}}
 
       {:error, reason} ->
         Registry.unregister(Voice.registry(), {call_id, request.delegation_id})
@@ -292,7 +332,7 @@ defmodule FermixChannels.Voice.Bridge do
     end
   end
 
-  defp build_message(%{call_id: call_id, store: store, persist?: persist?}, request) do
+  defp build_message(%{call_id: call_id, store: store, persist?: persist?} = handle, request) do
     Message.new!(%{
       id: delegation_message_id(request),
       content: request.text,
@@ -306,6 +346,8 @@ defmodule FermixChannels.Voice.Bridge do
         chat_type: "private",
         voice_call: %{
           call_id: call_id,
+          call_uuid: handle.call_uuid,
+          conversation_key: handle.conversation_key,
           delegation_id: request.delegation_id,
           revision: request.revision,
           turn_session_id: request.turn_session_id,

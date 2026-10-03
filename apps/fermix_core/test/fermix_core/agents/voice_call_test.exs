@@ -14,6 +14,8 @@ defmodule FermixCore.Agents.VoiceCallTest do
     Map.merge(
       %{
         call_id: "voice_live_1",
+        call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+        conversation_key: {"companion", "main", :root},
         delegation_id: "d-1",
         revision: 1,
         turn_session_id: "voice_delegation_1",
@@ -45,6 +47,8 @@ defmodule FermixCore.Agents.VoiceCallTest do
       assert call.call_id == "voice_live_1"
       assert call.turn_session_id == "voice_delegation_1"
       assert call.persist? == false
+      assert call.call_uuid == "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+      assert call.conversation_key == {"companion", "main", :root}
     end
 
     test "returns :none for a voice_call map on a non-operator message" do
@@ -76,7 +80,12 @@ defmodule FermixCore.Agents.VoiceCallTest do
         %{turn_session_id: ""},
         %{conversation_store: nil},
         %{prompt_addendum: ""},
-        %{persist?: "no"}
+        %{persist?: "no"},
+        %{call_uuid: ""},
+        %{conversation_key: nil},
+        %{conversation_key: {"companion", "", :root}},
+        %{conversation_key: {"companion", "main", :thread}},
+        %{conversation_key: "companion:main"}
       ]
 
       for override <- malformed do
@@ -89,10 +98,12 @@ defmodule FermixCore.Agents.VoiceCallTest do
     end
 
     test "raises when a required key is missing from a trusted voice_call" do
-      msg = message(%{metadata: %{voice_call: Map.delete(voice_call(), :turn_session_id)}})
+      for key <- [:turn_session_id, :call_uuid, :conversation_key] do
+        msg = message(%{metadata: %{voice_call: Map.delete(voice_call(), key)}})
 
-      assert_raise ArgumentError, ~r/malformed voice_call/, fn ->
-        VoiceCall.from_message(msg)
+        assert_raise ArgumentError, ~r/malformed voice_call/, fn ->
+          VoiceCall.from_message(msg)
+        end
       end
     end
 

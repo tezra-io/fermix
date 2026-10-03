@@ -4,10 +4,15 @@ defmodule FermixCore.Agents.VoiceCall do
 
   Under the `openai_live` engine a voice call delegates each task to an ordinary
   Core turn, and that turn needs context no channel message may supply for
-  itself: which `ConversationStore` holds the call's history, which trace session
-  the turn belongs to, which revision fences it, and the Live-only prompt
-  addendum. `FermixChannels.Voice.Bridge` builds that map; this module is what
-  decides whether to believe it.
+  itself: which conversation it runs in and which `ConversationStore` holds it,
+  which call and trace session the turn belongs to, which revision fences it,
+  and the Live-only prompt addendum. `FermixChannels.Voice.Bridge` builds that
+  map; this module is what decides whether to believe it.
+
+  The conversation is `conversation_key` (M56 §4.1): the chat's own, named by
+  Channels so Core never spells a channel, or, for a private call, one keyed
+  by the call's UUID. `ConversationKey.from/1` answers it for a trusted turn,
+  so every reader of the key agrees.
 
   Two conditions, both necessary: the message arrived on the `"voice"` channel
   AND the gateway authorized it as `:operator`. Anything else answers `:none` —
@@ -16,9 +21,10 @@ defmodule FermixCore.Agents.VoiceCall do
   is a defect in trusted code, so it raises rather than degrading to `:none`
   (which would silently run the turn against the global store).
 
-  Consumers: `MainAgent.turn_state/2` (store override, memory-review skip),
-  `TurnRunner` (session ids, origin, prompt addendum) and
-  `FermixChannels.Gateway.Queue` (stopped-marker store).
+  Consumers: `ConversationKey.from/1` (the conversation), `MainAgent.turn_state/2`
+  (store override, memory-review skip), `TurnRunner` (session ids, origin,
+  prompt addendum, the persisted request) and `FermixChannels.Gateway.Queue`
+  (stopped-marker store).
   """
 
   # The voice capability boundary (M41 §5.1), in ONE place because two surfaces
@@ -39,10 +45,13 @@ defmodule FermixCore.Agents.VoiceCall do
   @typedoc """
   The delegation context a Live session attaches to its Core turn.
   `conversation_store` is the call-owned ephemeral store (a pid) or the global
-  store (a module) when the call persists.
+  store (a module) when the hand-off runs in the chat or the call persists.
+  `call_uuid` is the call's durable identity; `call_id` the trace session.
   """
   @type t :: %{
           call_id: String.t(),
+          call_uuid: String.t(),
+          conversation_key: FermixCore.Agents.ConversationKey.t(),
           delegation_id: String.t(),
           revision: pos_integer(),
           turn_session_id: String.t(),
@@ -97,22 +106,25 @@ defmodule FermixCore.Agents.VoiceCall do
          %{
            revision: revision,
            conversation_store: conversation_store,
+           conversation_key: conversation_key,
            persist?: persist?
          } = voice_call
        ) do
     identifiers?(voice_call) and revision?(revision) and store?(conversation_store) and
-      is_boolean(persist?)
+      conversation_key?(conversation_key) and is_boolean(persist?)
   end
 
   defp valid?(_incomplete), do: false
 
   defp identifiers?(%{
          call_id: call_id,
+         call_uuid: call_uuid,
          delegation_id: delegation_id,
          turn_session_id: turn_session_id,
          prompt_addendum: prompt_addendum
        }) do
-    text?(call_id) and text?(delegation_id) and text?(turn_session_id) and text?(prompt_addendum)
+    text?(call_id) and text?(call_uuid) and text?(delegation_id) and text?(turn_session_id) and
+      text?(prompt_addendum)
   end
 
   defp identifiers?(_incomplete), do: false
@@ -120,6 +132,13 @@ defmodule FermixCore.Agents.VoiceCall do
   defp text?(value), do: is_binary(value) and value != ""
 
   defp revision?(value), do: is_integer(value) and value >= 1
+
+  # The canonical shape `ConversationKey` derives: a thread segment is `:root`
+  # or the platform's thread id as a string.
+  defp conversation_key?({channel, chat_id, thread_scope}),
+    do: text?(channel) and text?(chat_id) and (thread_scope == :root or text?(thread_scope))
+
+  defp conversation_key?(_other), do: false
 
   # A pid (the call-owned ephemeral store) or a registered name (the global
   # store). `nil` is neither, and would silently route the turn's history at the

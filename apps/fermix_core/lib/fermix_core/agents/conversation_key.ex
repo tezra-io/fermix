@@ -10,7 +10,16 @@ defmodule FermixCore.Agents.ConversationKey do
   Shared by `FermixChannels.Gateway.Queue` (FIFO keying) and
   `FermixCore.Agents.TurnRunner` (history/memory scoping). Core-owned; the
   gateway depends on core and may call it.
+
+  One override (M56 §4.1): a trusted Live hand-off runs in the conversation its
+  `voice_call` names (`VoiceCall`), usually the chat's own, so the queue lane,
+  the history read, the commit and context tracking all agree without any of
+  them knowing about voice. The map is believed only on an operator message on
+  the `voice` channel; before ingest a message has no trust, so a caller that
+  needs the key then (the voice bridge) names it itself.
   """
+
+  alias FermixCore.Agents.VoiceCall
 
   @typedoc """
   The canonical thread segment: `:root`, or the platform thread id as a string.
@@ -26,7 +35,10 @@ defmodule FermixCore.Agents.ConversationKey do
   @spec from(map()) :: t()
   def from(%{channel: channel, chat_id: chat_id} = msg)
       when is_binary(channel) and is_binary(chat_id) do
-    {channel, chat_id, thread_scope(msg)}
+    case VoiceCall.from_message(msg) do
+      {:ok, %{conversation_key: conversation_key}} -> conversation_key
+      :none -> {channel, chat_id, thread_scope(msg)}
+    end
   end
 
   defp thread_scope(%{thread_ts: thread_ts}) when not is_nil(thread_ts),
