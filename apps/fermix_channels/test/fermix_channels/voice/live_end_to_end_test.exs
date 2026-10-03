@@ -25,8 +25,10 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Companion.Requests
   alias FermixChannels.Voice.Bridge
   alias FermixChannels.Voice.CallRowSweep
+  alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -104,10 +106,11 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   #
   # `LiveSessionServer` builds the §6 `call` map itself, so it has no way to
   # name a scheduler — in production there is only one. This shim adds the
-  # `agent_server` the bridge already accepts and delegates every callback
-  # unchanged, so `conversation_window/call_active?/chat_call/show/open_call/
-  # submit/cancel/close_call` are the shipped code paths; only the queue they
-  # reach is the test's.
+  # `agent_server` the bridge already accepts (and the owner of the tasks that
+  # outlive a call, the daemon's own unless a test names one) and delegates
+  # every callback unchanged, so `conversation_window/call_active?/chat_call/
+  # show/open_call/submit/cancel/detach/close_call` are the shipped code paths;
+  # only the queue they reach is the test's.
   defmodule QueueBoundBridge do
     @behaviour FermixCore.Realtime.VoiceBridge
 
@@ -116,7 +119,10 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     # Unlinked: a session settles its call in `terminate/2`, which runs while
     # the test process is already exiting, and a binding that died first would
     # make every test log a close failure the product does not have.
-    def bind(queue), do: Agent.start(fn -> queue end, name: @name)
+    def bind(queue), do: Agent.start(fn -> %{queue: queue, detached: Detached} end, name: @name)
+
+    @doc "The owner the next call hands its running tasks to."
+    def bind_detached(detached), do: Agent.update(@name, &%{&1 | detached: detached})
 
     def unbind do
       case Process.whereis(@name) do
@@ -138,14 +144,19 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     def show(call, text), do: Bridge.show(call, text)
 
     @impl true
-    def open_call(call),
-      do: Bridge.open_call(Map.put(call, :agent_server, Agent.get(@name, & &1)))
+    def open_call(call) do
+      %{queue: queue, detached: detached} = Agent.get(@name, & &1)
+      Bridge.open_call(Map.merge(call, %{agent_server: queue, detached: detached}))
+    end
 
     @impl true
     def submit(handle, request, callbacks), do: Bridge.submit(handle, request, callbacks)
 
     @impl true
     def cancel(handle, task_ref), do: Bridge.cancel(handle, task_ref)
+
+    @impl true
+    def detach(handle, task_ref, task), do: Bridge.detach(handle, task_ref, task)
 
     @impl true
     def close_call(handle), do: Bridge.close_call(handle)
@@ -548,6 +559,175 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
     end
   end
 
+  # M56 §4.6: a task still running when a call in the chat ends finishes into
+  # the chat. Its reply lands there exactly once, as the task's done row,
+  # whichever side of the hand-over it arrives on: before the call ends it is
+  # said, as the session settles it is forwarded by the session, after the
+  # call it finds the new owner's route.
+  describe "a task that outlives its call" do
+    setup :start_timeline
+
+    test "a reply after the call ended lands in the chat once, as the task's done row" do
+      Process.flag(:trap_exit, true)
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+
+      assert :ok = SessionControl.call_stop(session)
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_1", status: "running", detached: true}}
+
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+      assert Process.alive?(turn_pid), "the call's end stopped the task it handed over"
+
+      running = call_row("task_running")
+      assert running["text"] == "Still working on: user: #{@spoken}"
+      assert running["metadata"]["call"]["uuid"] == call_uuid
+
+      send(turn_pid, {:proceed, @answer})
+
+      done = call_row("task_done")
+      assert done["text"] == @answer
+      assert done["metadata"]["call"]["state"] == "completed"
+      done_seq = done["server_seq"]
+      assert_receive {:mobile_event, "main", %{"t" => "row", "server_seq" => ^done_seq}}
+
+      refute_receive {:companion_event, %{"metadata" => %{"call" => %{"event" => "task_done"}}}},
+                     200
+
+      assert eventually(fn -> record_task(call_uuid) == {"completed", @answer} end)
+      assert done_rows(call_uuid) == 1
+    end
+
+    test "a reply that reaches the call as it settles lands in the chat once, never said" do
+      Process.flag(:trap_exit, true)
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+
+      # The reply reaches the session behind its stop, before the session has
+      # handed the task over and released its route.
+      :ok = :sys.suspend(session)
+      stop = Task.async(fn -> SessionControl.call_stop(session) end)
+      assert eventually(fn -> queued_call?(session, stop.pid, :call_stop) end, 250)
+      send(turn_pid, {:proceed, @answer})
+      assert eventually(fn -> delegation_event_queued?(session) end, 250)
+      :ok = :sys.resume(session)
+
+      assert :ok = Task.await(stop, 5_000)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+      done = call_row("task_done")
+      assert done["text"] == @answer
+
+      refute_receive {:companion_event, %{"metadata" => %{"call" => %{"event" => "task_done"}}}},
+                     200
+
+      refute_received {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      refute Enum.any?(
+               FakeLiveClient.events(),
+               &(&1.type == "session.commentary.append" and &1.delegation_id == "dg_1")
+             )
+
+      assert eventually(fn -> record_task(call_uuid) == {"completed", @answer} end)
+      assert done_rows(call_uuid) == 1
+    end
+
+    test "a reply before the call ends is said, and nothing is handed over" do
+      Process.flag(:trap_exit, true)
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+
+      send(turn_pid, {:proceed, @answer})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}},
+                     5_000
+
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+      refute_received {:realtime, %{type: "task", detached: true}}
+      assert done_rows(call_uuid) == 0
+    end
+
+    # The companion `cancel.task_ref` (M56 §4.6, §6): only the task those ids
+    # name is stopped, and its done row says it was cancelled.
+    test "a cancel from the chat by the task's ids stops that turn alone", ctx do
+      Process.flag(:trap_exit, true)
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+      call_row("task_running")
+
+      # The owner types while the task runs: the turn waits in the chat's lane.
+      :ok = Queue.enqueue(ctx.queue, typed_turn("typed-1"))
+      refute_receive {:turn_started, %{id: "typed-1"}, _pid}, 200
+
+      task_ref = %{"call_uuid" => call_uuid, "task_id" => "dg_1", "revision" => 2}
+      cancel = %{"profile_id" => "main", "client_msg_id" => "mac-9", "task_ref" => task_ref}
+
+      assert {:error, :task_not_running} = Requests.cancel(cancel, [])
+      assert Process.alive?(turn_pid)
+
+      assert :ok = Requests.cancel(put_in(cancel, ["task_ref", "revision"], 1), [])
+
+      done = call_row("task_done")
+      assert done["text"] == "The task was cancelled."
+      assert done["metadata"]["call"]["state"] == "cancelled"
+      refute Process.alive?(turn_pid)
+
+      assert_receive {:turn_started, %{id: "typed-1"}, typed_pid}, 5_000
+      send(typed_pid, {:proceed, "Noted."})
+      assert eventually(fn -> record_task(call_uuid) == {"cancelled", "cancelled"} end)
+    end
+
+    test "/stop ends a task that outlived its call with its row", ctx do
+      Process.flag(:trap_exit, true)
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+
+      assert %{active_stopped: 1} = Queue.stop_all(ctx.queue)
+
+      done = call_row("task_done")
+      assert done["metadata"]["call"]["state"] == "cancelled"
+      refute Process.alive?(turn_pid)
+      assert eventually(fn -> record_task(call_uuid) == {"cancelled", "cancelled"} end)
+    end
+
+    # M56 §4.6, §8: the owner dies with the daemon while the task runs; the
+    # next boot's pass writes the task's done row and fails it in the record.
+    test "a daemon that dies while the task runs leaves its done row to the next boot" do
+      Process.flag(:trap_exit, true)
+      owner = :"voice_e2e_detached_#{System.unique_integer([:positive])}"
+      start_supervised!({Detached, name: owner, mobile_running?: fn -> false end}, id: owner)
+      :ok = QueueBoundBridge.bind_detached(owner)
+
+      session = start_session(live_config(), record_repo: @timeline_repo, gist: gist("Parking."))
+      %{call_uuid: call_uuid, turn_pid: turn_pid} = task_running(session)
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+      call_row("task_running")
+      # The call's own row is written: what dies with the daemon is the task.
+      call_row("ended")
+
+      Enum.each([Process.whereis(owner), turn_pid], &Process.exit(&1, :kill))
+      assert eventually(fn -> record_task(call_uuid) |> elem(0) == "detached" end)
+
+      {:ok, sweep} = CallRowSweep.start_link(record_repo: @timeline_repo)
+      ref = Process.monitor(sweep)
+      assert_receive {:DOWN, ^ref, :process, ^sweep, :normal}, 5_000
+
+      done = call_row("task_done")
+      assert done["text"] == "The task stopped when Fermix restarted."
+      assert done["metadata"]["call"]["state"] == "failed"
+      assert record_task(call_uuid) == {"failed", "daemon_restarted"}
+      assert done_rows(call_uuid) == 1
+    end
+  end
+
   test "cancelling a task stops the running turn and reports it to the call" do
     Process.flag(:trap_exit, true)
     session = start_session()
@@ -579,7 +759,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # The companion's connection (`LocalVoiceSocket`'s handler) drives the session
   # through `SessionControl`, and on this rail a cancel or a hang-up reaches the
   # Queue's stop of the hand-off's turn, which answers only once the Queue is
-  # free. The Queue is held suspended only until the session's stop is seen
+  # free. A hang-up stops the turn of a private call; a call in the chat hands
+  # it over instead (below), so these calls are private. The Queue is held suspended only until the session's stop is seen
   # waiting in its mailbox: no test waits out a production call budget. What
   # tells a wait with no budget from a budget not used up yet is the call
   # itself, so each test traces the handler's call and reads the timeout it
@@ -653,6 +834,62 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   end
 
   # --- Helpers ---
+
+  # A call in the chat with one hand-off running as an agent turn.
+  defp task_running(session) do
+    :ok = SessionControl.call_start(session)
+    open_provider_session(session)
+
+    assert_receive {:realtime,
+                    %{type: "call_ready", call_uuid: call_uuid, tasks_outlive_call: true}}
+
+    speak(session, @spoken, 1_000, 4_000)
+    delegate(session, "dg_1", 4_200)
+    assert_receive {:turn_started, _msg, turn_pid}, 5_000
+    assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "running"}}
+    %{call_uuid: call_uuid, turn_pid: turn_pid}
+  end
+
+  defp gist(text), do: [routes: [{@gist_route, [adapter: GistAdapter, gist: text]}]]
+
+  # The next row of the call with this `event` the Mac is told of.
+  defp call_row(event) do
+    assert_receive {:companion_event,
+                    %{"t" => "row", "metadata" => %{"call" => %{"event" => ^event}}} = row},
+                   5_000
+
+    row
+  end
+
+  defp record_task(call_uuid) do
+    {:ok, %{tasks: [task]}} = Repo.get_voice_call(call_uuid, server: @timeline_repo)
+    {task["state"], task["summary"]}
+  end
+
+  defp done_rows(call_uuid) do
+    {:ok, %{messages: rows}} = E2ETimeline.history_page("main", limit: 50)
+    Enum.count(rows, &(&1.proactive_key == "voice:#{call_uuid}:dg_1:1:done"))
+  end
+
+  # A message the owner typed in the chat, queued in the lane a call in the
+  # chat's hand-offs share.
+  defp typed_turn(id) do
+    %{
+      id: id,
+      channel: "companion",
+      chat_id: "main",
+      sender: "owner",
+      content: "typed while the task runs",
+      source_trust: :operator,
+      metadata: %{},
+      reply_fn: fn _part -> :ok end
+    }
+  end
+
+  defp delegation_event_queued?(session) do
+    {:messages, messages} = Process.info(session, :messages)
+    Enum.any?(messages, &match?({:delegation_event, "dg_1", {:result, _result}}, &1))
+  end
 
   # The chat's timeline on a throwaway repo, a companion connection's place in
   # the registry, and the phones' sink, all this test's.
@@ -736,7 +973,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
        session_supervisor:
          start_supervised!({SessionSupervisor, name: :"voice_e2e_sessions_#{unique}"}),
        session_starter: starter,
-       session_opts: live_session_opts()}
+       session_opts:
+         Keyword.put(live_session_opts(), :config, live_config(conversation: "private"))}
     )
 
     %{socket_path: socket_path}
