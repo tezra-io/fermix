@@ -20,17 +20,31 @@ defmodule FermixCore.Auth.CallbackPageTest do
   end
 
   # Served from 127.0.0.1 at sign-in time: it must render offline and fetch
-  # nothing, so the mascot is inline and nothing points off the page.
-  test "every page is self-contained: the inline mascot, no script, nothing fetched" do
+  # nothing, so the Fermix pet mark is an inline data image and nothing points
+  # off the page.
+  test "every page is self-contained: the inline pet mark, no script, nothing fetched" do
     for kind <- @kinds do
       page = CallbackPage.render(kind)
 
-      assert page =~ ~s(<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 15 15")
+      assert page =~ ~s(<div class="mark" aria-hidden="true"></div>)
+      assert page =~ "--mark:url(data:image/png;base64,"
       refute page =~ "<script"
       refute page =~ ~r/(src|href)=/
       refute page =~ "@import"
-      refute page =~ "url("
+      assert Regex.scan(~r/url\((?!data:image\/png;base64,)/, page) == []
     end
+  end
+
+  # The mark is the pet in one ink, so it takes the text colour and follows the
+  # scheme rather than carrying colours of its own.
+  test "the pet mark is drawn in the text colour" do
+    assert CallbackPage.render(:received) =~
+             "width:72px;height:72px;margin:0 auto;background:var(--text);"
+  end
+
+  # One copy of the image: both mask rules read it from a custom property.
+  test "the mark's image is inlined once" do
+    assert length(String.split(CallbackPage.render(:received), "data:image/png;base64,")) == 2
   end
 
   test "every page follows the browser's light or dark scheme" do

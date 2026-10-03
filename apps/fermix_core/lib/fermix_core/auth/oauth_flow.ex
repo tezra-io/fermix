@@ -762,8 +762,9 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   # The callback page is never cached and never leaks its address (the code
   # and state are in it) as a referrer. It runs nothing and loads nothing: its
-  # only allowance is its own inline style.
-  @page_csp "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'"
+  # only allowances are its own inline style and the inline image of its mark.
+  @page_csp "default-src 'none'; style-src 'unsafe-inline'; img-src data:; " <>
+              "base-uri 'none'; form-action 'none'"
 
   defp http_response(status, status_text, body) do
     [
