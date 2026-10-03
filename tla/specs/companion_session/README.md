@@ -172,8 +172,8 @@ the checks that show a rule needs it):
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:148-158`; `cancel_request`,
   `mobile_sql.ex:546-565`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:302-315`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:226-229`, `stop_in_queue`,
+  (`hand_off`, `turns.ex:305-320`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:229-232`, `stop_in_queue`,
   `:416-427`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -184,12 +184,12 @@ the checks that show a rule needs it):
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:262-268`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:265-270`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:334-369`;
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:338-373`;
   `fail_attempt`, `report_failure`, `requests.ex:325-345`), through the
   transport's `report_failure`, which the connection writes as a failed
   worker's error (`connection.ex:496-503`, `:153-154`). `FALSE` only logs the
@@ -351,7 +351,7 @@ of an entity its rules are about. All still hold:
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:270-282`), so the device registry that forgot the phone never
+  `turns.ex:273-285`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -362,16 +362,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:285-291`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:287-293`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:416-427`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:420-431`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:512-522`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:517-527`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.
@@ -403,6 +403,11 @@ of an entity its rules are about. All still hold:
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
 - The LLM and tools, the ConversationStore, attachments, authentication and
   the socket's 0600 mode: single-call rules that ExUnit covers.
+- The Live voice mirror (`Voice.ChatMirror`, M56 §4.3). While a call in the
+  chat is up, `Turns` tells it each turn of the chat's conversation it hands
+  off and, as one completes, its answer: a cast to the call's session and one
+  ConversationStore read, whose exit is logged. No request, turn or wire state
+  moves, so no rule here reads it.
 - Other conversations: the Queue keys all state by conversation.
 
 ## Findings

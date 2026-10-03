@@ -63,7 +63,7 @@
 (* companion.sock. A phone's revocation is not modelled either: Turns runs *)
 (* it in its own mailbox as a cancel of every unsettled request the device *)
 (* claimed, one step that marks them all and stops each turn it handed off *)
-(* (handle_cast {:revoke_device}, turns.ex:270-282);                       *)
+(* (handle_cast {:revoke_device}, turns.ex:273-285);                       *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -93,6 +93,11 @@
 (* turn (metadata.caller) and decides only what the turn's tools may do;   *)
 (* - the LLM and tools, the ConversationStore, attachments, auth and the   *)
 (* socket's 0600 mode (single-call rules; ExUnit covers them);             *)
+(* - the Live voice mirror (Voice.ChatMirror, M56 section 4.3): while a    *)
+(* call in the chat is up, Turns tells it each turn of the chat's          *)
+(* conversation it hands off and, as one completes, its answer, a cast to  *)
+(* the call's session and one ConversationStore read whose exit is logged; *)
+(* no request, turn or wire state moves;                                   *)
 (* - other conversations (the Queue keys all state by conversation).       *)
 (*                                                                         *)
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
@@ -100,7 +105,7 @@
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 3d7da3eb0233
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ a188ccda0274
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 6e33d189d304
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 721f8a43246f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ 7309598811f2
@@ -184,7 +189,7 @@ CONSTANTS
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
                          \* requests.ex:148-158; cancel_request, mobile_sql.ex:546-565);
                          \* Turns reads the mark and enqueues in one step (hand_off,
-                         \* turns.ex:302-315) and sends every stop itself, after its
+                         \* turns.ex:305-320) and sends every stop itself, after its
                          \* enqueue (turns.ex:226-229, stop_in_queue :416-427). FALSE is
                          \* the old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
