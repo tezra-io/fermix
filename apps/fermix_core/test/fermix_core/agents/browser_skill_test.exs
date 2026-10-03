@@ -36,5 +36,9 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     assert definition.system_prompt =~ "`backend` is `fermix_app`"
     assert definition.system_prompt =~ "runs no WebMCP tools and saves no downloads"
     assert definition.system_prompt =~ ~s(profile: "fermix_chrome")
+
+    # `download` starts nothing: a click starts the file, `download` collects it.
+    assert definition.system_prompt =~ "`download` starts nothing"
+    assert definition.system_prompt =~ "click the file's link with `act` and then call `download`"
   end
 end

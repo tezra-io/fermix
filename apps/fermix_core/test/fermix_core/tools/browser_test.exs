@@ -87,6 +87,18 @@ defmodule FermixCore.Tools.BrowserTest do
   # reads names the field that says which browser it is in, both things the pane
   # cannot do, and the profile that is always Chrome, as one rule.
   describe "steering WebMCP and downloads out of the app's pane" do
+    # Downloads are steered to fermix_chrome, so the one path has to read
+    # through: in Chrome, a click starts the file and `download` collects it.
+    test "the description says download starts nothing and a click comes first" do
+      description = Browser.description()
+
+      assert description =~ "`download` clicks and fetches nothing"
+      assert description =~ "`act` click on its link or button"
+      assert description =~ "`path` is where it was saved"
+
+      assert Browser.parameters().properties.timeout_ms.description =~ "For download"
+    end
+
     test "both halves of the prompt name the pane, `backend` and fermix_chrome" do
       for surface <- [Browser.description(), Browser.when_to_use()] do
         assert surface =~ ~s(profile: "fermix_chrome")
@@ -377,6 +389,31 @@ defmodule FermixCore.Tools.BrowserTest do
       assert {:ok, oversize} = Browser.execute(big, @context)
       assert oversize.success == false
       assert oversize.error =~ "input"
+    end
+
+    # `download` starts nothing; a `ref`, `url` or `path` on it was a call that
+    # waited out its whole budget for a download nobody began (live, three times
+    # in one turn). Refused before dispatch, naming the move that starts one.
+    test "download refuses ref, url and path, and names the click that starts one" do
+      for {arg, value} <- [{"ref", "link_1"}, {"url", "https://a.test/r.csv"}, {"path", "r.csv"}] do
+        assert {:ok, result} = Browser.execute(%{"action" => "download", arg => value}, @context)
+        assert result.success == false
+        assert result.error =~ "(invalid_arg)"
+        assert result.error =~ "download takes no `#{arg}`"
+        assert result.error =~ "`act` click"
+        assert result.error =~ "`path` is where it was saved"
+      end
+    end
+
+    test "download with only timeout_ms passes validation and is dispatched" do
+      conversation = {"cli", "chat-download-#{System.unique_integer([:positive])}", :root}
+      stub_profile!(conversation)
+      context = %{agent_name: "test_agent", conversation_key: conversation}
+
+      assert {:ok, %{success: true, output: output}} =
+               Browser.execute(%{"action" => "download", "timeout_ms" => 500}, context)
+
+      assert {:ok, %{"ok" => true}} = Jason.decode(output)
     end
 
     test "surfaces the structured error code and details to the agent" do

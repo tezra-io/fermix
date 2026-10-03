@@ -164,7 +164,8 @@ scenarios:
         # The pane saves no downloads and answers every page with its canned
         # Example Domain, so the report code, which is only in the saved file
         # and is put together when the button is pressed, can only come from a
-        # Chrome that pressed it, a `download` that waited for the file, and a
+        # Chrome that pressed it with an `act` click, a `download` after the
+        # click to collect the file (`download` itself starts nothing), and a
         # read of that file. The page's own record of the press beside the
         # code is the floor; no route gate (the profile that is always Chrome
         # is the expected move, but any Chrome profile reaching the file is the
