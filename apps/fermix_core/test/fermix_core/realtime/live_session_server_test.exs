@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
@@ -473,6 +474,109 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       second = start_session(clock: clock)
       assert {:ok, %{session: ^second}} = CallRegistry.active(@call_registry)
+    end
+  end
+
+  describe "the call record" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-record-#{unique}.db")
+      repo = :"live_record_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo}
+    end
+
+    # `persist_transcripts` is off here: it gates verbatim captions, not this.
+    test "a call writes its record, every task state, and closes before the final usage", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+
+      assert {:ok, %{engine: "openai_live", ended_at: nil, tasks: []}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+
+      assert record_tasks(repo, uuid) == [
+               %{
+                 "task_id" => "dg_1",
+                 "revision" => 1,
+                 "state" => "running",
+                 "request" => "user: book the room",
+                 "summary" => nil
+               }
+             ]
+
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 4_400}})
+      send(session, {:openai_live_event, {:delegation_created, "dg_3", 4_600}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_3", status: "failed"}}
+
+      assert task_states(record_tasks(repo, uuid)) ==
+               [{"dg_1", "running"}, {"dg_2", "created"}, {"dg_3", "failed"}]
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:realtime, %{type: "usage", accounting: "complete", voice_cost_cents: cost}}
+
+      # Written before that frame went out, from the same settled ledger.
+      assert {:ok, record} = Repo.get_voice_call(uuid, server: repo)
+      assert %{end_reason: "call_stop", accounting: "complete", voice_cost_cents: ^cost} = record
+      assert is_binary(record.ended_at)
+
+      assert task_states(record.tasks) ==
+               [{"dg_1", "completed"}, {"dg_2", "cancelled"}, {"dg_3", "failed"}]
+
+      assert Enum.map(record.tasks, & &1["summary"]) ==
+               ["The room is booked for 10am.", "cancelled", "busy"]
+
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    test "a call the daemon ends is closed with its reason and an unsettled bill", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo, close_deadline_ms: 20)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      uuid = :sys.get_state(session).call_uuid
+      FakeLiveClient.silence_close()
+
+      send(session, {:openai_live_disconnect, %{reason: {:remote, :closed}}})
+      assert_receive {:EXIT, ^session, {:shutdown, :provider_disconnected}}
+
+      assert {:ok, %{end_reason: "provider_disconnected", accounting: "incomplete"}} =
+               Repo.get_voice_call(uuid, server: repo)
+    end
+
+    test "a call the provider refused leaves no record", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+
+      session =
+        start_session(clock: clock, record_repo: repo, live_client: RefusingLiveClient)
+
+      uuid = :sys.get_state(session).call_uuid
+
+      assert {:error, :provider_refused} = SessionControl.call_start(session)
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert Repo.get_voice_call(uuid, server: repo) == {:error, :not_found}
     end
   end
 
@@ -1391,6 +1495,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     on_exit(fn -> await_down(session) end)
     session
   end
+
+  defp record_tasks(repo, uuid) do
+    {:ok, %{tasks: tasks}} = Repo.get_voice_call(uuid, server: repo)
+    tasks
+  end
+
+  defp task_states(tasks), do: Enum.map(tasks, &{&1["task_id"], &1["state"]})
 
   # One call per daemon: a test that needs a session of its own first ends the
   # call its describe's setup started.

@@ -47,6 +47,14 @@ defmodule FermixCore.Realtime.LiveText do
   end
 
   @doc """
+  Cut to `max_bytes` and nothing else: line breaks and spacing are kept, for
+  the speaker-labelled request a call's record stores.
+  """
+  @spec bytes(String.t(), pos_integer()) :: String.t()
+  def bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) and max_bytes > 0,
+    do: truncate_bytes(text, max_bytes)
+
+  @doc """
   One line of at most `max_chars` CHARACTERS, ellipsised when cut.
 
   Characters, not bytes: this is the wire's own bound on `task.summary`, and the

@@ -33,6 +33,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
@@ -145,6 +147,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # telemetry event that names the call.
       call_uuid: DeviceIdentity.generate_uuid(),
       call_registry: Keyword.get(opts, :call_registry, CallRegistry),
+      # The call's durable record (`CallRecord`), `nil` until the call starts.
+      call_record: nil,
+      record_opts: CallRecord.repo_opts(Keyword.get(opts, :record_repo, Repo)),
       api_key: Keyword.get(opts, :api_key),
       device_id: Keyword.get(opts, :device_id, "unknown"),
       agent_id: Keyword.get(opts, :agent_id, MemoryConfig.agent_id()),
@@ -420,7 +425,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     case send_event(state, event) do
       :ok ->
         LiveTelemetry.call_start(telemetry_meta(state), state.max_duration_ms)
-        {:ok, arm_start_deadline(state)}
+        {:ok, state |> open_record() |> arm_start_deadline()}
 
       {:error, reason} ->
         close_socket(state)
@@ -590,6 +595,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp admit_delegation(state, id) do
     {:ok, record} = LiveDelegation.fetch(state.delegations, id)
+    state = record_task(state, record, "created")
 
     case LiveDelegation.active(state.delegations) do
       %{id: ^id} -> submit_or_wait(state, record)
@@ -715,18 +721,26 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       delegation_id: record.id,
       revision: record.revision,
       turn_session_id: turn_session_id,
-      text: LiveTranscript.context_since(state.transcript, record.offset_ms, @context_window_ms),
+      text: delegation_text(state, record),
       screen_frame: nil
     }
   end
 
+  defp delegation_text(state, record),
+    do: LiveTranscript.context_since(state.transcript, record.offset_ms, @context_window_ms)
+
+  # The record keeps the words the task ran with: what was submitted to the
+  # bridge, or, for a confirmed command, what the owner said around the yes.
   defp run_delegation(state, record, task_ref) do
     {:ok, delegations} =
       LiveDelegation.start(state.delegations, record.id, task_ref, record.revision)
 
     state = %{state | delegations: delegations}
     LiveTelemetry.delegation_start(telemetry_meta(state), delegation_meta(state, record))
-    notify_task(state, record, "running", nil)
+
+    state
+    |> record_task(record, "running", %{request: delegation_text(state, record)})
+    |> notify_task(record, "running", nil)
   end
 
   # The closures run in the BRIDGE's process, so they do exactly one thing:
@@ -814,9 +828,12 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # say so), and the companion gets the refusal as a task frame rather than
   # nothing at all.
   defp refuse_delegation(state, id) do
+    refused = %{id: id, revision: 1}
+
     state
     |> send_thinking(id, @busy_line)
-    |> notify_task(%{id: id, revision: 1}, "failed", "busy")
+    |> record_task(refused, "failed", %{summary: "busy"})
+    |> notify_task(refused, "failed", "busy")
   end
 
   defp cancel_delegation(state, record) do
@@ -851,12 +868,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
             duration_ms(state, record)
           )
 
-          notify_task(
-            %{state | delegations: delegations},
-            finished,
-            Atom.to_string(status),
-            summary
-          )
+          %{state | delegations: delegations}
+          |> record_task(finished, Atom.to_string(status), %{summary: summary})
+          |> notify_task(finished, Atom.to_string(status), summary)
 
         {:error, :unknown_delegation} ->
           state
@@ -918,6 +932,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     {seconds, state} = graceful_close(state)
     state = %{state | ledger: LiveLedger.finalize(state.ledger, seconds)}
 
+    close_record(state, reason)
     notify_usage(state)
     LiveTelemetry.call_stop(telemetry_meta(state), call_measurements(state), reason)
     cancel_timers(state)
@@ -1170,6 +1185,49 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     do: :odd_pcm16_frame
 
   defp audio_drop_reason(_state, _audio), do: nil
+
+  ## The call record
+
+  # Opened as the call starts, before any task can exist. A write that fails is
+  # logged and the call goes on: the record is what a call leaves behind, and
+  # a database hiccup must not end the conversation it records.
+  defp open_record(state) do
+    record = CallRecord.new(state.call_uuid, state.config.engine)
+    report_record(CallRecord.open(record, DateTime.utc_now(), state.record_opts), "open")
+    %{state | call_record: record}
+  end
+
+  # Every task state is written as it happens, so a crash loses nothing the
+  # call had already done.
+  defp record_task(state, record, task_state, fields \\ %{}) do
+    call_record =
+      CallRecord.put_task(state.call_record, record.id, record.revision, task_state, fields)
+
+    report_record(CallRecord.write_tasks(call_record, state.record_opts), "write")
+    %{state | call_record: call_record}
+  end
+
+  # Written before the final `usage` frame goes out, from the same settled
+  # ledger, so the record is the source that frame agrees with. A call that
+  # never reached `session.start` has no record to close.
+  defp close_record(%{call_record: nil}, _reason), do: :ok
+
+  defp close_record(state, reason) do
+    usage = LiveLedger.usage_payload(state.ledger)
+
+    state.call_record
+    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts)
+    |> report_record("close")
+  end
+
+  defp report_record(:ok, _action), do: :ok
+
+  # Memory off is a configuration: there is no table to write.
+  defp report_record({:error, :disabled}, _action), do: :ok
+
+  defp report_record({:error, reason}, action) do
+    Logger.error("voice_live: could not #{action} the call record: #{inspect(reason)}")
+  end
 
   ## Bridge, recorder, timers
 
