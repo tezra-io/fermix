@@ -285,7 +285,17 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback delete_message(message(), message_id :: String.t()) :: :ok | {:error, term()}
 
+  @doc """
+  The owner's own inbox on a transport only the owner reaches (the Mac's chat
+  socket, the paired phones): the destination `FermixCore.Delivery.OwnerInbox`
+  answers for this channel (M56 §4.7), or `:unavailable` while the transport
+  cannot deliver. A remote platform does not implement it: its inbox derives
+  from the owner id configured for it.
+  """
+  @callback owner_inbox() :: {:ok, String.t()} | :unavailable
+
   @optional_callbacks [
+    owner_inbox: 0,
     start_typing: 1,
     download_attachment: 2,
     health_check: 1,

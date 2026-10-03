@@ -151,6 +151,15 @@ defmodule FermixChannels.Channels.CompanionTest do
     {:ok, approvals: approvals}
   end
 
+  # M56 §4.7: what `Delivery.OwnerInbox` answers for this channel. The socket
+  # is the owner's alone and the row is the delivery, so the chat is the
+  # owner's inbox whether or not the app is connected.
+  describe "owner_inbox/0" do
+    test "is the owner's chat, connected or not" do
+      assert Companion.owner_inbox() == {:ok, Companion.chat_profile()}
+    end
+  end
+
   describe "registry entry" do
     test "carries the local-operator shape with slash commands on" do
       entry = Enum.find(ChannelRegistry.channels(), &(&1.name == "companion"))

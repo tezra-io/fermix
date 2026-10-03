@@ -9,6 +9,125 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
 
   @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp]
 
+  # A remote platform's adapter: it sends, and its inbox is derived from the
+  # owner id configured for it.
+  defmodule RemoteAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+  end
+
+  # A transport only the owner reaches (the Mac's chat socket): its adapter
+  # names the owner's inbox itself.
+  defmodule TransportAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: {:ok, "main"}
+  end
+
+  # The same kind of transport while it cannot deliver (the phones' channel
+  # not running).
+  defmodule AwayTransportAdapter do
+    def send_message(_destination, _text, _opts), do: :ok
+    def owner_inbox, do: :unavailable
+  end
+
+  @channels %{
+    "telegram" => RemoteAdapter,
+    "slack" => RemoteAdapter,
+    "signal" => RemoteAdapter,
+    "companion" => TransportAdapter,
+    "mobile" => AwayTransportAdapter,
+    "cli" => RemoteAdapter
+  }
+
+  describe "on_platform/2" do
+    test "a remote platform's inbox is the owner DM its owner id derives" do
+      assert {:ok,
+              %{
+                platform: "telegram",
+                destination: "owner-t",
+                thread_scope: "root",
+                source: :derived
+              }} =
+               OwnerInbox.on_platform("telegram",
+                 configured_owners: %{"telegram" => "owner-t", "signal" => "owner-s"},
+                 jobs_config: [delivery_channels: @channels]
+               )
+    end
+
+    test "the configured target is the inbox of its own platform only" do
+      opts = [
+        configured_owners: %{"telegram" => "owner-t", "slack" => "U1"},
+        jobs_config: [
+          delivery_channels: @channels,
+          default_delivery_target: [platform: "slack", chat_id: "U1"]
+        ]
+      ]
+
+      assert {:ok, %{platform: "slack", destination: "U1", source: :configured}} =
+               OwnerInbox.on_platform("slack", opts)
+
+      # The configured target is Slack's, so Telegram still answers its own DM,
+      # never the configured target.
+      assert {:ok, %{platform: "telegram", destination: "owner-t", source: :derived}} =
+               OwnerInbox.on_platform("telegram", opts)
+    end
+
+    test "a platform with no owner inbox is refused, never answered with another's" do
+      opts = [
+        configured_owners: %{"telegram" => "owner-t"},
+        jobs_config: [delivery_channels: @channels]
+      ]
+
+      # Slack has no derivable DM and no configured target; Signal has no owner.
+      assert {:error, :no_owner_inbox} = OwnerInbox.on_platform("slack", opts)
+      assert {:error, :no_owner_inbox} = OwnerInbox.on_platform("signal", opts)
+      # The CLI prints to the daemon's own output: it is no inbox.
+      assert {:error, :no_owner_inbox} = OwnerInbox.on_platform("cli", opts)
+    end
+
+    test "a transport only the owner reaches names its own inbox, while it can deliver" do
+      opts = [configured_owners: %{}, jobs_config: [delivery_channels: @channels]]
+
+      assert {:ok,
+              %{
+                platform: "companion",
+                destination: "main",
+                thread_scope: "root",
+                source: :transport
+              }} = OwnerInbox.on_platform("companion", opts)
+
+      assert {:error, :no_owner_inbox} = OwnerInbox.on_platform("mobile", opts)
+    end
+
+    test "a platform that is not a delivery channel is refused with the send path's reason" do
+      opts = [
+        configured_owners: %{"discord" => "owner-d"},
+        jobs_config: [delivery_channels: @channels]
+      ]
+
+      assert {:error, {:unsupported_delivery_platform, "discord"}} =
+               OwnerInbox.on_platform("discord", opts)
+
+      assert {:error, {:unsupported_delivery_platform, "voice"}} =
+               OwnerInbox.on_platform("voice", opts)
+    end
+  end
+
+  describe "reachable_platforms/1" do
+    test "names every delivery channel with an owner inbox now, in name order" do
+      assert OwnerInbox.reachable_platforms(
+               configured_owners: %{"telegram" => "owner-t"},
+               jobs_config: [delivery_channels: @channels]
+             ) == ["companion", "telegram"]
+    end
+
+    test "is empty when no delivery channel is configured" do
+      assert OwnerInbox.reachable_platforms(
+               configured_owners: %{"telegram" => "owner-t"},
+               jobs_config: [delivery_channels: %{}]
+             ) == []
+    end
+  end
+
   describe "resolve/1 precedence" do
     test "the configured jobs target wins when it is the owner's own inbox" do
       assert {:ok,

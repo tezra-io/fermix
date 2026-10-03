@@ -235,6 +235,18 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def start_typing(profile_id) when is_binary(profile_id), do: :ok
 
+  @doc """
+  The owner's inbox on this channel (M56 §4.7): the shared chat's profile,
+  only while the phone channel runs. A send here is a row and its push, and
+  with the channel off it would be a row the Mac alone hears, which is the
+  companion channel's send, not this one's.
+  """
+  @impl true
+  @spec owner_inbox() :: {:ok, String.t()} | :unavailable
+  def owner_inbox do
+    if MobileSupervisor.running?(), do: {:ok, @profile}, else: :unavailable
+  end
+
   @impl true
   def health_check(opts) when is_list(opts) do
     management = Keyword.get(opts, :management, Management)

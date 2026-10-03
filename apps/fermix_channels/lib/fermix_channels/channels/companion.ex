@@ -99,6 +99,15 @@ defmodule FermixChannels.Channels.Companion do
   def chat_profile, do: @profile
 
   @doc """
+  The owner's inbox on this channel (M56 §4.7): the chat itself. The socket
+  is the owner's alone and the row is the delivery, so it is there whether or
+  not the app is connected.
+  """
+  @impl true
+  @spec owner_inbox() :: {:ok, String.t()}
+  def owner_inbox, do: {:ok, @profile}
+
+  @doc """
   Whether every client watching the owner's chat now reads server event
   `type`, each connection known by the version its hello declared; true with
   none attached. A turn may end with no reply (`turn_done`) only while this
