@@ -12,7 +12,7 @@
 (*  - the LLM and tools (one "loop" step), streaming drafts, typing;       *)
 (*  - the access gate's parked confirmation: run_message_loop hands        *)
 (*    AgentLoop the owner-inbox closure and the Live call id               *)
-(*    (turn_runner.ex:527, :531); a parked call is a held tool result      *)
+(*    (turn_runner.ex:528, :532); a parked call is a held tool result      *)
 (*    inside the one loop step, and the owner's confirm later runs it on   *)
 (*    a task outside the Queue, not as a new turn;                         *)
 (*  - the empty-completion path (queue.ex:541-544, :723-732): it delivers *)
@@ -42,7 +42,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/peer.ex#@moduledoc,handle_info,start_prompt,hand_off,watch_queue,ingest,handle_ingest,apply_turn_result,cancel_turn,cancel_prompt_request,stop_turn,settle_queue_down,close_turn,demonitor_queue,apply_if_open @ 37fc57942bd1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/acp/session.ex#start_turn,clear_turn,turn_open?,put_queue_ref,queue_ref,queue @ ad21422f117f
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway.ex#ingest,do_deliver_to_agent @ a988106fa5ca
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ 91394423fe85
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_message_loop,persist_user_message,commit @ f09e4e84790f
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/conversation_store.ex @ 133fbbc3e716
 EXTENDS Naturals, Sequences, FiniteSets
 
@@ -367,7 +367,7 @@ CheckoutFail(m) ==
     /\ Show(m, "error")
     /\ QueueUnchanged /\ UNCHANGED <<holding, outcomes, history>>
 
-\* TurnRunner persist_user_message (turn_runner.ex:948), before AgentLoop.
+\* TurnRunner persist_user_message (turn_runner.ex:967), before AgentLoop.
 PersistUser(m) ==
     /\ pc[m] = "start"
     /\ MoveTo(m, "loop")
@@ -397,7 +397,7 @@ MarkDelivered(m) ==
     /\ UNCHANGED <<unsent, pending, active, held, claimed, restarting, dropped, holding,
                    outcomes, shown, history>>
 
-\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:149): persist the reply,
+\* runner.commit/4 (queue.ex:551 -> turn_runner.ex:150): persist the reply,
 \* then synchronous auto-compaction; the claim comes only after it returns.
 \* An orphan that passed fresh? before its Queue died still commits here,
 \* until QueueRestart kills it.
@@ -587,7 +587,7 @@ OnlyNamedTurnCancelled ==
 SingleFlight == Cardinality({m \in Msgs : pc[m] \in Alive}) <= 1
 
 \* TurnRunner.commit assumes the conversation is single-flight
-\* (turn_runner.ex:156-158). Read as: no turn commits its reply while
+\* (turn_runner.ex:157-159). Read as: no turn commits its reply while
 \* another turn of the same conversation is starting or running its loop.
 NoOrphanCommitBesideNewTurn ==
     ~(\E a, b \in Msgs :

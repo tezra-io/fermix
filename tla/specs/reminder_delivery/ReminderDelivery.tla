@@ -40,7 +40,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 065d9245f103
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ c861328f6405
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 80b3699ec7e4
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ e4e83044eb85
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ de373a13de07
 EXTENDS Naturals, FiniteSets
 
 CONSTANTS
@@ -189,7 +189,7 @@ SweptTo ==
     ELSE "pending"
 
 \* The platform puts the reminder in front of the user. The companion timeline
-\* drops a second message with the same key (output.ex:227-229, which the
+\* drops a second message with the same key (output.ex:235-237, which the
 \* mobile and companion adapters write through -> mobile_sql.ex:356-366,
 \* unique index :49-51); no other platform reads the key.
 AlreadyShownUnderKey == PlatformDedupes /\ StableKey /\ seen > 0

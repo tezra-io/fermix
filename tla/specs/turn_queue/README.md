@@ -163,8 +163,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:527`,
-  `:531`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:528`,
+  `:532`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -229,7 +229,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:149`).
+  `turn_runner.ex:150`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1095-1100`, `:1145-1158`).
@@ -254,7 +254,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:180`). The claim happens only after that returns
+  `turn_runner.ex:181`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -403,7 +403,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as `Companion.Turns` does at its hand-off
-    (`turns.ex:255-260`), gives the prompt to that pid, and monitors it.
+    (`turns.ex:273-278`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
