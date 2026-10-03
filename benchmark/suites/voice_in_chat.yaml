@@ -22,6 +22,17 @@
 # typed-message mirror reach GPT-Live, the model on the Live wire no driver
 # speaks, so no case here can observe them: the Live session, LiveChat, bridge,
 # Turns and Live end-to-end ExUnit suites hold them.
+#
+# A message typed during a call (M56 §4.4) is told the call is up by a system
+# line the daemon adds only while its own call registry holds a call in the
+# chat. That entry is held by a Live session in the daemon's own VM: the eval
+# daemon is another process, `drive: companion` speaks only the chat socket,
+# and a real call needs the Live wire and an OpenAI key, so no driver can make
+# the engine believe a call is up, and a typed message cannot carry the line
+# (nothing of it comes from a client payload, by design). So the silent link,
+# the answered question and the `voice_call_context` read have no case here:
+# the TurnRunner, MainAgent, voice_call_context, Turns, companion channel and
+# typed-turn end-to-end ExUnit suites hold them, the line's wording included.
 suite: voice_in_chat
 risk: host_readonly
 title: "Voice in the chat: a task asked aloud uses a link the owner typed"

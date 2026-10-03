@@ -48,6 +48,14 @@
         "invokes skill self_knowledge",
         "says that by default a GPT-Live call's tasks run in the Mac chat's own conversation, so a task asked aloud can read the pasted link, and that Settings > Voice > Voice calls join the chat set to No (conversation = \"private\") keeps each call apart from the chat"
       ]
+    },
+    {
+      "name": "typed_message_during_voice_call",
+      "prompt": "While I'm on a GPT-Live voice call, if I paste a link in the Mac chat, will Fermix reply to it in the chat? And can it see what I said on the call?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says the typed message's turn knows a call is up: it answers in writing when the message asks for something or needs an answer, and otherwise ends with no reply (nothing is shown), and that it can read the call in progress (start, tasks, the newest speech) with voice_call_context, which is offered only during a call in the chat"
+      ]
     }
   ]
 }

@@ -22,6 +22,7 @@ The Mac app's chat: a local, owner-only channel named `companion` that the app o
 ## Streaming, cancel and stop
 
 - A reply streams live with tool activity (a tool's detail and a turn's error text are cut to 512 bytes). Each reply part becomes a timeline row only when the turn completes; a cancelled or failed turn ends with an error and keeps nothing of its draft, and a turn lost to a restart of the daemon's queue ends as interrupted. An offline client later sees the message with no answer.
+- During a GPT-Live call in the chat a typed message may be material for the call, and its turn may end with no reply (the agent answered exactly `[SILENT]`): no row is written and no draft is shown, and the turn ends with `turn_done`, so the message stays with no answer after it. The wire is versioned (protocol 2, with protocol 1 still served): `turn_done` is sent only to a client that declared protocol 2, and while a protocol 1 client is connected the agent is never offered silence and acknowledges briefly instead. Detail: skill_view(name: "self-knowledge", file: "voice").
 - Cancel names **one request by its client message id** and stops that turn whether it is running, still waiting behind another turn, or not yet queued (the cancel is recorded, so a restart does not run it again). It never touches another turn, and a turn already finished ends normally with its answer.
 - `/stop` is still stop-everything: every active turn and queued message, each settled as cancelled so it is not run again at the next boot.
 

@@ -118,7 +118,9 @@ streaming stay in `FermixChannels.Gateway.Queue`.
 `MainAgent` is the persistent top-level agent process. It caches a
 `RuntimeContext` (bootstrap prompt, prompt memory, operator and guest capability
 profiles, runtime section) and hands out turn-state snapshots, freezing the
-Computer History gate and the provider routes for each one. The route chain is
+Computer History gate, the provider routes and, for an owner's chat turn, the
+Live call in the chat (`Agents.LiveCallTurn`, asked of `VoiceBridge`) for each
+one. The route chain is
 built at init, so a provider change needs a restart.
 
 `TurnRunner` runs a turn inside the queue's task: history, preflight
@@ -567,7 +569,9 @@ before the call has a handle and shaped by `LiveChat`.
 `Companion.Protocol` owns the chat vocabulary, served to the Mac app on
 `FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
 handshake, exported in `priv/companion/`) by `FermixChannels.Companion`; the
-mobile wire validates the chat events it shares through the same module.
+mobile wire validates the chat events it shares through the same module. A
+server event names the version that brought it, and a connection is never sent
+one newer than the version its hello declared.
 `Companion.Timeline` is the durable timeline the phone and the Mac share
 (profile `main`), paged in both directions and searched through an FTS5 index
 its own writes maintain. Its media index and link previews live in side
@@ -716,7 +720,11 @@ Current channels:
   turns, by message id (`Queue.stop_turn/3`). A private call keeps a
   conversation of its own, keyed by the call's UUID. While a call in the chat
   is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
-  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`.
+  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
+  each such turn is told the call is up (`Voice.Bridge.chat_call/1`): it can
+  read the call (`voice_call_context`) and may end with no reply, which its
+  runner tells the companion stream and `Companion.Turns` ends with
+  `turn_done`, offered only while every companion client attached reads it.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
