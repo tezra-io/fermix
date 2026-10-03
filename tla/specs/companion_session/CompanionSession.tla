@@ -116,7 +116,7 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 1df82141f988
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 5faf8e10505e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ f85236885710
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
@@ -187,7 +187,7 @@ CONSTANTS
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
                          \* connection.ex:522-523) and a delivery's (announce_written,
-                         \* channels/companion.ex:332-333), both built by Output.row and
+                         \* channels/companion.ex:338-339), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
@@ -373,7 +373,7 @@ Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 NextSeq == MaxOf(Range(tl)) + 1
 
 \* Companion.Fanout.announce (fanout.ex:46-66) -> Channels.Companion.broadcast
-\* (channels/companion.ex:149-152, dispatch :358-362): one send to every
+\* (channels/companion.ex:150-153, dispatch :364-368): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
 \* wire's row has (its kind and metadata among them, which no rule reads). A row and a text_done are both a live row here.
@@ -836,7 +836,7 @@ TurnsNext ==
 \* gateway stores a pending token (store_pending_grant, sandbox.ex:198-210)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
-\* card's end with (send_approval, channels/companion.ex:235-238 ->
+\* card's end with (send_approval, channels/companion.ex:236-239 ->
 \* Approvals.announce, approvals.ex:79-88, :130-134). The turn does not wait
 \* for it.
 Ask(m) ==
@@ -868,7 +868,7 @@ Claim(m) ==
                    obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:225-227, through build_turn_result, channels/companion.ex:215-219)
+\* turns.ex:225-227, through build_turn_result, channels/companion.ex:216-220)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
 \* turn (folded in: nothing else can act on the dead turn in between). A turn
 \* its snapshot let end with no reply may have answered exactly [SILENT]: its
@@ -885,10 +885,11 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:249-262). A GPT-Live call's    *)
-(* row (write_call_row, :277-296, M56 section 4.5) is written and          *)
-(* announced the same way, from the call's session, so the job stands for  *)
-(* it too.                                                                 *)
+(* job's own process (channels/companion.ex:250-263). A GPT-Live call's    *)
+(* rows (write_call_row, :280-299, M56 sections 4.2 and 4.5) are written   *)
+(* and announced the same way: a result shown, from the call's session,    *)
+(* and the call's one row when it ends, from the task that made its gist   *)
+(* or from the boot pass after a restart. So the job stands for them too.  *)
 
 \* Without SeqAssignedOnInsert the job reads the counter first.
 JobRead ==
@@ -908,7 +909,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:332-333).
+\* (channels/companion.ex:338-339).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"

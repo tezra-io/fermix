@@ -15,7 +15,7 @@ two clients share:
 - the timeline (`FermixCore.Companion.Timeline`, written through
   `Memory.Repo`);
 - a scheduled job reporting back through `Channels.Companion.send_message`,
-  which stands for a GPT-Live call's row too (`write_call_row`, written and
+  which stands for a GPT-Live call's rows too (`write_call_row`, written and
   announced the same way);
 - one approval, kept by `Companion.Approvals` until it resolves or expires,
   and answered by a `/confirm` or `/deny` command.
@@ -42,7 +42,11 @@ re-read for M56's typed turns during a voice call added a turn that ends with
 no reply, `turn_done` on companion protocol 2, and each client's version. The
 re-read after M56 stage 5 found a second writer the job's row stands for, a
 GPT-Live call's row, and the Mac's `row` carrying `kind` and `metadata`,
-which no rule reads; nothing the spec models changed.
+which no rule reads; nothing the spec models changed. The re-read after M56
+stage 6 found one more row that writer stands for, a call's own row when it
+ends, written by the task that made the call's gist or by the boot pass after
+a restart, and `PROTOCOL.md` describing it; again nothing the spec models
+changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -178,7 +182,7 @@ the checks that show a rule needs it):
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
   `connection.ex:522-523`) and a delivery (`announce_written`,
-  `channels/companion.ex:332-333`), both built by `Companion.Output.row` and
+  `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
@@ -440,13 +444,16 @@ of an entity its rules are about. All still hold:
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
 - The LLM and tools, the ConversationStore, attachments, authentication and
   the socket's 0600 mode: single-call rules that ExUnit covers.
-- A GPT-Live call's row (`Channels.Companion.write_call_row`, M56 §4.5): a
-  result the voice cannot say, written from the call's session through the
-  same proactive write and announcement as a job's delivery
-  (`Output.persist_text` with its key, then `announce_written`), so the job's
-  row stands for it. It is deduplicated per task revision, as a keyed
-  delivery is, and its `kind` and `metadata.call`, which the Mac's `row` now
-  carries, are read by no client rule.
+- A GPT-Live call's rows (`Channels.Companion.write_call_row`, M56 §4.2,
+  §4.5): a result the voice cannot say, written from the call's session, and
+  the call's one row when it ends, written after the session has gone by the
+  task that made its gist (`Realtime.CallGist`) or, after a restart, by the
+  boot pass (`Voice.CallRowSweep`). Each goes through the same proactive
+  write and announcement as a job's delivery (`Output.persist_text` with its
+  key, then `announce_written`), so the job's row stands for them. They are
+  deduplicated per task revision or per call, as a keyed delivery is, and
+  their `kind` and `metadata.call`, which the Mac's `row` carries, are read by
+  no client rule.
 - The Live voice mirror (`Voice.ChatMirror`, M56 §4.3). While a call in the
   chat is up, `Turns` tells it each turn of the chat's conversation it hands
   off and, as one completes, its answer: a cast to the call's session and one
