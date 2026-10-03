@@ -622,6 +622,39 @@ defmodule FermixCore.Memory.ReviewerTest do
     assert_receive {:review_skipped, %{reason: :under_interval}}
   end
 
+  # M56 D9: the phone's turns and the Mac's run in one conversation, the
+  # chat's, so one review reads what the owner said on either, and a review
+  # the other transport's turn asks for within the interval is not a second.
+  test "the chat's review reads both transports at once, and runs once", %{repo: repo} do
+    chat = {"companion", "main", :root}
+    insert_user_message(repo, "I moved to Lisbon", %{mobile_request_type: "msg"}, chat)
+    insert_user_message(repo, "I prefer short answers", %{companion_request_type: "msg"}, chat)
+
+    assert {:ok, %{input_messages: 2}} =
+             Reviewer.review_now(
+               provider: PromptEchoProvider,
+               repo: repo,
+               agent_id: "main",
+               owner_id: "default",
+               conversation_key: chat
+             )
+
+    insert_user_message(repo, "and I keep a cat", %{mobile_request_type: "msg"}, chat)
+
+    assert :ok =
+             attach_skip_telemetry(fn ->
+               Reviewer.start_background(
+                 provider: PromptEchoProvider,
+                 repo: repo,
+                 agent_id: "main",
+                 owner_id: "default",
+                 conversation_key: chat
+               )
+             end)
+
+    assert_receive {:review_skipped, %{reason: :under_interval}}
+  end
+
   test "background review skips when a review is already in flight", %{repo: repo} do
     insert_user_message(repo, "hello")
 
@@ -677,15 +710,20 @@ defmodule FermixCore.Memory.ReviewerTest do
     fun.()
   end
 
-  defp insert_user_message(repo, content, metadata \\ nil) do
+  defp insert_user_message(
+         repo,
+         content,
+         metadata \\ nil,
+         {channel, chat_id, thread_scope} \\ {"telegram", "chat-1", :root}
+       ) do
     assert {:ok, message} =
              Repo.insert_message(
                %{
                  agent_id: "main",
                  owner_id: "default",
-                 channel: "telegram",
-                 chat_id: "chat-1",
-                 thread_scope: "root",
+                 channel: channel,
+                 chat_id: chat_id,
+                 thread_scope: thread_scope,
                  sender: "alice",
                  role: "user",
                  kind: "chat_message",

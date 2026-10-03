@@ -2107,6 +2107,17 @@ defmodule FermixCore.Agents.TurnRunnerTest do
                "- 2026-10-03 14:05 UTC: You booked the room"
     end
 
+    # M56 D9: the phone's turns run in the chat, and are owner turns of it.
+    test "a turn the phone runs in the chat is told the last calls' gists", %{repo: repo} do
+      messages =
+        capture_prompt(
+          %{channel: "mobile", chat_id: "main", conversation_key: {"companion", "main", :root}},
+          memory_repo: repo
+        )
+
+      assert Enum.any?(messages, &(&1.content =~ "- 2026-10-03 14:05 UTC: You booked the room"))
+    end
+
     test "a hand-off is not told: it is the call", %{repo: repo} do
       {messages, _opts} =
         run_capture_turn(voice_msg("what was the last call about"), start_voice_store(),
@@ -2633,6 +2644,111 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     test "commit starts memory review when the snapshot does not disable it" do
       assert_review(%{}, :assert)
     end
+  end
+
+  # M56 D9: the phone's turns run in the Mac's chat. The gateway names the
+  # chat's key on every phone message (`conversation_key`), and the message
+  # keeps the phone's channel, so one history serves both transports.
+  describe "the phone's turns in the chat" do
+    test "a phone turn reads what was typed on the Mac, and the Mac's next turn the phone's" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      typed = "the lease is due on Friday"
+      :ok = ConversationStore.add_message(@chat_key, "user", typed, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "Noted.", server: store)
+
+      phone = phone_msg("when is the lease due?")
+      {messages, _opts} = run_capture_turn(phone, store)
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content == typed))
+      assert :ok = TurnRunner.commit(phone, commit_state(store), "On Friday.", 0)
+
+      {messages, _opts} = run_capture_turn(mac_msg("and the deposit?"), store)
+      contents = Enum.map(messages, & &1.content)
+
+      assert "when is the lease due?" in contents
+      assert "On Friday." in contents
+      assert ConversationStore.get_history({"mobile", "main", :root}, server: store) == []
+    end
+
+    test "a hand-off reads what was typed on the phone" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      phone = phone_msg("here is the brief: https://example.com/brief")
+      {_messages, _opts} = run_capture_turn(phone, store)
+      assert :ok = TurnRunner.commit(phone, commit_state(store), "Got it.", 0)
+
+      {messages, _opts} = run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert Enum.any?(
+               messages,
+               &(&1.role == "user" and
+                   &1.content == "here is the brief: https://example.com/brief")
+             )
+    end
+
+    # The named key is the message's routing, never its row: the row holds the
+    # phone's own metadata, under the chat's conversation.
+    test "a phone turn's request is stored in the chat's conversation, with the phone's fields" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(phone_msg("from the phone"), store)
+
+      assert [row] = await_rows(repo, @chat_key, 1)
+      assert row.channel == "companion"
+      assert row.content == "from the phone"
+      assert row.metadata == %{"client_msg_id" => "c-1", "mobile_request_type" => "msg"}
+    end
+
+    # One conversation, one review: the reviewer keys its state on the key
+    # each commit hands it, and both transports hand it the chat's.
+    test "a phone turn's commit and a Mac turn's ask for the one review of the chat" do
+      store = start_voice_store()
+
+      for msg <- [phone_msg("I moved to Lisbon"), mac_msg("I prefer short answers")] do
+        TurnRunner.commit(msg, review_state(store), "Noted.", 0)
+        assert_received {:memory_review_dispatched, @chat_key}
+      end
+    end
+  end
+
+  defp phone_msg(content) do
+    %{
+      channel: "mobile",
+      chat_id: "main",
+      conversation_key: @chat_key,
+      sender: "Mobile owner",
+      content: content,
+      source_trust: :operator,
+      metadata: %{client_msg_id: "c-1", mobile_request_type: "msg"}
+    }
+  end
+
+  defp mac_msg(content) do
+    %{
+      channel: "companion",
+      chat_id: "main",
+      sender: "Companion owner",
+      content: content,
+      source_trust: :operator,
+      metadata: %{}
+    }
+  end
+
+  defp review_state(store) do
+    turn_state(
+      adapter: CaptureTurnAdapter,
+      adapter_opts: [model: "mock-model", test_pid: self()],
+      capability_registry: nil,
+      conversation_store: store,
+      memory_reviewer: RecordingReviewer,
+      main_agent_server: nil,
+      review_interval_hours: 24,
+      review_max_messages: 50,
+      review_input_token_budget: 4_000,
+      review_failure_backoff_ms: 60_000,
+      compaction_failures: %{}
+    )
   end
 
   defmodule ReviewSpy do
