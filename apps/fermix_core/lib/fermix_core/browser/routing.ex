@@ -11,9 +11,9 @@ defmodule FermixCore.Browser.Routing do
   attached and `launch_app` allows it, the app is opened first and the
   decision waits for it under one deadline (`HostLauncher`). `fermix_headless`,
   `fermix_chrome` and `selected_tab`, and every other profile, run what their
-  configuration says and are never routed to the pane. `fermix_chrome` is the
-  managed Chrome a task names for what the pane cannot do (a page's WebMCP
-  tools): a second profile opened beside a pane task, never a re-route of it.
+  configuration says and are never routed to the pane. `fermix_chrome`, the
+  managed Chrome for what the pane cannot do (a page's WebMCP tools, a task's
+  downloads), is a second profile beside a pane task, never a re-route of it.
 
   The decision is made when no profile is live for the conversation and never
   again while one is: a live profile's registry entry records the backend it

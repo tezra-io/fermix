@@ -136,9 +136,10 @@ defmodule FermixCore.Browser.Config do
   # (M42 slice 7). It is built in rather than configured because there is
   # nothing to configure: the grant names the tab, and the person makes it.
   # `fermix_chrome` is the managed Chrome for what only Chrome can do, a page's
-  # WebMCP tools today: `Routing` never sends it to the app's pane, so a task
-  # whose default profile runs there names it per task. It is not a way tasks
-  # run, so the settings' "Run tasks" choice does not offer it.
+  # WebMCP tools and a task's downloads today: `Routing` never sends it to the
+  # app's pane, so a task whose default profile runs there names it per task.
+  # It is not a way tasks run, so the settings' "Run tasks" choice does not
+  # offer it.
   @default_profiles %{
     "fermix" => %{mode: :managed, headless: :auto, cdp_port: :auto},
     "fermix_visible" => %{mode: :managed, headless: false, cdp_port: :auto},
