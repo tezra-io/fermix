@@ -467,7 +467,12 @@ and `input_bytes` (the starting `session.input`: the chat's newest messages and
 earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
 the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
-with a `duration_ms` measurement. `provider_error` carries the vendor's bounded
+with a `duration_ms` measurement. When a call in the chat showed the
+delegation's result there (M56 §4.5: what the voice cannot say is written to
+the chat's timeline while it says a short line), `delegation_stop` also
+carries `server_seq`, the row it was written to, and `shown_bytes`, its size:
+sizes only, so the shown text reaches no field, and neither does the line
+said. `provider_error` carries the vendor's bounded
 sentence and is **not** terminal: a Live moderation refusal cuts the audio and
 the session keeps running.
 
