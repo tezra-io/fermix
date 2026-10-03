@@ -80,18 +80,31 @@ defmodule FermixCore.Realtime.LiveFrames do
     })
   end
 
-  @doc "One backend delegation's lifecycle. `summary` is bounded to the wire's limit."
-  @spec task(String.t(), String.t(), pos_integer(), String.t(), String.t() | nil) :: map()
-  def task(call_uuid, delegation_id, revision, status, summary)
+  @doc """
+  One backend delegation's lifecycle. `summary` is bounded to the wire's
+  limit. `server_seq` names the chat row its result was shown at (M56 §4.5),
+  absent when nothing was shown.
+  """
+  @spec task(
+          String.t(),
+          String.t(),
+          pos_integer(),
+          String.t(),
+          String.t() | nil,
+          pos_integer() | nil
+        ) :: map()
+  def task(call_uuid, delegation_id, revision, status, summary, server_seq \\ nil)
       when is_binary(call_uuid) and is_binary(delegation_id) and delegation_id != "" and
-             is_integer(revision) and revision >= 1 and status in @task_statuses do
+             is_integer(revision) and revision >= 1 and status in @task_statuses and
+             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) do
     compact(%{
       type: "task",
       call_uuid: call_uuid,
       delegation_id: delegation_id,
       revision: revision,
       status: status,
-      summary: LiveText.summary(summary, @summary_max_chars)
+      summary: LiveText.summary(summary, @summary_max_chars),
+      server_seq: server_seq
     })
   end
 

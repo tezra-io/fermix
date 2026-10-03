@@ -110,6 +110,26 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     assert golden["conversation"] == "chat"
   end
 
+  # M56 §6: the chat row a task's result was shown at. Additive and optional:
+  # an older companion ignores it, and nothing shown leaves it absent.
+  test "task publishes the chat row its result was shown at as an optional field", %{
+    schema: schema
+  } do
+    definition = schema["$defs"]["task"]
+
+    assert %{"type" => "integer", "minimum" => 1} = definition["properties"]["server_seq"]
+    refute "server_seq" in definition["required"]
+
+    shown =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "task" and Map.has_key?(&1, "server_seq")))
+
+    assert %{"status" => "completed", "server_seq" => seq} = shown
+    assert is_integer(seq) and seq > 0
+  end
+
   test "the one-call refusal is a published error reason with a golden row", %{schema: schema} do
     reason = Protocol.call_in_progress()
 
@@ -136,7 +156,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
           (frame["type"] == "usage" and frame["status"] == "live")
       end)
 
-    assert length(live_frames) == 3
+    assert length(live_frames) == 4
 
     for frame <- live_frames do
       assert frame["call_uuid"] =~ @uuid_v4, "golden #{frame["type"]} has no call_uuid"

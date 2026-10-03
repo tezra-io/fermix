@@ -89,6 +89,23 @@ defmodule FermixCore.Realtime.LiveFramesTest do
         LiveFrames.task(@call_uuid, "dg_1", 1, "queued", nil)
       end
     end
+
+    # M56 §6: the row a result was shown at, so the app can say it is in the
+    # chat. Additive and optional: absent when nothing was shown.
+    test "names the chat row a result was shown at" do
+      frame = LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "It is in the chat.", 42)
+
+      assert frame.server_seq == 42
+
+      refute Map.has_key?(
+               LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "Done.", nil),
+               :server_seq
+             )
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.task(@call_uuid, "dg_1", 1, "completed", nil, 0)
+      end
+    end
   end
 
   describe "state/1" do

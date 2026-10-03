@@ -173,7 +173,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `playback_stop` | — | The assistant's audio playback has stopped. |
 | `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, Live only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
-| `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. |
+| `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?`, `server_seq?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. `server_seq` (Live, a call in the chat) is the chat timeline row the result was shown at: a result too long to say, or that cannot be said (a link, code, a table), is written to the chat whole while the voice says a short line, so a client can say the result is in the chat. Absent when nothing was shown. |
 
 ## Live call sequence
 
@@ -202,7 +202,7 @@ daemon -> pet:   audio_delta … / state { speaking }
 daemon -> pet:   state { state: "listening" }      (the reply has had time to play out)
 daemon -> pet:   task { delegation_id, revision, status: "running" }      (backend work started)
 pet  -> daemon:  task_cancel { delegation_id }                            (optional)
-daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary? }
+daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary?, server_seq? }
 daemon -> pet:   usage { status: "live", voice_seconds, voice_cost_cents, backend_turns,
                          backend_cost: "unknown", accounting: "running" }
 pet  -> daemon:  call_stop

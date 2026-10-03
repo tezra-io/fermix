@@ -185,7 +185,12 @@
         "delegation_id": { "type": "string", "minLength": 1 },
         "revision": { "type": "integer", "minimum": 1 },
         "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] },
-        "summary": { "type": "string", "maxLength": 240 }
+        "summary": { "type": "string", "maxLength": 240 },
+        "server_seq": {
+          "type": "integer",
+          "minimum": 1,
+          "description": "Live, a call in the chat: the chat timeline row the result was shown at. Absent when nothing was shown."
+        }
       }
     },
     "usage": {
