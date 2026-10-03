@@ -557,7 +557,12 @@ fixtures).
 `priv/realtime/`). `SessionServer` runs OpenAI Realtime with tools through
 `ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
 Live, which executes no tools and delegates every task to an agent turn through
-the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`.
+the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`. A Live
+call's instructions are `LIVE.md` with what `LivePrompt` generates around it
+(the assistant's name, the owner's details, the date, the memory files in the
+`<memory-context>` frame `PromptComposer` owns), and a call in the chat starts
+with the chat's newest messages as provider input, read through the bridge
+before the call has a handle and shaped by `LiveChat`.
 
 `Companion.Protocol` owns the chat vocabulary, served to the Mac app on
 `FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
@@ -709,7 +714,9 @@ Current channels:
   in the trusted `voice_call` map, so a hand-off and a typed turn share one
   history and one queue lane; a cancel or a hang-up stops only the call's own
   turns, by message id (`Queue.stop_turn/3`). A private call keeps a
-  conversation of its own, keyed by the call's UUID.
+  conversation of its own, keyed by the call's UUID. While a call in the chat
+  is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
+  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests

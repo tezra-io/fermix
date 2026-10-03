@@ -16,6 +16,12 @@
 #
 # The page is the runner's own fixture form, so nothing is started by hand and
 # the reads change nothing.
+#
+# What the voice model itself starts a call with (M56 §4.3: the owner's name,
+# the date, the memory files, the newest chat messages as session.input) and the
+# typed-message mirror reach GPT-Live, the model on the Live wire no driver
+# speaks, so no case here can observe them: the Live session, LiveChat, bridge,
+# Turns and Live end-to-end ExUnit suites hold them.
 suite: voice_in_chat
 risk: host_readonly
 title: "Voice in the chat: a task asked aloud uses a link the owner typed"
