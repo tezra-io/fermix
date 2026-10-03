@@ -435,7 +435,7 @@ defmodule FermixCore.Agents.TurnRunner do
     {history, preflight_compaction} =
       maybe_preflight_auto_compact(conversation_key, state, history)
 
-    maybe_notify_preflight_compacted(preflight_compaction, deliver)
+    maybe_notify_preflight_compacted(preflight_compaction, deliver, voice_call)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
 
     # Strict Computer History taint (MILESTONE_32 §13.6): a prior activity-derived
@@ -1155,7 +1155,13 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  defp maybe_notify_preflight_compacted(:compacted, deliver) when is_function(deliver, 1) do
+  # A Live hand-off's reply route is its spoken result (M56 §4.1): the notice
+  # would be spoken as the answer, and the real answer then dropped as late. The
+  # trusted voice context decides, the gate a forged map never clears.
+  defp maybe_notify_preflight_compacted(:compacted, _deliver, {:ok, _voice_call}), do: :ok
+
+  defp maybe_notify_preflight_compacted(:compacted, deliver, :none)
+       when is_function(deliver, 1) do
     case deliver.(
            {:text, "Trimmed older conversation history to stay within the context window."}
          ) do
@@ -1167,7 +1173,7 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  defp maybe_notify_preflight_compacted(_status, _deliver), do: :ok
+  defp maybe_notify_preflight_compacted(_status, _deliver, _voice_call), do: :ok
 
   defp maybe_auto_compact(conversation_key, state, compaction_target, context_tokens) do
     config = Application.get_env(:fermix_core, :compaction, [])

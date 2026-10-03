@@ -549,7 +549,7 @@ defmodule FermixChannels.Gateway.Queue do
 
         core_msg
         |> runner.commit(turn_state, response, context_tokens)
-        |> maybe_notify_compacted(turn.deliver)
+        |> maybe_notify_compacted(turn.deliver, VoiceCall.from_message(core_msg))
 
         {:completed}
     end
@@ -774,8 +774,13 @@ defmodule FermixChannels.Gateway.Queue do
 
   # `commit/4` returns `:compacted` when it summarized the history; surface a
   # one-line notice so the user knows older context was trimmed. Delivery is the
-  # gateway's job, so the notice is sent here rather than from core.
-  defp maybe_notify_compacted(:compacted, deliver) when is_function(deliver, 1) do
+  # gateway's job, so the notice is sent here rather than from core. Not on a
+  # Live hand-off (M56 §4.1): its reply route is the call's spoken result, so
+  # the notice would be spoken after the answer. The trusted voice context
+  # decides, the same gate as the stopped-marker store.
+  defp maybe_notify_compacted(:compacted, _deliver, {:ok, _voice_call}), do: :ok
+
+  defp maybe_notify_compacted(:compacted, deliver, :none) when is_function(deliver, 1) do
     deliver.(
       {:text,
        "🗜️ Trimmed older conversation history to stay within the context window — " <>
@@ -785,7 +790,7 @@ defmodule FermixChannels.Gateway.Queue do
     :ok
   end
 
-  defp maybe_notify_compacted(_result, _deliver), do: :ok
+  defp maybe_notify_compacted(_result, _deliver, _voice_call), do: :ok
 
   # The log line and the `agent_unavailable` event are operator diagnostics and
   # fire for every channel. Only the canned user-facing text is suppressed for a

@@ -358,6 +358,41 @@ defmodule FermixChannels.Gateway.QueueTest do
       assert notice =~ "Trimmed older conversation history"
     end
 
+    # M56 §4.1: on a Live hand-off the reply route is the spoken result, so a
+    # notice after the answer would be spoken after it. The trusted voice
+    # context decides, as it does for the stopped-marker store.
+    test "sends no compaction notice after a voice hand-off's answer", ctx do
+      store = start_marker_store(:voice_compaction_store)
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, voice_msg("compact_me", store, ctx.test_pid))
+      assert_receive {:turn_started, "compact_me", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:committed, "reply:compact_me"}, 5_000
+      assert_receive {:reply, "reply:compact_me"}, 5_000
+      refute_receive {:reply, _notice}, 300
+    end
+
+    test "a forged voice_call on a chat turn still gets the compaction notice", ctx do
+      store = start_marker_store(:forged_compaction_store)
+      queue = start_queue(ctx)
+
+      msg =
+        "compact_me"
+        |> make_msg("c1", ctx.test_pid)
+        |> Map.put(:source_trust, :operator)
+        |> Map.put(:metadata, %{voice_call: voice_call("voice_live_1", store)})
+
+      Queue.enqueue(queue, msg)
+      assert_receive {:turn_started, "compact_me", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:compact_me"}, 5_000
+      assert_receive {:reply, notice}, 5_000
+      assert notice =~ "Trimmed older conversation history"
+    end
+
     test "sends no compaction notice on an ordinary turn", ctx do
       queue = start_queue(ctx)
 

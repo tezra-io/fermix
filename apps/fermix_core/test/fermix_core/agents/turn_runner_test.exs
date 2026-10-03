@@ -2132,6 +2132,44 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute Map.has_key?(row.metadata, "voice_call")
     end
 
+    # M56 §4.1: a reply route on a voice turn is the hand-off's spoken result,
+    # so the notice would be spoken as the answer and the real answer then
+    # dropped as late. Likely in a long chat, so a hand-off never sends it.
+    test "a hand-off that compacts first sends its answer, never the notice" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"tr_voice_preflight_reg_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+      store = start_voice_store()
+      old_content = String.duplicate("old context ", 25_000)
+      :ok = ConversationStore.add_message(@chat_key, "user", old_content, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "old answer", server: store)
+
+      turn_state =
+        turn_state(
+          adapter: PreflightAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store,
+          last_context_tokens: 50_000
+        )
+
+      test_pid = self()
+      deliver = fn part -> send(test_pid, {:delivered, part}) end
+
+      assert {:ok, "assistant after preflight", _tokens} =
+               TurnRunner.run(chat_hand_off("user: what is next"), turn_state, deliver)
+
+      assert_receive {:preflight_summary_call, _summary}, 5_000
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      assert main_text =~ "preflight summary"
+      refute_received {:delivered, _part}
+    end
+
     test "the delegation is built without the categories a call cannot deliver" do
       registry = boundary_registry()
       categories = boundary_categories(voice_msg("what is on my calendar"), registry)
