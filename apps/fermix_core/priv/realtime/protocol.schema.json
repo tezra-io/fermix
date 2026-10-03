@@ -148,6 +148,10 @@
           "enum": ["chat", "private"],
           "description": "Live only: chat when the call's hand-offs run in the chat's own conversation, private when they keep to a conversation of the call's own."
         },
+        "tasks_outlive_call": {
+          "type": "boolean",
+          "description": "Live only: true for a call in the chat, whose task still running when the call ends finishes into the chat; false for a private call, whose tasks end with it."
+        },
         "provider_session_id": { "type": "string" },
         "expires_at": {
           "type": "integer",
@@ -190,6 +194,10 @@
           "type": "integer",
           "minimum": 1,
           "description": "Live, a call in the chat: the chat timeline row the result was shown at. Absent when nothing was shown."
+        },
+        "detached": {
+          "type": "boolean",
+          "description": "Live, a call in the chat: true on the one running frame sent as the call ends, for a task that will finish into the chat instead of being cancelled. Absent otherwise."
         }
       }
     },

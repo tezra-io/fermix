@@ -56,6 +56,9 @@ defmodule FermixCore.Realtime.LiveFrames do
   the same UUID. `conversation` says whether the call's hand-offs join the
   chat (`"chat"`) or keep to a conversation of the call's own (`"private"`,
   M56 §5), so a client can say a private call is not kept in the chat.
+  `tasks_outlive_call` follows from it (M56 §4.6): a task still running when a
+  call in the chat ends finishes into the chat, and a private call's tasks
+  end with the call.
   """
   @spec call_ready(
           String.t(),
@@ -74,6 +77,7 @@ defmodule FermixCore.Realtime.LiveFrames do
       call_id: call_id,
       call_uuid: call_uuid,
       conversation: conversation,
+      tasks_outlive_call: conversation == "chat",
       provider_session_id: provider_session_id,
       expires_at: expires_at,
       captions: true
@@ -83,7 +87,9 @@ defmodule FermixCore.Realtime.LiveFrames do
   @doc """
   One backend delegation's lifecycle. `summary` is bounded to the wire's
   limit. `server_seq` names the chat row its result was shown at (M56 §4.5),
-  absent when nothing was shown.
+  absent when nothing was shown. `detached?` marks the one frame the session
+  sends, as its call ends, for a task that is still `running` and will
+  finish into the chat instead (M56 §4.6); absent on every other frame.
   """
   @spec task(
           String.t(),
@@ -91,12 +97,22 @@ defmodule FermixCore.Realtime.LiveFrames do
           pos_integer(),
           String.t(),
           String.t() | nil,
-          pos_integer() | nil
+          pos_integer() | nil,
+          boolean()
         ) :: map()
-  def task(call_uuid, delegation_id, revision, status, summary, server_seq \\ nil)
+  def task(
+        call_uuid,
+        delegation_id,
+        revision,
+        status,
+        summary,
+        server_seq \\ nil,
+        detached? \\ false
+      )
       when is_binary(call_uuid) and is_binary(delegation_id) and delegation_id != "" and
              is_integer(revision) and revision >= 1 and status in @task_statuses and
-             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) do
+             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) and
+             is_boolean(detached?) and (not detached? or status == "running") do
     compact(%{
       type: "task",
       call_uuid: call_uuid,
@@ -104,7 +120,8 @@ defmodule FermixCore.Realtime.LiveFrames do
       revision: revision,
       status: status,
       summary: LiveText.summary(summary, @summary_max_chars),
-      server_seq: server_seq
+      server_seq: server_seq,
+      detached: if(detached?, do: true)
     })
   end
 

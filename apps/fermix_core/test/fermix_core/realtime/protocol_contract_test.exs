@@ -130,6 +130,31 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     assert is_integer(seq) and seq > 0
   end
 
+  # M56 §4.6, §6: a call in the chat's tasks outlive it, and the session says
+  # so on the frame that detaches one. Both additive and optional: an older
+  # companion ignores them.
+  test "call_ready says whether tasks outlive the call, and task that one was detached", %{
+    schema: schema
+  } do
+    ready = schema["$defs"]["call_ready"]
+    task = schema["$defs"]["task"]
+
+    assert %{"type" => "boolean"} = ready["properties"]["tasks_outlive_call"]
+    refute "tasks_outlive_call" in ready["required"]
+    assert %{"type" => "boolean"} = task["properties"]["detached"]
+    refute "detached" in task["required"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"tasks_outlive_call" => true} = Enum.find(golden, &(&1["type"] == "call_ready"))
+
+    assert %{"status" => "running", "detached" => true} =
+             Enum.find(golden, &(&1["type"] == "task" and Map.has_key?(&1, "detached")))
+  end
+
   test "the one-call refusal is a published error reason with a golden row", %{schema: schema} do
     reason = Protocol.call_in_progress()
 
@@ -156,7 +181,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
           (frame["type"] == "usage" and frame["status"] == "live")
       end)
 
-    assert length(live_frames) == 4
+    assert length(live_frames) == 5
 
     for frame <- live_frames do
       assert frame["call_uuid"] =~ @uuid_v4, "golden #{frame["type"]} has no call_uuid"

@@ -34,8 +34,21 @@ defmodule FermixCore.Realtime.LiveFramesTest do
                call_id: "voice_live:1",
                call_uuid: @call_uuid,
                conversation: "chat",
+               tasks_outlive_call: true,
                captions: true
              }
+    end
+
+    # M56 §4.6, §6: a call in the chat's tasks finish into the chat after it
+    # ends; a private call's die with it.
+    test "says whether the call's tasks outlive it" do
+      chat = LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil)
+
+      private =
+        LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "private", nil, nil)
+
+      assert chat.tasks_outlive_call == true
+      assert private.tasks_outlive_call == false
     end
 
     # M56 §6: whether the call's hand-offs join the chat or keep to the call.
@@ -104,6 +117,20 @@ defmodule FermixCore.Realtime.LiveFramesTest do
 
       assert_raise FunctionClauseError, fn ->
         LiveFrames.task(@call_uuid, "dg_1", 1, "completed", nil, 0)
+      end
+    end
+
+    # M56 §4.6, §6: the frame the session sends as a running task is handed
+    # over to finish into the chat. Additive and optional: absent otherwise.
+    test "says a running task was detached from the call" do
+      frame = LiveFrames.task(@call_uuid, "dg_1", 1, "running", "In the chat.", nil, true)
+
+      assert frame.detached == true
+      assert frame.status == "running"
+      refute Map.has_key?(LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil), :detached)
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "Done.", nil, true)
       end
     end
   end
