@@ -629,11 +629,15 @@ defmodule FermixCore.Auth.OAuthFlow do
     end
   end
 
+  # The deadline is the waiter's too. Saying so before exiting makes a timeout
+  # read as one whichever process reaches the deadline first: a process's
+  # message always arrives before its `:DOWN`, which alone would read as a
+  # failed accept.
   defp accept_loop(listener, spec, deadline, reply_to) do
     remaining = deadline - System.monotonic_time(:millisecond)
 
     if remaining <= 0 do
-      :ok
+      reply(reply_to, {:error, :callback_timeout})
     else
       case :gen_tcp.accept(listener, min(remaining, 5_000)) do
         {:ok, conn} ->
