@@ -72,20 +72,22 @@
 (* rename before it: either only enables or disables the other takers of   *)
 (* that lock, so it commutes with every step in between.                   *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ bae696857f03
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ f4767b7ba440
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 66baf0d471ef
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ daf8f86bbc4f
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_manager.ex @ 7d1293c7498d
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_supervisor.ex @ 279e251b7e41
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/store.ex @ 19ee6771953f
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/refresh_client.ex @ 915161297f9b
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_token.ex @ 091e221339b5
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_import.ex @ b87011fae1ad
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/codex_login.ex @ 0337bd553071
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ d81c71a108d7
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ e580e287fec4
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ ca5678b38134
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 9ad843585b2f
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 2a44b8fd3cc2
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ 5ff12322ebe3
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 53141064392c
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/refresh.ex @ 235dc7b35088
 \* SOURCE: apps/fermix_core/lib/fermix_core/tools/media/backends/codex_image.ex @ ea4175294f01
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
 \* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 0fdfc82bfdcd
@@ -110,14 +112,14 @@ CONSTANTS
     SignOutForgets,         \* that logout is the provider sign-out (forget), not the plugin logout (stop)
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by at least one check to show a property needs it.
-    ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:492-496)
+    ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:513-517)
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
-    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:387-395, :479-504)
-    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout), or forget (sign-out) (plugins/auth.ex:73, management/auth.ex:138)
-    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:152-171)
-    StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:123-128, :139-146)
-    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:165-169)
-    RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:323-324, :372-380)
+    MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:426-434, :518-549)
+    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout), or forget (sign-out) (plugins/auth.ex:73, management/auth.ex:363)
+    PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:153-172)
+    StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:151-156, :167-174)
+    ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:193-197)
+    RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:332-333, :393-401)
     CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:267-283, plugins_command.ex:504-529, cli/daemon.ex:852-882)
 
 ASSUME /\ CodexProfiles \subseteq Profiles
@@ -137,9 +139,9 @@ Tok == Nat \cup {None}
 (* Who refreshes. <<"mgr", p, l>> is the manager of profile p;             *)
 (* <<"cli", CliProfile, 1>> is the CLI VM.                                 *)
 (* A profile has one manager process: TokenSupervisor registers children   *)
-(* in a Registry with keys: :unique (token_supervisor.ex:215) and answers  *)
+(* in a Registry with keys: :unique (token_supervisor.ex:216) and answers  *)
 (* {:already_started, _} with the running one (:263); the Codex manager is *)
-(* registered under the module name (token_manager.ex:36-37). Its mailbox  *)
+(* registered under the module name (token_manager.ex:37-38). Its mailbox  *)
 (* runs one callback at a time, so concurrent callers of one profile       *)
 (* queue. Lane 2 is a second process refreshing the same profile beside    *)
 (* the manager, possible only with OneCallbackPerManager off. It stands    *)
@@ -179,7 +181,7 @@ VARIABLES
     tfile       \* disk: tfile[p] = p's manager keeps its plugin child's access-token file
                 \*   (TokenFile). Every profile but Codex starts with one, the pessimistic
                 \*   case; refuse/2 and drop_tokens/1 delete it (sync_token_file,
-                \*   token_manager.ex:422, :384-396, :446-454). No step writes a new one.
+                \*   token_manager.ex:443, :405-417, :467-475). No step writes a new one.
 
 vars == <<disk, issued, revoked, mgr, mem, pc, tok, got, tries, buf, rounds, lpc, lbuf, best,
           slock, plock, tfile>>
@@ -248,10 +250,10 @@ ProfileFree(p) == ~ProfileLock \/ plock[p] = None
 -----------------------------------------------------------------------------
 (* Starting a refresh *)
 
-\* A manager callback runs do_refresh (token_manager.ex:275-310): from
+\* A manager callback runs do_refresh (token_manager.ex:284-319): from
 \* handle_call(:refresh) (:198), handle_call(:get_token) when due (:171) or
 \* handle_info(:proactive_refresh) (:250). A manager with state.refusal set
-\* never refreshes (:194, :245); one with no refresh token neither (:275).
+\* never refreshes (:194, :246); one with no refresh token neither (:275).
 MgrMayStart(a) ==
     /\ IsMgr(a)
     /\ pc[a] = "idle"
@@ -261,11 +263,11 @@ MgrMayStart(a) ==
     /\ a[3] = 1 \/ ~OneCallbackPerManager
     /\ QuietForRefresh(a)
 
-\* do_refresh's read finds no entry (stored_entry_error, :323-324).
+\* do_refresh's read finds no entry (stored_entry_error, :332-333).
 SignedOut(a) == RefusesMissingEntry /\ ReadsDiskBeforeRefresh /\ disk[Prof(a)] = None
 
-\* do_refresh takes the profile lock (Store.with_profile_lock, :285-290;
-\* store.ex:165-169); refresh_stored (token_manager.ex:314-319) reads the
+\* do_refresh takes the profile lock (Store.with_profile_lock, :294-299;
+\* store.ex:193-197); refresh_stored (token_manager.ex:323-328) reads the
 \* entry under it through latest_entry (:492-496) and refreshes the stored
 \* token. Without
 \* RefusesMissingEntry, a read that finds no entry falls back to the
@@ -299,7 +301,7 @@ MgrSignedOut(a) ==
                    slock, plock>>
 
 \* A tree-less CLI VM: TokenManager.refresh(profile) -> TokenSupervisor
-\* call_or_read finds no supervisor (token_supervisor.ex:222-225, :238-252)
+\* call_or_read finds no supervisor (token_supervisor.ex:223-226, :239-253)
 \* -> direct_refresh takes the profile lock, then Store.read and
 \* refresh_entry under it (:322-331). CodexToken.get_token does the same for
 \* Codex once the entry it read is due: it takes the lock, reads again and
@@ -324,12 +326,12 @@ CliStart(a) ==
 
 -----------------------------------------------------------------------------
 (* The refresh request: one provider-side effect each. RefreshClient.refresh *)
-(* posts the refresh token (refresh_client.ex:95-136 for Codex, :137-197 for *)
+(* posts the refresh token (refresh_client.ex:98-139 for Codex, :140-204 for *)
 (* the others). The provider accepts only its newest token.                  *)
 
 Valid(a) == ~revoked[Prof(a)] /\ tok[a] = issued[Prof(a)]
 
-\* 200: the provider rotates and the new pair arrives (refresh_client.ex:114,
+\* 200: the provider rotates and the new pair arrives (refresh_client.ex:117,
 \* :175). refresh_entry goes on to Store.write.
 SendOk(a) ==
     /\ pc[a] = "send"
@@ -342,11 +344,11 @@ SendOk(a) ==
 
 \* The provider rotates, but the response is lost: Req's receive timeout, a
 \* closed connection, or a 5xx after the rotation. RefreshClient cannot tell
-\* and retries with the SAME refresh token (refresh_client.ex:120-123,
-\* :127-130; :181-184, :189-192). A 408 or a 429 takes the same retries (the
+\* and retries with the SAME refresh token (refresh_client.ex:123-126,
+\* :127-130; :181-184, :196-199). A 408 or a 429 takes the same retries (the
 \* classifier, :43-48); one sent after a rotation is this step. After the
 \* last attempt the refresh fails with no state change
-\* (token_manager.ex:307-308) and the profile lock is released.
+\* (token_manager.ex:316-317) and the profile lock is released.
 SendLost(a) ==
     /\ ResponseCanBeLost
     /\ pc[a] = "send"
@@ -360,15 +362,15 @@ SendLost(a) ==
 
 \* A consumed token, or any token of a revoked session: a 4xx other than 408
 \* and 429, returned as {:permanent, status, body} (refresh_client.ex:44-49,
-\* :116-117, :178-179). A consumed token revokes the whole session (Codex
-\* rule, token_manager.ex:487-491). The manager refuses from now on
-\* (refresh_outcome/2 -> permanently_refused/2, :343-349, :359-366; refuse/2,
+\* :116-117, :185-186). A consumed token revokes the whole session (Codex
+\* rule, token_manager.ex:508-512). The manager refuses from now on
+\* (refresh_outcome/2 -> permanently_refused/2, :358-370, :380-387; refuse/2,
 \* :422), which deletes its plugin child's token file. For Codex nothing is
 \* written (:585-586; the CLI's CodexToken.refresh_entry returns the error,
 \* codex_token.ex:99-100) and the profile lock is released. Any other profile goes on to
 \* mark_reauthorization_required, a Store.write of the entry read when this
-\* refresh began (token_manager.ex:588-600; token_supervisor.ex:353, :377,
-\* :408, :430-442), still under the profile lock.
+\* refresh began (token_manager.ex:613-625; token_supervisor.ex:363, :387,
+\* :408, :440-452), still under the profile lock.
 SendRejected(a) ==
     /\ pc[a] = "send"
     /\ ~Valid(a)
@@ -383,10 +385,10 @@ SendRejected(a) ==
     /\ UNCHANGED <<disk, issued, mem, rounds, lpc, lbuf, best, slock>>
 
 -----------------------------------------------------------------------------
-(* Persisting: Store.write (store.ex:123-128), two steps each, under the    *)
-(* store lock (lock/4 and hold/4, :549-564).                                *)
+(* Persisting: Store.write (store.ex:151-156), two steps each, under the    *)
+(* store lock (lock/4 and hold/4, :602-617).                                *)
 
-\* read_for_write (store.ex:387-390, :407-418) reads the whole file. Without
+\* read_for_write (store.ex:426-429, :446-457) reads the whole file. Without
 \* MergesOnWrite the writer would start from an empty document instead.
 ReadForWrite(a) == IF MergesOnWrite THEN disk ELSE EmptyDoc
 
@@ -398,14 +400,14 @@ WriteRead(a) ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, tok, got, tries, rounds, lpc, lbuf, best,
                    plock, tfile>>
 
-\* put_provider + atomic_write (store.ex:391-392, :479-504, :571-585): the map
+\* put_provider + atomic_write (store.ex:430-431, :518-549, :624-638): the map
 \* read above, with this profile's entry replaced (or created: put_provider
-\* merges into Map.get(providers, key, %{}), :482), renamed over auth.json.
+\* merges into Map.get(providers, key, %{}), :521), renamed over auth.json.
 \* Both locks are then released: the store lock as Store.write returns, the
 \* profile lock as the refresh's locked section returns. A manager then
-\* applies the entry in memory (apply_entry, token_manager.ex:292-293,
+\* applies the entry in memory (apply_entry, token_manager.ex:301-302,
 \* :398-415). mgr is left alone: a refresh only runs while the manager is
-\* serving (:194, :245).
+\* serving (:194, :246).
 Rename(a) ==
     /\ pc[a] = "rename"
     /\ disk' = [buf[a] EXCEPT ![Prof(a)] = got[a]]
@@ -428,7 +430,7 @@ RejectRead(a) ==
 \* ...and rename half: %{entry | status: "reauthorization_required"}, whose
 \* tokens are the ones this refresh presented, over whatever another
 \* refresher renamed since. That status is not a quarantine the store reads
-\* back (store.ex:240); the damage is the consumed token on disk. Both locks
+\* back (store.ex:273); the damage is the consumed token on disk. Both locks
 \* are released.
 RejectRename(a) ==
     /\ pc[a] = "reject_rename"
@@ -448,14 +450,14 @@ RefreshStep(a) ==
 -----------------------------------------------------------------------------
 (* Logout, in the caller's process. Plugins.Auth.logout (plugins/auth.ex:  *)
 (* 66-88): Store.delete_provider, then TokenSupervisor.forget_signed_out.  *)
-(* The provider sign-out (management/auth.ex:135-142) deletes, then        *)
+(* The provider sign-out (management/auth.ex:137-143) deletes, then        *)
 (* forgets.                                                                *)
 
-\* delete_provider (store.ex:139-146) takes the profile lock, then the store
-\* lock, then read_existing (:397-400, :456-472). With no entry, the in-daemon
+\* delete_provider (store.ex:167-174) takes the profile lock, then the store
+\* lock, then read_existing (:397-400, :495-511). With no entry, the in-daemon
 \* plugin logout fails and stops there (plugins/auth.ex:70-72), while the
 \* provider sign-out treats :provider_missing as done and goes on to forget
-\* (management/auth.ex:351-360), and both CLI logouts go on to their notice
+\* (management/auth.ex:370-379), and both CLI logouts go on to their notice
 \* (auth_command.ex:295-298, plugins_command.ex:269-275). Init stores every
 \* entry, and with MergesOnWrite on (every check with LogoutFromCli) only
 \* the logout deletes one, so the entry is never already gone here: the
@@ -475,9 +477,9 @@ LogoutRead ==
     /\ UNCHANGED <<disk, issued, revoked, mgr, mem, pc, tok, got, tries, buf, rounds, best,
                    tfile>>
 
-\* remove_provider + atomic_write (store.ex:401-402, :506-516, :571-585),
+\* remove_provider + atomic_write (store.ex:440-441, :559-569, :624-638),
 \* then both locks are released. An entry that was already gone is not
-\* rewritten (remove_provider refuses, :512).
+\* rewritten (remove_provider refuses, :565).
 LogoutDelete ==
     /\ lpc = "read"
     /\ disk' = IF lbuf[LogoutProfile] = None THEN disk
@@ -496,7 +498,7 @@ Kill(f, v) == [b \in Actors |-> IF Killed(b) THEN v ELSE f[b]]
 Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 
 \* Four cases:
-\*  - forget_signed_out (token_supervisor.ex:152-171): forget, as below,
+\*  - forget_signed_out (token_supervisor.ex:153-172): forget, as below,
 \*    which also deletes the plugin child's token file, then stop_profile
 \*    for a child of TokenSupervisor, which by then is idle and refusing;
 \*    the Codex manager, a top-level child, is only forgotten. One step:
@@ -504,7 +506,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*    logouts end in it:
 \*    - A CLI VM has no TokenSupervisor tree (plugins_command.ex:5-8), so
 \*      its own forget_signed_out or stop_profile does nothing
-\*      (token_supervisor.ex:173-180, :184, :194-195). After the delete, both
+\*      (token_supervisor.ex:174-181, :185, :195-196). After the delete, both
 \*      CLI logouts tell a running daemon to let go of the profile
 \*      (plugins_command.ex:262, :504-529; auth_command.ex:223-241,
 \*      :267-283, :295-298): an `auth_forget` request on the control socket
@@ -515,13 +517,13 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*    - The in-daemon plugin logout calls it right after its delete
 \*      (plugins/auth.ex:73).
 \*  - stop_profile alone, the plugin logout without PluginLogoutForgets
-\*    (token_supervisor.ex:182-197): DynamicSupervisor.terminate_child sends
+\*    (token_supervisor.ex:183-198): DynamicSupervisor.terminate_child sends
 \*    :shutdown; TokenManager does not trap exits and has no terminate/2, so
 \*    it dies at once, mid-callback if one is running, and its plugin
 \*    child's token file stays on disk.
-\*  - forget (management/auth.ex:138, :362-379 -> token_manager.ex:205-208):
+\*  - forget (management/auth.ex:363, :381-398 -> token_manager.ex:206-209):
 \*    a GenServer.call, so it waits behind any refresh callback in flight,
-\*    then drops the tokens and sets state.refusal (drop_tokens, :384-396).
+\*    then drops the tokens and sets state.refusal (drop_tokens, :405-417).
 \*  - neither, with LogoutReachesManager off.
 LogoutStop ==
     /\ lpc = "deleted"
@@ -608,7 +610,7 @@ Spec == Init /\ [][Next]_vars /\ Fairness
 -----------------------------------------------------------------------------
 (* PROPERTIES *)
 
-\* token_manager.ex:487-491: "Refresh from the newest persisted entry, not
+\* token_manager.ex:508-512: "Refresh from the newest persisted entry, not
 \* the in-memory copy. Another refresher (a CLI/doctor probe, or a prior
 \* refresh) may have rotated the refresh token in the store; Codex
 \* invalidates the whole session if a rotated (consumed) refresh token is
@@ -629,7 +631,7 @@ LogoutSticks == lpc = "done" => disk[LogoutProfile] = None
 
 \* Proposed rule (TOKEN-6): once a logout completes, the profile's manager
 \* no longer serves its tokens. The plugin logout stops it and the provider
-\* sign-out forgets them (token_manager.ex:68-76: forget "drops the tokens
+\* sign-out forgets them (token_manager.ex:69-77: forget "drops the tokens
 \* this manager holds and refuses to serve them again"). A CLI logout has
 \* the running daemon do both (CliLogoutReachesDaemon).
 LogoutStopsServing == lpc = "done" => mgr[LogoutProfile] /= "serving"

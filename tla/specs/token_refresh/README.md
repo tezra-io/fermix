@@ -4,49 +4,63 @@ Models how Fermix rotates OAuth refresh tokens and stores them in
 `~/.fermix/auth.json`. The daemon runs one `TokenManager` GenServer per auth
 profile: the top-level `TokenManager` for Codex (`application.ex:173`,
 `:366-368`), and a child under `TokenSupervisor` for every other profile
-(`token_supervisor.ex:238-266`). A tree-less CLI VM refreshes a profile directly,
-with no manager (`token_supervisor.ex:222-225`, `:313-331`;
+(`token_supervisor.ex:239-267`). A tree-less CLI VM refreshes a profile directly,
+with no manager (`token_supervisor.ex:223-226`, `:314-332`;
 `codex_token.ex:15-23`). Every refresher persists through `Store.write`, which
-reads the whole file and then renames a new one over it (`store.ex:123-128`,
-`:387-395`, `:571-585`). The model therefore keeps the file as one map: a write
+reads the whole file and then renames a new one over it (`store.ex:151-156`,
+`:426-434`, `:624-638`). The model therefore keeps the file as one map: a write
 is never torn, and the last rename wins. After a 4xx, a profile other than Codex
 writes back the entry it read when its refresh began
 (`mark_reauthorization_required`). Logout deletes the entry, then has the
 profile's manager forget its tokens and stops it (plugin logout,
 `plugins/auth.ex:67-89` → `TokenSupervisor.forget_signed_out`,
-`token_supervisor.ex:132-171`) or only forgets them (provider sign-out,
-`management/auth.ex:135-142`). A logout from a tree-less CLI VM deletes the
+`token_supervisor.ex:133-172`) or only forgets them (provider sign-out,
+`management/auth.ex:137-143`). A logout from a tree-less CLI VM deletes the
 entry the same way, then has a running daemon let go of the profile over the
 control socket (`auth_forget`, `cli/daemon.ex:852-882` →
 `TokenSupervisor.forget_signed_out`).
 
+ChatGPT (Sign in with ChatGPT, profile `chatgpt`) keeps its registration through a
+sign-out, so it writes instead of deleting: under the profile lock it revokes the
+session upstream and writes the entry back with no token, then calls
+`TokenSupervisor.forget_signed_out` (`auth/chatgpt/logout.ex`, reached from
+`management/auth.ex` and the web setup). Every reader treats an entry with no
+token as gone: `Store.read` refuses it as `:missing_access_token`, and a manager
+maps that to signed out exactly as it maps a deleted entry
+(`token_manager.ex`, `stored_entry_error/1`). So the model's delete, then
+`forget_signed_out` (the plugin logout) covers it. Its refresh
+(`auth/chatgpt/refresh.ex`) runs under the same profile lock, never before the
+provider's `earliest_refresh_at` (a refresher that waits is a step the model
+already allows), and quarantines on the provider's terminal codes,
+`refresh_token_reused` among them, as the 4xx rule below says.
+
 Two cross-VM lockfiles (`FermixCore.Plugins.Dist.Lock`) order those writers
 (`store.ex:11-41`):
 - the store lock, `auth.json.lock`, around every `Store.write` and
-  `Store.delete_provider` (`store.ex:123-128`, `:139-146`);
+  `Store.delete_provider` (`store.ex:151-156`, `:167-174`);
 - one profile lock per profile, `auth.json.<base64 profile>.lock`, around one
-  refresh from its read of the entry to its write (`token_manager.ex:285-290`,
-  `token_supervisor.ex:322-331`, `codex_token.ex:112-126`), around a delete
-  (`store.ex:139-146`), and around a sign-in or import from before it spends
-  anything to its write (`store.ex:148-169`; `codex_login.ex:40-51`,
+  refresh from its read of the entry to its write (`token_manager.ex:294-299`,
+  `token_supervisor.ex:323-332`, `codex_token.ex:112-126`), around a delete
+  (`store.ex:167-174`), and around a sign-in or import from before it spends
+  anything to its write (`store.ex:176-197`; `codex_login.ex:40-51`,
   `xai_login.ex:50-58`, `plugins/auth.ex:196-207`, `codex_import.ex:38-56`,
   `anthropic_login.ex:104-121`). Every taker waits the same 10 s, and a lock
   still busy after it is `{:error, :profile_busy}` with nothing spent.
 
 The profile lock is always taken first. A manager whose stored entry is gone
-drops its tokens instead of refreshing them (`token_manager.ex:323-324`,
-`:372-396`).
+drops its tokens instead of refreshing them (`token_manager.ex:332-333`,
+`:393-417`).
 
 The provider rotates the refresh token on every refresh and revokes the session
 when a consumed token comes back. The code states that rule for Codex only
-(`token_manager.ex:487-491`). It says X's refresh tokens are "single-use and
+(`token_manager.ex:508-512`). It says X's refresh tokens are "single-use and
 rotated on every refresh" (`oauth_providers.ex:289-290`), but not what X does on
 reuse, and it says nothing about rotation for Anthropic, xAI or the other plugin
 providers. A provider that returns no new refresh token keeps the old one
-(`token_manager.ex:573`), so it can never be sent a consumed one. For every
+(`token_manager.ex:598`), so it can never be sent a consumed one. For every
 rotating provider the Fermix side is the same: a consumed token draws a 4xx,
 which Fermix treats as permanent, and it quarantines the grant until a new
-sign-in (`token_manager.ex:343-349`, `:359-366`). A 408 or a 429 is not a
+sign-in (`token_manager.ex:358-370`, `:380-387`). A 408 or a 429 is not a
 verdict on the grant: `RefreshClient` retries it like a 5xx and never
 quarantines on it (`refresh_client.ex:44-49`).
 
@@ -77,7 +91,7 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
 - `SignOutForgets`: that logout is the provider sign-out (delete, then
   `forget`), not the plugin logout (delete, then `forget_signed_out`: forget,
   then `stop_profile`). The sign-out goes on to `forget` even when the entry
-  is already gone (`management/auth.ex:351-360`). The in-daemon plugin logout
+  is already gone (`management/auth.ex:370-379`). The in-daemon plugin logout
   stops at the failed delete (`plugins/auth.ex:70-72`). Both CLI logouts go on to their
   notice (`auth_command.ex:295-298`, `plugins_command.ex:269-275`). Every
   entry starts stored, and with `MergesOnWrite` on (as in every check with
@@ -87,44 +101,44 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
 **Mechanism switches** (`TRUE` is the real code; each is switched off by at
 least one check):
 - `ReadsDiskBeforeRefresh`: `latest_entry` re-reads `auth.json` before each
-  refresh (`token_manager.ex:492-496`).
+  refresh (`token_manager.ex:513-517`).
 - `OneCallbackPerManager`: a profile has one manager process, and it runs one
   callback at a time. `TokenSupervisor` registers children in a Registry with
-  `keys: :unique` (`token_supervisor.ex:214`) and answers `{:already_started, _}`
-  with the running one (`:262`). The Codex manager is registered under its
-  module name (`token_manager.ex:36-37`). The BEAM mailbox then queues
+  `keys: :unique` (`token_supervisor.ex:215`) and answers `{:already_started, _}`
+  with the running one (`:263`). The Codex manager is registered under its
+  module name (`token_manager.ex:37-38`). The BEAM mailbox then queues
   concurrent callers. Switching it off models a second process refreshing the
   same profile beside the manager. That process stands for those concurrent
   callers, so `RefreshesCanOverlap` does not restrain it. The profile lock
   subsumes this mechanism, so it is load-bearing only in check 16, which has
   the profile lock off.
 - `MergesOnWrite`: `Store.write` re-reads the file and replaces only its own
-  entry (`store.ex:387-395`, `:479-504`).
+  entry (`store.ex:426-434`, `:518-549`).
 - `LogoutReachesManager`: logout reaches the profile's live manager: the plugin
   logout has it forget its tokens and stops it (`plugins/auth.ex:73` →
-  `token_supervisor.ex:152-171`), the provider sign-out has it forget them
-  (`management/auth.ex:138` → `token_manager.ex:205-208`).
+  `token_supervisor.ex:153-172`), the provider sign-out has it forget them
+  (`management/auth.ex:363` → `token_manager.ex:206-209`).
 - `PluginLogoutForgets`: the in-daemon plugin logout calls
   `forget_signed_out`, the same call as a CLI logout's notice, so the manager
   forgets its tokens, which deletes its plugin child's access-token file,
-  before it is stopped (`plugins/auth.ex:73` → `token_supervisor.ex:152-171`;
-  `drop_tokens`, `token_manager.ex:384-396`). Off, it calls `stop_profile`
-  alone (`token_supervisor.ex:182-197`), as it did until this switch was
+  before it is stopped (`plugins/auth.ex:73` → `token_supervisor.ex:153-172`;
+  `drop_tokens`, `token_manager.ex:405-417`). Off, it calls `stop_profile`
+  alone (`token_supervisor.ex:183-198`), as it did until this switch was
   added (ea1a12b5): the manager dies without a
   `terminate/2`, mid-callback if one is running, and the token file stays on
   disk until the next boot sweep.
 - `StoreLock`: `Store.write` and `Store.delete_provider` hold `auth.json.lock`
-  from their read to their rename (`store.ex:123-128`, `:139-146`,
-  `:549-569`).
+  from their read to their rename (`store.ex:151-156`, `:167-174`,
+  `:602-622`).
 - `ProfileLock`: a refresh holds its profile's lock from its read of the entry
-  to its write, in the manager (`token_manager.ex:285-290`), the tree-less
-  direct refresh (`token_supervisor.ex:322-331`) and `CodexToken`
+  to its write, in the manager (`token_manager.ex:294-299`), the tree-less
+  direct refresh (`token_supervisor.ex:323-332`) and `CodexToken`
   (`codex_token.ex:112-126`); `Store.delete_provider` takes it before its store
-  lock (`store.ex:139-146`). A sign-in holds it from before its code exchange
+  lock (`store.ex:167-174`). A sign-in holds it from before its code exchange
   to its write; that is folded (see the spec header).
 - `RefusesMissingEntry`: a manager whose read finds no entry (no auth file, or
   no entry for the profile) drops its tokens, as `forget` does, and sends and
-  writes nothing (`token_manager.ex:323-324`, `:372-396`). Off, it refreshes
+  writes nothing (`token_manager.ex:332-333`, `:393-417`). Off, it refreshes
   the in-memory copy, which is what `entry_from_state` did before the fix.
 - `CliLogoutReachesDaemon`: after its delete, a CLI logout sends a running
   daemon `auth_forget` for the profile (`plugins_command.ex:262`, `:504-529`;
@@ -132,17 +146,17 @@ least one check):
   `cli/daemon/client.ex:61-74`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops a
   `TokenSupervisor` child; the top-level Codex manager is only forgotten
-  (`cli/daemon.ex:628`, `:852-882`; `token_supervisor.ex:132-171`). Off, the
+  (`cli/daemon.ex:628`, `:852-882`; `token_supervisor.ex:133-172`). Off, the
   CLI logout reaches no manager. That is also the state a daemon leaves when
   it answers the notice with an error, which the CLI reports by exiting
   non-zero; checks 14 and 26 model that case.
 
-The atomic rename (`store.ex:577`) is not a switch. The model writes the whole
+The atomic rename (`store.ex:630`) is not a switch. The model writes the whole
 map by construction, and no property here is about a torn file. Neither is the
 tmp it renames: it is made private before its bytes land, and filled through
-the descriptor that created it (`store.ex:587-603`), and a tmp a killed VM
+the descriptor that created it (`store.ex:640-656`), and a tmp a killed VM
 left is removed by the next write or delete under the store lock every tmp
-writer holds (`store.ex:605-647`), so neither touches the map. A writer whose
+writer holds (`store.ex:658-700`), so neither touches the map. A writer whose
 store lock was broken as stale (see "Lock staleness") and whose tmp the next
 holder removes fails its chmod or its rename; its bytes never reach a
 re-created file.
@@ -275,21 +289,21 @@ failed before the fix. To see a counterexample, run
     p1's rename writes back the map from before the logout. p2's entry is back.
 - **Code (693970b7):**
   - `Store.write` ran `read_for_write`, then `put_provider` into the document
-    it read, then `atomic_write` (`store.ex:77-79`, `:282-293`, `:356-381`,
-    `:420-435`). It took no lock (`store.ex:9-12`). `delete_provider` had the
-    same shape (`store.ex:84-92`).
-  - Each profile's manager is its own process (`token_supervisor.ex:212-224`;
+    it read, then `atomic_write` (`store.ex:105-107`, `:315-326`, `:395-420`,
+    `:459-474`). It took no lock (`store.ex:9-12`). `delete_provider` had the
+    same shape (`store.ex:112-120`).
+  - Each profile's manager is its own process (`token_supervisor.ex:213-225`;
     for Codex, `application.ex:173`), so two managers' writes interleave. A CLI
     VM's writes, sign-ins and logouts interleave with them too.
   - `latest_entry` prefers the disk entry over the manager's in-memory token
-    (`token_manager.ex:418-420`), so the lost update became a reuse. A daemon
+    (`token_manager.ex:439-441`), so the lost update became a reuse. A daemon
     restart does the same, because `init` loads the disk entry.
 - **Fix:** `Store.write` and `Store.delete_provider` run their read, merge and
-  rename under `auth.json.lock` (`store.ex:123-128`, `:139-146`, `:549-569`):
+  rename under `auth.json.lock` (`store.ex:151-156`, `:167-174`, `:602-622`):
   80 attempts 100 ms apart, broken as stale after 5 s. The wait outlasts the
   stale threshold, so a dead VM's lockfile never fails a live writer. Reads
   take no lock. A lock that is not taken (busy past the wait, or a lockfile
-  that cannot be created) is a tuple, not a raise (`store.ex:543-569`),
+  that cannot be created) is a tuple, not a raise (`store.ex:596-622`),
   because a raise inside the Codex manager would restart the rest of the
   top-level `:rest_for_one` tree. Only a wedged filesystem, which makes the
   lock owner's own calls time out, still exits the caller (see "Outside this
@@ -313,15 +327,15 @@ failed before the fix. To see a counterexample, run
     renames R1. The CLI sends R0 and gets a 4xx. Its status write then renames
     the R0 entry it read at the start over the manager's R1.
 - **Code (693970b7):**
-  - `latest_entry` re-read the disk (`token_manager.ex:418-422`), which only
+  - `latest_entry` re-read the disk (`token_manager.ex:439-443`), which only
     helps once the other refresh has renamed its result. Nothing coordinated a
     refresh still in flight. The CLI VM has no manager
-    (`token_supervisor.ex:180-183`, `:197`, `:208`) and reads the file itself
-    (`:272`; `codex_token.ex:19-20`).
+    (`token_supervisor.ex:181-184`, `:198`, `:209`) and reads the file itself
+    (`:273`; `codex_token.ex:19-20`).
   - After a 4xx, any profile but Codex runs `mark_reauthorization_required`, a
     `Store.write` of the entry read when the refresh began
-    (`token_manager.ex:294`, `:317`, `:534-536`; `token_supervisor.ex:298-299`,
-    `:322-323`, `:353-354`, `:376-379`).
+    (`token_manager.ex:303`, `:326`, `:559-561`; `token_supervisor.ex:299-300`,
+    `:323-324`, `:363-364`, `:386-389`).
   - Inside the daemon, the Codex image backend refreshes through
     `CodexToken.get_token` from a tool process
     (`tools/media/backends/codex_image.ex:273-289`), not through the Codex
@@ -331,18 +345,18 @@ failed before the fix. To see a counterexample, run
     idle period, for example from parallel subagents, both send the expired
     entry's token.
 - **Fix:** one refresher per profile at a time, across processes and VMs.
-  `Store.with_profile_lock/3` (`store.ex:165-169`) wraps
+  `Store.with_profile_lock/3` (`store.ex:193-197`) wraps
   `Plugins.Dist.Lock.with_lock` on `auth.json.<base64 profile>.lock` (the name
   is encoded, so no `/` or `..` in an operator-set profile name leaves the auth
   file's directory): 100 attempts 100 ms apart, broken as stale after 120 s.
   It is taken around `TokenManager.do_refresh` (read, refresh, status write;
-  `token_manager.ex:285-310`), `TokenSupervisor.direct_refresh`
-  (`token_supervisor.ex:322-331`) and, only once the entry it read is due,
+  `token_manager.ex:294-319`), `TokenSupervisor.direct_refresh`
+  (`token_supervisor.ex:323-332`) and, only once the entry it read is due,
   `CodexToken.get_token`, which then reads again and refreshes only if still
   due (`codex_token.ex:112-126`). The manager's own state and token file change
   after the lock is released. A busy lock is a transient, logged error, never a
   refresh from memory. `RefreshClient` states its per-attempt bounds (pool 5 s,
-  connect 10 s, receive 15 s; `refresh_client.ex:39-60`, `:200-215`), so a live
+  connect 10 s, receive 15 s; `refresh_client.ex:39-60`, `:207-222`), so a live
   refresh (about 107 s with two store-lock waits) ends before its lockfile
   looks stale, unless the wall clock jumps mid-refresh (a system sleep or a
   clock step; see "Lock staleness"); a test holds that bound.
@@ -357,7 +371,7 @@ failed before the fix. To see a counterexample, run
   response is lost, nothing can recover the new token.
 - **Status:** accepted by design. No Fermix change can recover a rotation whose
   response never arrived: without the retry, the next refresh re-reads R0 from
-  disk and draws the same 4xx (`token_manager.ex:307-308`, `:492-496`). The
+  disk and draws the same 4xx (`token_manager.ex:316-317`, `:513-517`). The
   retry exists for transport errors before the provider acts (a refused or
   closed connection, the common case) and for a 408 or a 429, which the model
   leaves out as harmless, and for a provider with a grace window it is what
@@ -372,7 +386,7 @@ failed before the fix. To see a counterexample, run
 - **Code:**
   - `RefreshClient` retries a transport error, a 5xx, a 408 or a 429 with the
     same refresh token, up to three attempts (`refresh_client.ex:36`,
-    `:44-49`, `:120-123`, `:128-131`; `:181-184`, `:189-192`).
+    `:44-49`, `:123-126`, `:131-134`; `:188-191`, `:196-199`).
   - Req does not retry the POST itself: its default `retry: :safe_transient`
     covers GET and HEAD only.
 - **Impact:** the session is revoked on the retry, about 350 ms later, instead
@@ -397,14 +411,14 @@ failed before the fix. To see a counterexample, run
     rename that lands in between stays.
   - A refresh that starts in that gap also wrote the entry back: `latest_entry`
     found no entry and fell back to the in-memory tokens
-    (`token_manager.ex:421`, `:425-442`), and `put_provider` created the entry
-    (`store.ex:359`).
+    (`token_manager.ex:442`, `:446-463`), and `put_provider` created the entry
+    (`store.ex:398`).
   - The provider sign-out deletes, then calls `forget`
-    (`management/auth.ex:137-138`, `:371-379`). `forget` is a `GenServer.call`
-    (`token_manager.ex:80`), so it waits behind any refresh callback already
+    (`management/auth.ex:362-363`, `:390-398`). `forget` is a `GenServer.call`
+    (`token_manager.ex:81`), so it waits behind any refresh callback already
     running, and that refresh's write always landed first.
 - **Fix:** `Store.delete_provider` takes the profile lock before its store lock
-  (`store.ex:139-146`), so a delete waits for the profile's refresh in flight
+  (`store.ex:167-174`), so a delete waits for the profile's refresh in flight
   and deletes after it. A refresh that starts after the delete refuses
   (TOKEN-5's fix). A profile lock still busy after 10 s fails the logout loudly
   with nothing deleted (`{:error, :profile_busy}`). Every sign-in and import
@@ -436,20 +450,20 @@ failed before the fix. To see a counterexample, run
 - **Code (693970b7):**
   - The `fermix plugins` verbs run tree-less (`plugins_command.ex:5-8`), so
     `stop_profile` finds no registry and returns `:ok`
-    (`token_supervisor.ex:142`, `:152-153`).
+    (`token_supervisor.ex:143`, `:153-154`).
   - `auth_logout` (`plugins_command.ex:250-261`) does not ask the daemon to
     re-apply, unlike the verbs that call `apply_to_daemon` (`:469-486`).
   - `fermix auth logout` only deletes, then tells the operator to restart the
     daemon (`auth_command.ex:216-225`).
   - `latest_entry`'s fallback to the in-memory entry when the read fails
-    (`token_manager.ex:421`) refreshed a deleted profile, and `put_provider`
-    recreated the entry (`store.ex:359`).
+    (`token_manager.ex:442`) refreshed a deleted profile, and `put_provider`
+    recreated the entry (`store.ex:398`).
 - **Fix:** `latest_entry` returns the read's result, and `entry_from_state` is
-  gone (`token_manager.ex:492-496`). A missing auth file or entry means a
+  gone (`token_manager.ex:513-517`). A missing auth file or entry means a
   signed-out profile, because a manager's tokens only ever come from disk: the
   manager drops its tokens through the same `drop_tokens/1` as `forget`, which
   also deletes its plugin child's token file, logs a warning, and sends and
-  writes nothing (`token_manager.ex:323-324`, `:372-396`). Any other read error
+  writes nothing (`token_manager.ex:332-333`, `:393-417`). Any other read error
   is transient and keeps the state.
 - **Impact (before the fix):** the operator was told the account was logged
   out; the daemon wrote it back to `auth.json` at its next refresh.
@@ -458,15 +472,15 @@ failed before the fix. To see a counterexample, run
 - **Severity:** low. The entry stays deleted (TOKEN-5's fix), but the daemon's
   manager served the in-memory access token, and a plugin child kept its
   projected token file, until the manager's next refresh or a restart. The
-  proactive refresh runs five minutes before expiry (`token_manager.ex:30`,
-  `:263-273`), so this lasted up to one token lifetime.
+  proactive refresh runs five minutes before expiry (`token_manager.ex:31`,
+  `:264-282`), so this lasted up to one token lifetime.
 - **Status:** fixed (d514e149). The owner decided that a CLI
   logout hands the logout to a running daemon.
 - **Checks:** 27 now holds; 28 shows it needs `CliLogoutReachesDaemon` (before
   the fix: 27 violated in 4 states). 29 shows the logout still sticks with
   refreshes of both profiles running beside it, and 30 that TOKEN-5's refusal
   is what keeps it there. Rule `LogoutStopsServing` is a proposed
-  rule, taken from `forget`'s own doc at `token_manager.ex:68-76`.
+  rule, taken from `forget`'s own doc at `token_manager.ex:69-77`.
 - **Counterexample (before the fix):** the CLI logout reads and deletes p2's
   entry, and its `stop_profile` does nothing. The logout is done, and p2's
   manager is still serving.
@@ -474,7 +488,7 @@ failed before the fix. To see a counterexample, run
   - The CLI verbs run tree-less and never reached the daemon
     (`plugins_command.ex:5-8`, `:250-261`; `auth_command.ex:216-225`).
   - The manager learns of the deletion only when it next reads the entry, at
-    its next refresh (`token_manager.ex:314-325`).
+    its next refresh (`token_manager.ex:323-340`).
 - **Fix:** both CLI logouts keep their local logout unchanged, then tell a
   running daemon to let go of the profile. This is the shape of
   `apply_to_daemon` (`plugins_command.ex:484-501`): the CLI makes the change on
@@ -494,18 +508,18 @@ failed before the fix. To see a counterexample, run
     daemon the operator runs).
   - **The daemon side.** The daemon validates the profile, then runs
     `TokenSupervisor.forget_signed_out/1` (`cli/daemon.ex:628`, `:852-882`;
-    `token_supervisor.ex:132-171`).
+    `token_supervisor.ex:133-172`).
     - It reuses `forget` (`drop_tokens`: tokens cleared, refusal set, and the
       plugin child's token file deleted), then `stop_profile` for a
       `TokenSupervisor` child. The next use of that profile then starts a
       fresh manager from `auth.json`, so a later sign-in is served rather than
       refused.
     - The top-level Codex manager is only forgotten, as the in-daemon sign-out
-      does (`management/auth.ex:371-379`).
+      does (`management/auth.ex:390-398`).
     - A forget that exits (for example, a manager waiting on the profile lock
       past the call's 5 s) is logged and answered as an error, never "ok".
       A manager that stopped between the lookup and the call (`:noproc`)
-      held nothing, so that is answered "ok" (`token_supervisor.ex:165-171`).
+      held nothing, so that is answered "ok" (`token_supervisor.ex:166-172`).
   - **Why a notice rather than the management methods.** `plugins.disconnect`
     and `auth.logout` are whole logouts, not notices, and neither works in
     either role:
@@ -539,7 +553,7 @@ failed before the fix. To see a counterexample, run
 Fermix's?** Everything except the provider's reuse rule is confirmed in the
 code:
 - The import is the app's live path: the management `auth.import` for
-  `codex_cli` runs `CodexImport.import_tokens` (`management/auth.ex:275-279`).
+  `codex_cli` runs `CodexImport.import_tokens` (`management/auth.ex:276-280`).
 - The import refreshes the Codex CLI's refresh token once and stores the new
   pair only in Fermix's `auth.json` (`codex_import.ex:33-56`).
   `~/.codex/auth.json` is only read (`:66-76`), never rewritten, so the Codex
@@ -547,7 +561,7 @@ code:
 - Both use the same OAuth client id (`refresh_client.ex:34`), so they share one
   session.
 
-Under the rule the code states for Codex (`token_manager.ex:487-491`), the Codex
+Under the rule the code states for Codex (`token_manager.ex:508-512`), the Codex
 CLI's next refresh presents a consumed token, and the provider revokes the
 session that Fermix now depends on. This is not modelled, because
 `~/.codex/auth.json` belongs to another application. The one thing to verify is
@@ -557,13 +571,13 @@ grace window.
 ## Outside this model
 
 - **A provider sign-out can still time out behind a lock wait.** `forget` is a
-  `GenServer.call` with the default 5-second timeout (`token_manager.ex:80`).
+  `GenServer.call` with the default 5-second timeout (`token_manager.ex:81`).
   The profile lock mostly closes the old case: the delete waits for the
   refresh in flight, so `forget` normally finds the manager idle. It can still
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
   turns that into `internal_error` (`cli/daemon.ex:364-374`), and
-  `revert_route` (`management/auth.ex:139`) never runs. The in-daemon plugin
+  `revert_route` (`management/auth.ex:140`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) is the same call
   and can meet the same wait. Its caller then exits after the delete: the
   forget still runs, late, but the stop and the `Runtime.reload` do not.
@@ -592,15 +606,15 @@ grace window.
   exit (Rule 7).
 - **A refresher that waited for the profile lock refreshes again.** Only
   `CodexToken` re-checks under the lock that the entry is still due
-  (`codex_token.ex:120-126`). A manager (`token_manager.ex:285-290`) or a
-  tree-less refresh (`token_supervisor.ex:322-330`) that waited out another
+  (`codex_token.ex:120-126`). A manager (`token_manager.ex:294-299`) or a
+  tree-less refresh (`token_supervisor.ex:323-331`) that waited out another
   refresher's rotation, or a sign-in's write, rotates the fresh token once
   more. It reads under the lock, so it never presents a consumed token and
   `NeverSendConsumed` holds; the cost is one more token-endpoint round trip and
   one more TOKEN-3 window. The model already lets a refresh start at any time,
   so it covers this. A re-check could skip the extra rotation on the on-use
   trigger only: the proactive timer fires five minutes before expiry
-  (`token_manager.ex:30`), outside `refresh_due?`'s 10-second window
+  (`token_manager.ex:31`), outside `refresh_due?`'s 10-second window
   (`token_expiry.ex:4-10`), so a due check there would skip every proactive
   refresh.
 
