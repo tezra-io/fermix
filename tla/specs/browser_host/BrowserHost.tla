@@ -105,7 +105,7 @@
 (* host, or one thing the person, a page or the environment does.          *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser.ex#dispatch,dispatch_profile @ d5d1f1812173
-\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ 367903d92b93
+\* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_server.ex#init,stop,handle_message,operate,ensure_task,bind,check_host,lose,lost_error,request,host_error,public_id @ 1b6599997033
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_availability.ex @ 5ea87b4f20e6
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/host_launcher.ex @ 731c241a3438
 \* SOURCE: apps/fermix_core/lib/fermix_core/browser/routing.ex @ 478975edb7c5
