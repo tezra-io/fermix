@@ -48,6 +48,28 @@ defmodule FermixCore.Auth.ChatGPT.IdTokenTest do
     assert {:error, :invalid_id_token} = verify(sign(no_azp, key), key)
   end
 
+  # OpenAI sends a single audience as a one-element list with no `azp`; a
+  # sign-in failed on that shape until the list form was accepted.
+  test "a one-element audience list naming the client verifies without azp", %{key: key} do
+    assert {:ok, _claims} = verify(sign(claims(%{"aud" => [@client]}), key), key)
+  end
+
+  test "a one-element audience list naming another client is refused", %{key: key} do
+    assert {:error, :invalid_id_token} =
+             verify(sign(claims(%{"aud" => ["oaiapp_OTHER"]}), key), key)
+  end
+
+  test "an audience refusal names what the token said and what was expected", %{key: key} do
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :invalid_id_token} =
+                 verify(sign(claims(%{"aud" => "oaiapp_OTHER"}), key), key)
+      end)
+
+    assert log =~ ~s(wrong_audience: aud "oaiapp_OTHER")
+    assert log =~ ~s(expected "#{@client}")
+  end
+
   for {name, override} <- [
         {"another issuer", %{"iss" => "https://auth.openai.com/"}},
         {"another audience", %{"aud" => "oaiapp_OTHER"}},

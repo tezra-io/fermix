@@ -132,7 +132,7 @@ defmodule FermixCore.Auth.ChatGPT.IdToken do
 
   defp check_claims(claims, client_id, nonce, now) do
     with :ok <- check(claims["iss"] == @issuer, :wrong_issuer),
-         :ok <- check(audience?(claims, client_id), :wrong_audience),
+         :ok <- check(audience?(claims, client_id), audience_failure(claims, client_id)),
          :ok <- check(azp?(claims, client_id), :wrong_azp),
          :ok <- check(subject?(claims["sub"]), :missing_subject),
          :ok <- check(unexpired?(claims["exp"], now), :expired),
@@ -143,10 +143,22 @@ defmodule FermixCore.Auth.ChatGPT.IdToken do
 
   defp audience?(%{"aud" => client_id}, client_id), do: true
 
+  # OpenAI sends a single audience as a one-element list. Only a list that names
+  # other parties too needs `azp` to say which of them the token is for (OIDC
+  # Core 3.1.3.7).
+  defp audience?(%{"aud" => [client_id]}, client_id), do: true
+
   defp audience?(%{"aud" => audiences, "azp" => client_id}, client_id) when is_list(audiences),
     do: client_id in audiences
 
   defp audience?(_claims, _client_id), do: false
+
+  # Client ids are public, so a refusal names what the token said and what was
+  # expected: an audience mismatch is otherwise undiagnosable from the log.
+  defp audience_failure(claims, client_id),
+    do:
+      "wrong_audience: aud #{inspect(claims["aud"])}, azp #{inspect(claims["azp"])}, " <>
+        "expected #{inspect(client_id)}"
 
   defp azp?(%{"azp" => azp}, client_id), do: azp == client_id
   defp azp?(_claims, _client_id), do: true

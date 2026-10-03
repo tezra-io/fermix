@@ -736,11 +736,15 @@ defmodule FermixCore.Auth.OAuthFlow do
 
   defp vendor_code(error), do: if(Regex.match?(@vendor_code, error), do: error, else: "unknown")
 
+  # The browser is answered before the code is exchanged and the account
+  # verified, so the page cannot know the outcome: it says the sign-in reached
+  # Fermix and where the result shows, never that it succeeded.
   defp send_response(conn, {:ok, _callback}) do
     body = """
     <!doctype html><html><body style="font-family:system-ui;margin:40px">
-    <h2>Fermix login complete</h2>
-    <p>You can close this tab and return to the terminal.</p>
+    <h2>Return to Fermix</h2>
+    <p>Fermix received your sign-in and is finishing it. You can close this tab;
+    the result shows where you started the sign-in.</p>
     </body></html>
     """
 
