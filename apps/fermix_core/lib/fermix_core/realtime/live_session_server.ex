@@ -66,8 +66,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   # How far back a delegation's request reads. Long enough for a correction and
   # a confirmation, short enough that an unrelated earlier topic cannot be
-  # mistaken for the current request.
+  # mistaken for the current request. A private call's request is this window;
+  # every call's sufficiency check reads it.
   @context_window_ms 30_000
+
+  # The bound on a hand-off's request in the chat's conversation (M56 §4.1):
+  # the exchange since the previous hand-off, cut from the front, since its end
+  # is the ask.
+  @exchange_max_bytes 4_096
 
   # Live caps an append at 500 tokens. These byte bounds sit under that with
   # room for multibyte text, and they are what stops a 40 KB tool dump from
@@ -180,6 +186,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       closed_report: :never,
       ledger: LiveLedger.new(config.max_estimated_cost_cents_per_session, clock.()),
       transcript: LiveTranscript.new(),
+      # Where the next hand-off's exchange starts (M56 §4.1): the end of the
+      # newest speech when the previous request was handed to the bridge, `nil`
+      # until then (the exchange since the call started).
+      exchange_since_ms: nil,
       delegations: LiveDelegation.new(),
       turn_sessions: %{},
       last_activity_ms: %{},
@@ -634,14 +644,19 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
+  # The text is built once: what the bridge is given is what the turn persists
+  # and what the record keeps (M56 §4.1).
   defp submit_to_bridge(state, record) do
     turn_session_id = mint_turn_session_id()
-    request = delegation_request(state, record, turn_session_id)
+    text = request_text(state, record)
+    request = delegation_request(state, record, turn_session_id, text)
     state = %{state | turn_sessions: Map.put(state.turn_sessions, record.id, turn_session_id)}
 
     case state.voice_bridge.submit(state.bridge_handle, request, delegation_callbacks(record.id)) do
       {:ok, task_ref} ->
-        run_delegation(state, record, task_ref)
+        state
+        |> close_exchange()
+        |> run_delegation(record, task_ref, text)
 
       {:error, reason} ->
         Logger.warning(
@@ -702,7 +717,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       end)
 
     state = %{state | access_confirms: Map.put(state.access_confirms, task.ref, record.id)}
-    run_delegation(state, record, nil)
+    run_delegation(state, record, nil, request_text(state, record))
   end
 
   defp spoken(:ok, outcome), do: {:ok, "The owner said yes. " <> outcome}
@@ -716,23 +731,57 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
-  defp delegation_request(state, record, turn_session_id) do
+  defp delegation_request(state, record, turn_session_id, text) do
     %{
       call_id: state.call_id,
       delegation_id: record.id,
       revision: record.revision,
       turn_session_id: turn_session_id,
-      text: delegation_text(state, record),
+      text: text,
       screen_frame: nil
     }
   end
 
-  defp delegation_text(state, record),
+  # In the chat's conversation a hand-off's request is the exchange since the
+  # previous one, speaker labelled and bounded (M56 §4.1): it is persisted in
+  # the chat's history, where the overlapping window would store the same words
+  # twice. A private call keeps the window it always had.
+  defp request_text(state, record) do
+    case Config.conversation(state.config) do
+      "chat" -> LiveText.tail(exchange_text(state, record), @exchange_max_bytes)
+      "private" -> window_text(state, record)
+    end
+  end
+
+  defp exchange_text(%{exchange_since_ms: nil} = state, _record),
+    do: LiveTranscript.exchange_since(state.transcript, nil)
+
+  # Live can raise two tasks from one sentence, and the second then has no
+  # word of the owner's after the first went out. A request without the words
+  # that asked for it is no request, so it is sent the window, the sentence
+  # included, as a private call's would be.
+  defp exchange_text(state, record) do
+    case LiveTranscript.user_text_since(state.transcript, state.exchange_since_ms) do
+      "" -> window_text(state, record)
+      _new_words -> LiveTranscript.exchange_since(state.transcript, state.exchange_since_ms)
+    end
+  end
+
+  defp window_text(state, record),
     do: LiveTranscript.context_since(state.transcript, record.offset_ms, @context_window_ms)
 
+  # The request is with the bridge: the next one starts after what it carried.
+  defp close_exchange(state) do
+    case LiveTranscript.latest_end_ms(state.transcript) do
+      nil -> state
+      end_ms -> %{state | exchange_since_ms: end_ms}
+    end
+  end
+
   # The record keeps the words the task ran with: what was submitted to the
-  # bridge, or, for a confirmed command, what the owner said around the yes.
-  defp run_delegation(state, record, task_ref) do
+  # bridge, or, for a confirmed command, what the owner said around the yes. A
+  # private call is kept apart from the chat, and its record keeps none.
+  defp run_delegation(state, record, task_ref, text) do
     {:ok, delegations} =
       LiveDelegation.start(state.delegations, record.id, task_ref, record.revision)
 
@@ -740,8 +789,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     LiveTelemetry.delegation_start(telemetry_meta(state), delegation_meta(state, record))
 
     state
-    |> record_task(record, "running", %{request: delegation_text(state, record)})
+    |> record_task(record, "running", recorded_request(state, text))
     |> notify_task(record, "running", nil)
+  end
+
+  defp recorded_request(state, text) do
+    case Config.conversation(state.config) do
+      "chat" -> %{request: text}
+      "private" -> %{}
+    end
   end
 
   # The closures run in the BRIDGE's process, so they do exactly one thing:

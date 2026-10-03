@@ -9,6 +9,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.LiveText
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
 
@@ -561,6 +562,34 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
     end
 
+    # M56 §5: a private call is kept apart from the chat, and its record keeps
+    # the states and summaries only, never the words.
+    test "a private call's record keeps no request words", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, record_repo: repo, config: config)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      assert [
+               %{
+                 "task_id" => "dg_1",
+                 "state" => "completed",
+                 "request" => nil,
+                 "summary" => "The room is booked for 10am."
+               }
+             ] = record_tasks(repo, uuid)
+
+      end_call(session)
+    end
+
     test "a call the daemon ends is closed with its reason and an unsettled bill", %{
       clock: clock,
       repo: repo
@@ -741,6 +770,90 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert_receive {:realtime, %{type: "error", reason: "cost_limit", kind: "cost_limit"}}
       assert_receive {:realtime, %{type: "usage", accounting: "complete"}}
       assert_receive {:EXIT, ^session, {:shutdown, :cost_limit}}
+    end
+  end
+
+  # M56 §4.1: in the chat's conversation the request a hand-off persists is the
+  # exchange since the previous hand-off, speaker labelled and bounded, not the
+  # overlapping 30 second window; one text is sent and recorded. A private call
+  # keeps today's window, and its record keeps no words (M56 §5).
+  describe "the request a hand-off sends" do
+    test "in the chat it is the exchange since the previous hand-off", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1", text: first}}
+      assert first == "user: book the room"
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked for ten."})
+
+      send(
+        session,
+        {:openai_live_event, {:transcript_delta, :assistant, "booked ", 5_000, 6_000}}
+      )
+
+      speak(session, "and email Ana", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+
+      # The 30 second window would repeat "book the room"; the exchange does not.
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: second}}
+      assert second == "assistant: booked \nuser: and email Ana"
+    end
+
+    # Live can raise two tasks from one sentence. The second has no word of
+    # the owner's after the first went out, and a request without the words
+    # that asked for it is no request (an empty user turn is refused by a
+    # provider), so it is sent the window a private call reads.
+    test "a second hand-off from the same sentence is sent that sentence", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room and email Ana", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 4_400}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+
+      send(session, {:openai_live_event, {:transcript_delta, :assistant, "on it", 4_500, 5_000}})
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked."})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: text}}
+      assert text == "user: book the room and email Ana\nassistant: on it"
+    end
+
+    test "a long exchange is cut from the front to 4 KB behind a marker", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, String.duplicate("blah ", 1_000), 1_000, 20_000)
+      speak(session, "use that link", 20_000, 21_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 21_200}})
+
+      assert_receive {:bridge_submit, _handle, %{text: text}}
+      assert byte_size(text) <= 4_096
+      assert String.starts_with?(text, LiveText.cut_marker())
+      assert String.ends_with?(text, "use that link")
+    end
+
+    test "a private call sends the 30 second window, as before", %{clock: clock} do
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked for ten."})
+
+      speak(session, "and email Ana", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: second}}
+      # Fragments of one speaker join verbatim, as they always have.
+      assert second == "user: book the roomand email Ana"
     end
   end
 

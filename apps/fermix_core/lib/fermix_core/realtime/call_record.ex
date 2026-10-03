@@ -14,7 +14,8 @@ defmodule FermixCore.Realtime.CallRecord do
   delegation id. Its states are `created` and `running`, `detached` (a later
   stage: the task outlives its call), then one terminal state: `completed`,
   `failed`, `cancelled` or `timed_out`. Each task carries the request it ran
-  with, capped at 2 KB, and the summary the session put on the wire.
+  with, capped at 2 KB from the front (its end is the ask), and the summary the
+  session put on the wire. A private call's tasks carry no request (M56 §5).
 
   The functions building the record are pure. `open/3`, `write_tasks/2`,
   `close/5` and `sweep/2` are the writes, through `Memory.Repo`; each answers
@@ -53,8 +54,9 @@ defmodule FermixCore.Realtime.CallRecord do
   @doc """
   Moves a task to `state`, adding it the first time it is seen.
 
-  `fields` may carry `:request` (capped at 2 KB) and `:summary`; a field not
-  given keeps what the task already holds.
+  `fields` may carry `:request` (capped at 2 KB, cut from the front the way
+  `LiveText.tail/2` cuts the request a hand-off sends) and `:summary`; a field
+  not given keeps what the task already holds.
   """
   @spec put_task(t(), String.t(), pos_integer(), String.t(), map()) :: t()
   def put_task(%__MODULE__{} = record, task_id, revision, state, fields \\ %{})
@@ -177,7 +179,7 @@ defmodule FermixCore.Realtime.CallRecord do
   defp put_field(task, key, value) when is_binary(value), do: Map.put(task, key, value)
 
   defp request(nil), do: nil
-  defp request(text) when is_binary(text), do: LiveText.bytes(text, @request_max_bytes)
+  defp request(text) when is_binary(text), do: LiveText.tail(text, @request_max_bytes)
 
   defp add_task(record, task) do
     %{record | tasks: Enum.take(record.tasks ++ [task], -@max_tasks)}

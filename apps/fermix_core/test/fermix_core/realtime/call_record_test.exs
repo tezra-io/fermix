@@ -3,6 +3,7 @@ defmodule FermixCore.Realtime.CallRecordTest do
 
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRecord
+  alias FermixCore.Realtime.LiveText
 
   @uuid "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
   @started ~U[2026-10-02 09:00:00.000000Z]
@@ -42,17 +43,21 @@ defmodule FermixCore.Realtime.CallRecordTest do
              ]
     end
 
-    test "the request is capped at 2 KB on a character boundary" do
-      # One ASCII byte, then two-byte characters: byte 2,048 falls mid-character.
-      long = "a" <> String.duplicate("é", 2_000)
+    # The end of a speaker-labelled request is the ask itself, so the record
+    # keeps the end, cut the way the request the bridge was given is (M56 §4.1).
+    test "the request is capped at 2 KB from the front on a character boundary" do
+      # Two-byte characters after one ASCII byte: the cut point falls mid-character.
+      long = "a" <> String.duplicate("é", 2_000) <> "user: use that link"
 
       [task] =
         CallRecord.new(@uuid, "openai_live")
         |> CallRecord.put_task("dg_1", 1, "running", %{request: long})
         |> Map.fetch!(:tasks)
 
-      assert byte_size(task["request"]) == 2_047
+      assert byte_size(task["request"]) <= 2_048
       assert String.valid?(task["request"])
+      assert String.starts_with?(task["request"], LiveText.cut_marker())
+      assert String.ends_with?(task["request"], "user: use that link")
     end
 
     test "the state vocabulary is closed, the later stages' words included" do

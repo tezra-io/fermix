@@ -20,6 +20,10 @@ defmodule FermixCore.Realtime.LiveText do
 
   @ellipsis "…"
 
+  # What stands in front of a request cut from the front: the reader learns
+  # that speech came before, and that it was cut rather than never said.
+  @cut_marker "(earlier speech cut for length)\n"
+
   @doc "Collapse whitespace to single spaces and cut to `max_bytes`."
   @spec one_line(String.t(), pos_integer()) :: String.t()
   def one_line(text, max_bytes)
@@ -47,12 +51,26 @@ defmodule FermixCore.Realtime.LiveText do
   end
 
   @doc """
-  Cut to `max_bytes` and nothing else: line breaks and spacing are kept, for
-  the speaker-labelled request a call's record stores.
+  Keep the END of `text` within `max_bytes`, cut from the front on a UTF-8
+  boundary behind `cut_marker/0`, which counts toward the bound.
+
+  For a speaker-labelled request (M56 §4.1): the end of the exchange is the
+  ask itself, so it is the beginning that gives way.
   """
-  @spec bytes(String.t(), pos_integer()) :: String.t()
-  def bytes(text, max_bytes) when is_binary(text) and is_integer(max_bytes) and max_bytes > 0,
-    do: truncate_bytes(text, max_bytes)
+  @spec tail(String.t(), pos_integer()) :: String.t()
+  def tail(text, max_bytes)
+      when is_binary(text) and is_integer(max_bytes) and max_bytes > byte_size(@cut_marker) do
+    if byte_size(text) <= max_bytes do
+      text
+    else
+      keep = max_bytes - byte_size(@cut_marker)
+      @cut_marker <> drop_partial_codepoint(binary_part(text, byte_size(text) - keep, keep))
+    end
+  end
+
+  @doc "The marker `tail/2` puts in front of a cut request."
+  @spec cut_marker() :: String.t()
+  def cut_marker, do: @cut_marker
 
   @doc """
   One line of at most `max_chars` CHARACTERS, ellipsised when cut.
@@ -110,6 +128,13 @@ defmodule FermixCore.Realtime.LiveText do
       nil -> cut
     end
   end
+
+  # A cut from the front can land inside a character: its continuation bytes
+  # (10xxxxxx) are dropped, at most three of them in valid UTF-8.
+  defp drop_partial_codepoint(<<byte, rest::binary>>) when byte in 0x80..0xBF,
+    do: drop_partial_codepoint(rest)
+
+  defp drop_partial_codepoint(text), do: text
 
   defp truncate_bytes(text, max_bytes) when byte_size(text) <= max_bytes, do: text
 

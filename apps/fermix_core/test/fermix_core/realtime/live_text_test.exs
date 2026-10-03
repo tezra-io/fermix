@@ -20,6 +20,34 @@ defmodule FermixCore.Realtime.LiveTextTest do
     end
   end
 
+  # A spoken request's tail is the ask itself, so the front gives way, behind a
+  # marker that says something was cut (M56 §4.1).
+  describe "tail/2" do
+    test "leaves text inside the bound alone" do
+      assert LiveText.tail("user: book the room", 4_096) == "user: book the room"
+    end
+
+    test "keeps the end, cut from the front behind a marker, inside the bound" do
+      text = String.duplicate("a", 5_000) <> "user: use that link"
+      cut = LiveText.tail(text, 4_096)
+
+      assert byte_size(cut) == 4_096
+      assert String.starts_with?(cut, LiveText.cut_marker())
+      assert String.ends_with?(cut, "user: use that link")
+    end
+
+    test "never starts in the middle of a multibyte character" do
+      # Two-byte characters after one ASCII byte: the cut point falls mid-character.
+      text = "a" <> String.duplicate("é", 3_000)
+      cut = LiveText.tail(text, 4_096)
+
+      assert String.valid?(cut)
+      assert byte_size(cut) <= 4_096
+      assert String.starts_with?(cut, LiveText.cut_marker() <> "é")
+      assert String.ends_with?(cut, "éé")
+    end
+  end
+
   describe "sentence/2" do
     test "returns text that already fits, trimmed" do
       assert LiveText.sentence("  The room is booked.  ", 100) == "The room is booked."
