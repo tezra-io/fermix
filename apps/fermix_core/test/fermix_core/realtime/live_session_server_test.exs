@@ -6,6 +6,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LiveSessionServer
   alias FermixCore.Realtime.OpenAILiveClient
@@ -562,6 +563,46 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert {:ok, %{end_reason: "provider_disconnected", accounting: "incomplete"}} =
                Repo.get_voice_call(uuid, server: repo)
+    end
+
+    # The stage's gate: a kill leaves a closed record with its tasks marked.
+    test "a call killed mid-task is closed by the next boot's sweep, its task failed", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      uuid = :sys.get_state(session).call_uuid
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+
+      Process.exit(session, :kill)
+      assert_receive {:EXIT, ^session, :killed}
+
+      assert {:ok, %{ended_at: nil, tasks: [%{"state" => "running"}]}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      {:ok, sweep} = CallSweep.start_link(record_repo: repo)
+      ref = Process.monitor(sweep)
+      assert_receive {:DOWN, ^ref, :process, ^sweep, :normal}, 5_000
+
+      assert {:ok,
+              %{
+                end_reason: "daemon_restarted",
+                accounting: "incomplete",
+                voice_cost_cents: nil,
+                tasks: [
+                  %{
+                    "task_id" => "dg_1",
+                    "state" => "failed",
+                    "summary" => "daemon_restarted",
+                    "request" => "user: book the room"
+                  }
+                ]
+              }} = Repo.get_voice_call(uuid, server: repo)
     end
 
     test "a call the provider refused leaves no record", %{clock: clock, repo: repo} do

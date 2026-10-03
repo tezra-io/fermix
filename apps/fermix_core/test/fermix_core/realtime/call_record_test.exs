@@ -77,6 +77,35 @@ defmodule FermixCore.Realtime.CallRecordTest do
       assert hd(record.tasks)["task_id"] == "dg_7"
       assert List.last(record.tasks)["task_id"] == "dg_70"
     end
+
+    test "after a restart an unfinished task has failed, and a finished one stands" do
+      record =
+        ~w(created running detached completed failed cancelled timed_out)
+        |> Enum.with_index(1)
+        |> Enum.reduce(CallRecord.new(@uuid, "openai_live"), fn {state, index}, acc ->
+          CallRecord.put_task(acc, "dg_#{index}", 1, state, %{summary: "was #{state}"})
+        end)
+
+      swept = CallRecord.fail_unfinished(record.tasks)
+
+      assert Enum.map(swept, &{&1["state"], &1["summary"]}) == [
+               {"failed", "daemon_restarted"},
+               {"failed", "daemon_restarted"},
+               {"failed", "daemon_restarted"},
+               {"completed", "was completed"},
+               {"failed", "was failed"},
+               {"cancelled", "was cancelled"},
+               {"timed_out", "was timed_out"}
+             ]
+    end
+
+    # A stored document is read back, not trusted: a task missing a field must
+    # not crash the sweep that reads it at every boot.
+    test "a stored task missing its fields is still failed, never raised on" do
+      assert CallRecord.fail_unfinished([%{"task_id" => "dg_1"}]) == [
+               %{"task_id" => "dg_1", "state" => "failed", "summary" => "daemon_restarted"}
+             ]
+    end
   end
 
   describe "the record in the memory database" do

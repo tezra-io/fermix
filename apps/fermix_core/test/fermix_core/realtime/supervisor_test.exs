@@ -1,7 +1,9 @@
 defmodule FermixCore.Realtime.SupervisorTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Memory.Repo
   alias FermixCore.Realtime
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.LocalVoiceSocket
@@ -103,6 +105,42 @@ defmodule FermixCore.Realtime.SupervisorTest do
     :ok = Supervisor.stop(supervisor, :shutdown, 1_000)
 
     refute File.exists?(socket_path)
+  end
+
+  test "the realtime tree closes the call records a restart left open" do
+    unique = System.unique_integer([:positive])
+    socket_path = Path.join(System.tmp_dir!(), "fermix-realtime-sweep-#{unique}.sock")
+    db_path = Path.join(System.tmp_dir!(), "fermix-realtime-sweep-#{unique}.db")
+    repo = :"rt_sweep_repo_#{unique}"
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+    on_exit(fn ->
+      Enum.each(
+        [socket_path, db_path, "#{db_path}-wal", "#{db_path}-shm"],
+        &FermixTestSupport.SafeRm.rm/1
+      )
+    end)
+
+    uuid = "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
+    started_at = DateTime.add(DateTime.utc_now(), -60, :second)
+
+    :ok =
+      CallRecord.open(CallRecord.new(uuid, "openai_live"), started_at, CallRecord.repo_opts(repo))
+
+    start_supervised!(
+      {Realtime.Supervisor,
+       name: :"rt_sweep_supervisor_#{unique}",
+       socket_path: socket_path,
+       socket_name: :"rt_sweep_socket_#{unique}",
+       session_supervisor_name: :"rt_sweep_sessions_#{unique}",
+       task_supervisor_name: :"rt_sweep_tasks_#{unique}",
+       call_registry_name: :"rt_sweep_calls_#{unique}",
+       record_repo: repo}
+    )
+
+    wait_until(fn ->
+      match?({:ok, %{end_reason: "daemon_restarted"}}, Repo.get_voice_call(uuid, server: repo))
+    end)
   end
 
   test "session children are not restarted after normal shutdown" do
