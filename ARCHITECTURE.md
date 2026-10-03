@@ -564,7 +564,12 @@ call's instructions are `LIVE.md` with what `LivePrompt` generates around it
 (the assistant's name, the owner's details, the date, the memory files in the
 `<memory-context>` frame `PromptComposer` owns), and a call in the chat starts
 with the chat's newest messages as provider input, read through the bridge
-before the call has a handle and shaped by `LiveChat`.
+before the call has a handle and shaped by `LiveChat`. A call in the chat
+leaves a gist: its settle closes the `voice_calls` record (`CallRecord`) with
+the settled cost and what the call owes the chat, then `CallGist` makes the
+gist in a task the session never waits on and writes the call's one chat row
+through the bridge, rendered from the record by `CallRow`. An owner's turn is
+told the last gists (`RecentCalls`).
 
 `Companion.Protocol` owns the chat vocabulary, served to the Mac app on
 `FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
@@ -728,9 +733,12 @@ Current channels:
   What a hand-off's answer cannot say aloud is shown in the chat: the Live
   session writes it through `VoiceBridge.show/2`, which `Voice.Bridge`
   answers with `Companion.write_call_row/3`, the one write for a call's rows
-  (deduplicated per task revision, `metadata.call` validated by
-  `Companion.Protocol`); a reply its runner told the voice adapter is drawn
-  from Computer History is shown and never said unless OpenAI may carry it.
+  (deduplicated per task revision, and once per call for the row a call
+  leaves when it ends; `metadata.call` validated by `Companion.Protocol`); a
+  reply its runner told the voice adapter is drawn from Computer History is
+  shown and never said unless OpenAI may carry it. A call's row a dead daemon
+  left owed is written at the next boot by `Voice.CallRowSweep`, started after
+  the companion subtree.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests

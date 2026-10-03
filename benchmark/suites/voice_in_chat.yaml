@@ -33,6 +33,18 @@
 # the answered question and the `voice_call_context` read have no case here:
 # the TurnRunner, MainAgent, voice_call_context, Turns, companion channel and
 # typed-turn end-to-end ExUnit suites hold them, the line's wording included.
+#
+# What a call leaves (M56 §4.2): its gist, its one chat row, and the "Recent
+# voice calls" note an owner's turn is told, read from the `voice_calls` rows
+# in the eval home's memory.db. No driver can put a gist there: a gist is
+# written only by a Live session's own task after a real call, the behavioral
+# runner (`run_eval.py`) seeds no state at all, and the capability runner's
+# `checker.state` (`bin/seed_state.exs`) restores only jobs and reminders. So
+# "what was the last call about?" answered from the note has no case here:
+# the RecentCalls, TurnRunner, CallGist, Live session and Live end-to-end
+# ExUnit suites hold the note, its framing, its place beside the date note and
+# who is told it. A case would need `seed_state.exs` to seed a closed call
+# with a gist, and a behavioral runner that seeds before a case.
 suite: voice_in_chat
 risk: host_readonly
 title: "Voice in the chat: a task asked aloud uses a link the owner typed, and shows it back"

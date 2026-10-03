@@ -506,6 +506,31 @@ replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
 them in lockstep with the exporter's clauses, or a `call_stop` arriving without
 its opener reads as a `:subagent` phantom root.
 
+A call in the chat leaves a **gist** (M56 §4.2), and the gist is a run kind of
+its own: one bounded summarising call made after the call has settled and its
+`call_stop` closed the call's run, so it is always a **root**, minted
+`session_id = "voice_gist:<call_uuid>"` with no `parent_session` and tied to the
+call by `call_uuid` alone. Every emission goes through
+`FermixCore.Realtime.GistTelemetry`: `[:fermix, :voice_gist, :run_start |
+:run_complete | :run_error]`, with `agent: "voice_gist"`, `session_id` and
+`call_uuid`. `run_start` carries what it summarises by size (`tasks`,
+`speech_bytes`, `input_bytes`) and `tainted`, whether anything drawn from
+Computer History reached the call; `run_complete` has `status: "written"` and
+the measurements `duration_ms` and `gist_bytes`; `run_error` has `status:
+"failed"`, the bounded reason as `error`, and `count`/`duration_ms`. What was
+said, the task results and the gist reach no field of these events. The
+summarising call itself goes through the adapters'
+`Providers.Telemetry.emit_call/3` with the same `session_id` and `agent:
+"voice_gist"`, an ordinary `llm` span whose input and output follow the
+content switch like every provider call's (the meeting summariser's
+precedent). `Trace.TelemetryHandler` registers the three as `agent_event`
+rows; `FermixOpik` binds them (`infer_kind("voice_gist:" <> _)` →
+`:voice_gist`, the root opened by `run_start` and closed by either closer in
+`Aggregation`); `mix opik.replay` skips them, as it skips the soul-curation
+bookends. The call's row written after the gist, and the boot pass that
+writes a row a dead daemon left owed (failing its pending gist), emit nothing
+of their own: the row is a companion write, logged on failure.
+
 ## Sessionless channel points (pairing, push, render, transport posture)
 
 Pairing decisions and push deliveries are **point events with no agent

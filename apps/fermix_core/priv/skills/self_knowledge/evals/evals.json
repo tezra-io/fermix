@@ -64,6 +64,14 @@
         "invokes skill self_knowledge",
         "says the voice says a short line and the rest (a link, code, a table, a long answer) is written whole to the Mac chat, which the phone shows too, with the voice saying it is there, and that a private call (Voice calls join the chat set to No) shows nothing in the chat"
       ]
+    },
+    {
+      "name": "voice_call_gist",
+      "prompt": "After a GPT-Live voice call, does Fermix keep anything of it? Will I see it in the chat, and will it know next time what we talked about?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says a call in the chat leaves a gist (a few sentences on what was asked, done, decided and still open) made after the call ends, shown in the chat as one row for the call (Voice call, N minutes, with the gist, or the task list if it could not be made), and given to the next call and to the owner's chat turns; that the gist is the call's record, not a memory fact, no transcript is kept, and a private call leaves nothing"
+      ]
     }
   ]
 }
