@@ -2987,6 +2987,18 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  The gists of the newest Live calls that have one, newest first, at most
+  `limit`: what a call in the chat's conversation starts with (M56 §4.3).
+  """
+  @spec list_voice_call_gists(pos_integer(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def list_voice_call_gists(limit, opts \\ []) do
+    with {:ok, limit} <- VoiceCallsSql.normalize_limit(limit) do
+      call({:list_voice_call_gists, limit}, opts)
+    end
+  end
+
   defp decode_voice_calls(rows) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
       case VoiceCallsSql.decode(row) do
@@ -4022,6 +4034,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_open_voice_calls, cutoff}, _from, state) do
     reply = with_connection(state, &VoiceCallsSql.list_open(&1, cutoff))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_voice_call_gists, limit}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.recent_gists(&1, limit))
     {:reply, reply, state}
   end
 

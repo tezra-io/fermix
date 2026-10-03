@@ -155,12 +155,57 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
     end
   end
 
+  # What a call in the chat starts with (M56 §4.3): the gists of the newest
+  # earlier calls. Nothing writes a gist until the gist stage, so a call
+  # without one is skipped rather than read as an empty gist.
+  test "the newest gists come back newest first, and a call without one is skipped", %{
+    repo: repo,
+    db_path: db_path
+  } do
+    third = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+    no_gist = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    {:ok, _row} = create(repo, @other_uuid, ~U[2026-10-02 08:00:00.000000Z])
+    {:ok, _row} = create(repo, @uuid, @started)
+    {:ok, _row} = create(repo, third, ~U[2026-10-02 10:00:00.000000Z])
+    {:ok, _row} = create(repo, no_gist, ~U[2026-10-02 11:00:00.000000Z])
+
+    assert {:ok, []} = Repo.list_voice_call_gists(3, server: repo)
+
+    set_gist(db_path, @other_uuid, "Booked the dentist.")
+    set_gist(db_path, @uuid, "Planned the trip.")
+    set_gist(db_path, third, "Read the lease.")
+
+    assert {:ok, ["Read the lease.", "Planned the trip."]} =
+             Repo.list_voice_call_gists(2, server: repo)
+
+    assert {:ok, ["Read the lease.", "Planned the trip.", "Booked the dentist."]} =
+             Repo.list_voice_call_gists(3, server: repo)
+
+    assert {:error, {:invalid, :limit, :out_of_range}} =
+             Repo.list_voice_call_gists(101, server: repo)
+  end
+
   test "memory off is a configuration: every call answers disabled" do
     repo = :"memory_repo_voice_calls_off_#{System.unique_integer([:positive])}"
     start_supervised!({Repo, name: repo, enabled: false}, id: repo)
 
     assert {:error, :disabled} = create(repo, @uuid)
     assert {:error, :disabled} = Repo.list_open_voice_calls(@started, server: repo)
+    assert {:error, :disabled} = Repo.list_voice_call_gists(3, server: repo)
+  end
+
+  # The gist stage is the writer; until it lands a test writes the column.
+  defp set_gist(db_path, uuid, gist) do
+    {:ok, conn} = Sqlite3.open(db_path)
+
+    try do
+      {:ok, stmt} = Sqlite3.prepare(conn, "UPDATE voice_calls SET gist = ?1 WHERE uuid = ?2")
+      :ok = Sqlite3.bind(stmt, [gist, uuid])
+      :done = Sqlite3.step(conn, stmt)
+      :ok = Sqlite3.release(conn, stmt)
+    after
+      Sqlite3.close(conn)
+    end
   end
 
   defp create(repo, uuid, started_at \\ @started) do

@@ -101,6 +101,13 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
     end
   end
 
+  @doc "Validates how many gists one read may ask for: 1 to #{@list_limit}."
+  @spec normalize_limit(term()) :: {:ok, pos_integer()} | {:error, term()}
+  def normalize_limit(limit) when is_integer(limit) and limit > 0 and limit <= @list_limit,
+    do: {:ok, limit}
+
+  def normalize_limit(_limit), do: {:error, {:invalid, :limit, :out_of_range}}
+
   @doc "The fixed-width UTC form of a cutoff instant."
   @spec normalize_cutoff(DateTime.t()) :: {:ok, String.t()} | {:error, term()}
   def normalize_cutoff(cutoff), do: normalize_stamp(:cutoff, cutoff)
@@ -180,6 +187,28 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
              [cutoff, @list_limit]
            ) do
       {:ok, Enum.map(rows, &voice_call_row/1)}
+    end
+  end
+
+  @doc """
+  The gists of the newest calls that have one, newest first, at most `limit`
+  (M56 §4.3). A call with no gist (every call until the gist stage writes
+  them) is skipped.
+  """
+  @spec recent_gists(term(), pos_integer()) :: {:ok, [String.t()]} | {:error, term()}
+  def recent_gists(conn, limit) when is_integer(limit) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT gist FROM voice_calls
+             WHERE gist IS NOT NULL
+             ORDER BY started_at DESC, uuid DESC
+             LIMIT ?
+             """,
+             [limit]
+           ) do
+      {:ok, Enum.map(rows, fn [gist] -> gist end)}
     end
   end
 

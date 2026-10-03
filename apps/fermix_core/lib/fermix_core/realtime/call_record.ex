@@ -18,7 +18,8 @@ defmodule FermixCore.Realtime.CallRecord do
   session put on the wire. A private call's tasks carry no request (M56 §5).
 
   The functions building the record are pure. `open/3`, `write_tasks/2`,
-  `close/5` and `sweep/2` are the writes, through `Memory.Repo`; each answers
+  `close/5` and `sweep/2` are the writes, through `Memory.Repo`, and
+  `recent_gists/2` the read a later call starts with; each answers
   `{:error, :disabled}` when memory is off, a configuration and not a failure.
   """
 
@@ -113,6 +114,17 @@ defmodule FermixCore.Realtime.CallRecord do
     |> Repo.close_voice_call(fields, repo_opts)
     |> written()
   end
+
+  @doc """
+  The gists of the newest earlier calls that have one, newest first, at most
+  `limit`: what a call in the chat's conversation starts with (M56 §4.3).
+  A limit of 0 reads nothing.
+  """
+  @spec recent_gists(non_neg_integer(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def recent_gists(0, _repo_opts), do: {:ok, []}
+
+  def recent_gists(limit, repo_opts) when is_integer(limit) and limit > 0,
+    do: Repo.list_voice_call_gists(limit, repo_opts)
 
   @doc """
   Every task not in a terminal state, failed with the reason a restart gives:

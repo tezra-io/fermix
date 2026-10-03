@@ -156,6 +156,18 @@ defmodule FermixCore.Realtime.CallRecordTest do
 
       assert {:error, :disabled} =
                CallRecord.open(CallRecord.new(@uuid, "openai_live"), @started, server: repo)
+
+      assert {:error, :disabled} = CallRecord.recent_gists(3, server: repo)
+    end
+
+    test "the recent gists are read newest first, and none asked for reads nothing", %{
+      opts: opts
+    } do
+      assert :ok = CallRecord.open(CallRecord.new(@uuid, "openai_live"), @started, opts)
+
+      # No call has a gist until the gist stage writes one.
+      assert {:ok, []} = CallRecord.recent_gists(3, opts)
+      assert {:ok, []} = CallRecord.recent_gists(0, server: :no_such_repo)
     end
   end
 
