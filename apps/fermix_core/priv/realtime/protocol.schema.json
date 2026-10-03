@@ -139,6 +139,11 @@
         "type": { "const": "call_ready" },
         "engine": { "enum": ["openai_realtime", "openai_live"] },
         "call_id": { "type": "string", "minLength": 1 },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The Live call's durable identity, the key of its record. call_id stays the trace session id."
+        },
         "provider_session_id": { "type": "string" },
         "expires_at": {
           "type": "integer",
@@ -168,6 +173,11 @@
       "required": ["type", "delegation_id", "revision", "status"],
       "properties": {
         "type": { "const": "task" },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "The Live call's durable identity, the key of its record. call_id stays the trace session id."
+        },
         "delegation_id": { "type": "string", "minLength": 1 },
         "revision": { "type": "integer", "minimum": 1 },
         "status": { "enum": ["pending", "running", "completed", "failed", "cancelled"] },
@@ -179,6 +189,11 @@
       "required": ["type"],
       "properties": {
         "type": { "const": "usage" },
+        "call_uuid": {
+          "type": "string",
+          "format": "uuid",
+          "description": "Live only: the durable identity of the call the bill belongs to."
+        },
         "status": { "type": "string" },
         "input_tokens": { "type": "integer" },
         "output_tokens": { "type": "integer" },

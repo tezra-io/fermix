@@ -431,10 +431,13 @@ Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
 hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
 :call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
-id), `engine: "openai_live"`, `device_id`, `model`, `voice`, and
+id), `call_uuid`, `engine: "openai_live"`, `device_id`, `model`, `voice`, and
 `provider_session_id` once `session.started` arrives — that last one is the only
 handle a vendor-side investigation has, and it exists nowhere else in the trace.
-Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
+`call_uuid` is the call's durable identity, minted with the session and the key
+of its `voice_calls` record; the `voice_live:<n>` counter restarts with the VM,
+so the UUID is what ties a trace to that record. The counter stays the trace's
+session id. Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
 the Opik exporter's sweep floor for the root; omit it and a call that sits quiet
 between delegations is force-closed at the idle TTL, and its ledger-bearing
 `call_stop` then mints a second, empty root. The delegation events carry

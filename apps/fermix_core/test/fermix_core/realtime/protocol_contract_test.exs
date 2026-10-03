@@ -16,6 +16,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
   @schema_path Application.app_dir(:fermix_core, "priv/realtime/protocol.schema.json")
   @client_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/client_events.jsonl")
   @server_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/server_events.jsonl")
+  @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
   setup_all do
     %{schema: @schema_path |> File.read!() |> Jason.decode!()}
@@ -74,6 +75,40 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
 
     for field <- ~w(delegation_id revision status) do
       assert field in defs["task"]["required"]
+    end
+  end
+
+  # Additive and optional: an older companion ignores a field it does not know,
+  # so the wire stays at version 2. A Realtime call's frames never carry it.
+  test "call_ready, task and usage publish the call UUID as an optional field", %{
+    schema: schema
+  } do
+    for name <- ~w(call_ready task usage) do
+      definition = schema["$defs"][name]
+
+      assert %{"type" => "string", "format" => "uuid"} = definition["properties"]["call_uuid"],
+             "#{name} does not publish call_uuid"
+
+      refute "call_uuid" in definition["required"], "#{name} requires call_uuid"
+    end
+  end
+
+  test "the golden Live frames carry the call UUID" do
+    server_frames =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    live_frames =
+      Enum.filter(server_frames, fn frame ->
+        frame["type"] in ~w(call_ready task) or
+          (frame["type"] == "usage" and frame["status"] == "live")
+      end)
+
+    assert length(live_frames) == 3
+
+    for frame <- live_frames do
+      assert frame["call_uuid"] =~ @uuid_v4, "golden #{frame["type"]} has no call_uuid"
     end
   end
 

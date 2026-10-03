@@ -5,10 +5,10 @@
 {"type":"assistant_text_delta","text":"hi"}
 {"type":"tool_event","status":"completed"}
 {"type":"usage","input_tokens":1,"output_tokens":2}
-{"type":"call_ready","engine":"openai_live","call_id":"voice_live:17","provider_session_id":"sess_live_01H9","expires_at":1788000000,"captions":true}
+{"type":"call_ready","engine":"openai_live","call_id":"voice_live:17","call_uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","provider_session_id":"sess_live_01H9","expires_at":1788000000,"captions":true}
 {"type":"caption","speaker":"user","delta":"what is ","start_ms":1200,"end_ms":1640}
-{"type":"task","delegation_id":"dg_01H9","revision":1,"status":"running","summary":"checking the calendar"}
-{"type":"usage","status":"live","voice_seconds":64.2,"voice_cost_cents":5.35,"backend_turns":2,"backend_cost":"unknown","accounting":"running"}
+{"type":"task","call_uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","delegation_id":"dg_01H9","revision":1,"status":"running","summary":"checking the calendar"}
+{"type":"usage","call_uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","status":"live","voice_seconds":64.2,"voice_cost_cents":5.35,"backend_turns":2,"backend_cost":"unknown","accounting":"running"}
 {"type":"error","reason":"invalid_json"}
 {"type":"error","reason":"unsupported_protocol_version","direction":"client_too_new","client_version":99,"min_version":1,"max_version":2}
 {"type":"error","reason":"unsupported_protocol_version","kind":"update_required","direction":"client_too_old","client_version":1,"min_version":2,"max_version":2,"required_for":"openai_live"}

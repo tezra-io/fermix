@@ -47,14 +47,22 @@ defmodule FermixCore.Realtime.LiveFrames do
     %{type: "caption", speaker: speaker, delta: delta, start_ms: start_ms, end_ms: end_ms}
   end
 
-  @doc "The provider session is up and the call can carry audio."
-  @spec call_ready(String.t(), String.t(), String.t() | nil, integer() | nil) :: map()
-  def call_ready(engine, call_id, provider_session_id, expires_at)
-      when is_binary(engine) and is_binary(call_id) do
+  @doc """
+  The provider session is up and the call can carry audio.
+
+  `call_uuid` is the call's durable identity, the key of its record; `call_id`
+  stays the trace session id. Every frame of the call that names it carries
+  the same UUID.
+  """
+  @spec call_ready(String.t(), String.t(), String.t(), String.t() | nil, integer() | nil) ::
+          map()
+  def call_ready(engine, call_id, call_uuid, provider_session_id, expires_at)
+      when is_binary(engine) and is_binary(call_id) and is_binary(call_uuid) do
     compact(%{
       type: "call_ready",
       engine: engine,
       call_id: call_id,
+      call_uuid: call_uuid,
       provider_session_id: provider_session_id,
       expires_at: expires_at,
       captions: true
@@ -62,12 +70,13 @@ defmodule FermixCore.Realtime.LiveFrames do
   end
 
   @doc "One backend delegation's lifecycle. `summary` is bounded to the wire's limit."
-  @spec task(String.t(), pos_integer(), String.t(), String.t() | nil) :: map()
-  def task(delegation_id, revision, status, summary)
-      when is_binary(delegation_id) and delegation_id != "" and
+  @spec task(String.t(), String.t(), pos_integer(), String.t(), String.t() | nil) :: map()
+  def task(call_uuid, delegation_id, revision, status, summary)
+      when is_binary(call_uuid) and is_binary(delegation_id) and delegation_id != "" and
              is_integer(revision) and revision >= 1 and status in @task_statuses do
     compact(%{
       type: "task",
+      call_uuid: call_uuid,
       delegation_id: delegation_id,
       revision: revision,
       status: status,
@@ -82,10 +91,11 @@ defmodule FermixCore.Realtime.LiveFrames do
   ceiling kill, so the companion can tell a routine update from the reason the
   call is ending.
   """
-  @spec usage(map(), String.t() | nil) :: map()
-  def usage(payload, status \\ nil) when is_map(payload) do
+  @spec usage(String.t(), map(), String.t() | nil) :: map()
+  def usage(call_uuid, payload, status \\ nil) when is_binary(call_uuid) and is_map(payload) do
     payload
     |> Map.put(:type, "usage")
+    |> Map.put(:call_uuid, call_uuid)
     |> put_status(status)
   end
 

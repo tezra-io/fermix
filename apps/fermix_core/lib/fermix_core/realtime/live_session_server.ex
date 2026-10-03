@@ -35,6 +35,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.ConversationRecorder
+  alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.LiveDelegation
   alias FermixCore.Realtime.LiveFrames
   alias FermixCore.Realtime.LiveLedger
@@ -121,7 +122,11 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     %{
       companion: Keyword.fetch!(opts, :companion),
       config: config,
+      # The trace session id, a counter that restarts with the VM.
       call_id: to_string(session_scope),
+      # The call's durable identity: the key of its record, on every frame and
+      # telemetry event that names the call.
+      call_uuid: DeviceIdentity.generate_uuid(),
       api_key: Keyword.get(opts, :api_key),
       device_id: Keyword.get(opts, :device_id, "unknown"),
       agent_id: Keyword.get(opts, :agent_id, MemoryConfig.agent_id()),
@@ -1020,6 +1025,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       LiveFrames.call_ready(
         state.config.engine,
         state.call_id,
+        state.call_uuid,
         state.provider_session_id,
         state.expires_at
       )
@@ -1029,12 +1035,16 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   end
 
   defp notify_task(state, record, status, summary) do
-    notify(state, LiveFrames.task(record.id, record.revision, status, summary))
+    notify(state, LiveFrames.task(state.call_uuid, record.id, record.revision, status, summary))
     state
   end
 
   defp notify_usage(state, status \\ nil) do
-    notify(state, LiveFrames.usage(LiveLedger.usage_payload(state.ledger), status))
+    notify(
+      state,
+      LiveFrames.usage(state.call_uuid, LiveLedger.usage_payload(state.ledger), status)
+    )
+
     state
   end
 
@@ -1295,6 +1305,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp telemetry_meta(state) do
     %{
       session_id: state.call_id,
+      call_uuid: state.call_uuid,
       device_id: state.device_id,
       model: state.config.model,
       voice: state.config.voice,

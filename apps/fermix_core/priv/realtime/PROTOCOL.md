@@ -35,6 +35,9 @@ Current values (see the schema's `x-protocol-version` / `x-supported-version-ran
 | daemon `min_version` | `1` |
 | daemon `max_version` | `2` |
 
+Unknown fields are ignored by older peers, so an additive optional field does
+not need a version bump.
+
 ### Version 2 — the Live engine
 
 Version 2 adds the frames the `openai_live` engine needs: `task_cancel` from the
@@ -165,12 +168,12 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `transcript_delta` | `text` | Incremental transcript of the assistant's speech. |
 | `assistant_text_delta` | `text` | Incremental assistant text. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
-| `usage` | token/cost fields | Per-turn usage. Live adds `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
+| `usage` | token/cost fields | Per-turn usage. Live adds `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
 | `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
-| `call_ready` | `engine`, `call_id`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
+| `call_ready` | `engine`, `call_id`, `call_uuid?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
-| `task` | `delegation_id`, `revision`, `status`, `summary?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. |
+| `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. |
 
 ## Live call sequence
 
@@ -190,7 +193,7 @@ the voice in the audio, never from audio merely arriving.
 ```
 pet  -> daemon:  call_start
                  daemon opens the provider session and the backend bridge
-daemon -> pet:   call_ready { engine: "openai_live", call_id, provider_session_id?, expires_at?, captions }
+daemon -> pet:   call_ready { engine: "openai_live", call_id, call_uuid, provider_session_id?, expires_at?, captions }
 daemon -> pet:   state { state: "listening" }
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)

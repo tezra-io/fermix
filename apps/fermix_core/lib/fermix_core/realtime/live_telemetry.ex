@@ -81,9 +81,12 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   The call's correlation fields. `session_id` is the call id and is required;
   everything else is dropped from the metadata when absent rather than emitted
   as nil. `provider_session_id` is unknown until `session.started` arrives.
+  `call_uuid` is the key of the call's durable record: the call id is a counter
+  that restarts with the VM, so the UUID is what ties a trace to that record.
   """
   @type meta :: %{
           required(:session_id) => String.t(),
+          optional(:call_uuid) => String.t(),
           optional(:parent_session) => String.t(),
           optional(:device_id) => String.t(),
           optional(:model) => String.t(),
@@ -187,6 +190,7 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       agent: @agent,
       engine: @engine,
       session_id: Map.fetch!(meta, :session_id),
+      call_uuid: Map.get(meta, :call_uuid),
       parent_session: Map.get(meta, :parent_session),
       device_id: Map.get(meta, :device_id),
       model: Map.get(meta, :model),

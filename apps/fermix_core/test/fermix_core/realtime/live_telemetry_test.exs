@@ -3,8 +3,11 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
 
   alias FermixCore.Realtime.LiveTelemetry
 
+  @call_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+
   @meta %{
     session_id: "voice_live:7",
+    call_uuid: @call_uuid,
     device_id: "dev-1",
     model: "gpt-live-1",
     voice: "marin",
@@ -130,11 +133,26 @@ defmodule FermixCore.Realtime.LiveTelemetryTest do
     end
   end
 
+  # The call id is a counter that restarts with the VM; the UUID is the key of
+  # the call's durable record, so it is what ties a trace to that record.
+  test "every event carries the call UUID beside the call id" do
+    LiveTelemetry.call_start(@meta, 900_000)
+    LiveTelemetry.delegation_stop(@meta, @delegation, "completed", 10)
+    LiveTelemetry.call_stop(@meta, %{voice_seconds: 1}, :call_stop)
+
+    for event <- [:call_start, :delegation_stop, :call_stop] do
+      assert_receive {:vl, [:fermix, :voice_live, ^event], _measurements, meta}
+      assert meta.call_uuid == @call_uuid
+      assert meta.session_id == "voice_live:7"
+    end
+  end
+
   test "absent optional metadata is dropped, never emitted as nil" do
     LiveTelemetry.call_start(%{session_id: "voice_live:8"}, 60_000)
 
     assert_receive {:vl, [:fermix, :voice_live, :call_start], %{}, meta}
     refute Map.has_key?(meta, :provider_session_id)
+    refute Map.has_key?(meta, :call_uuid)
     refute Map.has_key?(meta, :device_id)
     refute Map.has_key?(meta, :parent_session)
     assert meta.session_id == "voice_live:8"

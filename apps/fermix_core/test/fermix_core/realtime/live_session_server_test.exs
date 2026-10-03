@@ -13,6 +13,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
   @live_title "# LIVE.md — Live Voice Companion"
   @closed_seconds 120.5
+  @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
   defmodule FakeLiveClient do
     @moduledoc """
@@ -359,6 +360,55 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       start_provider_session(session, expires_at: 99_999)
 
       assert :sys.get_state(session).max_duration_ms == 15 * 60_000
+    end
+  end
+
+  describe "call identity" do
+    test "one UUID names the call on call_ready, every task and every usage frame", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: uuid}}
+      assert uuid =~ @uuid_v4
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_1", status: "running", call_uuid: ^uuid}}
+
+      assert :ok = SessionControl.call_stop(session)
+
+      assert_receive {:realtime, %{type: "task", status: "cancelled", call_uuid: ^uuid}}
+      assert_receive {:realtime, %{type: "usage", accounting: "complete", call_uuid: ^uuid}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    test "each call mints its own UUID and keeps the counter as its trace session id", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      first_scope = "voice_live:identity_#{System.unique_integer([:positive, :monotonic])}"
+      second_scope = "voice_live:identity_#{System.unique_integer([:positive, :monotonic])}"
+      attach_call_start_handler([first_scope, second_scope])
+
+      first = start_session(clock: clock, session_scope: first_scope)
+      :ok = SessionControl.call_start(first)
+      assert_receive {:call_start, %{session_id: ^first_scope, call_uuid: first_uuid}}
+      :ok = SessionControl.call_stop(first)
+      assert_receive {:EXIT, ^first, {:shutdown, :call_stop}}
+
+      second = start_session(clock: clock, session_scope: second_scope)
+      :ok = SessionControl.call_start(second)
+      assert_receive {:call_start, %{session_id: ^second_scope, call_uuid: second_uuid}}
+
+      assert first_uuid =~ @uuid_v4
+      assert second_uuid =~ @uuid_v4
+      refute first_uuid == second_uuid
     end
   end
 
@@ -1304,6 +1354,24 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       [:fermix, :voice_live, :provider_error],
       fn _event, _measurements, metadata, _config ->
         if metadata.session_id == call_id, do: send(test_pid, {:provider_error, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok
+  end
+
+  # Pinned to these calls' ids, for the same reason as the handler above.
+  defp attach_call_start_handler(call_ids) do
+    handler_id = "live-session-call-start-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :voice_live, :call_start],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.session_id in call_ids, do: send(test_pid, {:call_start, metadata})
       end,
       nil
     )
