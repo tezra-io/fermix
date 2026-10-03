@@ -46,7 +46,14 @@ which no rule reads; nothing the spec models changed. The re-read after M56
 stage 6 found one more row that writer stands for, a call's own row when it
 ends, written by the task that made the call's gist or by the boot pass after
 a restart, and `PROTOCOL.md` describing it; again nothing the spec models
-changed.
+changed. The re-read after M56 stage 7 found two more rows that writer stands
+for, a GPT-Live task's running and done rows, written by `Voice.Detached`
+after the call has ended (a job's row can be written at any time), and a new
+clause of `Requests.cancel`: a version 2 `cancel` with `task_ref` names no
+request and never reaches the request store or `Turns`, and stops one voice
+task's own turn through its owner, a named stop `turn_queue` proves; a refused
+one is an `error` the client acts on no rule for. The request `cancel` the
+spec models is unchanged, so nothing it models changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -198,7 +205,7 @@ the checks that show a rule needs it):
   (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1035-1072`). `FALSE`
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
-  (`Requests.cancel`, `requests.ex:148-158`; `cancel_request`,
+  (`Requests.cancel`, `requests.ex:157-173`; `cancel_request`,
   `mobile_sql.ex:546-565`). `Turns` reads the mark and enqueues in one step
   (`hand_off`, `turns.ex:328-343`), and sends every stop of a turn it handed
   off itself, after the enqueue (`turns.ex:242-246`, `stop_in_queue`,
@@ -208,7 +215,7 @@ the checks that show a rule needs it):
   `Turns`; the cancel writes nothing.
 - `SettleAfterIngest`: once ingest returned, the request worker casts the
   request's settlement to `Turns` (`settle_after_ingest`,
-  `requests.ex:288-292`). `FALSE` is the code before: a message the gateway
+  `requests.ex:303-307`). `FALSE` is the code before: a message the gateway
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
@@ -218,7 +225,7 @@ the checks that show a rule needs it):
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
   that sent the request (`settle_inline`, `run_settle`, `turns.ex:361-396`;
-  `fail_attempt`, `report_failure`, `requests.ex:325-345`), through the
+  `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
   transport's `report_failure`, which the connection writes as a failed
   worker's error (`connection.ex:510-517`, `:159-160`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command

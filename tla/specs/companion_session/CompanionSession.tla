@@ -111,13 +111,18 @@
 (* conversation it hands off and, as one completes, its answer, a cast to  *)
 (* the call's session and one ConversationStore read whose exit is logged; *)
 (* no request, turn or wire state moves;                                   *)
+(* - a cancel naming a GPT-Live task that outlived its call by task_ref   *)
+(* (M56 4.6, protocol 2): it names no request, never reaches the store or  *)
+(* Turns, and stops that task's own turn through Voice.Detached, a named   *)
+(* stop as turn_queue proves it; that task's running and done rows are     *)
+(* call rows, which the job's row stands for, written after the call ends; *)
 (* - other conversations (the Queue keys all state by conversation).       *)
 (*                                                                         *)
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 5faf8e10505e
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 18aad614adcd
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ dd99cb050c33
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ f85236885710
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ e53c2a581752
@@ -174,7 +179,7 @@ CONSTANTS
     AcceptedDedupe,      \* a known client_msg_id is claimed as a duplicate
                          \* (claim_request_in_tx, classify_claim) and the request
                          \* coordinator starts no second attempt of a request running,
-                         \* completed or failed (acquire_and_run, requests.ex:216-232)
+                         \* completed or failed (acquire_and_run, requests.ex:231-247)
     SeqCursor,           \* the client keeps the last server_seq it shows, pulls
                          \* history_pull{after_seq: cursor} after server_hello, while a
                          \* page says more and on a gap, and applies a live row only at
@@ -207,17 +212,17 @@ CONSTANTS
                          \* queue.ex:185, stop_named_in :1035-1072); FALSE is the
                          \* conversation stop (stop_conversation_runtime :1020-1024)
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
-                         \* requests.ex:148-158; cancel_request, mobile_sql.ex:546-565);
+                         \* requests.ex:157-173; cancel_request, mobile_sql.ex:546-565);
                          \* Turns reads the mark and enqueues in one step (hand_off,
                          \* turns.ex:328-343) and sends every stop itself, after its
                          \* enqueue (turns.ex:242-246, stop_in_queue :449-460). FALSE is
                          \* the old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the cancel writes nothing (Requests.cancel,
-                         \* requests.ex:148-158; finish, fail, turns.ex:465-492)
+                         \* requests.ex:157-173; finish, fail, turns.ex:465-492)
     SettleAfterIngest,   \* once ingest returned, the request worker casts the request's
                          \* settlement to Turns (settle_after_ingest,
-                         \* requests.ex:288-292); FALSE is the code before: a message the
+                         \* requests.ex:303-307); FALSE is the code before: a message the
                          \* gateway answered without a turn stayed running, and the next
                          \* boot ran it again
     SettleUnlessHandedOff, \* Turns settles that request only if no turn was handed off
@@ -228,7 +233,7 @@ CONSTANTS
     FailsUnsettled,      \* a settlement that fails fails the request once for its attempt
                          \* and tells its client error{request_failed, client_msg_id}
                          \* (settle_inline, run_settle, turns.ex:361-396; fail_attempt,
-                         \* report_failure, requests.ex:325-345, through the
+                         \* report_failure, requests.ex:340-360, through the
                          \* transport's report_failure, which the Connection writes as
                          \* a failed worker's error, connection.ex:510-517,
                          \* :159-160); FALSE only logs
@@ -382,7 +387,7 @@ Fanout(ev) == FanoutTo(wire, ev)
 
 \* Timeline.history_page -> mobile_sql history (timeline.ex:83-90,
 \* mobile_sql.ex:370), then Requests.history's byte budget (fit_page, cut_page,
-\* requests.ex:124-136, :683-711): one Repo call reads the rows after a,
+\* requests.ex:127-139, :698-726): one Repo call reads the rows after a,
 \* oldest first, at most PageLimit of them, and the head. A page cut to fit
 \* keeps its oldest rows, at least one, and its next_after_seq names the last
 \* row it kept; more follow while next_after_seq is below history_head_seq.
@@ -475,24 +480,24 @@ Casts(m) ==
     \o (IF SettleAfterIngest THEN <<<<"settle", m>>>> ELSE <<>>)
 
 \* msg{client_msg_id} (Requests.request -> claim_and_run -> acquire_and_run
-\* -> run_started -> ingest_span, requests.ex:101-108, :195-280):
+\* -> run_started -> ingest_span, requests.ex:104-111, :210-295):
 \*  - claim_client_request claims the id durably (claim_request_in_tx,
 \*    mobile_sql.ex:963-972), and accepted{duplicate} goes to this client's
-\*    Connection (accepted_event, requests.ex:584-587) before anything runs;
+\*    Connection (accepted_event, requests.ex:599-602) before anything runs;
 \*  - the coordinator's acquire starts an attempt, or none for a request
 \*    running, completed or failed (request_coordinator.ex:125-132);
 \*  - an attempt appends the user's row (append_client_message, keyed by
 \*    client_msg_id: an existing row is returned, not written again), and a
 \*    row it created is announced to every connection (after_user_append ->
-\*    announce_user_row, requests.ex:403-407, connection.ex:522-523);
+\*    announce_user_row, requests.ex:418-422, connection.ex:522-523);
 \*  - Gateway.ingest calls Companion.Turns.handle_message, which casts the
 \*    hand-off into Turns' mailbox and returns (turns.ex:131-136). A slash
 \*    command the gateway answers inline hands nothing off;
 \*  - once ingest returned, the worker moves the coordinator's fence onto
-\*    Turns (handoff_settlement, requests.ex:306-323; not modelled) and casts
+\*    Turns (handoff_settlement, requests.ex:321-338; not modelled) and casts
 \*    the settlement to Turns, with how to complete the request, fail it and
 \*    tell its client (settle_after_ingest, settle_unless_handed_off,
-\*    requests.ex:288-302 -> Turns.settle_unless_handed_off, turns.ex:159-173).
+\*    requests.ex:303-317 -> Turns.settle_unless_handed_off, turns.ex:159-173).
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
@@ -510,7 +515,7 @@ OnMsg(c, m) ==
                    cancelEarly, refused, told>>
 
 \* cancel{client_msg_id} (dispatch, connection.ex:235-236 -> Requests.cancel,
-\* requests.ex:148-158), in the Connection's own step.
+\* requests.ex:157-173), in the Connection's own step.
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
 \*    settled, in one Repo call (cancel_request, mobile_sql.ex:546-565;
 \*    settled for one that has, not_found for one never claimed), then Turns
@@ -542,7 +547,7 @@ OnCancel(m) ==
 \* (sandbox.ex:521-538, Confirmations.take, confirmations.ex:21-26). Only a
 \* take that finds the token applies the answer and announces
 \* approval_resolved (notify_approval, sandbox.ex:317-325 ->
-\* approval_resolution_fn, requests.ex:501-506 -> Approvals.resolve,
+\* approval_resolution_fn, requests.ex:516-521 -> Approvals.resolve,
 \* approvals.ex:97-105, :136-143, which forgets the card first). Without
 \* SingleAnswer the token survives its first answer.
 OnAnswer(c) ==
@@ -742,10 +747,10 @@ Join(c) ==
 \*    with SettleUnlessHandedOff it runs only if Turns knows no hand-off of
 \*    the request; otherwise regardless. It completes the request
 \*    (settle_inline, run_settle, :361-396 -> Requests.settle_inline,
-\*    requests.ex:411-422). A completion that fails (SettlesCanFail) is,
+\*    requests.ex:426-437). A completion that fails (SettlesCanFail) is,
 \*    with FailsUnsettled, followed by one failure write for the attempt and
 \*    by error{request_failed, client_msg_id} to the Connection that ran the
-\*    request (Requests.fail_attempt, report_failure, requests.ex:325-345,
+\*    request (Requests.fail_attempt, report_failure, requests.ex:340-360,
 \*    through the transport's report_failure, request_failure_reporter,
 \*    connection.ex:510-517, which the Connection writes as a failed
 \*    worker's error, :159-160). That report is best effort
