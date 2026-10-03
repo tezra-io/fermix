@@ -452,9 +452,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp resolve_prompt(%{prompt: prompt}) when is_binary(prompt), do: {:ok, prompt}
 
   defp resolve_prompt(state) do
-    with {:ok, live_md} <- LivePrompt.load(state.agent_id) do
-      {:ok,
-       LivePrompt.compose(live_md, LivePrompt.eligible_capabilities(state.capability_registry))}
+    with {:ok, live_md} <- LivePrompt.load(state.agent_id),
+         {:ok, context} <- LivePrompt.context(state.agent_id) do
+      capabilities = LivePrompt.eligible_capabilities(state.capability_registry)
+      {:ok, LivePrompt.compose(live_md, capabilities, context)}
     end
   end
 

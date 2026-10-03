@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
@@ -247,6 +248,27 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       keys = payload |> Map.keys() |> Enum.map(&to_string/1)
       assert Enum.sort(keys) == ~w(audio delegation instructions model store)
+    end
+
+    # M56 §4.3 (D5): generated in code at the start of every call, after
+    # LIVE.md, so an owner's edit to LIVE.md can never shadow it.
+    test "the instructions name the assistant and the owner and carry today's date", %{
+      clock: clock
+    } do
+      saved = Map.new([:agent, :personalization], &{&1, Application.fetch_env(:fermix_core, &1)})
+      on_exit(fn -> Enum.each(saved, &restore_core_env/1) end)
+      Application.put_env(:fermix_core, :agent, name: "Nova")
+      Application.put_env(:fermix_core, :personalization, user_name: "Sujeeth")
+
+      session =
+        start_session(clock: clock, prompt: nil, capability_registry: start_capability_registry())
+
+      :ok = SessionControl.call_start(session)
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+
+      assert payload.instructions =~ "Your name is Nova."
+      assert payload.instructions =~ "## The owner\n\n- Name: Sujeeth"
+      assert payload.instructions =~ CurrentDate.note()
     end
 
     test "a v1-shaped realtime key never appears in any Live payload", %{clock: clock} do
@@ -1784,6 +1806,9 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         }}}
     )
   end
+
+  defp restore_core_env({key, {:ok, value}}), do: Application.put_env(:fermix_core, key, value)
+  defp restore_core_env({key, :error}), do: Application.delete_env(:fermix_core, key)
 
   defp restore_voice_bridge(nil), do: Application.delete_env(:fermix_core, :voice_bridge)
 

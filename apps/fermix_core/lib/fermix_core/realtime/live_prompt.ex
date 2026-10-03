@@ -10,6 +10,14 @@ defmodule FermixCore.Realtime.LivePrompt do
   along on Live-origin Core turns only; it never mutates the shared prompt
   that text conversations use.
 
+  Between the two halves of the frontend prompt sits what the voice model knows
+  about the owner when a call starts (M56 §4.3, D5): the assistant's name, the
+  owner's name, time zone and style, today's date, and `USER.md` and
+  `MEMORY.md` in the memory-context frame a turn gets. It is generated here,
+  never written into `LIVE.md`, because an owner's edit to that file would
+  shadow a template change (M43). `SOUL.md` is left out: `LIVE.md` is the
+  voice's own persona.
+
   Capability lines carry NAMES ONLY: no schemas, no descriptions, no JSON.
   The voice model does not dispatch tools under Live — Core does — so a schema
   here would be dead weight in every call and an invitation to hallucinate a
@@ -21,15 +29,36 @@ defmodule FermixCore.Realtime.LivePrompt do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapLoader
+  alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Prompt.IdentityName
+  alias FermixCore.Prompt.PromptComposer
   alias FermixCore.Prompt.RuntimeSections
   alias FermixCore.Prompt.VoicePresence
+
+  require Logger
 
   # The whole prompt must stay well under the API's 16_384-token instruction
   # ceiling, and the design targets roughly 500-800 tokens for LIVE.md itself.
   # A large plugin surface is the only part that grows without bound, so the
   # generated half is capped here and the excess categories drop whole.
   @capability_lines_max_bytes 3_200
+
+  # The bound on the whole instructions. The provider caps them at 16,384
+  # tokens and the engine has no tokenizer for its count, so the bound is in
+  # bytes at 4 bytes a token, taken at half: 32,768 bytes is 8,192 tokens of
+  # English, and the other half is the margin for text that tokenizes denser
+  # (another script, identifiers). The memory files are what give way, MEMORY.md
+  # first, then USER.md; LIVE.md and the presence text never do.
+  @instructions_max_bytes 32_768
+
+  @owner_heading "## The owner"
+  @owner_fields [
+    {:user_name, "Name"},
+    {:timezone, "Time zone"},
+    {:communication_style, "Communication style"}
+  ]
 
   @backend_heading "Backend tools:"
 
@@ -51,16 +80,76 @@ defmodule FermixCore.Realtime.LivePrompt do
   credentials, and do not instruct the voice model to promise unverified success.
   """
 
-  @doc """
-  The Live frontend instructions: `live_md`, the pet the owner talks to
-  (`VoicePresence`), and the backend tool categories available on this call.
+  @typedoc """
+  What a call starts knowing about the owner (`context/1`): the configured
+  assistant name (`nil` when unset), the personalization config as it stands,
+  the date note a turn carries, and the memory files as `PromptFiles` reads
+  them.
   """
-  @spec compose(String.t(), [Capability.t()]) :: String.t()
-  def compose(live_md, capabilities) when is_binary(live_md) and is_list(capabilities) do
-    String.trim_trailing(live_md) <>
-      "\n\n" <>
-      VoicePresence.text() <>
-      "\n\n" <> @backend_heading <> "\n" <> capability_lines(capabilities)
+  @type context :: %{
+          agent_id: String.t(),
+          assistant_name: String.t() | nil,
+          personalization: keyword(),
+          date_note: String.t(),
+          prompt_memory: PromptFiles.prompt_memory()
+        }
+
+  @doc """
+  The Live frontend instructions, in this order: `live_md`, the pet the owner
+  talks to (`VoicePresence`), the assistant's name, the owner's details that
+  are set, the date, the memory files in their memory-context frame, and the
+  backend tool categories available on this call.
+
+  Bounded by `instructions_max_bytes/0`: past it MEMORY.md is left out, then
+  USER.md, and the omission is logged. Nothing else is cut, so a `live_md`
+  that alone passes the bound is sent whole.
+  """
+  @spec compose(String.t(), [Capability.t()], context()) :: String.t()
+  def compose(live_md, capabilities, %{prompt_memory: %{}} = context)
+      when is_binary(live_md) and is_list(capabilities) do
+    leading =
+      Enum.reject(
+        [
+          String.trim_trailing(live_md),
+          VoicePresence.text(),
+          name_line(context.assistant_name),
+          owner_block(context.personalization),
+          context.date_note
+        ],
+        &is_nil/1
+      )
+
+    tools = @backend_heading <> "\n" <> capability_lines(capabilities)
+
+    fits? = fn memory ->
+      byte_size(join(leading ++ [memory, tools])) <= @instructions_max_bytes
+    end
+
+    join(leading ++ [memory_block(context, fits?), tools])
+  end
+
+  @doc "The byte bound on the whole Live instructions (4 bytes a token, half the provider's ceiling)."
+  @spec instructions_max_bytes() :: pos_integer()
+  def instructions_max_bytes, do: @instructions_max_bytes
+
+  @doc """
+  What a call is told about the owner, read as it starts: the configured name
+  (`IdentityName.configured_name/0`), `[fermix_core.personalization]`, today's
+  date note (`CurrentDate.note/0`) and `USER.md` and `MEMORY.md` for
+  `agent_id`.
+  """
+  @spec context(String.t()) :: {:ok, context()} | {:error, term()}
+  def context(agent_id) when is_binary(agent_id) do
+    with {:ok, prompt_memory} <- PromptFiles.load(agent_id) do
+      {:ok,
+       %{
+         agent_id: agent_id,
+         assistant_name: IdentityName.configured_name(),
+         personalization: Application.get_env(:fermix_core, :personalization, []),
+         date_note: CurrentDate.note(),
+         prompt_memory: prompt_memory
+       }}
+    end
   end
 
   @doc """
@@ -147,6 +236,54 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   defp separator_bytes([]), do: 0
   defp separator_bytes(_kept), do: 1
+
+  # `LIVE.md`'s template still says "You are Fermix"; this line, read after it,
+  # is what a renamed assistant answers to.
+  defp name_line(nil), do: nil
+
+  defp name_line(name) when is_binary(name),
+    do: "Your name is #{name}. It is the name you answer to and the one you give for yourself."
+
+  defp owner_block(personalization) when is_list(personalization) do
+    case Enum.flat_map(@owner_fields, &owner_line(personalization, &1)) do
+      [] -> nil
+      lines -> @owner_heading <> "\n\n" <> Enum.join(lines, "\n")
+    end
+  end
+
+  defp owner_line(personalization, {key, label}) do
+    case Keyword.get(personalization, key) do
+      value when is_binary(value) -> set_line(label, String.trim(value))
+      _unset -> []
+    end
+  end
+
+  defp set_line(_label, ""), do: []
+  defp set_line(label, value), do: ["- #{label}: #{value}"]
+
+  # Both files when they fit, USER.md alone when it does, else neither. Each
+  # candidate is framed only when the one before it did not fit.
+  defp memory_block(%{prompt_memory: %{user: nil, memory: nil}}, _fits?), do: nil
+
+  defp memory_block(%{agent_id: agent_id, prompt_memory: memory_files}, fits?) do
+    both = PromptComposer.memory_frame(agent_id, memory_files)
+
+    if fits?.(both), do: both, else: user_only(agent_id, memory_files.user, fits?)
+  end
+
+  defp user_only(agent_id, user, fits?) do
+    frame = PromptComposer.memory_frame(agent_id, %{user: user, memory: nil})
+
+    if frame != nil and fits?.(frame) do
+      Logger.warning("voice_live: MEMORY.md was left out of the call's instructions (bound)")
+      frame
+    else
+      Logger.warning("voice_live: USER.md and MEMORY.md were left out of the call's instructions")
+      nil
+    end
+  end
+
+  defp join(parts), do: parts |> Enum.reject(&is_nil/1) |> Enum.join("\n\n")
 
   defp category_index(category) do
     case Enum.find_index(RuntimeSections.category_order(), &(&1 == category)) do

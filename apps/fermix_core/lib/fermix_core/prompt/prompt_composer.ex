@@ -116,6 +116,27 @@ defmodule FermixCore.Prompt.PromptComposer do
     end
   end
 
+  @doc """
+  `USER.md` and `MEMORY.md` in the `<memory-context>` frame a turn's prompt
+  carries them in, or `nil` when neither is given.
+
+  The frame has this one owner: a Live call's instructions carry the memory
+  files in it too (M56 §4.3), so recalled memory reaches the voice model framed
+  as data exactly as it reaches a turn, injection-scanned the same way.
+  """
+  @spec memory_frame(String.t(), PromptFiles.prompt_memory()) :: String.t() | nil
+  def memory_frame(agent_id, %{user: user, memory: memory}) when is_binary(agent_id) do
+    parts =
+      [
+        memory_part(:user, PromptFiles.user_path(agent_id), user),
+        memory_part(:memory, PromptFiles.memory_path(agent_id), memory)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> scan_parts()
+
+    if parts == [], do: nil, else: memory_context(parts)
+  end
+
   defp build_base_parts(agent_id, bootstrap, prompt_memory) do
     [
       bootstrap_part(:identity, :bootstrap, bootstrap.identity),

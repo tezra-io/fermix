@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.Prompt.BootstrapPaths
+  alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Prompt.Defaults
   alias FermixCore.Prompt.VoicePresence
   alias FermixCore.Realtime.LivePrompt
@@ -28,11 +29,20 @@ defmodule FermixCore.Realtime.LivePromptTest do
     %{agent_id: "main", bootstrap_dir: bootstrap_dir}
   end
 
+  # What a call is told about the owner when nothing is known: the date only.
+  @bare %{
+    agent_id: "main",
+    assistant_name: nil,
+    personalization: [],
+    date_note: "Current date: Friday, 2026-10-02 (UTC).",
+    prompt_memory: %{user: nil, memory: nil}
+  }
+
   describe "compose/2" do
     # The owner talks to the pet on their Mac, and the model denied being it
     # when the prompt never said so (owner, 2026-09-29).
     test "tells the voice model the pet on the owner's Mac is itself" do
-      prompt = LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)])
+      prompt = LivePrompt.compose(Defaults.live_md(), [capability("web_search", :web)], @bare)
 
       assert prompt =~ "That pet is you"
       assert prompt =~ "never deny it"
@@ -40,11 +50,15 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
     test "renders LIVE.md, the backend tools heading, and one line per category" do
       prompt =
-        LivePrompt.compose(Defaults.live_md(), [
-          capability("read_file", :file),
-          capability("write_file", :file),
-          capability("web_search", :web)
-        ])
+        LivePrompt.compose(
+          Defaults.live_md(),
+          [
+            capability("read_file", :file),
+            capability("write_file", :file),
+            capability("web_search", :web)
+          ],
+          @bare
+        )
 
       assert prompt =~ @title
       assert prompt =~ "\n\nBackend tools:\n"
@@ -54,11 +68,15 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
     test "carries no schemas, no realtime wire vocabulary, no screen share, and no JSON" do
       prompt =
-        LivePrompt.compose(Defaults.live_md(), [
-          capability("read_file", :file),
-          capability("computer_use", :computer),
-          capability("screen_share", :computer)
-        ])
+        LivePrompt.compose(
+          Defaults.live_md(),
+          [
+            capability("read_file", :file),
+            capability("computer_use", :computer),
+            capability("screen_share", :computer)
+          ],
+          @bare
+        )
 
       refute prompt =~ "parameters"
       refute prompt =~ "server_vad"
@@ -69,17 +87,182 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
     test "orders categories the way the built-in capability catalog does" do
       prompt =
-        LivePrompt.compose(@title, [
-          capability("recall", :memory),
-          capability("web_search", :web),
-          capability("read_file", :file)
-        ])
+        LivePrompt.compose(
+          @title,
+          [
+            capability("recall", :memory),
+            capability("web_search", :web),
+            capability("read_file", :file)
+          ],
+          @bare
+        )
 
       assert prompt ==
                @title <>
                  "\n\n" <>
                  VoicePresence.text() <>
+                 "\n\n" <>
+                 @bare.date_note <>
                  "\n\nBackend tools:\n- File & Code: read_file\n- Web: web_search\n- Memory: recall"
+    end
+
+    # M56 §4.3 (D5): who the owner is, what day it is and the memory files,
+    # generated after LIVE.md and the presence text and before the tools, in
+    # this order. SOUL.md is not among them: LIVE.md is the voice's persona.
+    test "names the assistant, the owner, the date and the memory, in that order" do
+      context = %{
+        @bare
+        | assistant_name: "Nova",
+          personalization: [
+            user_name: "Sujeeth",
+            timezone: "Europe/London",
+            communication_style: "Balanced"
+          ],
+          prompt_memory: %{user: "- Likes short answers", memory: "- Car is a Model 3"}
+      }
+
+      prompt = LivePrompt.compose(@title, [capability("web_search", :web)], context)
+
+      sections = [
+        @title,
+        VoicePresence.text(),
+        "Your name is Nova.",
+        "## The owner\n\n- Name: Sujeeth\n- Time zone: Europe/London\n" <>
+          "- Communication style: Balanced",
+        @bare.date_note,
+        "<memory-context>",
+        "- Likes short answers",
+        "- Car is a Model 3",
+        "</memory-context>",
+        "Backend tools:"
+      ]
+
+      positions = Enum.map(sections, &position(prompt, &1))
+      assert positions == Enum.sort(positions)
+      assert prompt =~ "NOT new user input"
+    end
+
+    test "the owner block holds only the fields that are set" do
+      context = %{@bare | personalization: [user_name: "Sujeeth", timezone: "  ", other: "x"]}
+
+      prompt = LivePrompt.compose(@title, [], context)
+
+      assert prompt =~ "## The owner\n\n- Name: Sujeeth\n\n"
+      refute prompt =~ "Time zone:"
+      refute prompt =~ "Communication style:"
+      refute prompt =~ ": x"
+    end
+
+    test "with nothing set there is no name line, no owner block and no memory frame" do
+      prompt = LivePrompt.compose(@title, [], @bare)
+
+      refute prompt =~ "Your name is"
+      refute prompt =~ "## The owner"
+      refute prompt =~ "<memory-context>"
+    end
+
+    # The engine has no tokenizer for the provider's 16,384 token ceiling, so
+    # the instructions are bounded in bytes, counted at 4 bytes a token.
+    test "past the byte bound MEMORY.md is left out first, then USER.md", %{} do
+      max = LivePrompt.instructions_max_bytes()
+      assert max <= 16_384 * 4
+
+      user = "- " <> String.duplicate("u", 1_000)
+      memory = "- " <> String.duplicate("m", 6_000)
+      context = %{@bare | prompt_memory: %{user: user, memory: memory}}
+      base = byte_size(LivePrompt.compose(@title, [], @bare))
+
+      # Everything fits: both files.
+      fits = LivePrompt.compose(@title, [], context)
+      assert fits =~ user and fits =~ memory
+
+      # Room for USER.md but not for MEMORY.md as well.
+      padded = @title <> "\n" <> String.duplicate("p", max - base - 4_000)
+      user_only = LivePrompt.compose(padded, [], context)
+      assert user_only =~ user
+      refute user_only =~ memory
+      assert byte_size(user_only) <= max
+
+      # Room for neither: the frame goes, LIVE.md and the presence text stay.
+      tight = @title <> "\n" <> String.duplicate("p", max - base - 200)
+      neither = LivePrompt.compose(tight, [], context)
+      refute neither =~ "<memory-context>"
+      assert neither =~ tight
+      assert neither =~ VoicePresence.text()
+      assert byte_size(neither) <= max
+    end
+
+    test "LIVE.md and the presence text are never cut, however long" do
+      huge = @title <> "\n" <> String.duplicate("p", LivePrompt.instructions_max_bytes())
+
+      prompt = LivePrompt.compose(huge, [], %{@bare | prompt_memory: %{user: "- u", memory: nil}})
+
+      assert prompt =~ huge
+      assert prompt =~ VoicePresence.text()
+      refute prompt =~ "<memory-context>"
+    end
+  end
+
+  describe "context/1" do
+    setup do
+      memory_dir =
+        FermixTestSupport.SafeRm.make_tmp_dir!(
+          "live-prompt-memory-#{System.unique_integer([:positive, :monotonic])}"
+        )
+
+      saved =
+        Map.new(
+          [:agent, :personalization, :memory],
+          &{&1, Application.fetch_env(:fermix_core, &1)}
+        )
+
+      previous_memory = Application.get_env(:fermix_core, :memory, [])
+
+      Application.put_env(
+        :fermix_core,
+        :memory,
+        Keyword.merge(previous_memory, prompt_base_dir: memory_dir, agent_id: "main")
+      )
+
+      on_exit(fn ->
+        Enum.each(saved, &restore_env/1)
+        FermixTestSupport.SafeRm.rm_rf!(memory_dir)
+      end)
+
+      %{memory_dir: memory_dir}
+    end
+
+    test "reads the assistant's name, the owner, today's date and both memory files", %{
+      agent_id: agent_id,
+      memory_dir: memory_dir
+    } do
+      Application.put_env(:fermix_core, :agent, name: "Nova")
+      Application.put_env(:fermix_core, :personalization, user_name: "Sujeeth", timezone: "UTC")
+      File.mkdir_p!(Path.join(memory_dir, agent_id))
+      File.write!(Path.join([memory_dir, agent_id, "USER.md"]), "- Likes short answers\n")
+      File.write!(Path.join([memory_dir, agent_id, "MEMORY.md"]), "- Car is a Model 3\n")
+
+      assert {:ok, context} = LivePrompt.context(agent_id)
+
+      assert context.agent_id == agent_id
+      assert context.assistant_name == "Nova"
+      assert context.personalization == [user_name: "Sujeeth", timezone: "UTC"]
+      assert context.date_note == CurrentDate.note()
+
+      assert context.prompt_memory == %{
+               user: "- Likes short answers",
+               memory: "- Car is a Model 3"
+             }
+    end
+
+    test "a home with no name and no memory files gives none", %{agent_id: agent_id} do
+      Application.delete_env(:fermix_core, :agent)
+      Application.delete_env(:fermix_core, :personalization)
+
+      assert {:ok, %{assistant_name: nil, personalization: [], prompt_memory: memory}} =
+               LivePrompt.context(agent_id)
+
+      assert memory == %{user: nil, memory: nil}
     end
   end
 
@@ -109,7 +292,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
 
       # The cap is what keeps the whole prompt under the API's instruction
       # ceiling no matter how large the capability surface grows.
-      assert byte_size(LivePrompt.compose(Defaults.live_md(), capabilities)) < 12_000
+      assert byte_size(LivePrompt.compose(Defaults.live_md(), capabilities, @bare)) < 12_000
     end
 
     test "labels an unknown category the way the runtime catalog does" do
@@ -190,6 +373,16 @@ defmodule FermixCore.Realtime.LivePromptTest do
       metadata: %{category: category, when_to_use: "Never, this is a fixture."}
     })
   end
+
+  defp position(text, part) do
+    case :binary.match(text, part) do
+      {index, _length} -> index
+      :nomatch -> flunk("missing from the prompt: #{inspect(part)}")
+    end
+  end
+
+  defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_core, key, value)
+  defp restore_env({key, :error}), do: Application.delete_env(:fermix_core, key)
 
   defp numbered(prefix, index) do
     "#{prefix}_#{String.pad_leading(Integer.to_string(index), 3, "0")}"

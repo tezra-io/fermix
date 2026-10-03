@@ -105,7 +105,14 @@ defmodule FermixCore.Prompt.IdentityName do
     end
   end
 
-  defp configured_name do
+  @doc """
+  The configured assistant name, trimmed, or `nil` when it is unset or blank.
+
+  The one reader of `[fermix_core.agent].name` as a name to use: this
+  reconcile and the name line a Live call's instructions carry (M56 §4.3).
+  """
+  @spec configured_name() :: String.t() | nil
+  def configured_name do
     :fermix_core
     |> Application.get_env(:agent, [])
     |> Keyword.get(:name)
