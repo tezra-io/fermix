@@ -497,6 +497,7 @@ defmodule FermixChannels.Voice.Bridge do
         voice_call: %{
           call_id: call_id,
           call_uuid: handle.call_uuid,
+          conversation: handle.conversation,
           conversation_key: handle.conversation_key,
           delegation_id: request.delegation_id,
           revision: request.revision,

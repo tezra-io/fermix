@@ -25,7 +25,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Harness.ContinuationDispatcher
   alias FermixChannels.Voice.Bridge
   alias FermixChannels.Voice.CallRowSweep
   alias FermixChannels.Voice.Detached
@@ -33,6 +35,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Harness.Continuation
+  alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRegistry
@@ -63,6 +67,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   defmodule E2ETimeline do
     @opts [repo: :voice_e2e_timeline_repo]
 
+    def append(p, a, o), do: Timeline.append(p, a, o ++ @opts)
     def append_proactive(p, key, a, o), do: Timeline.append_proactive(p, key, a, o ++ @opts)
     def history_page(p, o), do: Timeline.history_page(p, o ++ @opts)
   end
@@ -131,6 +136,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
       end
     end
 
+    @doc "The queue this test bound the bridge to."
+    def queue, do: Agent.get(@name, & &1.queue)
+
     @impl true
     def conversation_window(bounds), do: Bridge.conversation_window(bounds)
 
@@ -160,6 +168,17 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     @impl true
     def close_call(handle), do: Bridge.close_call(handle)
+  end
+
+  # The REAL harness continuation dispatcher, pointed at this test's queue the
+  # way `QueueBoundBridge` points the bridge at it: a run's outcome re-enters
+  # its conversation through the shipped gateway path.
+  defmodule QueueBoundDispatcher do
+    @behaviour FermixCore.Harness.ContinuationDispatcher
+
+    @impl true
+    def dispatch(notice),
+      do: ContinuationDispatcher.dispatch(notice, agent_server: QueueBoundBridge.queue())
   end
 
   # The provider a call's gist is made on, bound into the gist's route: no
@@ -725,6 +744,76 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
       assert done["metadata"]["call"]["state"] == "failed"
       assert record_task(call_uuid) == {"failed", "daemon_restarted"}
       assert done_rows(call_uuid) == 1
+    end
+  end
+
+  # M56 §4.7: a coding run a call in the chat launches is a chat-origin run of
+  # the chat, since the hand-off that launched it ran in the chat's own
+  # conversation. Long after the call it ends: its outcome re-enters the chat
+  # as a companion turn (the harness continuation), is answered there and lands
+  # as a row of the chat. No delegation answers it and no voice route is
+  # needed, which is what kept coding runs off a call before.
+  describe "a coding run a call in the chat launches" do
+    setup :start_timeline
+
+    test "reports back into the chat after the call, answered as a chat turn" do
+      Process.flag(:trap_exit, true)
+      start_supervised!(Turns)
+      session = start_session()
+
+      :ok = SessionControl.call_start(session)
+      open_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_id: call_id}}
+      speak(session, @spoken, 1_000, 4_000)
+      delegate(session, "dg_1", 4_200)
+      assert_receive {:turn_started, hand_off, turn_pid}, 5_000
+
+      # The snapshot the run tool freezes at launch, from the hand-off's key.
+      assert {:ok, snapshot} =
+               HarnessDelivery.resolve_snapshot(%{
+                 conversation_key: ConversationKey.from(hand_off)
+               })
+
+      assert %{origin_kind: "chat", platform: "companion", destination: "main"} = snapshot
+
+      send(turn_pid, {:proceed, "Started a coding run on it."})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}},
+                     5_000
+
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 5_000
+      assert Registry.lookup(Voice.registry(), call_id) == []
+
+      run =
+        Map.merge(snapshot, %{
+          id: "hr_voice1",
+          vendor: "codex",
+          status: "completed",
+          cwd: "/repo",
+          continuation_depth: 0
+        })
+
+      assert Continuation.continuable?(run)
+      assert :ok = Continuation.dispatch(QueueBoundDispatcher, run, "The flaky test is fixed.")
+
+      assert_receive {:turn_started, notice, notice_pid}, 5_000
+      assert notice.channel == "companion"
+      assert notice.source_trust == :operator
+      assert ConversationKey.from(notice) == Companion.chat_conversation_key()
+      assert VoiceCall.from_message(notice) == :none
+      assert notice.content =~ "[coding run hr_voice1 finished]"
+      assert notice.metadata.harness_continuation == true
+
+      send(notice_pid, {:proceed, "The flaky test is fixed, and the suite passes."})
+
+      assert_receive {:companion_event,
+                      %{
+                        "t" => "row",
+                        "role" => "assistant",
+                        "text" => "The flaky test is fixed, and the suite passes."
+                      }},
+                     5_000
     end
   end
 

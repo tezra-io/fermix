@@ -2050,6 +2050,7 @@ defmodule FermixCore.Agents.MainAgentTest do
     %{
       call_id: call_id,
       call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+      conversation: "private",
       conversation_key: {"voice", call_id, :root},
       delegation_id: "d-1",
       revision: 1,

@@ -86,7 +86,9 @@ defmodule FermixCore.Tools.SendToChannelTest do
     assert capability.policy_class == :read_write
     assert capability.metadata.category == :delivery
 
-    refute :delivery in VoiceCall.excluded_categories()
+    for conversation <- ["chat", "private"] do
+      refute :delivery in VoiceCall.excluded_categories(conversation)
+    end
   end
 
   test "is no guest's, by surface or by name" do

@@ -22,6 +22,7 @@ defmodule FermixCore.Agents.ConversationKeyTest do
           voice_call: %{
             call_id: "voice_live_1",
             call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+            conversation: "chat",
             conversation_key: @chat_key,
             delegation_id: "d-1",
             revision: 1,

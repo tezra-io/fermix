@@ -286,6 +286,8 @@ defmodule FermixChannels.Voice.BridgeTest do
       assert voice_call.persist? == false
       # A private call shows nothing in the chat, so its addendum is today's.
       assert voice_call.prompt_addendum == LivePrompt.backend_addendum("private")
+      # The mode the turn's capability boundary is read for (M56 §4.7).
+      assert voice_call.conversation == "private"
       assert ConversationKey.from(msg) == {"voice", handle.call_uuid, :root}
       assert conversation_key == ConversationKey.from(msg)
 
@@ -309,6 +311,7 @@ defmodule FermixChannels.Voice.BridgeTest do
       assert msg.metadata.voice_call.conversation_store == ConversationStore
       # The reply may part into a line said and a result shown (M56 §4.5).
       assert msg.metadata.voice_call.prompt_addendum == LivePrompt.backend_addendum("chat")
+      assert msg.metadata.voice_call.conversation == "chat"
       assert ConversationKey.from(msg) == Companion.chat_conversation_key()
       assert task_key == Companion.chat_conversation_key()
 

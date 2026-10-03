@@ -387,34 +387,50 @@ defmodule FermixCore.Realtime.LivePromptTest do
     end
   end
 
-  describe "eligible_capabilities/1" do
-    test "keeps operator tools and drops channel, media, delegation and harness" do
-      registry = :"live_prompt_capabilities_#{System.unique_integer([:positive, :monotonic])}"
-      start_supervised!({CapabilityRegistry, [name: registry]})
+  describe "eligible_capabilities/2" do
+    # M56 §4.7: a call in the chat launches a coding run in the chat's own
+    # conversation, so its outcome re-enters the chat and is answered there.
+    test "a call in the chat keeps operator tools, sends and coding runs" do
+      registry = eligible_registry()
 
-      for {name, category} <- [
-            {"read_file", :file},
-            {"send_message", :channel},
-            {"generate_image", :media},
-            {"subagents", :delegation},
-            # A coding run launched by a call outlives it, and its completion
-            # notice re-enters on the voice channel with no delegation left to
-            # answer — so the voice model must never be offered one (M41 §5.1).
-            {"codex_run", :harness}
-          ] do
-        :ok = CapabilityRegistry.register(registry, capability(name, category))
-      end
+      assert names(registry, "chat") == ["codex_run", "read_file", "send_to_channel"]
+    end
 
-      names = registry |> LivePrompt.eligible_capabilities() |> Enum.map(& &1.name)
+    # A private call's conversation ends with the call, and a run launched
+    # there would report back into a conversation nobody reads (M41 §5.1).
+    test "a private call drops coding runs too, and keeps sends" do
+      registry = eligible_registry()
 
-      assert names == ["read_file"]
+      assert names(registry, "private") == ["read_file", "send_to_channel"]
+    end
+
+    test "the voice model is told the categories its call keeps, delivery among them" do
+      registry = eligible_registry()
+      chat = registry |> LivePrompt.eligible_capabilities("chat") |> LivePrompt.capability_lines()
+
+      assert chat ==
+               "- File & Code: read_file\n- Coding Harness: codex_run\n" <>
+                 "- Delivery: send_to_channel"
+
+      private =
+        registry |> LivePrompt.eligible_capabilities("private") |> LivePrompt.capability_lines()
+
+      assert private == "- File & Code: read_file\n- Delivery: send_to_channel"
     end
 
     test "the exclusion list is the shared one the delegation turn also reads" do
-      # One list, two surfaces (`TurnRunner` builds the delegation's profile
-      # from it): a disagreement between them would advertise a capability the
-      # delegation would not be given, and nothing would report it.
-      assert VoiceCall.excluded_categories() == [:channel, :media, :delegation, :harness]
+      # One list per mode, two surfaces (`TurnRunner` builds the delegation's
+      # profile from it): a disagreement between them would advertise a
+      # capability the delegation would not be given, and nothing would report
+      # it.
+      assert VoiceCall.excluded_categories("chat") == [:channel, :media, :delegation]
+
+      assert VoiceCall.excluded_categories("private") == [
+               :channel,
+               :media,
+               :delegation,
+               :harness
+             ]
     end
   end
 
@@ -447,6 +463,29 @@ defmodule FermixCore.Realtime.LivePromptTest do
       policy_class: :read_only,
       metadata: %{category: category, when_to_use: "Never, this is a fixture."}
     })
+  end
+
+  # One capability per category a voice call may or may not keep.
+  defp eligible_registry do
+    registry = :"live_prompt_capabilities_#{System.unique_integer([:positive, :monotonic])}"
+    start_supervised!({CapabilityRegistry, [name: registry]})
+
+    for {name, category} <- [
+          {"read_file", :file},
+          {"send_message", :channel},
+          {"generate_image", :media},
+          {"subagents", :delegation},
+          {"codex_run", :harness},
+          {"send_to_channel", :delivery}
+        ] do
+      :ok = CapabilityRegistry.register(registry, capability(name, category))
+    end
+
+    registry
+  end
+
+  defp names(registry, conversation) do
+    registry |> LivePrompt.eligible_capabilities(conversation) |> Enum.map(& &1.name)
   end
 
   defp position(text, part) do

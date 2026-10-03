@@ -227,22 +227,25 @@ defmodule FermixCore.Realtime.LivePrompt do
     do: join([String.trim(@addendum_task), String.trim(@addendum_private_reply)])
 
   @doc """
-  The capabilities a Live call may name to the voice model: operator trust,
-  minus `FermixCore.Agents.VoiceCall.excluded_categories/0` — the categories a
-  voice session cannot honestly use.
+  The capabilities a Live call in `conversation` (`"chat"` or `"private"`)
+  may name to the voice model: operator trust, minus
+  `FermixCore.Agents.VoiceCall.excluded_categories/1` for that mode — the
+  categories a voice session cannot honestly use.
 
   That list is shared with `TurnRunner`, which builds the delegation turn's
   profile from it, so what the voice model is told about and what its delegation
-  is actually given cannot drift apart. It is a superset of the Realtime
-  engine's boundary (`SessionServer.default_capabilities/1`): Live additionally
-  drops `:harness`, because a coding run launched by a call outlives it and its
-  completion has no delegation left to answer.
+  is actually given cannot drift apart. A call in the chat keeps the Realtime
+  engine's boundary (`SessionServer.default_capabilities/1`), coding runs
+  included: a run it launches reports back into the chat (M56 §4.7). A private
+  call additionally drops `:harness`, because its conversation ends with it
+  and a run's completion would have nothing left to answer it.
   """
-  @spec eligible_capabilities(GenServer.server()) :: [Capability.t()]
-  def eligible_capabilities(registry) when is_atom(registry) or is_pid(registry) do
+  @spec eligible_capabilities(GenServer.server(), String.t()) :: [Capability.t()]
+  def eligible_capabilities(registry, conversation)
+      when (is_atom(registry) or is_pid(registry)) and conversation in ["chat", "private"] do
     CapabilityRegistry.list_for(registry,
       trust: :operator,
-      excluded_categories: VoiceCall.excluded_categories()
+      excluded_categories: VoiceCall.excluded_categories(conversation)
     )
   end
 

@@ -11,12 +11,14 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
+  alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Temporal.Access
+  alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.SendAttachment
   alias FermixTestSupport.ComputerHistoryCanary
 
@@ -996,6 +998,59 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         })
 
       assert context.voice_call_id == "voice_live_42"
+    end
+
+    # M56 §4.7: why a hand-off in the chat may launch a coding run. Its tools run
+    # with the chat's conversation key, so the run's delivery snapshot is the
+    # chat's and its outcome re-enters the chat as a companion turn, with no
+    # delegation to answer; the run's origin session is the hand-off's turn,
+    # which nests under the call.
+    test "a hand-off in the chat gives a coding run the chat to report back into" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-chat-hand-off", %{
+          channel: "voice",
+          metadata: %{
+            source: :voice,
+            user_id: "voice",
+            voice_call: %{
+              voice_call()
+              | conversation: "chat",
+                conversation_key: {"companion", "main", :root}
+            }
+          }
+        })
+
+      assert context.conversation_key == {"companion", "main", :root}
+      assert context.session_id == "voice_delegation_7"
+      assert context.parent_session == "voice_live_42"
+      assert HarnessSupport.harness_deliverable?(context)
+
+      assert {:ok,
+              %{
+                origin_kind: "chat",
+                delivery_mode: "origin",
+                platform: "companion",
+                destination: "main",
+                thread: nil,
+                client_origin: nil
+              }} = HarnessDelivery.resolve_snapshot(context)
+    end
+
+    # The reason a private call still may not: its conversation is the call's
+    # own, on the voice channel, and ends with the call.
+    test "a private call's hand-off would give a coding run only the call to report into" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-private-hand-off", %{
+          channel: "voice",
+          metadata: %{source: :voice, user_id: "voice", voice_call: voice_call()}
+        })
+
+      assert {:ok, %{platform: "voice", destination: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"}} =
+               HarnessDelivery.resolve_snapshot(context)
     end
 
     test "voice_call_id is nil on a chat turn carrying a forged voice_call" do
@@ -2502,17 +2557,33 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute_received {:delivered, _part}
     end
 
-    test "the delegation is built without the categories a call cannot deliver" do
+    test "a private call's delegation is built without the categories it cannot deliver" do
       registry = boundary_registry()
       categories = boundary_categories(voice_msg("what is on my calendar"), registry)
 
-      for excluded <- VoiceCall.excluded_categories() do
+      for excluded <- VoiceCall.excluded_categories("private") do
         refute excluded in categories,
-               "a voice delegation must not advertise a #{excluded} capability"
+               "a private call's delegation must not advertise a #{excluded} capability"
       end
 
       # The boundary excludes categories, not the whole surface.
       assert :system in categories
+    end
+
+    # M56 §4.7: a hand-off in the chat launches a coding run in the chat's own
+    # conversation, so the run's outcome re-enters the chat and is answered
+    # there; channel sends, media and fan-out stay out.
+    test "a hand-off in the chat is built with coding runs, and without the rest" do
+      registry = boundary_registry()
+      categories = boundary_categories(chat_hand_off("fix the flaky test"), registry)
+
+      assert :harness in categories
+      assert :system in categories
+
+      for excluded <- VoiceCall.excluded_categories("chat") do
+        refute excluded in categories,
+               "a hand-off in the chat must not advertise a #{excluded} capability"
+      end
     end
 
     test "a text turn on the same registry still carries every category" do
@@ -2529,26 +2600,30 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       categories = boundary_categories(msg, registry)
 
-      for category <- [:system | VoiceCall.excluded_categories()] do
+      for category <- [:system | VoiceCall.excluded_categories("private")] do
         assert category in categories, "a text turn must still advertise #{category}"
       end
     end
 
-    test "the voice prompt and the delegation read one exclusion list" do
+    test "the voice prompt and the delegation read one exclusion list, per mode" do
       # The M28 lesson, pinned: what the voice model is told about and what its
       # delegation is given come from the same list, so they cannot drift.
       registry = boundary_registry()
 
-      advertised =
-        registry
-        |> LivePrompt.eligible_capabilities()
-        |> Enum.map(& &1.metadata[:category])
-        |> Enum.uniq()
+      for {conversation, msg} <- [
+            {"private", voice_msg("what is on my calendar")},
+            {"chat", chat_hand_off("what is on my calendar")}
+          ] do
+        advertised =
+          registry
+          |> LivePrompt.eligible_capabilities(conversation)
+          |> Enum.map(& &1.metadata[:category])
+          |> Enum.uniq()
 
-      delegated = boundary_categories(voice_msg("what is on my calendar"), registry)
+        delegated = boundary_categories(msg, registry)
 
-      assert Enum.sort(advertised) == Enum.sort(delegated)
-      assert VoiceCall.excluded_categories() == [:channel, :media, :delegation, :harness]
+        assert Enum.sort(advertised) == Enum.sort(delegated)
+      end
     end
 
     test "commit skips memory review when the snapshot disables it" do
@@ -2647,7 +2722,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     name = :"tr_boundary_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name}, id: name)
 
-    for category <- [:system | VoiceCall.excluded_categories()] do
+    for category <- [:system | VoiceCall.excluded_categories("private")] do
       :ok = CapabilityRegistry.register(name, boundary_capability(category))
     end
 
@@ -2761,7 +2836,10 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   defp forged_voice_call, do: %{source: :telegram, voice_call: voice_call()}
 
   defp chat_hand_off(content) do
-    put_in(voice_msg(content), [:metadata, :voice_call, :conversation_key], @chat_key)
+    content
+    |> voice_msg()
+    |> put_in([:metadata, :voice_call, :conversation_key], @chat_key)
+    |> put_in([:metadata, :voice_call, :conversation], "chat")
   end
 
   # What `commit/4` reads beyond the run's snapshot: no review (MainAgent
@@ -2822,6 +2900,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     %{
       call_id: "voice_live_42",
       call_uuid: @call_uuid,
+      conversation: "private",
       conversation_key: @private_key,
       delegation_id: "d-1",
       revision: 1,

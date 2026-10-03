@@ -1502,19 +1502,19 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # The voice capability boundary (M41 §5.1): a Live delegation runs on the
-  # operator surface minus `VoiceCall.excluded_categories/0` — the SAME list
-  # `LivePrompt` advertises to the voice model, so prose and wire move together
-  # (the M28 lesson). One seam: a voice turn takes this profile, every other
-  # turn takes today's cached one, unchanged.
+  # operator surface minus `VoiceCall.excluded_categories/1` for its call's
+  # mode — the SAME list `LivePrompt` advertises to the voice model, so prose
+  # and wire move together (the M28 lesson). One seam: a voice turn takes this
+  # profile, every other turn takes today's cached one, unchanged.
   #
   # Built per delegation rather than added to the per-epoch cache on purpose.
   # A fourth cached variant would cost every install a build it never uses, and
   # this one is a registry read plus string assembly (the expensive half — the
   # file-backed prompt base — stays cached and is reused from `ctx`), against a
   # delegation that is seconds of speech away from the next one.
-  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, _voice_call}) do
+  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}) do
     RuntimeContext.build_profile(profile_trust(trust), ctx.available_skills, registry,
-      excluded_categories: VoiceCall.excluded_categories()
+      excluded_categories: VoiceCall.excluded_categories(voice_call.conversation)
     )
   end
 
