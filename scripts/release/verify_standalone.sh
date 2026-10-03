@@ -259,6 +259,30 @@ env -u FERMIX_OPIK_ENABLED HOME="$browser_home" FERMIX_HOME="$bridge_home" \
 grep -Fq "is not listed in" "$bridge_err" ||
   fail "the browser-bridge pump admitted an unlisted origin: $(cat "$bridge_err")"
 
+# ── settings with no daemon, run from this artifact ─────────────────────────
+# `fermix settings` changes settings only through the running daemon and never
+# writes config.toml itself, so with no daemon it must refuse: exit 3, nothing
+# changed. Under `--json` its stdout is a machine contract, exactly one JSON
+# object, and the packaged runtime is where a boot log line on stdout comes
+# from, so this stage runs it from the artifact the release is about to
+# publish. The home is a fresh, empty one, so no socket can answer. It runs
+# before the migrate-to-app stage because that stage ends the script on a
+# Linux target.
+settings_home="$runtime_root/settings-home"
+mkdir -m 700 "$settings_home"
+settings_out="$runtime_root/settings.out"
+settings_err="$runtime_root/settings.err"
+settings_status=0
+env -u FERMIX_OPIK_ENABLED HOME="$home" FERMIX_HOME="$settings_home" \
+  "$artifact" settings --json < /dev/null > "$settings_out" 2> "$settings_err" || settings_status=$?
+printf '%s\n' "$(cat "$settings_err")"
+[ "$settings_status" -eq 3 ] || fail "fermix settings with no daemon must exit 3, got $settings_status"
+settings_json="$(cat "$settings_out")"
+[ "$settings_json" = '{"error":{"code":"not_running"}}' ] ||
+  fail "fermix settings --json with no daemon must print exactly {\"error\":{\"code\":\"not_running\"}} on stdout, got: $settings_json"
+grep -Fq "daemon is not running" "$settings_err" ||
+  fail "fermix settings did not say on stderr why it changed nothing: $(cat "$settings_err")"
+
 # ── migrate-to-app preflight, run from this artifact ────────────────────────
 # `fermix migrate-to-app` with no `--yes` is a plan: it inspects the account
 # and mutates nothing. It is also the one verb that reads PATH, the process

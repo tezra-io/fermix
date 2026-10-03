@@ -301,6 +301,75 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("wrote to stdout, which is the native-messaging wire", result.stderr)
 
+    # ── the settings no-daemon stage ──────────────────────────────────────
+
+    def test_settings_with_no_daemon_refuses_with_exit_3_and_one_json_object(self):
+        self._write_artifact(create_disclaim=True)
+
+        result = self._run("macos_aarch64")
+
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("settings change only through it", result.stdout)
+
+    # The release that lacks the verb: the dispatcher's unknown-command exit.
+    def test_rejects_an_artifact_without_the_settings_verb(self):
+        self._write_artifact(create_disclaim=True, settings="unknown_verb")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 3, got 2", result.stderr)
+
+    # Exit 1 is the older management clients' not-running code; settings
+    # reserves 3 for it so a script can tell "no daemon" from "refused".
+    def test_rejects_a_settings_verb_that_exits_1_with_no_daemon(self):
+        self._write_artifact(create_disclaim=True, settings="exit_one")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 3, got 1", result.stderr)
+
+    # The class this stage exists for: boot logging on stdout in the packaged
+    # runtime, ahead of the one JSON object a script parses.
+    def test_rejects_settings_json_with_a_log_line_on_stdout(self):
+        self._write_artifact(create_disclaim=True, settings="noisy_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly", result.stderr)
+
+    def test_rejects_settings_that_prints_its_sentence_on_stdout(self):
+        self._write_artifact(create_disclaim=True, settings="human_stdout")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must print exactly", result.stderr)
+
+    def test_rejects_settings_that_does_not_say_why_on_stderr(self):
+        self._write_artifact(create_disclaim=True, settings="silent")
+
+        result = self._run("macos_aarch64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("did not say on stderr why it changed nothing", result.stderr)
+
+    # The stage runs before migrate-to-app, which ends the script on Linux.
+    def test_linux_artifact_runs_the_settings_stage_too(self):
+        self.artifact = self.base / "fermix_linux_x86_64"
+        self._write_artifact(
+            create_disclaim=False,
+            migrate="refused:not_macos",
+            settings="exit_one",
+        )
+
+        result = self._run("linux_x86_64")
+
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("must exit 3, got 1", result.stderr)
+
     def _run(self, target, artifact=None):
         return subprocess.run(
             [str(SCRIPT), artifact or str(self.artifact), target, VERSION],
@@ -337,6 +406,7 @@ class VerifyStandaloneTest(unittest.TestCase):
         plugins_clear="forgets",
         auth_logout="removes",
         browser_bridge="works",
+        settings="refuses",
     ):
         setup = self._disclaim_setup(create_disclaim, disclaim_executable, disclaim_exit, version)
         marker_line = "" if marker is None else f"touch '{marker}'\n"
@@ -359,6 +429,9 @@ class VerifyStandaloneTest(unittest.TestCase):
             "fi\n"
             'if [ "${1:-}" = "browser-bridge" ]; then\n'
             f"{self._pump_behaviour(browser_bridge)}"
+            "fi\n"
+            'if [ "${1:-}" = "settings" ]; then\n'
+            f"{self._settings_behaviour(settings)}"
             "fi\n"
             f"printf 'fermix {version}\\n'\n",
             encoding="utf-8",
@@ -429,6 +502,34 @@ class VerifyStandaloneTest(unittest.TestCase):
             "    exit 1\n"
             f"{tail}"
         )
+
+    # The real verb's shape with no daemon: one JSON object on stdout, the
+    # sentence on stderr, exit 3. The argv is pinned so a stage that stops
+    # asking for `--json` cannot pass against this stub.
+    def _settings_behaviour(self, settings):
+        if settings == "unknown_verb":
+            return (
+                "  printf 'fermix: unknown command: settings\\n' >&2\n"
+                "  exit 2\n"
+            )
+        argv = '  [ "$*" = "settings --json" ] || exit 64\n'
+        noise = "  printf 'boot notice nobody asked for\\n'\n"
+        json = "  printf '{\"error\":{\"code\":\"not_running\"}}\\n'\n"
+        sentence = (
+            "  printf 'fermix settings: the Fermix daemon is not running,"
+            " and settings change only through it.\\n'"
+        )
+        if settings == "refuses":
+            return argv + json + sentence + " >&2\n" + "  exit 3\n"
+        if settings == "exit_one":
+            return argv + json + sentence + " >&2\n" + "  exit 1\n"
+        if settings == "noisy_stdout":
+            return argv + noise + json + sentence + " >&2\n" + "  exit 3\n"
+        if settings == "human_stdout":
+            return argv + sentence + "\n" + "  exit 3\n"
+        if settings == "silent":
+            return argv + json + "  exit 3\n"
+        raise ValueError(f"unknown settings behaviour: {settings}")
 
     def _plugins_clear_behaviour(self, plugins_clear):
         forget = (

@@ -29,6 +29,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.Run
   alias Fermix.CLI.SandboxCommand
   alias Fermix.CLI.ServiceCommand
+  alias Fermix.CLI.SettingsCommand
   alias Fermix.CLI.Setup
   alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
@@ -84,6 +85,7 @@ defmodule Fermix.CLI do
   defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
   defp dispatch("pair", rest), do: PairCommand.run(rest)
   defp dispatch("devices", rest), do: DevicesCommand.run(rest)
+  defp dispatch("settings", rest), do: SettingsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
@@ -140,6 +142,13 @@ defmodule Fermix.CLI do
       fermix pair                                  Pair a phone companion device
       fermix devices list                          List paired phones
       fermix devices revoke DEVICE_ID              Revoke a paired phone
+      fermix settings [list] [--json]              List the running daemon's settings sections
+      fermix settings show SECTION [--info] [--json]  Show one section's rows and values
+      fermix settings set SECTION KEY=VALUE... [--json]  Change keys in one section
+      fermix settings secret set ID [--stdin] [--json]  Store a secret (masked prompt or piped)
+      fermix settings secret clear ID [--json]     Forget a stored secret
+      fermix settings primary [PROVIDER] [--json]  Show providers or make one the primary
+      fermix settings reload [--json]              Read config.toml again after an outside edit
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file

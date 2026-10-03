@@ -103,6 +103,23 @@ Pair a mobile companion device.
 .B fermix devices
 List and revoke paired mobile devices.
 .TP
+.B fermix settings
+Show and change the running service's settings from a terminal, with no
+browser: \fBlist\fR (the default) names every section, \fBshow\fR
+\fISECTION\fR [\fB\-\-info\fR] prints its keys and values, \fBset\fR
+\fISECTION KEY\fR=\fIVALUE\fR... changes one or more keys, \fBsecret set\fR
+\fIID\fR [\fB\-\-stdin\fR] and \fBsecret clear\fR \fIID\fR store and forget a
+secret, \fBprimary\fR [\fIPROVIDER\fR] lists the providers or makes one primary,
+and \fBreload\fR reads config.toml again after an edit made outside Fermix.
+A secret is never taken as an argument, which would leave it in the process
+list and the shell history: \fBsecret set\fR prompts for it without echo, or
+reads it from standard input with \fB\-\-stdin\fR. The running daemon checks
+and applies every change; one that needs a restart says so, and
+\fBfermix restart\fR applies it. \fB\-\-json\fR prints the result as one JSON
+object. Exits 3, changing nothing, when no daemon is running. For a
+service bound to another home, name it:
+\fBFERMIX_HOME=\fR\fIPATH\fR \fBfermix settings\fR.
+.TP
 .B fermix memory
 Review and restore what the assistant remembers.
 .TP

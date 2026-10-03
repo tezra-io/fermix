@@ -86,6 +86,17 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert reference =~ "fermix setup --proxy"
   end
 
+  # On a server reached over SSH the terminal verb is the settings surface, and
+  # a secret enters it only through `secret set`, prompted or piped, so the
+  # reference must name both or the agent answers with an argument.
+  test "documents fermix settings and how a secret enters it" do
+    reference = File.read!(config_reference_path())
+
+    for required <- ["fermix settings", "secret set", "--stdin"] do
+      assert reference =~ required, "config self-knowledge does not mention #{required}"
+    end
+  end
+
   test "documents the mobile companion setup and its v1 boundaries" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(mobile_reference_path())

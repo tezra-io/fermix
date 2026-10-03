@@ -1,7 +1,7 @@
 # fish completion for fermix, installed by the fermix package.
 # The verb list is the one `fermix help` prints; a test keeps them in step.
 
-set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices memory logs upgrade uninstall migrate-to-app doctor diagnostics version help
+set -l fermix_verbs setup auth ask chat run sandbox grant revoke service start stop restart status health voice acp browser browser-bridge agents capabilities skills plugins pair devices settings memory logs upgrade uninstall migrate-to-app doctor diagnostics version help
 
 complete -c fermix -f
 
@@ -29,6 +29,7 @@ complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a skills 
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a plugins -d "Manage plugins"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a pair -d "Pair a mobile device"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a devices -d "List and revoke paired devices"
+complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a settings -d "Show and change settings"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a memory -d "Review and restore memory"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a logs -d "Show the daemon log file"
 complete -c fermix -n "not __fish_seen_subcommand_from $fermix_verbs" -a upgrade -d "Update the engine"
@@ -44,12 +45,16 @@ complete -c fermix -n "__fish_seen_subcommand_from auth" -a "login status logout
 complete -c fermix -n "__fish_seen_subcommand_from skills" -a "list view reload"
 complete -c fermix -n "__fish_seen_subcommand_from plugins" -a "list catalog install enable disable auth"
 complete -c fermix -n "__fish_seen_subcommand_from devices" -a "list revoke"
+complete -c fermix -n "__fish_seen_subcommand_from settings; and not __fish_seen_subcommand_from list show set secret primary reload" -a "list show set secret primary reload"
+complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from secret; and not __fish_seen_subcommand_from set clear" -a "set clear"
+complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from secret" -l stdin -d "Read the secret from standard input"
+complete -c fermix -n "__fish_seen_subcommand_from settings; and __fish_seen_subcommand_from show" -l info -d "Show each setting's explanation"
 complete -c fermix -n "__fish_seen_subcommand_from memory" -a "review restore"
 complete -c fermix -n "__fish_seen_subcommand_from browser" -a "bridge install uninstall status" -d "Browser bridge subcommand"
 complete -c fermix -n "__fish_seen_subcommand_from acp" -a "forget"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -a "export"
 complete -c fermix -n "__fish_seen_subcommand_from diagnostics" -l offline -d "Collect without a running daemon"
-complete -c fermix -n "__fish_seen_subcommand_from service install status uninstall status health agents voice ask chat capabilities skills plugins memory diagnostics restart" -l json -d "Print a machine-readable envelope"
+complete -c fermix -n "__fish_seen_subcommand_from service install status uninstall status health agents voice ask chat capabilities skills plugins settings memory diagnostics restart" -l json -d "Print a machine-readable envelope"
 complete -c fermix -n "__fish_seen_subcommand_from service install" -l home -r -d "The Fermix home this service runs from"
 complete -c fermix -n "__fish_seen_subcommand_from service install" -l port -r -d "The listener port"
 complete -c fermix -n "__fish_seen_subcommand_from doctor status" -l full -d "Show every check"
