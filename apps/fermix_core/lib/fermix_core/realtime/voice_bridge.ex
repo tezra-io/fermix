@@ -17,10 +17,14 @@ defmodule FermixCore.Realtime.VoiceBridge do
   deadline of their own and must stay bounded: the session runs them inside
   calls its own callers wait on with no timeout (`SessionControl`).
 
-  `conversation_window/1` is the one callback that is not call-scoped: a call
-  in the chat's conversation reads it before `session.start`, when no handle
-  exists yet, so it is a plain function of the module (M56 §4.3). A private
-  call never calls it.
+  `conversation_window/1` is not call-scoped: a call in the chat's
+  conversation reads it before `session.start`, when no handle exists yet, so
+  it is a plain function of the module (M56 §4.3). A private call never calls
+  it. Nor are `call_active?/0` and `chat_call/1`, which Core asks for a turn
+  that is not the call's own (M56 §4.4): whether a call in the chat is up (for
+  `voice_call_context`), and how a turn of the chat is told of it. Channels
+  answers both, because the chat is its to name and the clients attached to it
+  are its to count; a private call is no call in the chat.
   """
 
   @typedoc """
@@ -76,8 +80,18 @@ defmodule FermixCore.Realtime.VoiceBridge do
   """
   @type conversation_window :: %{messages: [map()], gists: [String.t()]}
 
+  @typedoc """
+  A call in the chat, as a turn of the chat is told of it (M56 §4.4): when it
+  started, and whether that turn may end with no reply, which it may only
+  while every companion client attached reads a turn that ends that way
+  (companion protocol 2).
+  """
+  @type chat_call :: %{started_at: DateTime.t(), silence_allowed?: boolean()}
+
   @callback conversation_window(window_bounds()) ::
               {:ok, conversation_window()} | {:error, term()}
+  @callback call_active?() :: boolean()
+  @callback chat_call(FermixCore.Agents.ConversationKey.t()) :: {:ok, chat_call()} | :none
   @callback open_call(call()) :: {:ok, call_handle :: term()} | {:error, term()}
   @callback submit(call_handle :: term(), request(), callbacks()) ::
               {:ok, task_ref :: term()} | {:error, term()}

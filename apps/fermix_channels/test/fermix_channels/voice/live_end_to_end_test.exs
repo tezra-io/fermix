@@ -86,8 +86,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # `LiveSessionServer` builds the §6 `call` map itself, so it has no way to
   # name a scheduler — in production there is only one. This shim adds the
   # `agent_server` the bridge already accepts and delegates every callback
-  # unchanged, so `conversation_window/open_call/submit/cancel/close_call` are
-  # the shipped code paths; only the queue they reach is the test's.
+  # unchanged, so `conversation_window/call_active?/chat_call/open_call/submit/
+  # cancel/close_call` are the shipped code paths; only the queue they reach
+  # is the test's.
   defmodule QueueBoundBridge do
     @behaviour FermixCore.Realtime.VoiceBridge
 
@@ -107,6 +108,12 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
     @impl true
     def conversation_window(bounds), do: Bridge.conversation_window(bounds)
+
+    @impl true
+    def call_active?, do: Bridge.call_active?()
+
+    @impl true
+    def chat_call(key), do: Bridge.chat_call(key)
 
     @impl true
     def open_call(call),

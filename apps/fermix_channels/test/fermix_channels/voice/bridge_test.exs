@@ -11,12 +11,15 @@ defmodule FermixChannels.Voice.BridgeTest do
 
   use ExUnit.Case, async: false
 
+  @call_started_at ~U[2026-10-03 14:05:00Z]
+
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.LivePrompt
 
@@ -624,6 +627,66 @@ defmodule FermixChannels.Voice.BridgeTest do
     end
   end
 
+  # M56 §4.4: whether a call in the chat is up, and how a typed turn of the
+  # chat is told of it, answered from Core's call registry and the companion
+  # clients attached. This test process holds the call's claim in its
+  # session's stead, and stands in for the companion clients it registers.
+  describe "a call in the chat" do
+    setup do
+      start_supervised!({CallRegistry, name: CallRegistry})
+      :ok
+    end
+
+    test "with no call up, there is none to tell" do
+      refute Bridge.call_active?()
+      assert Bridge.chat_call(Companion.chat_conversation_key()) == :none
+    end
+
+    test "a call in the chat is up, and the chat's turn is told when it started" do
+      :ok = CallRegistry.claim(CallRegistry, claim("chat"))
+
+      assert Bridge.call_active?()
+
+      assert Bridge.chat_call(Companion.chat_conversation_key()) ==
+               {:ok, %{started_at: @call_started_at, silence_allowed?: true}}
+    end
+
+    test "another conversation's turn is never told of the call" do
+      :ok = CallRegistry.claim(CallRegistry, claim("chat"))
+
+      assert Bridge.chat_call({"telegram", "chat-1", :root}) == :none
+      assert Bridge.chat_call({"mobile", "main", :root}) == :none
+    end
+
+    # The chat does not know a private call exists (M56 §4.4).
+    test "a private call is no call in the chat" do
+      :ok = CallRegistry.claim(CallRegistry, claim("private"))
+
+      refute Bridge.call_active?()
+      assert Bridge.chat_call(Companion.chat_conversation_key()) == :none
+    end
+
+    # M56 §6: a version 1 client clears a turn only on text_done or
+    # turn_error, so a turn may end with no reply only while every client
+    # attached reads turn_done.
+    test "silence is allowed while every companion client speaks version 2" do
+      :ok = CallRegistry.claim(CallRegistry, claim("chat"))
+      {:ok, _owner} = Registry.register(Companion.registry(), "main", 2)
+
+      assert {:ok, %{silence_allowed?: true}} =
+               Bridge.chat_call(Companion.chat_conversation_key())
+    end
+
+    test "one version 1 client attached is enough to forbid silence" do
+      :ok = CallRegistry.claim(CallRegistry, claim("chat"))
+      {:ok, _owner} = Registry.register(Companion.registry(), "main", 2)
+      attach_client(1)
+
+      assert {:ok, %{silence_allowed?: false}} =
+               Bridge.chat_call(Companion.chat_conversation_key())
+    end
+  end
+
   describe "conversation isolation" do
     test "a concurrent text conversation shares no history with the call", ctx do
       handle = open(ctx)
@@ -646,5 +709,31 @@ defmodule FermixChannels.Voice.BridgeTest do
 
       Bridge.close_call(handle)
     end
+  end
+
+  defp claim(conversation),
+    do: %{
+      call_uuid: DeviceIdentity.generate_uuid(),
+      conversation: conversation,
+      started_at: @call_started_at
+    }
+
+  # A companion client that has said hello at `version`, joined as a
+  # `Companion.Connection` joins, for as long as the test runs.
+  defp attach_client(version) do
+    test_pid = self()
+
+    spawn_link(fn ->
+      {:ok, _owner} = Registry.register(Companion.registry(), "main", version)
+      send(test_pid, :attached)
+
+      receive do
+        :never -> :ok
+      after
+        10_000 -> :ok
+      end
+    end)
+
+    assert_receive :attached
   end
 end

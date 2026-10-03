@@ -135,6 +135,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
 
     @impl true
+    def call_active?, do: false
+
+    @impl true
+    def chat_call(_key), do: :none
+
+    @impl true
     def open_call(call) do
       Agent.update(__MODULE__, fn state -> Map.put(state, :call, call) end)
       send(test_pid(), {:bridge_open_call, call})
@@ -187,6 +193,10 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     @impl true
     def conversation_window(_bounds), do: {:ok, %{messages: [], gists: []}}
+    @impl true
+    def call_active?, do: false
+    @impl true
+    def chat_call(_key), do: :none
     @impl true
     def open_call(_call), do: {:error, :no_queue}
     @impl true

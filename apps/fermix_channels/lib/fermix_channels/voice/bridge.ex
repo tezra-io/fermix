@@ -69,6 +69,7 @@ defmodule FermixChannels.Voice.Bridge do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRecord
+  alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Realtime.VoiceBridge
 
@@ -118,6 +119,33 @@ defmodule FermixChannels.Voice.Bridge do
       when is_integer(messages) and messages > 0 and is_integer(gists) and gists >= 0 do
     with {:ok, recent_gists} <- recent_gists(gists) do
       {:ok, %{messages: chat_messages(messages), gists: recent_gists}}
+    end
+  end
+
+  @doc """
+  Whether a call in the chat's conversation is up (M56 §4.4): the call Core's
+  registry names, unless it is private.
+  """
+  @impl true
+  @spec call_active?() :: boolean()
+  def call_active?, do: match?({:ok, %{conversation: "chat"}}, CallRegistry.active(CallRegistry))
+
+  @doc """
+  How a turn of conversation `key` is told of the call in the chat: `:none`
+  unless `key` is the chat's own and a call in the chat is up; otherwise its
+  start, and whether the turn may end with no reply, which it may only while
+  every companion client attached reads `turn_done` (M56 §4.4, §6).
+  """
+  @impl true
+  @spec chat_call(ConversationKey.t()) :: {:ok, VoiceBridge.chat_call()} | :none
+  def chat_call(key) when is_tuple(key) do
+    with true <- key == Companion.chat_conversation_key(),
+         {:ok, %{conversation: "chat", started_at: started_at}} <-
+           CallRegistry.active(CallRegistry) do
+      {:ok,
+       %{started_at: started_at, silence_allowed?: Companion.every_client_reads?("turn_done")}}
+    else
+      _not_the_chat_or_no_call -> :none
     end
   end
 

@@ -35,6 +35,7 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
   alias FermixCore.Telemetry
@@ -73,6 +74,21 @@ defmodule FermixChannels.Channels.Companion do
   """
   @spec chat_conversation_key() :: {String.t(), String.t(), :root}
   def chat_conversation_key, do: conversation_key(@profile)
+
+  @doc """
+  Whether every client watching the owner's chat now reads server event
+  `type`, each connection known by the version its hello declared; true with
+  none attached. A turn may end with no reply (`turn_done`) only while this
+  holds, or a version 1 client would show it as thinking (M56 §6).
+  """
+  @spec every_client_reads?(String.t()) :: boolean()
+  def every_client_reads?(type) when is_binary(type) do
+    needs = Protocol.server_event_version(type)
+
+    @registry
+    |> Registry.lookup(@profile)
+    |> Enum.all?(fn {_connection, version} -> is_integer(version) and version >= needs end)
+  end
 
   @doc "Normalize a decoded `msg` or `command` into a gateway message."
   @spec parse_event(event()) :: {:ok, [Message.t()]} | {:error, term()}
