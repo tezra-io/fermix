@@ -149,6 +149,18 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert :ok = Protocol.validate_call_metadata(call)
     assert call["event"] == "shared"
 
+    # The same row as history pages it, the shape every client reads it in.
+    paged =
+      @server_fixtures
+      |> jsonl()
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(&get_in(&1, ["metadata", "call"]))
+
+    assert %{"role" => "assistant", "kind" => "text", "media_refs" => []} = paged
+    assert paged["metadata"]["call"] == call
+    assert paged["content"] == golden["text"]
+
     [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
 
     for key <- ~w(uuid event task_id revision state duration_s voice_cost_cents accounting) do
