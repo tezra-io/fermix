@@ -492,6 +492,66 @@ defmodule FermixCore.Tools.JobsTest do
     assert result.error =~ "delivery_target"
   end
 
+  # M56 §15: a task asked aloud on a call in the chat runs in the chat's own
+  # conversation, so "report back here" is the chat, never the voice channel a
+  # later run could not deliver to.
+  test "schedule_job from a call's hand-off in the chat reports back into the chat", %{
+    context: context
+  } do
+    context =
+      Map.merge(context, %{
+        conversation_key: {"companion", "main", :root},
+        source_channel: "voice",
+        channel: "voice"
+      })
+
+    assert {:ok, created} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Spoken Origin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report back here.",
+                 "delivery_mode" => "origin"
+               },
+               context
+             )
+
+    assert created.success == true
+    payload = Jason.decode!(created.output)
+
+    assert {:ok, job} = Repo.get_scheduled_job(payload["id"], server: context.memory_repo)
+    assert job.delivery_target == %{"platform" => "companion", "chat_id" => "main"}
+    assert job.created_by_channel == "voice"
+  end
+
+  # A private call's conversation is the call's own and ends with it, so a job
+  # that reported back "to the origin" would fail every run. Refused when it is
+  # asked for, never created to fail later.
+  test "schedule_job refuses origin mode from a private call's hand-off", %{context: context} do
+    context =
+      Map.merge(context, %{
+        conversation_key: {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root},
+        source_channel: "voice",
+        channel: "voice"
+      })
+
+    assert {:ok, result} =
+             ScheduleJob.execute(
+               %{
+                 "name" => "Private Origin",
+                 "schedule" => "every 15 minutes",
+                 "task" => "Report back here.",
+                 "delivery_mode" => "origin"
+               },
+               context
+             )
+
+    assert result.success == false
+    assert result.error =~ "private voice call"
+    assert result.error =~ "delivery_target"
+    assert {:ok, []} = Repo.list_scheduled_jobs(%{}, server: context.memory_repo)
+  end
+
   test "schedule_job accepts an explicit delivery_target from an acp conversation", %{
     context: context
   } do

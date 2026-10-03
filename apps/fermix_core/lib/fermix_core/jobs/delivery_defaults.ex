@@ -58,11 +58,26 @@ defmodule FermixCore.Jobs.DeliveryDefaults do
           ~s(back. Pass an explicit delivery_target on a configured channel instead, or ) <>
           ~s(use delivery_mode "none" for a silent job.)}}
     else
-      :ok
+      spoken_origin(origin_channel(context))
     end
   end
 
   defp deliverable_origin(_mode, _context), do: :ok
+
+  # A task asked aloud runs in the conversation its call names (M56 §4.1): the
+  # chat's own for a call in the chat, so its origin is the chat and needs
+  # nothing here. Only a private call's conversation is on the voice channel,
+  # the call's own, and it ends with the call (M56 §15).
+  defp spoken_origin("voice") do
+    {:error,
+     {:invalid_delivery_target,
+      ~s(delivery_mode "origin" cannot be used from a private voice call: the call's ) <>
+        "conversation ends with it, so a later run has nowhere to report back. Pass an " <>
+        ~s(explicit delivery_target on a configured channel instead, or use ) <>
+        ~s(delivery_mode "none" for a silent job.)}}
+  end
+
+  defp spoken_origin(_channel), do: :ok
 
   defp origin_channel(%{conversation_key: {channel, _chat_id, _thread_scope}}), do: channel
   defp origin_channel(_context), do: nil
