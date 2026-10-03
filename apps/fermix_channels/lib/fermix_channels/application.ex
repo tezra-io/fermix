@@ -74,11 +74,19 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,
         FermixChannels.Gateway.Idempotency
-      ] ++ album_buffers() ++ transport_children(readiness, request_boot_epoch)
+      ] ++
+        album_buffers() ++
+        transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  # The chat rows Live calls still owe after a restart (M56 §4.2), written
+  # last, once the companion channel that writes them and the phones' channel
+  # that hears them are up; a test tree runs the pass each test drives.
+  defp call_row_sweep(true), do: [FermixChannels.Voice.CallRowSweep]
+  defp call_row_sweep(false), do: []
 
   # One non-blocking album buffer per channel that delivers a multi-image album
   # as separate inbound messages (Telegram media groups across poll cycles;

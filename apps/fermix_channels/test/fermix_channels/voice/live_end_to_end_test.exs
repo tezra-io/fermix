@@ -26,6 +26,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
+  alias FermixChannels.Voice.CallRowSweep
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -153,7 +154,16 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # The provider a call's gist is made on, bound into the gist's route: no
   # real adapter is ever resolved.
   defmodule GistAdapter do
-    def chat(_messages, _tools, opts), do: {:ok, %{content: Keyword.fetch!(opts, :gist)}}
+    def chat(_messages, _tools, opts) do
+      case Keyword.fetch!(opts, :gist) do
+        {:hold, test_pid} ->
+          send(test_pid, {:gist_held, self()})
+          Process.sleep(:infinity)
+
+        gist ->
+          {:ok, %{content: gist}}
+      end
+    end
   end
 
   defmodule StubAgent do
@@ -478,6 +488,63 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
                  Repo.get_voice_call(call_uuid, server: @timeline_repo)
                )
              end)
+    end
+  end
+
+  # M56 §4.2, §8: a daemon that dies after the call settled and before its
+  # gist was made leaves the gist pending and the row owed; the next boot
+  # writes the row, with the task list, through the same bridge.
+  describe "a call whose gist the daemon never finished" do
+    setup :start_timeline
+
+    test "the next boot writes its row once, with its task list" do
+      Process.flag(:trap_exit, true)
+
+      session =
+        start_session(live_config(),
+          record_repo: @timeline_repo,
+          gist: [routes: [{@gist_route, [adapter: GistAdapter, gist: {:hold, self()}]}]]
+        )
+
+      :ok = SessionControl.call_start(session)
+      open_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: call_uuid}}
+      speak(session, "book the room", 1_000, 4_000)
+      delegate(session, "dg_1", 4_200)
+      assert_receive {:turn_started, _msg, turn_pid}, 5_000
+      send(turn_pid, {:proceed, "The room is booked for 10am."})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}},
+                     5_000
+
+      assert :ok = SessionControl.call_stop(session)
+
+      # The daemon dies with the gist in flight: its job and its summariser.
+      assert_receive {:gist_held, summariser}, 5_000
+      # The summariser's first caller is the job that waits on it.
+      [job | _session] =
+        Process.info(summariser, :dictionary) |> elem(1) |> Keyword.fetch!(:"$callers")
+
+      Enum.each([job, summariser], &Process.exit(&1, :kill))
+
+      assert {:ok, %{gist_status: "pending", row_state: "row_pending"}} =
+               Repo.get_voice_call(call_uuid, server: @timeline_repo)
+
+      refute_received {:companion_event, %{"t" => "row"}}
+
+      {:ok, sweep} = CallRowSweep.start_link(record_repo: @timeline_repo)
+      ref = Process.monitor(sweep)
+      assert_receive {:DOWN, ^ref, :process, ^sweep, :normal}, 5_000
+
+      assert_receive {:companion_event, %{"t" => "row"} = mac_row}
+
+      assert mac_row["text"] ==
+               "Voice call, under a minute\n\n- Completed: The room is booked for 10am."
+
+      assert mac_row["metadata"]["call"]["gist_status"] == "failed"
+
+      assert {:ok, %{gist_status: "failed", row_state: "row_written"}} =
+               Repo.get_voice_call(call_uuid, server: @timeline_repo)
     end
   end
 
