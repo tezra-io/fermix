@@ -163,8 +163,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:528`,
-  `:532`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:531`,
+  `:535`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -181,6 +181,10 @@ watch was added to the model).
   like any other (marked spoken, a mark only the memory review acts on).
 - The compaction notices. A hand-off sends neither the preflight nor the
   post-commit one (`maybe_notify_compacted`), and neither is a step here.
+- What a turn tells its channel's stream. A hand-off's runner tells it, before
+  the reply, that the reply will carry the Computer History stamp `commit/4`
+  puts on it (`tell_history_tainted`, M56 §9), so the Live session never
+  says it. It is a send inside the turn's own steps and moves no Queue state.
 - Consumers other than `Acp.Peer`. `Companion.Turns`, the settlement owner of
   the companion socket's turns and the phone's alike, watches the Queue it
   handed each turn to and answers the turn the Peer's way, with one
