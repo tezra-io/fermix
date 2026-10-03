@@ -63,11 +63,13 @@ defmodule FermixCore.Realtime.LivePrompt do
 
   @backend_heading "Backend tools:"
 
-  # M56 §4.5: told, after the capability names, only to a call whose results
-  # can be shown in the chat.
+  # M56 §4.5, §4.6: told, after the capability names, only to a call whose
+  # results can be shown in the chat, and whose tasks outlive it.
   @shown_in_chat "Fermix puts a result that is too long to say, or cannot be said (a link, " <>
                    "code, a table), in the owner's chat and tells you when it has. Then you may " <>
-                   "tell the owner it is in the chat; never say a result is there otherwise."
+                   "tell the owner it is in the chat; never say a result is there otherwise. " <>
+                   "Work you handed off goes on after the call ends, and its result then lands " <>
+                   "in the owner's chat."
 
   # The backend addendum's rules for the task itself, the same for every call
   # (M41 §6.3).
@@ -198,7 +200,8 @@ defmodule FermixCore.Realtime.LivePrompt do
     * `"chat"`: the reply is spoken, so it opens with one short line to say,
       and what cannot be said follows one line that is exactly
       `LiveText.shown_delimiter/0`, for the session to show in the chat
-      (M56 §4.5, `LiveText.split/2`);
+      (M56 §4.5, `LiveText.split/2`); a reply that comes after the call ended
+      is shown in the chat instead (§4.6);
     * `"private"`: today's wording, verbatim, since a private call shows
       nothing (M56 §5).
   """
@@ -212,7 +215,9 @@ defmodule FermixCore.Realtime.LivePrompt do
       is more than can be said (a link, code, a table, a list, a long answer),
       put a line that is exactly #{LiveText.shown_delimiter()} after that line and the full
       result after it: Fermix shows that part in the owner's chat and tells the
-      voice it is there, so the short line need not say where it is.
+      voice it is there, so the short line need not say where it is. If the call
+      has ended by the time you reply, your reply is shown in the owner's chat
+      instead of said.
       """
       |> String.trim()
     ])

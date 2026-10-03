@@ -45,6 +45,18 @@
 # ExUnit suites hold the note, its framing, its place beside the date note and
 # who is told it. A case would need `seed_state.exs` to seed a closed call
 # with a gist, and a behavioral runner that seeds before a case.
+#
+# A task that outlives its call (M56 §4.6) is the daemon's hand-over, never
+# the model's choice: as a call in the chat ends, its Live session gives the
+# running hand-off to `Voice.Detached`, which writes its "still working" row,
+# its done row, its phone push and its record, and the owner's
+# `cancel.task_ref` stops it. No driver can end a call with a task running
+# (only the daemon's own Live session holds a call, on the Live wire no driver
+# speaks), and nothing of the hand-over reaches the model but the addendum's
+# line that a reply after the call is shown, which the cases below carry
+# verbatim. So it has no case here: the Detached, Live session, bridge, voice
+# adapter, Requests, CallRowSweep and Live end-to-end ExUnit suites prove it,
+# a reply arriving on either side of the hand-over landing in the chat once.
 suite: voice_in_chat
 risk: host_readonly
 title: "Voice in the chat: a task asked aloud uses a link the owner typed, and shows it back"
@@ -161,7 +173,9 @@ scenarios:
               is more than can be said (a link, code, a table, a list, a long answer),
               put a line that is exactly ---shown--- after that line and the full
               result after it: Fermix shows that part in the owner's chat and tells the
-              voice it is there, so the short line need not say where it is.
+              voice it is there, so the short line need not say where it is. If the call
+              has ended by the time you reply, your reply is shown in the owner's chat
+              instead of said.
 
               user: what was the address of that sign-up page again? I need to send it to someone.
             expect:
@@ -203,7 +217,9 @@ scenarios:
               is more than can be said (a link, code, a table, a list, a long answer),
               put a line that is exactly ---shown--- after that line and the full
               result after it: Fermix shows that part in the owner's chat and tells the
-              voice it is there, so the short line need not say where it is.
+              voice it is there, so the short line need not say where it is. If the call
+              has ended by the time you reply, your reply is shown in the owner's chat
+              instead of said.
 
               user: hey, the registration page I pasted earlier
               assistant: Sure, what about it?

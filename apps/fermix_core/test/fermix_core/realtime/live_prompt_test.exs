@@ -171,6 +171,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
       [_before, after_tools] = String.split(prompt, "- Web: web_search", parts: 2)
       assert after_tools =~ "in the owner's chat"
       assert after_tools =~ "never say a result is there otherwise"
+      # M56 §4.6: a task still running when the call ends finishes into the chat.
+      assert after_tools =~ "goes on after the call ends"
     end
 
     test "a private call is told nothing about the chat" do
@@ -350,6 +352,10 @@ defmodule FermixCore.Realtime.LivePromptTest do
       assert addendum =~ "a line that is exactly #{LiveText.shown_delimiter()}"
       assert addendum =~ "owner's chat"
       refute addendum =~ "result view"
+      # M56 §4.6: a reply that comes after the call ended is shown, not said.
+      assert one_spaced(addendum) =~
+               "If the call has ended by the time you reply, your reply is shown in the " <>
+                 "owner's chat instead of said."
     end
 
     # M56 §5: a private call is today's behaviour in full, its addendum included.
