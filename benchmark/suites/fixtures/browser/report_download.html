@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Report download fixture — a file only a saved download carries</title>
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 42rem; }
+  button { font: inherit; padding: 0.35rem 1rem; }
+  #outcome { font-size: 1.25rem; font-weight: 700; }
+</style>
+</head>
+<body>
+<h1>Usage reports (fixture)</h1>
+<p>
+  Your usage report is ready. It is a text file: download it to read its report
+  code, which this page does not show.
+</p>
+<p><button type="button" id="download-report">Download the usage report</button></p>
+
+<p id="outcome">Nothing downloaded yet.</p>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Fixture for the `browser` tool's `download` action. Served by the
+// runner-owned fixture server under this case attempt's token; the suites
+// address it with __EVAL_FIXTURE_URL__ (suites/browser_host.yaml).
+//
+// The button saves a real file: a `blob:` text file minted by this page, so
+// the download's source is this page's own loopback origin and nothing leaves
+// the machine. The report code is in that file and nowhere on the page, and it
+// is put together only when the button is pressed, so a reply that names it
+// read the file the browser saved.
+//
+// WHAT THE PAGE RECORDS (suites/SCHEMA.md `fixture_state`):
+//   report.downloaded — true, when the button is pressed
+//
+// Nothing is stored and nothing is sent beyond that report; every load starts
+// with nothing downloaded.
+(function () {
+  "use strict";
+
+  const outcome = document.getElementById('outcome');
+  const factors = [37, 41, 89];
+  let downloaded = false;
+
+  window.__fixture = {
+    page: 'report_download',
+    get downloaded() { return downloaded; },
+  };
+
+  function reportCode() {
+    return factors.reduce(function (product, factor) { return product * factor; }, 1) + 5;
+  }
+
+  document.getElementById('download-report').addEventListener('click', function () {
+    const text = 'Usage report\nReport code: ' + reportCode() + '\n';
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    link.download = 'usage-report.txt';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    downloaded = true;
+    outcome.textContent = 'The usage report download started.';
+    fixtureReport('report.downloaded', true);
+  });
+}());
+</script>
+</body>
+</html>

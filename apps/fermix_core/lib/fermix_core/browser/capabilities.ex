@@ -63,11 +63,16 @@ defmodule FermixCore.Browser.Capabilities do
   }
 
   # The Fermix app's own browser pane, driven over the app's local wire: the
-  # engine's browser as the managed Chrome is, so its tabs are Fermix's and its
-  # downloads land in the workspace. The wire addresses a tab by its id, so
-  # there is no debugger session to attach, and it carries no WebMCP.
+  # engine's browser as the managed Chrome is, so its tabs are Fermix's. The
+  # wire addresses a tab by its id, so there is no debugger session to attach,
+  # and it carries no WebMCP. It saves no download for a task either: on host
+  # protocol 1 a download's `download.began` carries no source address and the
+  # wire has no cancel, so a download could be vetted neither by its source nor
+  # by its size as Chrome's are, and the app refuses every one. Nothing lands
+  # in the workspace, so nothing is redirected there; `tab.open` still names
+  # the downloads directory only because that wire requires the field.
   @fermix_app %{
-    download_redirect: true,
+    download_redirect: false,
     target_discovery: true,
     target_attach: false,
     tab_cap: true,
@@ -75,7 +80,7 @@ defmodule FermixCore.Browser.Capabilities do
     close_tab: true,
     focus_tab: true,
     cookies: true,
-    downloads: true,
+    downloads: false,
     webmcp: false
   }
 
@@ -145,9 +150,19 @@ defmodule FermixCore.Browser.Capabilities do
       "for that."
   end
 
+  # What the pane cannot do, Chrome can: each sentence names the profile that is
+  # always Chrome. For WebMCP the next move is a choice, because the pane's own
+  # snapshot and act may do without the page's tools; a file has no such route.
   defp app_sentence(:webmcp) do
-    "The Fermix app's browser does not run a page's own WebMCP tools. Read the page with " <>
-      "`snapshot` and drive it with `act`."
+    "The Fermix app's browser does not run a page's own WebMCP tools. To use them, open " <>
+      ~s(the page with `profile: "fermix_chrome"`, which is always Chrome. When they are ) <>
+      "not needed, read the page with `snapshot` and drive it with `act`."
+  end
+
+  defp app_sentence(:downloads) do
+    "The Fermix app's browser does not save a task's downloads. To download the file, open " <>
+      ~s(the page with `profile: "fermix_chrome"`, which is always Chrome, and download it ) <>
+      "there."
   end
 
   defp app_sentence(capability) do

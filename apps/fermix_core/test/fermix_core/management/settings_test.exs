@@ -1186,11 +1186,15 @@ defmodule FermixCore.Management.SettingsTest do
       assert Application.get_env(:fermix_core, :browser) == nil
     end
 
+    # `fermix_chrome` is a profile a task names for a page's WebMCP tools, not a
+    # way tasks run, so the choice neither publishes nor takes it.
     test "how tasks run takes only the managed profiles it publishes" do
-      assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
-               Settings.apply("browser", %{"browser_default_profile" => "selected_tab"})
+      for profile <- ["selected_tab", "fermix_chrome"] do
+        assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
+                 Settings.apply("browser", %{"browser_default_profile" => profile})
 
-      assert sentence == "This setting takes one of its published values."
+        assert sentence == "This setting takes one of its published values."
+      end
     end
 
     test "the browser in force is shown here and changed elsewhere" do

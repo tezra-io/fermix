@@ -20,6 +20,18 @@ defmodule FermixCore.Browser.ConfigTest do
     assert Map.fetch!(config.profiles, "fermix_headless").headless == true
   end
 
+  # The profile for what only Chrome can do, a page's WebMCP tools today: built
+  # in, managed, and shaped like `fermix`, so it opens a window where there is a
+  # display. `Routing` never sends it to the app's pane (RoutingTest).
+  test "fermix_chrome is a built-in managed Chrome profile" do
+    Application.delete_env(:fermix_core, :browser)
+
+    assert {:ok, config} = Config.current()
+
+    assert Map.fetch!(config.profiles, "fermix_chrome") ==
+             %{mode: :managed, headless: :auto, cdp_port: :auto}
+  end
+
   test "rejects invalid max_live_profiles" do
     Application.put_env(:fermix_core, :browser, max_live_profiles: 0)
 

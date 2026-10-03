@@ -30,5 +30,15 @@ defmodule FermixCore.Agents.BrowserGuidanceSkillTest do
     assert definition.system_prompt =~ "Use `browser`"
     assert definition.system_prompt =~ "Use the default profile"
     assert definition.system_prompt =~ "not proof that async navigation"
+
+    # The pane has no WebMCP and saves no downloads: the skill names the field
+    # that says so and the profile that is always Chrome.
+    assert definition.system_prompt =~ "`backend` is `fermix_app`"
+    assert definition.system_prompt =~ "runs no WebMCP tools and saves no downloads"
+    assert definition.system_prompt =~ ~s(profile: "fermix_chrome")
+
+    # `download` starts nothing: a click starts the file, `download` collects it.
+    assert definition.system_prompt =~ "`download` starts nothing"
+    assert definition.system_prompt =~ "click the file's link with `act` and then call `download`"
   end
 end
