@@ -261,12 +261,14 @@ defmodule FermixCore.Realtime.CallRecord do
           {:ok, [String.t()]} | {:error, term()}
   def sweep_detached(%DateTime{} = cutoff, write, repo_opts) when is_function(write, 2) do
     with {:ok, rows} <- Repo.list_detached_voice_calls(cutoff, repo_opts) do
-      Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, settled} ->
-        case settle_detached(row, write, repo_opts) do
-          :ok -> {:cont, {:ok, settled ++ [row.uuid]}}
-          {:error, reason} -> {:halt, {:error, {row.uuid, reason}}}
-        end
-      end)
+      Enum.reduce_while(rows, {:ok, []}, &settle_detached(&1, &2, write, repo_opts))
+    end
+  end
+
+  defp settle_detached(row, {:ok, settled}, write, repo_opts) do
+    case settle_detached(row, write, repo_opts) do
+      :ok -> {:cont, {:ok, settled ++ [row.uuid]}}
+      {:error, reason} -> {:halt, {:error, {row.uuid, reason}}}
     end
   end
 

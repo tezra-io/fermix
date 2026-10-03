@@ -111,8 +111,7 @@ defmodule FermixCore.Realtime.LiveFrames do
       )
       when is_binary(call_uuid) and is_binary(delegation_id) and delegation_id != "" and
              is_integer(revision) and revision >= 1 and status in @task_statuses and
-             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) and
-             is_boolean(detached?) and (not detached? or status == "running") do
+             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) do
     compact(%{
       type: "task",
       call_uuid: call_uuid,
@@ -121,9 +120,13 @@ defmodule FermixCore.Realtime.LiveFrames do
       status: status,
       summary: LiveText.summary(summary, @summary_max_chars),
       server_seq: server_seq,
-      detached: if(detached?, do: true)
+      detached: detached(detached?, status)
     })
   end
+
+  # Only a task still running is handed over; the flag is absent otherwise.
+  defp detached(false, _status), do: nil
+  defp detached(true, "running"), do: true
 
   @doc """
   The call's spend, from `LiveLedger.usage_payload/1`.

@@ -24,8 +24,8 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   alias FermixChannels.Channels.Companion
   alias FermixChannels.Channels.Voice
-  alias FermixChannels.Gateway.Queue
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
   alias FermixChannels.Voice.CallRowSweep
   alias FermixChannels.Voice.Detached
@@ -760,8 +760,9 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
   # through `SessionControl`, and on this rail a cancel or a hang-up reaches the
   # Queue's stop of the hand-off's turn, which answers only once the Queue is
   # free. A hang-up stops the turn of a private call; a call in the chat hands
-  # it over instead (below), so these calls are private. The Queue is held suspended only until the session's stop is seen
-  # waiting in its mailbox: no test waits out a production call budget. What
+  # it over instead (above), so these calls are private. The Queue is held
+  # suspended only until the session's stop is seen waiting in its mailbox: no
+  # test waits out a production call budget. What
   # tells a wait with no budget from a budget not used up yet is the call
   # itself, so each test traces the handler's call and reads the timeout it
   # carries.
