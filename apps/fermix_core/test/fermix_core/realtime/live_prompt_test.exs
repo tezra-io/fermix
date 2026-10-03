@@ -358,6 +358,16 @@ defmodule FermixCore.Realtime.LivePromptTest do
                  "owner's chat instead of said."
     end
 
+    # M56 §4.7: "send it to my Telegram" asked aloud is sent with the tool,
+    # and the line the voice says names where it went.
+    test "a call in the chat sends a result the owner asks to send, and says where" do
+      addendum = one_spaced(LivePrompt.backend_addendum("chat"))
+
+      assert addendum =~
+               "When the owner asks for something to be sent to one of their own channels, " <>
+                 "send it with send_to_channel and say in the short line where it went."
+    end
+
     # M56 §5: a private call is today's behaviour in full, its addendum included.
     test "a private call keeps its wording, with no delimiter and nothing shown" do
       addendum = LivePrompt.backend_addendum("private")
@@ -365,6 +375,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       assert addendum =~ "Keep the portion sent to\nthe voice model concise"
       refute addendum =~ LiveText.shown_delimiter()
       refute addendum =~ "chat"
+      refute addendum =~ "send_to_channel"
     end
 
     test "no other conversation has an addendum" do

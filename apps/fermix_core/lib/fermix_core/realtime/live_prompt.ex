@@ -201,7 +201,9 @@ defmodule FermixCore.Realtime.LivePrompt do
       and what cannot be said follows one line that is exactly
       `LiveText.shown_delimiter/0`, for the session to show in the chat
       (M56 §4.5, `LiveText.split/2`); a reply that comes after the call ended
-      is shown in the chat instead (§4.6);
+      is shown in the chat instead (§4.6); a result the owner asks to have
+      sent to one of their channels goes out with `send_to_channel`, and the
+      line said names where (§4.7);
     * `"private"`: today's wording, verbatim, since a private call shows
       nothing (M56 §5).
   """
@@ -217,7 +219,9 @@ defmodule FermixCore.Realtime.LivePrompt do
       result after it: Fermix shows that part in the owner's chat and tells the
       voice it is there, so the short line need not say where it is. If the call
       has ended by the time you reply, your reply is shown in the owner's chat
-      instead of said.
+      instead of said. When the owner asks for something to be sent to one of
+      their own channels, send it with send_to_channel and say in the short line
+      where it went.
       """
       |> String.trim()
     ])
