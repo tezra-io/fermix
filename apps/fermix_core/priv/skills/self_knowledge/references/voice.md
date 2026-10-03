@@ -4,11 +4,11 @@ The Fermix app's voice companion. The app talks to the daemon over `$FERMIX_HOME
 
 ## Turning it on
 
-1. Mac Settings > Voice: turn on **Talk to Fermix** and fill **OpenAI key** (the same key the OpenAI provider uses). Pick **Model** and **Voice**; **Reasoning effort** shows only for a Realtime model, and **Backend** (read-only) only for GPT-Live. **End a conversation after**, **Stop a conversation at** and **Keep transcripts** bound each call. Then **Restart to apply**.
+1. Mac Settings > Voice: turn on **Talk to Fermix** and fill **OpenAI key** (the same key the OpenAI provider uses). Pick **Model** and **Voice**; **Reasoning effort** shows only for a Realtime model, and **Backend** (read-only) and **Voice calls join the chat** only for GPT-Live. **End a conversation after**, **Stop a conversation at** and **Keep transcripts** bound each call. Then **Restart to apply**.
 2. Start a call from the app's sidebar **Pet** > **Begin voice call** (**End voice call**, **Mute microphone**, **Interrupt reply**, **Cancel task**); **Show the floating companion** keeps a small window beside other work. macOS asks for the microphone the first time a call begins.
 
 - It needs an OpenAI Platform API key (`sk-…`): a Codex or ChatGPT sign-in does not authorize OpenAI's voice API. Both engines use the same key.
-- Config: `[fermix_core.realtime]` `enabled`, `model`, `voice`, `reasoning_effort`, `max_session_minutes`, `max_estimated_cost_cents_per_session`, `persist_transcripts`, `screen_share` (on by default), and `engine`, which is derived from the model. Browser setup has a Realtime tab for dev installs; the app is the only client that makes calls.
+- Config: `[fermix_core.realtime]` `enabled`, `model`, `voice`, `reasoning_effort`, `max_session_minutes`, `max_estimated_cost_cents_per_session`, `persist_transcripts`, `screen_share` (on by default), `conversation` (GPT-Live only: `"chat"`, the default while unset, or `"private"`; refused under a Realtime model, and dropped when the model moves to one), and `engine`, which is derived from the model. Browser setup has a Realtime tab for dev installs; the app is the only client that makes calls.
 
 ## Two engines, chosen by the model
 

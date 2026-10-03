@@ -25,6 +25,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
+  alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -394,6 +395,32 @@ defmodule FermixCore.Management.ProtocolContractTest do
       assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
       assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
     end
+  end
+
+  # The voice section's rows depend on the engine, and the section's first
+  # golden runs the default one, so the rows only Live publishes (its backend
+  # and whether calls join the chat, M56 §6) have a golden of their own. It is
+  # the producer's own answer for a Live block: the same rows in the same
+  # order, and the conversation row exactly.
+  test "the golden Live voice section is the one the daemon publishes under Live" do
+    realtime = [enabled: false, engine: "openai_live", model: "gpt-live-1", voice: "marin"]
+    providers = [openai: [primary: true, default_model: "gpt-5.4"]]
+
+    snapshot =
+      Map.update(ConfigStore.current_snapshot(), :fermix_core, [], fn core ->
+        core
+        |> Keyword.put(:realtime, realtime)
+        |> Keyword.put(:providers, providers)
+        |> Keyword.put(:agent, [])
+      end)
+
+    {:ok, live} = Settings.get("realtime", snapshot: snapshot)
+    golden = named_fixture_result("settings_get_realtime_live")
+
+    assert Enum.map(golden["rows"], & &1["key"]) == Enum.map(live["rows"], & &1["key"])
+
+    assert Enum.find(golden["rows"], &(&1["key"] == "realtime_conversation")) ==
+             Enum.find(live["rows"], &(&1["key"] == "realtime_conversation"))
   end
 
   # Every kind and format a row may carry is pinned to the module, so a kind

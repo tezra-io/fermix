@@ -490,6 +490,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_model",
                "realtime_voice",
                "realtime_backend",
+               "realtime_conversation",
                "openai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -538,6 +539,50 @@ defmodule FermixCore.Management.SettingsTest do
       )
 
       assert %{"value" => "Not configured"} = row("realtime", "realtime_backend")
+    end
+
+    # M56 §5 and §6: one row under Live says whether a call's hand-offs run in
+    # the chat's conversation. Absent in the file means the chat, so the row
+    # shows the value in force rather than a blank.
+    test "the Live engine says whether voice calls join the chat, the chat by default" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{
+               "kind" => "choice",
+               "label" => "Voice calls join the chat",
+               "value" => "chat",
+               "read_only" => false
+             } = row("realtime", "realtime_conversation")
+
+      assert option_values("realtime", "realtime_conversation") == ["chat", "private"]
+    end
+
+    test "choosing a private call writes the key and reads back" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_conversation" => "private"})
+
+      assert result["applied"] == ["realtime_conversation"]
+      assert result["side_effects"] == []
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :conversation) == "private"
+      assert %{"value" => "private"} = row("realtime", "realtime_conversation")
+
+      assert {:error, {:invalid_params, "realtime_conversation", _sentence}} =
+               Settings.apply("realtime", %{"realtime_conversation" => "shared"})
+    end
+
+    test "the Realtime engine publishes no conversation row" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
     end
   end
 
@@ -651,6 +696,29 @@ defmodule FermixCore.Management.SettingsTest do
       assert "realtime_voice" in result["applied"]
       assert "The voice changed to marin." in result["side_effects"]
       assert %{"value" => "marin"} = row("realtime", "realtime_voice")
+    end
+
+    # The setting is Live-only and refused under Realtime, so the switch drops
+    # it, and says so: a private call quietly becoming a chat call on the way
+    # back is a change the owner did not type.
+    test "choosing a Realtime model drops a chosen conversation and names it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        conversation: "private"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      refute Keyword.has_key?(Application.get_env(:fermix_core, :realtime), :conversation)
+      assert "realtime_conversation" in result["applied"]
+
+      assert "Whether voice calls join the chat was reset because this engine does not use it." in result[
+               "side_effects"
+             ]
     end
 
     test "a voice both engines ship survives the switch and is never named" do

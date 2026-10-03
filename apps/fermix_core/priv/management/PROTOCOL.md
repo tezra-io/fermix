@@ -511,10 +511,15 @@ Notes that the shapes alone do not carry:
   voices of that engine and nothing else, `realtime_reasoning_effort` is a
   Realtime session setting with no Live equivalent and is absent under Live, and
   `realtime_backend` is present only under Live, is read-only, and names the
-  primary provider and model that answer while Live speaks. Applying a model of
-  the other engine therefore moves the engine with it, adds or removes the
-  reasoning effort, and moves a voice the new engine does not ship. The result
-  names every key the daemon derived in `applied` — including `realtime_engine`,
+  primary provider and model that answer while Live speaks.
+  `realtime_conversation` ("Voice calls join the chat") is present only under
+  Live too, a choice of `chat` or `private` stored as `realtime.conversation`:
+  `chat`, the value in force while the key is unset, runs a call's hand-offs in
+  the chat's own conversation, and `private` keeps them in one of the call's
+  own. Applying a model of the other engine therefore moves the engine with it,
+  adds or removes the reasoning effort, moves a voice the new engine does not
+  ship, and drops a chosen `realtime_conversation` on the way to Realtime. The
+  result names every key the daemon derived in `applied` — including `realtime_engine`,
   which is a derived key rather than a row — with a sentence for each in
   `side_effects`; reload the section when one of those keys appears, because its
   row list has changed. `overview.get` reports the same selection as

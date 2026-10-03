@@ -2483,6 +2483,35 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert Keyword.get(realtime, :persist_transcripts) == true
   end
 
+  # M56 §5: absent means the chat, so the file says nothing until the owner
+  # chooses, and a choice survives the save and the load.
+  test "a Live block writes the conversation key only once it is set" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    live = [enabled: true, engine: "openai_live", model: "gpt-live-1", voice: "marin"]
+
+    snapshot = fn realtime ->
+      %{
+        fermix_core: [providers: [openai: []], agent: [name: "fermix"], realtime: realtime],
+        fermix_channels: [],
+        fermix_web: []
+      }
+    end
+
+    assert :ok = ConfigStore.save_snapshot(snapshot.(live))
+    refute File.read!(Path.join(tmp_home, "config.toml")) =~ "conversation"
+
+    assert :ok = ConfigStore.save_snapshot(snapshot.(live ++ [conversation: "private"]))
+    assert File.read!(Path.join(tmp_home, "config.toml")) =~ ~s(conversation = "private")
+
+    assert {:ok, loaded} = ConfigStore.load_runtime_config()
+    assert loaded.fermix_core |> Keyword.get(:realtime) |> Keyword.get(:conversation) == "private"
+  end
+
   test "load rejects removed realtime config keys" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

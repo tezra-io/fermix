@@ -54,6 +54,11 @@ defmodule FermixCore.Management.Settings.Voice do
     "openai_live" => "Live, with your Fermix agent"
   }
 
+  @conversation_labels %{
+    "chat" => "Yes",
+    "private" => "No, keep each call private"
+  }
+
   @effort_labels %{
     "minimal" => "Minimal",
     "low" => "Low",
@@ -159,12 +164,25 @@ defmodule FermixCore.Management.Settings.Voice do
   # one thing about this engine an operator cannot infer from the pane, and it
   # is changed in Providers, so the row is read-only rather than a control whose
   # save always refuses.
-  defp realtime_engine_rows(%{engine: "openai_live"}, snapshot, restart) do
+  #
+  # Whether a call's hand-offs run in the chat's own conversation is a Live
+  # question too (M56 §5): the Realtime engine hands nothing off. The row shows
+  # the value in force, so an unset key reads as the chat it means.
+  defp realtime_engine_rows(%{engine: "openai_live"} = config, snapshot, restart) do
     [
       Row.new("realtime_backend", :text, "Backend",
         footer: "Live speaks; your primary provider answers. Change it in Providers.",
         value: realtime_backend(snapshot),
         read_only: true,
+        restart: restart
+      ),
+      Row.new("realtime_conversation", :choice, "Voice calls join the chat",
+        footer:
+          "Each task you ask for aloud joins the chat's conversation with its answer, " <>
+            "so a call can use what you typed and a later message can refer to the call. " <>
+            "A private call is kept apart from the chat.",
+        value: RealtimeConfig.conversation(config),
+        options: Enum.map(RealtimeConfig.conversations(), &conversation_option/1),
         restart: restart
       )
     ]
@@ -315,6 +333,9 @@ defmodule FermixCore.Management.Settings.Voice do
   defp voice_option(voice), do: Row.option(voice, String.capitalize(voice))
 
   defp effort_option(level), do: Row.option(level, Map.fetch!(@effort_labels, level))
+
+  defp conversation_option(value),
+    do: Row.option(value, Map.fetch!(@conversation_labels, value))
 
   # The primary route in one line, read from the same snapshot the Providers
   # pane projects and resolved by the same reader routing uses, so the two panes

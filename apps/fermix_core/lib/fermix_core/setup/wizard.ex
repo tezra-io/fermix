@@ -61,6 +61,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
+          | {:realtime_conversation, String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
           | {:computer_use_background, boolean() | String.t()}
           | {:computer_history_enabled, boolean() | String.t()}
@@ -1822,6 +1823,11 @@ defmodule FermixCore.Setup.Wizard do
         normalize_realtime_bool(
           Keyword.get(answers, :realtime_persist_transcripts),
           :realtime_persist_transcripts
+        ),
+      conversation:
+        normalize_realtime_string(
+          Keyword.get(answers, :realtime_conversation),
+          :realtime_conversation
         )
     ]
     |> reject_nil_values()
@@ -1898,6 +1904,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp move_realtime_engine(existing, "openai_realtime") do
     existing
+    |> Keyword.drop([:conversation])
     |> Keyword.put_new(:reasoning_effort, "low")
     |> put_realtime_model("openai_realtime")
     |> put_realtime_voice("openai_realtime")

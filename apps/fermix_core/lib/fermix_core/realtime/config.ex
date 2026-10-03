@@ -53,6 +53,14 @@ defmodule FermixCore.Realtime.Config do
   # it on a Live payload.
   @realtime_only_keys [:reasoning_effort, :transcription_model, :max_response_output_tokens]
 
+  # The mirror image: settings the Realtime wire has no use for, refused under
+  # `openai_realtime` the same way (M56 §5).
+  @live_only_keys [:conversation]
+
+  # Where a Live call's hand-offs run (M56 §5): in the chat's own conversation,
+  # or, `private`, in one of the call's own as before.
+  @conversations ~w(chat private)
+
   @type t :: %__MODULE__{
           enabled?: boolean(),
           provider: String.t(),
@@ -69,7 +77,8 @@ defmodule FermixCore.Realtime.Config do
           max_estimated_cost_cents_per_session: pos_integer(),
           screen_share?: boolean(),
           persist_transcripts?: boolean(),
-          persist_audio?: boolean()
+          persist_audio?: boolean(),
+          conversation: String.t() | nil
         }
 
   defstruct enabled?: false,
@@ -93,7 +102,10 @@ defmodule FermixCore.Realtime.Config do
             # cadence/retention/budget bound is an internal constant.
             screen_share?: true,
             persist_transcripts?: false,
-            persist_audio?: false
+            persist_audio?: false,
+            # What the file says, `nil` while nobody has set it: `conversation/1`
+            # is the value in force, and only a set value is written back.
+            conversation: nil
 
   @spec current() :: t()
   def current do
@@ -166,6 +178,21 @@ defmodule FermixCore.Realtime.Config do
   @spec live?(t()) :: boolean()
   def live?(%__MODULE__{engine: engine}), do: engine == "openai_live"
 
+  @doc "The values `conversation` takes, in the order a pane offers them."
+  @spec conversations() :: [String.t()]
+  def conversations, do: @conversations
+
+  @doc """
+  Where a Live call's hand-offs run (M56 §5): `"chat"`, the chat's own
+  conversation, unless the owner chose `"private"`. Live only: the Realtime
+  engine has no hand-offs, and asking it is a defect.
+  """
+  @spec conversation(t()) :: String.t()
+  def conversation(%__MODULE__{engine: "openai_live", conversation: nil}), do: "chat"
+
+  def conversation(%__MODULE__{engine: "openai_live", conversation: conversation}),
+    do: conversation
+
   @spec normalize(keyword() | map() | nil) :: t()
   def normalize(nil), do: normalize([])
 
@@ -190,6 +217,7 @@ defmodule FermixCore.Realtime.Config do
 
     engine = engine(config)
     reject_realtime_only_keys!(config, engine)
+    reject_live_only_keys!(config, engine)
 
     realtime = %__MODULE__{
       enabled?: bool(config, :enabled, false),
@@ -208,7 +236,8 @@ defmodule FermixCore.Realtime.Config do
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
       screen_share?: bool(config, :screen_share, true),
       persist_transcripts?: bool(config, :persist_transcripts, false),
-      persist_audio?: bool(config, :persist_audio, false)
+      persist_audio?: bool(config, :persist_audio, false),
+      conversation: conversation_setting(config, engine)
     }
 
     validate!(realtime)
@@ -229,7 +258,7 @@ defmodule FermixCore.Realtime.Config do
         max_estimated_cost_cents_per_session: config.max_estimated_cost_cents_per_session,
         screen_share: config.screen_share?,
         persist_transcripts: config.persist_transcripts?
-      ]
+      ] ++ conversation_keyword(config)
   end
 
   @spec socket_path() :: String.t()
@@ -251,6 +280,13 @@ defmodule FermixCore.Realtime.Config do
   defp reasoning_effort_keyword(%__MODULE__{reasoning_effort: effort}),
     do: [reasoning_effort: effort]
 
+  # Written only once someone set it, so the file keeps "never chosen" apart
+  # from a chosen default (M56 D2).
+  defp conversation_keyword(%__MODULE__{conversation: nil}), do: []
+
+  defp conversation_keyword(%__MODULE__{conversation: conversation}),
+    do: [conversation: conversation]
+
   defp engine(config) do
     engine = string(config, :engine, "openai_realtime")
     assert_one_of!(engine, @valid_engines, :engine)
@@ -267,6 +303,27 @@ defmodule FermixCore.Realtime.Config do
                 ~s([fermix_core.realtime] or set engine = "openai_realtime")
       end
     end)
+  end
+
+  defp reject_live_only_keys!(_config, "openai_live"), do: :ok
+
+  defp reject_live_only_keys!(config, "openai_realtime") do
+    Enum.each(@live_only_keys, fn key ->
+      unless is_nil(lookup(config, key)) do
+        raise ArgumentError,
+              "realtime.#{key} is a Live-only setting; remove it from " <>
+                ~s([fermix_core.realtime] or set engine = "openai_live")
+      end
+    end)
+  end
+
+  defp conversation_setting(_config, "openai_realtime"), do: nil
+
+  defp conversation_setting(config, "openai_live") do
+    case string(config, :conversation, nil) do
+      nil -> nil
+      conversation -> one_of!(conversation, @conversations, :conversation)
+    end
   end
 
   defp reasoning_effort(_config, "openai_live"), do: nil
@@ -341,6 +398,11 @@ defmodule FermixCore.Realtime.Config do
       raise ArgumentError,
             "realtime.#{key} must be one of #{Enum.join(valid, ", ")}, got: #{inspect(actual)}"
     end
+  end
+
+  defp one_of!(actual, valid, key) do
+    assert_one_of!(actual, valid, key)
+    actual
   end
 
   defp bool(config, key, default) do

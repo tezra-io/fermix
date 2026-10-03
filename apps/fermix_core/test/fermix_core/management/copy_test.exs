@@ -167,6 +167,34 @@ defmodule FermixCore.Management.CopyTest do
       end
     end
 
+    # The suite's snapshot runs the default engine, so the rows only the Live
+    # engine publishes (its backend and whether calls join the chat) are walked
+    # here from a Live snapshot.
+    test "every row only the Live voice engine publishes obeys the rules" do
+      realtime = [enabled: true, engine: "openai_live", model: "gpt-live-1"]
+
+      snapshot =
+        Map.update(ConfigStore.current_snapshot(), :fermix_core, [realtime: realtime], fn core ->
+          Keyword.put(core, :realtime, realtime)
+        end)
+
+      {:ok, view} = Settings.get("realtime", snapshot: snapshot)
+      keys = Enum.map(view["rows"], & &1["key"])
+
+      assert "realtime_backend" in keys and "realtime_conversation" in keys
+
+      for row <- view["rows"] do
+        where = "realtime.#{row["key"]}"
+
+        assert_clean(row["label"], :prose, [], "row label #{where}")
+        assert_clean(row["footer"], :prose, [], "row footer #{where}")
+
+        for option <- row["options"] do
+          assert_clean(option["label"], :name, [], "option label #{where}")
+        end
+      end
+    end
+
     test "every remediation title and body obeys the rules" do
       for key <- Remediation.keys() do
         [id, status] = String.split(key, ".")

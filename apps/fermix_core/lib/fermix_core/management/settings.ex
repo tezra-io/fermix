@@ -276,7 +276,8 @@ defmodule FermixCore.Management.Settings do
     {:engine, "realtime_engine"},
     {:model, "realtime_model"},
     {:voice, "realtime_voice"},
-    {:reasoning_effort, "realtime_reasoning_effort"}
+    {:reasoning_effort, "realtime_reasoning_effort"},
+    {:conversation, "realtime_conversation"}
   ]
 
   defp derived_keys(_keys, nil), do: []
@@ -317,6 +318,10 @@ defmodule FermixCore.Management.Settings do
       effort_sentence(
         Keyword.has_key?(previous, :reasoning_effort),
         Keyword.has_key?(now, :reasoning_effort)
+      ) ++
+      conversation_sentence(
+        Keyword.has_key?(previous, :conversation),
+        Keyword.has_key?(now, :conversation)
       )
   end
 
@@ -337,6 +342,13 @@ defmodule FermixCore.Management.Settings do
 
   defp effort_sentence(false, true),
     do: ["Reasoning effort was restored because this engine uses it."]
+
+  # Live-only, so only the journey to Realtime moves it, and only a value the
+  # owner chose is there to lose: back on Live an unset key means the chat.
+  defp conversation_sentence(true, false),
+    do: ["Whether voice calls join the chat was reset because this engine does not use it."]
+
+  defp conversation_sentence(_previous, _now), do: []
 
   defp transcription_model(snapshot) do
     snapshot
