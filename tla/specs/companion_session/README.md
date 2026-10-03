@@ -124,10 +124,11 @@ answers however busy it is, so the model folds the Queue's stop into that
     which is live-only.
 - Whether a turn may end with no reply is frozen when it starts, at the
   queue's checkout (`MainAgent.turn_state` -> `Voice.Bridge.chat_call` ->
-  `Companion.every_client_reads?`): only while every client joined then
-  declared version 2. Each client's version is fixed for the run
-  (`V1Clients`), and the clients joined at the start are kept as the turn's
-  watchers.
+  `Companion.every_client_reads?`): only a turn this socket's transport runs,
+  while every client joined then declared version 2. A phone turn in the chat
+  (M56 D9) is never offered it: the phone's wire has no such ending. Each
+  client's version is fixed for the run (`V1Clients`), and the clients joined
+  at the start are kept as the turn's watchers.
 - Every writer gets `server_seq` from the per-profile counter inside the
   insert's transaction (`append_in_tx`).
 - A Connection joins the registry before it writes `server_hello`, and writes
@@ -235,8 +236,9 @@ the checks that show a rule needs it):
   reads the counter, then inserts in a second call.
 - `SilenceGate`: a turn may end with no reply only if every client joined
   when it started declared version 2 (`MainAgent.live_call`,
-  `Voice.Bridge.chat_call`, `Companion.every_client_reads?`, frozen into the
-  turn's snapshot). `FALSE` offers silence whoever is joined.
+  `Voice.Bridge.chat_call` for a turn on this socket's channel,
+  `Companion.every_client_reads?`, frozen into the turn's snapshot). `FALSE`
+  offers silence whoever is joined.
 
 **Bounds** (set per check): `Clients` (always two), `Senders` (the clients
 whose users type), `InlineSenders` (the senders whose messages are slash
@@ -395,7 +397,11 @@ of an entity its rules are about. All still hold:
   turn's reply as a `row`. A turn's stream and its ending, and an approval card
   with its resolution, stay on the transport that raised them, the only one
   its token resolves from. A phone's row reaches this spec's clients as the
-  job's row does. This spec is two clients on `companion.sock`.
+  job's row does. This spec is two clients on `companion.sock`. The phone's
+  turns run in this conversation's queue too (M56 D9): a phone turn waits as
+  another sender's would, its cancel names its own message id (the named stop
+  `turn_queue` proves), it is never offered silence, and it ends on its own
+  wire.
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,

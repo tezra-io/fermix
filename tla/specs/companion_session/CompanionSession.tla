@@ -49,16 +49,18 @@
 (* Queue's outcomes reach it in order, and a worker's two casts reach it   *)
 (* in the order the worker sent them.                                      *)
 (*                                                                         *)
-(* A turn of the chat during a GPT-Live call may end with no reply (M56     *)
+(* A turn of the chat during a GPT-Live call may end with no reply (M56    *)
 (* 4.4): its runner tells Turns before the reply arrives (Turns.silent,    *)
 (* from the turn's own process), the reply, exactly [SILENT], is dropped,  *)
 (* no row is written and the turn ends with turn_done, which only a        *)
-(* version 2 client is sent (connection.ex write_in_version). Whether the   *)
-(* turn may end so is frozen when it starts (MainAgent at checkout, through *)
-(* Voice.Bridge.chat_call and Companion.every_client_reads?): only while    *)
-(* every client joined then declared version 2. Each client's version is   *)
-(* fixed here (V1Clients); turn_done itself is read by no client rule, so   *)
-(* it is not put on the wire.                                              *)
+(* version 2 client is sent (connection.ex write_in_version). Whether the  *)
+(* turn may end so is frozen when it starts (MainAgent at checkout,        *)
+(* through Voice.Bridge.chat_call and Companion.every_client_reads?): only *)
+(* a turn this socket's transport runs, while every client joined then     *)
+(* declared version 2; a phone turn in the chat (M56 D9) is never offered  *)
+(* it, its wire having no such ending. Each client's version is fixed here *)
+(* (V1Clients); turn_done itself is read by no client rule, so it is not   *)
+(* put on the wire.                                                        *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (* - text_delta, tool_event, turn_started, read_state: live-only, never in *)
@@ -73,10 +75,14 @@
 (* turn's reply as a row); a turn's stream and ending, and an approval,    *)
 (* stay on the transport that raised them. A phone's row reaches this      *)
 (* spec's clients as the job's row does; this spec is two clients on       *)
-(* companion.sock. A phone's revocation is not modelled either: Turns runs *)
-(* it in its own mailbox as a cancel of every unsettled request the device *)
-(* claimed, one step that marks them all and stops each turn it handed off *)
-(* (handle_cast {:revoke_device}, turns.ex:296-308);                       *)
+(* companion.sock. Its turns run in this conversation's Queue too (M56     *)
+(* D9): a phone turn waits as another sender's would, its cancel names its *)
+(* own message id (the named stop turn_queue proves), it is never offered  *)
+(* silence, and it ends on its own wire. A phone's revocation is not       *)
+(* modelled either: Turns runs it in its own mailbox as a cancel of every  *)
+(* unsettled request the device claimed, one step that marks them all and  *)
+(* stops each turn it handed off (handle_cast {:revoke_device},            *)
+(* turns.ex:296-308);                                                      *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -136,8 +142,8 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox/confirmations.ex @ 7f77c69d0c1a
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ c010abc02f52
-\* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 2db5517fdaee
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/voice/bridge.ex#chat_call @ d1c29597e959
+\* SOURCE: apps/fermix_core/lib/fermix_core/agents/main_agent.ex#turn_state,live_call @ 4c76bdeeb9fd
 \* SOURCE: apps/fermix_core/lib/fermix_core/agents/turn_runner.ex#run_normal,tell_silent @ 315e701bd51c
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
