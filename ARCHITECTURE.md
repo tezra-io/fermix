@@ -127,10 +127,13 @@ built at init, so a provider change needs a restart.
 compaction, persisting the user message, `AgentLoop`, `[:fermix, :agent, ...]`
 telemetry, and `commit/4` after delivery. Conversation identity is
 `Agents.ConversationKey`: `{channel, chat_id, thread_scope}`, with `thread_ts`
-as the canonical thread identifier when present. The one override is a trusted
-Live hand-off, which runs in the conversation its `voice_call` map names
+as the canonical thread identifier when present. It takes one override, with
+two users: Channels names the conversation a message runs in when it is not
+the message's own, so the queue lane, the history, the commit and the memory
+review all agree. A trusted Live hand-off names it in its `voice_call` map
 (`Agents.VoiceCall`, believed only on an operator message on the `voice`
-channel), so the queue lane, the history and the commit all agree.
+channel); a phone message carries the Mac's chat in `conversation_key`, which
+only `Gateway.ingest/2` sets, from the adapter (M56 D9).
 
 Architecture Invariant: `MainAgent` and `TurnRunner` do not know how Telegram,
 Slack, WhatsApp, Discord, Signal, ACP, mobile, voice, or CLI replies are
@@ -657,7 +660,13 @@ Current channels:
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
-  conversation history. `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
+  conversation history. Its turns run in the Mac's chat conversation
+  (`Mobile.joined_conversation/1`, the one `Gateway.Channel` callback that
+  names another transport's conversation, which the gateway puts on every
+  message it ingests through the adapter), so the one timeline both transports
+  draw has one agent history and one queue lane, while the channel stays
+  `mobile` for the phone's authorization, approval cards, stream and push.
+  `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
   the device store and registry, `PairManager`, `MediaStore`, the bounded
   link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
   dispatcher when push is configured (it connects on the first push, never at
@@ -688,7 +697,9 @@ Current channels:
   answered inline), in mailbox order. A turn it tracks settles from the
   Queue's outcome: a companion turn's replies are held and written, with
   `text_done`, only on `{:completed}`, while a phone turn streams and writes
-  its own rows and is only settled. A `cancel` from either transport
+  its own rows and is only settled. Both transports' turns run in the chat's
+  one queue lane, so each waits for the other, and a stop names its own
+  turn's message id there. A `cancel` from either transport
   (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
   `Turns`, which owns the hand-off to the queue, reads that mark as it enqueues
   and sends any `Queue.stop_turn/3` itself, so a cancel is never lost between
@@ -722,12 +733,12 @@ Current channels:
 - `Voice` turns Live-voice delegations into `voice`-channel turns
   (`Voice.Bridge`). Unless the call is private, they run in the chat's own
   conversation (`Companion.chat_conversation_key/0`), which the bridge names
-  in the trusted `voice_call` map, so a hand-off and a typed turn share one
-  history and one queue lane; a cancel or a hang-up stops only the call's own
-  turns, by message id (`Queue.stop_turn/3`). A private call keeps a
-  conversation of its own, keyed by the call's UUID. A hand-off runs on the
-  operator surface less what a call cannot deliver, one list per mode read by
-  the voice model's prompt and the hand-off alike
+  in the trusted `voice_call` map, so a hand-off and a turn typed on the Mac
+  or the phone share one history and one queue lane; a cancel or a hang-up
+  stops only the call's own turns, by message id (`Queue.stop_turn/3`). A
+  private call keeps a conversation of its own, keyed by the call's UUID. A
+  hand-off runs on the operator surface less what a call cannot deliver, one
+  list per mode read by the voice model's prompt and the hand-off alike
   (`VoiceCall.excluded_categories/1`): a call in the chat may start a coding
   run, which reports back into the chat, and a private call may not. While a
   call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
@@ -735,7 +746,8 @@ Current channels:
   each such turn is told the call is up (`Voice.Bridge.chat_call/2`): it can
   read the call (`voice_call_context`) and may end with no reply, which its
   runner tells the companion stream and `Companion.Turns` ends with
-  `turn_done`, offered only while every companion client attached reads it.
+  `turn_done`, offered only to a turn the Mac runs while every companion
+  client attached reads it (the phone's wire has no such ending).
   What a hand-off's answer cannot say aloud is shown in the chat: the Live
   session writes it through `VoiceBridge.show/2`, which `Voice.Bridge`
   answers with `Companion.write_call_row/3`, the one write for a call's rows

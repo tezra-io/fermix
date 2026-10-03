@@ -80,6 +80,14 @@
         "invokes skill self_knowledge",
         "says a task asked aloud sends the text with send_to_channel to the owner's own inbox on the channel named (never another chat; a channel with no owner inbox is refused, not swapped) and says where it went, and that in a call in the chat a task can start a coding run that keeps going after the call and reports back into the Mac chat, while a private call cannot start one"
       ]
+    },
+    {
+      "name": "phone_and_mac_one_conversation",
+      "prompt": "If I tell Fermix something from my phone, will it know it when I carry on in the Mac app's chat? Can a message from the phone and one from the Mac run at the same time?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says no phone app is released yet, and that the phone channel's turns run in the Mac chat's one agent conversation: one history, so what is said on either is read by the next turn on the other (a voice call's tasks in the chat included), and one turn queue, so a message from one waits for a running turn from the other; a cancel stops only its own request, and /new from either starts the conversation afresh for both"
+      ]
     }
   ]
 }

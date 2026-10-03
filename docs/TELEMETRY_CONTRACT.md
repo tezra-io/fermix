@@ -438,6 +438,19 @@ chat's, `{"companion","main",:root}`, while the message's `channel` stays
 persists in the chat is marked spoken in the conversation store and reaches no
 telemetry field, like every other piece of spoken content.
 
+The phone's turns run in that same conversation (M56 D9): a phone message
+carries the chat's key, so for a phone turn the events that name a
+conversation key name the chat's too. The history read and the loop runtime
+carry `conversation_key` `{"companion","main",:root}` beside the message's
+`channel` `mobile`, and compaction's events carry that key; the queue's
+request events, the conversation store's `[:fermix, :memory,
+:message_persist]` and the memory review (its `session_id`, its
+`channel`/`chat_id` and the Opik `thread_id` they fill) take their `channel`
+from it and read `companion`. The turn's own events keep the message's
+channel (`[:fermix, :agent, :message]` and its Opik thread `mobile:main`, the
+queue's enqueue, the channel's message points), so a phone turn is still told
+apart there. Nothing new is emitted.
+
 A message typed in the chat while a call in the chat is up is an ordinary
 chat turn (`main-*` session, M56 §4.4): it is told the call is up and may end
 with no reply. Its `[:fermix, :agent, :message]` event carries `silent`, a
