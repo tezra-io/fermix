@@ -182,6 +182,38 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     def supports_streaming?, do: false
   end
 
+  # Answers with the reply its opts name, in one step.
+  defmodule ReplyAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      {:ok,
+       %{
+         content: Keyword.fetch!(opts, :reply),
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
   # Hands back the prompt AND the adapter opts. The correlation ids a real
   # adapter passes to `Providers.Telemetry.emit_call/3` arrive as adapter opts
   # (`AgentLoop.bind_route`), so asserting on them here is asserting on exactly
@@ -1978,6 +2010,95 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       refute Enum.any?(messages, &(&1.content =~ "voice call"))
       refute Enum.any?(messages, &(&1.content =~ "SILENT"))
+    end
+  end
+
+  # M56 §4.4: a turn the snapshot let end with no reply, whose reply is exactly
+  # the sentinel, tells its channel so (which then shows nothing) and says so on
+  # its turn event. The reply itself is returned as any other, for the queue to
+  # deliver and commit: history shows the turn closed.
+  describe "a silent ending" do
+    @allowed %{started_at: ~U[2026-10-03 14:05:00Z], silence_allowed?: true}
+
+    test "the sentinel on a turn allowed silence tells the channel and the turn event" do
+      {result, events, metadata} = run_reply_turn("[SILENT]", @allowed)
+
+      assert {:ok, "[SILENT]", _tokens} = result
+      assert :silent_reply in events
+      assert metadata.silent == true
+    end
+
+    test "with an older client attached the sentinel is ordinary text" do
+      {result, events, metadata} =
+        run_reply_turn("[SILENT]", %{@allowed | silence_allowed?: false})
+
+      assert {:ok, "[SILENT]", _tokens} = result
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+
+    test "outside a call the sentinel is ordinary text" do
+      {_result, events, metadata} = run_reply_turn("[SILENT]", nil)
+
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+
+    test "an answer during a call is no silent ending" do
+      {result, events, metadata} = run_reply_turn("Saved the lease.", @allowed)
+
+      assert {:ok, "Saved the lease.", _tokens} = result
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+  end
+
+  defp run_reply_turn(reply, live_call) do
+    registry_name = :"tr_silent_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+    chat_id = "silent-#{System.unique_integer([:positive])}"
+    test_pid = self()
+    handler_id = "turn-silent-#{chat_id}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :agent, :message],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.chat_id == chat_id, do: send(test_pid, {:turn_message, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    msg = %{
+      channel: "companion",
+      chat_id: chat_id,
+      sender: "Companion owner",
+      content: "https://x.test/lease",
+      source_trust: :operator
+    }
+
+    turn_state =
+      turn_state(
+        adapter: ReplyAdapter,
+        adapter_opts: [model: "mock-model", reply: reply],
+        capability_registry: registry_name,
+        conversation_store: start_voice_store(),
+        live_call: live_call
+      )
+
+    stream = fn event -> send(test_pid, {:stream, event}) end
+    result = TurnRunner.run(msg, turn_state, fn _part -> :ok end, stream)
+    assert_receive {:turn_message, metadata}, 5_000
+    {result, stream_events(), metadata}
+  end
+
+  defp stream_events do
+    receive do
+      {:stream, event} -> [event | stream_events()]
+    after
+      0 -> []
     end
   end
 

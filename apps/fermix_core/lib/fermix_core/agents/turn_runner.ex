@@ -592,7 +592,7 @@ defmodule FermixCore.Agents.TurnRunner do
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
     persist_user_message(conversation_key, msg, state, voice_call)
 
-    run_normal(loop_opts, context, msg, start)
+    run_normal(loop_opts, context, msg, {start, Map.get(state, :live_call)})
   end
 
   defp run_profile(msg) do
@@ -715,10 +715,11 @@ defmodule FermixCore.Agents.TurnRunner do
     |> String.trim()
   end
 
-  defp run_normal(loop_opts, context, msg, start) do
+  defp run_normal(loop_opts, context, msg, {start, live_call}) do
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
+        silent? = LiveCallTurn.silent?(live_call, result.response)
 
         :telemetry.execute(
           [:fermix, :agent, :message],
@@ -727,13 +728,14 @@ defmodule FermixCore.Agents.TurnRunner do
             total_tokens: result.total_tokens,
             duration_ms: duration_ms
           },
-          turn_message_metadata(context, msg, result)
+          context |> turn_message_metadata(msg, result) |> Map.put(:silent, silent?)
         )
 
         Logger.info(
           "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
         )
 
+        if silent?, do: tell_silent(Keyword.get(loop_opts, :stream_callback))
         {:ok, result.response, Map.get(result, :context_tokens, 0)}
 
       {:error, reason} ->
@@ -748,6 +750,15 @@ defmodule FermixCore.Agents.TurnRunner do
         {:error, reason}
     end
   end
+
+  # M56 §4.4: the turn ends with no reply, and its channel, the one surface
+  # that streams it, is told before the reply reaches it, from this same
+  # process, so it shows nothing for the turn. The reply still goes back to
+  # the queue, which delivers and commits it as any other.
+  defp tell_silent(stream_callback) when is_function(stream_callback, 1),
+    do: stream_callback.(:silent_reply)
+
+  defp tell_silent(nil), do: :ok
 
   defp turn_message_metadata(context, msg, result) do
     context

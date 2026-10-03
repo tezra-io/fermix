@@ -22,6 +22,11 @@ defmodule FermixChannels.Channels.Companion do
   relays each snapshot and every connection sends its own client the suffix it
   has not written yet; a client that connects mid-turn gets the text so far as
   its first delta. `turn_started` goes out when the loop starts.
+
+  During a Live call in the chat a turn may end with no reply (M56 §4.4): a
+  snapshot that could still become the sentinel is held back, so such a turn
+  never shows a draft, and the runner's `:silent_reply` tells `Turns` the turn
+  ends that way.
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -35,6 +40,7 @@ defmodule FermixChannels.Channels.Companion do
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
@@ -158,6 +164,9 @@ defmodule FermixChannels.Channels.Companion do
       {kind, text} when kind in [:text_delta, :text_done] ->
         relay(profile_id, turn_id, text)
 
+      :silent_reply ->
+        Turns.silent(message)
+
       _reasoning_or_other ->
         :ok
     end
@@ -268,8 +277,14 @@ defmodule FermixChannels.Channels.Companion do
   defp emit_outbound({:ok, :existing}, _duration_us), do: :ok
   defp emit_outbound({:error, reason}, _duration_us), do: {:error, reason}
 
-  defp relay(profile_id, turn_id, text) when is_binary(text),
-    do: stream(profile_id, turn_id, {:snapshot, text})
+  # A snapshot that could still become the sentinel waits for the next one: a
+  # turn that ends silently never shows a draft, and one that does not loses
+  # nothing, since the next snapshot, or its `text_done`, carries the text.
+  defp relay(profile_id, turn_id, text) when is_binary(text) do
+    if LiveCallTurn.sentinel_prefix?(text),
+      do: :ok,
+      else: stream(profile_id, turn_id, {:snapshot, text})
+  end
 
   defp stream(profile_id, turn_id, update),
     do: dispatch(@registry, profile_id, {:companion_stream, turn_id, update})

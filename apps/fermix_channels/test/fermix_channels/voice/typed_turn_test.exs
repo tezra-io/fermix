@@ -11,8 +11,11 @@ defmodule FermixChannels.Voice.TypedTurnTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Companion
+  alias FermixChannels.Companion.Turns
+  alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Queue
   alias FermixCore.Agents.MainAgent
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.DeviceIdentity
 
@@ -29,6 +32,55 @@ defmodule FermixChannels.Voice.TypedTurnTest do
 
     def commit(_msg, _turn_state, _response, _context_tokens), do: :ok
     def error_reply(reason), do: inspect(reason)
+  end
+
+  # A provider that answers every typed message with the sentinel, streaming
+  # it as a provider streams, a piece at a time.
+  defmodule SilentAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      stream = Keyword.get(opts, :stream_callback)
+
+      if is_function(stream, 1),
+        do: Enum.each(["[", "[SIL", "[SILENT]"], &stream.({:text_delta, &1}))
+
+      {:ok,
+       %{
+         content: "[SILENT]",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: true
+  end
+
+  # The companion timeline, standing in: it reports each row a reply becomes.
+  # A typed turn with no request behind it writes a plain row.
+  defmodule RowSink do
+    def append(profile, attrs, _opts) do
+      send(:typed_turn_test, {:row_written, attrs.content})
+
+      {:ok,
+       Map.merge(attrs, %{profile_id: profile, server_seq: 7, created_at: DateTime.utc_now()})}
+    end
   end
 
   setup do
@@ -77,6 +129,98 @@ defmodule FermixChannels.Voice.TypedTurnTest do
 
     assert_receive {:running, "queued during the call", nil, second}, 5_000
     send(second, :finish)
+  end
+
+  # The whole path, every piece real but the provider: a message typed in the
+  # chat during a call, answered with the sentinel, is committed to the chat's
+  # history, shows no draft, writes no row and ends with turn_done.
+  describe "a typed message the agent leaves unanswered" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :companion_store)
+      Application.put_env(:fermix_channels, :companion_store, RowSink)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, store} -> Application.put_env(:fermix_channels, :companion_store, store)
+          :error -> Application.delete_env(:fermix_channels, :companion_store)
+        end
+      end)
+
+      Process.register(self(), :typed_turn_test)
+      start_supervised!(Turns)
+      chat_key = Companion.chat_conversation_key()
+      :ok = ConversationStore.clear(chat_key)
+      on_exit(fn -> ConversationStore.clear(chat_key) end)
+
+      agent = :"silent_turn_main_agent_#{System.unique_integer([:positive])}"
+      start_supervised!({MainAgent, name: agent, adapter: SilentAdapter}, id: agent)
+      task_supervisor = start_supervised!({Task.Supervisor, []}, id: :silent_turn_tasks)
+
+      queue =
+        start_supervised!(
+          {Queue,
+           name: :"silent_turn_queue_#{System.unique_integer([:positive])}",
+           main_agent: agent,
+           task_supervisor: task_supervisor},
+          id: :silent_turn_queue
+        )
+
+      # This test process is the one companion client attached, at version 2.
+      {:ok, _owner} = Registry.register(Companion.registry(), "main", 2)
+      %{chat_key: chat_key, silent_queue: queue}
+    end
+
+    test "is committed, shows no draft, writes no row and ends with turn_done", ctx do
+      holder = hold_call()
+      {:ok, [message]} = Companion.parse_event(typed_event("e2e-silent", "https://x.test/lease"))
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: Companion,
+                 agent: Turns,
+                 agent_server: ctx.silent_queue,
+                 ingress_context: %{transport: :companion}
+               )
+
+      assert_receive {:companion_event, %{"t" => "turn_done", "turn_id" => "turn-e2e-silent"}},
+                     5_000
+
+      assert [%{role: "user"}, %{role: "assistant", content: "[SILENT]"}] =
+               ConversationStore.get_history(ctx.chat_key)
+
+      refute_received {:companion_stream, _turn, {:snapshot, _text}}
+      refute_received {:companion_event, %{"t" => "text_done"}}
+      refute_received {:row_written, _text}
+      send(holder, :release)
+    end
+
+    test "outside a call the sentinel is ordinary text, shown as the turn's answer", ctx do
+      {:ok, [message]} = Companion.parse_event(typed_event("e2e-plain", "hello"))
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: Companion,
+                 agent: Turns,
+                 agent_server: ctx.silent_queue,
+                 ingress_context: %{transport: :companion}
+               )
+
+      assert_receive {:companion_event, %{"t" => "text_done", "text" => "[SILENT]"}}, 5_000
+      assert_received {:row_written, "[SILENT]"}
+      refute_received {:companion_event, %{"t" => "turn_done"}}
+    end
+  end
+
+  defp typed_event(client_msg_id, text) do
+    %{
+      type: "msg",
+      payload: %{
+        "client_msg_id" => client_msg_id,
+        "profile_id" => "main",
+        "text" => text,
+        "attach_ids" => []
+      }
+    }
   end
 
   defp typed(content) do

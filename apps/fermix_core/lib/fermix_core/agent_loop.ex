@@ -74,7 +74,9 @@ defmodule FermixCore.AgentLoop do
   docs/design/CHANNEL_STREAMING.md §5.1). The loop emits `:session_started`
   once and `:iteration_started` before every provider call; streaming
   adapters emit `:text_delta`/`:reasoning_delta` through the same callback
-  (threaded via `adapter_opts[:stream_callback]`).
+  (threaded via `adapter_opts[:stream_callback]`). `:silent_reply` is never
+  the loop's: `TurnRunner` sends it after the loop, on a turn its snapshot let
+  end with no reply whose reply is exactly the sentinel (M56 §4.4).
   """
   @type stream_event ::
           {:session_started, String.t() | nil}
@@ -83,6 +85,7 @@ defmodule FermixCore.AgentLoop do
           | {:text_done, String.t()}
           | {:reasoning_delta, String.t()}
           | {:reasoning_done, String.t()}
+          | :silent_reply
   @type stream_callback :: (stream_event() -> any())
 
   @typedoc """

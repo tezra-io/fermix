@@ -289,6 +289,52 @@ defmodule FermixChannels.Channels.CompanionTest do
     refute_receive {:companion_stream, _turn, {:snapshot, "thinking"}}
   end
 
+  # M56 §4.4: a reply that may still become the sentinel never reaches a
+  # client as a draft, so a turn that ends silently shows nothing on its way.
+  test "a snapshot that could still become [SILENT] is held back from the draft" do
+    stream = Companion.build_raw_stream_callback(request_message())
+
+    stream.({:text_delta, "["})
+    stream.({:text_delta, "[SIL"})
+    stream.({:text_done, "[SILENT]"})
+    refute_receive {:companion_stream, _turn, {:snapshot, _text}}, 100
+
+    stream.({:text_delta, "[Note] the"})
+    assert_receive {:companion_stream, "turn-mac-1", {:snapshot, "[Note] the"}}
+  end
+
+  test "a turn ended silently writes no row and ends with turn_done" do
+    handler = attach_message_telemetry()
+    on_exit(fn -> :telemetry.detach(handler) end)
+    message = track(request_message())
+    stream = Companion.build_raw_stream_callback(message)
+    reply = Companion.build_text_reply(message)
+
+    stream.(:silent_reply)
+    assert :ok = reply.("[SILENT]")
+    assert :ok = Companion.build_turn_result(message).({:completed})
+
+    assert_receive {:companion_event, %{"t" => "turn_done", "turn_id" => "turn-mac-1"}}
+    assert_receive {:completed, "main", "mac-1", 3}
+    refute_received {:client_output, _profile, _id, _attempt, _key, _attrs}
+    refute_received {:companion_event, %{"t" => "text_done"}}
+    refute_received {:telemetry, _measurements, %{direction: :outbound}}
+  end
+
+  # Only the turn its runner said ends silently: anywhere else the sentinel is
+  # ordinary text, written and shown.
+  test "the sentinel on a turn not told it ends silently is a row like any reply" do
+    message = track(request_message())
+    reply = Companion.build_text_reply(message)
+
+    assert :ok = reply.("[SILENT]")
+    assert :ok = Companion.build_turn_result(message).({:completed})
+
+    assert_receive {:client_output, "main", "mac-1", 3, _key, %{content: "[SILENT]"}}
+    assert_receive {:companion_event, %{"t" => "text_done", "text" => "[SILENT]"}}
+    refute_received {:companion_event, %{"t" => "turn_done"}}
+  end
+
   test "a turn's replies are written and announced only once the queue completes it" do
     handler = attach_message_telemetry()
     on_exit(fn -> :telemetry.detach(handler) end)

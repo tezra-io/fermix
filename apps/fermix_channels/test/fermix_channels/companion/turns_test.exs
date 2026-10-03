@@ -1005,6 +1005,33 @@ defmodule FermixChannels.Companion.TurnsTest do
       refute_received {:"$gen_cast", {:chat, _event}}
     end
 
+    # M56 §4.4: a typed message may be material for the call, and its turn may
+    # end with no reply: its runner says so before the reply arrives.
+    test "a turn ended silently writes no row, ends with turn_done, and tells no answer", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "https://x.test/lease")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "https://x.test/lease"}}}
+
+      turn.stream_spec.callback.(:silent_reply)
+      assert :ok = turn.reply_fn.({:text, "[SILENT]"})
+      # The queue commits the sentinel as the turn's answer, closing it in history.
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "[SILENT]")
+      turn.turn_result_fn.({:completed})
+
+      turn_id = "turn-" <> id
+      assert_receive {:companion_event, %{"t" => "turn_done", "turn_id" => ^turn_id}}
+      assert {:ok, %{status: "completed", result_server_seq: nil}} = request(id)
+      drain(ctx)
+
+      refute_received {:companion_event, %{"t" => "text_done"}}
+      refute_received {:mobile_event, "main", %{"t" => "row", "role" => "assistant"}}
+      refute_received {:"$gen_cast", {:chat, {:answered, _message}}}
+    end
+
     # M56 §4.4: the chat does not know a private call exists.
     test "a private call is told nothing, and the chat is not read for it", ctx do
       :ok = CallRegistry.claim(CallRegistry, call_in("private"))
