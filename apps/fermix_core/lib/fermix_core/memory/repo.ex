@@ -3015,6 +3015,20 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  The closed records holding a task still `detached` that started before
+  `cutoff`, oldest first, at most `VoiceCallsSql.list_limit/0` of them: the
+  tasks a restart left with no owner, whose rows a boot writes (M56 §4.6).
+  """
+  @spec list_detached_voice_calls(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_detached_voice_calls(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_detached_voice_calls, stamp}, opts) do
+      decode_voice_calls(rows)
+    end
+  end
+
   @spec get_voice_call(String.t(), keyword()) ::
           {:ok, voice_call_row()} | {:error, :not_found | term()}
   def get_voice_call(uuid, opts \\ []) when is_binary(uuid) do
@@ -4110,6 +4124,11 @@ defmodule FermixCore.Memory.Repo do
 
   def handle_call({:list_owed_voice_call_rows, cutoff}, _from, state) do
     reply = with_connection(state, &VoiceCallsSql.list_owed_rows(&1, cutoff))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_detached_voice_calls, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_detached(&1, cutoff))
     {:reply, reply, state}
   end
 

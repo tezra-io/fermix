@@ -297,6 +297,33 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
   end
 
   @doc """
+  Closed records holding a task whose state is still `detached`, started
+  before `cutoff`, oldest first, at most #{@list_limit}: the tasks a restart
+  left with no owner (M56 §4.6). The task document is read with SQLite's own
+  JSON functions, so a record is listed only for what it holds.
+  """
+  @spec list_detached(term(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_detached(conn, cutoff) when is_binary(cutoff) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT #{@select} FROM voice_calls
+             WHERE ended_at IS NOT NULL AND started_at < ?
+               AND EXISTS (
+                 SELECT 1 FROM json_each(voice_calls.tasks_json) AS task
+                 WHERE json_extract(task.value, '$.state') = 'detached'
+               )
+             ORDER BY started_at ASC, uuid ASC
+             LIMIT ?
+             """,
+             [cutoff, @list_limit]
+           ) do
+      {:ok, Enum.map(rows, &voice_call_row/1)}
+    end
+  end
+
+  @doc """
   The gists of the newest calls that have one, newest first, at most `limit`
   (M56 §4.2, §4.3): each with when its call started and whether it was drawn
   from Computer History. A call with no gist is skipped.

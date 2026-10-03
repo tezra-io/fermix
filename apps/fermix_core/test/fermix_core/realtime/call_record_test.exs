@@ -95,15 +95,35 @@ defmodule FermixCore.Realtime.CallRecordTest do
 
       swept = CallRecord.fail_unfinished(record.tasks)
 
+      # A detached task is the chat's (M56 §4.6): the boot pass that writes
+      # its row fails it, so it is left for that pass.
       assert Enum.map(swept, &{&1["state"], &1["summary"]}) == [
                {"failed", "daemon_restarted"},
                {"failed", "daemon_restarted"},
-               {"failed", "daemon_restarted"},
+               {"detached", "was detached"},
                {"completed", "was completed"},
                {"failed", "was failed"},
                {"cancelled", "was cancelled"},
                {"timed_out", "was timed_out"}
              ]
+    end
+
+    # M56 §4.6: a task handed over as its call ends says where its result goes.
+    test "a detached task keeps its destination, the chat, and no other" do
+      [task] =
+        CallRecord.new(@uuid, "openai_live")
+        |> CallRecord.put_task("dg_1", 1, "running", %{request: "user: a"})
+        |> CallRecord.put_task("dg_1", 1, "detached", %{destination: "chat"})
+        |> CallRecord.put_task("dg_1", 1, "completed", %{summary: "Done."})
+        |> Map.fetch!(:tasks)
+
+      assert %{"state" => "completed", "destination" => "chat", "request" => "user: a"} = task
+
+      assert_raise FunctionClauseError, fn ->
+        CallRecord.put_task(CallRecord.new(@uuid, "openai_live"), "dg_1", 1, "detached", %{
+          destination: "telegram"
+        })
+      end
     end
 
     # A stored document is read back, not trusted: a task missing a field must
@@ -264,6 +284,74 @@ defmodule FermixCore.Realtime.CallRecordTest do
       assert {:ok, []} = CallRecord.sweep_rows(cutoff, write, opts)
     end
 
+    # M56 §4.6: a task that outlived its call ends after the record closed, in
+    # the record as stored.
+    test "a detached task's end is written to its closed record", %{opts: opts, repo: repo} do
+      detached!(@uuid, opts)
+
+      assert :ok =
+               CallRecord.settle_task(@uuid, "dg_2", 1, "completed", "Parking is north.", opts)
+
+      assert {:ok, %{tasks: [first, second]}} = get(repo)
+      assert first["state"] == "completed"
+
+      assert %{"state" => "completed", "summary" => "Parking is north.", "destination" => "chat"} =
+               second
+
+      assert_raise FunctionClauseError, fn ->
+        CallRecord.settle_task(@uuid, "dg_2", 1, "detached", nil, opts)
+      end
+    end
+
+    # M56 §4.6, §8: a daemon that died while a task it had detached still ran
+    # leaves it detached in a closed record. The boot writes its done row,
+    # then fails it, so a crash between the two writes the row again, keyed.
+    test "the boot pass writes a done row for every task a restart left detached", %{
+      opts: opts,
+      repo: repo
+    } do
+      detached!(@uuid, opts)
+      owe!(@other_uuid, :nothing, opts)
+      test_pid = self()
+
+      write = fn call, text ->
+        send(test_pid, {:row, call, text})
+        {:ok, 12}
+      end
+
+      cutoff = DateTime.add(@ended, 3_600, :second)
+      assert {:ok, [@uuid]} = CallRecord.sweep_detached(cutoff, write, opts)
+
+      assert_receive {:row, call, "The task stopped when Fermix restarted."}
+
+      assert call == %{
+               "uuid" => @uuid,
+               "event" => "task_done",
+               "task_id" => "dg_2",
+               "revision" => 1,
+               "state" => "failed"
+             }
+
+      refute_received {:row, _call, _text}
+      assert {:ok, %{tasks: [_first, second]}} = get(repo)
+      assert %{"state" => "failed", "summary" => "daemon_restarted"} = second
+
+      assert {:ok, []} = CallRecord.sweep_detached(cutoff, write, opts)
+    end
+
+    test "a detached task whose row cannot be written stays detached", %{opts: opts, repo: repo} do
+      detached!(@uuid, opts)
+      cutoff = DateTime.add(@ended, 3_600, :second)
+
+      assert {:error, {@uuid, :no_timeline}} =
+               CallRecord.sweep_detached(cutoff, fn _c, _t -> {:error, :no_timeline} end, opts)
+
+      assert {:ok, %{tasks: [_first, %{"state" => "detached"}]}} = get(repo)
+
+      assert {:ok, []} =
+               CallRecord.sweep_detached(@started, fn _c, _t -> flunk("written") end, opts)
+    end
+
     test "a call this boot started is not swept", %{opts: opts, repo: repo} do
       owe!(@uuid, :gist, opts)
 
@@ -284,6 +372,12 @@ defmodule FermixCore.Realtime.CallRecordTest do
 
       assert {:error, :disabled} =
                CallRecord.sweep_rows(@ended, fn _c, _t -> {:ok, 1} end, server: repo)
+
+      assert {:error, :disabled} =
+               CallRecord.sweep_detached(@ended, fn _c, _t -> {:ok, 1} end, server: repo)
+
+      assert {:error, :disabled} =
+               CallRecord.settle_task(@uuid, "dg_1", 1, "completed", "Done.", server: repo)
     end
 
     test "the recent gists are read newest first, and none asked for reads nothing", %{
@@ -303,6 +397,19 @@ defmodule FermixCore.Realtime.CallRecordTest do
   end
 
   defp get(repo), do: Repo.get_voice_call(@uuid, server: repo)
+
+  # A closed call in the chat whose second task was handed over as it ended.
+  defp detached!(uuid, opts) do
+    record =
+      CallRecord.new(uuid, "openai_live")
+      |> CallRecord.put_task("dg_1", 1, "completed", %{summary: "Booked."})
+      |> CallRecord.put_task("dg_2", 1, "running", %{request: "user: find parking"})
+      |> CallRecord.put_task("dg_2", 1, "detached", %{destination: "chat"})
+
+    :ok = CallRecord.open(record, @started, opts)
+    usage = %{voice_cost_cents: 5.35, accounting: "complete"}
+    :ok = CallRecord.close(record, :call_stop, usage, @ended, opts, :row)
+  end
 
   defp owe!(uuid, owes, opts) do
     record = CallRecord.new(uuid, "openai_live")

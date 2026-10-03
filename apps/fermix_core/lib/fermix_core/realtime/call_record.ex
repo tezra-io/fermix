@@ -11,11 +11,21 @@ defmodule FermixCore.Realtime.CallRecord do
   captions only.
 
   A task is `{call_uuid, task_id, revision}`, `task_id` being the provider's
-  delegation id. Its states are `created` and `running`, `detached` (a later
-  stage: the task outlives its call), then one terminal state: `completed`,
+  delegation id. Its states are `created` and `running`, `detached` (the task
+  outlives its call, M56 §4.6), then one terminal state: `completed`,
   `failed`, `cancelled` or `timed_out`. Each task carries the request it ran
   with, capped at 2 KB from the front (its end is the ask), and the summary the
-  session put on the wire. A private call's tasks carry no request (M56 §5).
+  session put on the wire. A private call's tasks carry no request (M56 §5). A
+  detached task names where its result goes, `destination: "chat"`, the one
+  destination there is.
+
+  A detached task ends after its call's record closed: `settle_task/6` writes
+  its terminal state into the record as stored, read and written back by the
+  one process that owns the task once the session has exited. A daemon that
+  died first leaves it `detached`, which the stage 1 sweep leaves alone (it
+  closes only records left open, and a record a restart cut off mid-detach is
+  closed with the task as it stands), and `sweep_detached/3` writes its done
+  row and fails it at the next boot.
 
   A call in the chat owes the chat one row when it ends, and a gist when
   anything was said or handed off (M56 §4.2): the close writes what it owes
@@ -32,9 +42,10 @@ defmodule FermixCore.Realtime.CallRecord do
   drawn from Computer History content (M56 §9).
 
   The functions building the record are pure. `open/3`, `write_tasks/2`,
-  `close/6`, `record_gist/3`, `write_row/3`, `sweep/2` and `sweep_rows/3` are
-  the writes, through `Memory.Repo`, and `recent_gists/2` the read; each
-  answers `{:error, :disabled}` when memory is off, a configuration and not a
+  `close/6`, `record_gist/3`, `write_row/3`, `settle_task/6`, `sweep/2`,
+  `sweep_rows/3` and `sweep_detached/3` are the writes, through
+  `Memory.Repo`, and `recent_gists/2` the read; each answers
+  `{:error, :disabled}` when memory is off, a configuration and not a
   failure.
   """
 
@@ -89,8 +100,9 @@ defmodule FermixCore.Realtime.CallRecord do
   Moves a task to `state`, adding it the first time it is seen.
 
   `fields` may carry `:request` (capped at 2 KB, cut from the front the way
-  `LiveText.tail/2` cuts the request a hand-off sends) and `:summary`; a field
-  not given keeps what the task already holds.
+  `LiveText.tail/2` cuts the request a hand-off sends), `:summary` and
+  `:destination` (`"chat"`, a detached task's); a field not given keeps what
+  the task already holds.
   """
   @spec put_task(t(), String.t(), pos_integer(), String.t(), map()) :: t()
   def put_task(%__MODULE__{} = record, task_id, revision, state, fields \\ %{})
@@ -200,15 +212,88 @@ defmodule FermixCore.Realtime.CallRecord do
 
   @doc """
   Every task not in a terminal state, failed with the reason a restart gives:
-  the process that ran it is gone, so it will never finish.
+  the process that ran it is gone, so it will never finish. A `detached` task
+  is left as it is: it is the chat's, and the boot pass that writes its row
+  fails it (`sweep_detached/3`).
   """
   @spec fail_unfinished([task()]) :: [task()]
   def fail_unfinished(tasks) when is_list(tasks) do
     Enum.map(tasks, fn
       %{"state" => state} = task when state in @terminal_states -> task
-      task -> Map.merge(task, %{"state" => "failed", "summary" => @restarted})
+      %{"state" => "detached"} = task -> task
+      task -> restarted(task)
     end)
   end
+
+  @doc """
+  Writes the terminal state of one task into the record as stored: a task
+  that outlived its call ends after the record closed (M56 §4.6).
+  `{:error, :not_found}` when there is no such record.
+  """
+  @spec settle_task(
+          String.t(),
+          String.t(),
+          pos_integer(),
+          String.t(),
+          String.t() | nil,
+          keyword()
+        ) ::
+          :ok | {:error, term()}
+  def settle_task(uuid, task_id, revision, state, summary, repo_opts)
+      when is_binary(uuid) and state in @terminal_states and
+             (is_nil(summary) or is_binary(summary)) do
+    with {:ok, row} <- Repo.get_voice_call(uuid, repo_opts) do
+      %__MODULE__{uuid: uuid, engine: row.engine, tasks: row.tasks}
+      |> put_task(task_id, revision, state, %{summary: summary})
+      |> write_tasks(repo_opts)
+    end
+  end
+
+  @doc """
+  Ends every task a restart left `detached` in a closed record started before
+  `cutoff` (M56 §4.6, §8): its done row first, written through `write` and
+  keyed so a repeat finds it, then the task failed with `daemon_restarted`.
+  Answers the UUIDs it settled, at most one page of
+  `Repo.list_detached_voice_calls/2`; the first failure stops the pass, and
+  the next boot settles the rest.
+  """
+  @spec sweep_detached(DateTime.t(), write_row(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def sweep_detached(%DateTime{} = cutoff, write, repo_opts) when is_function(write, 2) do
+    with {:ok, rows} <- Repo.list_detached_voice_calls(cutoff, repo_opts) do
+      Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, settled} ->
+        case settle_detached(row, write, repo_opts) do
+          :ok -> {:cont, {:ok, settled ++ [row.uuid]}}
+          {:error, reason} -> {:halt, {:error, {row.uuid, reason}}}
+        end
+      end)
+    end
+  end
+
+  defp settle_detached(row, write, repo_opts) do
+    detached = Enum.filter(row.tasks, &(&1["state"] == "detached"))
+
+    with :ok <- write_restarted_rows(row.uuid, detached, write) do
+      tasks = Enum.map(row.tasks, &restarted_if_detached/1)
+      row.uuid |> Repo.update_voice_call_tasks(tasks, repo_opts) |> written()
+    end
+  end
+
+  defp write_restarted_rows(uuid, tasks, write) do
+    Enum.reduce_while(tasks, :ok, fn task, :ok ->
+      {call, text} = CallRow.task_done(uuid, task["task_id"], task["revision"], :restarted)
+
+      case write.(call, text) do
+        {:ok, _server_seq} -> {:cont, :ok}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
+  defp restarted_if_detached(%{"state" => "detached"} = task), do: restarted(task)
+  defp restarted_if_detached(task), do: task
+
+  defp restarted(task), do: Map.merge(task, %{"state" => "failed", "summary" => @restarted})
 
   @doc """
   Closes every record a restart left open that started before `cutoff`: ended
@@ -296,7 +381,12 @@ defmodule FermixCore.Realtime.CallRecord do
     |> Map.put("state", state)
     |> put_field("request", request(Map.get(fields, :request)))
     |> put_field("summary", Map.get(fields, :summary))
+    |> put_field("destination", destination(Map.get(fields, :destination)))
   end
+
+  # The one place a detached task's result goes (M56 §4.6).
+  defp destination(nil), do: nil
+  defp destination("chat"), do: "chat"
 
   defp put_field(task, _key, nil), do: task
   defp put_field(task, key, value) when is_binary(value), do: Map.put(task, key, value)
