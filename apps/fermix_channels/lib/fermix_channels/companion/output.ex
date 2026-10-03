@@ -209,6 +209,8 @@ defmodule FermixChannels.Companion.Output do
   `:in_reply_to` and `:attempt` make it that attempt's output, keyed by the
   text's digest; a `:proactive_key` (with an optional `:proactive_part_id`)
   makes it a deduplicated proactive delivery; neither makes it a plain row.
+  The row's metadata carries the `:turn_id` that wrote it and a Live call's
+  `:call` map (M56 §6), already validated by its writer, each when given.
   """
   @spec persist_text(store(), String.t(), String.t(), map()) :: persisted()
   def persist_text(store, profile_id, text, attrs) when is_binary(text) and is_map(attrs) do
@@ -295,13 +297,18 @@ defmodule FermixChannels.Companion.Output do
       content: text,
       kind: "text",
       in_reply_to: value(attrs, :in_reply_to),
-      metadata: turn_metadata(value(attrs, :turn_id))
+      metadata: text_metadata(value(attrs, :turn_id), value(attrs, :call))
     }
   end
 
-  # A reply outside any turn (a delivery) has no turn to name.
-  defp turn_metadata(nil), do: nil
-  defp turn_metadata(turn_id), do: %{"turn_id" => turn_id}
+  # A reply outside any turn (a delivery) has no turn to name, and only a Live
+  # call's row has a call. A row with neither stores no metadata.
+  defp text_metadata(turn_id, call) do
+    case Enum.reject([{"turn_id", turn_id}, {"call", call}], &is_nil(elem(&1, 1))) do
+      [] -> nil
+      present -> Map.new(present)
+    end
+  end
 
   defp client_output?(attrs) do
     is_binary(value(attrs, :in_reply_to)) and value(attrs, :in_reply_to) != "" and
