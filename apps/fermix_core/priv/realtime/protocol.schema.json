@@ -144,6 +144,10 @@
           "format": "uuid",
           "description": "The Live call's durable identity, the key of its record. call_id stays the trace session id."
         },
+        "conversation": {
+          "enum": ["chat", "private"],
+          "description": "Live only: chat when the call's hand-offs run in the chat's own conversation, private when they keep to a conversation of the call's own."
+        },
         "provider_session_id": { "type": "string" },
         "expires_at": {
           "type": "integer",

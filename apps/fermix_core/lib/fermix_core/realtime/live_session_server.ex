@@ -1116,6 +1116,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
         state.config.engine,
         state.call_id,
         state.call_uuid,
+        Config.conversation(state.config),
         state.provider_session_id,
         state.expires_at
       )

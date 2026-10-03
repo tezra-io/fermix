@@ -93,6 +93,23 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
     end
   end
 
+  # M56 §6: whether a Live call's hand-offs join the chat. Additive and
+  # optional, like the UUID: an older companion ignores it.
+  test "call_ready publishes the call's conversation as an optional field", %{schema: schema} do
+    definition = schema["$defs"]["call_ready"]
+
+    assert %{"enum" => ["chat", "private"]} = definition["properties"]["conversation"]
+    refute "conversation" in definition["required"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "call_ready"))
+
+    assert golden["conversation"] == "chat"
+  end
+
   test "the one-call refusal is a published error reason with a golden row", %{schema: schema} do
     reason = Protocol.call_in_progress()
 

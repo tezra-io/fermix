@@ -346,6 +346,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
                         type: "call_ready",
                         engine: "openai_live",
                         call_id: ^call_id,
+                        conversation: "chat",
                         provider_session_id: "sess_live_1",
                         expires_at: 1_060,
                         captions: true
@@ -366,6 +367,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       start_provider_session(session)
 
       assert_receive {:bridge_open_call, %{conversation: "private"}}
+      assert_receive {:realtime, %{type: "call_ready", conversation: "private"}}
     end
 
     test "expires_at shorter than max_session_minutes wins", %{clock: clock} do

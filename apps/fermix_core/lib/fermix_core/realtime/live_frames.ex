@@ -22,6 +22,7 @@ defmodule FermixCore.Realtime.LiveFrames do
   @states ~w(idle listening speaking muted thinking reconnecting)
   @task_statuses ~w(pending running completed failed cancelled)
   @speakers ~w(user assistant)
+  @conversations ~w(chat private)
 
   # The wire's own bound on `task.summary`.
   @summary_max_chars 240
@@ -52,17 +53,27 @@ defmodule FermixCore.Realtime.LiveFrames do
 
   `call_uuid` is the call's durable identity, the key of its record; `call_id`
   stays the trace session id. Every frame of the call that names it carries
-  the same UUID.
+  the same UUID. `conversation` says whether the call's hand-offs join the
+  chat (`"chat"`) or keep to a conversation of the call's own (`"private"`,
+  M56 §5), so a client can say a private call is not kept in the chat.
   """
-  @spec call_ready(String.t(), String.t(), String.t(), String.t() | nil, integer() | nil) ::
-          map()
-  def call_ready(engine, call_id, call_uuid, provider_session_id, expires_at)
-      when is_binary(engine) and is_binary(call_id) and is_binary(call_uuid) do
+  @spec call_ready(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t() | nil,
+          integer() | nil
+        ) :: map()
+  def call_ready(engine, call_id, call_uuid, conversation, provider_session_id, expires_at)
+      when is_binary(engine) and is_binary(call_id) and is_binary(call_uuid) and
+             conversation in @conversations do
     compact(%{
       type: "call_ready",
       engine: engine,
       call_id: call_id,
       call_uuid: call_uuid,
+      conversation: conversation,
       provider_session_id: provider_session_id,
       expires_at: expires_at,
       captions: true

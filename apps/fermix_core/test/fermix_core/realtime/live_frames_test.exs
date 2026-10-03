@@ -13,7 +13,7 @@ defmodule FermixCore.Realtime.LiveFramesTest do
       LiveFrames.audio_delta("AAAA"),
       LiveFrames.playback_stop(),
       LiveFrames.caption("user", "hi", 0, 100),
-      LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, nil, nil),
+      LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil),
       LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil),
       LiveFrames.usage(@call_uuid, LiveLedger.usage_payload(LiveLedger.new(100, 0))),
       LiveFrames.error(:cost_limit)
@@ -24,22 +24,44 @@ defmodule FermixCore.Realtime.LiveFramesTest do
     end
   end
 
-  describe "call_ready/5" do
+  describe "call_ready/6" do
     test "omits the provider session and expiry while they are unknown" do
-      frame = LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, nil, nil)
+      frame = LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil)
 
       assert frame == %{
                type: "call_ready",
                engine: "openai_live",
                call_id: "voice_live:1",
                call_uuid: @call_uuid,
+               conversation: "chat",
                captions: true
              }
     end
 
+    # M56 §6: whether the call's hand-offs join the chat or keep to the call.
+    test "names the conversation the call's hand-offs run in" do
+      for conversation <- ~w(chat private) do
+        frame =
+          LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, conversation, nil, nil)
+
+        assert frame.conversation == conversation
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "shared", nil, nil)
+      end
+    end
+
     test "carries them once the provider reported them" do
       frame =
-        LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "sess_1", 1_788_000_000)
+        LiveFrames.call_ready(
+          "openai_live",
+          "voice_live:1",
+          @call_uuid,
+          "chat",
+          "sess_1",
+          1_788_000_000
+        )
 
       assert frame.provider_session_id == "sess_1"
       assert frame.expires_at == 1_788_000_000
