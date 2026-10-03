@@ -54,6 +54,7 @@ defmodule FermixCore.Memory.Repo do
   @mobile_media_index_migration_version 36
   @voice_calls_migration_version 37
   @voice_call_gist_taint_migration_version 38
+  @phone_joins_chat_migration_version 39
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -336,6 +337,48 @@ defmodule FermixCore.Memory.Repo do
       WHERE job_runs.job_id = scheduled_jobs.id
         AND job_runs.status IN ('queued', 'running')
     );
+  """
+
+  # One-time move of the phone's agent history into the Mac's chat (M56 D9):
+  # from this release the phone's turns run in `{"companion", "main", :root}`,
+  # so every row it kept under `{"mobile", "main", :root}` joins that
+  # conversation. A row keeps its id and its time, and a history is read in
+  # time order (`created_at`, then `id`), so the two transports' rows
+  # interleave as they were said; the review reads by id, which grows with
+  # time, so it sees them in the same order. The conversation's review state
+  # is one cursor: where both exist, the one further ahead is kept, so the
+  # review never re-reads the other's history from where it lagged (at its
+  # 40 messages a run that would hold it back as long as the lag), and a
+  # phone that lagged has its messages between the two cursors left
+  # unreviewed. Checkpoint resources stay under their old scope: they are
+  # audit records nothing reads back, and the summaries they record are rows
+  # of the history that moves. Core names both conversations here as the
+  # stored data it rewrites, once; routing never spells either.
+  @phone_joins_chat_sql """
+  DELETE FROM memory_review_state
+  WHERE channel = 'companion' AND chat_id = 'main' AND thread_scope = 'root'
+    AND EXISTS (
+      SELECT 1 FROM memory_review_state AS phone
+      WHERE phone.agent_id = memory_review_state.agent_id
+        AND phone.owner_id = memory_review_state.owner_id
+        AND phone.channel = 'mobile' AND phone.chat_id = 'main'
+        AND phone.thread_scope = 'root'
+        AND COALESCE(phone.last_reviewed_message_id, 0) >
+            COALESCE(memory_review_state.last_reviewed_message_id, 0)
+    );
+  DELETE FROM memory_review_state
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root'
+    AND EXISTS (
+      SELECT 1 FROM memory_review_state AS chat
+      WHERE chat.agent_id = memory_review_state.agent_id
+        AND chat.owner_id = memory_review_state.owner_id
+        AND chat.channel = 'companion' AND chat.chat_id = 'main'
+        AND chat.thread_scope = 'root'
+    );
+  UPDATE memory_review_state SET channel = 'companion'
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root';
+  UPDATE messages SET channel = 'companion'
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root';
   """
 
   # Prompt-resource rename: the agent operating-rules file moved from
@@ -3105,6 +3148,15 @@ defmodule FermixCore.Memory.Repo do
       @harness_continuation_schema_sql <> @harness_client_origin_schema_sql
   end
 
+  @doc """
+  The `memory_review_state` table as a store holds it from migration 9 on,
+  with the archive columns that migration gives `memories`. Public for the
+  same reason as `base_schema_sql/0`: a later migration rewrites its rows (39
+  moves the phone's review state into the Mac's chat).
+  """
+  @spec memory_review_schema_sql() :: String.t()
+  def memory_review_schema_sql, do: @memory_review_schema_sql
+
   @spec journal_mode(keyword()) :: {:ok, String.t()} | {:error, term()}
   def journal_mode(opts \\ []) do
     call(:journal_mode, opts)
@@ -4234,8 +4286,28 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_harness_vendor_config_migration(conn, versions),
          :ok <- apply_mobile_media_index_migration(conn, versions),
          :ok <- apply_voice_calls_migration(conn, versions),
-         :ok <- apply_voice_call_gist_taint_migration(conn, versions) do
+         :ok <- apply_voice_call_gist_taint_migration(conn, versions),
+         :ok <- apply_phone_joins_chat_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The phone's history joins the Mac's chat (M56 D9), with its version in one
+  # transaction, so it runs once: a later open finds the version, and a second
+  # run would find no phone row to move.
+  defp apply_phone_joins_chat_migration(conn, versions) do
+    if Enum.member?(versions, @phone_joins_chat_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@phone_joins_chat_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@phone_joins_chat_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
