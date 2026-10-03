@@ -95,6 +95,13 @@ defmodule FermixCore.Capabilities.Builtin do
       owner_only?: true
     },
     "react" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
+    # Writes to the owner's own inbox on another channel (M56 §4.7): a write, so
+    # neither a guest nor a delegated worker gets it, and the owner's alone.
+    "send_to_channel" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     "generate_image" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,

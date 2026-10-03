@@ -30,6 +30,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     :harness,
     :skill_admin,
     :config,
+    :delivery,
     :channel,
     :system
   ]
@@ -45,6 +46,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
     harness: "Coding Harness",
     skill_admin: "Skill Admin",
     config: "Configuration",
+    delivery: "Delivery",
     channel: "Channel",
     system: "System"
   }
