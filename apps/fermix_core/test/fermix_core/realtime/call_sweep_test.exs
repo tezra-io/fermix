@@ -39,7 +39,9 @@ defmodule FermixCore.Realtime.CallSweepTest do
     finished = CallRecord.new(@finished, "openai_live")
     open!(finished, earlier, repo)
     usage = %{voice_cost_cents: 1.5, accounting: "complete"}
-    :ok = CallRecord.close(finished, :call_stop, usage, earlier, CallRecord.repo_opts(repo))
+
+    :ok =
+      CallRecord.close(finished, :call_stop, usage, earlier, CallRecord.repo_opts(repo), :nothing)
 
     log = capture_log(fn -> run_sweep(repo) end)
     assert log =~ "closed 2 call record(s)"
@@ -48,6 +50,10 @@ defmodule FermixCore.Realtime.CallSweepTest do
 
     assert %{end_reason: "daemon_restarted", accounting: "incomplete", voice_cost_cents: nil} =
              swept
+
+    # Its end is not known, only that the daemon restarted after it: it owes
+    # the chat no row (M56 §4.2).
+    assert %{gist_status: "none", row_state: "none"} = swept
 
     assert is_binary(swept.ended_at)
 

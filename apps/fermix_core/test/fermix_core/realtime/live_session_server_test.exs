@@ -445,7 +445,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
           %{role: "user", content: "here is the lease: https://x.test/lease"},
           %{role: "assistant", content: "Got it."}
         ],
-        gists: ["Booked the dentist."]
+        gists: [
+          %{
+            gist: "Booked the dentist.",
+            tainted: false,
+            started_at: "2026-10-02T09:00:00.000000Z"
+          }
+        ]
       }
 
       FakeBridge.set_window({:ok, window})

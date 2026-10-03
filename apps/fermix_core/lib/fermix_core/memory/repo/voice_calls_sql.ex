@@ -14,6 +14,12 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
 
   @accounting ~w(complete incomplete running)
 
+  # What a close may owe the chat (M56 §4.2): a gist to make and a row to
+  # write, or nothing. Their ends (`written`, `failed`, `row_written`) are
+  # written by their own statements, never by a close.
+  @owed_gist ~w(none pending)
+  @owed_row ~w(none row_pending)
+
   @uuid_pattern ~r/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
   @engine_max 64
@@ -22,6 +28,9 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
   # document is a runaway, refused rather than stored.
   @tasks_json_max 262_144
   @list_limit 100
+  # A gist is a few sentences (`Realtime.CallGist` cuts it to 1,200 bytes);
+  # past this it is a runaway, refused rather than stored.
+  @gist_max 4_096
 
   @columns [
     :uuid,
@@ -35,13 +44,14 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
     :gist,
     :gist_status,
     :row_state,
-    :created_at
+    :created_at,
+    :gist_tainted
   ]
 
   @select Enum.map_join(@columns, ", ", &Atom.to_string/1)
 
-  # `gist_status` and `row_state` start at `none` and are moved by later
-  # stages (the gist and the chat row); nothing here writes them.
+  # `gist_status` and `row_state` start at `none`; a close moves them to what
+  # the call owes the chat, and the gist and the row's writers move them on.
   @schema_sql """
   CREATE TABLE IF NOT EXISTS voice_calls (
     uuid TEXT PRIMARY KEY,
@@ -61,8 +71,18 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
   CREATE INDEX IF NOT EXISTS idx_voice_calls_started ON voice_calls(started_at);
   """
 
+  # Whether a gist was drawn from Computer History content (M56 §9): a column
+  # beside it, so every reader sees the mark with the text.
+  @gist_taint_schema_sql """
+  ALTER TABLE voice_calls ADD COLUMN gist_tainted INTEGER NOT NULL DEFAULT 0
+    CHECK (gist_tainted IN (0, 1));
+  """
+
   @spec schema_sql() :: String.t()
   def schema_sql, do: @schema_sql
+
+  @spec gist_taint_schema_sql() :: String.t()
+  def gist_taint_schema_sql, do: @gist_taint_schema_sql
 
   # --- normalization (caller process) --------------------------------------
 
@@ -96,8 +116,19 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
            normalize_text(:end_reason, Map.get(fields, :end_reason), @end_reason_max),
          {:ok, cost} <- normalize_cost(Map.get(fields, :voice_cost_cents)),
          {:ok, accounting} <- normalize_accounting(Map.get(fields, :accounting)),
-         {:ok, tasks_json} <- normalize_tasks(Map.get(fields, :tasks)) do
-      {:ok, [ended_at, reason, cost, accounting, tasks_json]}
+         {:ok, tasks_json} <- normalize_tasks(Map.get(fields, :tasks)),
+         {:ok, gist_status} <- normalize_owed(:gist_status, fields, @owed_gist),
+         {:ok, row_state} <- normalize_owed(:row_state, fields, @owed_row) do
+      {:ok, [ended_at, reason, cost, accounting, tasks_json, gist_status, row_state]}
+    end
+  end
+
+  @doc "Validates a gist and its Computer History mark, as the UPDATE binds them."
+  @spec normalize_gist(term(), term()) :: {:ok, [String.t() | 0 | 1]} | {:error, term()}
+  def normalize_gist(gist, tainted?) do
+    with {:ok, gist} <- normalize_text(:gist, gist, @gist_max),
+         {:ok, tainted} <- normalize_flag(:gist_tainted, tainted?) do
+      {:ok, [gist, tainted]}
     end
   end
 
@@ -112,12 +143,19 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
   @spec normalize_cutoff(DateTime.t()) :: {:ok, String.t()} | {:error, term()}
   def normalize_cutoff(cutoff), do: normalize_stamp(:cutoff, cutoff)
 
-  @doc "A stored row as callers read it: `tasks` decoded from the document."
+  @doc """
+  A stored row as callers read it: `tasks` decoded from the document and
+  `gist_tainted` a boolean.
+  """
   @spec decode(map()) :: {:ok, map()} | {:error, term()}
   def decode(%{tasks_json: json, uuid: uuid} = row) do
     case Jason.decode(json) do
       {:ok, tasks} when is_list(tasks) ->
-        {:ok, row |> Map.delete(:tasks_json) |> Map.put(:tasks, tasks)}
+        {:ok,
+         row
+         |> Map.delete(:tasks_json)
+         |> Map.put(:tasks, tasks)
+         |> Map.update!(:gist_tainted, &(&1 == 1))}
 
       _unreadable ->
         {:error, {:invalid_tasks_json, uuid}}
@@ -150,17 +188,64 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
 
   @doc "Closes an open record; `:not_found` when there is none, closed ones included."
   @spec close(term(), String.t(), list()) :: {:ok, map()} | {:error, term()}
-  def close(conn, uuid, [_ended_at, _reason, _cost, _accounting, _tasks_json] = params)
+  def close(conn, uuid, [_ended, _reason, _cost, _accounting, _tasks, _gist, _row] = params)
       when is_binary(uuid) do
     returning(
       conn,
       """
       UPDATE voice_calls
-      SET ended_at = ?, end_reason = ?, voice_cost_cents = ?, accounting = ?, tasks_json = ?
+      SET ended_at = ?, end_reason = ?, voice_cost_cents = ?, accounting = ?, tasks_json = ?,
+          gist_status = ?, row_state = ?
       WHERE uuid = ? AND ended_at IS NULL
       RETURNING #{@select}
       """,
       params ++ [uuid]
+    )
+  end
+
+  @doc """
+  Writes the gist a close left pending, and its mark; `:not_found` unless the
+  record's gist is still pending, so a gist is settled once, by whichever
+  writer comes first.
+  """
+  @spec write_gist(term(), String.t(), [String.t() | 0 | 1]) :: {:ok, map()} | {:error, term()}
+  def write_gist(conn, uuid, [_gist, _tainted] = params) when is_binary(uuid) do
+    returning(
+      conn,
+      """
+      UPDATE voice_calls SET gist = ?, gist_tainted = ?, gist_status = 'written'
+      WHERE uuid = ? AND gist_status = 'pending'
+      RETURNING #{@select}
+      """,
+      params ++ [uuid]
+    )
+  end
+
+  @doc "Fails the gist a close left pending; `:not_found` unless it is still pending."
+  @spec fail_gist(term(), String.t()) :: {:ok, map()} | {:error, term()}
+  def fail_gist(conn, uuid) when is_binary(uuid) do
+    returning(
+      conn,
+      """
+      UPDATE voice_calls SET gist_status = 'failed'
+      WHERE uuid = ? AND gist_status = 'pending'
+      RETURNING #{@select}
+      """,
+      [uuid]
+    )
+  end
+
+  @doc "Marks an owed row written; `:not_found` unless the row is still owed."
+  @spec mark_row_written(term(), String.t()) :: {:ok, map()} | {:error, term()}
+  def mark_row_written(conn, uuid) when is_binary(uuid) do
+    returning(
+      conn,
+      """
+      UPDATE voice_calls SET row_state = 'row_written'
+      WHERE uuid = ? AND row_state = 'row_pending'
+      RETURNING #{@select}
+      """,
+      [uuid]
     )
   end
 
@@ -191,24 +276,48 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
   end
 
   @doc """
-  The gists of the newest calls that have one, newest first, at most `limit`
-  (M56 §4.3). A call with no gist (every call until the gist stage writes
-  them) is skipped.
+  Closed records that still owe their chat row, started before `cutoff`,
+  oldest first, at most #{@list_limit}: the rows a boot writes.
   """
-  @spec recent_gists(term(), pos_integer()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec list_owed_rows(term(), String.t()) :: {:ok, [map()]} | {:error, term()}
+  def list_owed_rows(conn, cutoff) when is_binary(cutoff) do
+    with {:ok, rows} <-
+           query_all(
+             conn,
+             """
+             SELECT #{@select} FROM voice_calls
+             WHERE row_state = 'row_pending' AND started_at < ?
+             ORDER BY started_at ASC, uuid ASC
+             LIMIT ?
+             """,
+             [cutoff, @list_limit]
+           ) do
+      {:ok, Enum.map(rows, &voice_call_row/1)}
+    end
+  end
+
+  @doc """
+  The gists of the newest calls that have one, newest first, at most `limit`
+  (M56 §4.2, §4.3): each with when its call started and whether it was drawn
+  from Computer History. A call with no gist is skipped.
+  """
+  @spec recent_gists(term(), pos_integer()) :: {:ok, [map()]} | {:error, term()}
   def recent_gists(conn, limit) when is_integer(limit) do
     with {:ok, rows} <-
            query_all(
              conn,
              """
-             SELECT gist FROM voice_calls
+             SELECT started_at, gist, gist_tainted FROM voice_calls
              WHERE gist IS NOT NULL
              ORDER BY started_at DESC, uuid DESC
              LIMIT ?
              """,
              [limit]
            ) do
-      {:ok, Enum.map(rows, fn [gist] -> gist end)}
+      {:ok,
+       Enum.map(rows, fn [started_at, gist, tainted] ->
+         %{started_at: started_at, gist: gist, tainted: tainted == 1}
+       end)}
     end
   end
 
@@ -242,6 +351,15 @@ defmodule FermixCore.Memory.Repo.VoiceCallsSql do
 
   defp normalize_accounting(accounting) when accounting in @accounting, do: {:ok, accounting}
   defp normalize_accounting(_accounting), do: {:error, {:invalid, :accounting, :unknown}}
+
+  defp normalize_owed(key, fields, vocabulary) do
+    value = Map.get(fields, key)
+    if value in vocabulary, do: {:ok, value}, else: {:error, {:invalid, key, :unknown}}
+  end
+
+  defp normalize_flag(_key, true), do: {:ok, 1}
+  defp normalize_flag(_key, false), do: {:ok, 0}
+  defp normalize_flag(key, _value), do: {:error, {:invalid, key, :not_a_boolean}}
 
   defp check_task_maps(tasks) do
     if Enum.all?(tasks, &is_map/1),

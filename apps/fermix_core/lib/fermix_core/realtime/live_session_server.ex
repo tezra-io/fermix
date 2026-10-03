@@ -1572,7 +1572,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     usage = LiveLedger.usage_payload(state.ledger)
 
     state.call_record
-    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts)
+    |> CallRecord.close(reason, usage, DateTime.utc_now(), state.record_opts, :nothing)
     |> report_record("close")
   end
 

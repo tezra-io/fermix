@@ -53,6 +53,7 @@ defmodule FermixCore.Memory.Repo do
   @harness_vendor_config_migration_version 35
   @mobile_media_index_migration_version 36
   @voice_calls_migration_version 37
+  @voice_call_gist_taint_migration_version 38
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -2954,7 +2955,9 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   Closes an open record, once: `fields` is `%{ended_at, end_reason,
-  voice_cost_cents, accounting, tasks}`, a `nil` cost meaning unknown.
+  voice_cost_cents, accounting, tasks, gist_status, row_state}`, a `nil` cost
+  meaning unknown, and the last two what the call owes the chat (M56 §4.2):
+  `gist_status` `none` or `pending`, `row_state` `none` or `row_pending`.
   `{:error, :not_found}` when no open record has this UUID.
   """
   @spec close_voice_call(String.t(), map(), keyword()) ::
@@ -2963,6 +2966,52 @@ defmodule FermixCore.Memory.Repo do
     with {:ok, params} <- VoiceCallsSql.normalize_close(fields),
          {:ok, closed} <- call({:close_voice_call, uuid, params}, opts) do
       VoiceCallsSql.decode(closed)
+    end
+  end
+
+  @doc """
+  Writes the gist a close left pending, with whether it was drawn from
+  Computer History, and marks it `written`. `{:error, :not_found}` unless the
+  gist is still pending: written or failed is final.
+  """
+  @spec write_voice_call_gist(String.t(), String.t(), boolean(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def write_voice_call_gist(uuid, gist, tainted?, opts \\ []) when is_binary(uuid) do
+    with {:ok, params} <- VoiceCallsSql.normalize_gist(gist, tainted?),
+         {:ok, row} <- call({:write_voice_call_gist, uuid, params}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc "Fails the gist a close left pending. `{:error, :not_found}` unless it is still pending."
+  @spec fail_voice_call_gist(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def fail_voice_call_gist(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:fail_voice_call_gist, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc "Marks an owed chat row written. `{:error, :not_found}` unless it is still owed."
+  @spec mark_voice_call_row_written(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def mark_voice_call_row_written(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:mark_voice_call_row_written, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc """
+  The closed records still owing their chat row that started before `cutoff`,
+  oldest first, at most `VoiceCallsSql.list_limit/0` of them: the rows a boot
+  writes.
+  """
+  @spec list_owed_voice_call_rows(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_owed_voice_call_rows(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_owed_voice_call_rows, stamp}, opts) do
+      decode_voice_calls(rows)
     end
   end
 
@@ -2989,10 +3038,12 @@ defmodule FermixCore.Memory.Repo do
 
   @doc """
   The gists of the newest Live calls that have one, newest first, at most
-  `limit`: what a call in the chat's conversation starts with (M56 §4.3).
+  `limit`, each `%{started_at, gist, tainted}`: what a call in the chat's
+  conversation starts with (M56 §4.3) and the chat's turn is told (§4.2).
   """
   @spec list_voice_call_gists(pos_integer(), keyword()) ::
-          {:ok, [String.t()]} | {:error, term()}
+          {:ok, [%{started_at: String.t(), gist: String.t(), tainted: boolean()}]}
+          | {:error, term()}
   def list_voice_call_gists(limit, opts \\ []) do
     with {:ok, limit} <- VoiceCallsSql.normalize_limit(limit) do
       call({:list_voice_call_gists, limit}, opts)
@@ -4042,6 +4093,26 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:write_voice_call_gist, uuid, params}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.write_gist(&1, uuid, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:fail_voice_call_gist, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.fail_gist(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mark_voice_call_row_written, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.mark_row_written(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_owed_voice_call_rows, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_owed_rows(&1, cutoff))
+    {:reply, reply, state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4143,8 +4214,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_companion_cancel_migration(conn, versions),
          :ok <- apply_harness_vendor_config_migration(conn, versions),
          :ok <- apply_mobile_media_index_migration(conn, versions),
-         :ok <- apply_voice_calls_migration(conn, versions) do
+         :ok <- apply_voice_calls_migration(conn, versions),
+         :ok <- apply_voice_call_gist_taint_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # Whether a call's gist was drawn from Computer History (M56 §9), a column
+  # beside the gist, with its version in one transaction.
+  defp apply_voice_call_gist_taint_migration(conn, versions) do
+    if Enum.member?(versions, @voice_call_gist_taint_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{VoiceCallsSql.gist_taint_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@voice_call_gist_taint_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 

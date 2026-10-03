@@ -27,12 +27,15 @@ defmodule FermixCore.Realtime.LiveChat do
   message stamped as Computer History content is masked against the voice
   provider's chain, the mask a turn's own history gets (`Taint.mask_for_chain/3`).
   A mirrored answer so stamped is dropped instead: a line saying something was
-  omitted would tell the voice model nothing.
+  omitted would tell the voice model nothing, and so is a gist made from such
+  content (M56 §9). `carries_taint?/1` says whether what a call starts with
+  holds any such content, which then marks the call's own gist.
   """
 
   alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.ComputerHistory.Gate
   alias FermixCore.ComputerHistory.Taint
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LiveText
 
   @messages 6
@@ -87,20 +90,34 @@ defmodule FermixCore.Realtime.LiveChat do
   `developer` item, oldest first; the chat messages as `user` and `assistant`
   items, oldest first; and a closing `developer` line. `[]` when there is no
   context at all. Only the newest `window_bounds/0` of each are used, whatever
-  the window holds.
+  the window holds, and a gist drawn from Computer History is left out unless
+  the voice may carry it (`history_permitted?/0`).
 
   Raises `ArgumentError` on a message whose role is not `user` or `assistant`:
   a window holding anything else broke the bridge's contract.
   """
-  @spec input(%{messages: [map()], gists: [String.t()]}) :: [item()]
+  @spec input(%{messages: [map()], gists: [CallRecord.gist()]}) :: [item()]
   def input(%{messages: messages, gists: gists}) when is_list(messages) and is_list(gists) do
-    context =
-      gist_items(Enum.take(gists, @gists)) ++ chat_items(Enum.take(messages, -@messages))
+    context = gist_items(given_gists(gists)) ++ chat_items(Enum.take(messages, -@messages))
 
     case within_bound(context) do
       [] -> []
       kept -> kept ++ [item("developer", "input_text", @closing)]
     end
+  end
+
+  @doc """
+  Whether the input built from `window` gives the voice anything drawn from
+  Computer History (M56 §9): only when the voice may carry it, and then when a
+  message or a gist the input uses is stamped. A call that starts so passes
+  the mark to its gist.
+  """
+  @spec carries_taint?(%{messages: [map()], gists: [CallRecord.gist()]}) :: boolean()
+  def carries_taint?(%{messages: messages, gists: gists})
+      when is_list(messages) and is_list(gists) do
+    history_permitted?() and
+      (Enum.any?(Enum.take(messages, -@messages), &Taint.tainted?/1) or
+         Enum.any?(Enum.take(gists, @gists), & &1.tainted))
   end
 
   @doc "The size of an input, for telemetry: its items and their text bytes, never the text."
@@ -133,11 +150,20 @@ defmodule FermixCore.Realtime.LiveChat do
     end
   end
 
+  # The newest three, less any the voice may not carry.
+  defp given_gists(gists) do
+    permitted? = history_permitted?()
+
+    gists
+    |> Enum.take(@gists)
+    |> Enum.reject(&(&1.tainted and not permitted?))
+  end
+
   # Read newest first, told oldest first, so the whole input runs in time order.
   defp gist_items([]), do: []
 
   defp gist_items(gists) do
-    lines = gists |> Enum.reverse() |> Enum.map_join("\n", &("- " <> String.trim(&1)))
+    lines = gists |> Enum.reverse() |> Enum.map_join("\n", &("- " <> String.trim(&1.gist)))
     [item("developer", "input_text", @gists_heading <> "\n" <> lines)]
   end
 

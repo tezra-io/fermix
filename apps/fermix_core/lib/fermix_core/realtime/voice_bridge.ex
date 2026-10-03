@@ -26,10 +26,12 @@ defmodule FermixCore.Realtime.VoiceBridge do
   answers both, because the chat is its to name and the clients attached to it
   are its to count; a private call is no call in the chat.
 
-  Nor is `show/2` (M56 §4.5): it writes a row of the call to the chat's
+  Nor is `show/2` (M56 §4.2, §4.5): it writes a row of the call to the chat's
   timeline, announced to the Mac and the phones, and answers the row's
   `server_seq`. The timeline's writer is the companion channel, which Core
-  never names, so a result the voice cannot say reaches the chat through here.
+  never names, so a result the voice cannot say, and the call's one row when
+  it ends, reach the chat through here; the latter from a task the session
+  spawned, or at boot, after the session is gone.
 
   A running turn reports one fact besides its progress and its result:
   `history_tainted`, before the result, when the turn read Computer History
@@ -83,7 +85,9 @@ defmodule FermixCore.Realtime.VoiceBridge do
   keyed as the timeline stores it in the row's `metadata`;
   `FermixCore.Companion.Protocol.validate_call_metadata/1` holds its shape. A
   result shown during the call is `%{"uuid", "event" => "shared", "task_id",
-  "revision"}`.
+  "revision"}`; the call's one row when it ends (M56 §4.2) is
+  `%{"uuid", "event" => "ended", "engine", "duration_s", "voice_cost_cents",
+  "accounting", "gist_status"}`, as `Realtime.CallRow` renders it.
   """
   @type shown_call :: %{required(String.t()) => String.t() | pos_integer()}
 
@@ -95,10 +99,14 @@ defmodule FermixCore.Realtime.VoiceBridge do
   assistant messages, at most `messages`, oldest first, as the conversation
   store holds them (a Computer History taint marker included, for Core to mask
   against the voice provider), and the gists of the newest earlier calls, at
-  most `gists`, newest first. Never a tool result, a checkpoint summary or any
-  other system message.
+  most `gists`, newest first, as `CallRecord.recent_gists/2` reads them (their
+  own mark included). Never a tool result, a checkpoint summary or any other
+  system message.
   """
-  @type conversation_window :: %{messages: [map()], gists: [String.t()]}
+  @type conversation_window :: %{
+          messages: [map()],
+          gists: [FermixCore.Realtime.CallRecord.gist()]
+        }
 
   @typedoc """
   A call in the chat, as a turn of the chat is told of it (M56 §4.4): when it

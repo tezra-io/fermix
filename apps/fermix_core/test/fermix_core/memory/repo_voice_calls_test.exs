@@ -8,6 +8,7 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
   alias FermixCore.Memory.Repo
 
   @voice_calls_version 37
+  @gist_taint_version 38
   @uuid "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
   @other_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
   @started ~U[2026-10-02 09:00:00.000000Z]
@@ -37,11 +38,12 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
     %{repo: repo, db_path: db_path}
   end
 
-  test "the voice_calls migration is applied on a fresh database and reruns cleanly", %{
+  test "the voice_calls migrations are applied on a fresh database and rerun cleanly", %{
     repo: repo
   } do
     assert {:ok, versions} = Repo.migration_versions(server: repo)
     assert @voice_calls_version in versions
+    assert @gist_taint_version in versions
 
     assert :ok = Repo.migrate(server: repo)
     assert {:ok, again} = Repo.migration_versions(server: repo)
@@ -64,6 +66,7 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
              tasks: [],
              gist: nil,
              gist_status: "none",
+             gist_tainted: false,
              row_state: "none",
              created_at: "2026-10-02T09:00:00.000000Z"
            }
@@ -136,6 +139,97 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
 
     assert {:error, {:invalid, :tasks, :not_a_list_of_maps}} =
              Repo.update_voice_call_tasks(@uuid, ["dg_1"], server: repo)
+
+    # A close owes a gist and a row, or nothing; it never writes their end.
+    assert {:error, {:invalid, :gist_status, :unknown}} =
+             Repo.close_voice_call(@uuid, %{close_fields([]) | gist_status: "written"},
+               server: repo
+             )
+
+    assert {:error, {:invalid, :row_state, :unknown}} =
+             Repo.close_voice_call(@uuid, %{close_fields([]) | row_state: "row_written"},
+               server: repo
+             )
+
+    assert {:error, {:invalid, :gist, :blank}} =
+             Repo.write_voice_call_gist(@uuid, " ", false, server: repo)
+
+    assert {:error, {:invalid, :gist_tainted, :not_a_boolean}} =
+             Repo.write_voice_call_gist(@uuid, "Planned the trip.", nil, server: repo)
+  end
+
+  # M56 §4.2: the close of a call in the chat owes its row, and its gist when
+  # there is anything to summarise, in the same write as the settled bill, so
+  # a crash after it never loses either.
+  test "a close records what the call owes the chat: a gist, a row, or nothing", %{repo: repo} do
+    {:ok, _row} = create(repo, @uuid)
+    owed = %{close_fields([]) | gist_status: "pending", row_state: "row_pending"}
+
+    assert {:ok, %{gist_status: "pending", row_state: "row_pending"}} =
+             Repo.close_voice_call(@uuid, owed, server: repo)
+
+    {:ok, _row} = create(repo, @other_uuid)
+
+    assert {:ok, %{gist_status: "none", row_state: "none"}} =
+             Repo.close_voice_call(@other_uuid, close_fields([]), server: repo)
+  end
+
+  test "a pending gist is written once, with its taint, and a failed one stays failed", %{
+    repo: repo
+  } do
+    {:ok, _row} = create(repo, @uuid)
+    owed = %{close_fields([]) | gist_status: "pending", row_state: "row_pending"}
+    {:ok, _row} = Repo.close_voice_call(@uuid, owed, server: repo)
+
+    assert {:ok, %{gist: "Planned the trip.", gist_status: "written", gist_tainted: true}} =
+             Repo.write_voice_call_gist(@uuid, "Planned the trip.", true, server: repo)
+
+    # Written is final: a second writer (the boot sweep) finds nothing pending.
+    assert {:error, :not_found} = Repo.fail_voice_call_gist(@uuid, server: repo)
+    assert {:error, :not_found} = Repo.write_voice_call_gist(@uuid, "Again.", false, server: repo)
+
+    {:ok, _row} = create(repo, @other_uuid)
+    {:ok, _row} = Repo.close_voice_call(@other_uuid, owed, server: repo)
+
+    assert {:ok, %{gist: nil, gist_status: "failed"}} =
+             Repo.fail_voice_call_gist(@other_uuid, server: repo)
+
+    assert {:error, :not_found} =
+             Repo.write_voice_call_gist(@other_uuid, "Late.", false, server: repo)
+  end
+
+  test "an owed row is marked written once", %{repo: repo} do
+    {:ok, _row} = create(repo, @uuid)
+    owed = %{close_fields([]) | row_state: "row_pending"}
+    {:ok, _row} = Repo.close_voice_call(@uuid, owed, server: repo)
+
+    assert {:ok, %{row_state: "row_written"}} =
+             Repo.mark_voice_call_row_written(@uuid, server: repo)
+
+    assert {:error, :not_found} = Repo.mark_voice_call_row_written(@uuid, server: repo)
+  end
+
+  test "the rows still owed of calls started before a cutoff are listed oldest first", %{
+    repo: repo
+  } do
+    owed = %{close_fields([]) | row_state: "row_pending"}
+    {:ok, _row} = create(repo, @other_uuid, ~U[2026-10-02 08:00:00.000000Z])
+    {:ok, _row} = Repo.close_voice_call(@other_uuid, owed, server: repo)
+    {:ok, _row} = create(repo, @uuid, @started)
+    {:ok, _row} = Repo.close_voice_call(@uuid, owed, server: repo)
+    written = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
+    {:ok, _row} = create(repo, written, @started)
+    {:ok, _row} = Repo.close_voice_call(written, owed, server: repo)
+    {:ok, _row} = Repo.mark_voice_call_row_written(written, server: repo)
+    later = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
+    {:ok, _row} = create(repo, later, ~U[2026-10-02 10:00:00.000000Z])
+    {:ok, _row} = Repo.close_voice_call(later, owed, server: repo)
+
+    assert {:ok, rows} =
+             Repo.list_owed_voice_call_rows(~U[2026-10-02 09:30:00.000000Z], server: repo)
+
+    assert Enum.map(rows, & &1.uuid) == [@other_uuid, @uuid]
+    assert Enum.all?(rows, &(&1.tasks == []))
   end
 
   test "the row state CHECK refuses a value outside its vocabulary", %{
@@ -155,31 +249,41 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
     end
   end
 
-  # What a call in the chat starts with (M56 §4.3): the gists of the newest
-  # earlier calls. Nothing writes a gist until the gist stage, so a call
-  # without one is skipped rather than read as an empty gist.
+  # What a call in the chat starts with (M56 §4.3), and what the chat's own
+  # turn is told (M56 §4.2): the gists of the newest earlier calls, each with
+  # when its call started and whether it was drawn from Computer History. A
+  # call without a gist is skipped rather than read as an empty one.
   test "the newest gists come back newest first, and a call without one is skipped", %{
-    repo: repo,
-    db_path: db_path
+    repo: repo
   } do
     third = "1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d"
     no_gist = "0b1c2d3e-4f50-4a6b-8c7d-9e0f1a2b3c4d"
-    {:ok, _row} = create(repo, @other_uuid, ~U[2026-10-02 08:00:00.000000Z])
-    {:ok, _row} = create(repo, @uuid, @started)
-    {:ok, _row} = create(repo, third, ~U[2026-10-02 10:00:00.000000Z])
+    gisted!(repo, @other_uuid, ~U[2026-10-02 08:00:00.000000Z], "Booked the dentist.", false)
+    gisted!(repo, @uuid, @started, "Planned the trip.", true)
+    gisted!(repo, third, ~U[2026-10-02 10:00:00.000000Z], "Read the lease.", false)
     {:ok, _row} = create(repo, no_gist, ~U[2026-10-02 11:00:00.000000Z])
 
-    assert {:ok, []} = Repo.list_voice_call_gists(3, server: repo)
+    assert {:ok,
+            [
+              %{
+                gist: "Read the lease.",
+                tainted: false,
+                started_at: "2026-10-02T10:00:00.000000Z"
+              },
+              %{
+                gist: "Planned the trip.",
+                tainted: true,
+                started_at: "2026-10-02T09:00:00.000000Z"
+              }
+            ]} = Repo.list_voice_call_gists(2, server: repo)
 
-    set_gist(db_path, @other_uuid, "Booked the dentist.")
-    set_gist(db_path, @uuid, "Planned the trip.")
-    set_gist(db_path, third, "Read the lease.")
+    assert {:ok, gists} = Repo.list_voice_call_gists(3, server: repo)
 
-    assert {:ok, ["Read the lease.", "Planned the trip."]} =
-             Repo.list_voice_call_gists(2, server: repo)
-
-    assert {:ok, ["Read the lease.", "Planned the trip.", "Booked the dentist."]} =
-             Repo.list_voice_call_gists(3, server: repo)
+    assert Enum.map(gists, & &1.gist) == [
+             "Read the lease.",
+             "Planned the trip.",
+             "Booked the dentist."
+           ]
 
     assert {:error, {:invalid, :limit, :out_of_range}} =
              Repo.list_voice_call_gists(101, server: repo)
@@ -192,20 +296,14 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
     assert {:error, :disabled} = create(repo, @uuid)
     assert {:error, :disabled} = Repo.list_open_voice_calls(@started, server: repo)
     assert {:error, :disabled} = Repo.list_voice_call_gists(3, server: repo)
+    assert {:error, :disabled} = Repo.list_owed_voice_call_rows(@started, server: repo)
   end
 
-  # The gist stage is the writer; until it lands a test writes the column.
-  defp set_gist(db_path, uuid, gist) do
-    {:ok, conn} = Sqlite3.open(db_path)
-
-    try do
-      {:ok, stmt} = Sqlite3.prepare(conn, "UPDATE voice_calls SET gist = ?1 WHERE uuid = ?2")
-      :ok = Sqlite3.bind(stmt, [gist, uuid])
-      :done = Sqlite3.step(conn, stmt)
-      :ok = Sqlite3.release(conn, stmt)
-    after
-      Sqlite3.close(conn)
-    end
+  defp gisted!(repo, uuid, started_at, gist, tainted?) do
+    {:ok, _row} = create(repo, uuid, started_at)
+    owed = %{close_fields([]) | gist_status: "pending", row_state: "row_pending"}
+    {:ok, _row} = Repo.close_voice_call(uuid, owed, server: repo)
+    {:ok, _row} = Repo.write_voice_call_gist(uuid, gist, tainted?, server: repo)
   end
 
   defp create(repo, uuid, started_at \\ @started) do
@@ -221,7 +319,9 @@ defmodule FermixCore.Memory.RepoVoiceCallsTest do
       end_reason: "call_stop",
       voice_cost_cents: 32.5,
       accounting: "complete",
-      tasks: tasks
+      tasks: tasks,
+      gist_status: "none",
+      row_state: "none"
     }
   end
 end

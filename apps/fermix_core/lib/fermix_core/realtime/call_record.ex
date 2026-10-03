@@ -17,13 +17,29 @@ defmodule FermixCore.Realtime.CallRecord do
   with, capped at 2 KB from the front (its end is the ask), and the summary the
   session put on the wire. A private call's tasks carry no request (M56 §5).
 
+  A call in the chat owes the chat one row when it ends, and a gist when
+  anything was said or handed off (M56 §4.2): the close writes what it owes
+  with the settled bill, `record_gist/3` settles the gist once, and
+  `write_row/3` writes the row once the gist has settled, rendered by
+  `CallRow` from the record as stored, and marks it written. A daemon that
+  died in between leaves both owed, and `sweep_rows/3`, run at boot, fails
+  the gist no process will finish and writes the row from the task list. The
+  row's writer is the companion channel, which Core never names, so both take
+  the write as a function.
+
+  The gist is not a memory fact: it is the call's record, read back by
+  `recent_gists/2` for a later call and the chat's turns, with whether it was
+  drawn from Computer History content (M56 §9).
+
   The functions building the record are pure. `open/3`, `write_tasks/2`,
-  `close/5` and `sweep/2` are the writes, through `Memory.Repo`, and
-  `recent_gists/2` the read a later call starts with; each answers
-  `{:error, :disabled}` when memory is off, a configuration and not a failure.
+  `close/6`, `record_gist/3`, `write_row/3`, `sweep/2` and `sweep_rows/3` are
+  the writes, through `Memory.Repo`, and `recent_gists/2` the read; each
+  answers `{:error, :disabled}` when memory is off, a configuration and not a
+  failure.
   """
 
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRow
   alias FermixCore.Realtime.LiveText
   alias FermixCore.Timeouts
 
@@ -45,6 +61,23 @@ defmodule FermixCore.Realtime.CallRecord do
   @typedoc "One task as stored: the JSON document's own string keys."
   @type task :: %{required(String.t()) => String.t() | pos_integer() | nil}
   @type t :: %__MODULE__{uuid: String.t(), engine: String.t(), tasks: [task()]}
+
+  @typedoc """
+  What a closing call owes the chat (M56 §4.2): its gist and its row (a call
+  in the chat that said or handed off anything), its row alone (one that said
+  nothing), or nothing (a private call, or one whose provider session never
+  started).
+  """
+  @type owes :: :gist | :row | :nothing
+
+  @typedoc "An earlier call's gist: when the call started (ISO 8601, UTC), its text and its mark."
+  @type gist :: %{started_at: String.t(), gist: String.t(), tainted: boolean()}
+
+  @typedoc """
+  The write of a call's row: its `metadata.call` and its text in, the row's
+  `server_seq` out (`Realtime.VoiceBridge.show/2`).
+  """
+  @type write_row :: (map(), String.t() -> {:ok, pos_integer()} | {:error, term()})
 
   @doc "A record with no tasks yet, for the call `uuid` on `engine`."
   @spec new(String.t(), String.t()) :: t()
@@ -97,18 +130,20 @@ defmodule FermixCore.Realtime.CallRecord do
   @doc """
   Closes the record as the call settles: why it ended, the settled voice cost
   and its accounting, read from `usage` (`LiveLedger.usage_payload/1`, the
-  payload of the final `usage` frame), and the final tasks.
+  payload of the final `usage` frame), the final tasks, and what the call owes
+  the chat, in one write, so a crash after it never loses the row.
   """
-  @spec close(t(), atom(), map(), DateTime.t(), keyword()) :: :ok | {:error, term()}
-  def close(%__MODULE__{} = record, end_reason, usage, %DateTime{} = ended_at, repo_opts)
-      when is_atom(end_reason) and is_map(usage) do
-    fields = %{
-      ended_at: ended_at,
-      end_reason: Atom.to_string(end_reason),
-      voice_cost_cents: Map.fetch!(usage, :voice_cost_cents),
-      accounting: Map.fetch!(usage, :accounting),
-      tasks: record.tasks
-    }
+  @spec close(t(), atom(), map(), DateTime.t(), keyword(), owes()) :: :ok | {:error, term()}
+  def close(%__MODULE__{} = record, end_reason, usage, %DateTime{} = ended_at, repo_opts, owes)
+      when is_atom(end_reason) and is_map(usage) and owes in [:gist, :row, :nothing] do
+    fields =
+      Map.merge(owed(owes), %{
+        ended_at: ended_at,
+        end_reason: Atom.to_string(end_reason),
+        voice_cost_cents: Map.fetch!(usage, :voice_cost_cents),
+        accounting: Map.fetch!(usage, :accounting),
+        tasks: record.tasks
+      })
 
     record.uuid
     |> Repo.close_voice_call(fields, repo_opts)
@@ -116,11 +151,48 @@ defmodule FermixCore.Realtime.CallRecord do
   end
 
   @doc """
-  The gists of the newest earlier calls that have one, newest first, at most
-  `limit`: what a call in the chat's conversation starts with (M56 §4.3).
-  A limit of 0 reads nothing.
+  Settles the gist a close left pending: `{:ok, gist, tainted?}` writes it
+  with its Computer History mark, `{:error, reason}` fails it.
+  `{:error, :not_found}` when it was no longer pending.
   """
-  @spec recent_gists(non_neg_integer(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  @spec record_gist(String.t(), {:ok, String.t(), boolean()} | {:error, term()}, keyword()) ::
+          :ok | {:error, term()}
+  def record_gist(uuid, {:ok, gist, tainted?}, repo_opts)
+      when is_binary(uuid) and is_binary(gist) and is_boolean(tainted?),
+      do: uuid |> Repo.write_voice_call_gist(gist, tainted?, repo_opts) |> written()
+
+  def record_gist(uuid, {:error, _reason}, repo_opts) when is_binary(uuid),
+    do: uuid |> Repo.fail_voice_call_gist(repo_opts) |> written()
+
+  @doc """
+  Writes the call's row through `write` when the record owes it and its gist
+  has settled, then marks it written, and answers the row's `server_seq`.
+  `:not_owed` when the record owes no row (a private call, or one already
+  written); `{:error, :gist_pending}` while the gist is still being made. A
+  write that fails leaves the row owed, for the next boot.
+  """
+  @spec write_row(String.t(), write_row(), keyword()) ::
+          {:ok, pos_integer()} | :not_owed | {:error, term()}
+  def write_row(uuid, write, repo_opts) when is_binary(uuid) and is_function(write, 2) do
+    with {:ok, record} <- Repo.get_voice_call(uuid, repo_opts),
+         :owed <- row_owed(record),
+         {call, text} = CallRow.ended(record),
+         {:ok, server_seq} <- write.(call, text),
+         {:ok, _marked} <- Repo.mark_voice_call_row_written(uuid, repo_opts) do
+      {:ok, server_seq}
+    end
+  end
+
+  defp row_owed(%{row_state: "row_pending", gist_status: "pending"}), do: {:error, :gist_pending}
+  defp row_owed(%{row_state: "row_pending"}), do: :owed
+  defp row_owed(_record), do: :not_owed
+
+  @doc """
+  The gists of the newest earlier calls that have one, newest first, at most
+  `limit`: what a call in the chat's conversation starts with (M56 §4.3) and
+  what the chat's own turns are told (§4.2). A limit of 0 reads nothing.
+  """
+  @spec recent_gists(non_neg_integer(), keyword()) :: {:ok, [gist()]} | {:error, term()}
   def recent_gists(0, _repo_opts), do: {:ok, []}
 
   def recent_gists(limit, repo_opts) when is_integer(limit) and limit > 0,
@@ -151,6 +223,39 @@ defmodule FermixCore.Realtime.CallRecord do
     end
   end
 
+  @doc """
+  Writes every row a call owed when the daemon died, of the calls started
+  before `cutoff` (M56 §4.2, §8): a gist still pending is failed first, since
+  the process making it is gone, and the row then carries the task list.
+  Answers the UUIDs whose rows it wrote, at most one page of
+  `Repo.list_owed_voice_call_rows/2`; the first failure stops the pass, and
+  the next boot writes the rest.
+  """
+  @spec sweep_rows(DateTime.t(), write_row(), keyword()) ::
+          {:ok, [String.t()]} | {:error, term()}
+  def sweep_rows(%DateTime{} = cutoff, write, repo_opts) when is_function(write, 2) do
+    with {:ok, rows} <- Repo.list_owed_voice_call_rows(cutoff, repo_opts) do
+      write_owed(rows, write, repo_opts)
+    end
+  end
+
+  defp write_owed(rows, write, repo_opts) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, swept} ->
+      case owed_row(row, write, repo_opts) do
+        {:ok, _server_seq} -> {:cont, {:ok, swept ++ [row.uuid]}}
+        {:error, reason} -> {:halt, {:error, {row.uuid, reason}}}
+      end
+    end)
+  end
+
+  defp owed_row(%{gist_status: "pending", uuid: uuid}, write, repo_opts) do
+    with :ok <- record_gist(uuid, {:error, :daemon_restarted}, repo_opts) do
+      write_row(uuid, write, repo_opts)
+    end
+  end
+
+  defp owed_row(%{uuid: uuid}, write, repo_opts), do: write_row(uuid, write, repo_opts)
+
   defp close_stranded(rows, cutoff, repo_opts) do
     Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, closed} ->
       case Repo.close_voice_call(row.uuid, stranded(row, cutoff), repo_opts) do
@@ -160,15 +265,21 @@ defmodule FermixCore.Realtime.CallRecord do
     end)
   end
 
+  # A call cut off mid-call owes no row: its end is not known, only that the
+  # daemon restarted after it.
   defp stranded(row, cutoff) do
-    %{
+    Map.merge(owed(:nothing), %{
       ended_at: cutoff,
       end_reason: @restarted,
       voice_cost_cents: nil,
       accounting: "incomplete",
       tasks: fail_unfinished(row.tasks)
-    }
+    })
   end
+
+  defp owed(:gist), do: %{gist_status: "pending", row_state: "row_pending"}
+  defp owed(:row), do: %{gist_status: "none", row_state: "row_pending"}
+  defp owed(:nothing), do: %{gist_status: "none", row_state: "none"}
 
   defp blank_task(task_id, revision) do
     %{
