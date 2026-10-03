@@ -26,10 +26,16 @@ defmodule FermixChannels.Channels.Voice do
     attachment has nowhere to go and says so (`:unsupported_in_voice`) instead
     of being silently dropped.
 
-  Every closure carries the turn's fence — the delegation id plus its revision,
-  both minted by the session and carried on `metadata.voice_call` — so an event
-  that arrives for a closed call or a superseded revision is recognised as late
-  and dropped rather than spoken.
+  Every closure carries the turn's fence — the call's UUID, the delegation id
+  and its revision, minted by the session and carried on `metadata.voice_call`
+  — so an event that arrives for a closed call or a superseded revision is
+  recognised as late and dropped rather than spoken.
+
+  A task can outlive its call (M56 §4.6): as a call in the chat ends, its
+  running task is handed to `Voice.Detached`, which registers a route of its
+  own before the session releases the session's. So an event is routed by the
+  session's entry first and the detached owner's second, read afresh for each
+  event, and only an event that finds neither is dropped as late.
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -39,6 +45,7 @@ defmodule FermixChannels.Channels.Voice do
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Reply
   alias FermixCore.Telemetry
@@ -47,8 +54,9 @@ defmodule FermixChannels.Channels.Voice do
   @registry FermixChannels.Voice.Registry
   @turn_opt :voice_turn
 
-  @typedoc "A delegation's fence: the id the session minted and its revision."
-  @type fence :: {delegation_id :: String.t(), revision :: pos_integer()}
+  @typedoc "A delegation's fence: its call's UUID, the id the session minted and its revision."
+  @type fence ::
+          {call_uuid :: String.t(), delegation_id :: String.t(), revision :: pos_integer()}
 
   @doc "The channel string this adapter answers to."
   @spec channel() :: String.t()
@@ -56,8 +64,9 @@ defmodule FermixChannels.Channels.Voice do
 
   @doc """
   The unique-keys Registry mapping `{call_id, delegation_id}` to the callbacks
-  the Live session supplied for that delegation. Written by
-  `FermixChannels.Voice.Bridge`, read here.
+  the Live session supplied for that delegation, and `Detached.route/2` to the
+  ones a detached task's owner supplied. Written by
+  `FermixChannels.Voice.Bridge` and `Voice.Detached`, read here.
   """
   @spec registry() :: atom()
   def registry, do: @registry
@@ -168,22 +177,23 @@ defmodule FermixChannels.Channels.Voice do
 
   defp fence(%Message{metadata: metadata}) when is_map(metadata) do
     case Map.get(metadata, :voice_call) do
-      %{delegation_id: delegation_id, revision: revision} -> {delegation_id, revision}
-      _absent -> nil
+      %{call_uuid: call_uuid, delegation_id: delegation_id, revision: revision} ->
+        {call_uuid, delegation_id, revision}
+
+      _absent ->
+        nil
     end
   end
 
-  defp notify({call_id, {delegation_id, revision}}, payload)
-       when is_binary(call_id) and is_binary(delegation_id) and is_integer(revision) do
+  # The session's route first, the detached owner's second (M56 §4.6). The
+  # owner registers before the session releases its own, so one of the two
+  # always holds the route of a task being handed over.
+  defp notify({call_id, {call_uuid, delegation_id, revision}} = route, payload)
+       when is_binary(call_id) and is_binary(call_uuid) and is_binary(delegation_id) and
+              is_integer(revision) do
     case Registry.lookup(@registry, {call_id, delegation_id}) do
-      [{_owner, %{revision: ^revision, callbacks: callbacks}}] ->
-        dispatch(callbacks, payload)
-
-      [{_owner, %{revision: _superseded}}] ->
-        drop(call_id, delegation_id, payload, :superseded_revision)
-
-      [] ->
-        drop(call_id, delegation_id, payload, :call_closed)
+      [{_session, entry}] -> to_session(route, entry, payload)
+      [] -> to_detached(route, payload)
     end
   end
 
@@ -196,6 +206,40 @@ defmodule FermixChannels.Channels.Voice do
 
     {:error, :missing_delegation_fence}
   end
+
+  # A session can release its route between that lookup and the send, as it
+  # hands the task over, and then exit without reading the event. So when the
+  # route is gone after the send, the event also goes to the detached owner:
+  # an event can reach it twice, never not at all, and it takes the first.
+  defp to_session({call_id, {_call_uuid, delegation_id, _revision}} = route, entry, payload) do
+    delivered = deliver(route, entry, payload)
+
+    case Registry.lookup(@registry, {call_id, delegation_id}) do
+      [_held] ->
+        delivered
+
+      [] ->
+        _also = to_detached(route, payload)
+        delivered
+    end
+  end
+
+  defp to_detached({call_id, {call_uuid, delegation_id, _revision}} = route, payload) do
+    case Registry.lookup(@registry, Detached.route(call_uuid, delegation_id)) do
+      [{_owner, entry}] -> deliver(route, entry, payload)
+      [] -> drop(call_id, delegation_id, payload, :call_closed)
+    end
+  end
+
+  defp deliver(
+         {_call_id, {_uuid, _id, revision}},
+         %{revision: revision, callbacks: callbacks},
+         payload
+       ),
+       do: dispatch(callbacks, payload)
+
+  defp deliver({call_id, {_uuid, delegation_id, _revision}}, %{revision: _superseded}, payload),
+    do: drop(call_id, delegation_id, payload, :superseded_revision)
 
   # The delivered answer IS the delegation's result: the gateway delivers text
   # exactly once per turn (a blank completion still delivers its canned retry),

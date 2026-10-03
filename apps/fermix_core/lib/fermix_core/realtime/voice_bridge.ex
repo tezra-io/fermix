@@ -33,6 +33,13 @@ defmodule FermixCore.Realtime.VoiceBridge do
   it ends, reach the chat through here; the latter from a task the session
   spawned, or at boot, after the session is gone.
 
+  `detach/3` hands a running task over as a call in the chat ends (M56 §4.6):
+  the bridge gives it to an owner that outlives the session, which takes the
+  task's reply route before the session's own is released, and answers a
+  function the session forwards the task's events with, for the ones that
+  reached it while it settled. Only a call in the chat detaches; a private
+  call's tasks are cancelled as before.
+
   A running turn reports one fact besides its progress and its result:
   `history_tainted`, before the result, when the turn read Computer History
   content and its reply will carry the stamp (M56 §9), so the session never
@@ -91,6 +98,27 @@ defmodule FermixCore.Realtime.VoiceBridge do
   """
   @type shown_call :: %{required(String.t()) => String.t() | pos_integer()}
 
+  @typedoc """
+  A running task a call in the chat hands over as it ends (M56 §4.6): its ids,
+  the request it ran with, its turn's session id, how long it had run, and the
+  Repo options of the call's record, which its new owner writes its end to.
+  """
+  @type detached_task :: %{
+          delegation_id: String.t(),
+          revision: pos_integer(),
+          request: String.t(),
+          turn_session_id: String.t(),
+          elapsed_ms: non_neg_integer(),
+          record_opts: keyword()
+        }
+
+  @typedoc """
+  What forwards a detached task's event, as the session's own callbacks were
+  given it (`{:result, result}`, `:history_tainted`, `{:progress, text}`,
+  `{:activity, event}`), to its new owner.
+  """
+  @type forward :: (term() -> :ok)
+
   @typedoc "How much of the chat a call starts with (`LiveChat.window_bounds/0`)."
   @type window_bounds :: %{messages: pos_integer(), gists: non_neg_integer()}
 
@@ -126,6 +154,8 @@ defmodule FermixCore.Realtime.VoiceBridge do
   @callback submit(call_handle :: term(), request(), callbacks()) ::
               {:ok, task_ref :: term()} | {:error, term()}
   @callback cancel(call_handle :: term(), task_ref :: term()) :: :ok | {:error, term()}
+  @callback detach(call_handle :: term(), task_ref :: term(), detached_task()) ::
+              {:ok, forward()} | {:error, term()}
   @callback close_call(call_handle :: term()) :: :ok
 
   @doc """

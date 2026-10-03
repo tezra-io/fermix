@@ -112,7 +112,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
             closed: 0,
             callbacks: %{},
             window: {:ok, %{messages: [], gists: []}},
-            show: {:ok, 42}
+            show: {:ok, 42},
+            detach: :forward
           }
         end,
         name: __MODULE__
@@ -124,6 +125,22 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
     @doc "What the next `show/2` answers."
     def set_show(result), do: Agent.update(__MODULE__, &%{&1 | show: result})
+
+    @doc "What `detach/3` answers: a forward to the test, or a refusal."
+    def set_detach(result), do: Agent.update(__MODULE__, &%{&1 | detach: result})
+
+    # The new owner of a detached task (M56 §4.6), stood in for by the test:
+    # what the session forwards to it reaches the test.
+    @impl true
+    def detach(_handle, task_ref, task) do
+      test_pid = test_pid()
+      send(test_pid, {:bridge_detach, task_ref, task})
+
+      case Agent.get(__MODULE__, & &1.detach) do
+        :forward -> {:ok, fn event -> send(test_pid, {:forwarded, task_ref, event}) && :ok end}
+        refusal -> refusal
+      end
+    end
 
     @impl true
     def show(call, text) do
@@ -222,6 +239,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     def submit(_handle, _request, _callbacks), do: {:error, :queue_down}
     @impl true
     def cancel(_handle, _ref), do: :ok
+    @impl true
+    def detach(_handle, _ref, _task), do: {:error, :no_owner}
     @impl true
     def close_call(_handle), do: :ok
   end
@@ -689,7 +708,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert :ok = SessionControl.call_stop(session)
 
-      assert_receive {:realtime, %{type: "task", status: "cancelled", call_uuid: ^uuid}}
+      # The frame that hands the running task over to the chat (M56 §4.6).
+      assert_receive {:realtime, %{type: "task", detached: true, call_uuid: ^uuid}}
       assert_receive {:realtime, %{type: "usage", accounting: "complete", call_uuid: ^uuid}}
       assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
     end
@@ -862,11 +882,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert %{end_reason: "call_stop", accounting: "complete", voice_cost_cents: ^cost} = record
       assert is_binary(record.ended_at)
 
+      # A call in the chat hands the task still running over (M56 §4.6).
       assert task_states(record.tasks) ==
-               [{"dg_1", "completed"}, {"dg_2", "cancelled"}, {"dg_3", "failed"}]
+               [{"dg_1", "completed"}, {"dg_2", "detached"}, {"dg_3", "failed"}]
 
       assert Enum.map(record.tasks, & &1["summary"]) ==
-               ["The room is booked for 10am.", "cancelled", "busy"]
+               ["The room is booked for 10am.", "The result will be in the chat.", "busy"]
 
       assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
     end
@@ -1225,6 +1246,205 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       summarizer: :local,
       remote_summaries: [:openai]
     )
+  end
+
+  # M56 §4.6: a task still running when a call in the chat ends finishes into
+  # the chat. The session hands it over in order: the record says it is
+  # detached, the bridge's owner takes its route, then the call closes.
+  describe "a task that outlives its call" do
+    setup %{clock: clock} do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-detach-#{unique}.db")
+      repo = :"live_detach_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      Process.flag(:trap_exit, true)
+      %{repo: repo, clock: clock}
+    end
+
+    test "call_ready says a call in the chat's tasks outlive it, a private call's not", ctx do
+      session = start_session(clock: ctx.clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", tasks_outlive_call: true}}
+      end_call(session)
+
+      private = start_session(clock: ctx.clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(private)
+      start_provider_session(private)
+      assert_receive {:realtime, %{type: "call_ready", tasks_outlive_call: false}}
+      end_call(private)
+    end
+
+    test "the running task is handed over, not cancelled, before the call closes", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      Agent.update(ctx.clock, fn _now -> 7_000 end)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_detach, {:task, "dg_1"}, task}
+
+      assert %{
+               delegation_id: "dg_1",
+               revision: 1,
+               request: "user: book the room",
+               elapsed_ms: 7_000,
+               record_opts: record_opts
+             } = task
+
+      assert task.turn_session_id =~ ~r/^voice_delegation_\d+$/
+      assert Keyword.get(record_opts, :server) == ctx.repo
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_1",
+                        status: "running",
+                        detached: true,
+                        summary: "The result will be in the chat."
+                      }}
+
+      assert_receive {:bridge_close_call, _handle}
+      assert_receive {:realtime, %{type: "usage", accounting: "complete"}}
+      refute_received {:bridge_cancel, _task_ref}
+      refute_received {:realtime, %{type: "task", delegation_id: "dg_1", status: "cancelled"}}
+
+      assert [%{"state" => "detached", "destination" => "chat"}] = record_tasks(ctx.repo, uuid)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    test "the voice is told once, before the call closes, that the work goes on in the chat",
+         ctx do
+      session = start_session(clock: ctx.clock)
+      running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      events = FakeLiveClient.events()
+      close = Enum.find_index(events, &(&1.type == "session.close"))
+
+      told =
+        events
+        |> Enum.with_index()
+        |> Enum.filter(fn {event, _index} ->
+          event.type == "session.thinking.append" and event.delegation_id == nil and
+            event.content =~ "in the owner's chat"
+        end)
+
+      assert [{line, index}] = told
+      assert index < close
+      assert byte_size(line.content) <= 1_200
+    end
+
+    test "nothing running at the end tells the voice nothing", ctx do
+      session = start_session(clock: ctx.clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      end_call(session)
+
+      refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.thinking.append"))
+      refute_received {:bridge_detach, _ref, _task}
+    end
+
+    test "a waiting task whose words were heard is started behind it and handed over", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      speak(session, "and find parking", 4_300, 5_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 5_200}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "pending"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: text}}
+      assert text =~ "find parking"
+      assert_receive {:bridge_detach, {:task, "dg_2"}, %{delegation_id: "dg_2"}}
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", detached: true}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert task_states(record_tasks(ctx.repo, uuid)) ==
+               [{"dg_1", "detached"}, {"dg_2", "detached"}]
+    end
+
+    test "a waiting task whose words were not heard is dropped and reads as dropped", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      # Raised long after the owner last spoke: nothing heard asked for it.
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 90_000}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "pending"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_2", status: "failed", summary: summary}}
+
+      assert summary =~ "Dropped"
+      refute_received {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert [_first, %{"task_id" => "dg_2", "state" => "failed", "summary" => ^summary}] =
+               record_tasks(ctx.repo, uuid)
+    end
+
+    test "a task its owner will not take is cancelled as before, its reason recorded", ctx do
+      FakeBridge.set_detach({:error, :full})
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_1", status: "cancelled", summary: reason}}
+
+      assert reason =~ "Not kept after the call"
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert [%{"state" => "cancelled", "summary" => ^reason}] = record_tasks(ctx.repo, uuid)
+      refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.thinking.append"))
+    end
+
+    # A reply that reached the session as it settled, before its route was
+    # released, never becomes a spoken result: the session hands it on.
+    test "a reply that reaches the session as it settles goes to the task's new owner", ctx do
+      FakeLiveClient.silence_close()
+      session = start_session(clock: ctx.clock, close_deadline_ms: 300)
+      running_task(session)
+
+      # The stop answers once the session is gone, so it is asked from aside
+      # while the reply lands; the session is waiting for `session.closed`.
+      stop = Task.async(fn -> SessionControl.call_stop(session) end)
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Parking is north."})
+
+      assert :ok = Task.await(stop, 2_000)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 2_000
+      assert_receive {:forwarded, {:task, "dg_1"}, :history_tainted}
+      assert_receive {:forwarded, {:task, "dg_1"}, {:result, {:ok, "Parking is north."}}}
+      assert commentary("dg_1") == []
+      refute_received {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+    end
+
+    test "a private call cancels its running task as before", ctx do
+      session = start_session(clock: ctx.clock, config: live_config(conversation: "private"))
+      running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "cancelled"}}
+      refute_received {:bridge_detach, _ref, _task}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
   end
 
   describe "mute" do
@@ -2419,7 +2639,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert :ok = SessionControl.call_stop(session)
 
       assert_receive {:realtime, %{type: "state", state: "idle"}}
-      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
       assert_receive {:bridge_close_call, _handle}
 
       assert_receive {:realtime,
@@ -2569,6 +2789,17 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   end
 
   defp task_states(tasks), do: Enum.map(tasks, &{&1["task_id"], &1["state"]})
+
+  # A call in progress with one task submitted and running.
+  defp running_task(session) do
+    :ok = SessionControl.call_start(session)
+    start_provider_session(session)
+    speak(session, "book the room", 1_000, 4_000)
+    send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+    assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+    assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "running"}}
+    %{uuid: :sys.get_state(session).call_uuid}
+  end
 
   # One call per daemon: a test that needs a session of its own first ends the
   # call its describe's setup started.

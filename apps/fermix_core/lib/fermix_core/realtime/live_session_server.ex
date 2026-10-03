@@ -29,9 +29,20 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   Every terminal exit — hang-up, ceiling, expiry, max duration, disconnect —
   runs one settle path: the companion is told the call is idle, in-flight
-  delegations are cancelled through the bridge, the provider session is closed
-  gracefully (bounded), the ledger is finalized, and `call_stop` telemetry
-  carries WHY. `terminate/2` only releases what is still held.
+  delegations are left (below), the provider session is closed gracefully
+  (bounded), the ledger is finalized, and `call_stop` telemetry carries WHY.
+  `terminate/2` only releases what is still held.
+
+  A private call cancels its in-flight delegations through the bridge. A call
+  in the chat hands its running one over instead (M56 §4.6), to finish into
+  the chat: the record says it is `detached`, the bridge's owner takes its
+  route, and only then is the call's own released; the task frame says so
+  (`detached: true`), and the voice is told once that the work goes on in the
+  chat. The waiting one is started behind it when its words were heard (the
+  check every hand-off passes), and is otherwise dropped, `failed`. A task
+  the owner will not take is cancelled as a private call's is, its reason on
+  the record. An event of a handed-over task that reached this session before
+  its route was released is forwarded to its owner as this process exits.
 
   A call in the chat leaves a gist and one chat row (M56 §4.2): the settle
   closes the record with the settled cost and what the call owes the chat,
@@ -119,6 +130,19 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   @withheld_shown_line "The result is in the chat."
   @withheld_unshown_line "The result could not be put in the chat."
   @withheld_private_line "That result draws on your computer history, so it cannot be said on this call."
+
+  # A task that outlives its call (M56 §4.6): what its frame and record say,
+  # what the voice is told once before the call closes, and why a waiting
+  # task, or one its new owner will not take, ended with the call.
+  @detached_summary "The result will be in the chat."
+  @detached_line "The call is ending. The work you handed off goes on, and its result " <>
+                   "will be in the owner's chat."
+  @dropped_summary "Dropped when the call ended: its words were not heard."
+  @not_kept_full_summary "Not kept after the call: too many tasks were still running."
+  @not_kept_summary "Not kept after the call: it could not be handed over."
+  # The events of handed-over tasks forwarded as this process exits. A task
+  # sends a handful, and its route is gone by then.
+  @max_forwarded 256
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -298,7 +322,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       # it answers (`Capabilities.AccessGate`'s spoken yes); `nil` otherwise.
       access_window: nil,
       # Confirmed access-sensitive runs in flight: task ref -> delegation id.
-      access_confirms: %{}
+      access_confirms: %{},
+      # Tasks handed over as the call ended (M56 §4.6): delegation id -> the
+      # forward to their new owner.
+      detached: %{}
     }
   end
 
@@ -500,6 +527,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def terminate(_reason, %{companion: _companion} = state) do
     cancel_timers(state)
     close_bridge_call(state)
+    forward_detached(state, @max_forwarded)
     close_socket(state)
     :ok
   end
@@ -858,9 +886,22 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
+  defp submit_to_bridge(state, record) do
+    case submit(state, record) do
+      {:ok, state} ->
+        state
+
+      {:error, state} ->
+        state
+        |> send_append(commentary(record.id, @submit_failed_line), :commentary, record.id)
+        |> settle_delegation(record, :failed, "submit_failed")
+        |> start_next()
+    end
+  end
+
   # The text is built once: what the bridge is given is what the turn persists
   # and what the record keeps (M56 §4.1).
-  defp submit_to_bridge(state, record) do
+  defp submit(state, record) do
     turn_session_id = mint_turn_session_id()
     text = request_text(state, record)
     request = delegation_request(state, record, turn_session_id, text)
@@ -868,19 +909,14 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
     case state.voice_bridge.submit(state.bridge_handle, request, delegation_callbacks(record.id)) do
       {:ok, task_ref} ->
-        state
-        |> close_exchange()
-        |> run_delegation(record, task_ref, text)
+        {:ok, state |> close_exchange() |> run_delegation(record, task_ref, text)}
 
       {:error, reason} ->
         Logger.warning(
           "voice_live: the bridge refused delegation #{record.id}: #{inspect(reason)}"
         )
 
-        state
-        |> send_append(commentary(record.id, @submit_failed_line), :commentary, record.id)
-        |> settle_delegation(record, :failed, "submit_failed")
-        |> start_next()
+        {:error, state}
     end
   end
 
@@ -1300,7 +1336,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       %{state | closing?: true}
       |> notify_state("idle")
       |> notify_terminal(reason)
-      |> cancel_in_flight_delegations()
+      |> leave_in_flight_delegations()
       |> close_bridge_call()
 
     {seconds, state} = graceful_close(state)
@@ -1323,11 +1359,135 @@ defmodule FermixCore.Realtime.LiveSessionServer do
 
   defp notify_terminal(state, reason), do: notify_error(state, reason)
 
+  defp leave_in_flight_delegations(state) do
+    case Config.conversation(state.config) do
+      "private" -> cancel_in_flight_delegations(state)
+      "chat" -> hand_over_in_flight_delegations(state)
+    end
+  end
+
   defp cancel_in_flight_delegations(state) do
     state.delegations
     |> LiveDelegation.in_flight()
     |> Enum.reduce(state, fn record, acc -> cancel_delegation(acc, record) end)
   end
+
+  ## A task that outlives its call (M56 §4.6)
+
+  # The running task first, then the waiting one, which runs behind it. The
+  # voice is told once, before the call closes, when anything was handed over.
+  defp hand_over_in_flight_delegations(state) do
+    state =
+      state.delegations
+      |> LiveDelegation.in_flight()
+      |> Enum.reduce(state, &hand_over/2)
+
+    if state.detached == %{}, do: state, else: send_thinking(state, nil, @detached_line)
+  end
+
+  # A confirmed access-sensitive command has no turn to hand over, and is
+  # cancelled as before; a task not yet submitted is started now when its
+  # words were heard, and dropped otherwise.
+  defp hand_over(%{status: :running, bridge_ref: nil} = record, state),
+    do: cancel_delegation(state, record)
+
+  defp hand_over(%{status: :running} = record, state), do: detach_delegation(state, record)
+
+  defp hand_over(record, state) do
+    if LiveTranscript.sufficient?(state.transcript, record.offset_ms, @context_window_ms),
+      do: submit_at_end(state, record),
+      else: settle_delegation(state, record, :failed, @dropped_summary)
+  end
+
+  defp submit_at_end(state, record) do
+    case submit(state, record) do
+      {:ok, state} ->
+        {:ok, running} = LiveDelegation.fetch(state.delegations, record.id)
+        detach_delegation(state, running)
+
+      {:error, state} ->
+        settle_delegation(state, record, :failed, "submit_failed")
+    end
+  end
+
+  # The ordered transfer: (1) the record says the task is detached, its result
+  # going to the chat; (2) the bridge's owner registers the task's route and
+  # (3) the session's own is released; the call closes after. A reply finds
+  # one route or the other throughout (`VoiceBridge.detach/3`). A task the
+  # owner will not take stays this call's, and is cancelled.
+  defp detach_delegation(state, record) do
+    state =
+      record_task(state, record, "detached", %{summary: @detached_summary, destination: "chat"})
+
+    handover = fn ->
+      state.voice_bridge.detach(
+        state.bridge_handle,
+        record.bridge_ref,
+        detached_task(state, record)
+      )
+    end
+
+    case bridge_call(handover) do
+      {:ok, forward} when is_function(forward, 1) -> detached(state, record, forward)
+      {:error, reason} -> not_kept(state, record, reason)
+    end
+  end
+
+  defp detached(state, record, forward) do
+    {:ok, _detached, delegations} = LiveDelegation.detach(state.delegations, record.id)
+
+    %{state | delegations: delegations, detached: Map.put(state.detached, record.id, forward)}
+    |> notify_task(record, "running", @detached_summary, nil, true)
+    |> forget_delegation(record.id)
+  end
+
+  defp not_kept(state, record, reason) do
+    Logger.warning(
+      "voice_live: #{record.id} could not be handed over as the call ended " <>
+        "(#{inspect(reason)}); it is cancelled"
+    )
+
+    cancel_on_bridge(state, record)
+    settle_delegation(state, record, :cancelled, not_kept_summary(reason))
+  end
+
+  defp not_kept_summary(:full), do: @not_kept_full_summary
+  defp not_kept_summary(_reason), do: @not_kept_summary
+
+  defp detached_task(state, record) do
+    %{
+      delegation_id: record.id,
+      revision: record.revision,
+      request: task_request(state.call_record, record),
+      turn_session_id: Map.fetch!(state.turn_sessions, record.id),
+      elapsed_ms: duration_ms(state, record),
+      record_opts: state.record_opts
+    }
+  end
+
+  # The words the task ran with, as its record keeps them. A task the record
+  # no longer holds (past its newest 64) has none to show.
+  defp task_request(%CallRecord{tasks: tasks}, record) do
+    Enum.find_value(tasks, "", fn task ->
+      if task["task_id"] == record.id and task["revision"] == record.revision,
+        do: task["request"] || ""
+    end)
+  end
+
+  # Each event of a handed-over task that reached this session before its
+  # route was released goes to its new owner, in the order it came.
+  defp forward_detached(%{detached: detached} = state, left)
+       when map_size(detached) > 0 and left > 0 do
+    receive do
+      {:delegation_event, id, event} when is_map_key(detached, id) ->
+        :ok = Map.fetch!(detached, id).(event)
+        forward_detached(state, left - 1)
+    after
+      0 -> :ok
+    end
+  end
+
+  defp forward_detached(_state, _left), do: :ok
 
   defp close_bridge_call(%{bridge_handle: nil} = state), do: state
 
@@ -1445,10 +1605,18 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     state
   end
 
-  defp notify_task(state, record, status, summary, server_seq \\ nil) do
+  defp notify_task(state, record, status, summary, server_seq \\ nil, detached? \\ false) do
     notify(
       state,
-      LiveFrames.task(state.call_uuid, record.id, record.revision, status, summary, server_seq)
+      LiveFrames.task(
+        state.call_uuid,
+        record.id,
+        record.revision,
+        status,
+        summary,
+        server_seq,
+        detached?
+      )
     )
 
     state

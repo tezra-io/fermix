@@ -26,7 +26,8 @@ defmodule FermixCore.Realtime.LiveDelegation do
   # because an unbounded ledger in a long-lived process is how a leak starts.
   @max_finished 64
 
-  @type status :: :created | :pending | :running | :completed | :failed | :cancelled
+  @type status ::
+          :created | :pending | :running | :completed | :failed | :cancelled | :detached
 
   @type record :: %{
           id: String.t(),
@@ -106,6 +107,13 @@ defmodule FermixCore.Realtime.LiveDelegation do
   @doc "The delegation was cancelled, from either slot."
   @spec cancel(t(), String.t()) :: {:ok, record(), t()} | {:error, :unknown_delegation}
   def cancel(%__MODULE__{} = state, id), do: finish(state, id, :cancelled, nil)
+
+  @doc """
+  The running delegation was handed over as its call ended (M56 §4.6): it
+  leaves its slot here, and finishes elsewhere.
+  """
+  @spec detach(t(), String.t()) :: {:ok, record(), t()} | {:error, :unknown_delegation}
+  def detach(%__MODULE__{} = state, id), do: finish(state, id, :detached, nil)
 
   @doc "The delegation currently owning the backend, if any."
   @spec active(t()) :: record() | nil

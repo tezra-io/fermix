@@ -36,6 +36,9 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
 
     @impl true
     def close_call(_handle), do: :ok
+
+    @impl true
+    def detach(_handle, _task_ref, _task), do: {:error, :no_owner}
   end
 
   setup do
@@ -68,10 +71,11 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
     assert_raise ArgumentError, ~r/voice_bridge must be a module/, fn -> VoiceBridge.resolve() end
   end
 
-  # Four are call-scoped; the chat read runs before a call has a handle, a
-  # turn that is not the call's own asks about the call in the chat, and a
-  # result shown in the chat is written to its timeline (M56 §4.5).
-  test "the behaviour declares the four call-scoped callbacks and the four about the chat" do
+  # Five are call-scoped, a task that outlives its call handed over among
+  # them (M56 §4.6); the chat read runs before a call has a handle, a turn
+  # that is not the call's own asks about the call in the chat, and a result
+  # shown in the chat is written to its timeline (M56 §4.5).
+  test "the behaviour declares the five call-scoped callbacks and the four about the chat" do
     assert Enum.sort(VoiceBridge.behaviour_info(:callbacks)) ==
              Enum.sort(
                conversation_window: 1,
@@ -81,6 +85,7 @@ defmodule FermixCore.Realtime.VoiceBridgeTest do
                open_call: 1,
                submit: 3,
                cancel: 2,
+               detach: 3,
                close_call: 1
              )
   end

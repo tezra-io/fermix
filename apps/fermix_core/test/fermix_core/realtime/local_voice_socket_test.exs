@@ -38,6 +38,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     def cancel(_handle, _ref), do: :ok
     @impl true
     def close_call(_handle), do: :ok
+
+    @impl true
+    def detach(_handle, _task_ref, _task), do: {:error, :no_owner}
   end
 
   defmodule FakeSession do

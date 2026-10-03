@@ -45,6 +45,13 @@ defmodule FermixChannels.Voice.Bridge do
   Core never names the companion channel, so its session reaches the write
   only here.
 
+  A task still running when a call in the chat ends outlives it (M56 §4.6):
+  `detach/3` hands it to `Voice.Detached`, which registers the task's route
+  of its own, and only then releases the session's, so the task's turn is no
+  longer one of the call's and `close_call/1` leaves it running. The ordered
+  transfer, and why the registry makes the order matter, are `Voice.Detached`'s
+  to say.
+
   Two lifetimes are call-scoped either way:
 
   - **The turns.** The queue serializes one call's delegations in their
@@ -71,6 +78,7 @@ defmodule FermixChannels.Voice.Bridge do
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
@@ -91,6 +99,8 @@ defmodule FermixChannels.Voice.Bridge do
   unless the caller named another, the same injection seam
   `Channels.Acp.Peer` takes as `agent_server`. It is resolved ONCE, at open,
   so every delegation, cancel and close of one call reaches the same scheduler.
+  `detached` is the owner its running tasks are handed to as it ends,
+  `Voice.Detached` unless the caller named another, resolved once as well.
   `conversation_key` and `store` are resolved once too, from the call's mode.
   """
   @type handle :: %{
@@ -101,7 +111,8 @@ defmodule FermixChannels.Voice.Bridge do
           store: GenServer.server(),
           owner: pid(),
           persist?: boolean(),
-          queue: GenServer.server()
+          queue: GenServer.server(),
+          detached: GenServer.server()
         }
 
   @typedoc """
@@ -188,7 +199,7 @@ defmodule FermixChannels.Voice.Bridge do
     queue = Map.get(call, :agent_server, Queue)
 
     case Registry.register(Voice.registry(), call_id, %{persist?: persist?}) do
-      {:ok, _owner} -> open_conversation(call, queue)
+      {:ok, _owner} -> open_conversation(Map.put_new(call, :detached, Detached), queue)
       {:error, {:already_registered, pid}} -> {:error, {:call_already_open, pid}}
     end
   end
@@ -238,6 +249,36 @@ defmodule FermixChannels.Voice.Bridge do
   end
 
   @doc """
+  Hand a running task of a call in the chat to `Voice.Detached` as the call
+  ends (M56 §4.6): the owner registers the task's route first, then the
+  session's own route is released, so its turn is no longer the call's and
+  `close_call/1` leaves it running. Answers the owner's forward for the
+  task's events that reached the session meanwhile, or the owner's refusal
+  (`{:error, :full}` past its bound), in which case nothing was moved. A
+  private call's tasks are never detached.
+  """
+  @impl true
+  @spec detach(handle(), task_ref(), VoiceBridge.detached_task()) ::
+          {:ok, VoiceBridge.forward()} | {:error, term()}
+  def detach(
+        %{call_id: call_id, conversation: "chat", owner: owner} = handle,
+        {conversation_key, message_id},
+        %{delegation_id: delegation_id, revision: revision} = task
+      )
+      when is_pid(owner) and is_tuple(conversation_key) and is_binary(message_id) do
+    with :ok <- ensure_owner(call_id, owner),
+         {:ok, forward} <- Detached.adopt(handle.detached, adopted(handle, message_id, task)) do
+      :ok = Registry.unregister(Voice.registry(), {call_id, delegation_id})
+
+      Logger.info(
+        "voice bridge detached #{call_id}/#{message_id} (revision #{revision}) into the chat"
+      )
+
+      {:ok, forward}
+    end
+  end
+
+  @doc """
   Close the call: stop routing first, then stop the work, then release the
   history.
 
@@ -265,6 +306,23 @@ defmodule FermixChannels.Voice.Bridge do
 
     Logger.info("voice bridge closed call #{call_id}: #{inspect(outcomes)}")
     :ok
+  end
+
+  defp adopted(handle, message_id, task) do
+    %{
+      call_id: handle.call_id,
+      call_uuid: handle.call_uuid,
+      task_id: task.delegation_id,
+      revision: task.revision,
+      request: task.request,
+      turn_session_id: task.turn_session_id,
+      elapsed_ms: task.elapsed_ms,
+      record_opts: task.record_opts,
+      conversation_key: handle.conversation_key,
+      message_id: message_id,
+      queue: handle.queue,
+      session: handle.owner
+    }
   end
 
   # --- What a call starts with ---
@@ -324,7 +382,8 @@ defmodule FermixChannels.Voice.Bridge do
       store: store,
       owner: self(),
       persist?: call.persist?,
-      queue: queue
+      queue: queue,
+      detached: call.detached
     }
   end
 

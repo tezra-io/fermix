@@ -17,8 +17,11 @@ defmodule FermixChannels.Voice.BridgeTest do
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Bridge
+  alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.DeviceIdentity
   alias FermixCore.Realtime.LivePrompt
@@ -108,7 +111,7 @@ defmodule FermixChannels.Voice.BridgeTest do
   end
 
   defp call(ctx, opts) do
-    %{
+    call = %{
       call_id: Keyword.get(opts, :call_id, "voice_live_#{System.unique_integer([:positive])}"),
       call_uuid: Keyword.get(opts, :call_uuid, uuid()),
       conversation: Keyword.get(opts, :conversation, "private"),
@@ -117,6 +120,11 @@ defmodule FermixChannels.Voice.BridgeTest do
       session_scope: "voice_live:1",
       agent_server: ctx.queue
     }
+
+    case Keyword.fetch(opts, :detached) do
+      {:ok, detached} -> Map.put(call, :detached, detached)
+      :error -> call
+    end
   end
 
   defp uuid, do: DeviceIdentity.generate_uuid()
@@ -594,6 +602,99 @@ defmodule FermixChannels.Voice.BridgeTest do
       send(typed_pid, {:proceed, :reply})
       assert_receive {:turn_started, %{id: "typed-2"}, second_pid}, 5_000
       send(second_pid, {:proceed, :reply})
+    end
+  end
+
+  # M56 §4.6: a task still running as a call in the chat ends is handed to an
+  # owner that outlives the session; the owner's route is taken before the
+  # session's is released, and the call's close then leaves its turn running.
+  describe "detach/3" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :companion_store)
+      Application.put_env(:fermix_channels, :companion_store, RecordingTimeline)
+      Process.register(self(), :voice_bridge_show_test)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, store} -> Application.put_env(:fermix_channels, :companion_store, store)
+          :error -> Application.delete_env(:fermix_channels, :companion_store)
+        end
+      end)
+
+      name = :"voice_bridge_detached_#{System.unique_integer([:positive])}"
+      start_supervised!({Detached, name: name, mobile_running?: fn -> false end})
+      records = :"voice_bridge_records_#{System.unique_integer([:positive])}"
+      start_supervised!({Repo, name: records, enabled: false}, id: records)
+      %{detached: name, record_opts: CallRecord.repo_opts(records)}
+    end
+
+    # The owner writes a task's end once the session that handed it over is
+    # gone, so the session's part runs in a process of its own here.
+    test "the owner takes the route, then the call's is released and its close spares the turn",
+         ctx do
+      test_pid = self()
+
+      session =
+        Task.async(fn ->
+          handle = open(ctx, conversation: "chat", detached: ctx.detached)
+          {:ok, hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+          {:ok, forward} = Bridge.detach(handle, hand_off, detached_task(ctx))
+          send(test_pid, {:routes, Registry.lookup(Voice.registry(), {handle.call_id, "d-1"})})
+          Bridge.close_call(handle)
+          {handle, forward}
+        end)
+
+      {handle, forward} = Task.await(session, 5_000)
+      assert is_function(forward, 1)
+      assert_receive {:routes, []}
+      assert_receive {:turn_started, %{id: "voice-delegation-d-1-1"}, hand_off_pid}, 5_000
+      assert Process.alive?(hand_off_pid)
+
+      assert [{_owner, %{revision: 1}}] =
+               Registry.lookup(Voice.registry(), Detached.route(handle.call_uuid, "d-1"))
+
+      assert_receive {:append_proactive, "main", running_key, _attrs}
+      assert running_key == "voice:#{handle.call_uuid}:d-1:1:running"
+
+      # Its answer reaches the owner, not the closed call, and lands as a row.
+      send(hand_off_pid, {:proceed, :reply})
+      assert_receive {:append_proactive, "main", done_key, %{content: content}}, 5_000
+      assert done_key == "voice:#{handle.call_uuid}:d-1:1:done"
+      assert content == "reply:user: what is on my calendar"
+    end
+
+    test "an owner that cannot take the task moves nothing", ctx do
+      handle = open(ctx, conversation: "chat", detached: :no_such_detached_owner)
+      {:ok, hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+      assert_receive {:turn_started, _msg, hand_off_pid}, 5_000
+
+      assert catch_exit(Bridge.detach(handle, hand_off, detached_task(ctx)))
+      assert Registry.lookup(Voice.registry(), {handle.call_id, "d-1"}) != []
+
+      Bridge.close_call(handle)
+      refute Process.alive?(hand_off_pid)
+    end
+
+    test "a private call's tasks are never handed over", ctx do
+      handle = open(ctx, detached: ctx.detached)
+      {:ok, hand_off} = Bridge.submit(handle, request(), callbacks("d-1"))
+
+      assert_raise FunctionClauseError, fn ->
+        Bridge.detach(handle, hand_off, detached_task(ctx))
+      end
+
+      Bridge.close_call(handle)
+    end
+
+    defp detached_task(ctx) do
+      %{
+        delegation_id: "d-1",
+        revision: 1,
+        request: "user: what is on my calendar",
+        turn_session_id: "voice_delegation_1",
+        elapsed_ms: 1_000,
+        record_opts: ctx.record_opts
+      }
     end
   end
 
