@@ -111,12 +111,16 @@ defmodule FermixCore.Setup.RuntimeTest do
 
     restart_global_memory_repo!()
 
-    :ok =
-      ConfigStore.save_snapshot(
-        baseline_snapshot()
-        |> snapshot_with_openai_key(Keyword.get(opts, :openai_api_key))
-        |> maybe_drop_personalization(Keyword.get(opts, :personalization, true))
-      )
+    if Keyword.get(opts, :persist, true) do
+      :ok =
+        ConfigStore.save_snapshot(
+          baseline_snapshot()
+          |> snapshot_with_openai_key(Keyword.get(opts, :openai_api_key))
+          |> maybe_drop_personalization(Keyword.get(opts, :personalization, true))
+        )
+    end
+
+    :ok
   end
 
   defp maybe_drop_personalization(snapshot, true), do: snapshot
@@ -1034,6 +1038,161 @@ defmodule FermixCore.Setup.RuntimeTest do
                )
 
       assert File.read!(Path.join(home, "config.toml")) =~ ~s(bot_token = "@file")
+    end
+  end
+
+  # A server has no display, so nothing can unlock or create a keyring for it:
+  # the store question comes before any answer the keyring would refuse, and
+  # the file store is its default (owner decision 2026-10-02).
+  describe "the file store, asked first on a headless host whose keyring cannot be used" do
+    setup do
+      FermixTestSupport.SecretWriterStub.reset()
+
+      on_exit(fn ->
+        FermixTestSupport.SecretWriterStub.clear_verdict(:keyring)
+        FermixTestSupport.SecretWriterStub.reset()
+        Application.delete_env(:fermix_core, :secret_store)
+      end)
+
+      :ok
+    end
+
+    defp no_keyring! do
+      FermixTestSupport.SecretWriterStub.set_verdict(%{
+        store: :keyring,
+        state: :tool_absent,
+        sentence: "this machine has no keyring client"
+      })
+    end
+
+    defp channel_answers do
+      [telegram_bot_token: "123:abc", telegram_owner_user_id: "42", openai_api_key: "sk-x"]
+    end
+
+    defp store_run(home, opts, store_answer) do
+      test_pid = self()
+      {puts, collector} = puts_collector()
+
+      prompt = fn label ->
+        send(test_pid, {:prompt, label})
+        if label =~ "Store secrets in that folder", do: store_answer, else: ""
+      end
+
+      result =
+        Runtime.run(
+          opts ++
+            [codex_auth_path: Path.join(home, "missing_codex_auth.json"), skip_probe: true],
+          puts: puts,
+          prompt: prompt
+        )
+
+      {result, Enum.join(puts_lines(collector), "\n"), received_prompts([])}
+    end
+
+    defp received_prompts(acc) do
+      receive do
+        {:prompt, label} -> received_prompts([label | acc])
+      after
+        0 -> Enum.reverse(acc)
+      end
+    end
+
+    test "the store question comes first, and a blank answer saves every secret in the file store" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      no_keyring!()
+
+      {result, printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "")
+
+      assert :ok = result
+      assert [first | _] = prompts
+      assert first == "Store secrets in that folder? [Y/n]"
+      refute Enum.any?(prompts, &(&1 =~ "[y/N]")), "the choice was already made"
+
+      assert printed =~ "this machine has no keyring client"
+      assert printed =~ Path.join(home, "secrets")
+
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ ~s(secret_store = "file")
+      assert contents =~ ~s(bot_token = "@file")
+      assert {:ok, "123:abc"} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    # Recording the store writes config.toml before any other answer; on a
+    # fresh home that must not read as a configured provider. Production has
+    # no default agent provider, so this home has none either.
+    test "on a fresh home the provider is still asked after the store answer" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home, persist: false)
+      Application.put_env(:fermix_core, :agent, name: "fermix")
+      no_keyring!()
+
+      {_result, _printed, prompts} = store_run(home, [display?: false], "")
+
+      assert [first | rest] = prompts
+      assert first == "Store secrets in that folder? [Y/n]"
+      assert Enum.any?(rest, &String.starts_with?(&1, "Provider ("))
+      assert File.read!(Path.join(home, "config.toml")) =~ ~s(secret_store = "file")
+    end
+
+    test "a no keeps the keyring, and the save refuses without asking a second time" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      no_keyring!()
+
+      {result, _printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "n")
+
+      assert {:error, sentence} = result
+      assert sentence =~ "could not be saved: this machine has no keyring client"
+      assert sentence =~ "fermix setup --secret-store file"
+
+      assert ["Store secrets in that folder? [Y/n]"] =
+               Enum.filter(prompts, &(&1 =~ "Store secrets"))
+
+      refute File.read!(Path.join(home, "config.toml")) =~ "secret_store"
+      assert {:error, :missing_secret} = SecretWriter.get(:telegram_bot_token, store: :file)
+    end
+
+    test "a desktop keeps the question for the moment a save is refused" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      no_keyring!()
+
+      {result, _printed, prompts} = store_run(home, [display?: true] ++ channel_answers(), "")
+
+      assert {:error, _sentence} = result
+      assert "Store secrets in that folder from now on? [y/N]: " in prompts
+      refute "Store secrets in that folder? [Y/n]" in prompts
+    end
+
+    test "a keyring that works asks nothing and keeps the keyring" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+
+      {result, _printed, prompts} = store_run(home, [display?: false] ++ channel_answers(), "")
+
+      assert :ok = result
+      refute Enum.any?(prompts, &(&1 =~ "Store secrets in that folder"))
+      assert File.read!(Path.join(home, "config.toml")) =~ ~s(bot_token = "@keyring")
+    end
+
+    test "an explicit --secret-store keyring asks nothing up front" do
+      home = tmp_home()
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      prepare(home)
+      no_keyring!()
+
+      {result, _printed, prompts} =
+        store_run(home, [display?: false, secret_store: "keyring"] ++ channel_answers(), "")
+
+      assert {:error, sentence} = result
+      assert sentence =~ "could not be saved"
+      refute Enum.any?(prompts, &(&1 =~ "Store secrets in that folder"))
     end
   end
 

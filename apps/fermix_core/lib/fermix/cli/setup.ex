@@ -140,7 +140,9 @@ defmodule Fermix.CLI.Setup do
     io = Keyword.take(run_opts, [:puts, :prompt])
 
     runtime_opts =
-      Keyword.drop(opts, [:scope, :user, :system, :web, :cli, :terminal, :rotate_token])
+      opts
+      |> Keyword.drop([:scope, :user, :system, :web, :cli, :terminal, :rotate_token])
+      |> Keyword.put(:display?, display_available?(run_opts))
 
     case runtime.(runtime_opts, io) do
       :ok -> finish_terminal_setup(opts, run_opts, io)

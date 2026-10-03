@@ -104,7 +104,8 @@ defmodule FermixCore.Setup.Runtime do
         seed_and_print(report, puts)
 
       true ->
-        with {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
+        with {:ok, opts} <- maybe_choose_file_store(report, opts, puts, prompt),
+             {:ok, extras} <- maybe_import_codex(report, opts, puts, prompt) do
           # Re-fetch the report — the codex import may have satisfied
           # the active provider check, leaving fewer required answers.
           {:ok, refreshed} = load_report()
@@ -273,13 +274,62 @@ defmodule FermixCore.Setup.Runtime do
 
   defp consents_to_file_store?(prompt, puts, sentence) do
     puts.(sentence)
-
-    puts.(
-      "Fermix can keep secrets in files under #{ConfigStore.fermix_home()}/secrets instead: " <>
-        "readable only by your account, not encrypted at rest, and named by `fermix doctor`."
-    )
-
+    puts.(file_store_explanation())
     ask_yes_no(prompt, "Store secrets in that folder from now on? [y/N]: ", false)
+  end
+
+  # A host with no display cannot unlock or create a keyring, so when the
+  # keyring cannot be used the store is chosen before any answer it would
+  # refuse, and the file store is the default (owner decision 2026-10-02). A
+  # yes records `secret_store = "file"`; a no keeps the keyring, and the save's
+  # refusal does not ask again. A desktop, an explicit `--secret-store`, a
+  # store already set to file, or a keyring that answers asks nothing here.
+  defp maybe_choose_file_store(report, opts, puts, prompt) do
+    cond do
+      Keyword.get(opts, :display?, true) -> {:ok, opts}
+      Keyword.has_key?(opts, :secret_store) -> {:ok, opts}
+      SecretWriter.store() != :keyring -> {:ok, opts}
+      true -> choose_store_without_keyring(report, opts, SecretWriter.probe(), puts, prompt)
+    end
+  end
+
+  defp choose_store_without_keyring(report, opts, verdict, puts, prompt) do
+    cond do
+      SecretWriter.usable?(verdict) ->
+        {:ok, opts}
+
+      consents_to_headless_file_store?(prompt, puts, verdict) ->
+        record_file_store(report, opts, puts)
+
+      true ->
+        {:ok, Keyword.put(opts, :secret_store, "keyring")}
+    end
+  end
+
+  defp consents_to_headless_file_store?(prompt, puts, verdict) do
+    reason = String.trim_trailing(verdict.sentence, ".")
+    puts.("This machine has no display, and its keyring cannot be used: #{reason}.")
+    puts.(file_store_explanation())
+    ask_yes_no(prompt, "Store secrets in that folder? [Y/n]", true)
+  end
+
+  defp record_file_store(report, opts, puts) do
+    case Wizard.save_answers(report.wizard, secret_store: "file") do
+      {:ok, saved} ->
+        puts.(~s(Recorded secret_store = "file" in #{saved.config_path}.))
+        {:ok, opts}
+
+      {:error, {:secret_store_failed, _key, sentence}} when is_binary(sentence) ->
+        {:error, sentence}
+
+      {:error, reason} ->
+        {:error, "failed to record the file store: #{inspect(reason)}"}
+    end
+  end
+
+  defp file_store_explanation do
+    "Fermix can keep secrets in files under #{ConfigStore.fermix_home()}/secrets instead: " <>
+      "readable only by your account, not encrypted at rest, and named by `fermix doctor`."
   end
 
   defp ensure_codex_auth(report, opts, puts) do

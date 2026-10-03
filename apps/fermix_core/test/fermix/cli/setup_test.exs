@@ -36,7 +36,7 @@ defmodule Fermix.CLI.SetupTest do
                web_launcher: unexpected_web_launcher(parent)
              )
 
-    assert_receive {:runtime, []}
+    assert_receive {:runtime, [display?: false]}
     refute_receive {:web_launcher, _opts}
   end
 
@@ -76,7 +76,7 @@ defmodule Fermix.CLI.SetupTest do
                  )
       end)
 
-    assert_receive {:runtime, []}
+    assert_receive {:runtime, [display?: false]}
     assert_receive {:service, :installed?, :user, []}
     assert_receive {:service, :install, :user, []}
     assert_receive {:service, :start, :user, []}
