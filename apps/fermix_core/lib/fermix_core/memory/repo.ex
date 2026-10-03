@@ -5036,8 +5036,11 @@ defmodule FermixCore.Memory.Repo do
 
   # The memory review's input: what the owner said. A message a guest sent
   # carries `"guest": true` in its metadata (`ConversationStore`) and is never
-  # selected, so nothing a guest says is distilled into the owner's memory. The
-  # filter is in the query, not after it, so a run of guest messages can never
+  # selected, so nothing a guest says is distilled into the owner's memory. A
+  # request the owner asked aloud on a Live call carries `"spoken": true` and is
+  # never selected either (M56 D10): a spoken fragment, possibly misheard, is
+  # not a durable fact. History replay and compaction still read both. The
+  # filters are in the query, not after it, so a run of such messages can never
   # fill the page and stall the review cursor behind them.
   defp fetch_user_messages_after(conn, selector, last_id, limit) do
     review_selector = normalize_memory_review_selector(selector)
@@ -5058,6 +5061,11 @@ defmodule FermixCore.Memory.Repo do
                AND COALESCE(
                      CASE WHEN json_valid(metadata_json)
                           THEN json_extract(metadata_json, '$.guest') END,
+                     0
+                   ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.spoken') END,
                      0
                    ) != 1
              ORDER BY id ASC
