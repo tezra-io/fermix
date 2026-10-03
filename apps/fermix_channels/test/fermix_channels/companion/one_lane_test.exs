@@ -86,6 +86,19 @@ defmodule FermixChannels.Companion.OneLaneTest do
     send(last, :finish)
   end
 
+  # The stage's own gate: a phone message during a call in the chat waits its
+  # turn behind the call's running task, which runs in the chat's lane.
+  test "a phone turn waits for a running hand-off of a call in the chat", ctx do
+    :ok = Queue.handle_message(hand_off_message("d-1"), ctx.queue)
+    assert_receive {:running, "voice-delegation-d-1-1", "voice", task}
+    hand_off(phone("p-1"), ctx)
+    refute_receive {:running, "p-1", _channel, _turn}, 200
+
+    send(task, :finish)
+    assert_receive {:running, "p-1", "mobile", phone_turn}
+    send(phone_turn, :finish)
+  end
+
   test "the Mac's cancel of its waiting turn leaves the phone's running turn alone", ctx do
     hand_off(phone("p-1"), ctx)
     assert_receive {:running, "p-1", "mobile", phone_turn}
@@ -152,6 +165,30 @@ defmodule FermixChannels.Companion.OneLaneTest do
   end
 
   defp mac(id), do: agent_message(id, Companion.channel())
+
+  # A Live call's task as `Voice.Bridge` ingests it: a voice message whose
+  # trusted `voice_call` names the chat's conversation.
+  defp hand_off_message(delegation_id) do
+    voice_call = %{
+      call_id: "voice_live_1",
+      call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+      conversation: "chat",
+      conversation_key: Companion.chat_conversation_key(),
+      delegation_id: delegation_id,
+      revision: 1,
+      turn_session_id: "voice_delegation_1",
+      conversation_store: ConversationStore,
+      prompt_addendum: "backend addendum",
+      persist?: false
+    }
+
+    %{
+      agent_message("voice-delegation-#{delegation_id}-1", "voice")
+      | chat_id: "voice_live_1",
+        reply_target: "voice_live_1",
+        metadata: %{voice_call: voice_call}
+    }
+  end
 
   defp agent_message(id, channel) do
     %{
