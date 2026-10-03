@@ -12,6 +12,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
+  alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
   alias FermixCore.Timeouts
 
@@ -51,6 +52,7 @@ defmodule FermixCore.Memory.Repo do
   @companion_cancel_migration_version 34
   @harness_vendor_config_migration_version 35
   @mobile_media_index_migration_version 36
+  @voice_calls_migration_version 37
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -1124,6 +1126,7 @@ defmodule FermixCore.Memory.Repo do
   @type scheduled_job_row :: map()
   @type job_run_row :: map()
   @type meeting_row :: map()
+  @type voice_call_row :: map()
   @type memory_source_row :: map()
   @type harness_run_attrs :: map()
   @type harness_run_row :: map()
@@ -2924,6 +2927,75 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  Opens a Live call's record (M56 §4.2): no tasks yet, no end, and the gist
+  and chat-row states at `none`.
+
+  `attrs`: `%{uuid, engine, started_at, created_at}`, the instants as
+  `DateTime`s. Every read returns the tasks decoded as `tasks`.
+  """
+  @spec create_voice_call(map(), keyword()) :: {:ok, voice_call_row()} | {:error, term()}
+  def create_voice_call(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- VoiceCallsSql.normalize_insert(attrs),
+         {:ok, created} <- call({:create_voice_call, row}, opts) do
+      VoiceCallsSql.decode(created)
+    end
+  end
+
+  @doc "Writes a record's whole task list, as the session holds it now."
+  @spec update_voice_call_tasks(String.t(), [map()], keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def update_voice_call_tasks(uuid, tasks, opts \\ []) when is_binary(uuid) do
+    with {:ok, tasks_json} <- VoiceCallsSql.normalize_tasks(tasks),
+         {:ok, updated} <- call({:update_voice_call_tasks, uuid, tasks_json}, opts) do
+      VoiceCallsSql.decode(updated)
+    end
+  end
+
+  @doc """
+  Closes an open record, once: `fields` is `%{ended_at, end_reason,
+  voice_cost_cents, accounting, tasks}`, a `nil` cost meaning unknown.
+  `{:error, :not_found}` when no open record has this UUID.
+  """
+  @spec close_voice_call(String.t(), map(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def close_voice_call(uuid, fields, opts \\ []) when is_binary(uuid) and is_map(fields) do
+    with {:ok, params} <- VoiceCallsSql.normalize_close(fields),
+         {:ok, closed} <- call({:close_voice_call, uuid, params}, opts) do
+      VoiceCallsSql.decode(closed)
+    end
+  end
+
+  @spec get_voice_call(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def get_voice_call(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:get_voice_call, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc """
+  The open records started before `cutoff`, oldest first, at most
+  `VoiceCallsSql.list_limit/0` of them: the ones a boot sweep closes.
+  """
+  @spec list_open_voice_calls(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_open_voice_calls(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_open_voice_calls, stamp}, opts) do
+      decode_voice_calls(rows)
+    end
+  end
+
+  defp decode_voice_calls(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case VoiceCallsSql.decode(row) do
+        {:ok, decoded} -> {:cont, {:ok, acc ++ [decoded]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -3928,6 +4000,31 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:create_voice_call, row}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.insert(&1, row))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_voice_call_tasks, uuid, tasks_json}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.update_tasks(&1, uuid, tasks_json))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:close_voice_call, uuid, params}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.close(&1, uuid, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_voice_call, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.fetch(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_open_voice_calls, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_open(&1, cutoff))
+    {:reply, reply, state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4028,8 +4125,27 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_companion_migration(conn, versions),
          :ok <- apply_companion_cancel_migration(conn, versions),
          :ok <- apply_harness_vendor_config_migration(conn, versions),
-         :ok <- apply_mobile_media_index_migration(conn, versions) do
+         :ok <- apply_mobile_media_index_migration(conn, versions),
+         :ok <- apply_voice_calls_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # One Live call's durable record (M56 §4.2), its table and version in one
+  # transaction.
+  defp apply_voice_calls_migration(conn, versions) do
+    if Enum.member?(versions, @voice_calls_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{VoiceCallsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@voice_calls_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
