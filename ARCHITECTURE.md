@@ -738,7 +738,17 @@ Current channels:
   reply its runner told the voice adapter is drawn from Computer History is
   shown and never said unless OpenAI may carry it. A call's row a dead daemon
   left owed is written at the next boot by `Voice.CallRowSweep`, started after
-  the companion subtree.
+  the companion subtree. A task still running when a call in the chat ends
+  finishes into the chat: the session hands it to `Voice.Detached`, one
+  process under the voice supervisor that outlives every session, in an
+  order the registry's ownership makes necessary (the record marks it
+  detached, the owner registers a route of its own, then the session
+  releases the call's), and the adapter resolves a reply by the session's
+  route first and the owner's second. The owner writes the task's running and
+  done rows through the same call-row write, pushes the phone, records the
+  end, bounds each task by a wall clock and holds at most eight; a companion
+  `cancel` with `task_ref` stops one through it (`Companion.Requests`), and
+  the boot pass ends the ones a restart orphaned.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
@@ -838,7 +848,9 @@ to and answers the prompt as a failed turn. `Companion.Turns` watches the
 Queue it handed each turn of either companion transport to, ends the turn as
 `interrupted` when that Queue dies, and holds the request's fence itself, so
 the request is failed once rather than released for a rerun. Voice does not
-watch (accepted: a call is bounded and the operator can cancel it).
+watch (accepted: a call is bounded and the operator can cancel it); a task
+that outlived its call is bounded by its owner's wall clock instead, so one
+whose Queue died ends there as timed out.
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
 dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s

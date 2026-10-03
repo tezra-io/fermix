@@ -447,8 +447,8 @@ its reply was exactly `[SILENT]`); the Opik root carries it in its metadata.
 `Tools.Telemetry.exec/5` like every tool, with `tasks` and `speech_bytes` and
 no output preview: what was said reaches no field.
 
-Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
-hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
+detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
 :call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
 id), `call_uuid`, `engine: "openai_live"`, `device_id`, `model`, `voice`, and
@@ -466,7 +466,8 @@ instructions, the owner's details and memory files included) and `input_items`
 and `input_bytes` (the starting `session.input`: the chat's newest messages and
 earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
-the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
+the terminal word `status` (`completed | failed | cancelled`, and `timed_out`
+on a detached stop; never a bare "ok")
 with a `duration_ms` measurement. When a call in the chat showed the
 delegation's result there (M56 §4.5: what the voice cannot say is written to
 the chat's timeline while it says a short line), `delegation_stop` also
@@ -475,6 +476,24 @@ sizes only, so the shown text reaches no field, and neither does the line
 said. `provider_error` carries the vendor's bounded
 sentence and is **not** terminal: a Live moderation refusal cuts the audio and
 the session keeps running.
+
+A delegation can end **after** `call_stop` (M56 §4.6). A task still running
+when a call in the chat ends is handed to `FermixChannels.Voice.Detached`,
+which owns it until it ends into the chat, so its `delegation_stop` comes from
+that owner, after the call's `call_stop`, through
+`LiveTelemetry.detached_delegation_stop/5`: the same event, with the call's
+`session_id` and `call_uuid` and the task's own `delegation_id`, `revision` and
+`turn_session_id`, plus `detached: true` and its terminal `status`, which may
+be `timed_out` (a detached task has a 30 minute wall clock), `duration_ms`
+from its creation on the call to its end, and `server_seq`/`shown_bytes` of
+its done row in the chat. Sizes only, as on the call. Its turn keeps its
+`session_id` and `parent_session` (the call's id). The call's Opik root ships
+at `call_stop`, so the aggregator attaches a detached stop only while that run
+is open (it never opens a run for one, which would be an empty phantom root)
+and its turn's later spans follow the tombstone rule of a run that outlived its
+trace; the JSONL stream keeps every one. A task that ends from the boot pass
+after a restart (`daemon_restarted`) emits nothing: it is a companion write,
+logged.
 
 `call_stop` is the run's whole cost record, and every value is a number:
 `voice_seconds`, `voice_cost_millicents`, `backend_turns`, and

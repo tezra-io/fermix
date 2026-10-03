@@ -93,7 +93,7 @@ Plugins are connected integrations that own a surface (an API, a vault) and regi
 
 ## Voice (macOS, off by default)
 
-The Fermix app's voice companion: Mac Settings > Voice > **Talk to Fermix** plus an OpenAI Platform API key (`[fermix_core.realtime] enabled`; a Codex sign-in does not authorize voice). A call starts from the app's sidebar **Pet** > **Begin voice call** and runs over `$FERMIX_HOME/realtime.sock`. The chosen model sets the engine: `openai_realtime` (default; the voice model runs tools) or `openai_live` (GPT-Live speaks, the Fermix agent acts, its tasks running in the Mac chat's conversation unless `conversation = "private"`). `screen_share` (start/stop) watches the screen only inside a Realtime call; Live has none. Detail: skill_view(name: "self-knowledge", file: "voice").
+The Fermix app's voice companion: Mac Settings > Voice > **Talk to Fermix** plus an OpenAI Platform API key (`[fermix_core.realtime] enabled`; a Codex sign-in does not authorize voice). A call starts from the app's sidebar **Pet** > **Begin voice call** and runs over `$FERMIX_HOME/realtime.sock`. The chosen model sets the engine: `openai_realtime` (default; the voice model runs tools) or `openai_live` (GPT-Live speaks, the Fermix agent acts, its tasks running in the Mac chat's conversation unless `conversation = "private"`, and a task still running when such a call ends finishes into the chat, cancellable there or by `/stop`). `screen_share` (start/stop) watches the screen only inside a Realtime call; Live has none. Detail: skill_view(name: "self-knowledge", file: "voice").
 
 ## Computer use & computer history (off by default)
 
