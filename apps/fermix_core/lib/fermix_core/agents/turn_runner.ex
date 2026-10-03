@@ -211,6 +211,11 @@ defmodule FermixCore.Agents.TurnRunner do
   # disagree with the section — the exact drift the live re-derivation had. The
   # context re-derivation remains only for callers without a frozen snapshot.
   defp history_taint_opt(msg, turn_state, replayed) do
+    if reply_tainted?(msg, turn_state, replayed), do: [metadata: Taint.metadata()], else: []
+  end
+
+  # The one decision above, also told ahead of a hand-off's reply (M56 §9).
+  defp reply_tainted?(msg, turn_state, replayed) do
     gate_context = %{
       source_trust: Map.get(msg, :source_trust),
       ordered_routes: Map.get(turn_state, :ordered_routes),
@@ -221,10 +226,8 @@ defmodule FermixCore.Agents.TurnRunner do
     opts = history_gate_opts(turn_state)
     routes = Map.get(turn_state, :ordered_routes)
 
-    if Taint.tainted_turn?(gate_context, opts) or
-         Taint.carries_unmasked_taint?(replayed, routes, opts),
-       do: [metadata: Taint.metadata()],
-       else: []
+    Taint.tainted_turn?(gate_context, opts) or
+      Taint.carries_unmasked_taint?(replayed, routes, opts)
   end
 
   # The turn's frozen Gate snapshot as taint opts, or `[]` for a caller that
@@ -590,10 +593,26 @@ defmodule FermixCore.Agents.TurnRunner do
       end)
 
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
+    tell_history_tainted(voice_call, msg, state, history, stream_callback)
     persist_user_message(conversation_key, msg, state, voice_call)
 
     run_normal(loop_opts, context, msg, {start, Map.get(state, :live_call)})
   end
+
+  # M56 §9: a hand-off's reply reaches its Live session before `commit/4`
+  # stamps it, so the stamp it will carry is told to its channel first, from
+  # this process, ahead of the reply: the session must not give a reply drawn
+  # from Computer History to a voice provider that may not carry it. Decided
+  # by `reply_tainted?/3`, the decision `commit/4` stamps with, over the history
+  # this turn replays (what commit re-reads, less this turn's own, never
+  # tainted, request). A turn with no stream has no channel to tell.
+  defp tell_history_tainted({:ok, _voice_call}, msg, state, history, stream_callback)
+       when is_function(stream_callback, 1) do
+    if reply_tainted?(msg, state, history), do: stream_callback.(:history_tainted)
+    :ok
+  end
+
+  defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)

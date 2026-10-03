@@ -2,6 +2,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Acp.Identity
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -2051,6 +2052,96 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute :silent_reply in events
       assert metadata.silent == false
     end
+  end
+
+  # M56 §9: a hand-off's reply reaches the Live session before the turn is
+  # committed, so the stamp commit would put on it is told to the turn's
+  # channel first, from the same process, on a hand-off only.
+  describe "a hand-off drawn from Computer History" do
+    setup do
+      original = Application.get_env(:fermix_core, :computer_history)
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+
+      on_exit(fn ->
+        case original do
+          nil -> Application.delete_env(:fermix_core, :computer_history)
+          value -> Application.put_env(:fermix_core, :computer_history, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a hand-off replaying a tainted reply unmasked tells its stream, as commit stamps" do
+      {events, history} = run_provenance_turn(voice_msg("user: what was I reading"), :local)
+
+      assert :history_tainted in events
+      assert List.last(history).history_tainted == true
+    end
+
+    test "a hand-off whose tainted prior is masked, or that has none, tells nothing" do
+      {masked, history} = run_provenance_turn(voice_msg("user: what was I reading"), :remote)
+      refute :history_tainted in masked
+      refute Map.has_key?(List.last(history), :history_tainted)
+
+      {clean, _history} =
+        run_provenance_turn(voice_msg("user: book the room"), :local, prior?: false)
+
+      refute :history_tainted in clean
+    end
+
+    test "a typed turn is never told: only a hand-off's reply goes to a voice" do
+      typed = %{
+        channel: "telegram",
+        chat_id: "provenance-#{System.unique_integer([:positive])}",
+        sender: "user",
+        content: "what was I reading",
+        source_trust: :operator
+      }
+
+      {events, history} = run_provenance_turn(typed, :local)
+
+      refute :history_tainted in events
+      assert List.last(history).history_tainted == true
+    end
+  end
+
+  # One turn run and committed on a local or remote chain, its conversation
+  # holding a prior reply stamped as Computer History content unless `prior?`
+  # is false. Answers what the turn told its stream and the history after.
+  defp run_provenance_turn(msg, chain, opts \\ []) do
+    registry_name = :"tr_provenance_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+    store = start_voice_store()
+    key = ConversationKey.from(msg)
+    routes = if chain == :local, do: local_routes(), else: remote_routes()
+
+    if Keyword.get(opts, :prior?, true) do
+      :ok =
+        ConversationStore.add_message(key, "assistant", "You were reading the Q3 report.",
+          server: store,
+          metadata: Taint.metadata()
+        )
+    end
+
+    turn_state =
+      turn_state(
+        adapter: ReplyAdapter,
+        adapter_opts: [model: "mock-model", reply: "It was the Q3 report."],
+        capability_registry: registry_name,
+        conversation_store: store,
+        ordered_routes: routes,
+        memory_review?: false,
+        main_agent_server: nil
+      )
+
+    test_pid = self()
+    stream = fn event -> send(test_pid, {:stream, event}) end
+
+    assert {:ok, reply, tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end, stream)
+    TurnRunner.commit(msg, turn_state, reply, tokens)
+    {stream_events(), ConversationStore.get_history(key, server: store)}
   end
 
   defp run_reply_turn(reply, live_call) do
