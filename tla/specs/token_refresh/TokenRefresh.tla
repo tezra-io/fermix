@@ -84,7 +84,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/token_expiry.ex @ 8373575105e9
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/xai_login.ex @ d81c71a108d7
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/anthropic_login.ex @ e580e287fec4
-\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 2529923717c0
+\* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 39434a9831b7
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
 \* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ bf9118522c25
