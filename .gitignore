@@ -69,7 +69,7 @@ erl_crash.dump
 !/docs/*.md
 !/docs/*.png
 /docs/superpowers/
-docs/design/
+/docs/design
 # Release film working files (brief, mascot/wordmark assets, motion proof, Figma exports)
 /docs/release-film/
 
