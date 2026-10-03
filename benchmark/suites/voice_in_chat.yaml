@@ -1,0 +1,88 @@
+# Voice in the chat (M56 §4.1): unless a call is private, a GPT-Live call's
+# tasks run in the Mac chat's own conversation, so a task asked aloud reads
+# what the owner typed in the chat before it.
+#
+# No eval driver speaks the Live wire (`drive:` is `ask`, `companion` or
+# `telegram_operator`, and a hand-off is a trusted message only the daemon's own
+# Live session can mint). So the hand-off is driven as what reaches the model:
+# in one conversation, a typed turn carrying the link, then a turn whose message
+# is the shape a hand-off persists, the speaker-labelled exchange since the
+# previous task ("user: ...", "assistant: ..."). The wire path itself (the
+# trusted conversation key, the shared queue lane, the persisted request, the
+# voice task profile and the backend addendum) is held by ExUnit: the bridge,
+# turn runner and Live end-to-end suites. What this proves is the half that
+# rots: given the chat's history, the model resolves "that link" to the one the
+# owner typed and uses it, instead of asking for it again.
+#
+# The page is the runner's own fixture form, so nothing is started by hand and
+# the reads change nothing.
+suite: voice_in_chat
+risk: host_readonly
+title: "Voice in the chat: a task asked aloud uses a link the owner typed"
+description: >
+  A GPT-Live task runs in the chat's conversation, so "open the link I sent"
+  said aloud reaches the agent with the typed link already in its history. Each
+  case types a link to the fixture registration form, then sends the spoken
+  exchange a hand-off persists, and grades the second turn: the reply names
+  what the form asks for (fields that exist on the page and nowhere else, so
+  the floor is phrasing-independent) and never asks the owner for a link they
+  already gave.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: spoken_task_uses_typed_link
+    # host_readonly, stated rather than inherited: both turns read one
+    # ephemeral fixture page, which records nothing a read does to it.
+    risk: host_readonly
+    title: "A task asked aloud reads the link typed in the chat before it"
+    severity: normal
+    # `fixture-server` marks the page as the runner's own: selecting this
+    # scenario starts one, nothing is started by hand.
+    tags: [voice, conversation, web, fixture-server]
+    cases:
+      - id: open_the_link_i_sent
+        turns:
+          - query: >
+              Here's the sign-up page I mentioned: __EVAL_FIXTURE_URL__/form.html
+              Nothing to do yet, I'll ask you about it in a minute.
+          # The shape a hand-off persists: what the owner said aloud since the
+          # previous task, speaker labelled.
+          - query: |-
+              user: okay, open the link I just sent you in the chat
+              user: and tell me what that form asks me for
+            expect:
+              reply_matches: "(?i)dietary"
+              reply_not_matches: "(?i)(which|what) link|(send|paste|share) (me )?(the|that) (link|url)|(can'?t|cannot|do ?n'?t) (see|find) (a|the|any) (link|url)"
+              max_cost_usd: 2
+              max_duration_ms: 180000
+        rubric: >
+          The second reply reads the registration form the owner linked in the
+          first message and names what it asks for: full name, city,
+          organisation, role and a dietary note. Reading it with a plain fetch
+          or with the browser is equally correct. Fails if it asks the owner
+          for the link, says it has no link, describes a different page, or
+          invents fields.
+      - id: what_to_have_ready
+        # The same intent with the voice's own line in the exchange, as a
+        # hand-off carries it when the voice answered before handing off.
+        turns:
+          - query: "Saving this for later: __EVAL_FIXTURE_URL__/form.html"
+          - query: |-
+              user: hey, about the page I pasted in the chat earlier
+              assistant: Sure, what about it?
+              user: what do I need to have ready before I fill it in?
+            expect:
+              reply_matches: "(?i)organi[sz]ation"
+              reply_not_matches: "(?i)(which|what) (link|page)|(send|paste|share) (me )?(the|that) (link|url|page)|(can'?t|cannot|do ?n'?t) (see|find) (a|the|any) (link|url|page)"
+              max_cost_usd: 2
+              max_duration_ms: 180000
+        rubric: >
+          The second reply reads the page the owner pasted in the first message
+          and says what the form will ask for: full name, city, organisation,
+          role and a dietary note. Not filling the form in is correct; the owner
+          asked what it needs. Fails if it asks which page, says it cannot find
+          one, or answers without reading the page.
