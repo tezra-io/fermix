@@ -439,6 +439,72 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert FakeLiveClient.events() == []
     end
 
+    # M56 §8: one retry without the input, logged; the call proceeds. Before
+    # `session.started` only `session.start` has been sent, and the provider's
+    # error names the field it refused in `param`.
+    test "a start refused over its input is sent once more without it", %{clock: clock} do
+      scope = "voice_live:input_#{System.unique_integer([:positive, :monotonic])}"
+      attach_provider_error_handler(scope)
+
+      FakeBridge.set_window(
+        {:ok, %{messages: [%{role: "user", content: "the lease"}], gists: []}}
+      )
+
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      [%{type: "session.start", session: first}] = FakeLiveClient.events()
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.input[0].content")}})
+      sync(session)
+
+      assert [_first, %{type: "session.start", session: second}] = FakeLiveClient.events()
+      refute Map.has_key?(second, :input)
+      assert second.instructions == first.instructions
+
+      # Logged with the field and the code, never the vendor's message, which
+      # may quote the chat text it refused.
+      assert_receive {:provider_error, %{reason: reason}}
+      assert reason =~ "session.input"
+      refute reason =~ "the lease"
+
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready"}}
+    end
+
+    test "a second refusal over the input is not retried again", %{clock: clock} do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.input")}})
+      send(session, {:openai_live_event, {:error, input_refusal("session.input")}})
+      sync(session)
+
+      assert [%{type: "session.start"}, %{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    test "a refusal naming any other field, or of a start with no input, is not retried", %{
+      clock: clock
+    } do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.audio.output.voice")}})
+      send(session, {:openai_live_event, {:error, input_refusal("session.input_audio")}})
+      sync(session)
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+
+      end_call(session)
+      FakeBridge.set_window({:ok, %{messages: [], gists: []}})
+      bare = start_session(clock: clock)
+      :ok = SessionControl.call_start(bare)
+
+      send(bare, {:openai_live_event, {:error, input_refusal("session.input")}})
+      sync(bare)
+      assert Enum.count(FakeLiveClient.events(), &(&1.type == "session.start")) == 2
+    end
+
     test "call_start says how large the instructions and the input are, never what", %{
       clock: clock
     } do
@@ -1909,6 +1975,17 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
           expires_at: Keyword.get(opts, :expires_at, 1_060)
         }}}
     )
+  end
+
+  # The provider's answer to a start whose input it will not take, in the
+  # shape its Live guide documents for a refused command.
+  defp input_refusal(param) do
+    %{
+      "type" => "invalid_request_error",
+      "code" => "invalid_value",
+      "message" => "Invalid value: 'the lease'.",
+      "param" => param
+    }
   end
 
   defp restore_core_env({key, {:ok, value}}), do: Application.put_env(:fermix_core, key, value)

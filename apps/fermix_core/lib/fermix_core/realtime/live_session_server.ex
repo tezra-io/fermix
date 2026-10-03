@@ -195,6 +195,9 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       turn_sessions: %{},
       last_activity_ms: %{},
       pending_appends: [],
+      # What `session.start` carried, `nil` until it is sent: kept so a start
+      # the provider refused over its input can be sent once more without it.
+      start: nil,
       start_timer: nil,
       max_session_timer: nil,
       usage_timer: nil,
@@ -444,6 +447,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           Map.put(LiveChat.input_size(input), :instructions_bytes, byte_size(instructions))
         )
 
+        state = %{state | start: %{instructions: instructions, input: input}}
         {:ok, state |> open_record() |> arm_start_deadline()}
 
       {:error, reason} ->
@@ -592,9 +596,13 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # keeps running. The companion is deliberately not told — it treats `error` as
   # the end of the call.
   defp handle_live_event({:error, error}, state) do
-    Logger.warning("voice_live: provider error: #{inspect(error)}")
-    LiveTelemetry.provider_error(telemetry_meta(state), provider_error_text(error))
-    {:noreply, fail_pending_append(state, Map.get(error, "client_event_id"))}
+    if refused_input?(state, error) do
+      {:noreply, start_without_input(state, error)}
+    else
+      Logger.warning("voice_live: provider error: #{inspect(error)}")
+      LiveTelemetry.provider_error(telemetry_meta(state), provider_error_text(error))
+      {:noreply, fail_pending_append(state, Map.get(error, "client_event_id"))}
+    end
   end
 
   defp handle_live_event({:info, code, message}, state) do
@@ -622,6 +630,41 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   defp handle_live_event(event, state) do
     Logger.debug("voice_live: no handler for provider event #{inspect(event)}")
     {:noreply, state}
+  end
+
+  # M56 §8: a start the provider refused over its input. Before
+  # `session.started` nothing but `session.start` can have been sent, and the
+  # provider names the field it refused in `param`, so an error naming
+  # `session.input` is that refusal. Only a start that carried input matches,
+  # and the retry carries none, so it is sent once at most.
+  defp refused_input?(%{provider_ready?: false, start: %{input: [_ | _]}}, %{"param" => param})
+       when is_binary(param),
+       do:
+         param == "session.input" or
+           String.starts_with?(param, ["session.input[", "session.input."])
+
+  defp refused_input?(_state, _error), do: false
+
+  # The call proceeds without the chat. Logged and traced with the field and
+  # the code only: the vendor's message may quote the chat text it refused.
+  defp start_without_input(state, error) do
+    detail = "#{Map.get(error, "code") || Map.get(error, "type")} (#{Map.fetch!(error, "param")})"
+
+    Logger.warning(
+      "voice_live: the provider refused the call's input, starting without it: #{detail}"
+    )
+
+    LiveTelemetry.provider_error(telemetry_meta(state), detail)
+
+    event =
+      OpenAILiveClient.session_start_event(state.config, state.start.instructions,
+        event_id: OpenAILiveClient.new_event_id()
+      )
+
+    %{state | start: %{state.start | input: []}}
+    |> cancel_start_timer()
+    |> send_provider(event)
+    |> arm_start_deadline()
   end
 
   # A mute applied before `session.started` was gated locally but never reached
