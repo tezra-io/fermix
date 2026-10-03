@@ -10,7 +10,9 @@
 (* outcome, and settles a request the gateway answered without a turn; the *)
 (* Gateway Queue; the timeline (FermixCore.Companion.Timeline, written     *)
 (* through Memory.Repo); a job reporting back through                      *)
-(* Channels.Companion.send_message; and one approval, kept by              *)
+(* Channels.Companion.send_message, which stands for a GPT-Live call's row *)
+(* too (Channels.Companion.write_call_row, written and announced the same *)
+(* way); and one approval, kept by                                         *)
 (* Companion.Approvals until it resolves or expires and answered by a      *)
 (* /confirm or /deny command.                                              *)
 (*                                                                         *)
@@ -114,15 +116,15 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 89f4c1ba3395
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 1df82141f988
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 9d16e9f82016
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ f85236885710
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ e53c2a581752
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ 7309598811f2
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ c76eab50921a
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,announce_written,message,build_raw_stream_callback,every_client_reads? @ 6dc74ad29fd0
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ 515903248437
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ d0a1ca7c444e
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 2dadf7da73c8
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
@@ -185,7 +187,7 @@ CONSTANTS
     AnnouncesEveryRow,   \* every row written outside a turn's completion is announced as
                          \* a row as it is written: the user's (announce_user_row,
                          \* connection.ex:522-523) and a delivery's (announce_written,
-                         \* channels/companion.ex:266-267), both built by Output.row and
+                         \* channels/companion.ex:332-333), both built by Output.row and
                          \* sent through Fanout.announce; FALSE announces no user row
     SingleAnswer,        \* an approval token is consumed once: Confirmations.take is
                          \* an :ets.take (confirmations.ex:21-26, take_pending
@@ -370,11 +372,11 @@ Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 \* (next_server_seq, increment_server_seq, mobile_sql.ex:758, :786-795).
 NextSeq == MaxOf(Range(tl)) + 1
 
-\* Companion.Fanout.announce (fanout.ex:44-64) -> Channels.Companion.broadcast
-\* (channels/companion.ex:135-138, dispatch :292-296): one send to every
+\* Companion.Fanout.announce (fanout.ex:46-66) -> Channels.Companion.broadcast
+\* (channels/companion.ex:149-152, dispatch :358-362): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
-\* wire's row has. A row and a text_done are both a live row here.
+\* wire's row has (its kind and metadata among them, which no rule reads). A row and a text_done are both a live row here.
 FanoutTo(w, ev) == [c \in Clients |-> IF sub[c] = "yes" THEN Append(w[c], ev) ELSE w[c]]
 Fanout(ev) == FanoutTo(wire, ev)
 
@@ -834,7 +836,7 @@ TurnsNext ==
 \* gateway stores a pending token (store_pending_grant, sandbox.ex:198-210)
 \* and the channel's approval store keeps the card, then announces it to this
 \* transport's connections alone, through the announce it announces the
-\* card's end with (send_approval, channels/companion.ex:221-224 ->
+\* card's end with (send_approval, channels/companion.ex:235-238 ->
 \* Approvals.announce, approvals.ex:79-88, :130-134). The turn does not wait
 \* for it.
 Ask(m) ==
@@ -866,7 +868,7 @@ Claim(m) ==
                    obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:225-227, through build_turn_result, channels/companion.ex:201-205)
+\* turns.ex:225-227, through build_turn_result, channels/companion.ex:215-219)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
 \* turn (folded in: nothing else can act on the dead turn in between). A turn
 \* its snapshot let end with no reply may have answered exactly [SILENT]: its
@@ -883,7 +885,10 @@ Finish(m) ==
 
 -----------------------------------------------------------------------------
 (* A scheduled job reporting back: Channels.Companion.send_message in the   *)
-(* job's own process (channels/companion.ex:235-248)                        *)
+(* job's own process (channels/companion.ex:249-262). A GPT-Live call's    *)
+(* row (write_call_row, :277-296, M56 section 4.5) is written and          *)
+(* announced the same way, from the call's session, so the job stands for  *)
+(* it too.                                                                 *)
 
 \* Without SeqAssignedOnInsert the job reads the counter first.
 JobRead ==
@@ -903,7 +908,7 @@ JobWrite ==
     /\ UNCHANGED <<client, conn, turns, reqs, queue, env, obs>>
 
 \* announce_written -> Fanout.announce: the job announces its row
-\* (channels/companion.ex:266-267).
+\* (channels/companion.ex:332-333).
 JobAnnounce ==
     /\ job = "written"
     /\ job' = "done"
