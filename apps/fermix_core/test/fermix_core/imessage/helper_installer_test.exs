@@ -32,8 +32,23 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
   end
 
   describe "install/1" do
-    test "the shipped build refuses a pin that is not set yet rather than downloading" do
-      assert HelperInstaller.install(macos?: true) == {:error, :pin_not_set}
+    test "the shipped pin names the first release by its sha256" do
+      assert %{"0.1.0" => %{"macos-universal" => %{url: url, sha256: sha}}} =
+               HelperInstaller.releases()
+
+      assert url =~ "/releases/download/v0.1.0/fermix-messages-0.1.0-macos-universal.zip"
+      assert String.match?(sha, ~r/^[0-9a-f]{64}$/)
+    end
+
+    test "a pin that is not set refuses rather than downloading" do
+      releases = %{
+        "0.1.0" => %{"macos-universal" => %{url: "https://example.invalid/x.zip", sha256: "TBD"}}
+      }
+
+      assert HelperInstaller.install(
+               install_opts(runner: fn _cmd, _args -> flunk("ran") end)
+               |> Keyword.put(:releases, releases)
+             ) == {:error, :pin_not_set}
     end
 
     test "refuses off a Mac before anything is fetched" do

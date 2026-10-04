@@ -45,14 +45,15 @@ defmodule FermixCore.IMessage.HelperInstaller do
 
   # version => %{target => %{url:, sha256:}}. The pin lands with the helper's
   # release choreography from the release's own `.sha256` sidecar; it is never
-  # hand-written. Until the first helper release exists, the sha256 is the
-  # unset marker and `install/1` refuses.
+  # hand-written. A release whose sha256 is the unset marker is refused by
+  # `install/1`. 0.1.0 is the helper's first release (tezra-io/fermix-messages
+  # at 99ce63f).
   @releases %{
     "0.1.0" => %{
       "macos-universal" => %{
         url:
           "https://github.com/tezra-io/fermix-messages/releases/download/v0.1.0/fermix-messages-0.1.0-macos-universal.zip",
-        sha256: @unset_pin
+        sha256: "5626ee81260db70e53b40e00067ece40ece069d80ffc83f95ae1108d95cc3979"
       }
     }
   }
@@ -77,6 +78,10 @@ defmodule FermixCore.IMessage.HelperInstaller do
   @doc "The helper version this build pins."
   @spec pinned_version() :: String.t()
   def pinned_version, do: @pinned_version
+
+  @doc "The pin table, version => target => url and sha256 (a release fact, never edited by hand)."
+  @spec releases() :: %{String.t() => %{String.t() => %{url: String.t(), sha256: String.t()}}}
+  def releases, do: @releases
 
   @doc "The Developer ID team every helper bundle must be signed by."
   @spec team_id() :: String.t()
