@@ -854,7 +854,9 @@ defmodule FermixChannels.Companion.ConnectionTest do
         end)
 
       :gen_tcp.close(listener)
-      refute log =~ "refusing"
+      # The capture sees every module's log while async tests run beside this
+      # one, so the refusal refuted is this connection's own line.
+      refute log =~ "companion connection refusing"
     end
   end
 

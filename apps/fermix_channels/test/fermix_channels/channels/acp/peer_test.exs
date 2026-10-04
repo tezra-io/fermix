@@ -1271,7 +1271,9 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
         end)
 
       :gen_tcp.close(listener)
-      refute log =~ "refusing"
+      # The capture sees every module's log while async tests run beside this
+      # one, so the refusal refuted is this peer's own line.
+      refute log =~ "ACP peer refusing"
     end
   end
 
