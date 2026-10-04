@@ -4,6 +4,20 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **OpenRouter and Venice suggest the newest models.** OpenRouter's list adds
+  Claude Sonnet 5.5, Claude Fable 5.1, Claude Opus 5.5, GPT-6 Astra, GPT-6.1
+  Sol, GPT-6 Luna and Grok 4.7 beside the models it already offered, and its
+  default stays Claude Sonnet 4.6. Venice adds Grok 4.7 and makes it the
+  default in place of Grok 4.6, so a Venice provider that never picked a model
+  moves to Grok 4.7 on upgrade; to stay on Grok 4.6, pick it in setup. A
+  provider already set to one of these models by hand now compacts
+  conversations at that model's known context window instead of the shorter
+  one Fermix assumes for a model it does not know.
+
 ## [0.12.1] - 2026-09-30
 
 ### Fixed

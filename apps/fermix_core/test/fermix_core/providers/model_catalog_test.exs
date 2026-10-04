@@ -359,14 +359,15 @@ defmodule FermixCore.Providers.ModelCatalogTest do
   # default, and the tier rides in the label because the label is the one model
   # field both setup doors draw.
   describe "the Venice catalog" do
-    test "defaults to grok-4-6 and lists family-then-newest after it" do
-      assert ModelCatalog.default_model_for(:venice) == "grok-4-6"
+    test "defaults to grok-4-7 and lists family-then-newest after it" do
+      assert ModelCatalog.default_model_for(:venice) == "grok-4-7"
 
       assert Enum.map(ModelCatalog.models_for(:venice), & &1.id) == [
-               "grok-4-6",
+               "grok-4-7",
                "deepseek-v4-1-flash",
                "z-ai-glm-5-3-flash",
                "z-ai-glm-5-3",
+               "grok-4-6",
                "e2ee-kimi-k3-p",
                "kimi-k3",
                "kimi-k2-6",
@@ -389,13 +390,24 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       by_id = Map.new(ModelCatalog.models_for(:venice), &{&1.id, &1})
 
       refute ModelCatalog.vision?(:venice, "z-ai-glm-5-3")
+      assert ModelCatalog.vision?(:venice, "grok-4-7")
       assert ModelCatalog.vision?(:venice, "grok-4-6")
       assert ModelCatalog.vision?(:venice, "e2ee-kimi-k3-p")
 
+      assert by_id["grok-4-7"].context_window == 500_000
       assert by_id["grok-4-6"].context_window == 500_000
       assert by_id["z-ai-glm-5-3-flash"].context_window == 1_048_576
       assert by_id["kimi-k2-6"].context_window == 256_000
       assert by_id["minimax-m3-preview"].context_window == 524_288
+    end
+
+    # Grok is the one curated Venice line the engine also calls directly, so its
+    # entries compact at the xAI list's windows.
+    test "the Grok entries take the xAI list's windows" do
+      by_id = Map.new(ModelCatalog.models_for(:venice), &{&1.id, &1})
+
+      assert by_id["grok-4-7"].context_window == ModelCatalog.context_window_for(:xai, "grok-4.7")
+      assert by_id["grok-4-6"].context_window == ModelCatalog.context_window_for(:xai, "grok-4.6")
     end
 
     # Venice takes the server default rather than a partial effort range (the
@@ -406,6 +418,51 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       end
     end
   end
+
+  # M12 §3.1: the curated OpenRouter list mirrors the vendor catalogs' current
+  # generation, so every entry names a model its vendor's own list carries and
+  # compacts at that entry's window, deliberate deviations included.
+  describe "the OpenRouter catalog" do
+    test "suggests each vendor line's current generation beside the entries it kept" do
+      assert Enum.map(ModelCatalog.models_for(:openrouter), & &1.id) == [
+               "anthropic/claude-sonnet-4.6",
+               "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.1",
+               "anthropic/claude-fable-5",
+               "anthropic/claude-opus-5.5",
+               "anthropic/claude-opus-4.8",
+               "openai/gpt-6-astra",
+               "openai/gpt-6.1-sol",
+               "openai/gpt-6-luna",
+               "openai/gpt-5.5",
+               "x-ai/grok-4.7",
+               "x-ai/grok-4.3"
+             ]
+
+      refute ModelCatalog.known_model?(:openrouter, "openai/gpt-6-sol")
+    end
+
+    test "defaults to the Anthropic default" do
+      assert ModelCatalog.default_model_for(:openrouter) == "anthropic/claude-sonnet-4.6"
+
+      assert vendor_model(ModelCatalog.default_model_for(:openrouter)) ==
+               {:anthropic, ModelCatalog.default_model_for(:anthropic)}
+    end
+
+    test "every entry is a model its vendor's list carries, at that entry's window" do
+      for %{id: id, context_window: window} <- ModelCatalog.models_for(:openrouter) do
+        {vendor, vendor_id} = vendor_model(id)
+
+        assert ModelCatalog.known_model?(vendor, vendor_id), "#{id} has no #{vendor} entry"
+        assert window == ModelCatalog.context_window_for(vendor, vendor_id), id
+      end
+    end
+  end
+
+  # OpenRouter prefixes every vendor and writes Anthropic's dashes as dots.
+  defp vendor_model("anthropic/" <> model), do: {:anthropic, String.replace(model, ".", "-")}
+  defp vendor_model("openai/" <> model), do: {:openai, model}
+  defp vendor_model("x-ai/" <> model), do: {:xai, model}
 
   describe "provider_for_model/1" do
     test "resolves a provider-unique slug" do
