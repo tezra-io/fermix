@@ -73,7 +73,7 @@ defmodule Fermix.CLI.Doctor.IMessageCheckTest do
                  verify: fn "/x/Fermix Messages.app" -> :ok end
                )
 
-      assert detail =~ "pinned 0.1.0"
+      assert detail =~ "pinned 0.1.1"
       assert detail =~ "signature verified"
     end
 

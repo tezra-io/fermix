@@ -28,21 +28,21 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
 
   test "the stable identifiers the setup surfaces key off" do
     assert HelperInstaller.plugin_name() == "imessage_helper"
-    assert HelperInstaller.pinned_version() == "0.1.0"
+    assert HelperInstaller.pinned_version() == "0.1.1"
   end
 
   describe "install/1" do
     test "the shipped pin names the first release by its sha256" do
-      assert %{"0.1.0" => %{"macos-universal" => %{url: url, sha256: sha}}} =
+      assert %{"0.1.1" => %{"macos-universal" => %{url: url, sha256: sha}}} =
                HelperInstaller.releases()
 
-      assert url =~ "/releases/download/v0.1.0/fermix-messages-0.1.0-macos-universal.zip"
+      assert url =~ "/releases/download/v0.1.1/fermix-messages-0.1.1-macos-universal.zip"
       assert String.match?(sha, ~r/^[0-9a-f]{64}$/)
     end
 
     test "a pin that is not set refuses rather than downloading" do
       releases = %{
-        "0.1.0" => %{"macos-universal" => %{url: "https://example.invalid/x.zip", sha256: "TBD"}}
+        "0.1.1" => %{"macos-universal" => %{url: "https://example.invalid/x.zip", sha256: "TBD"}}
       }
 
       assert HelperInstaller.install(
@@ -66,7 +66,7 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
       assert {:ok, binary} = HelperInstaller.install(install_opts(runner: runner))
 
       app =
-        Path.join([home, "plugins", "imessage_helper", "0.1.0", "macos-universal", app_name()])
+        Path.join([home, "plugins", "imessage_helper", "0.1.1", "macos-universal", app_name()])
 
       assert binary == Path.join([app, "Contents", "MacOS", "fermix-messages"])
       assert File.regular?(binary)
@@ -178,7 +178,7 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
           home,
           "plugins",
           "imessage_helper",
-          "0.1.0",
+          "0.1.1",
           "macos-universal",
           app_name(),
           "Contents",
@@ -202,7 +202,7 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
           home,
           "plugins",
           "imessage_helper",
-          "0.1.0",
+          "0.1.1",
           "macos-universal",
           app_name(),
           "Contents",
@@ -237,7 +237,7 @@ defmodule FermixCore.IMessage.HelperInstallerTest do
       [
         macos?: true,
         releases: %{
-          "0.1.0" => %{
+          "0.1.1" => %{
             "macos-universal" => %{url: "https://example.invalid/helper.zip", sha256: sha256}
           }
         },
