@@ -20,6 +20,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.SidecarInstaller
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.IMessage
+  alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Management.Settings.Voice, as: VoiceSettings
@@ -150,6 +152,9 @@ defmodule FermixWebWeb.SetupLive do
     :slack_owner_user_id,
     :signal_account,
     :signal_owner_user_id,
+    :imessage_posture,
+    :imessage_owner_user_id,
+    :imessage_allowed_sender_ids,
     # The ACP listener is a supervised transport child started at boot, so
     # flipping it needs a restart before the socket appears (or disappears).
     :acp_enabled
@@ -393,6 +398,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:slack_owner_user_id, params["slack_owner_user_id"])
       |> maybe_put_string(:signal_account, params["signal_account"])
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
+      |> put_imessage_answers(params, imessage_available?())
       |> maybe_put_string(:acp_enabled, params["acp_enabled"])
 
     socket =
@@ -586,6 +592,23 @@ defmodule FermixWebWeb.SetupLive do
   # of on the model's first screenshot. Re-probes after so the pane reflects reality.
   def handle_event("computer_use_grant", _params, socket) do
     {:noreply, request_computer_use_permissions(socket)}
+  end
+
+  # The iMessage helper's two grants (M54 §10.3), the `computer_use_grant` door
+  # for a helper of its own. Each waits on a person, so it runs off the
+  # LiveView process and reports when it lands.
+  def handle_event("imessage_grant", %{"service" => service}, socket)
+      when service in ["full_disk_access", "automation"] do
+    grant = imessage_grant_impl()
+    atom = String.to_existing_atom(service)
+
+    {:noreply, start_async(socket, :imessage_grant, fn -> grant.(atom) end)}
+  end
+
+  # The recipient confirmation: the helper shows its own dialog naming every
+  # handle in the saved settings.
+  def handle_event("imessage_policy_confirm", _params, socket) do
+    {:noreply, start_async(socket, :imessage_policy_confirm, imessage_confirm_impl())}
   end
 
   # Computer-history's Accessibility grant (MILESTONE_32 §22.3) — the shared compux
@@ -957,6 +980,18 @@ defmodule FermixWebWeb.SetupLive do
     result = failed_channel_probe(socket, channel, reason)
     {:noreply, finish_doctor_channel_probe(socket, channel, result)}
   end
+
+  def handle_async(:imessage_grant, {:ok, result}, socket),
+    do: {:noreply, on_imessage_card(socket, &imessage_grant_flash(&1, result))}
+
+  def handle_async(:imessage_grant, {:exit, reason}, socket),
+    do: {:noreply, on_imessage_card(socket, &imessage_grant_flash(&1, {:error, reason}))}
+
+  def handle_async(:imessage_policy_confirm, {:ok, result}, socket),
+    do: {:noreply, on_imessage_card(socket, &imessage_confirm_flash(&1, result))}
+
+  def handle_async(:imessage_policy_confirm, {:exit, reason}, socket),
+    do: {:noreply, on_imessage_card(socket, &imessage_confirm_flash(&1, {:error, reason}))}
 
   def handle_async({:resource_discovery, name}, {:ok, result}, socket) do
     {:noreply, finish_resource_discovery(socket, name, result)}
@@ -1707,7 +1742,9 @@ defmodule FermixWebWeb.SetupLive do
       discord: discord_form(channels),
       slack: slack_form(channels),
       signal: signal_form(channels),
-      acp: acp_form(channels)
+      imessage: imessage_form(channels),
+      acp: acp_form(channels),
+      imessage_available?: imessage_available?()
     }
   end
 
@@ -1763,6 +1800,19 @@ defmodule FermixWebWeb.SetupLive do
       enabled: channel_enabled?(config, false),
       account: safe_string(Keyword.get(config, :account)),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id))
+    }
+  end
+
+  # The account posture has no default (M54 D2), so an unsaved one reads as
+  # nothing chosen rather than as one of the two.
+  defp imessage_form(channels) do
+    config = Keyword.get(channels, :imessage, [])
+
+    %{
+      enabled: channel_enabled?(config, false),
+      posture: config |> Keyword.get(:posture) |> safe_string(),
+      owner_user_id: safe_string(Keyword.get(config, :owner_user_id)),
+      allowed_sender_ids: Enum.join(Keyword.get(config, :allowed_sender_ids, []), ", ")
     }
   end
 
@@ -2950,6 +3000,94 @@ defmodule FermixWebWeb.SetupLive do
     end
   end
 
+  # --- iMessage (M54 §10.3, macOS only) ---
+
+  # Whether this host has the channel at all. A seam only so a LiveView test
+  # names the platform it means; production reads the host.
+  defp imessage_available?,
+    do: Application.get_env(:fermix_web, :imessage_macos?, IMessage.macos?())
+
+  # Injectable so a LiveView test never spawns the helper or raises a real
+  # prompt or dialog (the `:computer_use_grant_impl` seam).
+  defp imessage_grant_impl,
+    do: Application.get_env(:fermix_web, :imessage_grant_impl, &IMessageControl.grant/1)
+
+  defp imessage_confirm_impl,
+    do: Application.get_env(:fermix_web, :imessage_confirm_impl, &confirm_saved_recipients/0)
+
+  # The policy a confirmation stores is built from the saved section, never
+  # from the form: the helper confirms what the daemon will run with.
+  defp confirm_saved_recipients do
+    config = Application.get_env(:fermix_channels, :imessage, [])
+
+    with {:ok, policy} <- IMessageControl.policy_for_config(config) do
+      IMessageControl.policy_set(policy)
+    end
+  end
+
+  # A grant or a confirmation refreshes the report, which rebuilds the channels
+  # form; the operator stays on the card whose button they pressed.
+  defp on_imessage_card(socket, update) do
+    editing = socket.assigns.channels_form.editing
+    socket = update.(socket)
+
+    assign(socket, :channels_form, %{socket.assigns.channels_form | editing: editing})
+  end
+
+  # Off a Mac the form has no iMessage fields, and posted ones are ignored
+  # rather than saved for a channel this host cannot run.
+  defp put_imessage_answers(answers, _params, false), do: answers
+
+  defp put_imessage_answers(answers, params, true) do
+    answers
+    |> maybe_put_string(:imessage_posture, params["imessage_posture"])
+    |> maybe_put_string(:imessage_owner_user_id, params["imessage_owner_user_id"])
+    |> put_imessage_guests(params["imessage_allowed_sender_ids"])
+  end
+
+  # A blank guests field is an answer ("no guests"), unlike every other field
+  # here, so it is passed through rather than skipped.
+  defp put_imessage_guests(answers, guests) when is_binary(guests),
+    do: [{:imessage_allowed_sender_ids, guests} | answers]
+
+  defp put_imessage_guests(answers, nil), do: answers
+
+  defp imessage_grant_flash(socket, {:ok, %{full_disk_access: fda, automation: automation}}) do
+    refresh_report(
+      socket,
+      "Fermix Messages: Full Disk Access #{grant_word(fda)}, Messages automation " <>
+        "#{grant_word(automation)}."
+    )
+  end
+
+  defp imessage_grant_flash(socket, {:error, :not_installed}),
+    do: flash_error(socket, "Fermix Messages is not installed on this Mac yet.")
+
+  defp imessage_grant_flash(socket, {:error, reason}),
+    do: flash_error(socket, "Couldn't reach Fermix Messages: #{Redaction.format(reason)}")
+
+  defp grant_word(:granted), do: "granted"
+  defp grant_word(:not_determined), do: "not asked yet"
+  defp grant_word(_denied_or_unknown), do: "not granted"
+
+  defp imessage_confirm_flash(socket, {:ok, _confirmation}),
+    do: refresh_report(socket, "Fermix may now message the recipients you saved.")
+
+  defp imessage_confirm_flash(socket, {:error, {:helper_error, :policy_refused, _message}}),
+    do: flash_info(socket, "The recipients were not confirmed: the dialog was cancelled.")
+
+  defp imessage_confirm_flash(socket, {:error, {:helper_error, :owner_not_self, _message}}),
+    do: flash_error(socket, "That is not a handle of the Messages account on this Mac.")
+
+  defp imessage_confirm_flash(socket, {:error, :owner_missing}),
+    do: flash_error(socket, "Save your phone number or email for iMessage, then confirm.")
+
+  defp imessage_confirm_flash(socket, {:error, :posture_missing}),
+    do: flash_error(socket, "Choose which account iMessage uses, then confirm.")
+
+  defp imessage_confirm_flash(socket, {:error, reason}),
+    do: flash_error(socket, "Couldn't confirm the recipients: #{Redaction.format(reason)}")
+
   # Injectable so a LiveView test never fires a real OS permission dialog (mirrors the
   # `:plugin_auth_runner` seam). Defaults to the real prompt.
   defp computer_use_grant_impl do
@@ -3957,6 +4095,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("discord", _default), do: :discord
   defp parse_channel_field("slack", _default), do: :slack
   defp parse_channel_field("signal", _default), do: :signal
+  defp parse_channel_field("imessage", _default), do: :imessage
   defp parse_channel_field("acp", _default), do: :acp
   defp parse_channel_field(_, default), do: default
 

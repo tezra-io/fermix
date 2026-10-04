@@ -127,6 +127,8 @@ defmodule Fermix.CLI.Doctor do
       Checks.meetings(),
       Checks.realtime(),
       Checks.mobile(),
+      Checks.imessage_helper(),
+      Checks.imessage_permissions(),
       Checks.acp(),
       Checks.computer_use_permissions(),
       Checks.computer_use_background(),

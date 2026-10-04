@@ -141,8 +141,8 @@ defmodule FermixCore.ReadinessTest do
   end
 
   describe "the channel table" do
-    test "publishes the five channels readiness knows about" do
-      assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal]
+    test "publishes the six channels readiness knows about" do
+      assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal, :imessage]
     end
 
     test "telegram is the one channel enabled by default" do
@@ -150,6 +150,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Readiness.channel_enabled?(:telegram)
       refute Readiness.channel_enabled?(:discord)
+      assert Keyword.fetch!(Readiness.channel_defaults(), :imessage) == false
     end
 
     test "configured follows the credentials the channel actually needs" do
@@ -159,6 +160,109 @@ defmodule FermixCore.ReadinessTest do
       Application.put_env(:fermix_channels, :telegram, enabled: true, bot_token: "t")
       assert Readiness.channel_configured?(:telegram)
     end
+  end
+
+  # M54 §14: readiness reads the saved section and whether the helper is on
+  # disk, and nothing else. The probe (grants, sign-in, the confirmed policy)
+  # spawns the helper, so it belongs to Doctor and the permissions read, never
+  # to the hot path every pane load runs.
+  describe "imessage" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :imessage)
+      previous_plugins = Application.fetch_env(:fermix_core, :plugins)
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("readiness-imessage")
+      System.put_env("FERMIX_HOME", home)
+      Application.delete_env(:fermix_core, :plugins)
+
+      on_exit(fn ->
+        restore(:fermix_channels, :imessage, previous)
+        restore(:fermix_core, :plugins, previous_plugins)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "off by default, and off is never a failure" do
+      Application.put_env(:fermix_channels, :imessage, [])
+
+      refute Readiness.channel_enabled?(:imessage)
+      refute imessage_failure()
+    end
+
+    test "on without a posture names the setting that fixes it" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      assert %{detail_key: "channel:imessage", gating: false, pane: "channels", action: action} =
+               imessage_failure()
+
+      assert action =~ "iMessage"
+    end
+
+    # The recipient policy the helper confirms is built from the owner, so an
+    # account with no owner is not configured.
+    test "on with a posture but no owner is not configured" do
+      Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
+
+      assert %{detail_key: "channel:imessage"} = imessage_failure()
+    end
+
+    test "configured but with no helper on disk says the helper is missing" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        posture: :dedicated_account,
+        owner_user_id: "+15551234567"
+      )
+
+      assert %{detail_key: "channel:imessage:helper", gating: false} = imessage_failure()
+    end
+
+    test "configured with the helper on disk reports nothing", %{home: home} do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        posture: :dedicated_account,
+        owner_user_id: "+15551234567"
+      )
+
+      binary =
+        Path.join([
+          home,
+          "plugins",
+          "imessage_helper",
+          "0.1.0",
+          "macos-universal",
+          "Fermix Messages.app",
+          "Contents",
+          "MacOS",
+          "fermix-messages"
+        ])
+
+      File.mkdir_p!(Path.dirname(binary))
+      File.write!(binary, "#!/bin/sh\n")
+      File.chmod!(binary, 0o755)
+
+      refute imessage_failure()
+    end
+
+    test "both of its sentences are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      assert "channel:imessage" in keys
+      assert "channel:imessage:helper" in keys
+    end
+
+    defp imessage_failure do
+      Enum.find(
+        Readiness.report().failures,
+        &String.starts_with?(&1.detail_key, "channel:imessage")
+      )
+    end
+
+    defp restore(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+    defp restore(app, key, :error), do: Application.delete_env(app, key)
   end
 
   describe "personalization_failure/0" do

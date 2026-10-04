@@ -15,6 +15,7 @@ defmodule FermixCore.HealthTest do
     signal = Application.get_env(:fermix_channels, :signal)
     acp = Application.get_env(:fermix_channels, :acp)
     mobile = Application.get_env(:fermix_channels, :mobile)
+    imessage = Application.get_env(:fermix_channels, :imessage)
     fermix_home = System.get_env("FERMIX_HOME")
 
     on_exit(fn ->
@@ -27,6 +28,7 @@ defmodule FermixCore.HealthTest do
       restore_env(:fermix_channels, :signal, signal)
       restore_env(:fermix_channels, :acp, acp)
       restore_env(:fermix_channels, :mobile, mobile)
+      restore_env(:fermix_channels, :imessage, imessage)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -202,6 +204,32 @@ defmodule FermixCore.HealthTest do
 
     assert %{name: "mobile", status: :ready, mode: :listener, process_alive: true} =
              channel(listening, "mobile")
+  end
+
+  # iMessage (M54 §5.1): off by default, and its liveness is its Supervisor,
+  # which owns the helper's Port and the Listener.
+  test "lists the iMessage transport and keys its liveness on its supervisor" do
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+    Application.put_env(:fermix_channels, :imessage, [])
+
+    off = health_report(fn _name -> nil end)
+
+    assert %{name: "imessage", status: :disabled, enabled: false, process_alive: nil} =
+             channel(off, "imessage")
+
+    Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
+
+    degraded = health_report(fn _name -> nil end)
+
+    assert %{name: "imessage", status: :degraded, enabled: true, process_alive: false} =
+             channel(degraded, "imessage")
+
+    running =
+      health_report(fn name ->
+        if name == FermixChannels.Channels.IMessage.Supervisor, do: self()
+      end)
+
+    assert %{name: "imessage", status: :ready, process_alive: true} = channel(running, "imessage")
   end
 
   defp health_report(process_resolver, opts \\ []) do

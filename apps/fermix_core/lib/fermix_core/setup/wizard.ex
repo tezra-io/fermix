@@ -93,6 +93,10 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
+          | {:imessage_posture, String.t()}
+          | {:imessage_owner_user_id, String.t()}
+          | {:imessage_allowed_sender_ids, [String.t()] | String.t()}
+          | {:imessage_enabled, boolean() | String.t()}
           | {:telegram_enabled, boolean() | String.t()}
           | {:whatsapp_enabled, boolean() | String.t()}
           | {:discord_enabled, boolean() | String.t()}
@@ -159,7 +163,8 @@ defmodule FermixCore.Setup.Wizard do
     whatsapp_owner_user_id: :whatsapp,
     discord_owner_user_id: :discord,
     slack_owner_user_id: :slack,
-    signal_owner_user_id: :signal
+    signal_owner_user_id: :signal,
+    imessage_owner_user_id: :imessage
   }
 
   @type seeding_result :: %{
@@ -425,6 +430,16 @@ defmodule FermixCore.Setup.Wizard do
         key: :signal_owner_user_id,
         label: "Signal command owner user ID",
         required?: channel_field_unpersisted?(persisted, :signal, :owner_user_id, false)
+      },
+      %{
+        key: :imessage_posture,
+        label: "iMessage account (dedicated_account/own_account)",
+        required?: channel_field_unpersisted?(persisted, :imessage, :posture, false)
+      },
+      %{
+        key: :imessage_owner_user_id,
+        label: "Your phone number or email for iMessage",
+        required?: channel_field_unpersisted?(persisted, :imessage, :owner_user_id, false)
       }
     ]
   end
@@ -774,6 +789,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_discord_config(answers)
       |> put_slack_config(answers)
       |> put_signal_config(answers)
+      |> put_imessage_config(answers)
       |> put_channel_enabled(answers)
       |> put_acp_config(answers)
       |> put_network_config(answers)
@@ -1242,7 +1258,9 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
+  @channel_components ~w(
+    channel:telegram channel:whatsapp channel:discord channel:slack channel:signal channel:imessage
+  )
 
   defp step_for(failures, snapshot) do
     components = Enum.map(failures, & &1.component) |> MapSet.new()
@@ -1300,6 +1318,7 @@ defmodule FermixCore.Setup.Wizard do
     |> put_enabled_channel(:discord, Keyword.get(channels, :discord, []), false)
     |> put_enabled_channel(:slack, Keyword.get(channels, :slack, []), false)
     |> put_enabled_channel(:signal, Keyword.get(channels, :signal, []), false)
+    |> put_enabled_channel(:imessage, Keyword.get(channels, :imessage, []), false)
     |> put_enabled_channel(:acp, Keyword.get(channels, :acp, []), true)
     |> put_enabled_channel(:mobile, Keyword.get(channels, :mobile, []), false)
     |> Enum.reverse()
@@ -2534,7 +2553,8 @@ defmodule FermixCore.Setup.Wizard do
       whatsapp: :whatsapp_owner_user_id,
       discord: :discord_owner_user_id,
       slack: :slack_owner_user_id,
-      signal: :signal_owner_user_id
+      signal: :signal_owner_user_id,
+      imessage: :imessage_owner_user_id
     ]
     |> Enum.reduce(snapshot, fn {channel, answer_key}, acc ->
       put_channel_owner_user_id(acc, channel, Keyword.get(answers, answer_key))
@@ -2563,12 +2583,43 @@ defmodule FermixCore.Setup.Wizard do
     config =
       existing_channels
       |> Keyword.get(channel, [])
-      |> Keyword.put(:enabled, true)
-      |> Keyword.put_new(:mode, mode)
+      |> put_saved_channel_defaults(channel, mode)
       |> Keyword.merge(values)
 
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
+
+  # iMessage takes the M53 APP-5 semantics from its first release: saving its
+  # settings never switches it on (only its own switch does), and its transport
+  # is the registry's, so no `mode` is written. Every other channel keeps the
+  # behaviour it shipped with.
+  defp put_saved_channel_defaults(config, :imessage, _mode), do: config
+
+  defp put_saved_channel_defaults(config, _channel, mode),
+    do: config |> Keyword.put(:enabled, true) |> Keyword.put_new(:mode, mode)
+
+  # The account posture and the guests (M54 §10.2). The owner rides
+  # `put_channel_owner_user_ids/2` like every channel's. An absent guests answer
+  # changes nothing; a blank one clears the list, which is how a flag or a form
+  # says "no guests".
+  defp put_imessage_config(snapshot, answers) do
+    posture = Keyword.get(answers, :imessage_posture)
+
+    values =
+      [
+        posture: if(blank?(posture), do: nil, else: posture),
+        allowed_sender_ids: imessage_guests(Keyword.get(answers, :imessage_allowed_sender_ids))
+      ]
+      |> reject_nil_values()
+
+    put_channel_config(snapshot, :imessage, values, :subprocess)
+  end
+
+  defp imessage_guests(nil), do: nil
+  defp imessage_guests(guests) when is_list(guests), do: guests
+
+  defp imessage_guests(guests) when is_binary(guests),
+    do: guests |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
 
   # A store with nothing to answer is refused by `refuse_unstorable_secrets/1`
   # before this pipeline runs, so a write here either stores the value or is

@@ -653,6 +653,14 @@ Current channels:
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` polls `signal-cli receive` once a second and sends through
   subprocesses.
+- `IMessage` (macOS only) speaks NDJSON over stdio (`transport: :subprocess`)
+  to **Fermix Messages**, a signed, self-disclaiming helper app
+  (`io.tezra.fermix.messages`) installed by `FermixCore.IMessage.HelperInstaller`.
+  The helper holds Full Disk Access and Automation → Messages, reads
+  `chat.db` read-only, sends through Messages, and keeps the confirmed
+  recipient policy in its own keychain item, changed only through a dialog it
+  shows on screen. Invariant: the BEAM never opens `chat.db` and never sends an
+  Apple Event.
 - `Acp` exposes Fermix as an Agent Client Protocol agent on
   `FERMIX_HOME/acp.sock` (`Acp.Endpoint`, one `Acp.Peer` per connection);
   `fermix acp` pipes stdio to that socket. Client identities are kept by

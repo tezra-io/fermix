@@ -1706,6 +1706,40 @@ def test_macos_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion(
     assert routed == ["stop_background_service_sanity"]
 
 
+def test_imessage_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
+    suite = _suite_by_name("imessage")
+    # An omitted scenario risk becomes `unclassified` and is silently skipped,
+    # so assert the value rather than trusting suite-level inheritance.
+    assert {scenario.risk for scenario in suite.scenarios} == {"host_readonly"}
+
+    routed = [case.id for scenario in suite.scenarios for case in scenario.cases
+              if _ROUTE_GATES & set(case.expect)]
+    assert routed == ["connect_imessage_sanity"]
+
+
+def test_imessage_gates_accept_a_correct_reply_and_reject_a_wrong_one():
+    cases = _suite_cases("imessage")
+    assert _reply_regexes_pass(
+        cases["connect_imessage_sanity"], 0,
+        "In the Mac app, give Fermix Messages Full Disk Access and Automation for "
+        "Messages, confirm who Fermix may message, then turn iMessage on.")
+    assert _reply_regexes_pass(
+        cases["imessage_tapback"], 0,
+        "No. On iMessage Fermix replies in plain text only; it cannot send a "
+        "tapback or any other reaction.")
+    assert _reply_regexes_pass(
+        cases["imessage_on_linux"], 0,
+        "No. iMessage runs only on the Mac whose Messages it reads; use Telegram "
+        "on Linux instead.")
+    assert not _reply_regexes_pass(
+        cases["connect_imessage_sanity"], 0,
+        "Run `fermix setup --imessage-posture dedicated_account`, then grant Full "
+        "Disk Access.")
+    assert not _reply_regexes_pass(
+        cases["imessage_tapback"], 0,
+        "Yes, if you disable SIP with csrutil you can send a tapback reaction.")
+
+
 def test_macos_app_wrong_mode_gates_accept_a_correct_app_managed_reply():
     cases = _suite_cases("macos_app")
     assert _reply_regexes_pass(

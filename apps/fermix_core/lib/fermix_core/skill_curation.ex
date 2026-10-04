@@ -46,7 +46,7 @@ defmodule FermixCore.SkillCuration do
   @local_channels ["cli", "daemon"]
   # Remote channels that can carry a configured `owner_user_id` — the same
   # closed set `FermixCore.Config.@channel_ingress_keys` names.
-  @owner_channels [:telegram, :whatsapp, :discord, :slack, :signal]
+  @owner_channels [:telegram, :whatsapp, :discord, :slack, :signal, :imessage]
 
   @type history_entry :: %{
           required(:index) => String.t(),

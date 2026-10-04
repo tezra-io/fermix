@@ -3,7 +3,7 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
 
   alias FermixCore.Prompt.ChannelPresentation
 
-  @chat_channels ["telegram", "whatsapp", "discord", "slack", "signal"]
+  @chat_channels ["telegram", "whatsapp", "discord", "slack", "signal", "imessage"]
 
   describe "note/2" do
     test "every chat channel gets the shared chat-surface core" do
@@ -46,6 +46,18 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
       note = ChannelPresentation.note("discord", "private")
 
       assert note =~ "Discord caps a single message"
+      refute note =~ "Telegram"
+    end
+
+    # M54 §8.1: iMessage renders no markup at all, which the shared core does
+    # not say on its own.
+    test "imessage earns its own line about plain text" do
+      note = ChannelPresentation.note("imessage", "private")
+
+      assert note =~
+               "- iMessage shows plain text only: no headings, bold or tables survive, so lead " <>
+                 "with the answer and keep lists short."
+
       refute note =~ "Telegram"
     end
 

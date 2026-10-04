@@ -790,9 +790,62 @@ defmodule FermixCore.Management.RouterTest do
       assert downloading["kind"] == "browser_install"
     end
 
+    # M54 §12. The read, the grant (one named service) and the confirmation,
+    # each against an injected helper and the case's own job registry.
+    test "the iMessage operations answer their own results", %{operation_opts: opts} do
+      probe = %{
+        helper_version: "0.1.0",
+        full_disk_access: :granted,
+        db: :readable,
+        automation: :granted,
+        messages_running: true,
+        signed_in: true,
+        user_session: true,
+        policy: :absent,
+        self_aliases: nil
+      }
+
+      imessage =
+        Keyword.merge(opts,
+          macos?: true,
+          installed?: fn -> true end,
+          config: [posture: :dedicated_account, owner_user_id: "+15551234567"],
+          probe: fn -> {:ok, probe} end,
+          grant: fn :automation -> {:ok, probe} end,
+          policy_set: fn _policy -> {:ok, %{confirmed_at: "2026-10-01T10:00:00Z"}} end
+        )
+
+      assert {:ok, %{"installed" => true, "policy" => "absent"}} =
+               Router.route(v2("imessage.permissions.get"), operation_opts: imessage)
+
+      assert {:ok, %{"kind" => "imessage_grant"}} =
+               Router.route(v2("imessage.grant.start", %{"service" => "automation"}),
+                 operation_opts: imessage
+               )
+
+      assert {:ok, %{"kind" => "imessage_policy_confirm"}} =
+               Router.route(v2("imessage.policy.confirm"), operation_opts: imessage)
+    end
+
+    test "the iMessage grant names its service and refuses anything else" do
+      assert {:error, :invalid_params, %{"field" => "service"}} =
+               Router.route(v2("imessage.grant.start"))
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(
+                 v2("imessage.grant.start", %{"service" => "automation", "extra" => 1})
+               )
+
+      assert {:error, :invalid_params, %{"field" => "service", "sentence" => _sentence}} =
+               Router.route(v2("imessage.grant.start", %{"service" => "contacts"}),
+                 operation_opts: [macos?: true]
+               )
+    end
+
     test "a no-parameter method refuses parameters rather than ignoring them" do
       for method <- ~w(job.list meetings.signin.start computer_use.grant.start
-                       computer_use.permissions.get browser.install.start) do
+                       computer_use.permissions.get browser.install.start
+                       imessage.permissions.get imessage.policy.confirm) do
         assert {:error, :invalid_params, %{"method" => ^method}} =
                  Router.route(v2(method, %{"extra" => 1})),
                "#{method} ignored an unexpected parameter"

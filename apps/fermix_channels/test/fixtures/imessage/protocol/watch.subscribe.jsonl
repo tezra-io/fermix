@@ -1,0 +1,3 @@
+{"id":6,"method":"watch.subscribe","params":{"since_rowid":4000,"replay":{"max_rows":50,"max_age_s":600},"buffer_limit":256}}
+{"id":6,"result":{"started_at_rowid":4020,"replay_skipped":3}}
+{"id":6,"error":{"kind":"policy_unconfirmed","message":"the recipient policy is not confirmed","data":{}}}

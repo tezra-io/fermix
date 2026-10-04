@@ -142,6 +142,17 @@ defmodule FermixCore.Delivery.ChannelSendTest do
                ChannelSend.resolve_adapter("telegram", channels: %{"telegram" => OkAdapter})
     end
 
+    # A keyword-shaped channel table is read by the platform's atom, so a
+    # platform with no atom clause would be "unsupported" there while the map
+    # shape delivered to it.
+    test "reads a keyword channels table by the platform's atom, iMessage included" do
+      assert {:ok, OkAdapter} =
+               ChannelSend.resolve_adapter("imessage", channels: [imessage: OkAdapter])
+
+      assert {:ok, OkAdapter} =
+               ChannelSend.resolve_adapter("signal", channels: [signal: OkAdapter])
+    end
+
     test "rejects an adapter lacking send_message/3" do
       assert {:error, {:invalid_delivery_adapter, Enum}} =
                ChannelSend.resolve_adapter("telegram", adapter: Enum)

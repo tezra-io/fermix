@@ -125,6 +125,36 @@ defmodule FermixCore.ConfigTest do
       Application.delete_env(:fermix_channels, :signal)
     end
 
+    # M54 §9.2: iMessage takes the M53 OWN-3 semantics from its first release —
+    # the ingress list is the owner AND the guests, so an empty guest list means
+    # "no guests", never "no owner".
+    test "imessage ingress is the owner and the guests, and an empty guest list keeps the owner" do
+      previous = Application.fetch_env(:fermix_channels, :imessage)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:fermix_channels, :imessage, value)
+          :error -> Application.delete_env(:fermix_channels, :imessage)
+        end
+      end)
+
+      Application.put_env(:fermix_channels, :imessage,
+        owner_user_id: "+15551234567",
+        allowed_sender_ids: []
+      )
+
+      assert Config.channel_ingress_authority(:imessage) == :config_allowlist
+      assert Config.channel_ingress_user_ids(:imessage) == ["+15551234567"]
+
+      Application.put_env(:fermix_channels, :imessage,
+        owner_user_id: "+15551234567",
+        allowed_sender_ids: ["friend@example.com", "+15551234567"]
+      )
+
+      assert Config.channel_ingress_user_ids(:imessage) == ["+15551234567", "friend@example.com"]
+      assert Config.channel_explicit_owner_user_id(:imessage) == "+15551234567"
+    end
+
     test "does not derive command owner from empty or multi-user ingress allowlists" do
       Application.put_env(:fermix_channels, :telegram, allowed_user_ids: [])
       assert Config.channel_command_owner_user_id(:telegram) == nil

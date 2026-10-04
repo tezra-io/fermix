@@ -56,6 +56,7 @@ defmodule FermixCore.Setup.WizardTest do
     discord = Application.fetch_env(:fermix_channels, :discord)
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
+    imessage = Application.fetch_env(:fermix_channels, :imessage)
     acp = Application.fetch_env(:fermix_channels, :acp)
     mobile = Application.fetch_env(:fermix_channels, :mobile)
     personalization = Application.get_env(:fermix_core, :personalization, [])
@@ -75,6 +76,7 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :discord, [])
     Application.put_env(:fermix_channels, :slack, [])
     Application.put_env(:fermix_channels, :signal, [])
+    Application.put_env(:fermix_channels, :imessage, enabled: false)
     # These tests assert which channels come back enabled, so every channel must
     # start from its production baseline rather than whatever an earlier module
     # left in the global app env.
@@ -108,6 +110,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      restore_env(:fermix_channels, :imessage, imessage)
       restore_env(:fermix_channels, :acp, acp)
       restore_env(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -427,6 +430,83 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(report.failures, &(&1.component == "channel:discord"))
     assert Enum.any?(report.failures, &(&1.component == "channel:slack"))
     assert Enum.any?(report.failures, &(&1.component == "channel:signal"))
+  end
+
+  test "report surfaces an enabled iMessage channel and its failure" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
+
+    report = Wizard.report()
+
+    assert report.status == :ready
+    assert :imessage in report.wizard.enabled_channels
+    assert Enum.any?(report.failures, &(&1.component == "channel:imessage" and not &1.gating))
+  end
+
+  # M54 §10.2 and M53 APP-5 from this channel's first release: saving the
+  # account, the owner or the guests never switches iMessage on, and the
+  # transport is the registry's, so no `mode` is written either.
+  test "save_answers persists the iMessage account, owner and guests without switching it on" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               imessage_posture: "dedicated_account",
+               imessage_owner_user_id: "+1 555 123 4567",
+               imessage_allowed_sender_ids: "Friend@Example.com, +15550001111"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    imessage = Keyword.fetch!(persisted.fermix_channels, :imessage)
+
+    refute Keyword.get(imessage, :enabled) == true
+    refute Keyword.has_key?(imessage, :mode)
+    assert Keyword.get(imessage, :posture) == :dedicated_account
+    assert Keyword.get(imessage, :owner_user_id) == "+15551234567"
+    assert Keyword.get(imessage, :allowed_sender_ids) == ["friend@example.com", "+15550001111"]
+  end
+
+  test "an empty guests answer clears the iMessage guest list" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    Application.put_env(:fermix_channels, :imessage,
+      posture: :dedicated_account,
+      allowed_sender_ids: ["friend@example.com"]
+    )
+
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard |> Wizard.save_answers(imessage_allowed_sender_ids: "")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(persisted.fermix_channels, :imessage)[:allowed_sender_ids] == []
+  end
+
+  test "a posture that is not one refuses the save with the key named" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    start_memory_repo!()
+
+    assert_raise ArgumentError, ~r/fermix_channels\.imessage\.posture/, fn ->
+      Wizard.report().wizard |> Wizard.save_answers(imessage_posture: "bot_account")
+    end
   end
 
   # The ACP surface is one boolean with no secret and no interactive step, so the

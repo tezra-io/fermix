@@ -265,8 +265,11 @@ defmodule FermixCore.Management.DraftParityTest do
   # The keys a section publishes are what the app binds a control to, so a key
   # in one and not the other is a pane with a control nothing answers, or a
   # value nothing edits. Compared by name rather than by shape.
+  # The Mac's inventory, named rather than inherited: the app is a Mac app, and a
+  # section that exists only there (`channels.imessage`) must be compared on
+  # every CI leg or its recorded divergences read as stale off a Mac.
   defp row_divergences(draft, export) do
-    Enum.flat_map(Settings.sections(), fn section ->
+    Enum.flat_map(Settings.sections(macos?: true), fn section ->
       set_divergence(
         "settings.get:#{section.id}",
         "rows",
@@ -347,7 +350,9 @@ defmodule FermixCore.Management.DraftParityTest do
 
   # --- selectors ---
 
-  defp selectors("settings.get", _draft, _export), do: Enum.map(Settings.sections(), & &1.id)
+  defp selectors("settings.get", _draft, _export),
+    do: Enum.map(Settings.sections(macos?: true), & &1.id)
+
   defp selectors(_method, _draft, _export), do: [nil]
 
   defp matching?(_record, nil), do: true

@@ -7,7 +7,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
 
   alias FermixCore.Delivery.OwnerInbox
 
-  @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp]
+  @owner_channels [:telegram, :discord, :signal, :slack, :whatsapp, :imessage]
 
   # A remote platform's adapter: it sends, and its inbox is derived from the
   # owner id configured for it.
@@ -183,6 +183,23 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
                OwnerInbox.resolve(configured_owners: owners, jobs_config: [])
     end
 
+    # M54 §7.5: an iMessage direct conversation is keyed by the owner's handle,
+    # so the owner id is the DM destination itself; it is derived last.
+    test "an iMessage owner is a derived inbox, after every older channel" do
+      owners = %{"imessage" => "+15551234567", "telegram" => "owner-t"}
+
+      assert [
+               %{platform: "telegram", destination: "owner-t"},
+               %{platform: "imessage", destination: "+15551234567", source: :derived}
+             ] = OwnerInbox.derived_candidates(configured_owners: owners)
+
+      assert {:ok, %{platform: "imessage"}} =
+               OwnerInbox.resolve(
+                 configured_owners: %{"imessage" => "+15551234567"},
+                 jobs_config: []
+               )
+    end
+
     test "every derived inbox is root-scoped and labelled :derived" do
       assert [%{thread_scope: "root", source: :derived}] =
                OwnerInbox.derived_candidates(configured_owners: %{"signal" => "owner-s"})
@@ -233,6 +250,15 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
 
       assert {:ok, %{platform: "telegram", destination: "555", source: :derived}} =
                OwnerInbox.resolve(jobs_config: [])
+    end
+
+    test "an iMessage owner id is read like every other channel's" do
+      Application.put_env(:fermix_channels, :imessage,
+        posture: :dedicated_account,
+        owner_user_id: "+15551234567"
+      )
+
+      assert OwnerInbox.configured_owners() == %{"imessage" => "+15551234567"}
     end
 
     test "no configured channel means no owners and no inbox" do

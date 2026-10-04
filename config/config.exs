@@ -120,6 +120,7 @@ config :fermix_core, :jobs,
     "discord" => FermixChannels.Channels.Discord,
     "signal" => FermixChannels.Channels.Signal,
     "whatsapp" => FermixChannels.Channels.WhatsApp,
+    "imessage" => FermixChannels.Channels.IMessage,
     "mobile" => FermixChannels.Channels.Mobile,
     "companion" => FermixChannels.Channels.Companion,
     "cli" => FermixChannels.CLI
@@ -189,6 +190,12 @@ config :fermix_channels,
     max_media_bytes: 20_971_520,
     media_store_max_bytes: 2_147_483_648,
     push: [enabled: false]
+  ],
+  # The iMessage channel (M54), Mac only. Off by default and nothing else:
+  # `posture` has no default (D2), the owner and guests are the operator's, and
+  # the transport is the registry's, not a setting.
+  imessage: [
+    enabled: false
   ],
   # The ACP agent surface (M29). `enabled` is the whole operator knob — the
   # socket path is fixed and the caps are internal constants. `mode` is not a

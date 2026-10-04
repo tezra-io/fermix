@@ -135,7 +135,7 @@ if Code.ensure_loaded?(FermixCore.Setup.ConfigStore) and
 
     {:error, reason} ->
       raise "FermixCore.Setup.ConfigStore.bootstrap_runtime_config failed: " <>
-              inspect(reason)
+              FermixCore.Setup.ConfigStore.load_error_sentence(reason)
   end
 
   # The provider that reads this file re-applies sys.config over the environment
@@ -604,6 +604,11 @@ config :fermix_channels, signal: merged_signal
 # operator's persisted `enabled = false`. Re-declaring the hydrated value is
 # what makes the TOML win.
 config :fermix_channels, acp: Application.get_env(:fermix_channels, :acp, [])
+
+# iMessage has no env-var overlay either: nothing in its section is a secret,
+# and the channel exists only on a Mac in a user session, where setup writes the
+# file. Re-declared for the same release-provider reason as acp above.
+config :fermix_channels, imessage: Application.get_env(:fermix_channels, :imessage, [])
 
 # Mobile settings are owned by config.toml. The APNs credential is the one
 # exception: SecretPaths declares FERMIX_APNS_KEY as a credential source, so a

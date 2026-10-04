@@ -443,6 +443,11 @@ defmodule FermixCore.Setup.RestartState do
 
   defp read_sentence(:enoent), do: "The settings file could not be read."
 
+  # A section enabled on a host that cannot run it is a refusal with its own
+  # words, not an unreadable file.
+  defp read_sentence({:unsupported_platform, _channel} = reason),
+    do: ConfigStore.load_error_sentence(reason)
+
   defp read_sentence(reason) when is_atom(reason),
     do: "The settings file could not be read: #{:file.format_error(reason)}."
 

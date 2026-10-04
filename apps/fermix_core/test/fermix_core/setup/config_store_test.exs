@@ -3007,6 +3007,175 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert mobile[:streaming] == "draft"
   end
 
+  describe "[fermix_channels.imessage] (M54 §11)" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :imessage)
+      tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("config-store-imessage")
+      System.put_env("FERMIX_HOME", tmp_home)
+
+      on_exit(fn ->
+        case previous do
+          {:ok, value} -> Application.put_env(:fermix_channels, :imessage, value)
+          :error -> Application.delete_env(:fermix_channels, :imessage)
+        end
+
+        FermixTestSupport.SafeRm.rm_rf!(tmp_home)
+      end)
+
+      %{home: tmp_home}
+    end
+
+    test "a full section loads with the posture as an atom and every handle normalized", %{
+      home: home
+    } do
+      write_config!(home, """
+      [fermix_channels.imessage]
+      enabled = true
+      posture = "dedicated_account"
+      owner_user_id = "+1 (555) 123-4567"
+      allowed_sender_ids = ["Friend@Example.com"]
+      command_allowlist = ["+15551234567"]
+      streaming = "block"
+      """)
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(macos?: true)
+
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage) == [
+               enabled: true,
+               posture: :dedicated_account,
+               owner_user_id: "+15551234567",
+               allowed_sender_ids: ["friend@example.com"],
+               command_allowlist: ["+15551234567"],
+               streaming: "block"
+             ]
+    end
+
+    test "an absent section is no override at all", %{home: home} do
+      write_config!(home, "[fermix_core.agent]\nname = \"fermix\"\n")
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config()
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage) == []
+    end
+
+    test "own_account loads in this build, with no guests", %{home: home} do
+      write_config!(home, """
+      [fermix_channels.imessage]
+      enabled = true
+      posture = "own_account"
+      owner_user_id = "me@example.com"
+      """)
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(macos?: true)
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage)[:posture] == :own_account
+    end
+
+    test "every silent misconfiguration refuses the load and names its key", %{home: home} do
+      refusals = [
+        {~s(enabled = true\nposture = "bot_account"\nowner_user_id = "+15551234567"),
+         ~r/fermix_channels\.imessage\.posture/},
+        # D2: no default posture, so an enabled channel without one refuses.
+        {~s(enabled = true\nowner_user_id = "+15551234567"),
+         ~r/fermix_channels\.imessage\.posture/},
+        # M53 OWN-2: an unquoted number is a TOML integer and has already lost
+        # its `+`; it refuses rather than being stringified.
+        {~s(posture = "dedicated_account"\nowner_user_id = 15551234567),
+         ~r/fermix_channels\.imessage\.owner_user_id must be a quoted string/},
+        {~s(posture = "dedicated_account"\nallowed_sender_ids = [15551234567]),
+         ~r/fermix_channels\.imessage\.allowed_sender_ids/},
+        # D9: a guest under the owner's own account is Fermix answering the
+        # owner's contacts as the owner.
+        {~s(posture = "own_account"\nowner_user_id = "me@example.com"\nallowed_sender_ids = ["friend@example.com"]),
+         ~r/fermix_channels\.imessage\.allowed_sender_ids/},
+        # iMessage cannot edit a sent message, so there is no draft to stream.
+        {~s(posture = "dedicated_account"\nstreaming = "draft"),
+         ~r/fermix_channels\.imessage\.streaming/},
+        {~s(enabled = "yes"\nposture = "dedicated_account"),
+         ~r/fermix_channels\.imessage\.enabled/}
+      ]
+
+      for {body, message} <- refusals do
+        write_config!(home, "[fermix_channels.imessage]\n" <> body <> "\n")
+
+        assert_raise ArgumentError, message, fn ->
+          ConfigStore.load_runtime_config(macos?: true)
+        end
+      end
+    end
+
+    test "an enabled section off a Mac refuses with the typed platform error", %{home: home} do
+      write_config!(home, """
+      [fermix_channels.imessage]
+      enabled = true
+      posture = "dedicated_account"
+      owner_user_id = "+15551234567"
+      """)
+
+      assert ConfigStore.load_runtime_config(macos?: false) ==
+               {:error, {:unsupported_platform, :imessage}}
+
+      assert ConfigStore.load_error_sentence({:unsupported_platform, :imessage}) ==
+               "imessage runs only on the Mac whose Messages it reads"
+
+      assert ConfigStore.bootstrap_runtime_config(supervised: false, macos?: false) ==
+               {:error, {:unsupported_platform, :imessage}}
+    end
+
+    test "a disabled section loads off a Mac", %{home: home} do
+      write_config!(home, """
+      [fermix_channels.imessage]
+      enabled = false
+      posture = "dedicated_account"
+      """)
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(macos?: false)
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage)[:enabled] == false
+    end
+
+    # The config round-trips rule: seeded with the normalized app-env shapes,
+    # the posture atom and the streaming word, saved as setup saves, loaded back.
+    test "save→load round-trips the normalized app-env shapes", %{home: home} do
+      section = [
+        enabled: true,
+        posture: :dedicated_account,
+        owner_user_id: "+15551234567",
+        allowed_sender_ids: ["friend@example.com"],
+        command_allowlist: [],
+        streaming: "block"
+      ]
+
+      snapshot = %{fermix_core: [], fermix_channels: [imessage: section], fermix_web: []}
+
+      assert :ok = ConfigStore.save_snapshot(snapshot)
+      contents = File.read!(Path.join(home, "config.toml"))
+      assert contents =~ "[fermix_channels.imessage]"
+      assert contents =~ ~s(posture = "dedicated_account")
+      refute contents =~ ~r/\[fermix_channels\.imessage\][^\[]*mode =/
+
+      assert {:ok, loaded} = ConfigStore.load_runtime_config(macos?: true)
+      assert Keyword.fetch!(loaded.fermix_channels, :imessage) == section
+    end
+
+    test "apply_snapshot puts the section into the live snapshot" do
+      Application.put_env(:fermix_channels, :imessage, enabled: false)
+
+      assert :ok =
+               ConfigStore.apply_snapshot(%{
+                 fermix_core: [],
+                 fermix_channels: [
+                   imessage: [posture: :own_account, owner_user_id: "me@example.com"]
+                 ],
+                 fermix_web: []
+               })
+
+      live = Keyword.fetch!(ConfigStore.current_snapshot().fermix_channels, :imessage)
+      assert live[:enabled] == false
+      assert live[:posture] == :own_account
+      assert live[:owner_user_id] == "me@example.com"
+    end
+
+    defp write_config!(home, contents), do: File.write!(Path.join(home, "config.toml"), contents)
+  end
+
   test "channel streaming survives the load normalizers for every channel" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

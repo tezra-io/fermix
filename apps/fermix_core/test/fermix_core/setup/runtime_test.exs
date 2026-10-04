@@ -904,6 +904,19 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :xai_api_key) == "xai-key"
     end
 
+    test "extracts the M54 iMessage flags as answers" do
+      answers =
+        Runtime.provided_answers(
+          imessage_posture: "dedicated_account",
+          imessage_owner_user_id: "+15551234567",
+          imessage_allowed_sender_ids: "friend@example.com"
+        )
+
+      assert Keyword.get(answers, :imessage_posture) == "dedicated_account"
+      assert Keyword.get(answers, :imessage_owner_user_id) == "+15551234567"
+      assert Keyword.get(answers, :imessage_allowed_sender_ids) == "friend@example.com"
+    end
+
     test "extracts the M15 image flags as answers" do
       answers =
         Runtime.provided_answers(

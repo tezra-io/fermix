@@ -164,6 +164,16 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       spec("meetings", :capability, :info, :configured, &Checks.meetings/0),
       spec("realtime", :capability, :info, :configured, &Checks.realtime/0),
       spec("acp", :capability, :info, :configured, &Checks.acp/0),
+      # M54 §10.4: both read without prompting (the probe asks TCC with
+      # `askUserIfNeeded: false`), so both belong in the local catalog.
+      spec("imessage_helper", :capability, :warning, :platform, &Checks.imessage_helper/0),
+      spec(
+        "imessage_permissions",
+        :capability,
+        :warning,
+        :platform,
+        &Checks.imessage_permissions/0
+      ),
       spec("computer_history", :capability, :info, :configured, &Checks.computer_history/0),
       spec("browser_disclaim", :security, :warning, :platform, &Checks.browser_disclaim/0),
       spec("harness", :capability, :warning, :configured, &Checks.harness/0),

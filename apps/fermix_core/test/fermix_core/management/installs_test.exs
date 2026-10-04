@@ -91,6 +91,41 @@ defmodule FermixCore.Management.InstallsTest do
       assert done["result"] == %{"target" => "meetbot", "installed" => true}
     end
 
+    # M54 §10.2: turning iMessage on installs Fermix Messages through this
+    # target, the compux card pattern.
+    test "the iMessage helper installs as its own target", %{jobs: jobs} do
+      install = fn -> {:ok, "/tmp/Fermix Messages.app/Contents/MacOS/fermix-messages"} end
+
+      assert {:ok, started} =
+               Capabilities.install_start("imessage_helper", jobs: jobs, install: install)
+
+      assert {:ok, done} = terminal(jobs, started["job_id"])
+      assert done["status"] == "completed"
+      assert done["result"] == %{"target" => "imessage_helper", "installed" => true}
+    end
+
+    test "each iMessage helper refusal is named in the daemon's words", %{jobs: jobs} do
+      cases = [
+        {:pin_not_set, "pins no Fermix Messages release"},
+        {{:helper_unverified, :team_id_mismatch}, "not signed by Fermix"},
+        {{:helper_unverified, "a sealed resource is missing"}, "not signed by Fermix"},
+        {{:unsupported_platform, :imessage}, "runs only on the Mac"},
+        {{:lsregister_failed, 3, "failed"}, "could not be registered"}
+      ]
+
+      for {reason, sentence} <- cases do
+        install = fn -> {:error, reason} end
+
+        assert {:ok, started} =
+                 Capabilities.install_start("imessage_helper", jobs: jobs, install: install)
+
+        assert {:ok, %{"status" => "failed", "failure" => failure}} =
+                 terminal(jobs, started["job_id"])
+
+        assert failure["sentence"] =~ sentence
+      end
+    end
+
     test "an unpinned notetaker release refuses in the installer's own words", %{jobs: jobs} do
       install = fn -> {:error, :no_pinned_release} end
 
@@ -232,7 +267,7 @@ defmodule FermixCore.Management.InstallsTest do
     end
 
     test "the published target catalog is closed" do
-      assert Capabilities.targets() == ~w(computer_use_sidecar meetbot local_stt)
+      assert Capabilities.targets() == ~w(computer_use_sidecar meetbot local_stt imessage_helper)
     end
   end
 

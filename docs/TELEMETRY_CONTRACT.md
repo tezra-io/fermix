@@ -633,6 +633,12 @@ by the caller and guarded to an atom by the emitter, so no response body, URL,
 or credential can reach a trace field. `Trace.TelemetryHandler` maps it to an
 `agent_event` row keyed on `channel`; Opik does **not** subscribe, for the same
 reason as pair/push.
+iMessage is one of its emitters: `emit_transport(:imessage, :degraded |
+:recovered, …)` fires on transitions of its helper (an exit loop, the Messages
+database becoming unavailable, a missing grant or unconfirmed recipients at
+boot, a suspected reply loop) and never per failure, and a message body the
+helper could not decode is the `emit_parse(:imessage, :decode_error, …)` parse
+status, not a new event name.
 
 ## Computer-history summarizer (a headless run with no bookends)
 

@@ -19,19 +19,24 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   - `:webhook` (WhatsApp, Slack) is web-triggered — no child.
   - `:loopback` (CLI, daemon) is local/operator — no child, no config key.
 
-  Two optional entry keys:
+  Three optional entry keys:
   - `trust: :local_operator` — the transport is a same-user local surface the
     human owner is sitting at (CLI, daemon). `Gateway.Authorizer` resolves it to
     an operator authorization before any sender lookup, and the ingress gates
     below exempt it: such a channel has no inbox and therefore no allow-list.
   - `commands?: false` — the gateway skips the slash-command pipeline for the
     channel entirely; message content is always model input. Absent means `true`.
+  - `platform: :macos` — the transport only exists on a Mac (iMessage reads the
+    Messages of the Mac it runs on). Elsewhere it is never started and never
+    reported as missing an owner. Absent means every platform. The host
+    platform is injected (`macos?:`) and read from the OS in one place only.
   """
 
   alias FermixCore.Config
 
   @type trust :: :local_operator
   @type ingress_auth :: :paired_device
+  @type platform :: :macos
 
   @type channel :: %{
           :name => String.t(),
@@ -42,7 +47,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
           :child => module() | nil,
           optional(:trust) => trust(),
           optional(:ingress_auth) => ingress_auth(),
-          optional(:commands?) => boolean()
+          optional(:commands?) => boolean(),
+          optional(:platform) => platform()
         }
 
   @default_channels [
@@ -85,6 +91,18 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       remote?: true,
       transport: :subprocess,
       child: FermixChannels.Channels.Signal.Listener
+    },
+    # MILESTONE_54: the signed Fermix Messages helper holds the Mac's grants;
+    # the supervisor owns its process (`IMessage.Port`) and the listener that
+    # ingests what it admits. Only a Mac has Messages to read.
+    %{
+      name: "imessage",
+      config_key: :imessage,
+      adapter: FermixChannels.Channels.IMessage,
+      remote?: true,
+      transport: :subprocess,
+      child: FermixChannels.Channels.IMessage.Supervisor,
+      platform: :macos
     },
     # The ACP agent surface (M29). `remote?: true` is deliberate: sessions are
     # persistent, so browsers stay warm across turns and detached continuation
@@ -245,24 +263,35 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   end
 
   @doc """
-  Supervised transport children to start, gated by readiness, the channel's
-  `enabled` flag, its configured mode matching its transport, and ingress
-  authorization. Replaces the hardcoded per-mode startup branches.
+  Supervised transport children to start, gated by readiness, the host
+  platform, the channel's `enabled` flag, its configured mode matching its
+  transport, and ingress authorization. Replaces the hardcoded per-mode startup
+  branches. `macos?:` injects the host platform (tests); absent, it is read
+  from the OS.
   """
-  @spec transport_children(map()) :: [{module(), keyword()}]
-  def transport_children(%{status: :ready}) do
+  @spec transport_children(map(), keyword()) :: [{module(), keyword()}]
+  def transport_children(readiness, opts \\ [])
+
+  def transport_children(%{status: :ready}, opts) when is_list(opts) do
+    host = [macos?: host_macos?(opts)]
+
     channels()
-    |> Enum.filter(&startable?/1)
+    |> Enum.filter(&(platform_ok?(&1, host) and startable?(&1)))
     |> Enum.map(fn %{child: child} -> {child, []} end)
   end
 
-  def transport_children(_not_ready), do: []
+  def transport_children(_not_ready, opts) when is_list(opts), do: []
 
-  @doc "Remote channels that are enabled but missing ingress authorization (for refusal logging)."
-  @spec missing_ingress_authorizations() :: [atom()]
-  def missing_ingress_authorizations do
+  @doc """
+  Remote channels that are enabled but missing ingress authorization (for
+  refusal logging). A channel this platform cannot run is never listed.
+  """
+  @spec missing_ingress_authorizations(keyword()) :: [atom()]
+  def missing_ingress_authorizations(opts \\ []) when is_list(opts) do
+    host = [macos?: host_macos?(opts)]
+
     channels()
-    |> Enum.filter(&(&1.remote? and needs_ingress?(&1)))
+    |> Enum.filter(&(&1.remote? and needs_ingress?(&1) and platform_ok?(&1, host)))
     |> Enum.filter(fn %{config_key: key} ->
       config = channel_config(key)
       enabled?(config) and not ingress_authorized?(key)
@@ -270,7 +299,24 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     |> Enum.map(& &1.config_key)
   end
 
+  @doc """
+  Whether a registry entry can run on the host described by `opts`. The host
+  must be injected (`macos?: boolean`); this function never reads the OS.
+  """
+  @spec platform_ok?(channel(), keyword()) :: boolean()
+  def platform_ok?(channel, opts) when is_map(channel) and is_list(opts) do
+    case Map.get(channel, :platform) do
+      nil -> true
+      :macos -> Keyword.fetch!(opts, :macos?) == true
+    end
+  end
+
   defp find(name), do: Enum.find(channels(), fn channel -> channel.name == name end)
+
+  # The one place the host platform is read from the OS; every caller can
+  # inject it instead.
+  defp host_macos?(opts),
+    do: Keyword.get_lazy(opts, :macos?, fn -> match?({:unix, :darwin}, :os.type()) end)
 
   defp trust_of(channel) when is_map(channel), do: Map.get(channel, :trust)
 

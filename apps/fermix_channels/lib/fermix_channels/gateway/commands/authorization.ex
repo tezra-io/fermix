@@ -106,5 +106,6 @@ defmodule FermixChannels.Gateway.Commands.Authorization do
   defp channel_key("discord"), do: {:ok, :discord}
   defp channel_key("slack"), do: {:ok, :slack}
   defp channel_key("signal"), do: {:ok, :signal}
+  defp channel_key("imessage"), do: {:ok, :imessage}
   defp channel_key(_channel), do: :error
 end

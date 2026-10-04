@@ -41,6 +41,7 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.channel_key("discord") == :discord
       assert ChannelRegistry.channel_key("signal") == :signal
       assert ChannelRegistry.channel_key("mobile") == :mobile
+      assert ChannelRegistry.channel_key("imessage") == :imessage
     end
 
     test "is nil for local and unknown channels" do
@@ -154,8 +155,11 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       # transport is a same-user socket, so it belongs to this list. `voice` is
       # remote for the same reason but carries no config key at all, so it
       # contributes nothing — a key list must never contain a nil.
+      # `imessage` is listed on every host: this is the static set of keys an
+      # ingress check may name. Whether its transport runs is the platform
+      # gate's question (`transport_children/2`), not this list's.
       assert Enum.sort(remote) ==
-               [:acp, :discord, :mobile, :signal, :slack, :telegram, :whatsapp]
+               [:acp, :discord, :imessage, :mobile, :signal, :slack, :telegram, :whatsapp]
 
       refute nil in remote
     end
@@ -194,6 +198,77 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
   describe "transport_children/1" do
     test "returns no children when readiness is not ready" do
       assert ChannelRegistry.transport_children(%{status: :setup_required, failures: []}) == []
+    end
+  end
+
+  # MILESTONE_54 §12: the helper reads the Messages of the Mac it runs on, so the
+  # entry carries `platform: :macos` and the platform is always injected here.
+  describe "the imessage channel" do
+    setup do
+      previous = Application.get_env(:fermix_channels, :imessage)
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_channels, :imessage)
+          config -> Application.put_env(:fermix_channels, :imessage, config)
+        end
+      end)
+    end
+
+    test "is a remote subprocess channel, supervised as a unit, for the Mac only" do
+      imessage = Enum.find(ChannelRegistry.channels(), &(&1.name == "imessage"))
+
+      assert imessage.config_key == :imessage
+      assert imessage.adapter == FermixChannels.Channels.IMessage
+      assert imessage.remote? == true
+      assert imessage.transport == :subprocess
+      assert imessage.child == FermixChannels.Channels.IMessage.Supervisor
+      assert imessage.platform == :macos
+      assert ChannelRegistry.trust("imessage") == nil
+      assert ChannelRegistry.commands?("imessage")
+    end
+
+    test "platform_ok?/2 answers from the injected platform alone" do
+      imessage = Enum.find(ChannelRegistry.channels(), &(&1.name == "imessage"))
+      telegram = Enum.find(ChannelRegistry.channels(), &(&1.name == "telegram"))
+
+      assert ChannelRegistry.platform_ok?(imessage, macos?: true)
+      refute ChannelRegistry.platform_ok?(imessage, macos?: false)
+      assert ChannelRegistry.platform_ok?(telegram, macos?: false)
+      assert ChannelRegistry.platform_ok?(telegram, macos?: true)
+    end
+
+    test "starts on a Mac once enabled with an owner" do
+      child = {FermixChannels.Channels.IMessage.Supervisor, []}
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      assert child in ChannelRegistry.transport_children(%{status: :ready}, macos?: true)
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: false,
+        owner_user_id: "+15551234567"
+      )
+
+      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: true)
+    end
+
+    test "never starts on Linux, and Linux never reports it as missing an owner" do
+      child = {FermixChannels.Channels.IMessage.Supervisor, []}
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: false)
+
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+      refute :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: false)
+      assert :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: true)
     end
   end
 

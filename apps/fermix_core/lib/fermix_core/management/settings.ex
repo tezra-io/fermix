@@ -49,13 +49,18 @@ defmodule FermixCore.Management.Settings do
 
   @doc """
   Every section this daemon can serve, ordered, with the pane it renders under.
+
+  A section that exists only on a Mac (`channels.imessage`) is absent off one.
+  `macos?:` names the host for a test.
   """
-  @spec sections() :: [section()]
-  def sections, do: Enum.flat_map(@families, & &1.sections())
+  @spec sections(keyword()) :: [section()]
+  def sections(opts \\ []) when is_list(opts),
+    do: Enum.flat_map(@families, &family_sections(&1, opts))
 
   @doc "Whether the named section exists."
-  @spec section?(String.t()) :: boolean()
-  def section?(section) when is_binary(section), do: family(section) != nil
+  @spec section?(String.t(), keyword()) :: boolean()
+  def section?(section, opts \\ []) when is_binary(section) and is_list(opts),
+    do: family(section, opts) != nil
 
   @doc """
   One section's rows.
@@ -65,9 +70,9 @@ defmodule FermixCore.Management.Settings do
   """
   @spec get(String.t(), keyword()) :: {:ok, map()} | {:error, {:unknown_section, String.t()}}
   def get(section, opts \\ []) when is_binary(section) and is_list(opts) do
-    case family(section) do
+    case family(section, opts) do
       nil -> {:error, {:unknown_section, section}}
-      module -> {:ok, view(section, module, snapshot(opts))}
+      module -> {:ok, view(section, module, opts)}
     end
   end
 
@@ -80,7 +85,7 @@ defmodule FermixCore.Management.Settings do
   @spec apply(String.t(), map(), keyword()) :: {:ok, map()} | {:error, write_error()}
   def apply(section, values, opts \\ [])
       when is_binary(section) and is_map(values) and is_list(opts) do
-    with {:ok, module} <- fetch_family(section),
+    with {:ok, module} <- fetch_family(section, opts),
          rows = module.rows(section, snapshot(opts)),
          {:ok, answers} <- answers(section, rows, values) do
       write(section, answers, Map.keys(values))
@@ -151,8 +156,9 @@ defmodule FermixCore.Management.Settings do
     end
   end
 
-  defp view(section, module, snapshot) do
-    %{id: id, title: title} = Enum.find(module.sections(), &(&1.id == section))
+  defp view(section, module, opts) do
+    snapshot = snapshot(opts)
+    %{id: id, title: title} = Enum.find(family_sections(module, opts), &(&1.id == section))
 
     %{"id" => id, "title" => title, "rows" => module.rows(section, snapshot)}
   end
@@ -374,12 +380,21 @@ defmodule FermixCore.Management.Settings do
 
   defp snapshot(opts), do: Keyword.get_lazy(opts, :snapshot, &ConfigStore.current_snapshot/0)
 
-  defp fetch_family(section) do
-    case family(section) do
+  defp fetch_family(section, opts) do
+    case family(section, opts) do
       nil -> {:error, {:unknown_section, section}}
       module -> {:ok, module}
     end
   end
 
-  defp family(section), do: Enum.find(@families, & &1.owns?(section))
+  # Channels is the one family with a section that exists on one platform only,
+  # so it is the one that is handed the host; every other family is the same
+  # everywhere.
+  defp family(section, opts), do: Enum.find(@families, &family_owns?(&1, section, opts))
+
+  defp family_owns?(Channels, section, opts), do: Channels.owns?(section, opts)
+  defp family_owns?(module, section, _opts), do: module.owns?(section)
+
+  defp family_sections(Channels, opts), do: Channels.sections(opts)
+  defp family_sections(module, _opts), do: module.sections()
 end

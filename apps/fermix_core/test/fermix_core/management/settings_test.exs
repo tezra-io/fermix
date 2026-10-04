@@ -52,7 +52,7 @@ defmodule FermixCore.Management.SettingsTest do
     :secret_writer,
     :secret_store
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
+  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
     key kind label footer info value present options min max step restart read_only suggestions
@@ -103,8 +103,10 @@ defmodule FermixCore.Management.SettingsTest do
       end
     end
 
+    # On a Mac, every channel readiness knows has a section. iMessage is the
+    # one that exists only there, so the host is named rather than inherited.
     test "publishes one section per channel plus the editors surface" do
-      sections = Settings.sections()
+      sections = Settings.sections(macos?: true)
 
       for channel <- Readiness.channels() do
         assert Enum.any?(sections, &(&1.id == "channels.#{channel}"))
@@ -1053,6 +1055,85 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # M54 §12. The posture is a closed choice (D7), the guests a list, and saving
+  # any of them never turns the channel on: only its own switch does (M53
+  # APP-5, from this channel's first release).
+  describe "the iMessage section" do
+    test "exists on a Mac and nowhere else" do
+      assert %{id: "channels.imessage", pane: "channels", title: "iMessage"} in Settings.sections(
+               macos?: true
+             )
+
+      refute Enum.any?(Settings.sections(macos?: false), &(&1.id == "channels.imessage"))
+
+      assert Settings.get("channels.imessage", macos?: false) ==
+               {:error, {:unknown_section, "channels.imessage"}}
+
+      assert {:error, {:unknown_section, "channels.imessage"}} =
+               Settings.apply("channels.imessage", %{"imessage_enabled" => true}, macos?: false)
+    end
+
+    test "publishes the posture choice, the owner, the guests and the switch" do
+      Application.put_env(:fermix_channels, :imessage, enabled: false)
+
+      assert Enum.map(rows("channels.imessage"), &{&1["key"], &1["kind"], &1["value"]}) == [
+               {"imessage_posture", "choice", ""},
+               {"imessage_owner_user_id", "text", ""},
+               {"imessage_allowed_sender_ids", "list", []},
+               {"imessage_enabled", "toggle", false}
+             ]
+
+      assert option_values("channels.imessage", "imessage_posture") == [
+               "dedicated_account",
+               "own_account"
+             ]
+
+      assert Enum.all?(rows("channels.imessage"), & &1["restart"])
+    end
+
+    test "a saved posture reads back as its word" do
+      Application.put_env(:fermix_channels, :imessage,
+        posture: :dedicated_account,
+        owner_user_id: "+15551234567",
+        allowed_sender_ids: ["friend@example.com"]
+      )
+
+      assert %{"value" => "dedicated_account"} = row("channels.imessage", "imessage_posture")
+
+      assert %{"value" => ["friend@example.com"]} =
+               row("channels.imessage", "imessage_allowed_sender_ids")
+    end
+
+    test "a posture outside the published options is refused under its control" do
+      assert {:error, {:invalid_params, "imessage_posture", _sentence}} =
+               Settings.apply("channels.imessage", %{"imessage_posture" => "bot_account"},
+                 macos?: true
+               )
+    end
+
+    test "saving the account and the owner never switches the channel on" do
+      Application.put_env(:fermix_channels, :imessage, enabled: false)
+
+      assert {:ok, _applied} =
+               Settings.apply(
+                 "channels.imessage",
+                 %{
+                   "imessage_posture" => "dedicated_account",
+                   "imessage_owner_user_id" => "+1 555 123 4567",
+                   "imessage_allowed_sender_ids" => ["Friend@Example.com"]
+                 },
+                 macos?: true
+               )
+
+      section = Application.get_env(:fermix_channels, :imessage)
+      assert section[:enabled] == false
+      assert section[:posture] == :dedicated_account
+      assert section[:owner_user_id] == "+15551234567"
+      assert section[:allowed_sender_ids] == ["friend@example.com"]
+      refute Keyword.has_key?(section, :mode)
+    end
+  end
+
   # The phone channel is a section of its own, not an inventory channel: it has
   # no credential, and its rows are a switch, a port and an address.
   describe "the phone section" do
@@ -1712,8 +1793,10 @@ defmodule FermixCore.Management.SettingsTest do
   defp shape([head | _rest]), do: [shape(head)]
   defp shape(_value), do: :scalar
 
+  # Read as on a Mac, so a section that exists only there reads the same on
+  # every CI leg; the platform gate itself has its own cases.
   defp rows(id) do
-    {:ok, %{"rows" => rows}} = Settings.get(id)
+    {:ok, %{"rows" => rows}} = Settings.get(id, macos?: true)
     rows
   end
 

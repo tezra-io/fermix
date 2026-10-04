@@ -5,7 +5,7 @@ Elixir-native multi-agent AI platform: Phoenix gateway, OTP-supervised agents, S
 ## Architecture
 ```
 apps/fermix_core/      # agents, providers, tools, memory, sandbox, harness, management protocol
-apps/fermix_channels/  # Telegram, Slack, Discord, Signal, WhatsApp, ACP, mobile, voice + gateway/queue
+apps/fermix_channels/  # Telegram, Slack, Discord, Signal, WhatsApp, iMessage (Mac), ACP, mobile, voice + gateway/queue
 apps/fermix_web/       # Phoenix: webhooks, health, LiveView, setup UI
 apps/fermix_opik/      # telemetry → Opik trace exporter
 apps/fermix_nif/       # C: kill_pgid/2 NIF (process-group kill) + macOS disclaim exec shim

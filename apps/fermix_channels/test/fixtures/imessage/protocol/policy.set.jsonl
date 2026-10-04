@@ -1,0 +1,4 @@
+{"id":5,"method":"policy.set","params":{"posture":"dedicated_account","owner_handle":"+15551234567","handles":["+15551234567","guest@example.com"]}}
+{"id":5,"result":{"confirmed_at":"2026-10-01T09:30:00Z"}}
+{"id":5,"error":{"kind":"policy_refused","message":"the owner cancelled the confirmation","data":{}}}
+{"id":5,"error":{"kind":"owner_not_self","message":"that handle is not one of this account's aliases","data":{"handle":"+15559999999"}}}

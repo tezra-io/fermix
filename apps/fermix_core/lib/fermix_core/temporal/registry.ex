@@ -45,7 +45,7 @@ defmodule FermixCore.Temporal.Registry do
   @scheduler FermixCore.Temporal.Scheduler
 
   @kinds ~w(birthday anniversary appointment deadline event follow_up explicit_reminder)
-  @platforms ~w(telegram slack discord signal whatsapp)
+  @platforms ~w(telegram slack discord signal whatsapp imessage)
   @leap_policies ~w(feb_28 mar_1)
   @destination_keys ~w(chat_id channel_id recipient target reply_target)
   @ephemeral_keys ~w(reply_to req_options)

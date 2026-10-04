@@ -14,6 +14,7 @@ defmodule FermixCore.Readiness do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Config
+  alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
@@ -69,7 +70,8 @@ defmodule FermixCore.Readiness do
     whatsapp: false,
     discord: false,
     slack: false,
-    signal: false
+    signal: false,
+    imessage: false
   ]
   # Each sentence names the CONTROL that fixes it, not the environment variable
   # behind it: every failure carries the `pane` that owns the fix, and a native
@@ -81,8 +83,12 @@ defmodule FermixCore.Readiness do
       "Add the WhatsApp access token, phone number ID, verify token, and app secret in Channels settings.",
     discord: "Add the Discord bot token and bot user ID in Channels settings.",
     slack: "Add the Slack bot token and signing secret in Channels settings.",
-    signal: "Add the Signal account in Channels settings."
+    signal: "Add the Signal account in Channels settings.",
+    imessage:
+      "Choose which account iMessage uses and add your phone number or email in Channels settings."
   ]
+  @imessage_helper_action "Fermix Messages, the helper iMessage needs, is not installed. " <>
+                            "Turn iMessage on in Channels settings to install it."
 
   @spec report() :: report()
   def report do
@@ -95,6 +101,7 @@ defmodule FermixCore.Readiness do
           discord_failure(),
           slack_failure(),
           signal_failure(),
+          imessage_failure(),
           realtime_failure(),
           personalization_failure()
         ],
@@ -140,6 +147,7 @@ defmodule FermixCore.Readiness do
           unknown_provider_action(:not_a_provider),
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
+          imessage_helper_row(),
           realtime_provider_row(),
           realtime_key_row()
         ],
@@ -166,7 +174,7 @@ defmodule FermixCore.Readiness do
   @spec ready?() :: boolean()
   def ready?, do: report().status == :ready
 
-  @doc "The five messaging channels readiness knows about, in publication order."
+  @doc "The messaging channels readiness knows about, in publication order."
   @spec channels() :: [atom()]
   def channels, do: Keyword.keys(@channel_credentials)
 
@@ -197,8 +205,16 @@ defmodule FermixCore.Readiness do
   @spec channel_configured?(atom()) :: boolean()
   def channel_configured?(channel) when is_atom(channel) do
     block = channel_block(channel)
-    Enum.all?(Keyword.fetch!(@channel_credentials, channel), &present?(Keyword.get(block, &1)))
+    Enum.all?(required_keys(channel), &present?(Keyword.get(block, &1)))
   end
+
+  # Unlike the token channels, iMessage needs its owner to be configured: the
+  # recipient policy the helper confirms is built from it (M54 §5.2), so without
+  # one nothing can be confirmed and the channel cannot start.
+  defp required_keys(:imessage),
+    do: Keyword.fetch!(@channel_credentials, :imessage) ++ [:owner_user_id]
+
+  defp required_keys(channel), do: Keyword.fetch!(@channel_credentials, channel)
 
   @spec personalization_failure() :: failure() | nil
   def personalization_failure do
@@ -411,7 +427,7 @@ defmodule FermixCore.Readiness do
       "Set `auth_mode` to `api_key` or `oauth`."
   end
 
-  # One table for the five channels, because three surfaces ask the same two
+  # One table for the channels, because three surfaces ask the same two
   # questions about them (is it on, are its credentials present) and a second
   # copy of this list is how a channel added later gets a readiness row and no
   # setup row, or the reverse.
@@ -420,6 +436,33 @@ defmodule FermixCore.Readiness do
   defp discord_failure, do: channel_credentials_failure(:discord)
   defp slack_failure, do: channel_credentials_failure(:slack)
   defp signal_failure, do: channel_credentials_failure(:signal)
+
+  # iMessage (M54 §14) reads presence only: the saved section, then whether the
+  # helper is on disk. Its probe spawns the helper, so it is read by Doctor and
+  # `imessage.permissions.get`, never on this hot path.
+  defp imessage_failure do
+    cond do
+      not channel_enabled?(:imessage) ->
+        nil
+
+      not channel_configured?(:imessage) ->
+        channel_failure(:imessage, @channel_actions[:imessage])
+
+      not HelperInstaller.installed?() ->
+        imessage_helper_row()
+
+      true ->
+        nil
+    end
+  end
+
+  defp imessage_helper_row do
+    advisory(
+      %{component: "channel:imessage", action: @imessage_helper_action},
+      "channels",
+      "channel:imessage:helper"
+    )
+  end
 
   defp channel_credentials_failure(channel) do
     cond do

@@ -9,6 +9,7 @@ defmodule FermixCore.Management.Settings.Channels do
   the only way to turn one off was to remove the credential.
   """
 
+  alias FermixCore.IMessage
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Source
@@ -18,11 +19,16 @@ defmodule FermixCore.Management.Settings.Channels do
   @pane "channels"
   @editors_id "editors"
 
-  @doc "Every channel section, plus editors."
-  @spec sections() :: [%{id: String.t(), pane: String.t(), title: String.t()}]
-  def sections do
+  @doc """
+  Every channel section that exists on this host, plus editors.
+
+  iMessage exists only on a Mac (M54 §12), so off one its section is neither
+  published nor readable. `macos?:` names the host for a test.
+  """
+  @spec sections(keyword()) :: [%{id: String.t(), pane: String.t(), title: String.t()}]
+  def sections(opts \\ []) when is_list(opts) do
     channel_sections =
-      Enum.map(Inventory.channels(), fn channel ->
+      Enum.map(available_channels(opts), fn channel ->
         %{id: section_id(channel), pane: @pane, title: Inventory.title(channel)}
       end)
 
@@ -33,14 +39,19 @@ defmodule FermixCore.Management.Settings.Channels do
   @spec section_id(atom()) :: String.t()
   def section_id(channel) when is_atom(channel), do: @prefix <> Atom.to_string(channel)
 
-  @doc "Whether this module owns the named section."
-  @spec owns?(String.t()) :: boolean()
-  def owns?(@editors_id), do: true
+  @doc "Whether this module owns the named section on this host."
+  @spec owns?(String.t(), keyword()) :: boolean()
+  def owns?(section, opts \\ [])
 
-  def owns?(@prefix <> name),
-    do: Enum.any?(Inventory.channels(), &(Atom.to_string(&1) == name))
+  def owns?(@editors_id, _opts), do: true
 
-  def owns?(_section), do: false
+  def owns?(@prefix <> name, opts) when is_list(opts),
+    do: Enum.any?(available_channels(opts), &(Atom.to_string(&1) == name))
+
+  def owns?(_section, _opts), do: false
+
+  defp available_channels(opts),
+    do: Inventory.available_channels(Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0))
 
   @doc "The rows of one owned section."
   @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
@@ -77,6 +88,25 @@ defmodule FermixCore.Management.Settings.Channels do
   defp row({key, config_key, :text, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :text, label,
       value: Source.string(block, config_key),
+      restart: restart
+    )
+  end
+
+  defp row({key, config_key, :list, label}, block, _snapshot, restart) do
+    Row.new(Atom.to_string(key), :list, label,
+      value: Source.strings(block, config_key),
+      restart: restart
+    )
+  end
+
+  # The options are the whole value space, so `settings.apply` refuses any other
+  # word under the control that sent it. An unset choice reads as the empty
+  # string, which no option carries: nothing is preselected on the operator's
+  # behalf (M54 D2, no default posture).
+  defp row({key, config_key, :choice, label, options}, block, _snapshot, restart) do
+    Row.new(Atom.to_string(key), :choice, label,
+      value: Source.string(block, config_key),
+      options: Enum.map(options, fn {value, option_label} -> Row.option(value, option_label) end),
       restart: restart
     )
   end

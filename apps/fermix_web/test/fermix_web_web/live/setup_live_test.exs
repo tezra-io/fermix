@@ -173,6 +173,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     harness = Application.get_env(:fermix_core, :harness, [])
     routing = Application.get_env(:fermix_core, :routing)
     mobile = Application.fetch_env(:fermix_channels, :mobile)
+    imessage = Application.fetch_env(:fermix_channels, :imessage)
+    imessage_macos? = Application.get_env(:fermix_web, :imessage_macos?)
+    imessage_grant_impl = Application.get_env(:fermix_web, :imessage_grant_impl)
+    imessage_confirm_impl = Application.get_env(:fermix_web, :imessage_confirm_impl)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -234,6 +238,12 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.delete_env(:fermix_web, :anthropic_login_impl)
     Application.delete_env(:fermix_web, :doctor_probe_opts)
     Application.delete_env(:fermix_web, :computer_use_grant_impl)
+    # iMessage ships off, and a card case names the platform it means; every
+    # other case runs as a machine with no iMessage card at all.
+    Application.put_env(:fermix_channels, :imessage, enabled: false)
+    Application.put_env(:fermix_web, :imessage_macos?, false)
+    Application.delete_env(:fermix_web, :imessage_grant_impl)
+    Application.delete_env(:fermix_web, :imessage_confirm_impl)
     Application.delete_env(:fermix_web, :local_installer)
     # A machine this build pins an on-device speech sidecar for, whichever one
     # the suite runs on; the cases about a machine with none say so themselves.
@@ -277,6 +287,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       Application.put_env(:fermix_core, :harness, harness)
       restore_env(:fermix_core, :routing, routing)
       restore_env(:fermix_channels, :mobile, mobile)
+      restore_env(:fermix_channels, :imessage, imessage)
+      restore_env(:fermix_web, :imessage_macos?, imessage_macos?)
+      restore_env(:fermix_web, :imessage_grant_impl, imessage_grant_impl)
+      restore_env(:fermix_web, :imessage_confirm_impl, imessage_confirm_impl)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -3168,6 +3182,110 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert Keyword.get(push, :key_id) == "KEY987"
       assert Keyword.get(push, :topic) == "io.tezra.fermix.app"
       assert Keyword.get(push, :environment) == "development"
+    end
+
+    # M54 §10.3: the iMessage card exists only on the Mac whose Messages it
+    # reads. The platform is named through the seam, never read from the host.
+    test "the iMessage card is offered on a Mac and nowhere else", %{conn: conn} do
+      Application.put_env(:fermix_web, :imessage_macos?, false)
+      {:ok, view, html} = live(conn, "/setup?tab=channels")
+
+      refute html =~ ~s(phx-value-channel="imessage")
+      refute html =~ "channels_form[imessage_"
+
+      html =
+        render_submit(view, "save_channels", %{
+          "channels_form" => %{
+            "telegram_owner_user_id" => "owner-1",
+            "imessage_posture" => "dedicated_account",
+            "imessage_owner_user_id" => "+15551234567"
+          }
+        })
+
+      assert html =~ "Channels saved."
+      refute Keyword.has_key?(Application.get_env(:fermix_channels, :imessage, []), :posture)
+
+      Application.put_env(:fermix_web, :imessage_macos?, true)
+      {:ok, _view, html} = live(conn, "/setup?tab=channels")
+
+      assert html =~ ~s(phx-value-channel="imessage")
+      assert html =~ "iMessage"
+    end
+
+    test "the iMessage form saves the account, the owner and the guests and leaves it off", %{
+      conn: conn
+    } do
+      Application.put_env(:fermix_web, :imessage_macos?, true)
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      html =
+        view
+        |> element(~s(button[phx-click="select_channel"][phx-value-channel="imessage"]))
+        |> render_click()
+
+      assert html =~ ~s(name="channels_form[imessage_posture]")
+      assert html =~ ~s(value="dedicated_account")
+      assert html =~ ~s(value="own_account")
+      assert html =~ ~s(name="channels_form[imessage_owner_user_id]")
+      assert html =~ ~s(name="channels_form[imessage_allowed_sender_ids]")
+      assert html =~ ~s(phx-click="imessage_grant")
+      assert html =~ ~s(phx-value-service="full_disk_access")
+      assert html =~ ~s(phx-value-service="automation")
+      assert html =~ ~s(phx-click="imessage_policy_confirm")
+
+      html =
+        view
+        |> form("form[phx-submit=\"save_channels\"]",
+          channels_form: %{
+            imessage_posture: "dedicated_account",
+            imessage_owner_user_id: "+1 555 123 4567",
+            imessage_allowed_sender_ids: "Friend@Example.com"
+          }
+        )
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+
+      imessage = Application.get_env(:fermix_channels, :imessage, [])
+      assert imessage[:posture] == :dedicated_account
+      assert imessage[:owner_user_id] == "+15551234567"
+      assert imessage[:allowed_sender_ids] == ["friend@example.com"]
+      refute imessage[:enabled] == true
+    end
+
+    test "the iMessage grant and confirm buttons ask the helper and say what happened", %{
+      conn: conn
+    } do
+      parent = self()
+      Application.put_env(:fermix_web, :imessage_macos?, true)
+
+      Application.put_env(:fermix_web, :imessage_grant_impl, fn service ->
+        send(parent, {:granted, service})
+        {:ok, %{full_disk_access: :granted, automation: :granted}}
+      end)
+
+      Application.put_env(:fermix_web, :imessage_confirm_impl, fn ->
+        {:error, {:helper_error, :policy_refused, "Cancelled"}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      view
+      |> element(~s(button[phx-click="select_channel"][phx-value-channel="imessage"]))
+      |> render_click()
+
+      view
+      |> element(~s(button[phx-click="imessage_grant"][phx-value-service="full_disk_access"]))
+      |> render_click()
+
+      assert_receive {:granted, :full_disk_access}
+      assert render_async(view) =~ "Fermix Messages"
+
+      view
+      |> element(~s(button[phx-click="imessage_policy_confirm"]))
+      |> render_click()
+
+      assert render_async(view) =~ "The recipients were not confirmed"
     end
 
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do

@@ -12,6 +12,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.IMessage
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
@@ -147,19 +148,47 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: Application.get_env(:fermix_channels, :slack, []),
         signal: Application.get_env(:fermix_channels, :signal, []),
         acp: Application.get_env(:fermix_channels, :acp, []),
-        mobile: Application.get_env(:fermix_channels, :mobile, [])
+        mobile: Application.get_env(:fermix_channels, :mobile, []),
+        imessage: Application.get_env(:fermix_channels, :imessage, [])
       ],
       fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
     |> persistable_snapshot()
   end
 
+  @doc """
+  Reads and normalizes the settings file.
+
+  A value a normalizer refuses raises with the key named. A section the file
+  enables on a host that cannot run it answers a typed error instead: an
+  enabled `[fermix_channels.imessage]` off a Mac is
+  `{:error, {:unsupported_platform, :imessage}}`. `macos?:` names the host for a
+  test; every other caller reads the real one.
+  """
   @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
   def load_runtime_config(opts \\ []) do
     case File.read(path()) do
-      {:ok, contents} -> {:ok, maybe_resolve_keyring(parse_document(contents), opts)}
+      {:ok, contents} -> platform_checked(parse_document(contents), opts)
       {:error, :enoent} -> {:ok, empty_runtime_config()}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The sentence a load refusal is reported with: a typed platform refusal in its
+  operator words, any other reason as its term.
+  """
+  @spec load_error_sentence(term()) :: String.t()
+  def load_error_sentence({:unsupported_platform, :imessage} = reason),
+    do: IMessage.error_message(reason)
+
+  def load_error_sentence(reason), do: inspect(reason)
+
+  defp platform_checked(snapshot, opts) do
+    imessage = Keyword.get(snapshot.fermix_channels, :imessage, [])
+
+    with :ok <- IMessage.check_platform(imessage, opts) do
+      {:ok, maybe_resolve_keyring(snapshot, opts)}
     end
   end
 
@@ -243,6 +272,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
+    apply_channel_config(:imessage, Keyword.get(persisted.fermix_channels, :imessage, []))
     apply_web_config(Map.get(persisted, :fermix_web, []))
   end
 
@@ -291,7 +321,7 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
-    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised])),
+    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
          :ok <- apply_snapshot(snapshot, opts),
          # This is the boot read of the file, which is what the external-change
          # baseline means: the values in application environment now came from
@@ -516,7 +546,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:mobile, [])
-          |> normalize_mobile()
+          |> normalize_mobile(),
+        imessage:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:imessage, [])
+          |> normalize_imessage()
       ],
       fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
@@ -631,7 +666,8 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: [],
         signal: [],
         acp: [],
-        mobile: []
+        mobile: [],
+        imessage: []
       ],
       fermix_web: []
     }
@@ -1109,6 +1145,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
+      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_web"], web)
     ]
     |> List.flatten()
@@ -1341,7 +1378,8 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
-        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
+        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"])),
+        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"]))
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
@@ -2552,6 +2590,138 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_acp(config) do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
+  end
+
+  # The iMessage channel (M54 §11). Every value that would otherwise be dropped
+  # or guessed refuses the load with its key named: an unknown posture, an
+  # enabled channel with none (D2, no default), an id that is not a quoted
+  # string (M53 OWN-2: an unquoted `+1555…` is a TOML integer that has already
+  # lost its `+`), a guest under the owner's own account (D9), and `"draft"`
+  # streaming on a channel that cannot edit. Handles are normalized here, once,
+  # so the owner the authorizer compares and the one the helper confirmed are the
+  # same string. `mode` is not a key: the registry fixes the transport.
+  @imessage_postures %{
+    "dedicated_account" => :dedicated_account,
+    "own_account" => :own_account,
+    dedicated_account: :dedicated_account,
+    own_account: :own_account
+  }
+
+  defp normalize_imessage(nil), do: []
+
+  defp normalize_imessage(config) when is_map(config) or is_list(config) do
+    []
+    |> put_if_present(:enabled, imessage_enabled(lookup(config, "enabled", :enabled)))
+    |> put_if_present(:posture, imessage_posture(lookup(config, "posture", :posture)))
+    |> put_if_present(
+      :owner_user_id,
+      imessage_owner(lookup(config, "owner_user_id", :owner_user_id))
+    )
+    |> put_if_present(
+      :allowed_sender_ids,
+      imessage_ids(lookup(config, "allowed_sender_ids", :allowed_sender_ids), :allowed_sender_ids)
+    )
+    |> put_if_present(
+      :command_allowlist,
+      imessage_ids(lookup(config, "command_allowlist", :command_allowlist), :command_allowlist)
+    )
+    |> put_streaming(config)
+    # `put_if_present/3` prepends; reversed, the section renders in the order
+    # the keys are documented in.
+    |> Enum.reverse()
+    |> validate_imessage!()
+  end
+
+  defp normalize_imessage(config) do
+    raise ArgumentError,
+          "invalid fermix_channels.imessage #{inspect(config)}; expected a table"
+  end
+
+  defp imessage_enabled(value) when is_nil(value) or is_boolean(value), do: value
+
+  defp imessage_enabled(value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.enabled #{inspect(value)} must be true or false"
+  end
+
+  defp imessage_posture(nil), do: nil
+
+  defp imessage_posture(value) do
+    case Map.fetch(@imessage_postures, value) do
+      {:ok, posture} ->
+        posture
+
+      :error ->
+        raise ArgumentError,
+              "fermix_channels.imessage.posture #{inspect(value)} is not a posture; " <>
+                "expected \"dedicated_account\" or \"own_account\""
+    end
+  end
+
+  defp imessage_owner(nil), do: nil
+  defp imessage_owner(value) when is_binary(value), do: imessage_handle(value)
+
+  defp imessage_owner(value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.owner_user_id must be a quoted string, " <>
+            "such as \"+15551234567\"; got #{inspect(value)}"
+  end
+
+  defp imessage_ids(nil, _key), do: nil
+
+  defp imessage_ids(ids, key) when is_list(ids) do
+    if Enum.all?(ids, &is_binary/1) do
+      ids |> Enum.map(&imessage_handle/1) |> Enum.reject(&is_nil/1)
+    else
+      refuse_imessage_ids(ids, key)
+    end
+  end
+
+  defp imessage_ids(ids, key), do: refuse_imessage_ids(ids, key)
+
+  defp refuse_imessage_ids(ids, key) do
+    raise ArgumentError,
+          "fermix_channels.imessage.#{key} must list quoted strings, " <>
+            "such as [\"+15551234567\"]; got #{inspect(ids)}"
+  end
+
+  defp imessage_handle(value) do
+    case {String.trim(value), IMessage.normalize_handle(value)} do
+      {"", _} -> nil
+      {_handle, {:ok, normalized}} -> normalized
+      {handle, {:error, :invalid_handle}} -> refuse_imessage_handle(handle)
+    end
+  end
+
+  defp refuse_imessage_handle(handle) do
+    raise ArgumentError,
+          "fermix_channels.imessage: #{inspect(handle)} is not an iMessage handle; " <>
+            "expected a phone number with its country code, such as \"+15551234567\", " <>
+            "or an email address"
+  end
+
+  defp validate_imessage!(fields) do
+    posture = Keyword.get(fields, :posture)
+
+    cond do
+      Keyword.get(fields, :enabled) == true and posture == nil ->
+        raise ArgumentError,
+              "fermix_channels.imessage.posture is required when the channel is enabled; " <>
+                "set it to \"dedicated_account\""
+
+      posture == :own_account and Keyword.get(fields, :allowed_sender_ids, []) != [] ->
+        raise ArgumentError,
+              "fermix_channels.imessage.allowed_sender_ids must be empty under posture " <>
+                "\"own_account\": a guest there would be answered as you"
+
+      Keyword.get(fields, :streaming) == "draft" ->
+        raise ArgumentError,
+              "fermix_channels.imessage.streaming \"draft\" is not supported: iMessage " <>
+                "cannot edit a sent message; expected \"block\" or \"off\""
+
+      true ->
+        fields
+    end
   end
 
   defp normalize_mobile(nil), do: []

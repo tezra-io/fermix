@@ -397,6 +397,46 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # iMessage is the one channel whose setup is macOS permissions rather than
+  # platform credentials, and the one that refuses Linux outright, so "how do I
+  # connect iMessage?" and "why is it silent?" are answered only if the grants,
+  # the recipient confirmation and the probe fields are named. Each string is a
+  # pane, a key, a probe field or a doctor row, not a phrasing.
+  test "documents iMessage: its permissions, the recipient confirmation and the Mac-only rule" do
+    paragraph = channels_paragraph()
+    reference = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    presentation = "channel_presentation" |> reference_path() |> File.read!()
+
+    for required <- ["iMessage", "Fermix Messages", "Full Disk Access", "Automation"] do
+      assert paragraph =~ required, "the Channels paragraph does not mention #{required}"
+    end
+
+    for required <- [
+          "## iMessage",
+          "Fermix Messages",
+          "Full Disk Access",
+          "Messages data",
+          "Messages automation",
+          "Awaiting confirmation",
+          "Confirm…",
+          "dedicated_account",
+          "own_account",
+          "[fermix_channels.imessage]",
+          "allowed_sender_ids",
+          "full_disk_access",
+          "user_session",
+          "signed_in",
+          "policy_matches_config",
+          "imessage_helper",
+          "imessage_permissions",
+          "Linux"
+        ] do
+      assert reference =~ required, "channel_setup reference does not mention #{required}"
+    end
+
+    assert presentation =~ "iMessage"
+  end
+
   defp channels_paragraph do
     self_knowledge_path()
     |> File.read!()

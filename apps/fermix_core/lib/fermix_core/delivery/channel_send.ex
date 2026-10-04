@@ -335,6 +335,7 @@ defmodule FermixCore.Delivery.ChannelSend do
   defp platform_atom("discord"), do: :discord
   defp platform_atom("signal"), do: :signal
   defp platform_atom("whatsapp"), do: :whatsapp
+  defp platform_atom("imessage"), do: :imessage
   defp platform_atom("cli"), do: :cli
   defp platform_atom(_platform), do: nil
 

@@ -1,6 +1,6 @@
 # Connecting a chat channel
 
-The answer to "how do I connect Telegram / Discord / Slack / WhatsApp / Signal?": what each needs, where each value comes from, where it is entered, and what to send first. Every channel needs the platform credentials plus the owner's own id on that platform.
+The answer to "how do I connect Telegram / Discord / Slack / WhatsApp / Signal / iMessage?": what each needs, where each value comes from, where it is entered, and what to send first. Every channel needs the platform credentials plus the owner's own id on that platform; iMessage has no credential and needs macOS permissions instead (its own section below).
 
 ## Where the values go
 
@@ -125,10 +125,42 @@ No public URL: Fermix runs `signal-cli` on the same machine.
 - **First message**: from your phone, message the Fermix number `hi`. Direct messages only; group messages are ignored.
 - A number without the `+` or with spaces never matches the sender. Keep signal-cli current (`brew upgrade signal-cli`); old releases stop working.
 
+## iMessage
+
+Mac only, and no public URL: Fermix reads and sends through Messages on the Mac it runs on. iMessage does not exist on Linux at all: the setup surfaces never show it there, and a `config.toml` that turns it on refuses to start ("imessage runs only on the Mac whose Messages it reads"). There is no remote-Mac mode.
+
+Fermix never opens the Messages database itself. A signed helper app, **Fermix Messages**, does the reading and sending, and the two macOS permissions belong to it, never to Fermix, Terminal or Homebrew, so they survive Fermix updates. The helper also keeps the list of people Fermix may message, which changes only through a dialog it shows on your screen.
+
+- **Requirements**: a Mac with Messages open and signed in to the account Fermix speaks as, awake, and Fermix running in your logged-in session (not over SSH alone and not as a system-wide daemon). Keep the Mac awake (`pmset`, or Energy settings); a sleeping Mac receives nothing.
+- **Account** (`posture`, required, no default): `dedicated_account` is a spare Apple ID used only by Fermix, signed into Messages on this Mac; you text that account from your phone like a bot, and guests may be allowed. `own_account` is your own Apple ID: Fermix answers only in your conversation with yourself (message yourself), and any guest list refuses to load. Mac **Account**; browser setup's iMessage card; `--imessage-posture`; `posture = "dedicated_account"`.
+- **Your phone number or email**: the handle you message from, as the account on this Mac sees it: a phone number in `+E.164` (`+15551234567`, no spaces) or an email, quoted. Mac **Your phone number or email**; browser setup's iMessage card; `--imessage-owner-user-id`; `owner_user_id = "+15551234567"`. An unquoted number refuses to load.
+- **Guests** (`dedicated_account` only): `allowed_sender_ids = ["+15557654321", "friend@example.com"]`, or `--imessage-allowed-sender-ids`. The owner is always let in; an empty list means no guests.
+- Other keys under `[fermix_channels.imessage]`: `enabled`, `command_allowlist`, `streaming` (`"block"` or `"off"`; `"draft"` refuses to load, because iMessage cannot edit a sent message). Nothing is secret, so nothing goes to the keychain.
+
+Order (the Mac app's own iMessage rows arrive with the app release that pins this engine; until then every step below runs from browser setup, `fermix setup`, or the helper's Doctor rows):
+
+1. Enter the account choice, your handle and any guests on the iMessage card of browser setup (`fermix setup` opens it; on an app-managed Mac the app's **Settings > Channels > iMessage > Set up…** once it ships), or by hand under `[fermix_channels.imessage]`. Saving does not turn iMessage on; the switch does (`enabled = true`). Turning it on installs the helper if it is missing.
+2. Grant the two permissions from the same card: **Grant…** under Messages data opens Full Disk Access in System Settings and shows Fermix Messages in Finder; switch Fermix Messages on there (drag it into the list if it is not listed). **Grant…** under Messages automation shows the one macOS prompt, "Fermix Messages wants access to control Messages": allow it.
+3. **Confirm…**: Fermix Messages shows its own dialog naming every handle; approve it. It asks again whenever the owner, the account choice or the guest list changes.
+4. **Restart to apply**. Then message the dedicated account from your phone (or, under `own_account`, message yourself).
+
+Direct iMessage conversations only: group chats and SMS are ignored. Replies are plain text sent in blocks; there is no typing indicator, no tapback or other reaction, no edit, no read receipt. A tapback you send is ignored, not answered. Text, photos, files and voice notes (transcribed) work both ways.
+
+Troubleshooting, by what the helper reports (Doctor rows `imessage_helper` and `imessage_permissions`, macOS only; the setup card and, once shipped, the app's Channels row name the first gap):
+- Helper not installed (`imessage_helper` red) → turn the iMessage switch on, or install it from the app; nothing else works until it is.
+- `full_disk_access` denied → "Needs Full Disk Access" → grant Full Disk Access to Fermix Messages (not to Fermix or Terminal).
+- `db` missing → Messages has never run on this Mac; `unreadable` → the OS error is shown; `schema_unexpected` → a macOS update changed the Messages database and the helper names the missing columns.
+- `automation` denied or not_determined → "Needs Messages automation" → **Grant…** under Messages automation, or switch Fermix Messages on under Automation > Messages in System Settings.
+- `messages_running` false → open Messages; `signed_in` false → sign Messages in to the account Fermix speaks as.
+- `user_session` false → Fermix is not running in your logged-in session (SSH only, or a system-wide service) → run it from your login session.
+- `policy` absent or unconfirmed, or `policy_matches_config` false → **Awaiting confirmation**: the saved owner, account or guests differ from what Fermix Messages last confirmed → **Confirm…** and approve the dialog. Cancelling the dialog leaves it awaiting.
+- Messages arrive but replies fail → Automation was revoked, or the handle has no iMessage (SMS only): Fermix never falls back to SMS.
+- A reply whose delivery Messages did not record is reported as uncertain and never re-sent, because it may have gone.
+
 ## Who may talk: owner and allow lists
 
 - `owner_user_id` is the operator: full tools and owner commands. With no allow list, the owner is the only sender let in.
-- Guests: `allowed_user_ids` (Telegram, Discord, Slack) or `allowed_sender_ids` (WhatsApp, Signal), a list of quoted ids in `config.toml`; neither the app nor browser setup has a field. Guests get read-only chat. Setting a list replaces the owner-only default (the owner still gets in); an empty list (`[]`, or an empty `*_ALLOWED_*_IDS` variable on a Linux or dev install) keeps Telegram, Discord and Signal from starting even with an owner set.
+- Guests: `allowed_user_ids` (Telegram, Discord, Slack) or `allowed_sender_ids` (WhatsApp, Signal, iMessage), a list of quoted ids in `config.toml`; only iMessage's guest list also has a setup field. Guests get read-only chat. Setting a list replaces the owner-only default (the owner still gets in); an empty list (`[]`, or an empty `*_ALLOWED_*_IDS` variable on a Linux or dev install) keeps Telegram, Discord and Signal from starting even with an owner set; on iMessage it only means no guests.
 - `command_allowlist` lets listed guests run owner-tier commands such as `/new` and `/compact`; each must also be on the guest list, or they never reach Fermix.
 - With neither an owner nor a list, Telegram, Discord and Signal refuse to start ("Refusing to start the <channel> adapter" in the boot log) and the Slack and WhatsApp webhooks drop every sender. A sender who is not allowed gets no reply at all.
 - Reminders and skill proposals go to `[fermix_core.jobs] default_delivery_target` when set, else to the owner on the first of Telegram, Signal and WhatsApp with an `owner_user_id`; a Discord or Slack owner needs that target. A scheduled job delivers only where it was told to (its origin, an explicit target, or that default), never to an owner id on its own.
@@ -142,6 +174,7 @@ No public URL: Fermix runs `signal-cli` on the same machine.
 | Slack | member ID `U…` (`W…` on Enterprise Grid) | profile > More > Copy member ID |
 | WhatsApp | your number, digits with country code | your own number |
 | Signal | your number in `+E.164` | your own number |
+| iMessage | your number in `+E.164`, or your email | the handle you message from |
 
 `/whoami` replies "Your user id on this channel: <id>", but only to a sender already allowed in, so it confirms an id and can never discover one. The boot log's "Run /whoami" advice does not work on a first setup.
 

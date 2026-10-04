@@ -12,7 +12,8 @@ defmodule FermixCore.Config do
     whatsapp: :allowed_sender_ids,
     discord: :allowed_user_ids,
     slack: :allowed_user_ids,
-    signal: :allowed_sender_ids
+    signal: :allowed_sender_ids,
+    imessage: :allowed_sender_ids
   ]
 
   @type config_error :: {:error, :not_configured}
@@ -129,6 +130,15 @@ defmodule FermixCore.Config do
   end
 
   defp channel_ingress_key(name), do: Keyword.get(@channel_ingress_keys, name)
+
+  # iMessage takes the M53 OWN-3 semantics from its first release (M54 §9.2): the
+  # ingress list is the owner and the explicit guests, so an empty guest list
+  # means "no guests", never "no owner".
+  defp channel_ingress_user_ids(:imessage, config, key) do
+    owner = normalize_id(Keyword.get(config, :owner_user_id))
+
+    Enum.uniq(List.wrap(owner) ++ normalize_ids(Keyword.get(config, key, [])))
+  end
 
   defp channel_ingress_user_ids(name, config, key) do
     case Keyword.fetch(config, key) do

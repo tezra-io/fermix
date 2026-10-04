@@ -3,7 +3,7 @@ defmodule FermixCore.Management.Capabilities do
   `capabilities.install.start` and `browser.install.start`: the downloads a
   setup surface can start (M34 native setup §7.3).
 
-  Three targets, one job kind. Each is idempotent — an installed half
+  Four targets, one job kind. Each is idempotent — an installed half
   short-circuits — so re-running an install after a failure resumes rather than
   starting over, and each is single-flight per target so two panes cannot
   download the same helper twice.
@@ -21,6 +21,7 @@ defmodule FermixCore.Management.Capabilities do
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.ChromeLauncher
   alias FermixCore.ComputerUse.SidecarInstaller, as: ComputerUseInstaller
+  alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
   alias FermixCore.Management.Jobs
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
@@ -29,7 +30,7 @@ defmodule FermixCore.Management.Capabilities do
 
   require Logger
 
-  @targets ~w(computer_use_sidecar meetbot local_stt)
+  @targets ~w(computer_use_sidecar meetbot local_stt imessage_helper)
 
   @no_chromium_build "Fermix has no Chromium download for this machine."
   @browser_still_missing "The download finished, but Fermix still finds no browser to run " <>
@@ -179,6 +180,21 @@ defmodule FermixCore.Management.Capabilities do
     end
   end
 
+  # The Fermix Messages helper (M54 §10.2): one signed bundle, verified and
+  # registered before it is placed, so a refusal names which check stopped it.
+  defp install_run("imessage_helper", opts) do
+    install = Keyword.get(opts, :install, &IMessageHelper.install/0)
+
+    fn _job_id, report ->
+      report.({:phase, "sidecar_downloading"})
+
+      case install.() do
+        {:ok, _path} -> {:ok, installed("imessage_helper")}
+        {:error, reason} -> {:error, {:unavailable, imessage_sentence(reason)}}
+      end
+    end
+  end
+
   defp install_meetbot_browser(install_browser, report) do
     report.({:phase, "downloading"})
     done("meetbot", install_browser.())
@@ -208,6 +224,28 @@ defmodule FermixCore.Management.Capabilities do
     do: "There is no meeting notetaker build for this machine (#{target})."
 
   defp meetbot_sentence(reason), do: sentence(reason)
+
+  defp imessage_sentence(:pin_not_set),
+    do: "This Fermix build pins no Fermix Messages release yet, so there is nothing to install."
+
+  defp imessage_sentence({:helper_unverified, _reason} = reason) do
+    log_install_refusal(reason)
+    "The download is not signed by Fermix, so it was not installed."
+  end
+
+  defp imessage_sentence({:unsupported_platform, :imessage}),
+    do: "iMessage runs only on the Mac whose Messages it reads."
+
+  defp imessage_sentence({:lsregister_failed, _code, _output} = reason) do
+    log_install_refusal(reason)
+    "Fermix Messages was installed but could not be registered with this Mac."
+  end
+
+  defp imessage_sentence(reason), do: sentence(reason)
+
+  defp log_install_refusal(reason) do
+    Logger.error("management capabilities: imessage_helper refused: #{Redaction.format(reason)}")
+  end
 
   defp sentence(:not_installed),
     do: "The helper this step needs is not installed yet."

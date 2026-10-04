@@ -123,6 +123,28 @@ defmodule FermixChannels.Gateway.OwnerInboxApprovalTest do
     assert :error = Confirmations.peek(token)
   end
 
+  # MILESTONE_54 §7.5: an iMessage conversation is keyed by the counterpart's
+  # handle, so the owner's DM chat id is the owner id, as on Telegram.
+  test "an iMessage owner inbox qualifies: its DM chat id is the owner's handle" do
+    owner = "+15551234567"
+
+    opts =
+      telegram_owner(
+        jobs_config: [default_delivery_target: %{channel: "imessage", chat_id: owner}],
+        configured_owners: %{"imessage" => owner}
+      )
+
+    assert {:ok, token, :new} = OwnerInboxApproval.request(request(), opts)
+
+    assert_received {:stub_adapter, {:approval, message, _text, ^token}}
+    assert message.channel == "imessage"
+    assert message.reply_target == owner
+
+    assert {:ok, record} = Confirmations.peek(token)
+    assert record.channel == "imessage"
+    assert record.chat_id == owner
+  end
+
   test "no owner inbox, or one on a platform whose DM is not the owner id, is refused" do
     assert {:error, :no_owner_inbox} =
              OwnerInboxApproval.request(request(), telegram_owner(configured_owners: %{}))

@@ -86,7 +86,10 @@ defmodule FermixCore.Management.Protocol do
     {"mobile.pair.cancel", 2},
     {"mobile.devices.list", 2},
     {"mobile.devices.revoke", 2},
-    {"browser.install.start", 2}
+    {"browser.install.start", 2},
+    {"imessage.permissions.get", 2},
+    {"imessage.grant.start", 2},
+    {"imessage.policy.confirm", 2}
   ]
   @methods Enum.map(@method_minimums, fn {method, _minimum} -> method end)
   @method_minimum_versions Map.new(@method_minimums)

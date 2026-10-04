@@ -133,6 +133,28 @@ defmodule FermixChannels.Bench.RunnerTest do
     assert scenario.stages["channel_message"].count >= 1
   end
 
+  # MILESTONE_54 §17: the iMessage adapter against the bench's fake helper.
+  test "runs every iMessage adapter scenario through the fake helper" do
+    scenarios = [
+      "imessage_parse_inbound",
+      "imessage_send_short_text",
+      "imessage_send_long_text_split",
+      "imessage_send_media",
+      "imessage_e2e_text"
+    ]
+
+    assert Enum.all?(scenarios, &(&1 in Runner.list_scenarios()))
+
+    assert {:ok, report} = Runner.run(scenarios: scenarios, samples: 1, warmup: 0, output: nil)
+
+    for name <- scenarios do
+      assert report.scenarios[name].messages_processed == 1, name
+    end
+
+    assert report.scenarios["imessage_send_long_text_split"].stages["channel_message"].count > 1
+    assert report.scenarios["imessage_e2e_text"].stages["agent_message"].count == 1
+  end
+
   test "runs webhook idempotency smoke scenario" do
     assert {:ok, report} =
              Runner.run(

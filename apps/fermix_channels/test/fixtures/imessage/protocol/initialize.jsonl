@@ -1,0 +1,4 @@
+{"id":1,"method":"initialize","params":{"protocol_version":1,"client":"fermix 0.12.1"}}
+{"id":1,"result":{"protocol_version":1,"helper_version":"0.1.0","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":4815162342,"birth_time":"2026-09-01T08:00:00Z"}}}
+{"id":1,"result":{"protocol_version":1,"helper_version":"0.1.0","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":null}}
+{"id":1,"error":{"kind":"protocol_mismatch","message":"helper speaks protocol 2, client asked for 1","data":{"helper":2,"client":1}}}

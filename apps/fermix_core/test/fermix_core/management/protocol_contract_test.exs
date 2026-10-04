@@ -315,6 +315,29 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert shape(finished) == shape(fixture_result("computer_use.grant.start", %{}))
   end
 
+  # The iMessage grant and confirmation goldens are terminal job views, because
+  # each job's whole answer is the probe it finishes with (plus, for a
+  # confirmation, its outcome). Each runs the real job against the live registry
+  # with only the helper injected.
+  test "the golden iMessage grant and confirmation results are the ones their jobs finish with" do
+    cases = [
+      {"imessage.grant.start", %{"service" => "automation"}},
+      {"imessage.policy.confirm", %{}}
+    ]
+
+    for {method, params} <- cases do
+      jobs = jobs()
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+      opts = [operation_opts: [jobs: jobs] ++ imessage_sources()]
+
+      assert {:ok, started} = Router.route(request, opts)
+      assert {:ok, finished} = eventually_terminal(jobs, started["job_id"])
+
+      assert finished["status"] == "completed"
+      assert shape(finished) == shape(fixture_result(method, params))
+    end
+  end
+
   # The browser download's goldens are its two terminal views: the one a client
   # reads the browser's name from, and the one it reads the daemon's sentence
   # from. Each is the job the real run finishes with, against the live registry,
@@ -361,8 +384,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # The section inventory is what three consumers walk, so a fixture that lists
   # a section the daemon does not serve, or omits one it does, is a client
   # rendering a pane that answers nothing.
+  # The export is the Mac's inventory: `channels.imessage` exists only there
+  # (M54 §12), and the app that vendors this contract is a Mac app. The host is
+  # named rather than inherited so every CI leg compares the same list.
   test "the golden section inventory is the one the daemon publishes" do
-    published = Enum.map(Settings.sections(), & &1.id)
+    published = Enum.map(Settings.sections(macos?: true), & &1.id)
 
     fixture =
       "settings.sections"
@@ -670,6 +696,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
        [operation_opts: [jobs: [server: jobs_server()], probe: probe()]]},
       {"computer_use.permissions.get", %{},
        [operation_opts: [probe: fn -> {:ok, permissions()} end]]},
+      {"imessage.permissions.get", %{}, [operation_opts: imessage_sources()]},
       # The listing runs against the daemon's own registry and baked catalog with
       # no seam at all: it reads and writes nothing, so the shape under test is
       # the live projection rather than an injected stand-in.
@@ -880,8 +907,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # reads the vendored fixture for the keys it binds, so a section with no
   # golden result is a pane whose keys nothing on the far side is held to.
   defp settings_cases do
-    for section <- Settings.sections(),
-        do: {"settings.get", %{"section" => section.id}, []}
+    for section <- Settings.sections(macos?: true),
+        do: {"settings.get", %{"section" => section.id}, [macos?: true]}
   end
 
   # Sources, never rendered rows: the projection under test is the daemon's.
@@ -914,6 +941,39 @@ defmodule FermixCore.Management.ProtocolContractTest do
 
   defp permissions do
     %{state: :probed, screen_capture: true, input_control: false, platform: "macos"}
+  end
+
+  # Sources for the iMessage methods: the helper's probe, its stored policy and
+  # the saved section, never a rendered view.
+  defp imessage_sources do
+    probe = %{
+      helper_version: "0.1.0",
+      full_disk_access: :granted,
+      db: :readable,
+      automation: :granted,
+      messages_running: true,
+      signed_in: true,
+      user_session: true,
+      policy: :confirmed,
+      self_aliases: nil
+    }
+
+    policy = %{
+      posture: :dedicated_account,
+      owner_handle: "+15551234567",
+      handles: ["+15551234567"],
+      confirmed_at: "2026-10-03T12:00:00Z"
+    }
+
+    [
+      macos?: true,
+      installed?: fn -> true end,
+      config: [posture: :dedicated_account, owner_user_id: "+15551234567"],
+      probe: fn -> {:ok, probe} end,
+      grant: fn _service -> {:ok, probe} end,
+      policy: fn -> {:ok, policy} end,
+      policy_set: fn _policy -> {:ok, %{confirmed_at: "2026-10-03T12:00:00Z"}} end
+    ]
   end
 
   defp jobs_server do

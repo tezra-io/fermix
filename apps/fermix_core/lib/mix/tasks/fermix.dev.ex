@@ -165,7 +165,7 @@ defmodule Mix.Tasks.Fermix.Dev do
 
   defp channels_status(true) do
     enabled =
-      [:telegram, :discord, :signal, :slack, :whatsapp]
+      [:telegram, :discord, :signal, :slack, :whatsapp, :imessage]
       |> Enum.filter(fn ch ->
         :fermix_channels
         |> Application.get_env(ch, [])

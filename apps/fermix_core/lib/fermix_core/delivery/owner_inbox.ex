@@ -19,7 +19,7 @@ defmodule FermixCore.Delivery.OwnerInbox do
   promoted to owner here. Channel presence alone derives nothing.
 
   Only channels whose DM destination *is* the bare owner user id can be derived
-  (Telegram, Signal, WhatsApp). A Discord or Slack DM needs a channel-id
+  (Telegram, Signal, WhatsApp, iMessage). A Discord or Slack DM needs a channel-id
   derivation the adapters do not have, so a bare user id there would fail at
   send time while every gate reported OK; those channels reach the owner
   through an explicit rung-one target only.
@@ -43,11 +43,12 @@ defmodule FermixCore.Delivery.OwnerInbox do
   alias FermixCore.Delivery.ChannelSend
 
   # All owner-capable channels, in the order owner identity is read.
-  @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp]
+  @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp, :imessage]
   # The same channels as platform names: the ones whose inbox an owner id makes.
   @remote_platforms Enum.map(@owner_channel_order, &Atom.to_string/1)
   # The derived rung: channels where the DM destination IS the bare owner id.
-  @derived_inbox_order ["telegram", "signal", "whatsapp"]
+  # An iMessage direct conversation is keyed by the owner's handle (M54 §7.5).
+  @derived_inbox_order ["telegram", "signal", "whatsapp", "imessage"]
   # Local targets are owner-private by construction — nobody else can read them.
   @local_channels ["cli", "daemon"]
   # Jobs-target destination keys, in `Jobs.DeliveryDefaults`' own precedence.

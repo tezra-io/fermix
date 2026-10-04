@@ -52,7 +52,9 @@ defmodule FermixCore.Prompt.ChannelPresentation do
       "- Discord caps a single message near 2,000 characters; keep sections tighter here.",
     "slack" => nil,
     "signal" => nil,
-    "whatsapp" => nil
+    "whatsapp" => nil,
+    "imessage" =>
+      "- iMessage shows plain text only: no headings, bold or tables survive, so lead with the answer and keep lists short."
   }
 
   # Chat types the channels report for a shared room (telegram: group/supergroup/

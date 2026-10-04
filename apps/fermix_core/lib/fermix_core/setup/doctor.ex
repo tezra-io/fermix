@@ -152,7 +152,7 @@ defmodule FermixCore.Setup.Doctor do
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
   @venice_default_base_url "https://api.venice.ai/api/v1"
-  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :mobile]
+  @command_channels [:telegram, :whatsapp, :discord, :slack, :signal, :imessage, :mobile]
   @web_search_probe_query "fermix web search health check"
   # A landmark, not a category: the place probe is never anchored (it must not
   # read the owner's saved location), and an unanchored category query can

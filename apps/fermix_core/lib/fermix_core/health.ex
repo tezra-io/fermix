@@ -67,6 +67,15 @@ defmodule FermixCore.Health do
       child: FermixChannels.Channels.Signal.Listener,
       health_provider_key: nil
     },
+    # iMessage (M54 §5.1) is probed through its Supervisor: it owns the helper's
+    # Port and the Listener, and both are its children.
+    %{
+      key: :imessage,
+      name: "imessage",
+      default_enabled: false,
+      child: FermixChannels.Channels.IMessage.Supervisor,
+      health_provider_key: nil
+    },
     %{
       key: :acp,
       name: "acp",

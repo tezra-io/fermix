@@ -220,7 +220,7 @@ daemon onto anything else.
 | `plugins.disconnect` | `name` | Forgets the credential behind one plugin, locally: an OAuth session is deleted, a stored token is removed from the keyring, and neither is revoked upstream. Minimum version `2`. |
 | `plugins.oauth_client.set` | `provider`, `client_id`, `redirect_port`, `region` | Registers one sign-in client. The client secret is not a parameter: it arrives through `secret.set`. `region` is required exactly where the client row publishes a non-empty `regions`, and refused where it publishes none; it is optional on the wire, like `secret_present`, so an older engine is unaffected. Minimum version `2`. |
 | `plugins.setting.set` | `name`, `key`, `value` | Writes one manifest-declared setting and answers with the plugin's row. `value` is always a string, and a setting whose `kind` is `boolean` takes only `true` or `false`. Minimum version `2`. |
-| `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, or the on-device speech backend. A job. Minimum version `2`. |
+| `capabilities.install.start` | `target` | Installs the computer use helper, the meeting notetaker, the on-device speech backend, or the iMessage helper (`imessage_helper`). A job. Minimum version `2`. |
 | `meetings.signin.start` | none | Starts the notetaker's one-time interactive sign-in. A job, because it waits for a person. Minimum version `2`. |
 | `computer_use.grant.start` | none | Raises the OS permission prompts and answers with what was granted. A job, and only ever on an explicit ask. Minimum version `2`. |
 | `computer_use.permissions.get` | none | The current, non-prompting permission state: whether the helper is installed, which grants it holds, and when they were read. Minimum version `2`. |
@@ -232,6 +232,9 @@ daemon onto anything else.
 | `mobile.devices.list` | none | Every paired phone, oldest first, at most 64, read from the paired-device file while the channel is not running. Minimum version `2`. |
 | `mobile.devices.revoke` | `device_id` | Forgets one paired phone and closes its live connection, and answers with the id and `revoked: true`. While the channel is not running it forgets the phone in the paired-device file. Minimum version `2`. |
 | `browser.install.start` | none | Downloads a browser for tasks: the meeting notetaker's helper, then the Chromium build it is pinned to, and completes with the name of the browser tasks now run in. A job. Minimum version `2`. |
+| `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
+| `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
+| `imessage.policy.confirm` | none | Asks the helper to confirm the saved recipients; when they differ from the ones it holds, the helper shows its own dialog naming every handle. A job that completes with the permissions view plus `outcome`. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -247,7 +250,8 @@ Notes that the shapes alone do not carry:
   60000 ms, `plugin_install` 600000 ms, `plugin_check` 30000 ms,
   `plugin_workspaces_discover` 60000 ms, `plugin_workspace_select` 60000 ms,
   `capability_install` 900000 ms, `meetings_signin` 660000 ms,
-  `computer_use_grant` 120000 ms, `browser_install` 900000 ms. At most 4 jobs run at once, at most one per
+  `computer_use_grant` 120000 ms, `browser_install` 900000 ms, `imessage_grant`
+  120000 ms, `imessage_policy_confirm` 180000 ms. At most 4 jobs run at once, at most one per
   kind and name (`busy` beyond either), and at most 16 finished jobs are
   retained, none older than 600000 ms. A `job_id` this daemon does not retain
   answers `unknown_job`.
@@ -258,7 +262,8 @@ Notes that the shapes alone do not carry:
   `plugin_workspaces_discover`: `listing`; `plugin_workspace_select`: `binding`;
   `capability_install`: `sidecar_downloading`, `downloading`,
   `verifying`; `meetings_signin`: `awaiting_signin`; `computer_use_grant`: none;
-  `browser_install`: `sidecar_downloading`, `downloading`.
+  `browser_install`: `sidecar_downloading`, `downloading`; `imessage_grant`: none;
+  `imessage_policy_confirm`: none.
   `status` is the state a client switches on. A terminal job clears its phase
   unless it `failed` or `timed_out`, where the step it stopped in is part of the
   diagnosis. A run that reports a phase outside its vocabulary fails the job:
@@ -399,6 +404,39 @@ Notes that the shapes alone do not carry:
   the installer rather than from the probe: the feature being switched off says
   nothing about whether the helper is on disk, and that is exactly what decides
   whether a surface offers "install it" or "turn it on".
+- **iMessage exists only on a Mac.** The three `imessage.*` methods answer
+  `unavailable` {`capability`: `imessage`} anywhere else, `settings.sections`
+  publishes no `channels.imessage` there, and `settings.get` refuses that
+  section. On a Mac, `channels.imessage` carries four boot-bound rows:
+  `imessage_posture`, a `choice` whose options are its whole value space
+  (`dedicated_account`, `own_account`) and whose value is the empty string until
+  one is chosen, because the account has no default; `imessage_owner_user_id`
+  (`text`); `imessage_allowed_sender_ids`, the guests (`list`); and the
+  `imessage_enabled` switch. Saving the account, the owner or the guests never
+  turns the channel on: only its switch does. `capabilities.install.start`
+  {`target`: `imessage_helper`} installs Fermix Messages: it checks the
+  download's sha256, extracts the bundle, verifies its signature and Team ID,
+  places it and registers it with LaunchServices, and a refusal names the check
+  that stopped it.
+- **`imessage.permissions.get` never prompts.** With `installed: false` every
+  other field is null. `full_disk_access` is `granted` or `denied`; `db` is
+  `readable`, `missing`, `unreadable` or `schema_unexpected`; `automation` is
+  `granted`, `denied`, `not_determined` or `unknown` (Messages is not running);
+  `signed_in` is null while Automation is not granted, because the helper cannot
+  ask Messages without it; `policy` is `confirmed`, `unconfirmed` or `absent`.
+  `policy_matches_config` is true only when the confirmed recipients are exactly
+  the saved ones; anything else is the state "Awaiting confirmation", cleared by
+  `imessage.policy.confirm` and never by the engine rewriting the helper's
+  record. A probe that cannot run answers `unavailable` {`capability`:
+  `imessage_permissions`}.
+- **An iMessage grant or confirmation waits on a person**, so each is a job
+  whose `result` is the permissions view. A confirmation's `result` adds
+  `outcome`: `confirmed`, or `policy_refused` when the owner pressed Cancel on
+  the helper's dialog. Cancel is a decision, so it completes the job rather than
+  failing it. A confirmation with no saved account or owner, or with an owner
+  that is not a handle of the Messages account on this Mac, fails `refused` with
+  the daemon's sentence. One of each runs at a time (`busy` {`operation`:
+  `imessage_grant`} or `imessage_policy_confirm`).
 - A **check status** is one of `passed`, `warning`, `failed`, `not_applicable`,
   `unavailable`, `skipped`, `cancelled`, `timed_out`. `not_applicable` means
   this distribution does not have the check (the two distribution rows under
@@ -406,7 +444,7 @@ Notes that the shapes alone do not carry:
   `summary` carries one count per status.
 - **Readiness is split into gating and advisory.** A failure carries `gating`,
   the `pane` that can clear it, and a closed-set `detail_key`. Provider
-  failures gate; personalization, the five channels, realtime, and allowed
+  failures gate; personalization, the channels, realtime, and allowed
   sandbox environment variables the daemon cannot read (`sandbox:env_missing`,
   `sandbox:env_helper_failed`, pane `sandbox`, one failure per cause naming
   every affected variable, with `component` `sandbox:env:missing` or

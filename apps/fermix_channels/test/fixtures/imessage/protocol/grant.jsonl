@@ -1,0 +1,3 @@
+{"id":3,"method":"grant","params":{"service":"automation"}}
+{"id":3,"result":{"helper_version":"0.1.0","full_disk_access":"granted","db":"readable","automation":"granted","messages_running":true,"signed_in":true,"user_session":true,"policy":"unconfirmed","self_aliases":["+15550001111"]}}
+{"id":3,"error":{"kind":"no_user_session","message":"no console session to show the prompt in","data":{}}}

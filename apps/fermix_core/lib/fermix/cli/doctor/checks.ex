@@ -34,6 +34,9 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.IMessage
+  alias FermixCore.IMessage.Control, as: IMessageControl
+  alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Net.Egress
@@ -1479,6 +1482,162 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp rtms_lane(false), do: "zoom rtms not configured"
 
   @doc """
+  The Fermix Messages helper (M54 §10.4): whether it is installed, the version
+  this build pins, and the `codesign --verify --deep --strict` plus Team ID
+  check the installer itself runs. Never spawns the helper. Off a Mac the
+  channel does not exist, so the row does not apply.
+
+  Seams: `macos?:`, `enabled?:`, `bundle:` (a `HelperInstaller.bundle_path/0`
+  answer) and `verify:` (a bundle path to `:ok | {:error, reason}`).
+  """
+  @spec imessage_helper(keyword()) :: result()
+  def imessage_helper(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) do
+      imessage_helper_row(
+        Keyword.get_lazy(opts, :bundle, &IMessageHelper.bundle_path/0),
+        Keyword.get_lazy(opts, :enabled?, &imessage_enabled?/0),
+        Keyword.get(opts, :verify, &IMessageHelper.verify_bundle/1)
+      )
+    else
+      not_applicable("imessage helper", "iMessage runs only on a Mac")
+    end
+  end
+
+  defp imessage_helper_row({:error, :not_installed}, false, _verify),
+    do: ok("imessage helper", "Fermix Messages is not installed; iMessage is off")
+
+  defp imessage_helper_row({:error, :not_installed}, true, _verify) do
+    warn(
+      "imessage helper",
+      "iMessage is on but Fermix Messages is not installed; turn iMessage on in the app " <>
+        "to install it"
+    )
+  end
+
+  defp imessage_helper_row({:ok, app}, _enabled?, verify), do: verified_helper_row(verify.(app))
+
+  defp verified_helper_row(:ok) do
+    ok(
+      "imessage helper",
+      "Fermix Messages installed (pinned #{IMessageHelper.pinned_version()}); " <>
+        "signature verified for team #{IMessageHelper.team_id()}"
+    )
+  end
+
+  defp verified_helper_row({:error, {:helper_unverified, reason}}) do
+    fail(
+      "imessage helper",
+      "Fermix Messages (pinned #{IMessageHelper.pinned_version()}) failed signature " <>
+        "verification: #{unverified_reason(reason)}; reinstall it"
+    )
+  end
+
+  defp unverified_reason(:team_id_mismatch), do: "signed by another team"
+  defp unverified_reason(reason) when is_binary(reason), do: reason
+
+  @doc """
+  The Fermix Messages probe (M54 §10.4): one entry per grant, the Messages
+  account and session, and the recipient confirmation, naming the identity to
+  grant exactly. Never prompts: the probe asks with `askUserIfNeeded: false`.
+
+  Full Disk Access missing (or a database that cannot be read) fails the row;
+  any other gap warns, because the channel reads but cannot yet answer. Probes
+  only while iMessage is on and the helper is installed.
+
+  Seams: `macos?:`, `enabled?:`, `installed?:`, `config:` (the saved section),
+  `probe:` and `policy:` (zero-arity `Control.probe/1` and `Control.policy_get/1`).
+  """
+  @spec imessage_permissions(keyword()) :: result()
+  def imessage_permissions(opts \\ []) when is_list(opts) do
+    cond do
+      not Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) ->
+        not_applicable("imessage permissions", "iMessage runs only on a Mac")
+
+      not Keyword.get_lazy(opts, :enabled?, &imessage_enabled?/0) ->
+        ok("imessage permissions", "iMessage is off; nothing was probed")
+
+      not Keyword.get_lazy(opts, :installed?, &IMessageHelper.installed?/0) ->
+        warn("imessage permissions", "Fermix Messages is not installed, so nothing was probed")
+
+      true ->
+        imessage_probed(opts)
+    end
+  end
+
+  defp imessage_probed(opts) do
+    probe = Keyword.get(opts, :probe, fn -> IMessageControl.probe() end)
+
+    case probe.() do
+      {:ok, state} ->
+        imessage_permissions_row(state, imessage_policy_matches?(state, opts))
+
+      {:error, reason} ->
+        fail("imessage permissions", "could not probe Fermix Messages: #{inspect(reason)}")
+    end
+  end
+
+  # The stored policy is read only when the probe says one is confirmed: absent
+  # or unconfirmed already means "awaiting confirmation".
+  defp imessage_policy_matches?(%{policy: :confirmed}, opts) do
+    reader = Keyword.get(opts, :policy, fn -> IMessageControl.policy_get() end)
+    config = Keyword.get_lazy(opts, :config, &imessage_config/0)
+
+    case reader.() do
+      {:ok, policy} -> IMessageControl.policy_matches_config?(policy, config)
+      {:error, _reason} -> false
+    end
+  end
+
+  defp imessage_policy_matches?(_state, _opts), do: false
+
+  defp imessage_permissions_row(state, matches?) do
+    detail =
+      Enum.join(
+        [
+          "Full Disk Access: " <> fda_word(state.full_disk_access),
+          "Messages data: " <> Atom.to_string(state.db),
+          "automation: " <> automation_word(state.automation),
+          "signed in: " <> yes_no_unknown(state.signed_in),
+          "user session: " <> yes_no_unknown(state.user_session),
+          "recipients: " <> recipients_word(state.policy, matches?)
+        ],
+        "; "
+      )
+
+    imessage_status(state, matches?).("imessage permissions", detail)
+  end
+
+  defp imessage_status(%{full_disk_access: :denied}, _matches?), do: &fail/2
+  defp imessage_status(%{db: db}, _matches?) when db != :readable, do: &fail/2
+
+  defp imessage_status(state, matches?) do
+    ready? =
+      state.automation == :granted and state.signed_in == true and state.user_session and matches?
+
+    if ready?, do: &ok/2, else: &warn/2
+  end
+
+  defp fda_word(:granted), do: "granted"
+  defp fda_word(:denied), do: "not granted; grant Fermix Messages, in Full Disk Access"
+
+  defp automation_word(:granted), do: "granted"
+  defp automation_word(:denied), do: "denied; allow Fermix Messages to control Messages"
+  defp automation_word(:not_determined), do: "not asked yet; use Grant to raise the prompt"
+  defp automation_word(:unknown), do: "unknown; open Messages, then probe again"
+
+  defp yes_no_unknown(true), do: "yes"
+  defp yes_no_unknown(false), do: "no"
+  defp yes_no_unknown(:unknown), do: "unknown"
+
+  defp recipients_word(:confirmed, true), do: "confirmed"
+  defp recipients_word(:confirmed, false), do: "differ from settings; awaiting confirmation"
+  defp recipients_word(_policy, _matches?), do: "not confirmed; awaiting confirmation"
+
+  defp imessage_enabled?, do: Keyword.get(imessage_config(), :enabled) == true
+
+  defp imessage_config, do: Application.get_env(:fermix_channels, :imessage, [])
+
+  @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
   load-bearing case is macOS: a GRANTED screen capture but DENIED input control is
   the silent-dropped-click symptom — `CGEventPost` is discarded without Accessibility,
@@ -2687,7 +2846,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp runtime_config_snapshot do
     case ConfigStore.load_runtime_config(resolve_secrets: false) do
       {:ok, snapshot} -> {:ok, snapshot}
-      {:error, reason} -> {:error, inspect(reason)}
+      {:error, reason} -> {:error, ConfigStore.load_error_sentence(reason)}
     end
   rescue
     error in [ArgumentError, RuntimeError] -> {:error, Exception.message(error)}

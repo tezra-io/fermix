@@ -49,7 +49,11 @@ defmodule FermixCore.Management.Jobs do
     },
     meetings_signin: %{budget_ms: 660_000, phases: ["awaiting_signin"]},
     computer_use_grant: %{budget_ms: 120_000, phases: []},
-    browser_install: %{budget_ms: 900_000, phases: ["sidecar_downloading", "downloading"]}
+    browser_install: %{budget_ms: 900_000, phases: ["sidecar_downloading", "downloading"]},
+    # M54 §12: a person answers the Automation prompt, and reads the helper's
+    # own recipient dialog, so both budgets are a person's, not a machine's.
+    imessage_grant: %{budget_ms: 120_000, phases: []},
+    imessage_policy_confirm: %{budget_ms: 180_000, phases: []}
   ]
   @kind_names Keyword.keys(@kinds)
   # The closed failure vocabulary a run may answer with. `timed_out` and
@@ -83,6 +87,8 @@ defmodule FermixCore.Management.Jobs do
           | :meetings_signin
           | :computer_use_grant
           | :browser_install
+          | :imessage_grant
+          | :imessage_policy_confirm
   @type view :: %{String.t() => term()}
   @type report :: ({:phase, String.t()} | {:progress, map()} | {:ready, map()} -> any())
   @type outcome :: {:ok, map()} | {:error, {:unavailable | :refused, String.t()}}
