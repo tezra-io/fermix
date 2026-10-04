@@ -10,8 +10,9 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
   `FermixCore.IMessage.Home.dir/0`), and passed down; tests inject them
   (`:executable`, `:home`, or the `:installer` / `:home_dir` modules). A
   missing helper, recipients the config cannot express, or a helper on another
-  protocol version fails the start loud with that class. The account posture
-  is not resolved here: the Listener reads the one the helper derived.
+  protocol version fails the start loud with that class (the channel registry
+  does not start this supervisor while the helper is missing, §14). The account
+  posture is not resolved here: the Listener reads the one the helper derived.
   """
 
   use Supervisor

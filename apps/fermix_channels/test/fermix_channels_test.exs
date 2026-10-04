@@ -161,4 +161,45 @@ defmodule FermixChannelsTest do
                "telegram ingress is enabled but no owner_user_id or allowed_*_ids list is set"
     end
   end
+
+  # MILESTONE_54 §14: iMessage on without Fermix Messages on disk is a named
+  # refusal at boot, not a failed channels application.
+  describe "missing-helper startup logs" do
+    test "names an enabled channel whose helper is not installed" do
+      previous = Application.get_env(:fermix_channels, :imessage)
+      previous_home = System.get_env("FERMIX_HOME")
+      previous_plugins = Application.get_env(:fermix_core, :plugins)
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("channels-app-missing-helper")
+      System.put_env("FERMIX_HOME", home)
+      Application.delete_env(:fermix_core, :plugins)
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      on_exit(fn ->
+        restore_app_env(:fermix_channels, :imessage, previous)
+        restore_app_env(:fermix_core, :plugins, previous_plugins)
+        restore_fermix_home(previous_home)
+        FermixTestSupport.SafeRm.rm_rf(home)
+      end)
+
+      log =
+        capture_log(fn ->
+          FermixChannels.Application.log_missing_helpers(%{status: :ready, failures: []},
+            macos?: true
+          )
+        end)
+
+      assert log =~ "imessage is enabled but the helper it needs is not installed"
+      assert log =~ "Not starting the imessage channel"
+    end
+  end
+
+  defp restore_app_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_app_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp restore_fermix_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_fermix_home(value), do: System.put_env("FERMIX_HOME", value)
 end

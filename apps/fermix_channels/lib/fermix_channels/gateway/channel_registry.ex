@@ -19,7 +19,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   - `:webhook` (WhatsApp, Slack) is web-triggered — no child.
   - `:loopback` (CLI, daemon) is local/operator — no child, no config key.
 
-  Three optional entry keys:
+  Four optional entry keys:
   - `trust: :local_operator` — the transport is a same-user local surface the
     human owner is sitting at (CLI, daemon). `Gateway.Authorizer` resolves it to
     an operator authorization before any sender lookup, and the ingress gates
@@ -30,6 +30,10 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     Messages of the Mac it runs on). Elsewhere it is never started and never
     reported as missing an owner. Absent means every platform. The host
     platform is injected (`macos?:`) and read from the OS in one place only.
+  - `helper: Module` — the transport runs a helper that must be on disk
+    (`Module.installed?/0`). Without it the channel is not started and
+    `missing_helpers/1` names it, so a pin that moved with a release never
+    fails the boot. Absent means nothing is required.
   """
 
   alias FermixCore.Config
@@ -48,7 +52,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
           optional(:trust) => trust(),
           optional(:ingress_auth) => ingress_auth(),
           optional(:commands?) => boolean(),
-          optional(:platform) => platform()
+          optional(:platform) => platform(),
+          optional(:helper) => module()
         }
 
   @default_channels [
@@ -102,7 +107,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       remote?: true,
       transport: :subprocess,
       child: FermixChannels.Channels.IMessage.Supervisor,
-      platform: :macos
+      platform: :macos,
+      helper: FermixCore.IMessage.HelperInstaller
     },
     # The ACP agent surface (M29). `remote?: true` is deliberate: sessions are
     # persistent, so browsers stay warm across turns and detached continuation
@@ -300,6 +306,22 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   end
 
   @doc """
+  Enabled channels this platform can run whose helper is not on disk (for
+  refusal logging); `transport_children/2` leaves them out.
+  """
+  @spec missing_helpers(keyword()) :: [atom()]
+  def missing_helpers(opts \\ []) when is_list(opts) do
+    host = [macos?: host_macos?(opts)]
+
+    channels()
+    |> Enum.filter(&(Map.has_key?(&1, :helper) and platform_ok?(&1, host)))
+    |> Enum.filter(fn %{config_key: key} = channel ->
+      enabled?(channel_config(key)) and not helper_present?(channel)
+    end)
+    |> Enum.map(& &1.config_key)
+  end
+
+  @doc """
   Whether a registry entry can run on the host described by `opts`. The host
   must be injected (`macos?: boolean`); this function never reads the OS.
   """
@@ -333,7 +355,16 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
     config = channel_config(key)
 
     enabled?(config) and mode_ok?(key, config, transport) and
-      (not needs_ingress?(channel) or ingress_authorized?(key))
+      (not needs_ingress?(channel) or ingress_authorized?(key)) and helper_present?(channel)
+  end
+
+  # A transport that runs a helper (MILESTONE_54 §14: Fermix Messages) starts
+  # only once the helper is on disk; the readiness row and Doctor name the gap.
+  defp helper_present?(channel) do
+    case Map.get(channel, :helper) do
+      nil -> true
+      helper -> helper.installed?()
+    end
   end
 
   defp channel_config(key), do: Application.get_env(:fermix_channels, key, [])
