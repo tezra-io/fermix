@@ -964,7 +964,7 @@ defmodule FermixCore.Realtime.SessionServer do
   end
 
   defp handle_provider_event_internal({:assistant_transcript_done, text}, state) do
-    notify(state.companion, %{type: "assistant_text_delta", text: text})
+    notify(state.companion, %{type: "assistant_text_done", text: text})
     %{state | assistant_transcript: text}
   end
 

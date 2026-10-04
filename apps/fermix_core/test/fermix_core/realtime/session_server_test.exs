@@ -1037,6 +1037,24 @@ defmodule FermixCore.Realtime.SessionServerTest do
     assert_receive {:realtime, %{type: "assistant_text_delta", text: "hello"}}
   end
 
+  # The reply's whole text goes once, as its own event: a client that joins the
+  # deltas must never meet the same words a second time as one more delta.
+  test "a finished reply's whole text is assistant_text_done, never another delta",
+       %{server: server} do
+    for delta <- ["hel", "lo"] do
+      assert :ok =
+               SessionServer.handle_provider_event(server, {:assistant_transcript_delta, delta})
+    end
+
+    assert :ok =
+             SessionServer.handle_provider_event(server, {:assistant_transcript_done, "hello"})
+
+    assert_receive {:realtime, %{type: "assistant_text_delta", text: "hel"}}
+    assert_receive {:realtime, %{type: "assistant_text_delta", text: "lo"}}
+    assert_receive {:realtime, %{type: "assistant_text_done", text: "hello"}}
+    refute_received {:realtime, %{type: "assistant_text_delta", text: "hello"}}
+  end
+
   test "provider function calls execute through ToolBridge and resume response", %{server: server} do
     assert :ok = SessionServer.call_start(server)
 

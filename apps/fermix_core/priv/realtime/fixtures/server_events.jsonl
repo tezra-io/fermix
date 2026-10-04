@@ -3,6 +3,7 @@
 {"type":"audio_delta","audio":"AAAA"}
 {"type":"transcript_delta","text":"hello"}
 {"type":"assistant_text_delta","text":"hi"}
+{"type":"assistant_text_done","text":"hi"}
 {"type":"tool_event","status":"completed"}
 {"type":"usage","input_tokens":1,"output_tokens":2}
 {"type":"call_ready","engine":"openai_live","call_id":"voice_live:17","call_uuid":"3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b","conversation":"chat","tasks_outlive_call":true,"provider_session_id":"sess_live_01H9","expires_at":1788000000,"captions":true}

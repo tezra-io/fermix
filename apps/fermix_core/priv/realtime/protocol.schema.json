@@ -52,6 +52,7 @@
             "audio_delta",
             "transcript_delta",
             "assistant_text_delta",
+            "assistant_text_done",
             "tool_event",
             "usage",
             "error",

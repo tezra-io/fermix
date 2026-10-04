@@ -35,7 +35,7 @@ defmodule FermixCore.Realtime.Protocol do
   @min_supported_version max(1, @protocol_version - 1)
 
   @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel)
-  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta tool_event usage error playback_stop call_ready caption task)
+  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
 
   # One call per daemon: a `call_start` while another Live call is up or still
   # settling is refused with this `error.reason`.

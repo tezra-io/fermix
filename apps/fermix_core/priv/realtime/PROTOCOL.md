@@ -165,8 +165,9 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `server_hello` | `min_version`, `max_version` | Handshake reply; advertises the accepted range. |
 | `state` | `state` (`idle` \| `listening` \| `speaking` \| `muted` \| `thinking` \| `reconnecting`) | Turn/session state. The vocabulary is OPEN and additive: a client that does not recognise a value falls back to its idle presentation, so the daemon may add one without a version bump — but it must never invent a value it has not documented here, or older clients silently render the call as idle. |
 | `audio_delta` | `audio` (base64 PCM16) | A chunk of assistant voice output. |
-| `transcript_delta` | `text` | Incremental transcript of the assistant's speech. |
-| `assistant_text_delta` | `text` | Incremental assistant text. |
+| `transcript_delta` | `text`, `role` (`user`) | Realtime only. The user's whole utterance, once the provider has transcribed it. |
+| `assistant_text_delta` | `text` | Realtime only. Incremental assistant text: the reply's words as they stream. |
+| `assistant_text_done` | `text` | Realtime only. The reply's whole text, once its words are done. It follows the reply's deltas and is never itself a delta. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
 | `usage` | token/cost fields | Per-turn usage. Live adds `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
 | `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another Live call is up (see *One call at a time*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |

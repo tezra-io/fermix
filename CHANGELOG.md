@@ -18,6 +18,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   conversations at that model's known context window instead of the shorter
   one Fermix assumes for a model it does not know.
 
+### Fixed
+
+- **A voice reply's whole text arrives once, as its own event.** The Realtime
+  engine sent a finished reply's text as one more `assistant_text_delta` after
+  its deltas, so a client joining the deltas showed the reply twice. It now
+  sends `assistant_text_done` instead, and the voice protocol's notes for
+  `transcript_delta`, which carries the user's utterance and not the
+  assistant's speech, say so. Clients that ignore both events are unaffected.
+
 ## [0.12.1] - 2026-09-30
 
 ### Fixed
