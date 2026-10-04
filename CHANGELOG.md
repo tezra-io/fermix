@@ -32,6 +32,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   OpenAI Codex picker could not be diagnosed: the ChatGPT sign-in, the
   2-second timeout or an HTTP status. The daemon now logs the provider and
   the reason as a warning. The answer on the wire is unchanged.
+- **The Images setting no longer names a backend that was never chosen.** A
+  `generate_image` block with no `backend` showed OpenAI in the Images row,
+  while the image tool refused to run until a backend was saved. The row
+  now holds no value, so the apps show it as not set, and choosing a backend
+  saves it.
 
 ## [0.12.1] - 2026-09-30
 

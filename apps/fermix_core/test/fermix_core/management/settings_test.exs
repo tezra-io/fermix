@@ -290,6 +290,16 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
     end
 
+    # The image tool refuses to run without a saved backend, so the row must not
+    # name one it would not call.
+    test "an image backend never chosen reads as not set" do
+      Application.put_env(:fermix_core, :tools, generate_image: [model: "gpt-image-2"])
+
+      assert %{"value" => ""} = row("generate_image", "image_backend")
+      assert %{"value" => "gpt-image-2", "options" => []} = row("generate_image", "image_model")
+      refute Enum.any?(rows("generate_image"), &(&1["kind"] == "secret"))
+    end
+
     # The picker's value is the model in force, so a provider nobody has chosen
     # a model for still shows the one the daemon will call.
     test "a model row names the catalog default until a model is chosen" do

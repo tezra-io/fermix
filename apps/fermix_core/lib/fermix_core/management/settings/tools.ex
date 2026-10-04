@@ -163,7 +163,7 @@ defmodule FermixCore.Management.Settings.Tools do
 
   def rows("generate_image", snapshot) do
     block = Source.tool(snapshot, :generate_image)
-    backend = Source.string(block, :backend, "openai")
+    backend = Source.string(block, :backend)
     restart = Row.restart?(:tools)
 
     [
