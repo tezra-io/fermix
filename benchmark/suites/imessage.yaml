@@ -126,7 +126,7 @@ scenarios:
           Messages are granted to Fermix Messages (not to Fermix or Terminal),
           that Messages is open and signed in, that the recipient list is
           confirmed (not "Awaiting confirmation"), that the channel switch is on
-          and Fermix was restarted, and that the phone number or email entered
+          and Fermix was restarted, and that the Apple ID or phone number entered
           is the handle being texted from. Points at Doctor (the iMessage rows)
           or the app's Channels row as where the first gap is named. Does not
           tell the user to open the Messages database by hand.

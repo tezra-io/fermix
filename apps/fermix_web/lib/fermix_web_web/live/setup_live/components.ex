@@ -4198,7 +4198,7 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp channel_fields(:imessage, form) do
     [
       radio_field("Account", "imessage_posture", form.posture, @imessage_postures),
-      text_field("Your phone number or email", "imessage_owner_user_id", form.owner_user_id),
+      text_field("Your Apple ID or phone number", "imessage_owner_user_id", form.owner_user_id),
       text_field(
         "Guests (comma-separated, dedicated account only)",
         "imessage_allowed_sender_ids",

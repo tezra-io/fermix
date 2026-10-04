@@ -438,7 +438,7 @@ defmodule FermixCore.Setup.Wizard do
       },
       %{
         key: :imessage_owner_user_id,
-        label: "Your phone number or email for iMessage",
+        label: "Your Apple ID or phone number for iMessage",
         required?: channel_field_unpersisted?(persisted, :imessage, :owner_user_id, false)
       }
     ]

@@ -66,7 +66,7 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
            {"dedicated_account", "Dedicated account"},
            {"own_account", "Your own account"}
          ]},
-        {:imessage_owner_user_id, :owner_user_id, :text, "Your phone number or email"},
+        {:imessage_owner_user_id, :owner_user_id, :text, "Your Apple ID or phone number"},
         {:imessage_allowed_sender_ids, :allowed_sender_ids, :list, "Guests"}
       ]
     }

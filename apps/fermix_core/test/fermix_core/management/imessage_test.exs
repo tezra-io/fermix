@@ -212,7 +212,7 @@ defmodule FermixCore.Management.IMessageTest do
       assert %{"status" => "failed", "failure" => %{"code" => "refused", "sentence" => s}} =
                await(started, jobs)
 
-      assert s =~ "phone number or email"
+      assert s =~ "Apple ID or phone number"
     end
 
     test "an owner that is not this account's own handle is refused in its own words", %{

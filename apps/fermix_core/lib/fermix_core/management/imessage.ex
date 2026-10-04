@@ -193,7 +193,7 @@ defmodule FermixCore.Management.IMessage do
     do: "Fermix Messages is not installed yet. Turn iMessage on to install it."
 
   defp sentence(:owner_missing),
-    do: "Add your phone number or email for iMessage, then confirm."
+    do: "Add your Apple ID or phone number for iMessage, then confirm."
 
   defp sentence(:posture_missing),
     do: "Choose which account iMessage uses, then confirm."

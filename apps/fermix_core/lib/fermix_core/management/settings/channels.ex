@@ -53,6 +53,23 @@ defmodule FermixCore.Management.Settings.Channels do
   defp available_channels(opts),
     do: Inventory.available_channels(Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0))
 
+  # The one line under a row that needs more than its label. Rows whose label
+  # says everything carry none.
+  @footers %{
+    imessage_posture: "Which Apple ID this Mac's Messages is signed in to.",
+    imessage_owner_user_id:
+      "The address your iPhone sends iMessages from: an Apple ID email, or a phone number with its country code.",
+    imessage_allowed_sender_ids:
+      "Other people who may message Fermix here, by Apple ID or phone number. Only with a dedicated account."
+  }
+
+  @option_hints %{
+    "dedicated_account" =>
+      "A separate Apple ID used only by Fermix. You text it from your phone, and guests may join.",
+    "own_account" =>
+      "Your own Apple ID. Fermix answers only in your conversation with yourself, and nobody else is let in."
+  }
+
   @doc "The rows of one owned section."
   @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
   def rows(@editors_id, snapshot) do
@@ -88,6 +105,7 @@ defmodule FermixCore.Management.Settings.Channels do
   defp row({key, config_key, :text, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :text, label,
       value: Source.string(block, config_key),
+      footer: footer(key),
       restart: restart
     )
   end
@@ -95,6 +113,7 @@ defmodule FermixCore.Management.Settings.Channels do
   defp row({key, config_key, :list, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :list, label,
       value: Source.strings(block, config_key),
+      footer: footer(key),
       restart: restart
     )
   end
@@ -106,10 +125,16 @@ defmodule FermixCore.Management.Settings.Channels do
   defp row({key, config_key, :choice, label, options}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :choice, label,
       value: Source.string(block, config_key),
-      options: Enum.map(options, fn {value, option_label} -> Row.option(value, option_label) end),
+      options:
+        Enum.map(options, fn {value, option_label} ->
+          Row.option(value, option_label, hint: Map.get(@option_hints, value))
+        end),
+      footer: footer(key),
       restart: restart
     )
   end
+
+  defp footer(key), do: Map.get(@footers, key)
 
   # The shipped default differs per channel (Telegram ships on), so the row reads
   # `Readiness`'s own defaults rather than a second copy of them: a channel that

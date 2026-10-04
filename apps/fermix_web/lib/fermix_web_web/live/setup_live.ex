@@ -3080,7 +3080,7 @@ defmodule FermixWebWeb.SetupLive do
     do: flash_error(socket, "That is not a handle of the Messages account on this Mac.")
 
   defp imessage_confirm_flash(socket, {:error, :owner_missing}),
-    do: flash_error(socket, "Save your phone number or email for iMessage, then confirm.")
+    do: flash_error(socket, "Save your Apple ID or phone number for iMessage, then confirm.")
 
   defp imessage_confirm_flash(socket, {:error, :posture_missing}),
     do: flash_error(socket, "Choose which account iMessage uses, then confirm.")
