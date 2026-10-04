@@ -250,10 +250,27 @@ defmodule FermixCore.Providers.ModelCatalog do
   # doctor probe, not the first turn). 2026-introduced models only — the
   # web pane's live upstream catalog offers everything else newest-first,
   # so this curated list stays current-generation.
+  #
+  # A vendor line's newer models sit beside its older entries, which stay
+  # because a person may have configured them, in the vendor list's own order;
+  # the head follows the Anthropic default. The GPT-6 entries take @openai's
+  # 320_000 calibration, not the listed 1,050,000: OpenRouter bills them at the
+  # same 2x/1.5x above 272k input tokens (its listing's pricing override, read
+  # 2026-10-03).
   @openrouter [
     %Entry{
       id: "anthropic/claude-sonnet-4.6",
       label: "Claude Sonnet 4.6 via OpenRouter (default)",
+      context_window: 1_000_000
+    },
+    %Entry{
+      id: "anthropic/claude-sonnet-5.5",
+      label: "Claude Sonnet 5.5 via OpenRouter",
+      context_window: 1_000_000
+    },
+    %Entry{
+      id: "anthropic/claude-fable-5.1",
+      label: "Claude Fable 5.1 via OpenRouter",
       context_window: 1_000_000
     },
     %Entry{
@@ -262,11 +279,28 @@ defmodule FermixCore.Providers.ModelCatalog do
       context_window: 1_000_000
     },
     %Entry{
+      id: "anthropic/claude-opus-5.5",
+      label: "Claude Opus 5.5 via OpenRouter",
+      context_window: 1_000_000
+    },
+    %Entry{
       id: "anthropic/claude-opus-4.8",
       label: "Claude Opus 4.8 via OpenRouter",
       context_window: 1_000_000
     },
+    %Entry{
+      id: "openai/gpt-6-astra",
+      label: "GPT-6 Astra via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{
+      id: "openai/gpt-6.1-sol",
+      label: "GPT-6.1 Sol via OpenRouter",
+      context_window: 320_000
+    },
+    %Entry{id: "openai/gpt-6-luna", label: "GPT-6 Luna via OpenRouter", context_window: 320_000},
     %Entry{id: "openai/gpt-5.5", label: "GPT-5.5 via OpenRouter", context_window: 1_050_000},
+    %Entry{id: "x-ai/grok-4.7", label: "Grok 4.7 via OpenRouter", context_window: 500_000},
     %Entry{id: "x-ai/grok-4.3", label: "Grok 4.3 via OpenRouter", context_window: 1_000_000}
   ]
 
@@ -297,17 +331,20 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Venice's own edge still sees plaintext. The live listing offers the
   # `anonymized` tier too; this curated list does not.
   #
-  # From the listing of 2026-09-19, all tool-calling. The head is the default:
-  # the private model Venice itself tags `most_intelligent`. The rest follow the
-  # live listing's own order — by family, then newest first — so one ordering
-  # rule explains both surfaces. Windows are the listed `context_length`
-  # ([verify] on every addition: an overstated window defers compaction past the
-  # provider's real limit). `reasoning_effort` is omitted for every Venice model
-  # (see the descriptor entry), so no entry caps it. `vision?: false` marks the
-  # one model that takes no images, so an image turn routed to it fails loud at
-  # the capability gate (M14) instead of 400-ing downstream.
+  # From the listing of 2026-09-19, all tool-calling; Grok 4.7 from the listing
+  # of 2026-10-03, where it took the `most_intelligent` tag from Grok 4.6, which
+  # stays for the people who chose it. The head is the default: the private
+  # model Venice itself tags `most_intelligent`. The rest follow the live
+  # listing's own order — by family, then newest first — so one ordering rule
+  # explains both surfaces. Windows are the listed `context_length`, which for
+  # the Grok entries is also @xai's ([verify] on every addition: an overstated
+  # window defers compaction past the provider's real limit). `reasoning_effort`
+  # is omitted for every Venice model (see the descriptor entry), so no entry
+  # caps it. `vision?: false` marks the one model that takes no images, so an
+  # image turn routed to it fails loud at the capability gate (M14) instead of
+  # 400-ing downstream.
   @venice [
-    %Entry{id: "grok-4-6", label: "Grok 4.6 · Private", context_window: 500_000},
+    %Entry{id: "grok-4-7", label: "Grok 4.7 · Private", context_window: 500_000},
     %Entry{
       id: "deepseek-v4-1-flash",
       label: "DeepSeek V4.1 Flash · Private",
@@ -320,6 +357,7 @@ defmodule FermixCore.Providers.ModelCatalog do
       context_window: 1_000_000,
       vision?: false
     },
+    %Entry{id: "grok-4-6", label: "Grok 4.6 · Private", context_window: 500_000},
     %Entry{id: "e2ee-kimi-k3-p", label: "Kimi K3 · Private (TEE)", context_window: 1_000_000},
     %Entry{id: "kimi-k3", label: "Kimi K3 · Private", context_window: 1_000_000},
     %Entry{id: "kimi-k2-6", label: "Kimi K2.6 · Private", context_window: 256_000},

@@ -172,7 +172,7 @@ defmodule FermixCore.Management.ProvidersTest do
       assert {:ok, page} = Providers.models(%{"provider" => "venice", "live" => false})
 
       assert page["source"] == "catalog"
-      assert hd(page["models"]) == %{"id" => "grok-4-6", "label" => "Grok 4.6 · Private"}
+      assert hd(page["models"]) == %{"id" => "grok-4-7", "label" => "Grok 4.7 · Private"}
 
       assert Enum.all?(page["models"], &String.contains?(&1["label"], " · Private"))
     end

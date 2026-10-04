@@ -312,6 +312,19 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.("providers.openai") == []
       refute "gpt-6-sol" in published.("providers.openai")
+
+      assert [
+               "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.1",
+               "anthropic/claude-opus-5.5",
+               "openai/gpt-6-astra",
+               "openai/gpt-6.1-sol",
+               "openai/gpt-6-luna",
+               "x-ai/grok-4.7"
+             ] -- published.("providers.openrouter") == []
+
+      refute "openai/gpt-6-sol" in published.("providers.openrouter")
+      assert "grok-4-7" in published.("providers.venice")
     end
 
     # OpenAI Codex lists the signed-in account's models live: its model row

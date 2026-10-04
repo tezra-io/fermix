@@ -704,9 +704,34 @@ def test_the_established_openrouter_routes_left_the_pending_table():
                 rate.cached_input_per_mtok) == expected, model
 
 
+_OPENROUTER_DIRECT_ROUTES = {"anthropic": "anthropic", "openai": "openai", "x-ai": "xai"}
+
+
+def test_an_openrouter_slug_with_a_direct_entry_carries_its_rate():
+    """OpenRouter adds no per-token markup and a cache leg belongs to the
+    vendor's price list, so a slug the engine also calls directly prices exactly
+    as that entry does. OpenRouter's public listing (`GET /api/v1/models`, read
+    2026-10-03) agrees on every leg for every pair here. Anthropic-direct writes
+    the dots OpenRouter uses as dashes."""
+    pairs = {}
+    for (route, model), rate in pricing.CARD.items():
+        vendor, _, slug = model.partition("/")
+        direct_route = _OPENROUTER_DIRECT_ROUTES.get(vendor)
+        if route != "openrouter" or direct_route is None:
+            continue
+        direct = slug.replace(".", "-") if direct_route == "anthropic" else slug
+        pairs[model] = (rate, pricing.CARD[(direct_route, direct)])
+    # Derived, so it must not pass by finding nothing.
+    assert len(pairs) >= 12, sorted(pairs)
+    for model, (routed, direct) in pairs.items():
+        assert routed == direct, model
+
+
 # Venice's curated `@venice` catalog list, with the figures transcribed from
-# `model_spec.pricing` on the listing read 2026-09-19.
+# `model_spec.pricing` on the listing read 2026-09-19, and grok-4-7's on the
+# listing read 2026-10-03.
 _VENICE_LISTING_RATES = (
+    ("grok-4-7", (2.27, 6.80, 0.57)),
     ("grok-4-6", (2.27, 6.80, 0.57)),
     ("deepseek-v4-1-flash", (0.375, 1.50, 0.0075)),
     ("z-ai-glm-5-3-flash", (0.15, 0.50, 0.03)),
@@ -734,7 +759,7 @@ def test_venice_prices_the_tee_surface_exactly_like_the_plain_one():
 def test_venices_cached_input_discount_is_per_model_not_a_house_rate():
     """No ratio derives one Venice leg from another, so none may be inferred.
 
-    The discount runs from -98% to -75% across these eight. A reader who
+    The discount runs from -98% to -75% across these nine. A reader who
     "corrects" deepseek-v4-1-flash's 0.0075 to a tenth of input — the house rate
     every other vendor on this card happens to use — overstates a cached token
     on it five-fold.
@@ -751,7 +776,8 @@ def test_venices_cached_input_discount_is_per_model_not_a_house_rate():
 def test_no_venice_entry_claims_a_cache_write_rate_the_listing_never_published():
     # Venice publishes `cache_write` on 26 of its 117 text models, every one of
     # them an `anonymized` id proxied to another vendor, and on none of its 68
-    # `private` ones — which is all eight of these. An absent key is the vendor
+    # `private` ones — which is all nine of these (on 2026-10-03, 32 of 128 and
+    # still none of the 70 private ones). An absent key is the vendor
     # saying nothing, so the leg is `None`. Spelling it BILLS_AT_INPUT_RATE
     # would assert a "no premium" the vendor never stated, which is the Mistral
     # defect with the sign flipped.
@@ -787,7 +813,7 @@ def test_a_venice_read_count_bills_at_the_discount_but_stays_ceiling():
 
 
 def test_a_venice_model_outside_the_curated_list_is_unpriced_not_silently_zero():
-    # The picker offers every model Venice lists, not just the carded eight, so
+    # The picker offers every model Venice lists, not just the carded nine, so
     # an operator can route to one that has no card entry. It must surface as an
     # actionable route name, never as a $0 cell.
     result = pricing.price([Span("qwen-3-8-max", "venice", "chat_completions",
