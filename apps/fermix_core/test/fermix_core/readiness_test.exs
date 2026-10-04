@@ -3,6 +3,7 @@ defmodule FermixCore.ReadinessTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
+  alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Env
@@ -233,7 +234,7 @@ defmodule FermixCore.ReadinessTest do
           home,
           "plugins",
           "imessage_helper",
-          "0.1.0",
+          HelperInstaller.pinned_version(),
           "macos-universal",
           "Fermix Messages.app",
           "Contents",
