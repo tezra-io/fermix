@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" role="img" aria-label="iMessage">
+  <!-- Fermix's own iMessage mark (first-party artwork, not Apple's icon): a green speech
+       bubble with a typing ellipsis, in the flat language of the other setup logos. -->
+  <path d="M12 3.5c-5 0-9 3.3-9 7.4 0 2.3 1.3 4.4 3.4 5.8-.2 1.2-.8 2.4-1.9 3.3 1.9-.1 3.6-.8 4.9-1.9.8.2 1.7.3 2.6.3 5 0 9-3.3 9-7.5s-4-7.4-9-7.4z" fill="#34c759" />
+  <circle cx="8.2" cy="10.9" r="1.35" fill="#ffffff" />
+  <circle cx="12" cy="10.9" r="1.35" fill="#ffffff" />
+  <circle cx="15.8" cy="10.9" r="1.35" fill="#ffffff" />
+</svg>
