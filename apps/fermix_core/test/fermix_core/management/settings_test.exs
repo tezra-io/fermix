@@ -1065,9 +1065,10 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
-  # M54 §12. The posture is a closed choice (D7), the guests a list, and saving
-  # any of them never turns the channel on: only its own switch does (M53
-  # APP-5, from this channel's first release).
+  # M54 §12. The account is not asked: the helper derives it when the
+  # recipients are confirmed. The guests are a list, and saving any row never
+  # turns the channel on: only its own switch does (M53 APP-5, from this
+  # channel's first release).
   describe "the iMessage section" do
     test "exists on a Mac and nowhere else" do
       assert %{id: "channels.imessage", pane: "channels", title: "iMessage"} in Settings.sections(
@@ -1083,52 +1084,52 @@ defmodule FermixCore.Management.SettingsTest do
                Settings.apply("channels.imessage", %{"imessage_enabled" => true}, macos?: false)
     end
 
-    test "publishes the posture choice, the owner, the guests and the switch" do
+    test "publishes the owner, the guests and the switch, and no account choice" do
       Application.put_env(:fermix_channels, :imessage, enabled: false)
 
       assert Enum.map(rows("channels.imessage"), &{&1["key"], &1["kind"], &1["value"]}) == [
-               {"imessage_posture", "choice", ""},
                {"imessage_owner_user_id", "text", ""},
                {"imessage_allowed_sender_ids", "list", []},
                {"imessage_enabled", "toggle", false}
              ]
 
-      assert option_values("channels.imessage", "imessage_posture") == [
-               "dedicated_account",
-               "own_account"
-             ]
+      assert %{
+               "label" => "Your Apple ID or phone number",
+               "footer" => "The address your iPhone sends iMessages from."
+             } = row("channels.imessage", "imessage_owner_user_id")
+
+      assert %{"label" => "Guests", "footer" => "Others who may message Fermix here."} =
+               row("channels.imessage", "imessage_allowed_sender_ids")
 
       assert Enum.all?(rows("channels.imessage"), & &1["restart"])
     end
 
-    test "a saved posture reads back as its word" do
+    test "saved guests read back as their handles" do
       Application.put_env(:fermix_channels, :imessage,
-        posture: :dedicated_account,
         owner_user_id: "+15551234567",
         allowed_sender_ids: ["friend@example.com"]
       )
 
-      assert %{"value" => "dedicated_account"} = row("channels.imessage", "imessage_posture")
+      assert %{"value" => "+15551234567"} = row("channels.imessage", "imessage_owner_user_id")
 
       assert %{"value" => ["friend@example.com"]} =
                row("channels.imessage", "imessage_allowed_sender_ids")
     end
 
-    test "a posture outside the published options is refused under its control" do
+    test "an account choice is no setting of the section" do
       assert {:error, {:invalid_params, "imessage_posture", _sentence}} =
-               Settings.apply("channels.imessage", %{"imessage_posture" => "bot_account"},
+               Settings.apply("channels.imessage", %{"imessage_posture" => "dedicated_account"},
                  macos?: true
                )
     end
 
-    test "saving the account and the owner never switches the channel on" do
+    test "saving the owner and the guests never switches the channel on" do
       Application.put_env(:fermix_channels, :imessage, enabled: false)
 
       assert {:ok, _applied} =
                Settings.apply(
                  "channels.imessage",
                  %{
-                   "imessage_posture" => "dedicated_account",
                    "imessage_owner_user_id" => "+1 555 123 4567",
                    "imessage_allowed_sender_ids" => ["Friend@Example.com"]
                  },
@@ -1137,7 +1138,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       section = Application.get_env(:fermix_channels, :imessage)
       assert section[:enabled] == false
-      assert section[:posture] == :dedicated_account
+      refute Keyword.has_key?(section, :posture)
       assert section[:owner_user_id] == "+15551234567"
       assert section[:allowed_sender_ids] == ["friend@example.com"]
       refute Keyword.has_key?(section, :mode)

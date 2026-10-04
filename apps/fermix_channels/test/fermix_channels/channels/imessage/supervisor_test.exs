@@ -28,6 +28,8 @@ defmodule FermixChannels.Channels.IMessage.SupervisorTest do
         printf '{"id":%s,"result":{"protocol_version":%s,"helper_version":"0.0.0-test","macos_version":"27.0","bundle_id":"io.tezra.fermix.messages","db_generation":{"inode":9,"birth_time":"2026-09-01T00:00:00Z"}}}\\n' "$id" "$version" ;;
       probe)
         printf '{"id":%s,"result":{"helper_version":"0.0.0-fake","full_disk_access":"granted","db":"readable","automation":"granted","messages_running":true,"signed_in":true,"user_session":true,"policy":"confirmed","self_aliases":[]}}\\n' "$id" ;;
+      policy.get)
+        printf '{"id":%s,"result":{"posture":"dedicated_account","owner_handle":"+15551234567","handles":["+15551234567"],"confirmed_at":"2026-10-01T09:30:00Z"}}\\n' "$id" ;;
       watch.subscribe)
         printf '{"id":%s,"result":{"started_at_rowid":500,"replay_skipped":0}}\\n' "$id" ;;
       shutdown)
@@ -65,7 +67,7 @@ defmodule FermixChannels.Channels.IMessage.SupervisorTest do
       listener_name: :"imessage_sup_listener_#{unique}",
       executable: executable,
       home: home,
-      policy: %{posture: :dedicated_account, owner: "+15551234567", handles: ["+15551234567"]}
+      recipients: %{owner: "+15551234567", handles: ["+15551234567"]}
     ]
 
     %{home: home, executable: executable, opts: opts}
@@ -103,9 +105,9 @@ defmodule FermixChannels.Channels.IMessage.SupervisorTest do
     assert IMessage.Supervisor.start_link(missing) == {:error, {:helper_missing, :not_installed}}
   end
 
-  test "without an injected policy the channel's config must name one", ctx do
+  test "without injected recipients the channel's config must name its owner", ctx do
     previous = Application.get_env(:fermix_channels, :imessage)
-    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
+    Application.put_env(:fermix_channels, :imessage, enabled: true)
 
     on_exit(fn ->
       case previous do
@@ -114,8 +116,8 @@ defmodule FermixChannels.Channels.IMessage.SupervisorTest do
       end
     end)
 
-    opts = Keyword.delete(ctx.opts, :policy)
-    assert IMessage.Supervisor.start_link(opts) == {:error, {:invalid_posture, nil}}
+    opts = Keyword.delete(ctx.opts, :recipients)
+    assert IMessage.Supervisor.start_link(opts) == {:error, :owner_not_configured}
   end
 
   defp assert_eventually(fun, attempts \\ 400)

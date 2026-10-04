@@ -25,7 +25,10 @@ defmodule FermixChannels.Channels.IMessage.Protocol do
   @methods ~w(initialize probe grant policy.get policy.set watch.subscribe watch.unsubscribe
               messages.after send.text send.file attachment.fetch shutdown)
 
-  @events ~w(message watch.overflow db.state send.reconciled)
+  # `policy.state` is the helper's runtime refusal: Messages on this Mac is now
+  # signed in as the owner's own address (`owner_is_this_mac`), with the owner
+  # already redacted.
+  @events ~w(message watch.overflow db.state send.reconciled policy.state)
 
   @error_kinds %{
     "not_initialized" => :not_initialized,
@@ -39,6 +42,7 @@ defmodule FermixChannels.Channels.IMessage.Protocol do
     "policy_refused" => :policy_refused,
     "policy_violation" => :policy_violation,
     "owner_not_self" => :owner_not_self,
+    "owner_is_this_mac" => :owner_is_this_mac,
     "not_signed_in" => :not_signed_in,
     "no_user_session" => :no_user_session,
     "service_not_imessage" => :service_not_imessage,
@@ -63,6 +67,7 @@ defmodule FermixChannels.Channels.IMessage.Protocol do
           | :policy_refused
           | :policy_violation
           | :owner_not_self
+          | :owner_is_this_mac
           | :not_signed_in
           | :no_user_session
           | :service_not_imessage

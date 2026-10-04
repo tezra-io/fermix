@@ -12,6 +12,10 @@ defmodule FermixCore.Management.IMessage do
 
   A confirmation the owner cancels is how the job ends (`outcome:
   "policy_refused"`), never how it fails: Cancel is a decision, not a fault.
+  The request names the owner and the recipients only: the helper derives the
+  account posture as it confirms them, and refuses an owner that is the
+  address Messages on this Mac is signed in as (`owner_is_this_mac`) until the
+  own-account mode is supported.
 
   Off a Mac the channel does not exist, so every method is unavailable there.
   """
@@ -113,6 +117,9 @@ defmodule FermixCore.Management.IMessage do
   defp confirmed({:error, {:helper_error, :owner_not_self, _message}}, _opts),
     do: {:error, {:refused, sentence(:owner_not_self)}}
 
+  defp confirmed({:error, {:helper_error, :owner_is_this_mac, _message}}, _opts),
+    do: {:error, {:refused, sentence(:owner_is_this_mac)}}
+
   defp confirmed({:error, reason}, _opts), do: {:error, {:unavailable, sentence(reason)}}
 
   # Either way the job ends, the pane redraws from the probe it finishes with.
@@ -195,11 +202,13 @@ defmodule FermixCore.Management.IMessage do
   defp sentence(:owner_missing),
     do: "Add your Apple ID or phone number for iMessage, then confirm."
 
-  defp sentence(:posture_missing),
-    do: "Choose which account iMessage uses, then confirm."
-
   defp sentence(:owner_not_self),
     do: "That is not a handle of the Messages account on this Mac."
+
+  defp sentence(:owner_is_this_mac),
+    do:
+      "Messages on this Mac is signed in as this address. Sign Messages in with a " <>
+        "separate Apple ID for Fermix, then confirm again."
 
   defp sentence(:timeout), do: "Nobody answered in time. Try again when you are at the Mac."
 

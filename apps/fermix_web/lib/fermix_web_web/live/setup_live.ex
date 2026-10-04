@@ -152,7 +152,6 @@ defmodule FermixWebWeb.SetupLive do
     :slack_owner_user_id,
     :signal_account,
     :signal_owner_user_id,
-    :imessage_posture,
     :imessage_owner_user_id,
     :imessage_allowed_sender_ids,
     # The ACP listener is a supervised transport child started at boot, so
@@ -1803,14 +1802,12 @@ defmodule FermixWebWeb.SetupLive do
     }
   end
 
-  # The account posture has no default (M54 D2), so an unsaved one reads as
-  # nothing chosen rather than as one of the two.
+  # No account choice: the helper derives it when it confirms the recipients.
   defp imessage_form(channels) do
     config = Keyword.get(channels, :imessage, [])
 
     %{
       enabled: channel_enabled?(config, false),
-      posture: config |> Keyword.get(:posture) |> safe_string(),
       owner_user_id: safe_string(Keyword.get(config, :owner_user_id)),
       allowed_sender_ids: Enum.join(Keyword.get(config, :allowed_sender_ids, []), ", ")
     }
@@ -3040,7 +3037,6 @@ defmodule FermixWebWeb.SetupLive do
 
   defp put_imessage_answers(answers, params, true) do
     answers
-    |> maybe_put_string(:imessage_posture, params["imessage_posture"])
     |> maybe_put_string(:imessage_owner_user_id, params["imessage_owner_user_id"])
     |> put_imessage_guests(params["imessage_allowed_sender_ids"])
   end
@@ -3079,11 +3075,16 @@ defmodule FermixWebWeb.SetupLive do
   defp imessage_confirm_flash(socket, {:error, {:helper_error, :owner_not_self, _message}}),
     do: flash_error(socket, "That is not a handle of the Messages account on this Mac.")
 
+  defp imessage_confirm_flash(socket, {:error, {:helper_error, :owner_is_this_mac, _message}}),
+    do:
+      flash_error(
+        socket,
+        "Messages on this Mac is signed in as this address. Sign Messages in with a " <>
+          "separate Apple ID for Fermix, then confirm again."
+      )
+
   defp imessage_confirm_flash(socket, {:error, :owner_missing}),
     do: flash_error(socket, "Save your Apple ID or phone number for iMessage, then confirm.")
-
-  defp imessage_confirm_flash(socket, {:error, :posture_missing}),
-    do: flash_error(socket, "Choose which account iMessage uses, then confirm.")
 
   defp imessage_confirm_flash(socket, {:error, reason}),
     do: flash_error(socket, "Couldn't confirm the recipients: #{Redaction.format(reason)}")

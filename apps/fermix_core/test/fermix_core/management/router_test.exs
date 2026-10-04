@@ -809,10 +809,12 @@ defmodule FermixCore.Management.RouterTest do
         Keyword.merge(opts,
           macos?: true,
           installed?: fn -> true end,
-          config: [posture: :dedicated_account, owner_user_id: "+15551234567"],
+          config: [owner_user_id: "+15551234567"],
           probe: fn -> {:ok, probe} end,
           grant: fn :automation -> {:ok, probe} end,
-          policy_set: fn _policy -> {:ok, %{confirmed_at: "2026-10-01T10:00:00Z"}} end
+          policy_set: fn _policy ->
+            {:ok, %{confirmed_at: "2026-10-01T10:00:00Z", posture: :dedicated_account}}
+          end
         )
 
       assert {:ok, %{"installed" => true, "policy" => "absent"}} =

@@ -64,7 +64,6 @@ defmodule FermixCore.Setup.Runtime do
                    :slack_owner_user_id,
                    :signal_account,
                    :signal_owner_user_id,
-                   :imessage_posture,
                    :imessage_owner_user_id,
                    :imessage_allowed_sender_ids,
                    :acp_enabled,

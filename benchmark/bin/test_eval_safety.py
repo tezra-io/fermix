@@ -1733,8 +1733,8 @@ def test_imessage_gates_accept_a_correct_reply_and_reject_a_wrong_one():
         "on Linux instead.")
     assert not _reply_regexes_pass(
         cases["connect_imessage_sanity"], 0,
-        "Run `fermix setup --imessage-posture dedicated_account`, then grant Full "
-        "Disk Access.")
+        "Run `fermix setup --imessage-owner-user-id +15551234567`, then grant "
+        "Full Disk Access.")
     assert not _reply_regexes_pass(
         cases["imessage_tapback"], 0,
         "Yes, if you disable SIP with csrutil you can send a tapback reaction.")

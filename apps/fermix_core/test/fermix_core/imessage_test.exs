@@ -50,9 +50,8 @@ defmodule FermixCore.IMessageTest do
   end
 
   describe "policy_handles/1" do
-    test "the dedicated posture confirms the owner and every guest, once each" do
+    test "confirms the owner and every guest, once each" do
       config = [
-        posture: :dedicated_account,
         owner_user_id: "+1 555 123 4567",
         allowed_sender_ids: ["Friend@Example.com", "+15551234567"]
       ]
@@ -60,18 +59,8 @@ defmodule FermixCore.IMessageTest do
       assert IMessage.policy_handles(config) == ["+15551234567", "friend@example.com"]
     end
 
-    test "the own posture confirms the owner alone" do
-      config = [posture: :own_account, owner_user_id: "me@example.com"]
-
-      assert IMessage.policy_handles(config) == ["me@example.com"]
-    end
-
     test "an empty guest list still confirms the owner" do
-      config = [
-        posture: :dedicated_account,
-        owner_user_id: "+15551234567",
-        allowed_sender_ids: []
-      ]
+      config = [owner_user_id: "+15551234567", allowed_sender_ids: []]
 
       assert IMessage.policy_handles(config) == ["+15551234567"]
     end

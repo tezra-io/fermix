@@ -31,6 +31,15 @@ defmodule FermixChannels.Test.IMessageFakeHelper do
     "self_aliases" => []
   }
 
+  # The stored policy the helper answers `policy.get` with: the recipients and
+  # the account posture it derived when they were confirmed.
+  @good_policy %{
+    "posture" => "dedicated_account",
+    "owner_handle" => "+15551234567",
+    "handles" => ["+15551234567", "guest@example.com"],
+    "confirmed_at" => "2026-10-01T09:30:00Z"
+  }
+
   @handshake %{
     "protocol_version" => 1,
     "helper_version" => "0.0.0-fake",
@@ -42,6 +51,10 @@ defmodule FermixChannels.Test.IMessageFakeHelper do
   @doc "A probe with every gate open."
   @spec good_probe() :: map()
   def good_probe, do: @good_probe
+
+  @doc "A confirmed `policy.get` result, under the dedicated posture."
+  @spec good_policy() :: map()
+  def good_policy, do: @good_policy
 
   @doc "The default `initialize` result."
   @spec handshake() :: map()
@@ -150,6 +163,7 @@ defmodule FermixChannels.Test.IMessageFakeHelper do
   defp default_responses do
     %{
       "probe" => {:ok, @good_probe},
+      "policy.get" => {:ok, @good_policy},
       "watch.subscribe" => {:ok, %{"started_at_rowid" => 100, "replay_skipped" => 0}},
       "watch.unsubscribe" => {:ok, %{}},
       "messages.after" => {:ok, %{"messages" => [], "has_more" => false}},

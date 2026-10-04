@@ -1,10 +1,12 @@
 defmodule FermixChannels.Channels.IMessage.ListenerTest do
   @moduledoc """
   `IMessage.Listener` against the scripted fake helper (MILESTONE_54 §7.3,
-  §7.4, §9.2, §9.3): the probe gate before any subscription, the acknowledged
-  cursor and its generation, boot replay, overflow paging, admission per
-  posture, dedupe, the bounded hand-off retry, and the own-posture loop breaker.
-  The gateway is the real one; the agent is a capturing stand-in.
+  §7.4, §9.2, §9.3): the probe gate before any subscription, the posture the
+  helper derived, read from `policy.get` before subscribing, the runtime
+  `policy.state` refusal, the acknowledged cursor and its generation, boot
+  replay, overflow paging, admission per posture, dedupe, the bounded hand-off
+  retry, and the own-posture loop breaker. The gateway is the real one; the
+  agent is a capturing stand-in.
   """
   use ExUnit.Case, async: false
 
@@ -17,7 +19,8 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
   @owner "+15551234567"
   @guest "guest@example.com"
   @generation %{"inode" => 42, "birth_time" => "2026-09-01T00:00:00Z"}
-  @dedicated %{posture: :dedicated_account, owner: @owner, handles: [@owner, @guest]}
+  @recipients %{owner: @owner, handles: [@owner, @guest]}
+  @dedicated Map.put(@recipients, :posture, :dedicated_account)
   @own %{posture: :own_account, owner: @owner, handles: [@owner]}
 
   # Records every hand-off for the test and answers from a script (`:ok` once
@@ -40,11 +43,7 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
     home = SafeRm.make_tmp_dir!("imessage-listener")
     previous = Application.get_env(:fermix_channels, :imessage)
 
-    Application.put_env(:fermix_channels, :imessage,
-      enabled: true,
-      posture: :dedicated_account,
-      owner_user_id: @owner
-    )
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: @owner)
 
     on_exit(fn ->
       restore_env(previous)
@@ -77,7 +76,7 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
           helper: FakeHelper,
           server: ctx.fake,
           home: ctx.home,
-          policy: @dedicated,
+          recipients: @recipients,
           agent: CapturingAgent,
           agent_server: ctx.agent,
           probe_retry_ms: 20,
@@ -246,6 +245,20 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
       refute_received {:transport, ^listener, :degraded, _, _}
     end
 
+    # The owner is one of the signed-in account's own aliases: Messages on this
+    # Mac speaks as the owner, which the helper refuses until own-account mode
+    # is supported, so nothing is subscribed.
+    test "an owner among the account's own aliases closes the gate", ctx do
+      own_mac = Map.put(FakeHelper.good_probe(), "self_aliases", ["+1 555 123 4567"])
+      start_fake(ctx, responses: %{"probe" => {:ok, own_mac}})
+
+      listener = start_listener(ctx, probe_retry_ms: 60_000)
+
+      assert_eventually(fn -> Listener.status(listener).class == :owner_is_this_mac end)
+      assert %{phase: :waiting} = Listener.status(listener)
+      assert FakeHelper.calls(ctx.fake, "watch.subscribe") == []
+    end
+
     test "a helper that is down at attach waits for it to come up", ctx do
       start_fake(ctx, attach: {:down, "helper_exit 75"})
       listener = start_listener(ctx)
@@ -268,6 +281,96 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
       fake = ctx.fake
       assert_receive {:fake_helper_call, ^fake, "watch.subscribe", %{"since_rowid" => nil}}
       assert_eventually(fn -> Listener.status(listener).phase == :live end)
+    end
+  end
+
+  describe "the posture the helper derived" do
+    test "is read with policy.get after the probe and before the subscription", ctx do
+      start_fake(ctx, [])
+      listener = start_listener(ctx)
+      fake = ctx.fake
+
+      methods =
+        for _call <- 1..3 do
+          assert_receive {:fake_helper_call, ^fake, method, _params}
+          method
+        end
+
+      assert methods == ["probe", "policy.get", "watch.subscribe"]
+      assert_eventually(fn -> Listener.status(listener).phase == :live end)
+
+      FakeHelper.push(ctx.fake, "message", row(101))
+      assert_receive {:agent_message, %{metadata: %{posture: :dedicated_account}}}
+    end
+
+    test "own_account from the helper admits the self chat, whatever the config says", ctx do
+      own = Map.put(FakeHelper.good_policy(), "posture", "own_account")
+      live(ctx, responses: %{"policy.get" => {:ok, own}})
+
+      FakeHelper.push(ctx.fake, "message", row(101))
+      FakeHelper.push(ctx.fake, "message", own_row(102))
+
+      assert_receive {:agent_message,
+                      %{content: "message 102", metadata: %{posture: :own_account}}}
+
+      refute_received {:agent_message, %{content: "message 101"}}
+    end
+
+    test "a policy.get outside the protocol keeps the channel waiting", ctx do
+      bad = Map.put(FakeHelper.good_policy(), "posture", "shared_account")
+      start_fake(ctx, responses: %{"policy.get" => {:ok, bad}})
+
+      log =
+        capture_log(fn ->
+          listener = start_listener(ctx, probe_retry_ms: 60_000)
+          assert_eventually(fn -> Listener.status(listener).class == :protocol_error end)
+        end)
+
+      assert log =~ "posture"
+      assert FakeHelper.calls(ctx.fake, "watch.subscribe") == []
+    end
+  end
+
+  describe "policy.state (the helper's runtime refusal)" do
+    test "owner_is_this_mac stops the channel, logs once and names the class", ctx do
+      attach_transport_events()
+      listener = live(ctx, [], probe_retry_ms: 60_000)
+      own_mac = Map.put(FakeHelper.good_probe(), "self_aliases", [@owner])
+      FakeHelper.script(ctx.fake, "probe", {:ok, own_mac})
+      params = %{"state" => "owner_is_this_mac", "owner" => "+1555…4567"}
+
+      log =
+        capture_log(fn ->
+          FakeHelper.push(ctx.fake, "policy.state", params)
+          assert_eventually(fn -> Listener.status(listener).class == :owner_is_this_mac end)
+          FakeHelper.push(ctx.fake, "policy.state", params)
+          send(listener, :probe)
+          :sys.get_state(listener)
+        end)
+
+      assert %{phase: :waiting, class: :owner_is_this_mac} = Listener.status(listener)
+
+      assert_receive {:transport, ^listener, :degraded, _measurements,
+                      %{error_class: :owner_is_this_mac}}
+
+      assert length(Regex.scan(~r/owner_is_this_mac/, log)) == 1
+      refute log =~ @owner
+
+      FakeHelper.push(ctx.fake, "message", row(101))
+      refute_receive {:agent_message, _}, 50
+    end
+
+    test "a state outside the protocol is logged and changes nothing", ctx do
+      listener = live(ctx)
+
+      log =
+        capture_log(fn ->
+          FakeHelper.push(ctx.fake, "policy.state", %{"state" => "teleported"})
+          :sys.get_state(listener)
+        end)
+
+      assert log =~ "teleported"
+      assert %{phase: :live, class: nil} = Listener.status(listener)
     end
   end
 
@@ -574,7 +677,8 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
   describe "the own-posture loop breaker (§9.3)" do
     test "more than six admitted rows in a minute pause the chat, once, and it recovers", ctx do
       attach_transport_events()
-      listener = live(ctx, [], policy: @own)
+      own = Map.put(FakeHelper.good_policy(), "posture", "own_account")
+      listener = live(ctx, responses: %{"policy.get" => {:ok, own}})
 
       log =
         capture_log(fn ->

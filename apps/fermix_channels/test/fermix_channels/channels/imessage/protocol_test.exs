@@ -99,6 +99,21 @@ defmodule FermixChannels.Channels.IMessage.ProtocolTest do
       assert data == %{"handle" => "+15559999999"}
     end
 
+    # The account posture is the helper's to derive (owner ∈ the signed-in
+    # account's aliases), so the request names none and the result reports it.
+    test "policy.set sends the recipients alone and answers the derived posture" do
+      [request, confirmed, _refused, own_mac] = frames("policy.set.jsonl")
+
+      assert %{"params" => params} = Jason.decode!(request)
+      assert Map.keys(params) |> Enum.sort() == ["handles", "owner_handle"]
+
+      assert {:ok, {:response, 5, {:ok, %{"posture" => "dedicated_account"}}}} =
+               Protocol.decode(confirmed)
+
+      assert {:ok, {:response, 5, {:error, {:owner_is_this_mac, _message, %{}}}}} =
+               Protocol.decode(own_mac)
+    end
+
     test "an unknown error kind is refused with a typed error that keeps the request id" do
       line = ~s({"id":7,"error":{"kind":"teleported","message":"?","data":{}}})
 
@@ -120,6 +135,16 @@ defmodule FermixChannels.Channels.IMessage.ProtocolTest do
         %{"event" => ^event, "params" => params} = Jason.decode!(line)
         assert Protocol.decode(line) == {:ok, {:notification, event, params}}, event
       end
+    end
+
+    test "policy.state names the runtime refusal with the owner already redacted" do
+      [line] = frames("notification.policy.state.jsonl")
+
+      assert {:ok,
+              {:notification, "policy.state", %{"state" => "owner_is_this_mac", "owner" => owner}}} =
+               Protocol.decode(line)
+
+      refute owner == "+15551234567"
     end
 
     test "an unknown event is refused" do

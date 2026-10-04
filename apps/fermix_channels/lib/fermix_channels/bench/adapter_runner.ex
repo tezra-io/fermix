@@ -407,11 +407,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
       client_opts: []
     )
 
-    Application.put_env(:fermix_channels, :imessage,
-      enabled: true,
-      posture: :dedicated_account,
-      owner_user_id: "+15551234567"
-    )
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
   end
 
   defp snapshot_channel_env do

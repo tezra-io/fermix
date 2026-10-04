@@ -253,10 +253,7 @@ defmodule FermixCore.Delivery.OwnerInboxTest do
     end
 
     test "an iMessage owner id is read like every other channel's" do
-      Application.put_env(:fermix_channels, :imessage,
-        posture: :dedicated_account,
-        owner_user_id: "+15551234567"
-      )
+      Application.put_env(:fermix_channels, :imessage, owner_user_id: "+15551234567")
 
       assert OwnerInbox.configured_owners() == %{"imessage" => "+15551234567"}
     end

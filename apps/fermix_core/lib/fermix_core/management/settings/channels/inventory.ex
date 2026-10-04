@@ -54,18 +54,12 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
         {:signal_owner_user_id, :owner_user_id, :text, "Your Signal number"}
       ]
     },
-    # M54. The posture is a closed choice rather than free text (D7): a typed
-    # word that names no posture is the silent misconfiguration a choice cannot
-    # produce. It carries no token, so it has no secret row at all.
+    # M54. It carries no token, so it has no secret row at all, and no account
+    # choice: the helper derives the account when it confirms the recipients.
     imessage: %{
       title: "iMessage",
       platform: :macos,
       rows: [
-        {:imessage_posture, :posture, :choice, "Account",
-         [
-           {"dedicated_account", "Dedicated account"},
-           {"own_account", "Your own account"}
-         ]},
         {:imessage_owner_user_id, :owner_user_id, :text, "Your Apple ID or phone number"},
         {:imessage_allowed_sender_ids, :allowed_sender_ids, :list, "Guests"}
       ]
@@ -77,14 +71,8 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
   # without, which is what `Readiness.channel_configured?/1` requires.
   @people_keys [:owner_user_id, :allowed_sender_ids]
 
-  @typedoc """
-  One row: the answer key, the channel-block key it reads, its kind and its
-  label. A `:choice` row also carries its whole value space as
-  `{value, label}` pairs.
-  """
-  @type row_spec ::
-          {atom(), atom(), :secret | :text | :list, String.t()}
-          | {atom(), atom(), :choice, String.t(), [{String.t(), String.t()}]}
+  @typedoc "One row: the answer key, the channel-block key it reads, its kind and its label."
+  @type row_spec :: {atom(), atom(), :secret | :text | :list, String.t()}
 
   @doc "Every channel, in publication order."
   @spec channels() :: [atom()]

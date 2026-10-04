@@ -93,9 +93,36 @@ defmodule FermixCore.IMessage.ControlTest do
       assert Control.parse(:policy_get, "null") == {:ok, nil}
     end
 
-    test "a confirmed policy set" do
+    test "a confirmed policy set carries the posture the helper derived" do
+      frame = ~s({"confirmed_at": "2026-10-01T10:00:00Z", "posture": "dedicated_account"})
+
+      assert Control.parse(:policy_set, frame) ==
+               {:ok, %{confirmed_at: "2026-10-01T10:00:00Z", posture: :dedicated_account}}
+    end
+
+    test "a policy set without a derived posture is a protocol error, not a guess" do
       assert Control.parse(:policy_set, ~s({"confirmed_at": "2026-10-01T10:00:00Z"})) ==
-               {:ok, %{confirmed_at: "2026-10-01T10:00:00Z"}}
+               {:error, {:helper_protocol, {:invalid_field, "posture", nil}}}
+    end
+
+    test "an owner that is this Mac's own address is a closed refusal" do
+      frame = ~s({"error": {"kind": "owner_is_this_mac", "message": "signed in as the owner"}})
+
+      assert Control.parse(:policy_set, frame) ==
+               {:error, {:helper_error, :owner_is_this_mac, "signed in as the owner"}}
+    end
+
+    test "decode_policy/1 reads the stored policy the serving helper answers" do
+      assert {:ok, %{posture: :own_account, owner_handle: "+15551234567"}} =
+               Control.decode_policy(%{
+                 "posture" => "own_account",
+                 "owner_handle" => "+15551234567",
+                 "handles" => ["+15551234567"],
+                 "confirmed_at" => "2026-10-01T10:00:00Z"
+               })
+
+      assert Control.decode_policy(%{"owner_handle" => "+15551234567"}) ==
+               {:error, {:helper_protocol, {:invalid_field, "posture", nil}}}
     end
   end
 
@@ -129,24 +156,22 @@ defmodule FermixCore.IMessage.ControlTest do
       assert recorded_args(dir) == ["grant", "--home", "/h", "--service", "full_disk_access"]
     end
 
-    test "policy_set passes the posture, the owner and every handle", %{dir: dir} do
-      binary = fake_helper(dir, ~s({"confirmed_at": "2026-10-01T10:00:00Z"}), 0)
+    test "policy_set passes the owner and every handle, never a posture", %{dir: dir} do
+      stdout = ~s({"confirmed_at": "2026-10-01T10:00:00Z", "posture": "dedicated_account"})
+      binary = fake_helper(dir, stdout, 0)
 
       policy = %{
-        posture: :dedicated_account,
         owner_handle: "+15551234567",
         handles: ["+15551234567", "friend@example.com"]
       }
 
-      assert {:ok, %{confirmed_at: _at}} =
+      assert {:ok, %{confirmed_at: _at, posture: :dedicated_account}} =
                Control.policy_set(policy, binary_path: binary, home: "/h")
 
       assert recorded_args(dir) == [
                "policy-set",
                "--home",
                "/h",
-               "--posture",
-               "dedicated_account",
                "--owner",
                "+15551234567",
                "--handle",
@@ -187,7 +212,6 @@ defmodule FermixCore.IMessage.ControlTest do
   describe "policy_matches_config?/2" do
     @config [
       enabled: true,
-      posture: :dedicated_account,
       owner_user_id: "+1 555 123 4567",
       allowed_sender_ids: ["Friend@Example.com"]
     ]
@@ -214,7 +238,7 @@ defmodule FermixCore.IMessage.ControlTest do
       refute Control.policy_matches_config?(policy, @config)
     end
 
-    test "a different posture or owner does not match" do
+    test "the derived posture is the helper's, so only the owner and recipients compare" do
       policy = %{
         posture: :own_account,
         owner_handle: "+15551234567",
@@ -222,12 +246,8 @@ defmodule FermixCore.IMessage.ControlTest do
         confirmed_at: "2026-10-01T10:00:00Z"
       }
 
-      refute Control.policy_matches_config?(policy, @config)
-
-      refute Control.policy_matches_config?(
-               %{policy | posture: :dedicated_account, owner_handle: "+15550000000"},
-               @config
-             )
+      assert Control.policy_matches_config?(policy, @config)
+      refute Control.policy_matches_config?(%{policy | owner_handle: "+15550000000"}, @config)
     end
 
     test "no stored policy, or no owner saved, never matches" do
@@ -240,7 +260,7 @@ defmodule FermixCore.IMessage.ControlTest do
         confirmed_at: "2026-10-01T10:00:00Z"
       }
 
-      refute Control.policy_matches_config?(policy, posture: :dedicated_account)
+      refute Control.policy_matches_config?(policy, enabled: true)
     end
   end
 
@@ -248,13 +268,11 @@ defmodule FermixCore.IMessage.ControlTest do
     assert Control.policy_for_config(@config) ==
              {:ok,
               %{
-                posture: :dedicated_account,
                 owner_handle: "+15551234567",
                 handles: ["+15551234567", "friend@example.com"]
               }}
 
-    assert Control.policy_for_config(posture: :dedicated_account) == {:error, :owner_missing}
-    assert Control.policy_for_config(owner_user_id: "+15551234567") == {:error, :posture_missing}
+    assert Control.policy_for_config(enabled: true) == {:error, :owner_missing}
   end
 
   # A shell script standing in for the helper: it records its argv one per line

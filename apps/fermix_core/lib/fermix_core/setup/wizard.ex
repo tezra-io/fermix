@@ -93,7 +93,6 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
-          | {:imessage_posture, String.t()}
           | {:imessage_owner_user_id, String.t()}
           | {:imessage_allowed_sender_ids, [String.t()] | String.t()}
           | {:imessage_enabled, boolean() | String.t()}
@@ -430,11 +429,6 @@ defmodule FermixCore.Setup.Wizard do
         key: :signal_owner_user_id,
         label: "Signal command owner user ID",
         required?: channel_field_unpersisted?(persisted, :signal, :owner_user_id, false)
-      },
-      %{
-        key: :imessage_posture,
-        label: "iMessage account (dedicated_account/own_account)",
-        required?: channel_field_unpersisted?(persisted, :imessage, :posture, false)
       },
       %{
         key: :imessage_owner_user_id,
@@ -2598,18 +2592,13 @@ defmodule FermixCore.Setup.Wizard do
   defp put_saved_channel_defaults(config, _channel, mode),
     do: config |> Keyword.put(:enabled, true) |> Keyword.put_new(:mode, mode)
 
-  # The account posture and the guests (M54 §10.2). The owner rides
-  # `put_channel_owner_user_ids/2` like every channel's. An absent guests answer
-  # changes nothing; a blank one clears the list, which is how a flag or a form
-  # says "no guests".
+  # The guests (M54 §10.2). The owner rides `put_channel_owner_user_ids/2` like
+  # every channel's, and the account is not asked: the helper derives it when it
+  # confirms the recipients. An absent guests answer changes nothing; a blank
+  # one clears the list, which is how a flag or a form says "no guests".
   defp put_imessage_config(snapshot, answers) do
-    posture = Keyword.get(answers, :imessage_posture)
-
     values =
-      [
-        posture: if(blank?(posture), do: nil, else: posture),
-        allowed_sender_ids: imessage_guests(Keyword.get(answers, :imessage_allowed_sender_ids))
-      ]
+      [allowed_sender_ids: imessage_guests(Keyword.get(answers, :imessage_allowed_sender_ids))]
       |> reject_nil_values()
 
     put_channel_config(snapshot, :imessage, values, :subprocess)

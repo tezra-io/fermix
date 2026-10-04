@@ -419,8 +419,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Messages automation",
           "Awaiting confirmation",
           "Confirm…",
-          "dedicated_account",
-          "own_account",
+          "separate Apple ID",
+          "Sign Messages in with a separate Apple ID for Fermix",
           "[fermix_channels.imessage]",
           "allowed_sender_ids",
           "full_disk_access",
@@ -432,6 +432,13 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
           "Linux"
         ] do
       assert reference =~ required, "channel_setup reference does not mention #{required}"
+    end
+
+    # The account is derived by the helper, never chosen: no surface names a
+    # posture setting any more.
+    for gone <- ["--imessage-posture", "posture =", "own_account"] do
+      refute reference =~ gone, "channel_setup reference still names #{gone}"
+      refute paragraph =~ gone, "the Channels paragraph still names #{gone}"
     end
 
     assert presentation =~ "iMessage"

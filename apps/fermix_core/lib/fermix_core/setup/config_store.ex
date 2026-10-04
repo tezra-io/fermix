@@ -2593,26 +2593,22 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # The iMessage channel (M54 §11). Every value that would otherwise be dropped
-  # or guessed refuses the load with its key named: an unknown posture, an
-  # enabled channel with none (D2, no default), an id that is not a quoted
+  # or guessed refuses the load with its key named: an id that is not a quoted
   # string (M53 OWN-2: an unquoted `+1555…` is a TOML integer that has already
-  # lost its `+`), a guest under the owner's own account (D9), and `"draft"`
-  # streaming on a channel that cannot edit. Handles are normalized here, once,
-  # so the owner the authorizer compares and the one the helper confirmed are the
-  # same string. `mode` is not a key: the registry fixes the transport.
-  @imessage_postures %{
-    "dedicated_account" => :dedicated_account,
-    "own_account" => :own_account,
-    dedicated_account: :dedicated_account,
-    own_account: :own_account
-  }
-
+  # lost its `+`), `"draft"` streaming on a channel that cannot edit, and the
+  # `posture` key an earlier build wrote. The account is no longer chosen: the
+  # helper derives it when it confirms the recipients, so a leftover `posture`
+  # is refused by name rather than silently ignored. Handles are normalized
+  # here, once, so the owner the authorizer compares and the one the helper
+  # confirmed are the same string. `mode` is not a key: the registry fixes the
+  # transport.
   defp normalize_imessage(nil), do: []
 
   defp normalize_imessage(config) when is_map(config) or is_list(config) do
+    refuse_imessage_posture!(lookup(config, "posture", :posture))
+
     []
     |> put_if_present(:enabled, imessage_enabled(lookup(config, "enabled", :enabled)))
-    |> put_if_present(:posture, imessage_posture(lookup(config, "posture", :posture)))
     |> put_if_present(
       :owner_user_id,
       imessage_owner(lookup(config, "owner_user_id", :owner_user_id))
@@ -2644,18 +2640,12 @@ defmodule FermixCore.Setup.ConfigStore do
           "fermix_channels.imessage.enabled #{inspect(value)} must be true or false"
   end
 
-  defp imessage_posture(nil), do: nil
+  defp refuse_imessage_posture!(nil), do: :ok
 
-  defp imessage_posture(value) do
-    case Map.fetch(@imessage_postures, value) do
-      {:ok, posture} ->
-        posture
-
-      :error ->
-        raise ArgumentError,
-              "fermix_channels.imessage.posture #{inspect(value)} is not a posture; " <>
-                "expected \"dedicated_account\" or \"own_account\""
-    end
+  defp refuse_imessage_posture!(_value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.posture is no longer used; remove it. Fermix Messages " <>
+            "works out the account when you confirm who Fermix may message"
   end
 
   defp imessage_owner(nil), do: nil
@@ -2701,27 +2691,13 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp validate_imessage!(fields) do
-    posture = Keyword.get(fields, :posture)
-
-    cond do
-      Keyword.get(fields, :enabled) == true and posture == nil ->
-        raise ArgumentError,
-              "fermix_channels.imessage.posture is required when the channel is enabled; " <>
-                "set it to \"dedicated_account\""
-
-      posture == :own_account and Keyword.get(fields, :allowed_sender_ids, []) != [] ->
-        raise ArgumentError,
-              "fermix_channels.imessage.allowed_sender_ids must be empty under posture " <>
-                "\"own_account\": a guest there would be answered as you"
-
-      Keyword.get(fields, :streaming) == "draft" ->
-        raise ArgumentError,
-              "fermix_channels.imessage.streaming \"draft\" is not supported: iMessage " <>
-                "cannot edit a sent message; expected \"block\" or \"off\""
-
-      true ->
-        fields
+    if Keyword.get(fields, :streaming) == "draft" do
+      raise ArgumentError,
+            "fermix_channels.imessage.streaming \"draft\" is not supported: iMessage " <>
+              "cannot edit a sent message; expected \"block\" or \"off\""
     end
+
+    fields
   end
 
   defp normalize_mobile(nil), do: []

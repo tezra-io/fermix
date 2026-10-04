@@ -3197,13 +3197,16 @@ defmodule FermixWebWeb.SetupLiveTest do
         render_submit(view, "save_channels", %{
           "channels_form" => %{
             "telegram_owner_user_id" => "owner-1",
-            "imessage_posture" => "dedicated_account",
             "imessage_owner_user_id" => "+15551234567"
           }
         })
 
       assert html =~ "Channels saved."
-      refute Keyword.has_key?(Application.get_env(:fermix_channels, :imessage, []), :posture)
+
+      refute Keyword.has_key?(
+               Application.get_env(:fermix_channels, :imessage, []),
+               :owner_user_id
+             )
 
       Application.put_env(:fermix_web, :imessage_macos?, true)
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
@@ -3212,7 +3215,9 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "iMessage"
     end
 
-    test "the iMessage form saves the account, the owner and the guests and leaves it off", %{
+    # The account is not asked: the helper derives it when the recipients are
+    # confirmed, so the card carries no account choice and saves none.
+    test "the iMessage form saves the owner and the guests and leaves it off", %{
       conn: conn
     } do
       Application.put_env(:fermix_web, :imessage_macos?, true)
@@ -3223,9 +3228,8 @@ defmodule FermixWebWeb.SetupLiveTest do
         |> element(~s(button[phx-click="select_channel"][phx-value-channel="imessage"]))
         |> render_click()
 
-      assert html =~ ~s(name="channels_form[imessage_posture]")
-      assert html =~ ~s(value="dedicated_account")
-      assert html =~ ~s(value="own_account")
+      refute html =~ "imessage_posture"
+      refute html =~ ~s(value="own_account")
       assert html =~ ~s(name="channels_form[imessage_owner_user_id]")
       assert html =~ ~s(name="channels_form[imessage_allowed_sender_ids]")
       assert html =~ ~s(phx-click="imessage_grant")
@@ -3237,7 +3241,6 @@ defmodule FermixWebWeb.SetupLiveTest do
         view
         |> form("form[phx-submit=\"save_channels\"]",
           channels_form: %{
-            imessage_posture: "dedicated_account",
             imessage_owner_user_id: "+1 555 123 4567",
             imessage_allowed_sender_ids: "Friend@Example.com"
           }
@@ -3247,7 +3250,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       assert html =~ "Channels saved."
 
       imessage = Application.get_env(:fermix_channels, :imessage, [])
-      assert imessage[:posture] == :dedicated_account
+      refute Keyword.has_key?(imessage, :posture)
       assert imessage[:owner_user_id] == "+15551234567"
       assert imessage[:allowed_sender_ids] == ["friend@example.com"]
       refute imessage[:enabled] == true
@@ -3286,6 +3289,26 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> render_click()
 
       assert render_async(view) =~ "The recipients were not confirmed"
+    end
+
+    test "an owner that is this Mac's own address names the separate Apple ID", %{conn: conn} do
+      Application.put_env(:fermix_web, :imessage_macos?, true)
+
+      Application.put_env(:fermix_web, :imessage_confirm_impl, fn ->
+        {:error, {:helper_error, :owner_is_this_mac, "signed in as the owner"}}
+      end)
+
+      {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+      view
+      |> element(~s(button[phx-click="select_channel"][phx-value-channel="imessage"]))
+      |> render_click()
+
+      view
+      |> element(~s(button[phx-click="imessage_policy_confirm"]))
+      |> render_click()
+
+      assert render_async(view) =~ "Sign Messages in with a separate Apple ID for Fermix"
     end
 
     test "saving a channel keeps that channel selected, not bounced to telegram", %{conn: conn} do

@@ -191,9 +191,9 @@ config :fermix_channels,
     media_store_max_bytes: 2_147_483_648,
     push: [enabled: false]
   ],
-  # The iMessage channel (M54), Mac only. Off by default and nothing else:
-  # `posture` has no default (D2), the owner and guests are the operator's, and
-  # the transport is the registry's, not a setting.
+  # The iMessage channel (M54), Mac only. Off by default and nothing else: the
+  # owner and guests are the operator's, the account is what the helper derives
+  # when it confirms them, and the transport is the registry's, not a setting.
   imessage: [
     enabled: false
   ],

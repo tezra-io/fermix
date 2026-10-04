@@ -4,10 +4,17 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   (docs/design/MILESTONE_54_IMESSAGE_CHANNEL.md §7.3, §7.4, §9.2, §9.3).
 
   **Gate.** Nothing is subscribed until `probe` reports a user session, Full
-  Disk Access, a readable database, a confirmed policy, Automation and a
-  signed-in Messages (`IMessage.probe_gate/1`). Until then `status/1` names the
-  first missing thing and the probe is retried every 30 s, logged once per
-  change of class, with one `:degraded` transport event and one `:recovered`.
+  Disk Access, a readable database, a confirmed policy, Automation, a
+  signed-in Messages and an owner who is not one of that account's own aliases
+  (`IMessage.probe_gate/2`). Until then `status/1` names the first missing
+  thing and the probe is retried every 30 s, logged once per change of class,
+  with one `:degraded` transport event and one `:recovered`.
+
+  **Posture.** The account posture is the helper's, never config's: once the
+  gate opens, `policy.get` answers the posture it derived when it confirmed the
+  recipients, and admission follows it. A `policy.state` notification
+  (`owner_is_this_mac`: Messages here is now signed in as the owner) stops the
+  channel with that class until the probe shows a separate account again.
 
   **Cursor.** `FERMIX_HOME/imessage/cursor` holds `{generation, rowid}`, written
   by atomic rename. A row is acknowledged only once it is settled: dropped by
@@ -72,10 +79,10 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   # --- Public API ------------------------------------------------------------
 
   @doc """
-  Starts the listener. Options: `:home` and `:policy` (required); `:helper`
-  and `:server` (default `IMessage.Port`); `:agent` and `:agent_server`
-  (default `Gateway.Queue`); `:name`; and `:probe_retry_ms`,
-  `:handoff_retry_ms`, `:loop_pause_ms` (tests shrink these).
+  Starts the listener. Options: `:home` and `:recipients` (required, an
+  `IMessage.recipients()`); `:helper` and `:server` (default `IMessage.Port`);
+  `:agent` and `:agent_server` (default `Gateway.Queue`); `:name`; and
+  `:probe_retry_ms`, `:handoff_retry_ms`, `:loop_pause_ms` (tests shrink these).
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) when is_list(opts) do
@@ -111,7 +118,10 @@ defmodule FermixChannels.Channels.IMessage.Listener do
       helper: Keyword.get(opts, :helper, HelperPort),
       server: Keyword.get(opts, :server, HelperPort),
       home: Keyword.fetch!(opts, :home),
-      policy: Keyword.fetch!(opts, :policy),
+      recipients: Keyword.fetch!(opts, :recipients),
+      # The recipients plus the posture the helper derived, set by `policy.get`
+      # before every subscription; nothing is admitted while it is nil.
+      policy: nil,
       agent: Keyword.get(opts, :agent, Queue),
       agent_server: Keyword.get(opts, :agent_server, Queue),
       probe_retry_ms: Keyword.get(opts, :probe_retry_ms, @probe_retry_ms),
@@ -173,6 +183,9 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   def handle_info({:imessage_event, "db.state", %{"state" => "available"}}, state),
     do: {:noreply, db_available(state)}
 
+  def handle_info({:imessage_event, "policy.state", params}, state),
+    do: {:noreply, policy_state(state, params)}
+
   def handle_info({:imessage_event, "send.reconciled", params}, state) do
     Logger.info(
       "iMessage send #{inspect(params["idempotency_key"])} reconciled after a helper " <>
@@ -215,8 +228,10 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   end
 
   defp start_watch(state) do
-    case probe(state) do
-      :ok -> subscribe(state)
+    with :ok <- probe(state),
+         {:ok, posture} <- derived_posture(state) do
+      subscribe(%{state | policy: Map.put(state.recipients, :posture, posture)})
+    else
       {:error, class} -> wait(state, class)
     end
   end
@@ -224,8 +239,36 @@ defmodule FermixChannels.Channels.IMessage.Listener do
   defp probe(state) do
     with {:ok, raw} <- probe_call(state),
          {:ok, probe} <- decode_probe(raw) do
-      IMessage.probe_gate(probe)
+      IMessage.probe_gate(probe, state.recipients.owner)
     end
+  end
+
+  # The posture the helper derived when it confirmed the recipients. A result
+  # outside the protocol is a helper defect, waited out like any refusal.
+  defp derived_posture(state) do
+    case call(state, "policy.get", %{}) do
+      {:ok, raw} -> decoded_posture(Control.decode_policy(raw))
+      {:error, {kind, _message, _data}} -> {:error, kind}
+    end
+  end
+
+  defp decoded_posture({:ok, %{posture: posture}}), do: {:ok, posture}
+
+  defp decoded_posture({:error, {:helper_protocol, reason}}) do
+    Logger.error("iMessage policy.get answered outside the protocol: #{inspect(reason)}")
+    {:error, :protocol_error}
+  end
+
+  # Before the helper has answered `initialize` there is nothing to stop; the
+  # probe gate names the same state once it is up.
+  defp policy_state(%{phase: phase} = state, _params) when phase in [:starting, :helper_down],
+    do: state
+
+  defp policy_state(state, %{"state" => "owner_is_this_mac"}), do: wait(state, :owner_is_this_mac)
+
+  defp policy_state(state, params) do
+    Logger.warning("iMessage policy.state outside the protocol: #{inspect(params["state"])}")
+    state
   end
 
   defp probe_call(state) do

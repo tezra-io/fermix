@@ -217,7 +217,7 @@ defmodule FermixCore.HealthTest do
     assert %{name: "imessage", status: :disabled, enabled: false, process_alive: nil} =
              channel(off, "imessage")
 
-    Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
+    Application.put_env(:fermix_channels, :imessage, enabled: true)
 
     degraded = health_report(fn _name -> nil end)
 

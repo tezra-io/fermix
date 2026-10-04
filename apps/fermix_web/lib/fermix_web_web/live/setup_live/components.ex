@@ -17,13 +17,6 @@ defmodule FermixWebWeb.SetupLive.Components do
     {:acp, "ACP (editors & agent clients)"}
   ]
 
-  @imessage_postures [
-    {"dedicated_account", "Dedicated account",
-     "A spare Apple ID signed into Messages on this Mac, used only by Fermix. You text it like a contact."},
-    {"own_account", "Your own account",
-     "Your own Apple ID. Fermix answers only in your conversation with yourself, and takes no guests."}
-  ]
-
   attr :active_tab, :string, required: true
   # The macOS app's in-app presentation (`?embed=1`): same components, native
   # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
@@ -3723,25 +3716,6 @@ defmodule FermixWebWeb.SetupLive.Components do
       checked={@field.checked}
       hint={@field.hint}
     />
-    <fieldset :if={@field.kind == :radio} class="space-y-2">
-      <legend class="text-sm font-medium">{@field.label}</legend>
-      <label
-        :for={{value, label, description} <- @field.options}
-        class={search_backend_option_class(value == @field.value)}
-      >
-        <input
-          type="radio"
-          name={@field.name}
-          value={value}
-          checked={value == @field.value}
-          class="radio radio-primary radio-sm mt-0.5"
-        />
-        <span class="min-w-0">
-          <span class="block font-medium">{label}</span>
-          <span class="block text-xs leading-5 text-base-content/60">{description}</span>
-        </span>
-      </label>
-    </fieldset>
     <button
       :if={@field.kind == :action}
       type="button"
@@ -4192,15 +4166,15 @@ defmodule FermixWebWeb.SetupLive.Components do
     ]
   end
 
-  # The account, the owner and the guests are saved with the form; the two
-  # grants and the recipient confirmation act on the helper at once, so they
-  # are buttons rather than fields. Saving never turns the channel on.
+  # The owner and the guests are saved with the form; the two grants and the
+  # recipient confirmation act on the helper at once, so they are buttons rather
+  # than fields. There is no account choice: the helper derives it when it
+  # confirms the recipients. Saving never turns the channel on.
   defp channel_fields(:imessage, form) do
     [
-      radio_field("Account", "imessage_posture", form.posture, @imessage_postures),
       text_field("Your Apple ID or phone number", "imessage_owner_user_id", form.owner_user_id),
       text_field(
-        "Guests (comma-separated, dedicated account only)",
+        "Guests (comma-separated)",
         "imessage_allowed_sender_ids",
         form.allowed_sender_ids
       ),
@@ -4231,10 +4205,6 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   defp toggle_field(label, key, checked, hint) do
     %{kind: :toggle, label: label, name: "channels_form[#{key}]", checked: checked, hint: hint}
-  end
-
-  defp radio_field(label, key, value, options) do
-    %{kind: :radio, label: label, name: "channels_form[#{key}]", value: value, options: options}
   end
 
   defp action_field(label, event, value) do

@@ -30,7 +30,6 @@ defmodule FermixCore.Management.IMessageTest do
 
   @config [
     enabled: true,
-    posture: :dedicated_account,
     owner_user_id: "+15551234567",
     allowed_sender_ids: ["friend@example.com"]
   ]
@@ -169,7 +168,7 @@ defmodule FermixCore.Management.IMessageTest do
 
       set = fn policy ->
         send(parent, {:policy_set, policy})
-        {:ok, %{confirmed_at: "2026-10-01T10:00:00Z"}}
+        {:ok, %{confirmed_at: "2026-10-01T10:00:00Z", posture: :dedicated_account}}
       end
 
       assert {:ok, started} = IMessage.policy_confirm(sources(jobs: jobs, policy_set: set))
@@ -181,12 +180,13 @@ defmodule FermixCore.Management.IMessageTest do
       assert done["result"]["outcome"] == "confirmed"
       assert done["result"]["policy_matches_config"] == true
 
-      assert_receive {:policy_set,
-                      %{
-                        posture: :dedicated_account,
-                        owner_handle: "+15551234567",
-                        handles: ["+15551234567", "friend@example.com"]
-                      }}
+      # The account is the helper's to derive, so the request names no posture.
+      assert_receive {:policy_set, request}
+
+      assert request == %{
+               owner_handle: "+15551234567",
+               handles: ["+15551234567", "friend@example.com"]
+             }
     end
 
     # Cancel on the helper's dialog is the owner's decision, so it is how the
@@ -207,7 +207,7 @@ defmodule FermixCore.Management.IMessageTest do
 
     test "no saved owner is refused with what to do first", %{jobs: jobs} do
       assert {:ok, started} =
-               IMessage.policy_confirm(sources(jobs: jobs, config: [posture: :dedicated_account]))
+               IMessage.policy_confirm(sources(jobs: jobs, config: [enabled: true]))
 
       assert %{"status" => "failed", "failure" => %{"code" => "refused", "sentence" => s}} =
                await(started, jobs)
@@ -224,6 +224,20 @@ defmodule FermixCore.Management.IMessageTest do
 
       assert %{"failure" => %{"code" => "refused", "sentence" => s}} = await(started, jobs)
       assert s =~ "not a handle of the Messages account on this Mac"
+    end
+
+    # Until the own-account mode is supported, the helper refuses an owner that
+    # is this Mac's own address, and the sentence names the one fix.
+    test "an owner that is this Mac's own address is refused with the fix", %{jobs: jobs} do
+      set = fn _policy -> {:error, {:helper_error, :owner_is_this_mac, "signed in as owner"}} end
+
+      assert {:ok, started} = IMessage.policy_confirm(sources(jobs: jobs, policy_set: set))
+
+      assert %{"failure" => %{"code" => "refused", "sentence" => s}} = await(started, jobs)
+
+      assert s ==
+               "Messages on this Mac is signed in as this address. Sign Messages in with a " <>
+                 "separate Apple ID for Fermix, then confirm again."
     end
   end
 

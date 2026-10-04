@@ -1096,25 +1096,19 @@
       "method": "settings.get:channels.imessage",
       "field": "rows:imessage_allowed_sender_ids",
       "kind": "engine_only",
-      "why": "M54: the channels.imessage section postdates the draft. The account is a closed choice, the owner a text row, the guests a list row and the switch the ordinary toggle; it exists only on a Mac. The rows are the ordinary row shape."
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
     },
     {
       "method": "settings.get:channels.imessage",
       "field": "rows:imessage_enabled",
       "kind": "engine_only",
-      "why": "M54: the channels.imessage section postdates the draft. The account is a closed choice, the owner a text row, the guests a list row and the switch the ordinary toggle; it exists only on a Mac. The rows are the ordinary row shape."
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
     },
     {
       "method": "settings.get:channels.imessage",
       "field": "rows:imessage_owner_user_id",
       "kind": "engine_only",
-      "why": "M54: the channels.imessage section postdates the draft. The account is a closed choice, the owner a text row, the guests a list row and the switch the ordinary toggle; it exists only on a Mac. The rows are the ordinary row shape."
-    },
-    {
-      "method": "settings.get:channels.imessage",
-      "field": "rows:imessage_posture",
-      "kind": "engine_only",
-      "why": "M54: the channels.imessage section postdates the draft. The account is a closed choice, the owner a text row, the guests a list row and the switch the ordinary toggle; it exists only on a Mac. The rows are the ordinary row shape."
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
     }
   ]
 }

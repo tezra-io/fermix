@@ -9,6 +9,7 @@
 {"id":20,"error":{"kind":"policy_refused","message":"cancelled","data":{}}}
 {"id":20,"error":{"kind":"policy_violation","message":"outside the policy","data":{"handle":"+15559999999"}}}
 {"id":20,"error":{"kind":"owner_not_self","message":"not a self alias","data":{}}}
+{"id":20,"error":{"kind":"owner_is_this_mac","message":"Messages on this Mac is signed in as this address. Sign Messages in with a separate Apple ID for Fermix, then confirm again.","data":{}}}
 {"id":20,"error":{"kind":"not_signed_in","message":"Messages is not signed in","data":{}}}
 {"id":20,"error":{"kind":"no_user_session","message":"no console session","data":{}}}
 {"id":20,"error":{"kind":"service_not_imessage","message":"SMS-only chat","data":{"handle":"+15551234567"}}}

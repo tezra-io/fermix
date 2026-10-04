@@ -61,6 +61,7 @@ defmodule FermixChannels.Channels.IMessage do
     :policy_unconfirmed,
     :policy_refused,
     :owner_not_self,
+    :owner_is_this_mac,
     :not_signed_in,
     :no_user_session,
     :automation_refused
@@ -71,9 +72,8 @@ defmodule FermixChannels.Channels.IMessage do
   @converted_images ["image/heic", "image/heif"]
   # The probe's gates in the order a person fixes them (§10.1): the field, the
   # one value that opens it, and the class it reports otherwise (`:db` and
-  # `:policy` name the class by the value the helper reported).
-  # Over the typed probe (`FermixCore.IMessage.Control.probe/0`): the first
-  # closed gate, in the order a person fixes them.
+  # `:policy` name the class by the value the helper reported). After them,
+  # the owner gate (`owner_gate/2`).
   @gates [
     {:user_session, true, :no_user_session},
     {:full_disk_access, :granted, {:permission_denied, :full_disk_access}},
@@ -85,7 +85,13 @@ defmodule FermixChannels.Channels.IMessage do
 
   @type posture :: :dedicated_account | :own_account
 
-  @typedoc "Who the channel may talk to: the posture, the owner, and owner ∪ guests."
+  @typedoc "Who the channel may talk to, from config: the owner, and owner ∪ guests."
+  @type recipients :: %{owner: String.t(), handles: [String.t()]}
+
+  @typedoc """
+  The recipients plus the account posture the helper derived when it confirmed
+  them (`policy.get`); admission and the row mapping read it.
+  """
   @type policy :: %{posture: posture(), owner: String.t(), handles: [String.t()]}
 
   @typedoc "The helper an inbound message came through, carried so replies use it too."
@@ -100,6 +106,7 @@ defmodule FermixChannels.Channels.IMessage do
           | :policy_absent
           | :policy_unconfirmed
           | :not_signed_in
+          | :owner_is_this_mac
 
   # --- Transport and capabilities -------------------------------------------------
 
@@ -667,17 +674,31 @@ defmodule FermixChannels.Channels.IMessage do
   Health is the one-shot `probe` (`FermixCore.IMessage.Control`), never the
   serving helper: Doctor asks from a tree-less CLI process where no Port runs,
   and the daemon's own answer must be the same one, so there is one path.
-  `control:` and `home:` are test seams.
+  The owner it checks against the account's own aliases is the saved one.
+  `control:`, `home:` and `owner:` are test seams.
   """
   @impl true
   @spec health_check(keyword()) :: FermixChannels.Gateway.Channel.health_result()
   def health_check(opts \\ []) when is_list(opts) do
     control = Keyword.get(opts, :control, Control)
+    owner = Keyword.get_lazy(opts, :owner, &configured_owner/0)
     started = System.monotonic_time(:millisecond)
 
     case control.probe(Keyword.take(opts, [:home])) do
-      {:ok, probe} -> health(probe_gate(probe), System.monotonic_time(:millisecond) - started)
-      {:error, reason} -> {:error, control_error(reason)}
+      {:ok, probe} ->
+        health(probe_gate(probe, owner), System.monotonic_time(:millisecond) - started)
+
+      {:error, reason} ->
+        {:error, control_error(reason)}
+    end
+  end
+
+  # An owner that is missing or unparseable is the config's own refusal
+  # (`recipients_from_config/0`); the owner gate has nothing to compare then.
+  defp configured_owner do
+    case owner() do
+      {:ok, owner} -> owner
+      {:error, _not_configured} -> nil
     end
   end
 
@@ -711,13 +732,28 @@ defmodule FermixChannels.Channels.IMessage do
   `Control.decode_probe/1`) says is missing, in the order a person fixes them,
   or `:ok`. The Listener opens no subscription and `health_check/1` is red
   until this is `:ok`.
+
+  The last gate is the helper's own rule for the account: an `owner` among the
+  signed-in account's own aliases means Messages on this Mac is signed in as
+  the owner (`:owner_is_this_mac`), which the helper refuses until the
+  own-account mode is supported. A `nil` owner or unknown aliases leave it open.
   """
-  @spec probe_gate(Control.probe()) :: :ok | {:error, gate_class()}
-  def probe_gate(probe) when is_map(probe) do
-    Enum.find_value(@gates, :ok, fn {field, open, class} ->
-      gate(Map.get(probe, field), open, class)
-    end)
+  @spec probe_gate(Control.probe(), String.t() | nil) :: :ok | {:error, gate_class()}
+  def probe_gate(probe, owner) when is_map(probe) and (is_binary(owner) or is_nil(owner)) do
+    first_closed =
+      Enum.find_value(@gates, :ok, fn {field, open, class} ->
+        gate(Map.get(probe, field), open, class)
+      end)
+
+    with :ok <- first_closed, do: owner_gate(Map.get(probe, :self_aliases), owner)
   end
+
+  defp owner_gate(aliases, owner) when is_list(aliases) and is_binary(owner) do
+    own? = Enum.any?(aliases, &(Protocol.normalize_handle(&1) == {:ok, owner}))
+    if own?, do: {:error, :owner_is_this_mac}, else: :ok
+  end
+
+  defp owner_gate(_aliases, _owner), do: :ok
 
   defp gate(open, open, _class), do: nil
   defp gate(value, _open, :db), do: {:error, db_class(value)}
@@ -753,25 +789,25 @@ defmodule FermixChannels.Channels.IMessage do
 
   defp gate_detail(:not_signed_in), do: "Messages is not signed in on this Mac"
 
+  defp gate_detail(:owner_is_this_mac),
+    do: "Sign Messages in with a separate Apple ID for Fermix"
+
   # --- Config ---------------------------------------------------------------------
 
   @doc """
-  The channel's policy from `[fermix_channels.imessage]`: the posture, the
-  owner's normalized handle, and owner ∪ allowed senders (an empty allow list
-  means no guests, never no owner).
+  The channel's recipients from `[fermix_channels.imessage]`: the owner's
+  normalized handle, and owner ∪ allowed senders (an empty allow list means no
+  guests, never no owner). The account posture is not config: the Listener
+  reads the one the helper derived (`policy.get`).
   """
-  @spec policy_from_config() :: {:ok, policy()} | {:error, term()}
-  def policy_from_config do
-    with {:ok, config} <- Config.channel(:imessage),
-         {:ok, posture} <- posture(Keyword.get(config, :posture)),
+  @spec recipients_from_config() :: {:ok, recipients()} | {:error, term()}
+  def recipients_from_config do
+    with {:ok, _config} <- Config.channel(:imessage),
          {:ok, owner} <- owner(),
          {:ok, guests} <- normalize_all(Config.channel_ingress_user_ids(:imessage)) do
-      {:ok, %{posture: posture, owner: owner, handles: Enum.uniq([owner | guests])}}
+      {:ok, %{owner: owner, handles: Enum.uniq([owner | guests])}}
     end
   end
-
-  defp posture(posture) when posture in [:dedicated_account, :own_account], do: {:ok, posture}
-  defp posture(other), do: {:error, {:invalid_posture, other}}
 
   defp owner do
     case Config.channel_explicit_owner_user_id(:imessage) do

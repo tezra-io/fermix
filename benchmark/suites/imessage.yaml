@@ -77,9 +77,9 @@ scenarios:
           max_cost_usd: 1.2
           max_duration_ms: 160000
         rubric: >
-          Says iMessage needs Messages on this Mac signed in to the Apple ID
-          Fermix speaks as (a spare Apple ID used only by Fermix for the
-          dedicated account), and that the Fermix Messages helper needs two
+          Says iMessage needs Messages on this Mac signed in to a separate
+          Apple ID used only by Fermix (not the user's own), and that the
+          Fermix Messages helper needs two
           macOS permissions, Full Disk Access (Messages data) and Automation
           for Messages, granted from the app. Says one on-screen confirmation of
           who Fermix may message is also needed, that the channel is turned on
@@ -99,7 +99,7 @@ scenarios:
         rubric: >
           Explains that the Fermix Messages helper keeps its own confirmed list
           of who Fermix may message, and that the row waits whenever the saved
-          owner, account choice or guest list differs from that list. Says the
+          owner or guest list differs from that list. Says the
           fix is the Confirm action in the app, which shows the helper's own
           dialog naming every handle, and approving it; cancelling leaves it
           waiting. Does not tell the user to edit the keychain or a config file
@@ -124,7 +124,8 @@ scenarios:
           Walks through the checks the helper itself reports: that the Fermix
           Messages helper is installed, that Full Disk Access and Automation for
           Messages are granted to Fermix Messages (not to Fermix or Terminal),
-          that Messages is open and signed in, that the recipient list is
+          that Messages is open and signed in to a separate Apple ID for
+          Fermix rather than the user's own, that the recipient list is
           confirmed (not "Awaiting confirmation"), that the channel switch is on
           and Fermix was restarted, and that the Apple ID or phone number entered
           is the handle being texted from. Points at Doctor (the iMessage rows)

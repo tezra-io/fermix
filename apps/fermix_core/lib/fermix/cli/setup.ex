@@ -54,7 +54,6 @@ defmodule Fermix.CLI.Setup do
     slack_owner_user_id: :string,
     signal_account: :string,
     signal_owner_user_id: :string,
-    imessage_posture: :string,
     imessage_owner_user_id: :string,
     imessage_allowed_sender_ids: :string,
     acp_enabled: :boolean,

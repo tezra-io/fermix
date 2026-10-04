@@ -162,21 +162,17 @@ defmodule FermixCore.Management.SetupStateTest do
     assert telegram["mode"] == "polling"
   end
 
-  # M54: configured is the account and the owner, because the recipient policy
-  # the helper confirms is built from the owner; the transport is the
-  # registry's, so its mode is not read from a file.
-  test "the iMessage row needs its account and its owner, and its mode is fixed" do
-    Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
+  # M54: configured is the owner, because the recipient policy the helper
+  # confirms is built from it (the helper derives the account); the transport
+  # is the registry's, so its mode is not read from a file.
+  test "the iMessage row needs its owner, and its mode is fixed" do
+    Application.put_env(:fermix_channels, :imessage, enabled: true)
 
     half = imessage_row(SetupState.report(sources()))
     assert %{"enabled" => true, "configured" => false, "status" => "setup_required"} = half
     assert half["mode"] == "subprocess"
 
-    Application.put_env(:fermix_channels, :imessage,
-      enabled: true,
-      posture: :dedicated_account,
-      owner_user_id: "+15551234567"
-    )
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
 
     assert %{"configured" => true, "status" => "ok"} = imessage_row(SetupState.report(sources()))
   end

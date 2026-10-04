@@ -56,18 +56,8 @@ defmodule FermixCore.Management.Settings.Channels do
   # The one line under a row that needs more than its label. Rows whose label
   # says everything carry none.
   @footers %{
-    imessage_posture: "Which Apple ID this Mac's Messages is signed in to.",
-    imessage_owner_user_id:
-      "The address your iPhone sends iMessages from: an Apple ID email, or a phone number with its country code.",
-    imessage_allowed_sender_ids:
-      "Other people who may message Fermix here, by Apple ID or phone number. Only with a dedicated account."
-  }
-
-  @option_hints %{
-    "dedicated_account" =>
-      "A separate Apple ID used only by Fermix. You text it from your phone, and guests may join.",
-    "own_account" =>
-      "Your own Apple ID. Fermix answers only in your conversation with yourself, and nobody else is let in."
+    imessage_owner_user_id: "The address your iPhone sends iMessages from.",
+    imessage_allowed_sender_ids: "Others who may message Fermix here."
   }
 
   @doc "The rows of one owned section."
@@ -113,22 +103,6 @@ defmodule FermixCore.Management.Settings.Channels do
   defp row({key, config_key, :list, label}, block, _snapshot, restart) do
     Row.new(Atom.to_string(key), :list, label,
       value: Source.strings(block, config_key),
-      footer: footer(key),
-      restart: restart
-    )
-  end
-
-  # The options are the whole value space, so `settings.apply` refuses any other
-  # word under the control that sent it. An unset choice reads as the empty
-  # string, which no option carries: nothing is preselected on the operator's
-  # behalf (M54 D2, no default posture).
-  defp row({key, config_key, :choice, label, options}, block, _snapshot, restart) do
-    Row.new(Atom.to_string(key), :choice, label,
-      value: Source.string(block, config_key),
-      options:
-        Enum.map(options, fn {value, option_label} ->
-          Row.option(value, option_label, hint: Map.get(@option_hints, value))
-        end),
       footer: footer(key),
       restart: restart
     )

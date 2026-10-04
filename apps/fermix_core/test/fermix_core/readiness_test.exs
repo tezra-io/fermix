@@ -190,30 +190,32 @@ defmodule FermixCore.ReadinessTest do
       refute imessage_failure()
     end
 
-    test "on without a posture names the setting that fixes it" do
+    # The recipient policy the helper confirms is built from the owner, so an
+    # account with no owner is not configured, and the sentence names that row.
+    test "on without an owner names the setting that fixes it" do
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+
+      assert %{detail_key: "channel:imessage", gating: false, pane: "channels", action: action} =
+               imessage_failure()
+
+      assert action =~ "Apple ID or phone number"
+      refute action =~ ~r/choose/i
+    end
+
+    # The helper derives the account when the recipients are confirmed, so the
+    # owner alone configures the channel.
+    test "on with an owner is configured" do
       Application.put_env(:fermix_channels, :imessage,
         enabled: true,
         owner_user_id: "+15551234567"
       )
 
-      assert %{detail_key: "channel:imessage", gating: false, pane: "channels", action: action} =
-               imessage_failure()
-
-      assert action =~ "iMessage"
-    end
-
-    # The recipient policy the helper confirms is built from the owner, so an
-    # account with no owner is not configured.
-    test "on with a posture but no owner is not configured" do
-      Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
-
-      assert %{detail_key: "channel:imessage"} = imessage_failure()
+      assert Readiness.channel_configured?(:imessage)
     end
 
     test "configured but with no helper on disk says the helper is missing" do
       Application.put_env(:fermix_channels, :imessage,
         enabled: true,
-        posture: :dedicated_account,
         owner_user_id: "+15551234567"
       )
 
@@ -223,7 +225,6 @@ defmodule FermixCore.ReadinessTest do
     test "configured with the helper on disk reports nothing", %{home: home} do
       Application.put_env(:fermix_channels, :imessage,
         enabled: true,
-        posture: :dedicated_account,
         owner_user_id: "+15551234567"
       )
 

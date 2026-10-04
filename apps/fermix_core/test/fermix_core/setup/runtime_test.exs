@@ -904,7 +904,7 @@ defmodule FermixCore.Setup.RuntimeTest do
       assert Keyword.get(answers, :xai_api_key) == "xai-key"
     end
 
-    test "extracts the M54 iMessage flags as answers" do
+    test "extracts the M54 iMessage flags as answers, and no account choice" do
       answers =
         Runtime.provided_answers(
           imessage_posture: "dedicated_account",
@@ -912,7 +912,7 @@ defmodule FermixCore.Setup.RuntimeTest do
           imessage_allowed_sender_ids: "friend@example.com"
         )
 
-      assert Keyword.get(answers, :imessage_posture) == "dedicated_account"
+      refute Keyword.has_key?(answers, :imessage_posture)
       assert Keyword.get(answers, :imessage_owner_user_id) == "+15551234567"
       assert Keyword.get(answers, :imessage_allowed_sender_ids) == "friend@example.com"
     end

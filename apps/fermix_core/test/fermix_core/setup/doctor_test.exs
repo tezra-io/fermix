@@ -878,7 +878,6 @@ defmodule FermixCore.Setup.DoctorTest do
 
       Application.put_env(:fermix_channels, :imessage,
         enabled: true,
-        posture: :dedicated_account,
         owner_user_id: "+15551234567",
         command_allowlist: ["friend@example.com"]
       )

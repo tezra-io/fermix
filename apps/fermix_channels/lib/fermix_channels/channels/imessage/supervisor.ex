@@ -9,8 +9,9 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
   core seams (`FermixCore.IMessage.HelperInstaller.binary_path/0`,
   `FermixCore.IMessage.Home.dir/0`), and passed down; tests inject them
   (`:executable`, `:home`, or the `:installer` / `:home_dir` modules). A
-  missing helper, a policy the config cannot express, or a helper on another
-  protocol version fails the start loud with that class.
+  missing helper, recipients the config cannot express, or a helper on another
+  protocol version fails the start loud with that class. The account posture
+  is not resolved here: the Listener reads the one the helper derived.
   """
 
   use Supervisor
@@ -26,8 +27,8 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
 
   @doc """
   Starts the transport. Options: `:name`, `:port_name`, `:listener_name`;
-  `:executable` or `:installer`; `:home` or `:home_dir`; `:policy` (default:
-  `IMessage.policy_from_config/0`); and the Port's and Listener's own tuning
+  `:executable` or `:installer`; `:home` or `:home_dir`; `:recipients`
+  (default: `IMessage.recipients_from_config/0`); and the Port's and Listener's own tuning
   options, passed through.
   """
   @spec start_link(keyword()) :: Supervisor.on_start() | {:error, term()}
@@ -35,10 +36,10 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
     home_dir = Keyword.get(opts, :home_dir, @home_dir)
 
     with {:ok, executable} <- executable(opts),
-         {:ok, policy} <- policy(opts),
+         {:ok, recipients} <- recipients(opts),
          home = Keyword.get_lazy(opts, :home, fn -> home_dir.fermix_home() end),
          :ok <- ensure_home(opts, home_dir) do
-      init_arg = Keyword.merge(opts, executable: executable, home: home, policy: policy)
+      init_arg = Keyword.merge(opts, executable: executable, home: home, recipients: recipients)
       Supervisor.start_link(__MODULE__, init_arg, name: Keyword.get(opts, :name, __MODULE__))
     end
   end
@@ -57,7 +58,7 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
         helper: HelperPort,
         server: port_name,
         home: opts[:home],
-        policy: opts[:policy]
+        recipients: opts[:recipients]
       ] ++ Keyword.take(opts, @listener_options)
 
     Supervisor.init([{HelperPort, port_opts}, {Listener, listener_opts}], strategy: :rest_for_one)
@@ -84,10 +85,10 @@ defmodule FermixChannels.Channels.IMessage.Supervisor do
     end
   end
 
-  defp policy(opts) do
-    case Keyword.fetch(opts, :policy) do
-      {:ok, policy} when is_map(policy) -> {:ok, policy}
-      :error -> IMessage.policy_from_config()
+  defp recipients(opts) do
+    case Keyword.fetch(opts, :recipients) do
+      {:ok, recipients} when is_map(recipients) -> {:ok, recipients}
+      :error -> IMessage.recipients_from_config()
     end
   end
 end

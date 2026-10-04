@@ -15,8 +15,7 @@ defmodule FermixCore.IMessage.Control do
       fermix-messages probe      --home <FERMIX_HOME>
       fermix-messages grant      --home <FERMIX_HOME> --service automation|full_disk_access
       fermix-messages policy-get --home <FERMIX_HOME>
-      fermix-messages policy-set --home <FERMIX_HOME> --posture <posture> --owner <handle>
-                                 [--handle <handle>]...
+      fermix-messages policy-set --home <FERMIX_HOME> --owner <handle> [--handle <handle>]...
 
   The helper writes exactly one JSON object to stdout and exits 0, whether the
   object is a result or `{"error": {"kind", "message"}}` with a kind from the
@@ -30,6 +29,13 @@ defmodule FermixCore.IMessage.Control do
   reads the dialog). At the bound the helper's process group is killed and the
   call answers `{:error, :timeout}`. Parsing is pure (`parse/2`,
   `exit_error/1`); only `run/3` touches a process.
+
+  The account posture is never asked of the owner or sent to the helper: the
+  helper derives it when it confirms the recipients (the owner among the
+  signed-in account's own aliases is `own_account`, anything else
+  `dedicated_account`), refuses an owner that is this Mac's own address with
+  `owner_is_this_mac` until the own-account mode is supported, and reports the
+  posture it stored in every `policy-get` and `policy-set` result.
   """
 
   alias FermixCore.IMessage
@@ -44,7 +50,6 @@ defmodule FermixCore.IMessage.Control do
   @max_stdout_bytes 1_048_576
 
   @services [:automation, :full_disk_access]
-  @postures [:dedicated_account, :own_account]
 
   @exit_classes %{
     64 => :usage,
@@ -61,7 +66,7 @@ defmodule FermixCore.IMessage.Control do
   @error_kinds ~w(
                  not_initialized protocol_mismatch permission_denied db_missing db_unreadable
                  db_schema_unexpected policy_absent policy_unconfirmed policy_refused
-                 policy_violation owner_not_self not_signed_in no_user_session
+                 policy_violation owner_not_self owner_is_this_mac not_signed_in no_user_session
                  service_not_imessage chat_not_found automation_refused send_timeout
                  path_refused attachment_not_admitted attachment_too_large busy
                )
@@ -106,7 +111,8 @@ defmodule FermixCore.IMessage.Control do
           handles: [String.t()],
           confirmed_at: String.t()
         }
-  @type policy_request :: %{posture: posture(), owner_handle: String.t(), handles: [String.t()]}
+  @type policy_request :: %{owner_handle: String.t(), handles: [String.t()]}
+  @type confirmation :: %{confirmed_at: String.t(), posture: posture()}
   @type exit_class ::
           :usage
           | :disclaim_unavailable
@@ -153,42 +159,38 @@ defmodule FermixCore.IMessage.Control do
   @doc """
   Asks the helper to store a recipient policy. A changed policy shows the
   helper's own dialog; `{:error, {:helper_error, :policy_refused, _}}` is the
-  owner pressing Cancel.
+  owner pressing Cancel, and `{:error, {:helper_error, :owner_is_this_mac, _}}`
+  an owner that is the address Messages on this Mac is signed in as. The
+  result names the posture the helper derived.
   """
-  @spec policy_set(policy_request(), keyword()) ::
-          {:ok, %{confirmed_at: String.t()}} | {:error, error()}
-  def policy_set(%{posture: posture, owner_handle: owner, handles: handles}, opts \\ [])
-      when posture in @postures and is_binary(owner) and is_list(handles) and is_list(opts) do
+  @spec policy_set(policy_request(), keyword()) :: {:ok, confirmation()} | {:error, error()}
+  def policy_set(%{owner_handle: owner, handles: handles}, opts \\ [])
+      when is_binary(owner) and is_list(handles) and is_list(opts) do
     args =
       ["policy-set" | home_args(opts)] ++
-        ["--posture", Atom.to_string(posture), "--owner", owner] ++
-        Enum.flat_map(handles, &["--handle", &1])
+        ["--owner", owner] ++ Enum.flat_map(handles, &["--handle", &1])
 
     run(:policy_set, args, timeout(opts, @policy_set_timeout_ms), opts)
   end
 
   @doc """
   The policy a confirmation stores for a saved `[fermix_channels.imessage]`
-  section: its posture, its normalized owner and every recipient
-  (`FermixCore.IMessage.policy_handles/1`).
+  section: its normalized owner and every recipient
+  (`FermixCore.IMessage.policy_handles/1`). The posture is the helper's to
+  derive, so it is not part of the request.
   """
-  @spec policy_for_config(keyword()) ::
-          {:ok, policy_request()} | {:error, :owner_missing | :posture_missing}
+  @spec policy_for_config(keyword()) :: {:ok, policy_request()} | {:error, :owner_missing}
   def policy_for_config(config) when is_list(config) do
-    case {Keyword.get(config, :posture), Keyword.get(config, :owner_user_id)} do
-      {posture, owner} when posture in @postures and is_binary(owner) ->
+    case Keyword.get(config, :owner_user_id) do
+      owner when is_binary(owner) ->
         {:ok,
          %{
-           posture: posture,
            owner_handle: IMessage.normalize_handle!(owner),
            handles: IMessage.policy_handles(config)
          }}
 
-      {posture, _owner} when posture in @postures ->
+      _missing ->
         {:error, :owner_missing}
-
-      _no_posture ->
-        {:error, :posture_missing}
     end
   end
 
@@ -203,22 +205,22 @@ defmodule FermixCore.IMessage.Control do
 
   @doc """
   Whether the helper's stored policy (a `policy_get/1` result) names exactly
-  the saved section's posture, owner and recipients. A mismatch is the state
+  the saved section's owner and recipients. The posture it carries is the
+  helper's own derivation, so it is not compared. A mismatch is the state
   "Awaiting confirmation" (§10.1); it is resolved by a confirmation, never by
   the engine rewriting the helper's item.
   """
   @spec policy_matches_config?(policy() | nil, keyword()) :: boolean()
   def policy_matches_config?(nil, config) when is_list(config), do: false
 
-  def policy_matches_config?(%{posture: _, owner_handle: _, handles: handles} = policy, config)
+  def policy_matches_config?(%{owner_handle: owner, handles: handles}, config)
       when is_list(config) do
     case policy_for_config(config) do
       {:ok, expected} ->
-        policy.posture == expected.posture and policy.owner_handle == expected.owner_handle and
-          Enum.sort(Enum.map(handles, &normalized_or_raw/1)) ==
-            Enum.sort(expected.handles)
+        owner == expected.owner_handle and
+          Enum.sort(Enum.map(handles, &normalized_or_raw/1)) == Enum.sort(expected.handles)
 
-      {:error, _missing} ->
+      {:error, :owner_missing} ->
         false
     end
   end
@@ -245,6 +247,14 @@ defmodule FermixCore.IMessage.Control do
   @spec decode_probe(map()) :: {:ok, probe()} | {:error, error()}
   def decode_probe(decoded) when is_map(decoded), do: parse_probe(decoded)
 
+  @doc """
+  The typed stored policy from one decoded `policy.get` result (pure). The
+  serving helper's answer and the one-shot command's stdout share this shape,
+  so the channel's Listener reads the derived posture the way setup does.
+  """
+  @spec decode_policy(map()) :: {:ok, policy()} | {:error, error()}
+  def decode_policy(decoded) when is_map(decoded), do: parse_policy(decoded)
+
   @doc "The typed class of a non-zero helper exit (pure)."
   @spec exit_error(integer()) :: {:helper_exit, exit_class()}
   def exit_error(status) when is_integer(status),
@@ -268,8 +278,12 @@ defmodule FermixCore.IMessage.Control do
   defp result(:policy_get, nil), do: {:ok, nil}
   defp result(:policy_get, decoded) when is_map(decoded), do: parse_policy(decoded)
 
-  defp result(:policy_set, %{"confirmed_at" => at}) when is_binary(at),
-    do: {:ok, %{confirmed_at: at}}
+  defp result(:policy_set, decoded) when is_map(decoded) do
+    with {:ok, confirmed_at} <- string_field(decoded, "confirmed_at"),
+         {:ok, posture} <- posture(Map.get(decoded, "posture")) do
+      {:ok, %{confirmed_at: confirmed_at, posture: posture}}
+    end
+  end
 
   defp result(_kind, _decoded), do: {:error, {:helper_protocol, :invalid_json}}
 

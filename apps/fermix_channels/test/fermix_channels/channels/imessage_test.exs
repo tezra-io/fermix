@@ -328,6 +328,8 @@ defmodule FermixChannels.Channels.IMessageTest do
       {{:error, {:policy_absent, "none", %{}}}, {:permanent, :adapter_unavailable}},
       {{:error, {:policy_unconfirmed, "pending", %{}}}, {:permanent, :adapter_unavailable}},
       {{:error, {:automation_refused, "-1743", %{}}}, {:permanent, :adapter_unavailable}},
+      {{:error, {:owner_is_this_mac, "signed in as the owner", %{}}},
+       {:permanent, :adapter_unavailable}},
       {{:error, {:chat_not_found, "none", %{}}}, {:permanent, :remote_rejected}},
       {{:error, {:service_not_imessage, "sms", %{}}}, {:permanent, :remote_rejected}},
       {{:error, {:policy_violation, "outside", %{}}}, {:permanent, :remote_rejected}},
@@ -548,9 +550,16 @@ defmodule FermixChannels.Channels.IMessageTest do
       def probe(_opts), do: {:error, :not_installed}
     end
 
+    defmodule OwnMacControl do
+      def probe(_opts) do
+        probe = Map.put(FakeHelper.good_probe(), "self_aliases", ["+1 (555) 123-4567"])
+        Control.decode_probe(probe)
+      end
+    end
+
     test "is ok only when every gate is open, through the one-shot probe", ctx do
       assert {:ok, %{detail: detail, latency_ms: ms}} =
-               IMessage.health_check(control: OkControl, home: ctx.home)
+               IMessage.health_check(control: OkControl, home: ctx.home, owner: @owner)
 
       assert detail =~ "Fermix Messages"
       assert is_integer(ms)
@@ -575,28 +584,48 @@ defmodule FermixChannels.Channels.IMessageTest do
         {%{full_disk_access: :denied, policy: :absent}, {:permission_denied, :full_disk_access}}
       ]
 
-      assert IMessage.probe_gate(good) == :ok
+      assert IMessage.probe_gate(good, @owner) == :ok
 
       for {override, class} <- cases do
-        assert IMessage.probe_gate(Map.merge(good, override)) == {:error, class},
+        assert IMessage.probe_gate(Map.merge(good, override), @owner) == {:error, class},
                inspect(override)
       end
     end
 
+    # The helper's own rule (owner ∈ the signed-in account's aliases), read from
+    # the probe, so a tree-less Doctor names it too.
+    test "an owner among the account's own aliases is this Mac's address" do
+      {:ok, good} = Control.decode_probe(FakeHelper.good_probe())
+      own_mac = %{good | self_aliases: ["+1 555 123 4567", "me@example.com"]}
+
+      assert IMessage.probe_gate(own_mac, @owner) == {:error, :owner_is_this_mac}
+      assert IMessage.probe_gate(own_mac, "friend@example.com") == :ok
+      assert IMessage.probe_gate(%{good | self_aliases: nil}, @owner) == :ok
+      assert IMessage.probe_gate(own_mac, nil) == :ok
+    end
+
+    test "names the separate Apple ID when Messages here is signed in as the owner" do
+      assert IMessage.health_check(control: OwnMacControl, owner: @owner) ==
+               {:error,
+                {:owner_is_this_mac, "Sign Messages in with a separate Apple ID for Fermix"}}
+    end
+
     test "returns the class and a sentence naming the remedy" do
       assert {:error, {:policy_unconfirmed, detail}} =
-               IMessage.health_check(control: UnconfirmedControl)
+               IMessage.health_check(control: UnconfirmedControl, owner: @owner)
 
       assert detail =~ "Awaiting confirmation"
     end
 
     test "a helper that is not installed reports it as missing, without a daemon" do
-      assert {:error, {:helper_missing, detail}} = IMessage.health_check(control: MissingControl)
+      assert {:error, {:helper_missing, detail}} =
+               IMessage.health_check(control: MissingControl, owner: @owner)
+
       assert detail =~ "not installed"
     end
   end
 
-  describe "policy_from_config/0" do
+  describe "recipients_from_config/0" do
     setup do
       previous = Application.get_env(:fermix_channels, :imessage)
 
@@ -608,35 +637,26 @@ defmodule FermixChannels.Channels.IMessageTest do
       end)
     end
 
-    test "reads the posture and the normalized owner" do
+    test "reads the normalized owner and every guest, and no account choice" do
       Application.put_env(:fermix_channels, :imessage,
         enabled: true,
-        posture: :dedicated_account,
-        owner_user_id: "+1 (555) 123-4567"
+        owner_user_id: "+1 (555) 123-4567",
+        allowed_sender_ids: ["guest@example.com"]
       )
 
-      assert {:ok, %{posture: :dedicated_account, owner: @owner, handles: handles}} =
-               IMessage.policy_from_config()
-
-      assert @owner in handles
+      assert IMessage.recipients_from_config() ==
+               {:ok, %{owner: @owner, handles: [@owner, "guest@example.com"]}}
     end
 
-    test "refuses a missing posture, a missing owner, or an unparseable owner" do
-      Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: @owner)
-      assert {:error, {:invalid_posture, nil}} = IMessage.policy_from_config()
+    test "refuses a missing owner or an unparseable one" do
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+      assert {:error, :owner_not_configured} = IMessage.recipients_from_config()
 
-      Application.put_env(:fermix_channels, :imessage, enabled: true, posture: :dedicated_account)
-      assert {:error, :owner_not_configured} = IMessage.policy_from_config()
-
-      Application.put_env(:fermix_channels, :imessage,
-        posture: :dedicated_account,
-        owner_user_id: "5551234567"
-      )
-
-      assert {:error, {:invalid_handle, "5551234567"}} = IMessage.policy_from_config()
+      Application.put_env(:fermix_channels, :imessage, owner_user_id: "5551234567")
+      assert {:error, {:invalid_handle, "5551234567"}} = IMessage.recipients_from_config()
 
       Application.delete_env(:fermix_channels, :imessage)
-      assert {:error, :not_configured} = IMessage.policy_from_config()
+      assert {:error, :not_configured} = IMessage.recipients_from_config()
     end
   end
 end

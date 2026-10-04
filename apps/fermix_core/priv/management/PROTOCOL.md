@@ -407,17 +407,15 @@ Notes that the shapes alone do not carry:
 - **iMessage exists only on a Mac.** The three `imessage.*` methods answer
   `unavailable` {`capability`: `imessage`} anywhere else, `settings.sections`
   publishes no `channels.imessage` there, and `settings.get` refuses that
-  section. On a Mac, `channels.imessage` carries four boot-bound rows:
-  `imessage_posture`, a `choice` whose options are its whole value space
-  (`dedicated_account`, `own_account`) and whose value is the empty string until
-  one is chosen, because the account has no default; `imessage_owner_user_id`
-  (`text`); `imessage_allowed_sender_ids`, the guests (`list`); and the
-  `imessage_enabled` switch. Saving the account, the owner or the guests never
-  turns the channel on: only its switch does. `capabilities.install.start`
-  {`target`: `imessage_helper`} installs Fermix Messages: it checks the
-  download's sha256, extracts the bundle, verifies its signature and Team ID,
-  places it and registers it with LaunchServices, and a refusal names the check
-  that stopped it.
+  section. On a Mac, `channels.imessage` carries three boot-bound rows:
+  `imessage_owner_user_id` (`text`); `imessage_allowed_sender_ids`, the guests
+  (`list`); and the `imessage_enabled` switch. There is no account row: the
+  helper derives the account when it confirms the recipients. Saving the owner
+  or the guests never turns the channel on: only its switch does.
+  `capabilities.install.start` {`target`: `imessage_helper`} installs Fermix
+  Messages: it checks the download's sha256, extracts the bundle, verifies its
+  signature and Team ID, places it and registers it with LaunchServices, and a
+  refusal names the check that stopped it.
 - **`imessage.permissions.get` never prompts.** With `installed: false` every
   other field is null. `full_disk_access` is `granted` or `denied`; `db` is
   `readable`, `missing`, `unreadable` or `schema_unexpected`; `automation` is
@@ -433,9 +431,11 @@ Notes that the shapes alone do not carry:
   whose `result` is the permissions view. A confirmation's `result` adds
   `outcome`: `confirmed`, or `policy_refused` when the owner pressed Cancel on
   the helper's dialog. Cancel is a decision, so it completes the job rather than
-  failing it. A confirmation with no saved account or owner, or with an owner
-  that is not a handle of the Messages account on this Mac, fails `refused` with
-  the daemon's sentence. One of each runs at a time (`busy` {`operation`:
+  failing it. A confirmation with no saved owner, with an owner that is not a
+  handle of the Messages account on this Mac, or with an owner that is the
+  address Messages on this Mac is signed in as, fails `refused` with the
+  daemon's sentence; the last one names the fix, signing Messages in with a
+  separate Apple ID for Fermix. One of each runs at a time (`busy` {`operation`:
   `imessage_grant`} or `imessage_policy_confirm`).
 - A **check status** is one of `passed`, `warning`, `failed`, `not_applicable`,
   `unavailable`, `skipped`, `cancelled`, `timed_out`. `not_applicable` means

@@ -13,7 +13,6 @@ defmodule Fermix.CLI.Doctor.IMessageCheckTest do
 
   @config [
     enabled: true,
-    posture: :dedicated_account,
     owner_user_id: "+15551234567",
     allowed_sender_ids: []
   ]

@@ -89,20 +89,18 @@ defmodule FermixCore.IMessage do
   end
 
   @doc """
-  The recipients a policy for this section names: the owner and, in the
-  dedicated posture, every guest, normalized and listed once each. An empty
-  guest list means "no guests", never "no owner" (M53 OWN-3).
+  The recipients a policy for this section names: the owner and every guest,
+  normalized and listed once each. An empty guest list means "no guests",
+  never "no owner" (M53 OWN-3). The account posture is not the section's: the
+  helper derives it when it confirms these recipients.
   """
   @spec policy_handles(keyword()) :: [String.t()]
   def policy_handles(section) when is_list(section) do
     owner = section |> Keyword.get(:owner_user_id) |> List.wrap()
-    guests = guest_handles(Keyword.get(section, :posture), section)
+    guests = Keyword.get(section, :allowed_sender_ids, [])
 
     (owner ++ guests)
     |> Enum.map(&normalize_handle!/1)
     |> Enum.uniq()
   end
-
-  defp guest_handles(:own_account, _section), do: []
-  defp guest_handles(_posture, section), do: Keyword.get(section, :allowed_sender_ids, [])
 end

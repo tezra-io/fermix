@@ -84,8 +84,7 @@ defmodule FermixCore.Readiness do
     discord: "Add the Discord bot token and bot user ID in Channels settings.",
     slack: "Add the Slack bot token and signing secret in Channels settings.",
     signal: "Add the Signal account in Channels settings.",
-    imessage:
-      "Choose which Apple ID iMessage uses and add your Apple ID or phone number in Channels settings."
+    imessage: "Add your Apple ID or phone number for iMessage in Channels settings."
   ]
   @imessage_helper_action "Fermix Messages, the helper iMessage needs, is not installed. " <>
                             "Turn iMessage on in Channels settings to install it."
