@@ -1,6 +1,8 @@
 defmodule FermixCore.Management.ProvidersTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Providers
 
@@ -125,8 +127,13 @@ defmodule FermixCore.Management.ProvidersTest do
       live = fn :ollama, _opts -> {:error, "connection refused"} end
       params = %{"provider" => "ollama", "live" => true}
 
-      assert {:error, {:unavailable, "model_listing"}} =
-               Providers.models(params, live_models: live)
+      log =
+        capture_log(fn ->
+          assert {:error, {:unavailable, "model_listing"}} =
+                   Providers.models(params, live_models: live)
+        end)
+
+      assert log =~ "management providers: the ollama model list was not read: connection refused"
     end
 
     test "a live listing answers with the live label" do

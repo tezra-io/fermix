@@ -26,6 +26,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   sends `assistant_text_done` instead, and the voice protocol's notes for
   `transcript_delta`, which carries the user's utterance and not the
   assistant's speech, say so. Clients that ignore both events are unaffected.
+- **A model list that could not be read says why in the daemon log.**
+  `providers.models.list` answers a failed live listing with `unavailable`
+  and the capability alone, and nothing recorded the reason. A refused
+  OpenAI Codex picker could not be diagnosed: the ChatGPT sign-in, the
+  2-second timeout or an HTTP status. The daemon now logs the provider and
+  the reason as a warning. The answer on the wire is unchanged.
 
 ## [0.12.1] - 2026-09-30
 

@@ -210,10 +210,17 @@ defmodule FermixCore.Management.Providers do
     end
   end
 
+  # The refusal names only the capability, so the reason goes to the daemon log
+  # here, where it is known: a ChatGPT sign-in that cannot carry a turn, a
+  # timeout, an HTTP status.
   defp live_entries(provider, live_models) do
     case live_models.(provider, []) do
-      {:ok, models} -> {:ok, "live", Enum.map(models, &%{"id" => &1.id, "label" => &1.label})}
-      {:error, _reason} -> {:error, {:unavailable, "model_listing"}}
+      {:ok, models} ->
+        {:ok, "live", Enum.map(models, &%{"id" => &1.id, "label" => &1.label})}
+
+      {:error, reason} ->
+        Logger.warning("management providers: the #{provider} model list was not read: #{reason}")
+        {:error, {:unavailable, "model_listing"}}
     end
   end
 
