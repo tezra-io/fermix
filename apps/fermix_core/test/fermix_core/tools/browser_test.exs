@@ -110,6 +110,12 @@ defmodule FermixCore.Tools.BrowserTest do
       end
     end
 
+    # `backend` arrives only with an `open`, so a need known before one is
+    # decided before it, not after a first open in the pane.
+    test "the description sends a need known before opening straight to fermix_chrome" do
+      assert Browser.description() =~ "from the first `open` when you already know you need one"
+    end
+
     test "the profile argument and the pane's refusal tag name both cases and fermix_chrome" do
       profile = Browser.parameters().properties.profile.description
       assert profile =~ "`fermix_chrome`"
