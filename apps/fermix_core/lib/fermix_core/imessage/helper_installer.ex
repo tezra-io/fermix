@@ -46,18 +46,18 @@ defmodule FermixCore.IMessage.HelperInstaller do
   # version => %{target => %{url:, sha256:}}. The pin lands with the helper's
   # release choreography from the release's own `.sha256` sidecar; it is never
   # hand-written. A release whose sha256 is the unset marker is refused by
-  # `install/1`. 0.1.1 is the helper's first notarized release
-  # (tezra-io/fermix-messages at 6f9f137).
+  # `install/1`. 0.1.2 puts System Settings in front of the revealed bundle on
+  # the Full Disk Access grant (tezra-io/fermix-messages at 007f00e).
   @releases %{
-    "0.1.1" => %{
+    "0.1.2" => %{
       "macos-universal" => %{
         url:
-          "https://github.com/tezra-io/fermix-messages/releases/download/v0.1.1/fermix-messages-0.1.1-macos-universal.zip",
-        sha256: "fe667e30aa35e6bfba7da52a337ff74b45be8f1ca095f0fe6b22aba79dd8a308"
+          "https://github.com/tezra-io/fermix-messages/releases/download/v0.1.2/fermix-messages-0.1.2-macos-universal.zip",
+        sha256: "91c354178b32c0562c5633d165db8a86f92905e07bf14b902e64897111b9fe3c"
       }
     }
   }
-  @pinned_version "0.1.1"
+  @pinned_version "0.1.2"
 
   @type release :: %{url: String.t(), sha256: String.t()}
   @type runner :: (String.t(), [String.t()] -> {String.t(), non_neg_integer()})
