@@ -200,6 +200,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   is now refused at once and points to `fermix_chrome`. `download` collects a
   file a click or a navigation already started, and now refuses `ref`, `url`
   and `path`, which read as if it could start one, with the move that does.
+- **Watching a game no longer ends the turn after four waits.** A page's own
+  wait tool, such as a game's, is the same call every time, and five identical
+  calls in a row ended the turn with "Repeated tool call loop detected", so
+  following a game stopped after four waits however much was happening. A
+  repeated call to a page's WebMCP tool now counts only since it last returned
+  something new: while each wait brings a new position the agent keeps
+  following, and a wait that keeps answering the same thing, or keeps timing
+  out, still ends the turn. Every other tool counts its repeats as before.
 - **A voice reply's whole text arrives once, as its own event.** The Realtime
   engine sent a finished reply's text as one more `assistant_text_delta` after
   its deltas, so a client joining the deltas showed the reply twice. It now

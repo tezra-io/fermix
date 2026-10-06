@@ -194,6 +194,24 @@ defmodule FermixCore.Tools.BrowserTest do
     end
   end
 
+  describe "progress_by_result?/1" do
+    test "a call to a page's WebMCP tool counts progress by what it returns" do
+      assert Browser.progress_by_result?(%{
+               "action" => "webmcp",
+               "op" => "call",
+               "name" => "chess_wait",
+               "input" => %{"until" => "change"}
+             })
+    end
+
+    test "every other action counts each repeat, as before" do
+      refute Browser.progress_by_result?(%{"action" => "webmcp", "op" => "list"})
+      refute Browser.progress_by_result?(%{"action" => "snapshot"})
+      refute Browser.progress_by_result?(%{"action" => "screenshot"})
+      refute Browser.progress_by_result?(%{})
+    end
+  end
+
   describe "execute/2 - validation" do
     test "returns error for missing action parameter" do
       assert {:ok, result} = Browser.execute(%{}, @context)
