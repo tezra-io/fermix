@@ -131,9 +131,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     # Protocol tests use the production handshake budget. Only the missing-hello
     # test shortens it; a 200 ms deadline otherwise races a loaded CI runner.
     start_supervised!(
-      {Acp.Supervisor,
-       socket_path: socket_path,
-       peer_opts: [agent: Queue, agent_server: queue]},
+      {Acp.Supervisor, socket_path: socket_path, peer_opts: [agent: Queue, agent_server: queue]},
       id: :acp_supervisor
     )
 
