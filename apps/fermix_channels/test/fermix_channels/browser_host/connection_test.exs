@@ -365,26 +365,33 @@ defmodule FermixChannels.BrowserHost.ConnectionTest do
   # itself closes, from the caller's point of view. So connecting right behind
   # a connection this test just closed retries the transient refusal instead
   # of racing that teardown. The endpoint refuses at accept, before any hello:
-  # it writes the refusal and closes, so a hello sent after that close fails
-  # (`:closed` on Linux) while the refusal line still waits to be read. The
-  # reply is the verdict, not the send.
+  # it writes the refusal and closes. A hello that lands first reads the
+  # refusal line back. A hello sent after the close fails (`:closed`, on
+  # Linux), and a passive socket's failed send closes the client side too:
+  # the driver answers the next recv `{:error, :closed}` without reading the
+  # refusal line still in the buffer. So that failed send is the refusal.
   defp connect_handshaken(path, attempts \\ 40) do
     client = connect(path)
     hello = Jason.encode!(%{"type" => "client_hello", "protocol_version" => 1}) <> "\n"
 
     case :gen_tcp.send(client, hello) do
-      :ok -> :ok
-      {:error, :closed} -> :ok
-    end
+      :ok ->
+        case recv(client) do
+          %{"type" => "error", "reason" => "host_already_attached"} when attempts > 0 ->
+            retry_handshake(path, attempts)
 
-    case recv(client) do
-      %{"type" => "error", "reason" => "host_already_attached"} when attempts > 0 ->
-        Process.sleep(10)
-        connect_handshaken(path, attempts - 1)
+          response ->
+            {client, response}
+        end
 
-      response ->
-        {client, response}
+      {:error, :closed} when attempts > 0 ->
+        retry_handshake(path, attempts)
     end
+  end
+
+  defp retry_handshake(path, attempts) do
+    Process.sleep(10)
+    connect_handshaken(path, attempts - 1)
   end
 
   defp attach(path) do
