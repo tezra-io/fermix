@@ -1,0 +1,2 @@
+{"event":"send.reconciled","params":{"idempotency_key":"turn:t-42:1:text:0","disposition":"recorded","guid":"A9B8C7D6-0002-4E5F-8A9B-0C1D2E3F4A5B"}}
+{"event":"send.reconciled","params":{"idempotency_key":"proactive:temporal:r-7:main:text:0","disposition":"uncertain","guid":null}}

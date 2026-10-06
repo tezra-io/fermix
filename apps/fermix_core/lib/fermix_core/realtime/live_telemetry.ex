@@ -37,6 +37,9 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   @call_stop_event [:fermix, :voice_live, :call_stop]
 
   @delegation_statuses ~w(completed failed cancelled)
+  # A task that outlived its call has a wall clock, which one on the call
+  # never reaches (M56 §4.6).
+  @detached_statuses ~w(completed failed cancelled timed_out)
 
   @trace_event_definitions [
     %{
@@ -81,9 +84,12 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   The call's correlation fields. `session_id` is the call id and is required;
   everything else is dropped from the metadata when absent rather than emitted
   as nil. `provider_session_id` is unknown until `session.started` arrives.
+  `call_uuid` is the key of the call's durable record: the call id is a counter
+  that restarts with the VM, so the UUID is what ties a trace to that record.
   """
   @type meta :: %{
           required(:session_id) => String.t(),
+          optional(:call_uuid) => String.t(),
           optional(:parent_session) => String.t(),
           optional(:device_id) => String.t(),
           optional(:model) => String.t(),
@@ -101,18 +107,45 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   @spec trace_event_definitions() :: [map()]
   def trace_event_definitions, do: @trace_event_definitions
 
+  @typedoc """
+  How large what a call started with was (M56 §4.3): the instructions' bytes,
+  and the starting `session.input`'s items and text bytes. Sizes only: the
+  owner's details, memory and chat never reach a field.
+  """
+  @type start_size :: %{
+          instructions_bytes: non_neg_integer(),
+          input_items: non_neg_integer(),
+          input_bytes: non_neg_integer()
+        }
+
   @doc """
-  Opens the run, before the provider socket is even dialled.
+  Opens the run, as `session.start` goes out.
 
   `max_duration_ms` is the call's own cap and becomes the Opik exporter's sweep
   floor: a Live call is silent between delegations for minutes at a time, so
   without it a quiet call is force-closed at the idle TTL and its `call_stop`
-  mints a second, ledger-only root.
+  mints a second, ledger-only root. `start_size` rides as metadata.
   """
-  @spec call_start(meta(), pos_integer()) :: :ok
-  def call_start(meta, max_duration_ms)
-      when is_map(meta) and is_integer(max_duration_ms) and max_duration_ms > 0 do
-    execute(@call_start_event, %{}, Map.put(base(meta), :max_duration_ms, max_duration_ms))
+  @spec call_start(meta(), pos_integer(), start_size()) :: :ok
+  def call_start(
+        meta,
+        max_duration_ms,
+        %{instructions_bytes: instructions, input_items: items, input_bytes: input}
+      )
+      when is_map(meta) and is_integer(max_duration_ms) and max_duration_ms > 0 and
+             is_integer(instructions) and instructions >= 0 and is_integer(items) and
+             items >= 0 and is_integer(input) and input >= 0 do
+    metadata =
+      meta
+      |> base()
+      |> Map.merge(%{
+        max_duration_ms: max_duration_ms,
+        instructions_bytes: instructions,
+        input_items: items,
+        input_bytes: input
+      })
+
+    execute(@call_start_event, %{}, metadata)
   end
 
   @doc """
@@ -132,24 +165,64 @@ defmodule FermixCore.Realtime.LiveTelemetry do
     execute(@delegation_start_event, %{}, delegation_metadata(meta, delegation))
   end
 
+  @typedoc """
+  A delegation's result shown in the chat (M56 §4.5): the row it was written
+  to and how many bytes were shown. Sizes only: the text never reaches a field.
+  """
+  @type shown :: %{server_seq: pos_integer(), bytes: non_neg_integer()}
+
   @doc """
   A delegation reached a terminal state.
 
   `status` is the terminal word (`completed` / `failed` / `cancelled`), never a
   bare "ok": a cancelled delegation and a failed one are different outcomes and
-  the trace is the only place that distinction survives.
+  the trace is the only place that distinction survives. `shown`, when its
+  result was shown in the chat, adds `server_seq` and `shown_bytes`.
   """
-  @spec delegation_stop(meta(), delegation(), String.t(), non_neg_integer()) :: :ok
-  def delegation_stop(meta, delegation, status, duration_ms)
+  @spec delegation_stop(meta(), delegation(), String.t(), non_neg_integer(), shown() | nil) ::
+          :ok
+  def delegation_stop(meta, delegation, status, duration_ms, shown \\ nil)
       when is_map(meta) and is_map(delegation) and status in @delegation_statuses and
-             is_integer(duration_ms) and duration_ms >= 0 do
+             is_integer(duration_ms) and duration_ms >= 0 and (is_nil(shown) or is_map(shown)) do
     metadata =
       meta
       |> delegation_metadata(delegation)
       |> Map.put(:status, status)
+      |> put_shown(shown)
 
     execute(@delegation_stop_event, %{duration_ms: duration_ms}, metadata)
   end
+
+  @doc """
+  A delegation that outlived its call reached its end, after the call's
+  `call_stop` (M56 §4.6): emitted by its new owner with the call's ids and its
+  own, `detached: true`, and its terminal state, which may be `timed_out`.
+  `shown` is its done row in the chat, by `server_seq` and size, never text.
+  """
+  @spec detached_delegation_stop(
+          meta(),
+          delegation(),
+          String.t(),
+          non_neg_integer(),
+          shown() | nil
+        ) :: :ok
+  def detached_delegation_stop(meta, delegation, status, duration_ms, shown)
+      when is_map(meta) and is_map(delegation) and status in @detached_statuses and
+             is_integer(duration_ms) and duration_ms >= 0 and (is_nil(shown) or is_map(shown)) do
+    metadata =
+      meta
+      |> delegation_metadata(delegation)
+      |> Map.merge(%{status: status, detached: true})
+      |> put_shown(shown)
+
+    execute(@delegation_stop_event, %{duration_ms: duration_ms}, metadata)
+  end
+
+  defp put_shown(metadata, nil), do: metadata
+
+  defp put_shown(metadata, %{server_seq: server_seq, bytes: bytes})
+       when is_integer(server_seq) and server_seq > 0 and is_integer(bytes) and bytes >= 0,
+       do: Map.merge(metadata, %{server_seq: server_seq, shown_bytes: bytes})
 
   @doc """
   The provider reported an error mid-call. Not terminal on its own — a
@@ -187,6 +260,7 @@ defmodule FermixCore.Realtime.LiveTelemetry do
       agent: @agent,
       engine: @engine,
       session_id: Map.fetch!(meta, :session_id),
+      call_uuid: Map.get(meta, :call_uuid),
       parent_session: Map.get(meta, :parent_session),
       device_id: Map.get(meta, :device_id),
       model: Map.get(meta, :model),

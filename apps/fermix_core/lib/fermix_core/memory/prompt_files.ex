@@ -17,25 +17,48 @@ defmodule FermixCore.Memory.PromptFiles do
 
   @type memory_row :: Repo.memory_row()
 
-  @user_sections ["Identity", "Preferences", "Interests", "Goals"]
-  @memory_sections ["Context", "Working Rules"]
+  @type section_usage :: %{
+          category: String.t(),
+          used: non_neg_integer(),
+          cap: pos_integer()
+        }
 
-  # Per-section row caps keep any one section from crowding the file out (the
-  # primary verbosity governor); the per-file token cap is the backstop. Caps
-  # keep the most recently updated rows — rows arrive newest-first from the repo.
+  @user_sections ["Identity", "Preferences", "Interests", "Goals"]
+
+  # Working Rules pack before Context: the per-file token cap trims from the
+  # bottom, and a standing rule the owner set must outlive a context note.
+  @memory_sections ["Working Rules", "Context"]
+
+  @user_categories ~w(identity preference interest goal)
+  @memory_categories ~w(directive context)
+
+  # Per-section row caps keep any one section from crowding the file out; the
+  # per-file token cap is the backstop. Caps keep the most recently updated
+  # rows — rows arrive newest-first from the repo. They are sized for the short
+  # clauses the reviewer writes, so a full set of sections lands near the file
+  # cap rather than at a fraction of it, and the reviewer is shown them
+  # (`section_usage/1`) so it merges rows before one is dropped.
   @section_caps %{
-    "Identity" => 6,
-    "Preferences" => 6,
-    "Interests" => 6,
-    "Goals" => 5,
-    "Context" => 12,
-    "Working Rules" => 8
+    "Identity" => 10,
+    "Preferences" => 16,
+    "Interests" => 8,
+    "Goals" => 8,
+    "Context" => 40,
+    "Working Rules" => 16
   }
 
   # Hard backstop on a single rendered fact. The reviewer is instructed to write
   # one short clause per value; this caps a legacy or runaway row so it cannot
   # bloat the file on its own.
   @max_value_chars 200
+
+  @doc """
+  The longest value a prompt file renders whole; a longer one is cut at this
+  length with an ellipsis. A foreground write refuses a longer value instead
+  (`Memory.LongTerm`), so what the owner asked to keep is never shown clipped.
+  """
+  @spec max_value_chars() :: pos_integer()
+  def max_value_chars, do: @max_value_chars
 
   @spec user_path(String.t()) :: String.t()
   def user_path(agent_id) when is_binary(agent_id) do
@@ -74,6 +97,32 @@ defmodule FermixCore.Memory.PromptFiles do
         {:ok, %{user: normalize_content(user), memory: normalize_content(memory)}}
       end
     end
+  end
+
+  @doc """
+  Rows each prompt-file section holds against its row cap, per category.
+
+  Counted over the same selection `rebuild/4` renders from, so the reviewer
+  budgets against what the prompt will actually show.
+  """
+  @spec section_usage([memory_row()]) :: %{user: [section_usage()], memory: [section_usage()]}
+  def section_usage(memories) when is_list(memories) do
+    %{
+      user: category_usage(select_user_memories(memories), :user, @user_categories),
+      memory: category_usage(select_memory_memories(memories), :memory, @memory_categories)
+    }
+  end
+
+  defp category_usage(rows, kind, categories) do
+    counts = Enum.frequencies_by(rows, & &1.category)
+
+    Enum.map(categories, fn category ->
+      %{
+        category: category,
+        used: Map.get(counts, category, 0),
+        cap: Map.fetch!(@section_caps, section_name(kind, category))
+      }
+    end)
   end
 
   defp load_memories(agent_id, owner_id) do
@@ -286,9 +335,11 @@ defmodule FermixCore.Memory.PromptFiles do
     end
   end
 
+  # Layout only: collapse whitespace so a value stays one bullet. Punctuation is
+  # meaning (a date, a flag, a path, a UTC offset) and is left alone; the
+  # wrapper tag is defanged at the prompt boundary (`PromptComposer`).
   defp normalize_inline(text) do
     text
-    |> String.replace(~r/[_-]+/u, " ")
     |> String.replace(~r/\s+/u, " ")
     |> String.trim()
   end

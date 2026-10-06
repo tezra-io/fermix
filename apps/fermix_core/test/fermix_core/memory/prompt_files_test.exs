@@ -156,12 +156,14 @@ defmodule FermixCore.Memory.PromptFilesTest do
     refute user_text =~ "STALE"
     refute memory_text =~ "STALE"
     assert user_text =~ "## Preferences"
-    assert memory_text =~ "## Context"
+    assert memory_text =~ "## Working Rules"
     assert estimated_tokens(user_text) <= 32
     assert estimated_tokens(memory_text) <= 36
-    # The lower-priority second row in each file is dropped under the byte cap.
+    # The byte cap trims from the bottom of each file: the goal in USER.md, and
+    # in MEMORY.md the context note — a standing rule packs first and survives.
     refute user_text =~ "ship durable"
-    refute memory_text =~ "warnings are errors"
+    assert memory_text =~ "warnings are errors"
+    refute memory_text =~ "fermix umbrella app"
     assert File.exists?(PromptFiles.user_path(agent_id))
     assert File.exists?(PromptFiles.memory_path(agent_id))
 
@@ -208,6 +210,160 @@ defmodule FermixCore.Memory.PromptFilesTest do
            - beta
            - alpha\
            """
+  end
+
+  test "rebuild/2 keeps the punctuation a value carries", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    with_prompt_caps(1_500, 2_000)
+
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "agent",
+      scope_id: agent_id,
+      category: "context",
+      key: "deploy_branch",
+      value: "Deploys run from release-2026 with --dry-run,\n  logs in ~/reports/q3_exports",
+      promote_target: "memory_md"
+    })
+
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "owner",
+      scope_id: owner_id,
+      category: "identity",
+      key: "timezone",
+      value: "Works in UTC-5 until 2026-11-03",
+      promote_target: "user_md"
+    })
+
+    assert {:ok, %{user: user_text, memory: memory_text}} =
+             PromptFiles.rebuild(agent_id, owner_id)
+
+    assert user_text == "## Identity\n- Works in UTC-5 until 2026-11-03"
+
+    # Whitespace still collapses, so one value is always exactly one bullet.
+    assert memory_text ==
+             "## Context\n- Deploys run from release-2026 with --dry-run, logs in ~/reports/q3_exports"
+  end
+
+  test "rebuild/2 packs Working Rules ahead of Context", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    with_prompt_caps(1_500, 2_000)
+    insert_agent_memory(repo, agent_id, owner_id, "context", "repo", "Fermix is an umbrella app")
+
+    insert_agent_memory(
+      repo,
+      agent_id,
+      owner_id,
+      "directive",
+      "rule",
+      "Show drafts before sending"
+    )
+
+    assert {:ok, %{memory: memory_text}} = PromptFiles.rebuild(agent_id, owner_id)
+
+    assert memory_text == """
+           ## Working Rules
+           - Show drafts before sending
+
+           ## Context
+           - Fermix is an umbrella app\
+           """
+  end
+
+  test "rebuild/2 keeps the newest rows up to the section cap and says what it dropped", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    with_prompt_caps(1_500, 2_000)
+
+    for index <- 1..17 do
+      insert_memory(repo, %{
+        agent_id: agent_id,
+        owner_id: owner_id,
+        scope_type: "owner",
+        scope_id: owner_id,
+        category: "preference",
+        key: "pref_#{index}",
+        value: "preference number #{index}",
+        promote_target: "user_md",
+        updated_at: DateTime.add(~U[2026-03-01 00:00:00Z], index, :minute)
+      })
+    end
+
+    log =
+      capture_log(fn ->
+        assert {:ok, %{user: user_text}} = PromptFiles.rebuild(agent_id, owner_id)
+        assert length(String.split(user_text, "\n- ")) - 1 == 16
+        assert user_text =~ "preference number 17"
+        refute user_text =~ "preference number 1\n"
+      end)
+
+    assert log =~ "section Preferences capped: kept 16/17 rows"
+  end
+
+  test "section_usage/1 counts what each section would render against its cap", %{
+    agent_id: agent_id,
+    owner_id: owner_id,
+    repo: repo
+  } do
+    insert_agent_memory(repo, agent_id, owner_id, "context", "repo", "Fermix is an umbrella app")
+
+    insert_agent_memory(
+      repo,
+      agent_id,
+      owner_id,
+      "directive",
+      "rule",
+      "Show drafts before sending"
+    )
+
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "owner",
+      scope_id: owner_id,
+      category: "preference",
+      key: "tone",
+      value: "Prefers short answers",
+      promote_target: "user_md"
+    })
+
+    # A conversation note never renders, so it never counts against a section.
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "conversation",
+      scope_id: "telegram:chat-1:root",
+      category: "fact",
+      key: "note",
+      value: "a note for this chat"
+    })
+
+    {:ok, rows} =
+      Repo.get_memories(%{agent_id: agent_id, owner_id: owner_id, archived?: false}, server: repo)
+
+    assert PromptFiles.section_usage(rows) == %{
+             user: [
+               %{category: "identity", used: 0, cap: 10},
+               %{category: "preference", used: 1, cap: 16},
+               %{category: "interest", used: 0, cap: 8},
+               %{category: "goal", used: 0, cap: 8}
+             ],
+             memory: [
+               %{category: "directive", used: 1, cap: 16},
+               %{category: "context", used: 1, cap: 40}
+             ]
+           }
   end
 
   test "rebuild/2 re-evaluates stored promotion hints under current policy", %{
@@ -356,6 +512,34 @@ defmodule FermixCore.Memory.PromptFilesTest do
     assert revision.mutation_source == "scheduler_rebuild"
     assert revision.provenance["trigger"] == "scheduler_rebuild"
     assert revision.provenance["rebuild_reason"] == "periodic"
+  end
+
+  # The setup pins tiny caps to exercise the byte backstop; a test about what a
+  # section renders needs room for the rows it inserts.
+  defp with_prompt_caps(user_tokens, memory_tokens) do
+    config = Application.get_env(:fermix_core, :memory, [])
+
+    Application.put_env(
+      :fermix_core,
+      :memory,
+      Keyword.merge(config,
+        prompt_user_token_cap: user_tokens,
+        prompt_memory_token_cap: memory_tokens
+      )
+    )
+  end
+
+  defp insert_agent_memory(repo, agent_id, owner_id, category, key, value) do
+    insert_memory(repo, %{
+      agent_id: agent_id,
+      owner_id: owner_id,
+      scope_type: "agent",
+      scope_id: agent_id,
+      category: category,
+      key: key,
+      value: value,
+      promote_target: "memory_md"
+    })
   end
 
   defp insert_memory(repo, attrs) do

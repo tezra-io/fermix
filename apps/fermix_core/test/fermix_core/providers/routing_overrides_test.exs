@@ -178,6 +178,16 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
                )
     end
 
+    # OpenAI Codex lists the signed-in account's models live and ships no
+    # catalog, so an OpenAI slug pinned to it is not another provider's model.
+    test "accepts an OpenAI slug pinned to openai_codex, which ships no catalog" do
+      assert %{provider: :openai_codex, model: "gpt-5.5"} =
+               RoutingOverrides.parse(
+                 [subagent_provider: "openai_codex", subagent_model: "gpt-5.5"],
+                 :subagent
+               )
+    end
+
     test "a provider-only or model-only override has nothing to pair-check" do
       assert %{provider: :openrouter, model: nil} =
                RoutingOverrides.parse([subagent_provider: "openrouter"], :subagent)
@@ -287,7 +297,8 @@ defmodule FermixCore.Providers.RoutingOverridesTest do
     test "prefers the primary provider for a slug shared across catalogs" do
       Application.put_env(:fermix_core, :providers, [])
 
-      # gpt-5.5 is in both :openai_codex and :openai catalogs; primary breaks the tie.
+      # gpt-5.5 is an :openai catalog slug that :openai_codex also runs; the
+      # primary decides.
       Application.put_env(:fermix_core, :agent, provider: :openai)
 
       assert %{provider: :openai} =

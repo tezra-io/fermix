@@ -130,4 +130,16 @@ defmodule FermixCore.Realtime.LiveDelegationTest do
       assert {:duplicate, ^state} = LiveDelegation.create(state, "dg_100", 1_000, 1_000)
     end
   end
+
+  # M56 §4.6: a task handed over as its call ends leaves its slot, and its id
+  # is still known, so the provider re-emitting it never starts it again.
+  test "a detached delegation leaves its slot and stays known" do
+    {:ok, state} = LiveDelegation.create(LiveDelegation.new(), "dg_1", 0, 0)
+    {:ok, state} = LiveDelegation.start(state, "dg_1", :ref, 1)
+
+    assert {:ok, %{status: :detached}, state} = LiveDelegation.detach(state, "dg_1")
+    assert LiveDelegation.in_flight(state) == []
+    assert {:duplicate, _state} = LiveDelegation.create(state, "dg_1", 10, 10)
+    assert {:error, :unknown_delegation} = LiveDelegation.detach(state, "dg_1")
+  end
 end

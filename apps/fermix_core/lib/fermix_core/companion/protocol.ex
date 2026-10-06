@@ -22,11 +22,18 @@ defmodule FermixCore.Companion.Protocol do
   daemon replies `server_hello` with the inclusive `{min_version, max_version}`
   range it supports (an N/N-1 window derived from one constant). See
   `PROTOCOL.md` for the state machine and the rollout order.
+
+  Version 2 adds `turn_done`, the ending of a turn that wrote no reply (M56
+  §4.4), and `cancel.task_ref`, which stops a GPT-Live task that outlived its
+  call by its three ids (§4.6). A client on version 1 would show such a turn as thinking until the
+  next one began, so a server event names the version that brought it
+  (`server_event_version/1`) and a connection is never sent one newer than the
+  version its hello declared.
   """
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 1
+  @protocol_version 2
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -39,9 +46,25 @@ defmodule FermixCore.Companion.Protocol do
 
   @client_events ~w(client_hello msg command cancel history_pull history_search read_state)
   @server_events ~w(
-    server_hello accepted turn_started text_delta tool_event text_done turn_error row approval
-    approval_resolved read_state history_page search_results error
+    server_hello accepted turn_started text_delta tool_event text_done turn_error turn_done row
+    approval approval_resolved read_state history_page search_results error
   )
+
+  # The server events a version after 1 brought; every other one is version 1.
+  @server_event_versions %{"turn_done" => 2}
+
+  # A row a Live call writes carries `metadata.call` (M56 §6): what happened
+  # on the call, and which task it was about.
+  @call_events ~w(shared ended task_running task_done)
+  @call_task_events ~w(shared task_running task_done)
+  @call_task_end_states ~w(completed failed cancelled timed_out)
+  @call_accounting ~w(complete incomplete)
+  @call_gist_statuses ~w(written failed none)
+  @call_keys ~w(
+    uuid event task_id revision state duration_s voice_cost_cents accounting engine gist_status
+  )
+  @call_engine_max_bytes 64
+  @uuid ~r/\A[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\z/
 
   # The chat events whose payload the mobile wire carries verbatim. `history_pull`
   # and `history_page` are not among them: this wire's version 1 adds the
@@ -71,6 +94,7 @@ defmodule FermixCore.Companion.Protocol do
     "tool_event" => ~w(turn_id tool phase),
     "text_done" => ~w(turn_id server_seq text),
     "turn_error" => ~w(turn_id code message),
+    "turn_done" => ~w(turn_id),
     "row" => ~w(profile_id server_seq role text ts),
     "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
     "approval_resolved" => ~w(approval_id outcome),
@@ -97,6 +121,17 @@ defmodule FermixCore.Companion.Protocol do
   @doc "Ordered server event catalog."
   @spec server_events() :: [String.t()]
   def server_events, do: @server_events
+
+  @doc """
+  The protocol version that brought server event `type`: a connection whose
+  hello declared an older one is never sent it.
+  """
+  @spec server_event_version(String.t()) :: pos_integer()
+  def server_event_version(type) when is_binary(type) do
+    if type in @server_events,
+      do: Map.get(@server_event_versions, type, 1),
+      else: raise(ArgumentError, "unknown companion server event #{inspect(type)}")
+  end
 
   @doc "The client chat events whose payload the mobile wire shares verbatim."
   @spec shared_client_events() :: [String.t()]
@@ -187,6 +222,72 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
+  @doc """
+  Validate the `call` map a Live call's timeline row carries in its
+  `metadata` (M56 §6), string keyed as the timeline stores it: `uuid` (the
+  call's), `event` (`shared`, `ended`, `task_running` or `task_done`), and
+  optional `task_id`, `revision`, `state` (a task's terminal state),
+  `duration_s`, `voice_cost_cents`, `accounting` (`complete` or
+  `incomplete`), `engine` and `gist_status` (`written`, `failed` or `none`).
+  A task's event names its `task_id` and `revision`, and `task_done` its
+  `state`; `ended`, the call's one row when it ends (M56 §4.2), names its
+  `engine`, `duration_s`, `accounting` and `gist_status`. A key outside these
+  is refused. The writer of a call row validates here, the one place the
+  shape is held.
+  """
+  @spec validate_call_metadata(term()) :: :ok | {:error, term()}
+  def validate_call_metadata(call) when is_map(call) do
+    with :ok <- known_call_keys(call),
+         :ok <- call_required(call, ["uuid", "event"]),
+         :ok <- call_field(call, "uuid", &(is_binary(&1) and Regex.match?(@uuid, &1))),
+         :ok <- call_field(call, "event", &(&1 in @call_events)),
+         :ok <- call_event_fields(call),
+         :ok <- call_field(call, "task_id", &(is_binary(&1) and &1 != "")),
+         :ok <- call_field(call, "revision", &(is_integer(&1) and &1 > 0)),
+         :ok <- call_field(call, "state", &(&1 in @call_task_end_states)),
+         :ok <- call_field(call, "duration_s", &(is_integer(&1) and &1 >= 0)),
+         :ok <- call_field(call, "voice_cost_cents", &(is_number(&1) and &1 >= 0)),
+         :ok <- call_field(call, "accounting", &(&1 in @call_accounting)),
+         :ok <- call_field(call, "engine", &call_engine?/1) do
+      call_field(call, "gist_status", &(&1 in @call_gist_statuses))
+    end
+  end
+
+  def validate_call_metadata(_call), do: {:error, {:invalid_field, "call"}}
+
+  defp known_call_keys(call) do
+    case Enum.find(Map.keys(call), &(&1 not in @call_keys)) do
+      nil -> :ok
+      key -> {:error, {:unknown_field, "call.#{key}"}}
+    end
+  end
+
+  defp call_event_fields(%{"event" => "task_done"} = call),
+    do: call_required(call, ["task_id", "revision", "state"])
+
+  defp call_event_fields(%{"event" => event} = call) when event in @call_task_events,
+    do: call_required(call, ["task_id", "revision"])
+
+  defp call_event_fields(%{"event" => "ended"} = call),
+    do: call_required(call, ["engine", "duration_s", "accounting", "gist_status"])
+
+  defp call_engine?(engine),
+    do: is_binary(engine) and engine != "" and byte_size(engine) <= @call_engine_max_bytes
+
+  defp call_required(call, keys) do
+    case Enum.find(keys, &(not Map.has_key?(call, &1))) do
+      nil -> :ok
+      key -> {:error, {:missing_field, "call." <> key}}
+    end
+  end
+
+  defp call_field(call, key, valid?) do
+    case Map.fetch(call, key) do
+      :error -> :ok
+      {:ok, value} -> if valid?.(value), do: :ok, else: {:error, {:invalid_field, "call." <> key}}
+    end
+  end
+
   # `client_hello` is transport, not chat: it has no payload rules beyond the
   # version, and its two errors are the Realtime socket's, verbatim.
   defp validate_client_event("client_hello", payload) do
@@ -229,7 +330,11 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  defp validate_client("cancel", payload), do: strings(payload, ~w(profile_id client_msg_id))
+  defp validate_client("cancel", payload) do
+    with :ok <- strings(payload, ~w(profile_id client_msg_id)) do
+      optional_task_ref(payload)
+    end
+  end
 
   defp validate_client("history_pull", payload) do
     with :ok <- nonempty(payload, "profile_id"),
@@ -247,6 +352,21 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   defp validate_client("read_state", payload), do: validate_read_state(payload)
+
+  # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
+  # exactly its three ids, the ones its `task_running` row carries.
+  defp optional_task_ref(%{"task_ref" => task_ref}) do
+    if task_ref?(task_ref), do: :ok, else: {:error, {:invalid_field, "task_ref"}}
+  end
+
+  defp optional_task_ref(_payload), do: :ok
+
+  defp task_ref?(%{"call_uuid" => uuid, "task_id" => task_id, "revision" => revision} = ref)
+       when map_size(ref) == 3 and is_binary(uuid) and is_binary(task_id) and task_id != "" and
+              is_integer(revision) and revision > 0,
+       do: Regex.match?(@uuid, uuid)
+
+  defp task_ref?(_task_ref), do: false
 
   # Exactly one cursor: `after_seq` pages forward (the catch-up read), and
   # `before_seq` pages backward from it (scroll to the top).
@@ -296,10 +416,14 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_server("turn_error", payload), do: strings(payload, ~w(turn_id code message))
 
+  defp validate_server("turn_done", payload), do: nonempty(payload, "turn_id")
+
   defp validate_server("row", payload) do
     with :ok <- strings(payload, ~w(profile_id role ts)),
          :ok <- positive_u64(payload, "server_seq"),
-         :ok <- binary_field(payload, "text") do
+         :ok <- binary_field(payload, "text"),
+         :ok <- optional_nonempty(payload, "kind"),
+         :ok <- optional_map(payload, "metadata") do
       optional_nonempty(payload, "client_msg_id")
     end
   end
@@ -457,6 +581,10 @@ defmodule FermixCore.Companion.Protocol do
 
   defp optional_nonempty(payload, field) do
     if Map.has_key?(payload, field), do: nonempty(payload, field), else: :ok
+  end
+
+  defp optional_map(payload, field) do
+    if is_map(Map.get(payload, field, %{})), do: :ok, else: {:error, {:invalid_field, field}}
   end
 
   defp optional_binary(payload, field) do

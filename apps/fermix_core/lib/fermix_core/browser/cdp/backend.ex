@@ -51,6 +51,12 @@ defmodule FermixCore.Browser.CDP.Backend do
   # The document every tab `open` creates starts on, and is navigated from
   # (`create_tab/3`).
   @initial_document "about:blank"
+  # `download` starts nothing, so a wait that ends empty is most often a
+  # download nobody started; the sentence names the move that starts one.
+  @download_timeout "No download finished in time. `download` starts nothing: it collects a " <>
+                      "file an `act` click on a link or button, or a `navigate` to the file, " <>
+                      "already started. Start it that way, or call again with a longer " <>
+                      "`timeout_ms` if a large file is still arriving."
 
   @impl true
   def init(opts) when is_list(opts) do
@@ -2355,7 +2361,7 @@ defmodule FermixCore.Browser.CDP.Backend do
     remaining = max(deadline - System.monotonic_time(:millisecond), 0)
 
     if remaining == 0 do
-      {:error, Error.new("timeout", "download timed out"), state}
+      {:error, Error.new("timeout", @download_timeout), state}
     else
       receive do
         {:cdp_event, method, event} ->

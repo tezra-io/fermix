@@ -38,17 +38,18 @@ defmodule FermixOpik.Client do
 
   defp post(config, path, body, opts) do
     url = config.base_url <> path
-    req = Keyword.get(opts, :req_module, Req)
 
-    case req.post(url,
-           json: sanitize(body),
-           headers: headers(config),
-           # These batch POSTs upsert the same ids and payload on every attempt.
-           retry: :transient,
-           max_retries: 2,
-           retry_delay: fn attempt -> 500 * (attempt + 1) end,
-           receive_timeout: 10_000
-         ) do
+    options = [
+      json: sanitize(body),
+      headers: headers(config),
+      # These batch POSTs upsert the same ids and payload on every attempt.
+      retry: :transient,
+      max_retries: 2,
+      retry_delay: fn attempt -> 500 * (attempt + 1) end,
+      receive_timeout: 10_000
+    ]
+
+    case send_batch(url, options, opts) do
       {:ok, %{status: status}} when status in 200..299 ->
         :ok
 
@@ -60,6 +61,30 @@ defmodule FermixOpik.Client do
         Logger.warning("Opik request to #{path} failed: #{inspect(reason)}")
         {:error, reason}
     end
+  end
+
+  defp send_batch(url, options, opts) do
+    case Keyword.fetch(opts, :req_module) do
+      {:ok, req_module} ->
+        req_module.post(url, options)
+
+      :error ->
+        [method: :post, url: url]
+        |> Keyword.merge(options)
+        |> Req.new()
+        |> route_through_fermix_egress()
+        |> Req.request()
+    end
+  end
+
+  # Inside Fermix the exporter leaves the way Fermix does: direct, or through
+  # the proxy `[fermix_core.network]` names. This app does not depend on
+  # fermix_core, so the policy is reached by name, the way fermix_core reaches
+  # this app. Built on its own there is no Fermix policy to ask.
+  defp route_through_fermix_egress(request) do
+    if Code.ensure_loaded?(FermixCore.Net.Egress),
+      do: apply(FermixCore.Net.Egress, :attach, [request, :direct]),
+      else: request
   end
 
   # Recursively walk the payload and replace non-UTF8 binaries with a placeholder.

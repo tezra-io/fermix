@@ -14,7 +14,9 @@ two clients share:
 - the Gateway Queue;
 - the timeline (`FermixCore.Companion.Timeline`, written through
   `Memory.Repo`);
-- a scheduled job reporting back through `Channels.Companion.send_message`;
+- a scheduled job reporting back through `Channels.Companion.send_message`,
+  which stands for a GPT-Live call's rows too (`write_call_row`, written and
+  announced the same way);
 - one approval, kept by `Companion.Approvals` until it resolves or expires,
   and answered by a `/confirm` or `/deny` command.
 
@@ -35,7 +37,23 @@ COMPANION-13 were found in the 2026-09-27 review of the phone channel, which
 made `Companion.Turns` the settlement owner of both transports; the re-reads
 after it added the settlement, the settlement that fails, and the approval
 cards kept across drops and dropped at `server_hello`. All thirteen are fixed
-or hold, in the code or in `PROTOCOL.md`'s client rules.
+or hold, in the code or in `PROTOCOL.md`'s client rules. The 2026-10-03
+re-read for M56's typed turns during a voice call added a turn that ends with
+no reply, `turn_done` on companion protocol 2, and each client's version. The
+re-read after M56 stage 5 found a second writer the job's row stands for, a
+GPT-Live call's row, and the Mac's `row` carrying `kind` and `metadata`,
+which no rule reads; nothing the spec models changed. The re-read after M56
+stage 6 found one more row that writer stands for, a call's own row when it
+ends, written by the task that made the call's gist or by the boot pass after
+a restart, and `PROTOCOL.md` describing it; again nothing the spec models
+changed. The re-read after M56 stage 7 found two more rows that writer stands
+for, a GPT-Live task's running and done rows, written by `Voice.Detached`
+after the call has ended (a job's row can be written at any time), and a new
+clause of `Requests.cancel`: a version 2 `cancel` with `task_ref` names no
+request and never reaches the request store or `Turns`, and stops one voice
+task's own turn through its owner, a named stop `turn_queue` proves; a refused
+one is an `error` the client acts on no rule for. The request `cancel` the
+spec models is unchanged, so nothing it models changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
@@ -95,8 +113,22 @@ answers however busy it is, so the model folds the Queue's stop into that
 - `Turns` holds a turn's reply until the Queue's outcome:
   - `{:completed}` writes the reply row, fenced to the running attempt, and
     announces `text_done{server_seq}`, then completes the request;
+  - `{:completed}` of a turn its runner said ends with no reply (M56 §4.4: a
+    turn of the chat during a GPT-Live call, which answered exactly
+    `[SILENT]`) writes no row, completes the request and announces
+    `turn_done`, live-only and sent only to a client that declared companion
+    protocol 2. The runner's word (`Turns.silent`), its reply and its outcome
+    come from the turn's one process in that order, so they are one event,
+    `"quiet"`;
   - `{:cancelled}` settles the request failed and announces one `turn_error`,
     which is live-only.
+- Whether a turn may end with no reply is frozen when it starts, at the
+  queue's checkout (`MainAgent.turn_state` -> `Voice.Bridge.chat_call` ->
+  `Companion.every_client_reads?`): only a turn this socket's transport runs,
+  while every client joined then declared version 2. A phone turn in the chat
+  (M56 D9) is never offered it: the phone's wire has no such ending. Each
+  client's version is fixed for the run (`V1Clients`), and the clients joined
+  at the start are kept as the turn's watchers.
 - Every writer gets `server_seq` from the per-profile counter inside the
   insert's transaction (`append_in_tx`).
 - A Connection joins the registry before it writes `server_hello`, and writes
@@ -135,6 +167,10 @@ answers however busy it is, so the model folds the Queue's stop into that
 - `SettlesCanFail`: the settlement of a request answered without a turn fails:
   its completion write returns an error or exits, or the request path's settle
   code raises.
+- `SilentTurns`: a GPT-Live call in the chat is up, so a turn whose snapshot
+  lets it end with no reply may answer exactly `[SILENT]`. With it off the
+  silence decision is never taken and the state space is the one before.
+  `V1Clients` names the clients on companion protocol 1.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
@@ -146,21 +182,21 @@ the checks that show a rule needs it):
   (`request_coordinator.ex:125-132`).
 - `SeqCursor`: the client's cursor rules (`PROTOCOL.md`).
 - `SubscribeBeforePull`: the Connection joins the registry before
-  `server_hello` (`join`, `connection.ex:252-262`).
+  `server_hello` (`join`, `connection.ex:258-268`).
 - `PageWrittenInReadStep`: the Connection writes `history_page` to the socket
-  in the step that read it (`read_opts`, `connection.ex:520-524`). `FALSE`
+  in the step that read it (`read_opts`, `connection.ex:534-538`). `FALSE`
   sends it through its own mailbox, where a live row sent after the read can
   overtake it.
 - `AnnouncesEveryRow`: every row written outside a turn's completion is
   announced as a `row` as it is written: the user's row (`announce_user_row`,
-  `connection.ex:508-509`) and a delivery (`announce_written`,
-  `channels/companion.ex:225-226`), both built by `Companion.Output.row` and
+  `connection.ex:522-523`) and a delivery (`announce_written`,
+  `channels/companion.ex:338-339`), both built by `Companion.Output.row` and
   sent through `Companion.Fanout.announce`. `FALSE` announces no user row.
 - `SingleAnswer`: `Confirmations.take` is an `:ets.take`, the sole consumer of
   a token (`confirmations.ex:21-31`).
 - `ResendsPendingApprovals`: the Connection writes every card still waiting
   right after `server_hello`, in the step that joined the registry
-  (`send_pending_approvals`, `connection.ex:268-277`, from
+  (`send_pending_approvals`, `connection.ex:274-283`, from
   `Approvals.pending`). `FALSE`: a card goes out once, live.
 - `DropsCardsAtHello`: when `server_hello` arrives the client drops every card
   it shows and keeps only those sent after it (`PROTOCOL.md` "Approvals").
@@ -170,34 +206,39 @@ the checks that show a rule needs it):
   (`Queue.stop_turn`, `stop_named_in`, `queue.ex:185`, `:1035-1072`). `FALSE`
   is the conversation stop.
 - `CancelMarksRequest`: a cancel is recorded on its request first
-  (`Requests.cancel`, `requests.ex:148-158`; `cancel_request`,
+  (`Requests.cancel`, `requests.ex:157-173`; `cancel_request`,
   `mobile_sql.ex:546-565`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:302-315`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:226-229`, `stop_in_queue`,
-  `:416-427`). `FALSE` is the code before 431d5663: the Connection called
+  (`hand_off`, `turns.ex:328-343`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:242-246`, `stop_in_queue`,
+  `:449-460`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
   `Turns`; the cancel writes nothing.
 - `SettleAfterIngest`: once ingest returned, the request worker casts the
   request's settlement to `Turns` (`settle_after_ingest`,
-  `requests.ex:288-292`). `FALSE` is the code before: a message the gateway
+  `requests.ex:303-307`). `FALSE` is the code before: a message the gateway
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:262-268`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:288-294`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:334-369`;
-  `fail_attempt`, `report_failure`, `requests.ex:325-345`), through the
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:361-396`;
+  `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
   transport's `report_failure`, which the connection writes as a failed
-  worker's error (`connection.ex:496-503`, `:153-154`). `FALSE` only logs the
+  worker's error (`connection.ex:510-517`, `:159-160`). `FALSE` only logs the
   failure: the request stays `running`, and the next boot runs the command
   again.
 - `SeqAssignedOnInsert`: the seq comes from the counter inside the inserting
   transaction (`append_in_tx`, `mobile_sql.ex:737-743`). `FALSE`: a writer
   reads the counter, then inserts in a second call.
+- `SilenceGate`: a turn may end with no reply only if every client joined
+  when it started declared version 2 (`MainAgent.live_call`,
+  `Voice.Bridge.chat_call` for a turn on this socket's channel,
+  `Companion.every_client_reads?`, frozen into the turn's snapshot). `FALSE`
+  offers silence whoever is joined.
 
 **Bounds** (set per check): `Clients` (always two), `Senders` (the clients
 whose users type), `InlineSenders` (the senders whose messages are slash
@@ -275,6 +316,14 @@ client told.
   away when it was answered or expired included (`NoStaleCard`). This rests on
   `DropsCardsAtHello` (check 33), COMPANION-13's fix.
 
+**Check 34** holds with a GPT-Live call in the chat, a version 2 client typing,
+a version 1 client that may drop and reconnect, and a turn free to end with no
+reply whenever its snapshot allows: no turn ends with `turn_done` while a
+version 1 client watched it start (`NoTurnLeftThinking`), so no version 1
+client is left showing a turn as thinking. This rests on `SilenceGate` (check
+35). Witness 36 shows a turn ending with `turn_done` while a client watches
+it: the version 1 client had dropped before the turn started.
+
 **Check 15** (liveness) holds with a drop that can lose any answer, and a job
 reporting back while no client is connected. Fairness is on the steps Fermix
 drives only: the clients' reconnect loop, their reading and their outbox, the
@@ -308,6 +357,7 @@ counterexample):
 | 29 | `ResendsPendingApprovals` | 13 states: COMPANION-11's path |
 | 31 | `FailsUnsettled` | 5 states: COMPANION-12's path |
 | 33 | `DropsCardsAtHello` | 18 states: COMPANION-13's path |
+| 35 | `SilenceGate` | 10 states: the version 1 client connects, the version 2 client's message starts its turn with both joined, and the turn ends with `turn_done`, which the version 1 client is never sent |
 
 The settlement `Turns` is sent after every hand-off made several paths one or
 two states longer than they were before it: `Turns` handles that settlement
@@ -347,11 +397,18 @@ of an entity its rules are about. All still hold:
   turn's reply as a `row`. A turn's stream and its ending, and an approval card
   with its resolution, stay on the transport that raised them, the only one
   its token resolves from. A phone's row reaches this spec's clients as the
-  job's row does. This spec is two clients on `companion.sock`.
+  job's row does. This spec is two clients on `companion.sock`. The phone's
+  turns run in this conversation's queue too (M56 D9): a phone turn waits as
+  another sender's would, its cancel names its own message id (the named stop
+  `turn_queue` proves), it is never offered silence, and it ends on its own
+  wire. A delivery written through `Channels.Companion.send_message` (the
+  job's row) is also pushed to the phones while their channel runs, after its
+  announce (`Mobile.schedule_push`, the proactive row's push `mobile_push`
+  models); no rule here reads it.
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:270-282`), so the device registry that forgot the phone never
+  `turns.ex:296-308`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -362,16 +419,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:285-291`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:310-316`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:416-427`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:449-460`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:512-522`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:559-569`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.
@@ -397,12 +454,37 @@ of an entity its rules are about. All still hold:
 - The grant resume a confirmed approval re-ingests as a new turn (`sandbox.ex`
   `resume_request`).
 - The peer check at the hand-over (`handle_info(:socket_handover)`,
-  `connection.ex:120-127`). A client the daemon cannot place is sent
+  `connection.ex:126-133`). A client the daemon cannot place is sent
   `error: unidentified_client` and closed before a line is read, which the
   client sees as a drop before `server_hello`. The caller it places rides on
   each turn (`metadata.caller`) and decides only what the turn's tools may do.
 - The LLM and tools, the ConversationStore, attachments, authentication and
   the socket's 0600 mode: single-call rules that ExUnit covers.
+- A GPT-Live call's rows (`Channels.Companion.write_call_row`, M56 §4.2,
+  §4.5): a result the voice cannot say, written from the call's session, and
+  the call's one row when it ends, written after the session has gone by the
+  task that made its gist (`Realtime.CallGist`) or, after a restart, by the
+  boot pass (`Voice.CallRowSweep`). Each goes through the same proactive
+  write and announcement as a job's delivery (`Output.persist_text` with its
+  key, then `announce_written`), so the job's row stands for them. They are
+  deduplicated per task revision or per call, as a keyed delivery is, and
+  their `kind` and `metadata.call`, which the Mac's `row` carries, are read by
+  no client rule.
+- The Live voice mirror (`Voice.ChatMirror`, M56 §4.3). While a call in the
+  chat is up, `Turns` tells it each turn of the chat's conversation it hands
+  off and, as one completes, its answer: a cast to the call's session and one
+  ConversationStore read, whose exit is logged. No request, turn or wire state
+  moves, so no rule here reads it.
+- Between a turn's checkout and its `turn_started` the runner reads history
+  and builds the prompt; the model folds both into the turn's start. A version
+  1 client that joins in that window, after the silence decision and before
+  `turn_started`, would see the turn start and, if it ends with no reply,
+  never see it end until the next turn begins. The window is the runner's own
+  set-up, milliseconds; it is not modelled.
+- `turn_done` on the wire: no client rule reads it (a client clears the turn
+  it shows, which the model does not track), so it is recorded as the turn's
+  ending (`ends`) and not put on the wire. A version 1 connection drops it
+  (`write_in_version`), an ExUnit rule.
 - Other conversations: the Queue keys all state by conversation.
 
 ## Findings
@@ -422,7 +504,7 @@ off; open `tla/out/companion_session/<check>.txt` after a run to see the path.
 
 ### COMPANION-2: a connection must join the fan-out before its history is read
 - **Status:** holds in the code (b9248004): `join` registers the Connection
-  before it writes `server_hello` (`connection.ex:252-262`).
+  before it writes `server_hello` (`connection.ex:258-268`).
 - **Checks:** 01 holds; 03 breaks `TimelineConverges` with the join after the
   first page.
 

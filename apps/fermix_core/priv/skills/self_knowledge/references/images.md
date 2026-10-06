@@ -27,8 +27,8 @@ it `paths`: one to six local paths, in the order you want to refer to them
 ## How an image reaches the model
 
 Inbound images, `view_image` results and images a tool returns (a `browser`
-screenshot) all reach the model as image content. Anthropic, the OpenAI
-Responses/Codex wire and Grok take images. OpenRouter, Mistral, Venice and Ollama
+screenshot) all reach the model as image content. Anthropic, OpenAI and OpenAI
+Codex (the Responses wire) and Grok take images. OpenRouter, Mistral, Venice and Ollama
 depend on the model: a model the built-in catalog marks text-only (Ollama's three
 default models, Venice's GLM 5.3) is refused before the call, any other model is
 sent the image and the provider refuses it if it cannot see. An image is never
@@ -42,17 +42,16 @@ sandbox path or `inbound:last` — the image just sent in this chat. Optional
 OpenAI backend only), `size` and `model` round out the arguments.
 
 The backend is `[fermix_core.tools.generate_image] backend` (Mac: Settings >
-Images): `openai`, `xai`, `google` or `openai_codex`, plus optional `model` and
-`size`. `edit` and `mask` are refused loudly on a backend that lacks them.
-OpenAI and SpaceXAI reuse their chat key; Google takes `google_api_key` in that
+Images): `openai`, `xai` or `google`, plus optional `model` and `size`. `edit`
+and `mask` are refused loudly on a backend that lacks them. OpenAI and SpaceXAI
+reuse their chat key; Google takes `google_api_key` in that
 section (the Mac Images pane's key row), with `GEMINI_API_KEY` as the fallback.
 Any other key in the section stops the daemon from booting.
 
-**`openai_codex`** needs no API key: it generates `gpt-image-2` through the
-ChatGPT subscription sign-in (billed to the subscription), over an experimental,
-undocumented Codex surface; a plan without it answers `auth_failed`. Generate
-and edit, no `mask`. The model that carries the image tool is fixed internally,
-not a setting.
+An older config's `backend = "openai_codex"` is dropped at load with a warning
+naming those three, which leaves image generation off until one is chosen.
+Signing in to OpenAI Codex with ChatGPT does not generate images: its route has
+no image tool.
 
 ### Save, look, then send
 

@@ -46,7 +46,7 @@ attempts (`session_server.ex:60`).
 **Environment switches** (set per check):
 - `Drops`: how many times the network or OpenAI may drop an open socket.
 - `VadTurns`: how many more responses server VAD may start on the operator's
-  speech (`create_response: true`, `openai_client.ex:427`).
+  speech (`create_response: true`, `openai_client.ex:432`).
 - `Yeses` (0 or 1): the owner says yes to the command a tool call parked, and
   the session starts its confirmed run (`answer_access` ->
   `start_access_dispatch`, `session_server.ex:1313-1341`). The yes is one
@@ -283,7 +283,7 @@ as well. All still hold:
   `tool_call_context` gives each tool task (`:1278-1284`), and the binding of
   the owner's answer to the first input item committed after the park, by
   item id (`bind_access_answer` and `answer_access`, `:1294-1323`, with the
-  item id `decode_server_event` passes on, `openai_client.ex:367-375`).
+  item id `decode_server_event` passes on, `openai_client.ex:372-380`).
   They decide whether a yes starts a run, not when its reply lands. A spoken
   no only adds a passive status item (no `response.create`) and starts
   nothing.
@@ -412,7 +412,7 @@ the finding's rule breaking again with the fix's mechanism switched off; open
      is configured, and becomes `openai_pid`.
   4. Socket 2's close finishes, or hits WebSockex's 5 s timeout.
      `OpenAIClient.handle_disconnect` sends `{:openai_realtime_disconnect, _}`
-     (`openai_client.ex:450`).
+     (`openai_client.ex:455`).
   5. The session handles it as if socket 3 had dropped (`:422`).
      `schedule_reconnect` sets `openai_pid` to nil without closing socket 3
      (`:629`).

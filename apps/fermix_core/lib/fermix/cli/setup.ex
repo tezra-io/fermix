@@ -26,7 +26,6 @@ defmodule Fermix.CLI.Setup do
     provider: :string,
     default_model: :string,
     reasoning_effort: :string,
-    fast: :boolean,
     realtime_enabled: :boolean,
     realtime_api_key: :string,
     realtime_model: :string,
@@ -55,12 +54,15 @@ defmodule Fermix.CLI.Setup do
     slack_owner_user_id: :string,
     signal_account: :string,
     signal_owner_user_id: :string,
+    imessage_owner_user_id: :string,
+    imessage_allowed_sender_ids: :string,
     acp_enabled: :boolean,
+    proxy: :string,
+    proxy_bypass: :string,
     print_state: :boolean,
     reconfigure: :boolean,
     migrate_secrets: :boolean,
     secret_store: :string,
-    import_codex: :boolean,
     no_browser: :boolean,
     skip_probe: :boolean,
     port: :integer,
@@ -138,7 +140,9 @@ defmodule Fermix.CLI.Setup do
     io = Keyword.take(run_opts, [:puts, :prompt])
 
     runtime_opts =
-      Keyword.drop(opts, [:scope, :user, :system, :web, :cli, :terminal, :rotate_token])
+      opts
+      |> Keyword.drop([:scope, :user, :system, :web, :cli, :terminal, :rotate_token])
+      |> Keyword.put(:display?, display_available?(run_opts))
 
     case runtime.(runtime_opts, io) do
       :ok -> finish_terminal_setup(opts, run_opts, io)
@@ -267,7 +271,7 @@ defmodule Fermix.CLI.Setup do
   defp provided_setup_answers?(opts), do: Runtime.provided_answers(opts) != []
 
   defp terminal_action?(opts) do
-    Enum.any?([:print_state, :reconfigure, :migrate_secrets, :import_codex], fn key ->
+    Enum.any?([:print_state, :reconfigure, :migrate_secrets], fn key ->
       Keyword.get(opts, key, false)
     end)
   end

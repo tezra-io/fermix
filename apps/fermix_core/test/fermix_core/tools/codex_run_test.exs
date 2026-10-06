@@ -563,6 +563,46 @@ defmodule FermixCore.Tools.CodexRunTest do
     end
   end
 
+  # M56 §4.7: a task asked aloud on a call in the chat runs in the chat's own
+  # conversation, so a run it launches is a chat-origin run of the chat: its
+  # outcome re-enters the chat, and its origin session is the hand-off's turn.
+  describe "a launch from a call's hand-off in the chat" do
+    test "is offered, and admits a run that reports back into the chat", ctx do
+      Application.put_env(:fermix_core, :harness, enabled: true, approved: true)
+      manager = stub_manager(start_run_reply: {:ok, "hr_voice000001"})
+
+      context =
+        ctx.cwd
+        |> attended_context(manager)
+        |> Map.merge(%{
+          channel: "voice",
+          conversation_key: {"companion", "main", :root},
+          session_id: "voice_delegation_7",
+          parent_session: "voice_live:3",
+          voice_call_id: "voice_live:3"
+        })
+
+      assert CodexRun.advertise?(context)
+
+      assert {:ok, %{success: true, output: output}} =
+               CodexRun.execute(run_args(ctx.cwd), context)
+
+      assert %{"detail" => detail} = Jason.decode!(output)
+      assert detail =~ "reports back into this conversation"
+
+      assert_received {:start_run, request}
+      assert request.origin_session_id == "voice_delegation_7"
+
+      assert %{
+               origin_kind: "chat",
+               delivery_mode: "origin",
+               platform: "companion",
+               destination: "main",
+               client_origin: nil
+             } = request.snapshot
+    end
+  end
+
   # --- Helpers ------------------------------------------------------------
 
   defp stub_manager(replies \\ []) do

@@ -44,6 +44,7 @@ defmodule FermixCore.Temporal.RegistryTest do
     "discord" => FakeAdapter,
     "signal" => FakeAdapter,
     "whatsapp" => FakeAdapter,
+    "imessage" => FakeAdapter,
     "cli" => FakeAdapter
   }
 
@@ -581,8 +582,8 @@ defmodule FermixCore.Temporal.RegistryTest do
       assert event.delivery_thread_scope == "1712345.6789"
     end
 
-    test "discord, signal, and whatsapp normalize to root", %{repo: repo} do
-      for {platform, index} <- Enum.with_index(["discord", "signal", "whatsapp"]) do
+    test "discord, signal, whatsapp and imessage normalize to root", %{repo: repo} do
+      for {platform, index} <- Enum.with_index(["discord", "signal", "whatsapp", "imessage"]) do
         params = birthday_params(%{title: "Anniversary #{index}"})
 
         assert {:ok, %{event: event}} =

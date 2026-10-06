@@ -8,6 +8,7 @@ defmodule FermixChannels.Mobile.Unfurl do
   and a one-MiB body per response.
   """
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Guard
   alias FermixCore.Net.TimeoutPolicy
 
@@ -235,7 +236,14 @@ defmodule FermixChannels.Mobile.Unfurl do
     request.(pinned, request_options(pinned, opts))
   end
 
-  defp default_request(pinned, options), do: Req.get(pinned.url, options)
+  # Through a proxy the tunnel is opened to the pinned address, never the name.
+  defp default_request(pinned, options) do
+    [method: :get, url: pinned.url]
+    |> Keyword.merge(options)
+    |> Req.new()
+    |> Egress.attach(:direct)
+    |> Req.request()
+  end
 
   defp request_options(pinned, opts) do
     base = [

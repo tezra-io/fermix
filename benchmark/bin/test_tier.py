@@ -175,11 +175,63 @@ def test_auto_run_preserves_exit_code_and_always_cleans_up(tmp_path, check_exit,
               'run() {\n' + body + '\n}\nrun\n')
     env = {**os.environ, "BENCH": BENCH, "BIN_DIR": HERE,
            "HOME_DIR": str(tmp_path / "disposable-eval"), "PROJECT": "test-eval",
+           "CAPABILITY_PRIVATE": "0",
            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"]}
     result = subprocess.run(["bash", "-c", script], env=env,
                             capture_output=True, text=True, timeout=10)
     assert result.returncode == (check_exit or run_exit), result.stderr
     assert result.stdout.splitlines().count("cleaned") == 1
+
+
+def _auto_run_with_private(tmp_path, stub_path, *, sync_ok=True, public=0, private=0):
+    """The real run() body with startup stubbed and a fake `uv` that answers the sync,
+    the preflight, the public sweep and the --private sweep with chosen codes."""
+    source = Path(HERE, "capability-daemon.sh").read_text()
+    body = source.split("\nrun() {\n", 1)[1].split("\n}\n", 1)[0]
+    uv = tmp_path / "uv"
+    uv.write_text('#!/bin/sh\ncase " $* " in\n'
+                  f'  *" sync "*) {"echo noise; echo /tmp/fermix-eval-private; exit 0" if sync_ok else "exit 3"} ;;\n'
+                  '  *" --check "*) exit 0 ;;\n'
+                  f'  *" --private "*) exit {private} ;;\n'
+                  f'  *) exit {public} ;;\nesac\n')
+    uv.chmod(0o755)
+    script = ('set -euo pipefail\n'
+              'log() { printf "%s\\n" "$*" >&2; }\n'
+              'up() { printf "up seed_args=%s\\n" "${FERMIX_CAP_SEED_ARGS:-}"; }\n'
+              'down() { printf "cleaned\\n"; }\n'
+              'run() {\n' + body + '\n}\nrun\n')
+    env = {**{k: v for k, v in os.environ.items() if k not in CONTROLLED},
+           "BENCH": BENCH, "BIN_DIR": HERE, "HOME_DIR": str(tmp_path / "disposable-eval"),
+           "PROJECT": "test-eval",
+           "PATH": str(tmp_path) + os.pathsep + stub_path + os.pathsep + os.environ["PATH"]}
+    return subprocess.run(["bash", "-c", script], env=env, capture_output=True, text=True,
+                          timeout=20)
+
+
+@pytest.mark.parametrize("public,private,want", [(0, 0, 0), (5, 0, 5), (0, 5, 5),
+                                                 (5, 4, 4), (3, 5, 3), (0, 2, 2)])
+def test_auto_run_scores_the_private_suites_and_keeps_the_worse_code(
+        tmp_path, stub_path, public, private, want):
+    result = _auto_run_with_private(tmp_path, stub_path, public=public, private=private)
+    assert result.returncode == want, result.stderr
+    assert "up seed_args= --private-dir /tmp/fermix-eval-private" in result.stdout
+    assert result.stdout.splitlines().count("cleaned") == 1
+
+
+def test_a_failed_private_sync_starts_nothing(tmp_path, stub_path):
+    result = _auto_run_with_private(tmp_path, stub_path, sync_ok=False)
+    assert result.returncode == 3
+    assert "up seed_args" not in result.stdout
+
+
+def test_capability_private_runs_the_holdout_judged(stub_path):
+    judge, argv = plan("capability-private", stub_path, EVAL_JUDGE_API_KEY="k",
+                       CONFIRM_DAEMON_ISOLATED="1", CONFIRM_ISOLATED_ENV="1",
+                       CONFIRM_COST="1")
+    assert judge == "<set>"
+    assert argv[:3] == ["uv", "run", "bin/run_capability.py"]
+    assert {"--private", "--judge", "--confirm-daemon-isolated", "--confirm-isolated-env",
+            "--confirm-cost"} <= set(argv)
 
 
 if __name__ == "__main__":

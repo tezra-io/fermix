@@ -30,6 +30,7 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
 
   use WebSockex
 
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Tls
   alias FermixCore.Realtime.Config
 
@@ -45,8 +46,12 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
     url = Keyword.fetch!(opts, :url)
     headers = Keyword.fetch!(opts, :headers)
     parent = Keyword.fetch!(opts, :parent)
+    egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
 
-    with {:ok, start_opts} <- start_options(url, headers) do
+    # This socket cannot tunnel, so behind a proxy it refuses rather than dial
+    # around it.
+    with :ok <- Egress.ensure_direct(url, egress),
+         {:ok, start_opts} <- start_options(url, headers) do
       WebSockex.start_link(url, __MODULE__, %{parent: parent}, start_opts)
     end
   end
@@ -106,20 +111,27 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
 
   `store: false` is explicit: provider-side recording is a separate feature and
   must never follow from local transcripts being enabled.
+
+  `opts[:input]` is the text the session starts with (`LiveChat.input/1`), sent
+  as `session.input` only when there is any (M56 §4.3).
   """
   @spec session_start_event(Config.t(), String.t(), keyword()) :: map()
   def session_start_event(%Config{} = config, instructions, opts)
       when is_binary(instructions) and is_list(opts) do
-    session = %{
-      model: config.model,
-      instructions: instructions,
-      audio: %{
-        format: %{type: "audio/pcm", rate: @audio_rate},
-        output: %{voice: config.voice}
-      },
-      delegation: %{type: "client"},
-      store: false
-    }
+    session =
+      put_input(
+        %{
+          model: config.model,
+          instructions: instructions,
+          audio: %{
+            format: %{type: "audio/pcm", rate: @audio_rate},
+            output: %{voice: config.voice}
+          },
+          delegation: %{type: "client"},
+          store: false
+        },
+        Keyword.get(opts, :input, [])
+      )
 
     case Keyword.get(opts, :event_id) do
       nil -> %{type: "session.start", session: session}
@@ -157,8 +169,18 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
     {event_id, append_event("session.instructions.append", event_id, nil, content)}
   end
 
-  @doc "Bounded progress for one delegation: what the backend is doing right now."
-  @spec thinking_append_event(String.t(), String.t(), String.t()) :: {String.t(), map()}
+  @doc """
+  Bounded progress for one delegation: what the backend is doing right now.
+  With a `nil` delegation id it is quiet context for the whole session, a fact
+  the voice model may use without saying it (the typed-message mirror, M56
+  §4.3); `nil` is encoded as JSON `null`.
+  """
+  @spec thinking_append_event(String.t(), String.t() | nil, String.t()) :: {String.t(), map()}
+  def thinking_append_event(event_id, nil, content)
+      when is_binary(event_id) and is_binary(content) do
+    {event_id, append_event("session.thinking.append", event_id, nil, content)}
+  end
+
   def thinking_append_event(event_id, delegation_id, content)
       when is_binary(event_id) and is_binary(delegation_id) and is_binary(content) do
     {event_id, append_event("session.thinking.append", event_id, delegation_id, content)}
@@ -298,6 +320,9 @@ defmodule FermixCore.Realtime.OpenAILiveClient do
     send(state.parent, {:openai_live_disconnect, status})
     {:ok, state}
   end
+
+  defp put_input(session, []), do: session
+  defp put_input(session, input) when is_list(input), do: Map.put(session, :input, input)
 
   defp append_event(type, event_id, delegation_id, content) do
     %{type: type, event_id: event_id, delegation_id: delegation_id, content: content}

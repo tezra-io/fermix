@@ -28,7 +28,10 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Companion.Protocol, as: CompanionProtocol
   alias FermixCore.Companion.Timeline
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
+  alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.DeviceIdentity
 
   @repo :companion_turns_test_repo
   @work_registry :companion_turns_test_work
@@ -358,6 +361,8 @@ defmodule FermixChannels.Companion.TurnsTest do
     assert {:ok, %{status: "failed"}} = request(id)
   end
 
+  # The phone's turns run in the chat's lane (M56 D9), so its stop names that
+  # lane and its own turn's message id, which no other turn there shares.
   test "the phone cancels one request's turn in the queue (STB-10)", ctx do
     id = unique()
     msg = decoded("msg", msg_payload(id, "stop me"))
@@ -366,7 +371,7 @@ defmodule FermixChannels.Companion.TurnsTest do
 
     cancel = decoded("cancel", %{"profile_id" => "main", "client_msg_id" => id})
     assert :ok = EventRouter.route(cancel, mobile_context(ctx), request_opts(ctx))
-    assert_receive {:stop_turn, {"mobile", "main", :root}, ^id}
+    assert_receive {:stop_turn, {"companion", "main", :root}, ^id}
   end
 
   describe "a revoked device (SEC-3)" do
@@ -398,7 +403,7 @@ defmodule FermixChannels.Companion.TurnsTest do
                )
 
       assert :ok = DeviceRegistry.revoke(registry, ctx.device_id)
-      assert_receive {:stop_turn, {"mobile", "main", :root}, ^running}
+      assert_receive {:stop_turn, {"companion", "main", :root}, ^running}
       assert {:ok, %{cancelled_at: %DateTime{}}} = request(waiting)
 
       late = unique()
@@ -928,9 +933,156 @@ defmodule FermixChannels.Companion.TurnsTest do
     end
   end
 
+  # M56 §4.3: during a Live call in the chat, a message typed in the chat and
+  # the chat's answer to it are told to the call, which this test process
+  # stands in for: it holds the claim in Core's call registry, so the casts a
+  # session would get arrive here.
+  describe "a voice call in the chat" do
+    setup do
+      start_supervised!({CallRegistry, name: CallRegistry})
+      chat_key = Companion.chat_conversation_key()
+      :ok = ConversationStore.clear(chat_key)
+      on_exit(fn -> ConversationStore.clear(chat_key) end)
+      %{chat_key: chat_key}
+    end
+
+    test "a typed message is told to the call, and so is the answer it gets", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "use https://x.test/lease")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "use https://x.test/lease"}}}
+
+      # The turn commits its answer to the chat before its outcome fires.
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "use https://x.test/lease")
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Saved the lease.")
+      assert :ok = turn.reply_fn.({:text, "Saved the lease."})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "text_done"}}
+
+      assert_receive {:"$gen_cast",
+                      {:chat, {:answered, %{role: "assistant", content: "Saved the lease."}}}}
+    end
+
+    test "a turn that ends without an answer of its own tells the call nothing more", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+      id = unique()
+
+      assert :ok =
+               Requests.request(
+                 %{type: "msg", payload: msg_payload(id, "hello")},
+                 companion_transport(),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "hello"}}}
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "hello")
+      turn.turn_result_fn.({:failed, :provider_down})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, {:answered, _message}}}
+    end
+
+    # The phone's turns run in the chat's conversation (M56 D9), where a
+    # hand-off reads them, so a message typed on the phone is told to the call
+    # as it is handed off, and its answer once, as its turn completes: the
+    # phone writes its own reply rows, and `Turns` tells the call from the
+    # turn's outcome, the one place both transports' answers pass.
+    test "a message typed on the phone is told to the call, and so is its answer, once", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+      id = unique()
+
+      assert :ok =
+               EventRouter.route(
+                 decoded("msg", msg_payload(id, "from the phone")),
+                 mobile_context(ctx),
+                 request_opts(ctx)
+               )
+
+      assert_receive {:enqueued, turn}
+      assert turn.conversation_key == ctx.chat_key
+      assert_receive {:"$gen_cast", {:chat, {:typed, "from the phone"}}}
+
+      # The turn commits its answer to the chat before its outcome fires.
+      :ok = ConversationStore.add_message(ctx.chat_key, "user", "from the phone")
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Got it on the phone.")
+      assert :ok = turn.reply_fn.({:text, "Got it on the phone."})
+      turn.turn_result_fn.({:completed})
+      drain(ctx)
+
+      assert_received {:"$gen_cast",
+                       {:chat, {:answered, %{role: "assistant", content: "Got it on the phone."}}}}
+
+      refute_received {:"$gen_cast", {:chat, {:answered, _again}}}
+    end
+
+    # M56 §4.4: a typed message may be material for the call, and its turn may
+    # end with no reply: its runner says so before the reply arrives.
+    test "a turn ended silently writes no row, ends with turn_done, and tells no answer", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("chat"))
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "https://x.test/lease")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      assert_receive {:"$gen_cast", {:chat, {:typed, "https://x.test/lease"}}}
+
+      turn.stream_spec.callback.(:silent_reply)
+      assert :ok = turn.reply_fn.({:text, "[SILENT]"})
+      # The queue commits the sentinel as the turn's answer, closing it in history.
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "[SILENT]")
+      turn.turn_result_fn.({:completed})
+
+      turn_id = "turn-" <> id
+      assert_receive {:companion_event, %{"t" => "turn_done", "turn_id" => ^turn_id}}
+      assert {:ok, %{status: "completed", result_server_seq: nil}} = request(id)
+      drain(ctx)
+
+      refute_received {:companion_event, %{"t" => "text_done"}}
+      refute_received {:mobile_event, "main", %{"t" => "row", "role" => "assistant"}}
+      refute_received {:"$gen_cast", {:chat, {:answered, _message}}}
+    end
+
+    # M56 §4.4: the chat does not know a private call exists.
+    test "a private call is told nothing, and the chat is not read for it", ctx do
+      :ok = CallRegistry.claim(CallRegistry, call_in("private"))
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "a private aside")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Noted.")
+      assert :ok = turn.reply_fn.({:text, "Noted."})
+      turn.turn_result_fn.({:completed})
+      assert_receive {:companion_event, %{"t" => "text_done"}}
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, _event}}
+    end
+
+    test "with no call in progress nothing is told", ctx do
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "no call now")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ConversationStore.add_message(ctx.chat_key, "assistant", "Fine.")
+      turn.turn_result_fn.({:completed})
+      drain(ctx)
+
+      refute_received {:"$gen_cast", {:chat, _event}}
+    end
+  end
+
   # One announcer for everyone watching a profile (STB-9).
   describe "fan-out across the transports" do
-    test "a phone hears a row as the history message it renders, the Mac as always (R1-6)" do
+    # The Mac's row carries the message's kind and metadata too (M56 §6), and
+    # never a field its wire does not have (media refs, link previews).
+    test "a phone hears a row as the history message it renders, the Mac its own fields (R1-6)" do
       image = String.duplicate("c", 64)
 
       media = %{
@@ -949,7 +1101,7 @@ defmodule FermixChannels.Companion.TurnsTest do
         client_msg_id: "phone-1",
         in_reply_to: nil,
         media_refs: [media],
-        metadata: %{"turn_id" => nil},
+        metadata: %{"turn_id" => nil, "source" => "phone"},
         link_previews: [],
         created_at: ~U[2026-09-27 09:00:00Z]
       }
@@ -965,7 +1117,9 @@ defmodule FermixChannels.Companion.TurnsTest do
                "role" => "user",
                "text" => "look at this",
                "ts" => "2026-09-27T09:00:00Z",
-               "client_msg_id" => "phone-1"
+               "client_msg_id" => "phone-1",
+               "kind" => "media",
+               "metadata" => %{"source" => "phone"}
              }
 
       assert_receive {:mobile_event, "main", phone_row}
@@ -979,11 +1133,14 @@ defmodule FermixChannels.Companion.TurnsTest do
                "ts" => "2026-09-27T09:00:00Z",
                "client_msg_id" => "phone-1",
                "kind" => "media",
-               "media_refs" => [media]
+               "media_refs" => [media],
+               "metadata" => %{"source" => "phone"}
              }
 
       assert {:ok, _frames} =
                MobileProtocol.encode_server_event("row", Map.delete(phone_row, "t"), 1, <<>>, [])
+
+      assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
     end
 
     # R4-9: each user's row as its own transport writes it, through the
@@ -1024,7 +1181,7 @@ defmodule FermixChannels.Companion.TurnsTest do
              } = mac_row
 
       assert Map.keys(mac_row) |> Enum.sort() ==
-               ~w(client_msg_id profile_id role server_seq t text ts)
+               ~w(client_msg_id kind profile_id role server_seq t text ts)
 
       assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
 
@@ -1135,6 +1292,14 @@ defmodule FermixChannels.Companion.TurnsTest do
 
   # The application repo outlives a run, so every request id is new.
   defp unique, do: "e2e-" <> Base.url_encode64(:crypto.strong_rand_bytes(9), padding: false)
+
+  # The claim a Live session takes, held by this test process in its stead.
+  defp call_in(conversation),
+    do: %{
+      call_uuid: DeviceIdentity.generate_uuid(),
+      conversation: conversation,
+      started_at: DateTime.utc_now()
+    }
 
   defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_channels, key, value)
   defp restore_env({key, :error}), do: Application.delete_env(:fermix_channels, key)

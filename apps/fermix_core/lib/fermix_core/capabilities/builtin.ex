@@ -31,6 +31,12 @@ defmodule FermixCore.Capabilities.Builtin do
     # Owner-only on-device activity recall (MILESTONE_32 §11.2); the Gate is the
     # real barrier, this pins the guest filter and classification.
     "recall_activity" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
+    # What was said on the owner's own voice call (M56 §4.4): the owner's data.
+    "voice_call_context" => %{
+      policy_class: :read_only,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     # The run's own tool results, read back by call id after in-loop compaction
     # (docs/design/IN_LOOP_CONTEXT_OVERFLOW.md §3.1): what the model already
     # received on this run, never another surface's data.
@@ -64,6 +70,7 @@ defmodule FermixCore.Capabilities.Builtin do
     "tool_call" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
     "memory_recall" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
     "memory_store" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
+    "memory_forget" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "schedule_job" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "update_job" => %{policy_class: :read_write, hidden_from_agent?: false, owner_only?: false},
     "list_jobs" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: true},
@@ -88,6 +95,13 @@ defmodule FermixCore.Capabilities.Builtin do
       owner_only?: true
     },
     "react" => %{policy_class: :read_only, hidden_from_agent?: false, owner_only?: false},
+    # Writes to the owner's own inbox on another channel (M56 §4.7): a write, so
+    # neither a guest nor a delegated worker gets it, and the owner's alone.
+    "send_to_channel" => %{
+      policy_class: :read_write,
+      hidden_from_agent?: false,
+      owner_only?: true
+    },
     "generate_image" => %{
       policy_class: :external_api,
       hidden_from_agent?: false,

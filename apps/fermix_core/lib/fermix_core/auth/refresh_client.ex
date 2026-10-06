@@ -2,7 +2,9 @@ defmodule FermixCore.Auth.RefreshClient do
   @moduledoc """
   Bare HTTP refresh against OAuth token endpoints.
 
-  Keeps OpenAI Codex and plugin-provider refresh requests in one place.
+  Keeps every OAuth provider's refresh request in one place: the provider an
+  `Auth.OAuthProvider` describes names the endpoint, the client and any extra
+  refresh fields.
 
   **Time bound.** A refresh runs under its profile's lock
   (`FermixCore.Auth.Store.with_profile_lock/3`), which another refresher breaks
@@ -29,9 +31,8 @@ defmodule FermixCore.Auth.RefreshClient do
   alias FermixCore.Auth.JwtClaims
   alias FermixCore.Auth.OAuthProvider
   alias FermixCore.Auth.Redaction
+  alias FermixCore.Net.Egress
 
-  @client_id "app_EMoamEEZ73f0CkXaXp7hrann"
-  @token_url "https://auth.openai.com/oauth/token"
   @max_attempts 3
   @retry_base_ms 350
 
@@ -43,7 +44,7 @@ defmodule FermixCore.Auth.RefreshClient do
   # refresh_token_reused, …), and retrying the same dead refresh token can
   # never succeed, except 408 and 429: the endpoint did not act on the request
   # (it timed the request out, or is rate-limiting), so those take the bounded
-  # retries a 5xx takes. One classifier for both request paths.
+  # retries a 5xx takes.
   defguardp permanent_status(status)
             when status >= 400 and status < 500 and status not in [408, 429]
 
@@ -61,14 +62,11 @@ defmodule FermixCore.Auth.RefreshClient do
   @type tokens :: %{
           access_token: String.t(),
           refresh_token: String.t() | nil,
-          expires_at: DateTime.t() | nil
+          expires_at: DateTime.t() | nil,
+          scope: String.t() | nil,
+          id_token: String.t() | nil,
+          earliest_refresh_at: term()
         }
-
-  @spec refresh(String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
-  def refresh(refresh_token, req_options \\ []) when is_binary(refresh_token) do
-    {sleep, req_options} = pop_retry_sleep(req_options)
-    do_refresh(refresh_token, req_options, sleep, 1)
-  end
 
   @spec refresh(OAuthProvider.t(), String.t(), keyword()) :: {:ok, tokens()} | {:error, term()}
   def refresh(%OAuthProvider{} = provider, refresh_token, req_options)
@@ -91,55 +89,16 @@ defmodule FermixCore.Auth.RefreshClient do
     end
   end
 
-  defp do_refresh(refresh_token, req_options, sleep, attempt) do
-    body =
-      URI.encode_query(%{
-        "grant_type" => "refresh_token",
-        "refresh_token" => refresh_token,
-        "client_id" => @client_id
-      })
-
-    request =
-      Req.new(
-        [
-          url: @token_url,
-          method: :post,
-          body: body,
-          headers: [{"content-type", "application/x-www-form-urlencoded"}]
-        ] ++ request_bounds()
-      )
-
-    case request |> Req.merge(req_options) |> Req.request() do
-      {:ok, %{status: 200, body: body}} ->
-        parse_token_response(body)
-
-      {:ok, %{status: status, body: body}} when permanent_status(status) ->
-        {:error, {:permanent, status, body}}
-
-      {:ok, %{status: status}} when attempt < @max_attempts ->
-        Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} got #{status}")
-        sleep.(@retry_base_ms * attempt)
-        do_refresh(refresh_token, req_options, sleep, attempt + 1)
-
-      {:ok, %{status: status, body: body}} ->
-        {:error, "Refresh failed (#{status}): #{Redaction.format(body)}"}
-
-      {:error, _reason} when attempt < @max_attempts ->
-        Logger.warning("RefreshClient: attempt #{attempt}/#{@max_attempts} failed")
-        sleep.(@retry_base_ms * attempt)
-        do_refresh(refresh_token, req_options, sleep, attempt + 1)
-
-      {:error, reason} ->
-        {:error, reason}
-    end
-  end
-
   defp do_refresh(%OAuthProvider{} = provider, refresh_token, req_options, sleep, attempt) do
+    # `extra_refresh_params` sits under the grant's own fields, so a provider
+    # definition can add what its endpoint requires (ChatGPT's `resource`) but
+    # never rewrite the grant or the client.
     body =
-      %{
+      provider.extra_refresh_params
+      |> Map.merge(%{
         "grant_type" => "refresh_token",
         "refresh_token" => refresh_token
-      }
+      })
       |> Map.merge(OAuthProvider.body_credentials(provider))
       |> URI.encode_query()
 
@@ -153,7 +112,7 @@ defmodule FermixCore.Auth.RefreshClient do
         ] ++ request_bounds()
       )
 
-    response = request |> Req.merge(req_options) |> Req.request()
+    response = request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request()
 
     case client_rejection(provider, response) do
       nil -> refresh_response(provider, refresh_token, req_options, sleep, attempt, response)
@@ -224,11 +183,16 @@ defmodule FermixCore.Auth.RefreshClient do
           JwtClaims.expires_at(access)
       end
 
+    # `scope`, `id_token` and `earliest_refresh_at` as the provider sent them:
+    # only a ChatGPT refresh reads them (`Auth.ChatGPT.Refresh`).
     {:ok,
      %{
        access_token: access,
        refresh_token: body["refresh_token"],
-       expires_at: expires_at
+       expires_at: expires_at,
+       scope: body["scope"],
+       id_token: body["id_token"],
+       earliest_refresh_at: body["earliest_refresh_at"]
      }}
   end
 

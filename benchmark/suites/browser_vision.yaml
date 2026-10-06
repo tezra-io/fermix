@@ -17,7 +17,10 @@ description: >
   because a missing/blocked browser is an environment condition, not a code defect.
   States real-user intent and lets the model pick the route — the only route gate is a
   single tools_any:[browser] sanity case (the screenshot path runs through the
-  `browser` tool); everything else gates on the substance of the reply.
+  `browser` tool); everything else gates on the substance of the reply. The positive
+  floor is the one material fact in the capture, the page's heading; the appearance
+  words that used to sit beside it ("plain", "white", "text", "page") matched any
+  reply at all, so the floor could never fail. The rubric owns appearance.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -30,11 +33,13 @@ scenarios:
     tags: [browser, vision, computer-use, screenshot]
     cases:
       - id: example_appearance
+        # THE labelled sanity case: the prompt names the capture because the
+        # capture IS the mechanism under test, and the route gate pins that it
+        # went through the browser tool.
         query: "Open https://example.com in the browser, take a screenshot of it, and tell me what the page looks like — its overall layout and visual style."
         expect:
           tools_any: [browser]
-          main_model_matches: "."
-          reply_matches: "(?i)(example domain|heading|title|cent(er|re)|paragraph|plain|white|minimal|simple|link|text)"
+          reply_matches: "(?i)example domain"
           reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|render|open).{0,24}(image|screenshot|capture|page)"
         rubric: >
           Describes the actual rendered appearance of example.com — a minimal page
@@ -42,11 +47,11 @@ scenarios:
           styling. Fails if it claims it cannot see the screenshot/image, or if it
           never captured the page.
       - id: example_look
-        query: "Take a visual look at how https://example.com renders and describe its appearance in a sentence or two."
+        query: "Take a visual look at how https://example.com renders and tell me what's on it and how it looks, in a sentence or two."
         expect:
-          reply_matches: "(?i)(example domain|heading|title|paragraph|plain|white|minimal|simple|link|text|page)"
+          reply_matches: "(?i)example domain"
           reply_not_matches: "(?i)(can't|cannot|don't|do not|unable to) (see|view|render).{0,24}(image|screenshot|capture)"
         rubric: >
-          Gives a description grounded in the rendered page (heading plus a short
-          paragraph, plain/minimal styling); does not claim it cannot see the
-          captured image.
+          Gives a description grounded in the rendered page (the "Example Domain"
+          heading plus a short paragraph, plain/minimal styling); does not claim it
+          cannot see the captured image.

@@ -55,13 +55,16 @@ all of them.
   risk: isolated_mutation      # optional override of the suite risk
   tags: [memory, core]         # optional; matches --tag
   sticky_gates: [reply_not_matches]   # optional; see below
-  cases:                       # required, >= 2  (critical/safety scenarios: more)
+  cases:                       # required, >= 2 (cap_* suites: >= 1; critical/safety: more)
     - ...
 ```
 
 **Rule: every scenario has at least 2 cases.** Two phrasings of the same intent,
 so a pass is not an overfit to one wording. Critical and safety scenarios should
-have 3+.
+have 3+. Capability suites (named `cap_*`) need only one: a capability task is
+repeated `--trials` times, and a reworded twin that passes and fails with its
+sibling doubles that task's weight in the score and the sweep's time without adding
+information.
 
 `risk` is executable policy, not documentation. Allowed values:
 
@@ -348,7 +351,11 @@ March statement; only this one can say which button was pressed, and only
 - **In the capability tier it is a SCORER, not a constraint** (`score:` and
   `checker:` being the other two): all clauses hold -> 1.0, else 0.0. A
   capability case carrying `fixture_state` plus any of `score`/`checker`/`rubric`
-  declares two oracles and `run_capability.py` refuses the selection.
+  declares two oracles and `run_capability.py` refuses the selection. A
+  rubric-graded capability case may still open a fixture page: once the page
+  has reported in (`page.ready`), the judge receives the page's recorded state
+  as `tool_evidence` (`web_page_record`), so a rubric can grade what was posted
+  or pressed on the page, not what the reply claims.
 
 ### `drive: companion` — the Mac app's chat socket
 
@@ -448,6 +455,7 @@ They are validated here so a malformed capability case fails `--dry-run` too.
 |---|---|---|
 | `requires_tools` | [str] | provenance, **any-of**: the trial scores 0 unless ≥1 of these tool spans fired, so an answer reached from parametric recall cannot score |
 | `requires_tools_all` | [str] | provenance, **all-of**: every listed tool span must have fired. Use it when completion genuinely takes more than one step — `[skill_create, skill_reload]` as `requires_tools` means *either*, which lets half the work score full credit |
+| `cross_session` | bool | every turn but the last runs in one session and the last (the recall) in a fresh session for the same owner, so only durable memory or message-history search can answer it. Needs 2+ turns and a `score` block, which grades the recall reply. `{token}` and `{subject}` are replaced per trial in every turn |
 
 Both keys may appear on one case (a mandatory pair plus an either-or research
 step). **A span carrying `error_info` satisfies neither key**: the tool has to
@@ -487,6 +495,48 @@ itself. A bare root used to validate and be refused only mid-sweep by the runtim
 SafeRm guard, i.e. after loading, `--estimate`, seeding and possibly earlier
 tasks' spend — and that refusal aborts the run.
 
+### `checker.state`
+
+```yaml
+checker:
+  script: suites/capability/checkers/jobs_state.py
+  mode: json
+  state: fixtures/state/handle_jobs.json   # optional, under the tasks root
+```
+
+The jobs and reminders a task starts from, restored **before every trial** by
+`bin/seed_state.exs` (run with `mix run --no-start` from the umbrella root, beside
+the eval daemon): it waits for any job run in flight, deletes every scheduled job,
+cancels every active reminder, then creates the spec's through `Jobs.Registry`,
+the scheduler's claim/settle calls (for past runs) and `Temporal.Registry`. The spec:
+
+```json
+{"jobs": [{"key": "weather", "name": "morning weather", "schedule": "0 7 * * *",
+           "task_prompt": "...", "timeout_seconds": 300, "expires_in_days": 60,
+           "runs": [{"hours_ago": 25, "duration_seconds": 300, "status": "timeout",
+                     "error": "wall-clock timeout after 300000ms"}]}],
+ "reminders": [{"title": "...", "date": "2027-04-16", "time": "09:00:00",
+                "kind": "appointment", "plan": [{"type": "at_time"}]}]}
+```
+
+Reminder dates are absolute: a weekday or "tomorrow" computed from the run date
+means something different on a Friday than on a Monday. The checker reads the
+manifest from the evidence file as `state`: `jobs` (each key's id and seeded
+columns, for "unchanged" and "same id" checks), `reminders` (the seeded ids, so
+only what the trial created is graded), `zone` and `today` (the home's local date
+at seed time, for "tomorrow"). `jobs_state.py` and `reminders_state.py` grade
+against it. A seed failure stops the sweep on exit 3 rather than running a trial
+on what the previous one left behind.
+
+The helper runs in its own BEAM, so the daemon's job and reminder schedulers are
+not told about seeded rows; they pick them up on their next 60-second reconcile.
+Keep every seeded schedule and reminder due well outside a trial's few minutes (a
+daily job at a fixed hour, reminders on absolute future dates). Removed jobs and
+cancelled reminders are safe: due scans re-query, and a cancelled event's pending
+deliveries are cancelled with it. The helper refuses to run unless the database it
+would open is `<FERMIX_HOME>/memory.db`, so an inherited `FERMIX_MEMORY_DB_PATH` or
+`MIX_ENV=test` cannot seed some other store.
+
 ### `score.single`
 
 ```yaml
@@ -501,22 +551,11 @@ containing the expected value somewhere.
 
 ### Multi-turn capability cases
 
-A capability case (one carrying `score:` or `checker:`) may declare **one turn**,
-or exactly the two turns of a `cross_session: true` pair. Any other multi-turn
-capability case is a load error:
-
-```
-<suite>: <scenario>/<case>: multi-turn capability cases are not driven; use cross_session or a single turn
-```
-
-The runner drives one prompt per trial, so the earlier turns of a longer case
-would be silently dropped and the case scored off its last prompt alone. Refuse
-it at load rather than publish a number for work that never ran.
-
-A rubric-only case carries neither `score:` nor `checker:`, so the loader cannot
-see it as a capability case at all — it becomes one only when `--judge` admits it
-to a selection. `run_capability.py` therefore refuses the same shape again at
-selection time, before any spend, with the task ids named.
+A capability case may declare several turns. The runner drives every turn of a
+trial in one session, in order, then grades: `score:` and `checker:` read the last
+reply or the end state, a turn's own `expect` gates that turn, and the judge sees
+the whole conversation. A `cross_session: true` case runs its last turn in a fresh
+session instead (see the table above).
 
 ## Authoring guidance
 

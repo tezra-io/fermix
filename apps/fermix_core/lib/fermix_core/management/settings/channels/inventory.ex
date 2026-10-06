@@ -53,15 +53,26 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
         {:signal_account, :account, :text, "Signal account"},
         {:signal_owner_user_id, :owner_user_id, :text, "Your Signal number"}
       ]
+    },
+    # M54. It carries no token, so it has no secret row at all, and no account
+    # choice: the helper derives the account when it confirms the recipients.
+    imessage: %{
+      title: "iMessage",
+      platform: :macos,
+      rows: [
+        {:imessage_owner_user_id, :owner_user_id, :text, "Your Apple ID or phone number"},
+        {:imessage_allowed_sender_ids, :allowed_sender_ids, :list, "Guests"}
+      ]
     }
   ]
 
-  # The one row that names the OPERATOR rather than the connection. Every other
-  # row is a credential the channel cannot run without, which is what
-  # `Readiness.channel_configured?/1` requires.
-  @owner_key :owner_user_id
+  # The rows that name PEOPLE rather than the connection: the operator, and on
+  # iMessage the guests. Every other row is something the channel cannot run
+  # without, which is what `Readiness.channel_configured?/1` requires.
+  @people_keys [:owner_user_id, :allowed_sender_ids]
 
-  @type row_spec :: {atom(), atom(), :secret | :text, String.t()}
+  @typedoc "One row: the answer key, the channel-block key it reads, its kind and its label."
+  @type row_spec :: {atom(), atom(), :secret | :text | :list, String.t()}
 
   @doc "Every channel, in publication order."
   @spec channels() :: [atom()]
@@ -80,7 +91,7 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
   def credential_keys(channel) when is_atom(channel) do
     channel
     |> rows()
-    |> Enum.reject(&(elem(&1, 1) == @owner_key))
+    |> Enum.reject(&(elem(&1, 1) in @people_keys))
     |> Enum.map(&elem(&1, 1))
   end
 
@@ -91,4 +102,22 @@ defmodule FermixCore.Management.Settings.Channels.Inventory do
   @doc "Whether the named channel has a section."
   @spec known?(atom()) :: boolean()
   def known?(channel) when is_atom(channel), do: Keyword.has_key?(@channels, channel)
+
+  @doc """
+  Whether a channel exists on this host. iMessage exists only on the Mac whose
+  Messages it reads, so off a Mac no surface offers it; every other channel
+  exists everywhere.
+  """
+  @spec available?(atom(), boolean()) :: boolean()
+  def available?(channel, macos?) when is_atom(channel) and is_boolean(macos?) do
+    case Keyword.fetch!(@channels, channel) do
+      %{platform: :macos} -> macos?
+      %{} -> true
+    end
+  end
+
+  @doc "The channels that exist on this host, in publication order."
+  @spec available_channels(boolean()) :: [atom()]
+  def available_channels(macos?) when is_boolean(macos?),
+    do: Enum.filter(channels(), &available?(&1, macos?))
 end

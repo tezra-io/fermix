@@ -239,6 +239,9 @@ defmodule FermixCore.Meetings.DeliveryTest do
       assert Delivery.transient?({:transport, :econnreset})
       assert Delivery.transient?(%Mint.TransportError{reason: :closed})
       assert Delivery.transient?(%Req.TransportError{reason: :nxdomain})
+      # The same refused or unresolved connect, when the hop is the proxy.
+      assert Delivery.transient?(%Req.TransportError{reason: :proxy_unreachable})
+      refute Delivery.transient?(%Req.TransportError{reason: :proxy_refused})
       assert Delivery.transient?({:http_status, 500})
       assert Delivery.transient?({:http_status, 503, "unavailable"})
     end

@@ -230,6 +230,36 @@ defmodule FermixCore.AgentLoopTest do
     end
   end
 
+  # A page-like tool: `wait` counts its repeats by what it returns, as a page's
+  # WebMCP tool does through `Tools.Browser.progress_by_result?/1`; `peek` has
+  # changing results too but counts every repeat. Each call returns the next of
+  # the results the test scripted, then the last one again.
+  defmodule FeedTool do
+    @behaviour Tool
+
+    @impl true
+    def name, do: "feed"
+    @impl true
+    def description, do: "Waits for the next event of a feed"
+    @impl true
+    def parameters, do: %{"type" => "object", "properties" => %{"op" => %{"type" => "string"}}}
+
+    def progress_by_result?(%{"op" => "wait"}), do: true
+    def progress_by_result?(arguments) when is_map(arguments), do: false
+
+    @impl true
+    def execute(_args, _ctx) do
+      case Process.get(:feed_results) do
+        [result] ->
+          {:ok, result}
+
+        [result | rest] ->
+          Process.put(:feed_results, rest)
+          {:ok, result}
+      end
+    end
+  end
+
   # -- Helpers --
 
   defp turn(content, opts \\ []) do
@@ -1650,6 +1680,79 @@ defmodule FermixCore.AgentLoopTest do
                )
 
       assert result.response == "Recovered"
+    end
+
+    # The same call `turns` times in a row, then a reply. A kill one call late
+    # lets the turn reach "Followed", so each kill assertion pins the threshold.
+    defp follow_feed(registry, call, results, turns) do
+      register_caps(registry, [FeedTool])
+      Process.put(:feed_results, results)
+
+      set_mock_responses(
+        List.duplicate(turn("", tool_calls: [call]), turns) ++ [turn("Followed")]
+      )
+
+      run_loop(
+        capability_registry: registry,
+        max_iterations: 15,
+        loop_detection_warn_threshold: 3,
+        loop_detection_kill_threshold: 5
+      )
+    end
+
+    test "a call that counts progress by its result goes on while each result is new", %{
+      registry: registry
+    } do
+      # Watching a game: the page's wait is the same call every time, and each
+      # one returns the next position. Six in a row is past the kill threshold.
+      wait = tool_call("call_wait", "feed", %{"op" => "wait"})
+      results = Enum.map(1..6, &Tool.success("event #{&1}"))
+
+      assert {:ok, result} = follow_feed(registry, wait, results, 6)
+      assert result.response == "Followed"
+    end
+
+    test "the same answer from such a call is still a loop at the kill threshold", %{
+      registry: registry
+    } do
+      wait = tool_call("call_wait", "feed", %{"op" => "wait"})
+
+      assert {:error, reason} = follow_feed(registry, wait, [Tool.success("no new event")], 5)
+      assert reason =~ "Repeated tool call loop detected"
+    end
+
+    test "the same error from such a call is a loop at the kill threshold", %{
+      registry: registry
+    } do
+      # A wait that keeps timing out returns one answer: no progress, however
+      # long each call took.
+      wait = tool_call("call_wait", "feed", %{"op" => "wait"})
+      timeout = Tool.error("webmcp_timeout: the tool did not answer in the budget")
+
+      assert {:error, reason} = follow_feed(registry, wait, [timeout], 5)
+      assert reason =~ "Repeated tool call loop detected"
+    end
+
+    test "a result seen earlier in the window is not progress", %{registry: registry} do
+      # a, b, a, a, a: only the first two are new, so the sixth call is the
+      # fifth since the last new result.
+      wait = tool_call("call_wait", "feed", %{"op" => "wait"})
+      results = Enum.map(~w(a b a), &Tool.success("position #{&1}"))
+
+      assert {:error, reason} = follow_feed(registry, wait, results, 6)
+      assert reason =~ "Repeated tool call loop detected"
+    end
+
+    test "a call without the progress hook counts every repeat, whatever it returns", %{
+      registry: registry
+    } do
+      # A computer-use screenshot names a fresh observation id each time; its
+      # repeats must still end the turn.
+      peek = tool_call("call_peek", "feed", %{"op" => "peek"})
+      results = Enum.map(1..6, &Tool.success("observation #{&1}"))
+
+      assert {:error, reason} = follow_feed(registry, peek, results, 5)
+      assert reason =~ "Repeated tool call loop detected"
     end
   end
 

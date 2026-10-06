@@ -13,6 +13,8 @@ defmodule Fermix.CLI.Upgrade.Manifest do
   no caller is ever handed a URL to fetch from somewhere else.
   """
 
+  alias FermixCore.Net.Egress
+
   @manifest_url "https://github.com/tezra-io/fermix/releases/latest/download/releases.json"
 
   # Every artifact URL the release pipeline emits is rooted here — the exact base
@@ -56,7 +58,13 @@ defmodule Fermix.CLI.Upgrade.Manifest do
     url = Keyword.get(opts, :url, @manifest_url)
     req_options = Keyword.get(opts, :req_options, [])
 
-    case Req.get(url, req_options) do
+    request =
+      [method: :get, url: url]
+      |> Keyword.merge(req_options)
+      |> Req.new()
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
       {:ok, %Req.Response{status: 200, body: body}} when is_map(body) -> normalize(body)
       {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> decode(body)
       {:ok, %Req.Response{status: status}} -> {:error, {:manifest_http_status, status}}

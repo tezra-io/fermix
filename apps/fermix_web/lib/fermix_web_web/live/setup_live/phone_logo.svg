@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" role="img" aria-label="Phone">
+  <!-- Fermix's own Phone mark (first-party artwork): a full-tile blue gradient squircle with
+       a white phone, the phone that runs the Fermix companion app. -->
+  <defs>
+    <linearGradient id="phone-blue" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#4d7cff" />
+      <stop offset="1" stop-color="#1f4fe0" />
+    </linearGradient>
+  </defs>
+  <rect width="24" height="24" rx="5.4" fill="url(#phone-blue)" />
+  <rect x="8" y="4" width="8" height="16" rx="1.9" fill="#ffffff" />
+  <rect x="9.1" y="5.7" width="5.8" height="11.3" rx="0.8" fill="#2b5cff" />
+  <circle cx="12" cy="18.5" r="0.7" fill="#2b5cff" />
+</svg>

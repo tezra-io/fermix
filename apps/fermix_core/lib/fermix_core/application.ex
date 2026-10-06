@@ -12,7 +12,6 @@ defmodule FermixCore.Application do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Auth.Store, as: AuthStore
-  alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Boot.PathBaseline
   alias FermixCore.BootProfile
@@ -39,13 +38,12 @@ defmodule FermixCore.Application do
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Memory.Store
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.CapabilitySeeder, as: PluginCapabilitySeeder
   alias FermixCore.Plugins.Dist.Installer, as: PluginInstaller
   alias FermixCore.Prompt.BootstrapRename
   alias FermixCore.Prompt.IdentityName
   alias FermixCore.Prompt.TemplateReconciler
-  alias FermixCore.Providers.PrimaryConfig
-  alias FermixCore.Providers.Selection
   alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Realtime.Supervisor, as: RealtimeSupervisor
   alias FermixCore.Sandbox.CommandCapabilities
@@ -135,7 +133,7 @@ defmodule FermixCore.Application do
   # pairing window, device store, and live socket registry. Starting a second
   # tree here would create a competing listener and a split persistence path.
   # Halt before any sibling app starts so there is no file logger, no
-  # `Memory.Repo`, no `TokenManager`, and no port bind.
+  # `Memory.Repo`, no token manager, and no port bind.
   defp cli_dispatch(_profile, argv) do
     System.halt(run_cli(argv))
   end
@@ -168,10 +166,9 @@ defmodule FermixCore.Application do
         # add no restart intensity to the tree.
         CommandHostSupervisor,
         {Task.Supervisor, name: FermixCore.TaskSupervisor},
-        {Finch, name: FermixCore.Finch, pools: finch_pools()},
+        finch_children(Egress.activate()),
         {Trace, trace_opts()},
         TokenSupervisor,
-        maybe_token_manager(),
         # The browser bridge listens on a socket the browser extension's pump
         # connects to, so it starts in a daemon and nowhere else — the same
         # question `maybe_daemon_socket/0` answers below.
@@ -277,9 +274,7 @@ defmodule FermixCore.Application do
   # slept or sat idle — the next request then fails with a `:closed`
   # transport error before any byte arrives. Capping idle age means
   # checkout discards stale connections and handshakes fresh ones (a few
-  # hundred ms of TLS, noise next to an LLM call). chatgpt.com keeps the
-  # Codex adapter's 5s connect timeout, moved here because Req forbids
-  # combining `:finch` with `:connect_options`.
+  # hundred ms of TLS, noise next to an LLM call).
   @http_conn_max_idle_ms 15_000
 
   # Finch's default pool count is 1 — a single pool process per host. Right
@@ -291,20 +286,6 @@ defmodule FermixCore.Application do
   # `pool_timeout` (see `FermixCore.Net.HttpClient`) is a rarely-needed floor
   # rather than the common path.
   @http_pool_count 2
-
-  # Reap a chatgpt.com pool process that has been idle this long: Finch's
-  # `handle_ping` stops it (`{:stop, :idle_timeout}`, `restart: :transient`)
-  # and the next request auto-starts a fresh one. Verified in deps/finch. This
-  # moves stale-socket teardown OFF the request path — after a burst or a
-  # wake, the sockets a returning checkout would otherwise have to close
-  # synchronously are already gone with the reaped pool process, so a teardown
-  # storm cannot land inside a checkout budget. It cannot rescue a pool process
-  # that is ALREADY wedged mid-teardown (reaping is itself a ping-time
-  # decision); the continuation retry in `FermixCore.AgentLoop` covers that.
-  # Deliberately chatgpt.com only — the verified incident is Codex-specific,
-  # and :default fans out over many low-traffic hosts where reaping would just
-  # churn handshakes for no measured benefit.
-  @codex_pool_max_idle_ms 60_000
 
   # Web-search backend hosts get the same idle-capped pool plus the backends'
   # fail-fast connect budget (they degrade to DuckDuckGo on failure, so a dead
@@ -333,15 +314,7 @@ defmodule FermixCore.Application do
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
     Map.merge(
-      %{
-        :default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count],
-        "https://chatgpt.com" => [
-          conn_max_idle_time: @http_conn_max_idle_ms,
-          count: @http_pool_count,
-          pool_max_idle_time: @codex_pool_max_idle_ms,
-          conn_opts: [transport_opts: [timeout: 5_000]]
-        ]
-      },
+      %{:default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count]},
       Map.new(@web_search_hosts, &{&1, web_search_pool()})
     )
   end
@@ -354,6 +327,47 @@ defmodule FermixCore.Application do
     ]
   end
 
+  @doc """
+  The outbound pools this process runs: the direct one always, and a second one
+  for proxied destinations when `[fermix_core.network]` names a proxy. The
+  proxied table is the direct table with the proxy added, so both keep the idle
+  caps and pool counts above.
+  """
+  @spec finch_instances(Egress.t()) :: [keyword()]
+  def finch_instances(%Egress{} = egress) do
+    direct = [name: Egress.direct_pool(), pools: finch_pools()]
+
+    case Egress.proxied_pools(egress, finch_pools()) do
+      nil -> [direct]
+      proxied -> [direct, [name: Egress.proxied_pool(), pools: proxied]]
+    end
+  end
+
+  @doc """
+  Starts the outbound pools for a caller that has no supervision tree (a CLI
+  verb, a Mix task), through the same constructor the daemon uses, so a probe
+  travels the route a turn would. A no-op when the pools are already running.
+  """
+  @spec ensure_finch_pools() :: :ok
+  def ensure_finch_pools do
+    if Process.whereis(Egress.direct_pool()) == nil do
+      Egress.activate() |> finch_instances() |> Enum.each(&start_finch!/1)
+    end
+
+    :ok
+  end
+
+  defp start_finch!(instance) do
+    {:ok, _pid} = Finch.start_link(instance)
+    :ok
+  end
+
+  defp finch_children(egress) do
+    egress
+    |> finch_instances()
+    |> Enum.map(&Supervisor.child_spec({Finch, &1}, id: Keyword.fetch!(&1, :name)))
+  end
+
   defp run_cli(argv) do
     Fermix.CLI.main(argv)
   rescue
@@ -361,23 +375,6 @@ defmodule FermixCore.Application do
       IO.puts(:stderr, "fermix: unexpected error — #{Exception.message(error)}")
       IO.puts(:stderr, Exception.format_stacktrace(__STACKTRACE__))
       1
-  end
-
-  # Codex participates in routing when it is the chosen primary (flag or
-  # legacy agent.provider — PrimaryConfig owns that migration) OR a
-  # configured failover fallback, so the token manager must be up for
-  # either. Starting it tokenless is harmless (it serves {:error, :no_token});
-  # NOT starting it while Codex is routable crashes the first Codex call
-  # with :noproc.
-  defp maybe_token_manager do
-    if codex_routable?(), do: [TokenManager], else: []
-  end
-
-  defp codex_routable? do
-    case PrimaryConfig.primary() do
-      {:ok, :openai_codex} -> true
-      _other_or_multiple -> Selection.configured?(:openai_codex)
-    end
   end
 
   # The management operations the socket routes to are owned by long-lived

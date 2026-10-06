@@ -92,7 +92,7 @@ redacting logger, attaches telemetry, and starts the core tree under
 
 1. command hosting, `FermixCore.TaskSupervisor`, the `FermixCore.Finch` HTTP
    pool, and `Trace`
-2. `Auth.TokenSupervisor`, plus the Codex token manager when Codex is routable
+2. `Auth.TokenSupervisor`
 3. `Browser.Supervisor`
 4. `Capabilities.Registry` and its seeders (built-ins, sandbox commands, the
    plugin installer and plugin tools), then `SkillRegistry`
@@ -118,14 +118,22 @@ streaming stay in `FermixChannels.Gateway.Queue`.
 `MainAgent` is the persistent top-level agent process. It caches a
 `RuntimeContext` (bootstrap prompt, prompt memory, operator and guest capability
 profiles, runtime section) and hands out turn-state snapshots, freezing the
-Computer History gate and the provider routes for each one. The route chain is
+Computer History gate, the provider routes and, for an owner's chat turn, the
+Live call in the chat (`Agents.LiveCallTurn`, asked of `VoiceBridge`) for each
+one. The route chain is
 built at init, so a provider change needs a restart.
 
 `TurnRunner` runs a turn inside the queue's task: history, preflight
 compaction, persisting the user message, `AgentLoop`, `[:fermix, :agent, ...]`
 telemetry, and `commit/4` after delivery. Conversation identity is
 `Agents.ConversationKey`: `{channel, chat_id, thread_scope}`, with `thread_ts`
-as the canonical thread identifier when present.
+as the canonical thread identifier when present. It takes one override, with
+two users: Channels names the conversation a message runs in when it is not
+the message's own, so the queue lane, the history, the commit and the memory
+review all agree. A trusted Live hand-off names it in its `voice_call` map
+(`Agents.VoiceCall`, believed only on an operator message on the `voice`
+channel); a phone message carries the Mac's chat in `conversation_key`, which
+only `Gateway.ingest/2` sets, from the adapter (M56 D9).
 
 Architecture Invariant: `MainAgent` and `TurnRunner` do not know how Telegram,
 Slack, WhatsApp, Discord, Signal, ACP, mobile, voice, or CLI replies are
@@ -160,14 +168,17 @@ snapshot built when the loop starts, never hard-coded in the loop.
 `Providers.Adapter` is the provider behaviour (`chat/3`, `continue/3`,
 `to_provider_tools/1`, `parse_tool_calls/1`, `parse_response/1`, and optional
 `supports_streaming?/0`). The static `Providers.Descriptor` registry is the
-single source of truth for the supported providers: `openai_codex` (Codex
-OAuth), OpenAI (API key), Anthropic (API key or subscription OAuth), xAI (API
-key or Grok OAuth, shown as SpaceXAI), OpenRouter, Mistral, Venice, and a
-keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
+single source of truth for the supported providers: `openai_codex` (OpenAI
+Codex, Sign in with ChatGPT on the person's plan), OpenAI (API key), Anthropic
+(API key or subscription OAuth), xAI (API key or Grok OAuth, shown as
+SpaceXAI), OpenRouter, Mistral, Venice, and a keyless local Ollama. Each entry names the adapter module, auth modes, secrets,
 config keys, and whether the provider supports reasoning effort. Adapters
-include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.Codex`,
-`Anthropic.Messages`, and `XAI.Responses`; OpenAI is `:routed` (model +
-base_url pick Responses vs ChatCompletions).
+include `OpenAI.ChatCompletions`, `OpenAI.Responses`, `OpenAI.ChatGPTPlan`
+(OpenAI Codex on the public Responses API), `Anthropic.Messages`, and
+`XAI.Responses`; OpenAI is `:routed` (model + base_url pick Responses vs
+ChatCompletions). OpenAI Codex ships no model catalog: `ModelListing` reads the
+signed-in account's list, and after a sign-in `Setup.LiveModel` sets the
+configured model to the first listed one when the list does not have it.
 
 `Selection` builds the primary-plus-fallback chain (at most one provider may be
 marked `primary`), `RouteResolver` resolves a route to `{route_key,
@@ -189,19 +200,31 @@ secret overlay in `config/runtime.exs`, not a sweep of hand-maintained lists.
 
 `Auth` owns OAuth credentials for providers and plugins. `Auth.Store` keeps
 versioned per-provider profiles in `FERMIX_HOME/auth.json`, written atomically
-with mode 0600. Login flows are per vendor (`CodexLogin` and `OAuthFlow` with a
-loopback listener, `CodexImport`, `AnthropicLogin`, `XAILogin`, and plugin
-providers through `OAuthProviders`), and `TokenSupervisor` runs one
-`TokenManager` per profile.
+with mode 0600. Login flows are per vendor (`Auth.ChatGPT`, Sign in with ChatGPT
+for `openai_codex`, under the `chatgpt` profile; `OAuthFlow` with a loopback
+listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
+`OAuthProviders`), and `TokenSupervisor` runs one `TokenManager` per profile.
 
 `Net.HttpClient` sends outbound HTTP on the shared `FermixCore.Finch` pool,
-retrying once on a stale socket and never on a timeout. `Net.TimeoutPolicy`
+retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
+each connection leaves: direct, or through the HTTP proxy `[fermix_core.network]`
+names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
+HTTPS is tunnelled with `CONNECT`. `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
 options for WebSockets, and `Net.Guard` the public-URL checks.
 `FermixCore.Timeouts` names the non-HTTP deadlines.
 
 Architecture Invariant: core boot aborts if `auth.json` exists with a mode other
 than 0600. `Net.TimeoutPolicy` has no default, so an unknown request kind raises.
+
+Architecture Invariant: no connector in the BEAM chooses its own way out. Every
+`Req` request is routed by `Net.Egress.attach/3` at its adapter, once per hop, and
+a transport that cannot tunnel (the WebSocket clients, the pinned remote MCP
+connector, the APNs socket) asks `Net.Egress.ensure_direct/2` and refuses a proxied
+route. A proxied request whose proxy fails is an error, never a direct dial.
+`Net.EgressSurfaceTest` reads the source of every app to hold this. Processes
+Fermix spawns (the browser, coding agents, sidecars, the agent's shell) make their
+own connections and are outside it.
 
 Architecture Invariant: `auth.json` has two lockfiles beside it, shared by every
 VM on the host. Every read-modify-write of the file holds the store lock, and a
@@ -245,10 +268,12 @@ tool schemas.
 Built-in tool families: file read/write/edit, glob and content search, shell,
 and `view_image`; git read/write; web (`web_search`, `web_fetch`,
 `place_search`, `browser`); skills and delegation (`skill_*`, `subagents`,
-`model_routing_config`); memory (`memory_store`, `memory_recall`,
-`memory_sources_list`, `recall_activity`); scheduled jobs; dated events and
+`model_routing_config`); memory (`memory_store`, `memory_forget`,
+`memory_recall`, `memory_sources_list`, `recall_activity`); scheduled jobs;
+dated events and
 reminders (`event_*`, `reminder_snooze`); messaging (`send_attachment`,
-`react`); `generate_image`, `request_directory_access`, and `tool_help`.
+`react`, and `send_to_channel` to the owner's own inbox on a channel they name);
+`generate_image`, `request_directory_access`, and `tool_help`.
 `computer_use`, the coding-harness tools, and the meeting tools are registered
 only when their feature is ready.
 
@@ -285,12 +310,15 @@ The same database also holds full-text search, versioned resources, scheduled
 jobs and their runs, temporal events and reminders, harness runs, meetings,
 skill usage and curation, the companion timeline, and computer-history rows.
 
-`Memory.Reviewer` writes durable memory. It is a time-gated background review
-(daily by default) of the owner's recent messages that applies add, replace,
-and archive operations through `ReviewTools`, after which `PromptFiles` rebuilds
-`USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Admission` holds
-category and scope policy, `Compactor` summarizes long conversations, and
-`Search` runs FTS5 lookups.
+Durable memory has two writers, and both end by having `PromptFiles` rebuild
+`USER.md` and `MEMORY.md` under `FERMIX_HOME/memory/<agent>/`. `Memory.Reviewer`
+is a time-gated background review (daily by default) of the owner's recent
+messages that applies add, replace, and archive operations through
+`ReviewTools`. `Memory.LongTerm` is the foreground path behind the
+`memory_store` and `memory_forget` tools: a save under a category, a correction
+by row id, or a forget, applied at once and reported with what actually
+happened. `Admission` holds the category and scope policy both writers share,
+`Compactor` summarizes long conversations, and `Search` runs FTS5 lookups.
 
 Architecture Invariant: SQLite is canonical for durable memory. Prompt memory
 files are derived prompt artifacts, not the source of truth.
@@ -298,6 +326,12 @@ files are derived prompt artifacts, not the source of truth.
 Architecture Invariant: memory review runs after the reply is delivered, in a
 supervised task. A failed review records backoff state and never turns a
 delivered reply into a failed turn.
+
+Architecture Invariant: the owner's memory is the owner's. A guest's turn is
+never sent `USER.md` or `MEMORY.md`, never starts a review, and what a guest
+says is stored marked as theirs, so no review reads it, in a shared chat
+included. A request the owner asked aloud on a Live call is stored marked
+spoken, and no review reads it either.
 
 ### `FermixCore.Prompt`
 
@@ -387,7 +421,8 @@ reminder text without a model.
 `Delivery` is the shared outbound layer. `ChannelSend` makes one bounded send
 through the adapter named in `[:fermix_core, :jobs, :delivery_channels]`, so core
 never compile-depends on channels, and `OwnerInbox` is the one resolver for the
-owner's inbox.
+owner's inbox, the first one or the one on a named platform (a transport only
+the owner reaches names its own through its adapter's `owner_inbox/0`).
 
 Architecture Invariant: a delivery destination is resolved once, at acceptance,
 and stored on the row; send time resolves only the adapter. A send watched by
@@ -532,12 +567,24 @@ fixtures).
 `priv/realtime/`). `SessionServer` runs OpenAI Realtime with tools through
 `ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
 Live, which executes no tools and delegates every task to an agent turn through
-the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`.
+the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`. A Live
+call's instructions are `LIVE.md` with what `LivePrompt` generates around it
+(the assistant's name, the owner's details, the date, the memory files in the
+`<memory-context>` frame `PromptComposer` owns), and a call in the chat starts
+with the chat's newest messages as provider input, read through the bridge
+before the call has a handle and shaped by `LiveChat`. A call in the chat
+leaves a gist: its settle closes the `voice_calls` record (`CallRecord`) with
+the settled cost and what the call owes the chat, then `CallGist` makes the
+gist in a task the session never waits on and writes the call's one chat row
+through the bridge, rendered from the record by `CallRow`. An owner's turn is
+told the last gists (`RecentCalls`).
 
 `Companion.Protocol` owns the chat vocabulary, served to the Mac app on
 `FERMIX_HOME/companion.sock` (newline-delimited JSON with the Realtime socket's
 handshake, exported in `priv/companion/`) by `FermixChannels.Companion`; the
-mobile wire validates the chat events it shares through the same module.
+mobile wire validates the chat events it shares through the same module. A
+server event names the version that brought it, and a connection is never sent
+one newer than the version its hello declared.
 `Companion.Timeline` is the durable timeline the phone and the Mac share
 (profile `main`), paged in both directions and searched through an FTS5 index
 its own writes maintain. Its media index and link previews live in side
@@ -606,17 +653,34 @@ Current channels:
 - `Discord` uses a supervised Gateway connection and REST replies.
 - `Signal` polls `signal-cli receive` once a second and sends through
   subprocesses.
+- `IMessage` (macOS only) speaks NDJSON over stdio (`transport: :subprocess`)
+  to **Fermix Messages**, a signed, self-disclaiming helper app
+  (`io.tezra.fermix.messages`) installed by `FermixCore.IMessage.HelperInstaller`.
+  The helper holds Full Disk Access and Automation → Messages, reads
+  `chat.db` read-only, sends through Messages, and keeps the confirmed
+  recipient policy in its own keychain item, changed only through a dialog it
+  shows on screen. Invariant: the BEAM never opens `chat.db` and never sends an
+  Apple Event.
 - `Acp` exposes Fermix as an Agent Client Protocol agent on
   `FERMIX_HOME/acp.sock` (`Acp.Endpoint`, one `Acp.Peer` per connection);
   `fermix acp` pipes stdio to that socket. Client identities are kept by
   `FermixCore.Acp.Identity`.
 - `Companion` serves the Mac app's chat on `FERMIX_HOME/companion.sock`
   whenever the daemon runs (`Companion.Endpoint`, one `Companion.Connection` per
-  client). Its trust is the 0600 socket, so it runs as the local operator.
+  client). Its trust is the 0600 socket, so it runs as the local operator. A
+  delivery it writes (a job's result, `send_to_channel`), unlike a reply, is
+  pushed to the phones while their channel runs, as the phone's own deliveries
+  are, since the two draw one timeline.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
   Noise sessions, a pairing window, APNs push). It is off by default, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
-  conversation history. `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
+  conversation history. Its turns run in the Mac's chat conversation
+  (`Mobile.joined_conversation/1`, the one `Gateway.Channel` callback that
+  names another transport's conversation, which the gateway puts on every
+  message it ingests through the adapter), so the one timeline both transports
+  draw has one agent history and one queue lane, while the channel stays
+  `mobile` for the phone's authorization, approval cards, stream and push.
+  `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
   the device store and registry, `PairManager`, `MediaStore`, the bounded
   link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
   dispatcher when push is configured (it connects on the first push, never at
@@ -647,7 +711,9 @@ Current channels:
   answered inline), in mailbox order. A turn it tracks settles from the
   Queue's outcome: a companion turn's replies are held and written, with
   `text_done`, only on `{:completed}`, while a phone turn streams and writes
-  its own rows and is only settled. A `cancel` from either transport
+  its own rows and is only settled. Both transports' turns run in the chat's
+  one queue lane, so each waits for the other, and a stop names its own
+  turn's message id there. A `cancel` from either transport
   (`Requests.cancel`) is recorded on the request (`cancelled_at`) before
   `Turns`, which owns the hand-off to the queue, reads that mark as it enqueues
   and sends any `Queue.stop_turn/3` itself, so a cancel is never lost between
@@ -679,7 +745,42 @@ Current channels:
   sent after it. It runs on every boot, after the registry and `Turns` in
   `Companion.Supervisor`.
 - `Voice` turns Live-voice delegations into `voice`-channel turns
-  (`Voice.Bridge`).
+  (`Voice.Bridge`). Unless the call is private, they run in the chat's own
+  conversation (`Companion.chat_conversation_key/0`), which the bridge names
+  in the trusted `voice_call` map, so a hand-off and a turn typed on the Mac
+  or the phone share one history and one queue lane; a cancel or a hang-up
+  stops only the call's own turns, by message id (`Queue.stop_turn/3`). A
+  private call keeps a conversation of its own, keyed by the call's UUID. A
+  hand-off runs on the operator surface less what a call cannot deliver, one
+  list per mode read by the voice model's prompt and the hand-off alike
+  (`VoiceCall.excluded_categories/1`): a call in the chat may start a coding
+  run, which reports back into the chat, and a private call may not. While a
+  call in the chat is up, `Companion.Turns` tells it each chat turn it hands off and that turn's
+  answer (`Voice.ChatMirror`), finding the call in Core's `CallRegistry`, and
+  each such turn is told the call is up (`Voice.Bridge.chat_call/2`): it can
+  read the call (`voice_call_context`) and may end with no reply, which its
+  runner tells the companion stream and `Companion.Turns` ends with
+  `turn_done`, offered only to a turn the Mac runs while every companion
+  client attached reads it (the phone's wire has no such ending).
+  What a hand-off's answer cannot say aloud is shown in the chat: the Live
+  session writes it through `VoiceBridge.show/2`, which `Voice.Bridge`
+  answers with `Companion.write_call_row/3`, the one write for a call's rows
+  (deduplicated per task revision, and once per call for the row a call
+  leaves when it ends; `metadata.call` validated by `Companion.Protocol`); a
+  reply its runner told the voice adapter is drawn from Computer History is
+  shown and never said unless OpenAI may carry it. A call's row a dead daemon
+  left owed is written at the next boot by `Voice.CallRowSweep`, started after
+  the companion subtree. A task still running when a call in the chat ends
+  finishes into the chat: the session hands it to `Voice.Detached`, one
+  process under the voice supervisor that outlives every session, in an
+  order the registry's ownership makes necessary (the record marks it
+  detached, the owner registers a route of its own, then the session
+  releases the call's), and the adapter resolves a reply by the session's
+  route first and the owner's second. The owner writes the task's running and
+  done rows through the same call-row write, pushes the phone, records the
+  end, bounds each task by a wall clock and holds at most eight; a companion
+  `cancel` with `task_ref` stops one through it (`Companion.Requests`), and
+  the boot pass ends the ones a restart orphaned.
 - `CLI` is the channel behind `fermix ask` and `fermix chat`.
 
 `outbound/` holds pure long-form text helpers, and `harness/` re-ingests
@@ -779,7 +880,9 @@ to and answers the prompt as a failed turn. `Companion.Turns` watches the
 Queue it handed each turn of either companion transport to, ends the turn as
 `interrupted` when that Queue dies, and holds the request's fence itself, so
 the request is failed once rather than released for a rerun. Voice does not
-watch (accepted: a call is bounded and the operator can cancel it).
+watch (accepted: a call is bounded and the operator can cancel it); a task
+that outlived its call is bounded by its owner's wall clock instead, so one
+whose Queue died ends there as timed out.
 
 Long-running or blocking work runs under `FermixCore.TaskSupervisor` or a
 dedicated supervised process (channel turns under `Gateway.QueueSupervisor`'s

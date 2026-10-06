@@ -117,6 +117,14 @@ class UsageLimitCfg:
 
 
 @dataclass
+class PrivateSuitesCfg:
+    """The private holdout: scored tasks whose answers must stay off the public repo.
+    `dir` is the local clone (None = not configured), `remote` where it is cloned from."""
+    dir: str | None
+    remote: str | None
+
+
+@dataclass
 class Config:
     daemon: DaemonCfg
     opik: OpikCfg
@@ -126,6 +134,7 @@ class Config:
     report_dir: str
     rubric_failures: str  # warn | fail
     skill_dir: str
+    private_suites: PrivateSuitesCfg | None = None
 
     @property
     def env(self) -> dict:
@@ -200,6 +209,10 @@ def load(skill_dir: str, path: str | None = None) -> Config:
         max_duration_ms=_positive_int(b.get("max_duration_ms", 300000),
                                       "budgets.max_duration_ms"),
     )
+    ps = _section(raw, "private_suites")
+    private_suites = PrivateSuitesCfg(
+        dir=_expand(_nonempty_string(ps["dir"], "private_suites.dir")) if "dir" in ps else None,
+        remote=_nonempty_string(ps["remote"], "private_suites.remote") if "remote" in ps else None)
     u = _section(raw, "usage_limit")
     usage_limit = UsageLimitCfg(
         retry_backoff_min=_backoff_minutes(u.get("retry_backoff_min"), [30, 60, 120, 180]),
@@ -217,4 +230,5 @@ def load(skill_dir: str, path: str | None = None) -> Config:
         report_dir=os.path.join(skill_dir, report_dir),
         rubric_failures=rubric_failures,
         skill_dir=skill_dir,
+        private_suites=private_suites,
     )

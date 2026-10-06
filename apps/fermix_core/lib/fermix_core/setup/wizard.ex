@@ -7,6 +7,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Management.Settings.Channels.Inventory
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Prompt.SetupSeeder
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ModelCatalog
@@ -47,8 +48,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:provider, provider() | String.t()}
           | {:default_model, String.t()}
           | {:reasoning_effort, reasoning_effort() | String.t()}
-          | {:fast, boolean() | String.t()}
           | {:compaction_threshold, float() | String.t()}
+          | {:proxy, String.t()}
+          | {:proxy_bypass, [String.t()] | String.t()}
           | {:review_interval_hours, non_neg_integer() | String.t()}
           | {:realtime_enabled, boolean() | String.t()}
           | {:realtime_api_key, String.t()}
@@ -58,6 +60,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:realtime_max_session_minutes, pos_integer() | String.t()}
           | {:realtime_max_cost_cents, pos_integer() | String.t()}
           | {:realtime_persist_transcripts, boolean() | String.t()}
+          | {:realtime_conversation, String.t()}
           | {:computer_use_enabled, boolean() | String.t()}
           | {:computer_use_background, boolean() | String.t()}
           | {:computer_history_enabled, boolean() | String.t()}
@@ -90,6 +93,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:slack_owner_user_id, String.t()}
           | {:signal_account, String.t()}
           | {:signal_owner_user_id, String.t()}
+          | {:imessage_owner_user_id, String.t()}
+          | {:imessage_allowed_sender_ids, [String.t()] | String.t()}
+          | {:imessage_enabled, boolean() | String.t()}
           | {:telegram_enabled, boolean() | String.t()}
           | {:whatsapp_enabled, boolean() | String.t()}
           | {:discord_enabled, boolean() | String.t()}
@@ -128,7 +134,6 @@ defmodule FermixCore.Setup.Wizard do
     :provider,
     :default_model,
     :reasoning_effort,
-    :fast,
     :realtime_enabled,
     :computer_use_enabled,
     :computer_history_enabled
@@ -157,7 +162,8 @@ defmodule FermixCore.Setup.Wizard do
     whatsapp_owner_user_id: :whatsapp,
     discord_owner_user_id: :discord,
     slack_owner_user_id: :slack,
-    signal_owner_user_id: :signal
+    signal_owner_user_id: :signal,
+    imessage_owner_user_id: :imessage
   }
 
   @type seeding_result :: %{
@@ -240,10 +246,6 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp reconfigure_offered?(%{key: :fast}, persisted) do
-    chosen_provider(persisted) == :openai_codex
-  end
-
   defp reconfigure_offered?(_prompt, _persisted), do: true
 
   defp prompt_specs(%WizardState{} = state) do
@@ -273,7 +275,6 @@ defmodule FermixCore.Setup.Wizard do
     provider_block = provider_config(persisted, prompt_provider)
     model_unset? = provider_unset? or blank?(Keyword.get(provider_block, :default_model))
     effort_unset? = provider_unset? or blank?(Keyword.get(provider_block, :reasoning_effort))
-    fast_unset? = prompt_provider == :openai_codex and not Keyword.has_key?(provider_block, :fast)
 
     field_unset =
       for descriptor <- Descriptor.all(), field <- descriptor.setup_fields, into: %{} do
@@ -288,7 +289,6 @@ defmodule FermixCore.Setup.Wizard do
       provider_unset?: provider_unset?,
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
-      fast_unset?: fast_unset?,
       field_unset: field_unset,
       realtime_api_key_unset?: canonical_openai_api_key_unpersisted?(persisted),
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
@@ -322,12 +322,6 @@ defmodule FermixCore.Setup.Wizard do
           required?:
             (context.provider_unset? or Descriptor.fetch!(context.prompt_provider).effort?) and
               context.effort_unset?
-        },
-        %{
-          key: :fast,
-          label: "Codex fast mode? (yes/no; blank = no)",
-          default: false,
-          required?: context.provider_unset? or context.fast_unset?
         }
       ]
   end
@@ -435,6 +429,11 @@ defmodule FermixCore.Setup.Wizard do
         key: :signal_owner_user_id,
         label: "Signal command owner user ID",
         required?: channel_field_unpersisted?(persisted, :signal, :owner_user_id, false)
+      },
+      %{
+        key: :imessage_owner_user_id,
+        label: "Your Apple ID or phone number for iMessage",
+        required?: channel_field_unpersisted?(persisted, :imessage, :owner_user_id, false)
       }
     ]
   end
@@ -750,7 +749,7 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   defp commit_answers(state, answers) do
-    # Model/effort/fast writes target the provider being EDITED (the web pane's
+    # Model/effort writes target the provider being EDITED (the web pane's
     # `:edit_provider`), not the primary — so editing a fallback's settings doesn't
     # have to promote it. Falls back to the active/primary provider when unset (CLI).
     target = edit_provider_target(answers)
@@ -771,7 +770,6 @@ defmodule FermixCore.Setup.Wizard do
       |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
       |> put_harness_approved(Keyword.get(answers, :harness_approved))
       |> put_reasoning_effort(Keyword.get(answers, :reasoning_effort), target)
-      |> put_fast(Keyword.get(answers, :fast), target)
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
@@ -785,8 +783,10 @@ defmodule FermixCore.Setup.Wizard do
       |> put_discord_config(answers)
       |> put_slack_config(answers)
       |> put_signal_config(answers)
+      |> put_imessage_config(answers)
       |> put_channel_enabled(answers)
       |> put_acp_config(answers)
+      |> put_network_config(answers)
       |> put_mobile_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
@@ -1082,7 +1082,7 @@ defmodule FermixCore.Setup.Wizard do
   # "Newly configured" = a pre/post eligibility diff against the persisted
   # TOML snapshot (docs/design/MULTI_PROVIDER_FAILOVER.md §2). Runs in the
   # save_answers pipeline AFTER credential/auth-mode answers are applied
-  # (so OAuth auth-mode flips are seen) and BEFORE the model/effort/fast
+  # (so OAuth auth-mode flips are seen) and BEFORE the model/effort
   # writers (so a newly promoted provider receives its fields — §4). An
   # explicit provider answer disables it (put_primary_selection already
   # chose). The CLI login path (`set_provider_auth_mode`) has no promotion
@@ -1252,7 +1252,9 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  @channel_components ~w(channel:telegram channel:whatsapp channel:discord channel:slack channel:signal)
+  @channel_components ~w(
+    channel:telegram channel:whatsapp channel:discord channel:slack channel:signal channel:imessage
+  )
 
   defp step_for(failures, snapshot) do
     components = Enum.map(failures, & &1.component) |> MapSet.new()
@@ -1310,6 +1312,7 @@ defmodule FermixCore.Setup.Wizard do
     |> put_enabled_channel(:discord, Keyword.get(channels, :discord, []), false)
     |> put_enabled_channel(:slack, Keyword.get(channels, :slack, []), false)
     |> put_enabled_channel(:signal, Keyword.get(channels, :signal, []), false)
+    |> put_enabled_channel(:imessage, Keyword.get(channels, :imessage, []), false)
     |> put_enabled_channel(:acp, Keyword.get(channels, :acp, []), true)
     |> put_enabled_channel(:mobile, Keyword.get(channels, :mobile, []), false)
     |> Enum.reverse()
@@ -1536,21 +1539,6 @@ defmodule FermixCore.Setup.Wizard do
     for descriptor <- Descriptor.all(), descriptor.effort?, do: descriptor.id
   end
 
-  defp put_fast(snapshot, nil, _target), do: snapshot
-  defp put_fast(snapshot, "", _target), do: snapshot
-
-  defp put_fast(snapshot, value, target) do
-    fast = parse_fast!(value)
-    provider = target || active_provider(snapshot)
-
-    if provider == :openai_codex do
-      update_provider_block(snapshot, provider, :fast, fast)
-    else
-      raise ArgumentError,
-            "fast mode applies to :openai_codex provider only; selected provider is #{inspect(provider)}"
-    end
-  end
-
   defp edit_provider_target(answers) do
     case Keyword.get(answers, :edit_provider) do
       value when value in [nil, ""] -> nil
@@ -1587,23 +1575,7 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  defp parse_fast!(value) when is_boolean(value), do: value
-
-  defp parse_fast!(value) when is_binary(value) do
-    normalized = value |> String.trim() |> String.downcase()
-
-    cond do
-      normalized in @realtime_true_values -> true
-      normalized in @realtime_false_values -> false
-      true -> raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
-    end
-  end
-
-  defp parse_fast!(value) do
-    raise ArgumentError, "invalid fast mode #{inspect(value)}; expected true or false"
-  end
-
-  # Which provider block receives model/effort/fast writes. Re-anchored on
+  # Which provider block receives model/effort writes. Re-anchored on
   # the primary flag (mark_primary_provider runs earlier in the save
   # pipeline); the legacy agent.provider key remains readable as migration
   # input until the first flag write removes it.
@@ -1818,6 +1790,11 @@ defmodule FermixCore.Setup.Wizard do
         normalize_realtime_bool(
           Keyword.get(answers, :realtime_persist_transcripts),
           :realtime_persist_transcripts
+        ),
+      conversation:
+        normalize_realtime_string(
+          Keyword.get(answers, :realtime_conversation),
+          :realtime_conversation
         )
     ]
     |> reject_nil_values()
@@ -1894,6 +1871,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp move_realtime_engine(existing, "openai_realtime") do
     existing
+    |> Keyword.drop([:conversation])
     |> Keyword.put_new(:reasoning_effort, "low")
     |> put_realtime_model("openai_realtime")
     |> put_realtime_voice("openai_realtime")
@@ -2179,7 +2157,7 @@ defmodule FermixCore.Setup.Wizard do
 
   defp normalize_image_backend(value) when is_binary(value) do
     case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google openai_codex) -> backend
+      backend when backend in ~w(openai xai google) -> backend
       invalid -> raise ArgumentError, "invalid image_backend #{inspect(invalid)}"
     end
   end
@@ -2461,6 +2439,44 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
+  # The outbound proxy (`[fermix_core.network]`, `fermix setup --proxy`). An
+  # absent answer changes nothing, a blank one removes the key, and the merged
+  # section is normalized the way the boot loader normalizes it, so a value the
+  # daemon would refuse is refused here with the same sentence, which never
+  # prints the value.
+  defp put_network_config(snapshot, answers) do
+    proxy = Keyword.get(answers, :proxy)
+    bypass = Keyword.get(answers, :proxy_bypass)
+
+    if is_nil(proxy) and is_nil(bypass) do
+      snapshot
+    else
+      core = Map.get(snapshot, :fermix_core, [])
+
+      network =
+        core
+        |> Keyword.get(:network, [])
+        |> put_network_key(:proxy, proxy)
+        |> put_network_key(:proxy_bypass, normalize_bypass_answer(bypass))
+        |> Egress.normalize()
+
+      Map.put(snapshot, :fermix_core, Keyword.put(core, :network, network))
+    end
+  end
+
+  defp put_network_key(network, _key, nil), do: network
+  defp put_network_key(network, key, ""), do: Keyword.delete(network, key)
+  defp put_network_key(network, key, []), do: Keyword.delete(network, key)
+  defp put_network_key(network, key, value), do: Keyword.put(network, key, value)
+
+  # The flag takes one comma-separated value; the browser form hands a list.
+  defp normalize_bypass_answer(nil), do: nil
+  defp normalize_bypass_answer(entries) when is_list(entries), do: entries
+
+  defp normalize_bypass_answer(value) when is_binary(value) do
+    value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
+  end
+
   # The phone channel's four operator settings (M51 management pairing §6). Each
   # answer is one key merged into `[fermix_channels.mobile]`, so the keys no
   # pane writes (`push`, `streaming`, the media bounds) survive the write, and
@@ -2531,7 +2547,8 @@ defmodule FermixCore.Setup.Wizard do
       whatsapp: :whatsapp_owner_user_id,
       discord: :discord_owner_user_id,
       slack: :slack_owner_user_id,
-      signal: :signal_owner_user_id
+      signal: :signal_owner_user_id,
+      imessage: :imessage_owner_user_id
     ]
     |> Enum.reduce(snapshot, fn {channel, answer_key}, acc ->
       put_channel_owner_user_id(acc, channel, Keyword.get(answers, answer_key))
@@ -2560,12 +2577,38 @@ defmodule FermixCore.Setup.Wizard do
     config =
       existing_channels
       |> Keyword.get(channel, [])
-      |> Keyword.put(:enabled, true)
-      |> Keyword.put_new(:mode, mode)
+      |> put_saved_channel_defaults(channel, mode)
       |> Keyword.merge(values)
 
     Map.put(snapshot, :fermix_channels, Keyword.put(existing_channels, channel, config))
   end
+
+  # iMessage takes the M53 APP-5 semantics from its first release: saving its
+  # settings never switches it on (only its own switch does), and its transport
+  # is the registry's, so no `mode` is written. Every other channel keeps the
+  # behaviour it shipped with.
+  defp put_saved_channel_defaults(config, :imessage, _mode), do: config
+
+  defp put_saved_channel_defaults(config, _channel, mode),
+    do: config |> Keyword.put(:enabled, true) |> Keyword.put_new(:mode, mode)
+
+  # The guests (M54 §10.2). The owner rides `put_channel_owner_user_ids/2` like
+  # every channel's, and the account is not asked: the helper derives it when it
+  # confirms the recipients. An absent guests answer changes nothing; a blank
+  # one clears the list, which is how a flag or a form says "no guests".
+  defp put_imessage_config(snapshot, answers) do
+    values =
+      [allowed_sender_ids: imessage_guests(Keyword.get(answers, :imessage_allowed_sender_ids))]
+      |> reject_nil_values()
+
+    put_channel_config(snapshot, :imessage, values, :subprocess)
+  end
+
+  defp imessage_guests(nil), do: nil
+  defp imessage_guests(guests) when is_list(guests), do: guests
+
+  defp imessage_guests(guests) when is_binary(guests),
+    do: guests |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
 
   # A store with nothing to answer is refused by `refuse_unstorable_secrets/1`
   # before this pipeline runs, so a write here either stores the value or is

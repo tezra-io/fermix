@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:227-229` → `mobile_sql.ex:356-366`), and
+  companion channels (`output.ex:237-239` → `mobile_sql.ex:356-366`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -34,7 +34,7 @@ mechanism check.
   (`delivery_worker.ex:210-213`, `:75`).
 - `SchedulerCanRestart`: the scheduler crashes while the BEAM stays up. Any
   earlier child of the flat `:rest_for_one` list (`Repo`, `MainAgent`,
-  `JobScheduler`, …; `application.ex:189-268`) restarts it too. A scheduler
+  `JobScheduler`, …; `application.ex:190-269`) restarts it too. A scheduler
   Repo call that times out no longer does: it returns an error (see
   `RepoCanFail`).
 - `DaemonCanCrash`: the whole daemon dies and boots again.
@@ -62,7 +62,7 @@ least one check):
   (`:1042`) repeat it inside the same Repo callback (`repo.ex:3026-3029`), where
   no other writer can interleave, so removing only them would change nothing.
 - `WorkersDieWithScheduler`: `DeliverySupervisor` starts after the scheduler
-  under `:rest_for_one` (`application.ex:250-251`, `:268`).
+  under `:rest_for_one` (`application.ex:251-252`, `:269`).
 - `SendsDieWithWorker`: a worker's send process is spawned linked to it
   (`Process.spawn(fun, [:link, :monitor])`, `channel_send.ex:219-224`), so a
   worker killed mid-send takes its send with it. Off, it is the code before the
@@ -88,7 +88,7 @@ least one check):
   - No sixth attempt (`scheduler.ex:330-333`). This rests on `AttemptCap`
     (check 02).
   - Never two workers for the row (`delivery_supervisor.ex:5-10`,
-    `application.ex:237-243`). This rests on `ClaimRequiresPending` (check 03),
+    `application.ex:238-244`). This rests on `ClaimRequiresPending` (check 03),
     `WorkersDieWithScheduler` (check 04) and `ResetSkipsMonitored` (check 05),
     and on the timing fact `DownHandledBeforeRetryDue` (check 20).
   - Never two sends for the row either (the premise of M30 §19.10's no-lease
@@ -204,7 +204,7 @@ still holds.
   reminder runs in that configuration. Reminder targets are limited to
   `telegram slack discord signal whatsapp` (`registry.ex:48`, enforced at
   `:1458` and `:1503`). The only adapters that read `proactive_key` are mobile
-  and companion, both through `output.ex:227-229`. The `temporal:<id>` key that
+  and companion, both through `output.ex:237-239`. The `temporal:<id>` key that
   `delivery.ex:70` attaches to every send is ignored by every platform a
   reminder can reach.
 - **Never attempt six, never two workers:** both hold (check 01), each covered
@@ -245,7 +245,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
 - **Code:**
   - The watchdog reports `:delivery_timeout` without knowing whether the request
     landed (`channel_send.ex:239`, `:284-300`), and that result is retryable
-    (`error.ex:180`, `delivery_worker.ex:134-151`). A result the send posted
+    (`error.ex:191`, `delivery_worker.ex:134-151`). A result the send posted
     just before the kill is discarded too, so a send that did deliver can still
     be reported as a timeout and sent again.
   - A failed settlement exits with `{:settlement_failed, _}`
@@ -257,7 +257,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   out:**
   - the HTTP client's own receive timeout (Req's 15 s default;
     `telegram.ex:577-580` sets none), which returns a retryable
-    `{:transport, :timeout}` (`error.ex:154-158`, `:179`) and is the usual way
+    `{:transport, :timeout}` (`error.ex:165-169`, `:190`) and is the usual way
     an attempt gives up on a request the platform may already hold, as are a
     connection reset after the write and signal-cli's own timeout
     (`signal.ex:544-547`);
@@ -296,7 +296,7 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   - `ChannelSend.with_timeout` ran the adapter call in a `spawn_monitor`ed
     process. It was not linked to the worker, and no supervisor owns it.
   - The worker does not trap exits, so the `DeliverySupervisor` shutdown under
-    `:rest_for_one` (`application.ex:250-251`, `:268`) kills it at once, inside
+    `:rest_for_one` (`application.ex:251-252`, `:269`) kills it at once, inside
     the watchdog's `receive`.
   - The watchdog is the worker's own `receive … after`, so the orphan was
     bounded only by the HTTP client's own timeouts (for example the 15 s pool

@@ -16,7 +16,8 @@ the ones it shares (`msg`, `command`, `cancel`, `read_state`, `accepted`,
 `approval`, `approval_resolved`) through the same module. This wire adds
 `history_search`, `search_results`, and a backward cursor on `history_pull`
 and `history_page`. The phone's `row` carries more than this wire's: the whole
-history message. This wire's `row` is unchanged.
+history message. This wire's `row` carries the message's `kind` and `metadata`
+beside its own fields.
 
 ## Transport
 
@@ -54,9 +55,32 @@ previous one (or the same value while only one version exists).
 
 | Field | Value |
 |---|---|
-| `protocol_version` (companion declares) | `1` |
+| `protocol_version` (companion declares) | `2` |
 | daemon `min_version` | `1` |
-| daemon `max_version` | `1` |
+| daemon `max_version` | `2` |
+
+### Version 2: a turn that ends with no reply
+
+Version 2 adds one server event, `turn_done { turn_id }`: the turn completed and
+wrote no reply, so no `text_done` ends it. It happens during a GPT-Live voice
+call in the chat, where a message typed may be material for the call rather
+than a request, and the agent may answer it with nothing. A version 1 client
+clears a turn only on `text_done` or `turn_error`, so it would show such a turn
+as thinking until the next one began. So the daemon:
+
+- sends a server event only to a connection whose `client_hello` declared the
+  version that brought it, so `turn_done` reaches version 2 connections only
+  (the schema names that version as `x-since-version`);
+- lets a turn end with no reply only while every connection attached declared
+  version 2. With a version 1 client attached the agent is told to answer
+  briefly instead, and its answer ends the turn with `text_done` as always.
+
+Version 2 also adds one client field, `cancel.task_ref`, which stops a
+GPT-Live task that outlived its call (see *A Live call's rows*). A version 1
+client never sends it.
+
+A version 1 client is served as before and never sees `turn_done`. Every
+version 1 event, field and rule holds unchanged on version 2.
 
 ## Handshake state machine
 
@@ -114,7 +138,7 @@ in a fixed order:
 | `client_hello` | `protocol_version` (int > 0) | First frame. Opens the handshake. |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | A message to the agent. `text` must not be blank. `attach_ids` is **empty** on this wire in version 1; a non-empty list is refused with `error: attachments_unsupported`. |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | A slash command, `/name args`. An approval's routes are sent this way. |
-| `cancel` | `profile_id`, `client_msg_id` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. |
+| `cancel` | `profile_id`, `client_msg_id`; `task_ref?` | Stops the turn of that request, running or waiting, and no other, whichever client sent the request (the Mac or a phone). Never answered itself; see *Streaming a turn*. Version 2: with `task_ref { call_uuid, task_id, revision }` it stops instead the GPT-Live task those ids name, one that outlived its call, and `client_msg_id` names the cancel itself; see *A Live call's rows*. |
 | `history_pull` | `profile_id`, `limit` (1–200), and exactly one of `after_seq` (≥ 0) or `before_seq` (≥ 1) | `after_seq` pages forward (the catch-up read); `before_seq` pages backward from it (scroll to the top). Either is any unsigned 64-bit value. |
 | `history_search` | `profile_id`, `query` (1–256 characters), `limit` (1–50); `before_seq?` | Full-text search of the timeline, newest first, below `before_seq` when given. |
 | `read_state` | `profile_id`, `read_up_to_seq` | Advances the monotonic read frontier, never past the newest row. |
@@ -133,7 +157,8 @@ in a fixed order:
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
 | `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn. |
+| `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`; `client_msg_id?`, `kind?`, `metadata?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind` and `metadata` are the history message's, as a `history_page` carries them; a Live call's row carries `metadata.call` (see *A Live call's rows*). |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
 | `read_state` | `profile_id`, `read_up_to_seq` | The read frontier, sent to every connection, whichever client (the Mac or a phone) moved it. |
@@ -159,6 +184,59 @@ text around the matches, `…` where it was cut), and `ranges[]`, each
 `{start, length}` in **Unicode scalar values** of `excerpt`, one per matched
 word.
 
+### A Live call's rows
+
+A GPT-Live voice call in the chat writes rows of its own to the timeline, each
+`kind: "text"`, `role: "assistant"` and `media_refs: []`, so every client
+draws one as text. A task's result that is too long to say, or cannot be said
+(a link, code, a table), is one: the voice says a short line and the whole
+result is written here, at most 32 KB (cut at the end behind a marker). The
+call's own row when it ends is another (`event: "ended"`): the daemon's
+sentence, `Voice call, 6 minutes` (`under a minute` below one), then, on its
+own paragraph, the call's gist, a few sentences on what was asked, done,
+decided and left open; or, when the gist could not be made, the call's tasks,
+one a line, each its state and summary (`Still running` for a task that
+outlived the call); or nothing more when the call had neither. It is written
+once the gist is made or has failed, so it always carries the settled cost.
+A private call writes no row.
+
+A task still running when a call in the chat ends is not cancelled: it
+finishes into the chat, so it writes two rows of its own. The first, as the
+call ends, says it is still running (`event: "task_running"`): `Still working
+on:` and the request on one line. The second, when it ends
+(`event: "task_done"`, with its terminal `state`), is its result as the
+shown part of a reply (or the whole reply), its failure's sentence, or a fixed
+sentence for a task cancelled, timed out (it may run 30 minutes) or lost to a
+daemon restart (`failed`). A client resolves the running row with the done row
+of the same `uuid`, `task_id` and `revision`. While the running row stands, a
+version 2 client may stop the task with `cancel { task_ref: { call_uuid,
+task_id, revision } }`, the three ids that row carries: only that task's turn
+is stopped, and the acknowledgement is its done row with `state: "cancelled"`
+(or the state it reached first, when it was already finishing). A `task_ref`
+that names no task still running under exactly those ids (another revision, a
+task already done, a private call's) is refused with
+`error { reason: "request_failed", message }`, and the connection stays open.
+A `/stop` stops such a task too, which then writes its `cancelled` row. Such a
+row's `metadata.call` says what it is about:
+
+| Key | Type | Notes |
+|---|---|---|
+| `uuid` | UUID | The call, as `call_ready.call_uuid` names it on the realtime wire. Always present. |
+| `event` | `shared` \| `ended` \| `task_running` \| `task_done` | Always present. `shared` is a task's result shown here during the call; `ended` the call's row when it ends; `task_running` and `task_done` the two rows of a task that outlived its call. |
+| `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
+| `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
+| `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
+| `engine` | string | The call's voice engine, `openai_live`. Present on `ended`. |
+| `duration_s` | int ≥ 0 | The call's length. Present on `ended`. |
+| `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. On `ended` when it is known. |
+| `accounting` | `complete` \| `incomplete` | Whether that cost is settled. Present on `ended`. |
+| `gist_status` | `written` \| `failed` \| `none` | What became of the call's gist: in the text, could not be made (the text lists the tasks), or none was needed (nothing was said). Present on `ended`. |
+
+No other key appears in it. A call's row is written once: a write repeated for
+the same task revision and event, or for the same call's end, finds the row
+already written, and the realtime wire's `task.server_seq` names a task's, so
+the app can say the result is in the chat.
+
 ## One timeline with the phone
 
 The profile's timeline is the one the phone's mobile channel reads and writes:
@@ -175,8 +253,8 @@ as their own `row`, which carries the whole history message, and the reply of
 a turn started here reaches them as a `row` too, since they never saw that
 turn start. What crosses the two transports is the timeline and the read
 frontier. A turn's stream and its ending (`turn_started`, `text_delta`,
-`tool_event`, `text_done`, `turn_error`) stay with the transport that ran the
-turn, and so do approvals, whose token resolves only there (see
+`tool_event`, `text_done`, `turn_error`, `turn_done`) stay with the transport
+that ran the turn, and so do approvals, whose token resolves only there (see
 *Approvals*).
 
 `server_seq` is assigned inside the write that stores the row, from a
@@ -256,6 +334,10 @@ daemon's turn queue:
 
 - it completed: each reply part is written to the timeline then, and sent as
   a `text_done` at its row, replacing the draft;
+- it completed and wrote no reply (version 2): one `turn_done`, and nothing of
+  its draft is kept. Only a turn the agent was told it may leave unanswered
+  ends this way, and only while every connection speaks version 2 (see
+  *Version 2*); no `text_delta` carries the reply it did not write;
 - it was cancelled or failed: one `turn_error` (`cancelled`, or the failure's
   code), and nothing of its draft is kept;
 - the daemon lost the turn (its queue restarted under it): one `turn_error`
@@ -263,9 +345,9 @@ daemon's turn queue:
 - the request could not be handed to the turn queue: one `turn_error` with
   code `turn_failed`.
 
-`turn_error` is live-only and carries no seq: a cancelled or failed message
-leaves its user's row (announced as a `row` when it was written) with no
-answer after it. `cancel` names the request whose turn to stop, whichever
+`turn_error` and `turn_done` are live-only and carry no seq: a cancelled or
+failed message, or one that ended with no reply, leaves its user's row
+(announced as a `row` when it was written) with no answer after it. `cancel` names the request whose turn to stop, whichever
 client sent it and whether it runs or still waits; it never stops another
 turn, and the daemon never answers it itself. It is recorded on the request
 before anything else, so a cancel that arrives after `accepted` but before
@@ -273,7 +355,10 @@ the request has reached the turn queue is not lost: the request is never
 queued and ends with `turn_error` (code `cancelled`), and a request the
 daemon recovers after a restart is not run again. A turn that had already
 finished when the cancel arrived ends with its `text_done`, not an error, and
-a cancel for a request that already ended changes nothing.
+a cancel for a request that already ended changes nothing. A `cancel` with
+`task_ref` (version 2) is the one a `cancel` is answered for: a task the
+daemon is not running under exactly those ids is refused with
+`request_failed`; see *A Live call's rows*.
 
 ## Approvals
 
@@ -325,8 +410,8 @@ is `command{name: "confirm", args: "TOKEN"}`, and `/soul apply TOKEN` is
 ## Chat sequence
 
 ```
-companion -> daemon:  client_hello { protocol_version: 1 }
-daemon -> companion:  server_hello { min_version: 1, max_version: 1 }
+companion -> daemon:  client_hello { protocol_version: 2 }
+daemon -> companion:  server_hello { min_version: 1, max_version: 2 }
 companion -> daemon:  history_pull { profile_id: "main", after_seq: 12, limit: 200 }
 daemon -> companion:  history_page { messages: [...], next_after_seq: 12, history_head_seq: 12 }
 companion -> daemon:  msg { client_msg_id: "mac-1", profile_id: "main", text, attach_ids: [] }

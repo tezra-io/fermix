@@ -58,3 +58,6 @@
 {"name": "mobile_devices_list", "expect": "v1", "method": "mobile.devices.list", "frame": {"request_id": "req-mobile-devices-list-1", "protocol_version": 2, "method": "mobile.devices.list", "params": {}}}
 {"name": "mobile_devices_revoke", "expect": "v1", "method": "mobile.devices.revoke", "frame": {"request_id": "req-mobile-devices-revoke-1", "protocol_version": 2, "method": "mobile.devices.revoke", "params": {"device_id": "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}}}
 {"name": "browser_install_start", "expect": "v1", "method": "browser.install.start", "frame": {"request_id": "req-browser-install-start-1", "protocol_version": 2, "method": "browser.install.start"}}
+{"name": "imessage_permissions_get", "expect": "v1", "method": "imessage.permissions.get", "frame": {"request_id": "req-imessage-permissions-get-1", "protocol_version": 2, "method": "imessage.permissions.get"}}
+{"name": "imessage_grant_start", "expect": "v1", "method": "imessage.grant.start", "frame": {"request_id": "req-imessage-grant-start-1", "protocol_version": 2, "method": "imessage.grant.start", "params": {"service": "automation"}}}
+{"name": "imessage_policy_confirm", "expect": "v1", "method": "imessage.policy.confirm", "frame": {"request_id": "req-imessage-policy-confirm-1", "protocol_version": 2, "method": "imessage.policy.confirm"}}

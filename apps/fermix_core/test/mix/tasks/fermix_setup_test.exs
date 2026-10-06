@@ -229,7 +229,7 @@ defmodule Mix.Tasks.Fermix.SetupTest do
     assert Keyword.get(codex, :primary) == true
     assert Keyword.get(codex, :default_model) == "gpt-5.5"
     assert Keyword.get(codex, :reasoning_effort) == :high
-    assert Keyword.get(codex, :fast) == false
+    refute Keyword.has_key?(codex, :fast)
   end
 
   # The `--acp-enabled` switch is declared twice (this Mix wrapper and

@@ -1,0 +1,163 @@
+# iMessage (M54), graded through the real agent path.
+#
+# WHAT ROTS HERE. iMessage is the one channel whose setup is macOS permissions
+# rather than platform credentials: two grants (Full Disk Access and Automation
+# for Messages) that belong to a signed helper named Fermix Messages, plus one
+# on-screen confirmation of who Fermix may message. It runs only on the Mac
+# whose Messages it reads, and it cannot react, type or edit. None of that is
+# general macOS or Messages knowledge: it lives in the `self-knowledge` skill's
+# channel_setup reference, which the model has to actually reach and read.
+# ExUnit proves the sentences are in the file; this suite proves the model finds
+# them when an owner asks in their own words.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. Driving a real iMessage needs an Apple
+# account and a second device, and the capability runner refuses
+# `external_write`. The answer is advice, so there is no end state to score; the
+# channel itself is proven by the owner's live check (M54 §19, stage 4).
+#
+# WHY ITS OWN SUITE. `macos_app` carries the other app-managed channel question
+# and keeps exactly one route assertion (`bin/test_eval_safety.py` pins it), so
+# iMessage brings its own suite and its own single sanity case.
+#
+# THE DAEMON UNDER TEST IS STANDALONE. `~/.fermix-dev` is a formula/dev install,
+# so every prompt states its own premise (the Mac app, or a Linux box).
+#
+# ROUTE ASSERTIONS. Exactly one — the labelled sanity case below. Everything
+# else gates on the outcome and lets the model reach it however it likes.
+#
+# FLOORS AND WRONG-ANSWER GATES. Each case's floor is the one proper noun every
+# correct answer must contain (the Full Disk Access grant, the Mac, the Confirm
+# action, the tapback being asked about); the rubric owns correctness.
+# `reply_not_matches` names only answers that have no place in a correct reply
+# in any polarity: setup flags on an app-managed Mac, SIP changes, third-party
+# bridges, opening the Messages database by hand, keychain surgery. It does not
+# try to catch a negated sentence: a pattern tight enough to reject "Fermix can
+# send a tapback" also fires on "Fermix cannot send a tapback".
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant for this suite, and every
+# case is `host_readonly`.
+suite: imessage
+risk: host_readonly
+title: "iMessage — connecting it, why it is silent, what it cannot do, and where it runs"
+description: >
+  Ordinary owner questions about the iMessage channel: how to connect it from
+  the Mac app, why it does not answer, whether it can react with a tapback,
+  whether it works on Linux, and what "Awaiting confirmation" waits for. Each
+  case gates on a phrasing-independent floor plus wrong-answer refusals; the
+  rubric owns the wording. One labelled sanity case pins that the answer comes
+  from the self-knowledge skill rather than from the model's own guess about how
+  a Messages integration usually works.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: imessage_setup
+    title: "Connecting iMessage and what it waits for"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, channels, imessage, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. The two grants
+      # belong to a helper named Fermix Messages, which no model knows without
+      # reading the skill, so this case pins that the model opened it.
+      - id: connect_imessage_sanity
+        query: >
+          I use the Fermix Mac app. How do I connect iMessage so I can text
+          Fermix from my iPhone?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: '(?i)full\s+disk\s+access'
+          reply_not_matches: '(?i)(--imessage-|\bcsrutil\b|\bbluebubbles\b|\bsudo\b)'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says iMessage needs Messages on this Mac signed in to a separate
+          Apple ID used only by Fermix (not the user's own), and that the
+          Fermix Messages helper needs two
+          macOS permissions, Full Disk Access (Messages data) and Automation
+          for Messages, granted from the app. Says one on-screen confirmation of
+          who Fermix may message is also needed, that the channel is turned on
+          with its switch in Settings > Channels, and that Fermix then needs a
+          restart. Does not tell the user to run `fermix setup` with flags, to
+          turn off System Integrity Protection, or to install a third-party
+          bridge.
+      - id: imessage_awaiting_confirmation
+        query: >
+          In the Fermix Mac app the iMessage row keeps saying "Awaiting
+          confirmation". What is it waiting for?
+        expect:
+          reply_matches: '(?i)\bconfirm'
+          reply_not_matches: '(?i)(security\s+(add|delete|find)-generic-password|\bcsrutil\b|\bsudo\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Explains that the Fermix Messages helper keeps its own confirmed list
+          of who Fermix may message, and that the row waits whenever the saved
+          owner or guest list differs from that list. Says the
+          fix is the Confirm action in the app, which shows the helper's own
+          dialog naming every handle, and approving it; cancelling leaves it
+          waiting. Does not tell the user to edit the keychain or a config file
+          by hand to clear it.
+
+  - id: imessage_limits
+    title: "Why iMessage is silent, what it cannot do, and where it runs"
+    severity: normal
+    risk: host_readonly
+    tags: [macos-app, channels, imessage, self-knowledge]
+    cases:
+      - id: imessage_not_answering
+        query: >
+          I set up iMessage in the Fermix Mac app, but when I text it from my
+          phone nothing ever comes back. What should I check?
+        expect:
+          reply_matches: '(?i)full\s+disk\s+access'
+          reply_not_matches: '(?i)(\bcsrutil\b|\bbluebubbles\b|\bsudo\b|\bsqlite3\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Walks through the checks the helper itself reports: that the Fermix
+          Messages helper is installed, that Full Disk Access and Automation for
+          Messages are granted to Fermix Messages (not to Fermix or Terminal),
+          that Messages is open and signed in to a separate Apple ID for
+          Fermix rather than the user's own, that the recipient list is
+          confirmed (not "Awaiting confirmation"), that the channel switch is on
+          and Fermix was restarted, and that the Apple ID or phone number entered
+          is the handle being texted from. Points at Doctor (the iMessage rows)
+          or the app's Channels row as where the first gap is named. Does not
+          tell the user to open the Messages database by hand.
+      - id: imessage_tapback
+        query: >
+          Can Fermix react to my iMessages with a tapback, like a thumbs up,
+          instead of writing a reply?
+        expect:
+          reply_matches: '(?i)tapback|reaction|react'
+          reply_not_matches: '(?i)(\bcsrutil\b|\bbluebubbles\b|\bimsg\b)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: on iMessage Fermix sends plain-text replies only and cannot
+          send a tapback or any other reaction, a typing indicator or an edit,
+          and a tapback the user sends is ignored rather than answered. Naming
+          the channels where Fermix can react with an emoji is correct and must
+          never be penalized. Does not suggest disabling System Integrity
+          Protection or installing a third-party tool to get tapbacks.
+      - id: imessage_on_linux
+        query: >
+          My Fermix runs on a Linux box at home. Can I hook it up to iMessage?
+        expect:
+          reply_matches: '(?i)\bmac(os)?\b'
+          reply_not_matches: '(?i)(\bbluebubbles\b|\bimsg\b|apt(-get)?\s+install|dnf\s+install)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: iMessage works only on the Mac whose Messages Fermix reads,
+          so a Linux install has no iMessage channel at all, and a config that
+          turns it on there refuses to start. Offers a channel that does work on
+          Linux, such as Telegram. Does not propose a workaround through a
+          remote Mac, a relay server or a third-party bridge.

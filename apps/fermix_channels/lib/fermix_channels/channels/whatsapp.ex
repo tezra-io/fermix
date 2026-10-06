@@ -18,6 +18,7 @@ defmodule FermixChannels.Channels.WhatsApp do
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
 
@@ -614,6 +615,7 @@ defmodule FermixChannels.Channels.WhatsApp do
       Req.new(url: url, method: :get)
       |> Req.Request.put_header("authorization", "Bearer #{access_token}")
       |> Req.merge(req_options([]))
+      |> Egress.attach(:direct)
       |> Req.request()
 
     case result do

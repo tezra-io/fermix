@@ -7,6 +7,7 @@ defmodule FermixCore.Browser.HostServerTest do
   alias FermixCore.Browser.Config
   alias FermixCore.Browser.Error
   alias FermixCore.Browser.HostAvailability
+  alias FermixCore.Browser.HostServer
   alias FermixCore.Browser.ProfileServer
   alias FermixCore.Browser.TurnMarker
   alias FermixCore.BrowserHost.Link
@@ -50,7 +51,7 @@ defmodule FermixCore.Browser.HostServerTest do
     defaults = [owner_key: "owner-pane", profile_name: "fermix", profile: @pane, config: config]
     spec = {ProfileServer, Keyword.merge(defaults, opts)}
 
-    start_supervised!(Supervisor.child_spec(spec, restart: :temporary))
+    start_supervised!(Supervisor.child_spec(spec, restart: :temporary, id: make_ref()))
   end
 
   # An isolated host, attached to a fake connection and reporting available.
@@ -91,30 +92,25 @@ defmodule FermixCore.Browser.HostServerTest do
   end
 
   test "the fermix_app mode is the host backend, and every other mode is CDP's" do
-    assert Backend.for_mode(:fermix_app) == FermixCore.Browser.HostServer
+    assert Backend.for_mode(:fermix_app) == HostServer
 
     for mode <- [:managed, :existing_session, :remote_cdp, :attached_tab] do
       assert Backend.for_mode(mode) == CDP.Backend
     end
   end
 
-  test "the app's pane is a whole browser of Fermix's own, without WebMCP" do
+  # Host protocol 1 cannot vet a download (no source address, no cancel), so the
+  # app saves none for a task and nothing lands in the workspace.
+  test "the app's pane is a whole browser of Fermix's own, without WebMCP or downloads" do
     caps = Capabilities.for_mode(:fermix_app)
 
-    for capability <- [
-          :new_tab,
-          :close_tab,
-          :focus_tab,
-          :cookies,
-          :downloads,
-          :download_redirect,
-          :target_discovery,
-          :tab_cap
-        ] do
+    for capability <- [:new_tab, :close_tab, :focus_tab, :cookies, :target_discovery, :tab_cap] do
       assert Map.fetch!(caps, capability), "#{capability} is withheld from the app's pane"
     end
 
     refute caps.webmcp
+    refute caps.downloads
+    refute caps.download_redirect
     refute caps.target_attach
 
     assert Map.keys(caps) |> Enum.sort() ==
@@ -125,11 +121,70 @@ defmodule FermixCore.Browser.HostServerTest do
     pid = start_server(backend: UpBackend, test_pid: self())
 
     assert {:error, %Error{code: "unsupported_in_fermix_app"} = error} = req(pid, "webmcp")
-    assert error.message =~ "snapshot"
     refute_received {:backend_asked, :webmcp}
+
+    # The next move, either way: the profile that is always Chrome for the
+    # page's own tools, or the pane's own snapshot and act without them.
+    assert error.message =~ ~s(profile: "fermix_chrome")
+    assert error.message =~ "snapshot"
 
     assert {:ok, _} = req(pid, "snapshot")
     assert_received {:backend_asked, :snapshot}
+  end
+
+  test "the server refuses a download on the app's pane before the backend is asked" do
+    pid = start_server(backend: UpBackend, test_pid: self())
+
+    assert {:error, %Error{code: "unsupported_in_fermix_app"} = error} = req(pid, "download")
+    refute_received {:backend_asked, :download}
+
+    # A file has no pane route: the one next move is the profile that is always
+    # Chrome.
+    assert error.message =~ "does not save a task's downloads"
+    assert error.message =~ ~s(profile: "fermix_chrome")
+  end
+
+  # The released app answers every download as failed and the wire cannot vet
+  # one, so the pane's own backend refuses too, at once, rather than waiting
+  # out the download budget for a file that is never saved.
+  test "a download on the pane is refused at once, and nothing is asked of the app" do
+    {host, connection} = usable_host()
+    pid = start_server(host_availability: host)
+
+    assert {:error, %Error{code: "unsupported_in_fermix_app", message: message}} =
+             req(pid, "download", %{"timeout_ms" => 60_000})
+
+    assert message =~ ~s(profile: "fermix_chrome")
+    assert FakeBrowserHostConnection.requests(connection) == []
+
+    {:ok, config} = Config.current(%{})
+    state = HostServer.init(owner_key: "owner-pane", profile_name: "fermix", config: config)
+
+    assert {:error, %Error{code: "unsupported_in_fermix_app"}, ^state} =
+             HostServer.download(%{}, %{}, state)
+  end
+
+  # Which browser a task is in decides whether a page's WebMCP tools run there,
+  # so the profile's status and the two results that first show a page say it,
+  # before anything is refused. One vocabulary, the backend label the registry
+  # records, so a Chrome result names its browser too.
+  test "status, open and navigate name the browser, and no other result does" do
+    for {mode, label} <- [fermix_app: "fermix_app", managed: "cdp"] do
+      pid = start_server(backend: UpBackend, test_pid: self(), profile: %{@pane | mode: mode})
+
+      for action <- ~w(start open navigate) do
+        assert {:ok, %{"backend" => ^label}} = req(pid, action, %{"url" => "about:blank"})
+      end
+
+      assert %{"backend" => ^label} = ProfileServer.status(pid)
+
+      for action <-
+            ~w(snapshot tabs focus close screenshot pdf console dialog cookies storage upload
+               act) do
+        assert {:ok, result} = req(pid, action)
+        refute Map.has_key?(result, "backend"), "`#{action}` names the browser"
+      end
+    end
   end
 
   # ── a task on the host ───────────────────────────────────────────────────
@@ -158,6 +213,7 @@ defmodule FermixCore.Browser.HostServerTest do
 
     assert {:ok, result} = req(pid, "open", %{"url" => "about:blank"})
     assert result["target"] == "h1:t1"
+    assert result["backend"] == "fermix_app"
     assert result["page"] == "changed"
     assert result["snapshot"] =~ "<browser_page_content>"
     assert [{"tab.open", _payload}] = FakeBrowserHostConnection.requests(connection)

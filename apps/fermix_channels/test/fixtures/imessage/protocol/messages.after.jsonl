@@ -1,0 +1,2 @@
+{"id":8,"method":"messages.after","params":{"since_rowid":4020,"limit":64}}
+{"id":8,"result":{"messages":[{"rowid":4021,"guid":"F1C2E3A4-0001-4B5C-9D6E-7F8091A2B3C4","chat":{"rowid":17,"guid":"any;-;+15551234567","identifier":"+15551234567","service":"iMessage","group":false},"sender":{"handle":"+15551234567","service":"iMessage","is_me":false},"date":"2026-10-03T12:00:00Z","text":"hello fermix","decode_error":null,"reply_to_guid":null,"attachments":[],"reaction":null}],"has_more":false}}

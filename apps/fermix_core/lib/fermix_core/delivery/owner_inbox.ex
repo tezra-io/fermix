@@ -19,7 +19,7 @@ defmodule FermixCore.Delivery.OwnerInbox do
   promoted to owner here. Channel presence alone derives nothing.
 
   Only channels whose DM destination *is* the bare owner user id can be derived
-  (Telegram, Signal, WhatsApp). A Discord or Slack DM needs a channel-id
+  (Telegram, Signal, WhatsApp, iMessage). A Discord or Slack DM needs a channel-id
   derivation the adapters do not have, so a bare user id there would fail at
   send time while every gate reported OK; those channels reach the owner
   through an explicit rung-one target only.
@@ -29,14 +29,26 @@ defmodule FermixCore.Delivery.OwnerInbox do
   §11.1 normalizes `message_thread_id`/`thread_ts`) reads the raw jobs target
   itself and uses `derived_candidates/1` for rung two, applying its own
   rung-one validation — same precedence, its own acceptance rules.
+
+  A third question is the owner's inbox on ONE named platform (`on_platform/2`,
+  M56 §4.7: "send it to my Telegram"), which never answers another platform's.
+  A remote platform's inbox is the configured target when it is that
+  platform's and the owner's own, else the owner DM its owner id derives. A
+  transport only the owner reaches (the Mac's chat socket, the paired phones)
+  has no owner id: its channel adapter names the inbox itself
+  (`owner_inbox/0`), or says it cannot deliver now.
   """
 
   alias FermixCore.Config
+  alias FermixCore.Delivery.ChannelSend
 
   # All owner-capable channels, in the order owner identity is read.
-  @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp]
+  @owner_channel_order [:telegram, :discord, :signal, :slack, :whatsapp, :imessage]
+  # The same channels as platform names: the ones whose inbox an owner id makes.
+  @remote_platforms Enum.map(@owner_channel_order, &Atom.to_string/1)
   # The derived rung: channels where the DM destination IS the bare owner id.
-  @derived_inbox_order ["telegram", "signal", "whatsapp"]
+  # An iMessage direct conversation is keyed by the owner's handle (M54 §7.5).
+  @derived_inbox_order ["telegram", "signal", "whatsapp", "imessage"]
   # Local targets are owner-private by construction — nobody else can read them.
   @local_channels ["cli", "daemon"]
   # Jobs-target destination keys, in `Jobs.DeliveryDefaults`' own precedence.
@@ -47,8 +59,18 @@ defmodule FermixCore.Delivery.OwnerInbox do
           platform: String.t(),
           destination: String.t(),
           thread_scope: String.t(),
-          source: :configured | :derived
+          source: :configured | :derived | :transport
         }
+
+  @typedoc """
+  Why a named platform has no owner inbox: it is no delivery channel (the
+  send path's own reason, `ChannelSend.resolve_adapter/2`), or it is one with
+  no inbox of the owner's on it now.
+  """
+  @type platform_refusal ::
+          {:unsupported_delivery_platform, String.t()}
+          | {:invalid_delivery_adapter, term()}
+          | :no_owner_inbox
 
   @type owners :: %{String.t() => String.t()}
 
@@ -89,6 +111,41 @@ defmodule FermixCore.Delivery.OwnerInbox do
     end)
     |> Enum.reject(fn {_channel, owner} -> is_nil(owner) end)
     |> Map.new()
+  end
+
+  @doc """
+  The owner's own inbox on `platform`, and on no other.
+
+  `platform` must be a delivery channel (`[fermix_core.jobs]`'s
+  `delivery_channels`); otherwise the refusal is the send path's own. A remote
+  platform answers the configured target when it is on `platform` and is the
+  owner's inbox, else the owner DM derived for it (Telegram, Signal,
+  WhatsApp). Any other channel answers what its adapter's `owner_inbox/0`
+  names, and an adapter without one (the CLI) is no inbox.
+
+  Seams: `:jobs_config` (its `:delivery_channels` and
+  `:default_delivery_target`) and `:configured_owners`.
+  """
+  @spec on_platform(String.t(), keyword()) :: {:ok, inbox()} | {:error, platform_refusal()}
+  def on_platform(platform, opts \\ []) when is_binary(platform) and is_list(opts) do
+    case ChannelSend.resolve_adapter(platform, channels: delivery_channels(opts)) do
+      {:ok, adapter} -> platform_inbox(platform, adapter, opts)
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  Every delivery channel with an owner inbox now (`on_platform/2`), in name
+  order. Seams as `on_platform/2`.
+  """
+  @spec reachable_platforms(keyword()) :: [String.t()]
+  def reachable_platforms(opts \\ []) when is_list(opts) do
+    opts
+    |> delivery_channels()
+    |> Enum.map(fn {platform, _adapter} -> to_string(platform) end)
+    |> Enum.uniq()
+    |> Enum.sort()
+    |> Enum.filter(&match?({:ok, _inbox}, on_platform(&1, opts)))
   end
 
   # --- rung one: the configured target ------------------------------------
@@ -139,6 +196,36 @@ defmodule FermixCore.Delivery.OwnerInbox do
   defp first_candidate([]), do: :no_delivery_target
   defp first_candidate([inbox | _rest]), do: {:ok, inbox}
 
+  # --- one named platform --------------------------------------------------
+
+  defp platform_inbox(platform, _adapter, opts) when platform in @remote_platforms do
+    owners = owners(opts)
+
+    case configured_inbox(opts, owners) do
+      {:ok, %{platform: ^platform} = inbox} -> {:ok, inbox}
+      _other_or_none -> derived_inbox(platform, owners)
+    end
+  end
+
+  defp platform_inbox(platform, adapter, _opts) do
+    if function_exported?(adapter, :owner_inbox, 0),
+      do: transport_inbox(platform, adapter.owner_inbox()),
+      else: {:error, :no_owner_inbox}
+  end
+
+  defp derived_inbox(platform, owners) do
+    case Enum.find(candidates(owners), &(&1.platform == platform)) do
+      nil -> {:error, :no_owner_inbox}
+      inbox -> {:ok, inbox}
+    end
+  end
+
+  defp transport_inbox(platform, {:ok, destination})
+       when is_binary(destination) and destination != "",
+       do: {:ok, inbox(platform, destination, :transport)}
+
+  defp transport_inbox(_platform, :unavailable), do: {:error, :no_owner_inbox}
+
   # --- shared --------------------------------------------------------------
 
   defp inbox(platform, destination, source) do
@@ -151,6 +238,12 @@ defmodule FermixCore.Delivery.OwnerInbox do
   end
 
   defp owners(opts), do: Keyword.get_lazy(opts, :configured_owners, &configured_owners/0)
+
+  defp delivery_channels(opts) do
+    opts
+    |> Keyword.get_lazy(:jobs_config, &jobs_config/0)
+    |> Keyword.get(:delivery_channels, %{})
+  end
 
   defp jobs_config, do: Application.get_env(:fermix_core, :jobs, [])
 end

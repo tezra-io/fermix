@@ -106,6 +106,19 @@ down() {
 
 run() {
   trap down EXIT
+  # The private holdout (config private_suites.dir) joins every local run: synced
+  # before seeding so its skills are in the home, scored after the public sweep as its
+  # own :private row. CAPABILITY_PRIVATE=0 leaves it out (e.g. no access to its repo).
+  local private_dir=""
+  if [ "${CAPABILITY_PRIVATE:-1}" != "0" ]; then
+    log "syncing the private suites (CAPABILITY_PRIVATE=0 leaves them out)"
+    if ! private_dir="$(cd "$BENCH" && uv run bin/private_suites.py sync)"; then
+      log "private suite sync failed (reason above); nothing was started"
+      return 3
+    fi
+    private_dir="${private_dir##*$'\n'}"     # the dir is the last line
+    FERMIX_CAP_SEED_ARGS="${FERMIX_CAP_SEED_ARGS:-} --private-dir $private_dir"
+  fi
   up
   log "verifying preconditions (Opik + daemon)"
   local result=0
@@ -120,6 +133,23 @@ run() {
       CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
       "$BIN_DIR/tier.sh" capability ) || result=$?
   log "capability runner exited with code $result (0=green, 2=selection, 3=preconditions, 4=invalid, 5=release gate red)"
+  if [ -n "$private_dir" ]; then
+    log "running the private suites from $private_dir"
+    local private_result=0
+    ( cd "$BENCH" && FERMIX_EVAL_HOME="$HOME_DIR" OPIK_PROJECT="$PROJECT" \
+        CONFIRM_DAEMON_ISOLATED=1 CONFIRM_ISOLATED_ENV=1 CONFIRM_COST=1 \
+        "$BIN_DIR/tier.sh" capability-private ) || private_result=$?
+    log "private runner exited with code $private_result"
+    # The run's code is the worse of the two: invalid, preconditions, selection,
+    # then a red gate, so a broken private measurement is never hidden by a public one.
+    local code
+    for code in 4 3 2 5; do
+      if [ "$result" = "$code" ] || [ "$private_result" = "$code" ]; then
+        result="$code"
+        break
+      fi
+    done
+  fi
   return "$result"
 }
 

@@ -40,6 +40,54 @@
         "invokes skill self_knowledge",
         "names the bot token from @BotFather /newbot and the numeric Telegram user id (from @userinfobot, not /whoami) as the two values, entered in the Mac app's Settings > Channels > Telegram or browser setup on Linux, then a restart and pressing Start (/start) in the bot's chat"
       ]
+    },
+    {
+      "name": "voice_call_uses_chat_link",
+      "prompt": "If I paste a link in the Mac chat and then ask about it out loud on a GPT-Live voice call, can Fermix use it? And can I keep calls out of the chat?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says that by default a GPT-Live call's tasks run in the Mac chat's own conversation, so a task asked aloud can read the pasted link, and that Settings > Voice > Voice calls join the chat set to No (conversation = \"private\") keeps each call apart from the chat"
+      ]
+    },
+    {
+      "name": "typed_message_during_voice_call",
+      "prompt": "While I'm on a GPT-Live voice call, if I paste a link in the Mac chat, will Fermix reply to it in the chat? And can it see what I said on the call?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says the typed message's turn knows a call is up: it answers in writing when the message asks for something or needs an answer, and otherwise ends with no reply (nothing is shown), and that it can read the call in progress (start, tasks, the newest speech) with voice_call_context, which is offered only during a call in the chat"
+      ]
+    },
+    {
+      "name": "voice_call_result_in_chat",
+      "prompt": "On a GPT-Live voice call, if I ask for something with a long answer or a link, does Fermix read the whole thing out? Where does the rest go?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says the voice says a short line and the rest (a link, code, a table, a long answer) is written whole to the Mac chat, which the phone shows too, with the voice saying it is there, and that a private call (Voice calls join the chat set to No) shows nothing in the chat"
+      ]
+    },
+    {
+      "name": "voice_call_gist",
+      "prompt": "After a GPT-Live voice call, does Fermix keep anything of it? Will I see it in the chat, and will it know next time what we talked about?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says a call in the chat leaves a gist (a few sentences on what was asked, done, decided and still open) made after the call ends, shown in the chat as one row for the call (Voice call, N minutes, with the gist, or the task list if it could not be made), and given to the next call and to the owner's chat turns; that the gist is the call's record, not a memory fact, no transcript is kept, and a private call leaves nothing"
+      ]
+    },
+    {
+      "name": "voice_call_sends_and_codes",
+      "prompt": "On a GPT-Live voice call, can I ask Fermix to send something to my Telegram, or to get a coding agent working on my repo?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says a task asked aloud sends the text with send_to_channel to the owner's own inbox on the channel named (never another chat; a channel with no owner inbox is refused, not swapped) and says where it went, and that in a call in the chat a task can start a coding run that keeps going after the call and reports back into the Mac chat, while a private call cannot start one"
+      ]
+    },
+    {
+      "name": "phone_and_mac_one_conversation",
+      "prompt": "If I tell Fermix something from my phone, will it know it when I carry on in the Mac app's chat? Can a message from the phone and one from the Mac run at the same time?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says no phone app is released yet, and that the phone channel's turns run in the Mac chat's one agent conversation: one history, so what is said on either is read by the next turn on the other (a voice call's tasks in the chat included), and one turn queue, so a message from one waits for a running turn from the other; a cancel stops only its own request, and /new from either starts the conversation afresh for both"
+      ]
     }
   ]
 }

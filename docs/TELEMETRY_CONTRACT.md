@@ -427,22 +427,105 @@ under the call's trace. A call opened from a turn may carry its own
 `parent_session` as correlation metadata, but it never nests: the call outlives
 the turn that asked for it (the meeting precedent).
 
-Every emission goes through `FermixCore.Realtime.LiveTelemetry` — never
-hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
+A delegation keeps that `session_id` and `parent_session` whichever
+conversation it runs in. Unless the call is private
+(`[fermix_core.realtime] conversation = "private"`), its hand-offs run in the
+chat's own conversation (M56 §4.1), so the events that name a conversation
+key (the history read, the loop runtime, the queue's request events) name the
+chat's, `{"companion","main",:root}`, while the message's `channel` stays
+`voice`. The trace still nests under the call, because nesting follows
+`parent_session` and never the conversation key. The request a hand-off
+persists in the chat is marked spoken in the conversation store and reaches no
+telemetry field, like every other piece of spoken content.
+
+The phone's turns run in that same conversation (M56 D9): a phone message
+carries the chat's key, so for a phone turn the events that name a
+conversation key name the chat's too. The history read and the loop runtime
+carry `conversation_key` `{"companion","main",:root}` beside the message's
+`channel` `mobile`, and compaction's events carry that key; the queue's
+request events, the conversation store's `[:fermix, :memory,
+:message_persist]` and the memory review (its `session_id`, its
+`channel`/`chat_id` and the Opik `thread_id` they fill) take their `channel`
+from it and read `companion`. The turn's own events keep the message's
+channel (`[:fermix, :agent, :message]` and its Opik thread `mobile:main`, the
+queue's enqueue, the channel's message points), so a phone turn is still told
+apart there. Nothing new is emitted.
+
+A message typed in the chat while a call in the chat is up is an ordinary
+chat turn (`main-*` session, M56 §4.4): it is told the call is up and may end
+with no reply. Its `[:fermix, :agent, :message]` event carries `silent`, a
+boolean, `true` only when the turn ended that way (its snapshot allowed it and
+its reply was exactly `[SILENT]`); the Opik root carries it in its metadata.
+`voice_call_context`, the tool such a turn reads the call with, emits through
+`Tools.Telemetry.exec/5` like every tool, with `tasks` and `speech_bytes` and
+no output preview: what was said reaches no field.
+
+`send_to_channel` (M56 §4.7) sends a text to the owner's own inbox on a
+channel they name, from any owner turn and from a call's task alike. Its one
+exec event carries `channel` (the name asked for, at most 64 bytes),
+`text_bytes` and `outcome`, one of `sent`, `invalid_args`, `text_too_long`,
+`unsupported_delivery_platform`, `invalid_delivery_adapter`, `no_owner_inbox`
+and `delivery_failed`, and no input preview: the text, which may have been
+said aloud, reaches no field. The output preview is the result's sentence,
+which names channels and never the text. The send itself is a channel delivery
+and counts as the channel's own outbound message point.
+
+A coding run a task of a call in the chat launches (M56 §4.7) is a harness run
+like any other, and so a **root** of its own (`harness_<id>`, never nested:
+it outlives the turn that launched it, and the call's run closed at
+`call_stop` long before the run ends). Its `origin_session_id` is the task's
+`voice_delegation_<n>`, whose own `parent_session` is the call: that is how a
+run is tied to the call that asked for it, through the turn, as correlation.
+Its completion re-enters the chat as an ordinary companion turn (`main-*`),
+also a root of its own.
+
+Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
+detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
 :call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
-id), `engine: "openai_live"`, `device_id`, `model`, `voice`, and
+id), `call_uuid`, `engine: "openai_live"`, `device_id`, `model`, `voice`, and
 `provider_session_id` once `session.started` arrives — that last one is the only
 handle a vendor-side investigation has, and it exists nowhere else in the trace.
-Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
+`call_uuid` is the call's durable identity, minted with the session and the key
+of its `voice_calls` record; the `voice_live:<n>` counter restarts with the VM,
+so the UUID is what ties a trace to that record. The counter stays the trace's
+session id. Nils are dropped rather than emitted. `call_start` carries `max_duration_ms` —
 the Opik exporter's sweep floor for the root; omit it and a call that sits quiet
 between delegations is force-closed at the idle TTL, and its ledger-bearing
-`call_stop` then mints a second, empty root. The delegation events carry
+`call_stop` then mints a second, empty root. It also sizes what the call started
+with (M56 §4.3), never quoting it: `instructions_bytes` (the composed
+instructions, the owner's details and memory files included) and `input_items`
+and `input_bytes` (the starting `session.input`: the chat's newest messages and
+earlier calls' gists; both `0` for a private call or an empty chat). The delegation events carry
 `delegation_id`, `revision` and `turn_session_id`, and `delegation_stop` adds
-the terminal word `status` (`completed | failed | cancelled`, never a bare "ok")
-with a `duration_ms` measurement. `provider_error` carries the vendor's bounded
+the terminal word `status` (`completed | failed | cancelled`, and `timed_out`
+on a detached stop; never a bare "ok")
+with a `duration_ms` measurement. When a call in the chat showed the
+delegation's result there (M56 §4.5: what the voice cannot say is written to
+the chat's timeline while it says a short line), `delegation_stop` also
+carries `server_seq`, the row it was written to, and `shown_bytes`, its size:
+sizes only, so the shown text reaches no field, and neither does the line
+said. `provider_error` carries the vendor's bounded
 sentence and is **not** terminal: a Live moderation refusal cuts the audio and
 the session keeps running.
+
+A delegation can end **after** `call_stop` (M56 §4.6). A task still running
+when a call in the chat ends is handed to `FermixChannels.Voice.Detached`,
+which owns it until it ends into the chat, so its `delegation_stop` comes from
+that owner, after the call's `call_stop`, through
+`LiveTelemetry.detached_delegation_stop/5`: the same event, with the call's
+`session_id` and `call_uuid` and the task's own `delegation_id`, `revision` and
+`turn_session_id`, plus `detached: true` and its terminal `status`, which may
+be `timed_out` (a detached task has a 30 minute wall clock), `duration_ms`
+from its creation on the call to its end, and `server_seq`/`shown_bytes` of
+its done row in the chat. Sizes only, as on the call. Its turn keeps its
+`session_id` and `parent_session` (the call's id). The call's Opik root ships
+at `call_stop`, so the aggregator attaches a detached stop only while that run
+is open (it never opens a run for one, which would be an empty phantom root)
+and its turn's later spans follow the tombstone rule of a run that outlived its
+trace; the JSONL stream keeps every one. A task that ends from the boot pass
+after a restart (`daemon_restarted`) emits nothing: it is a companion write,
+logged.
 
 `call_stop` is the run's whole cost record, and every value is a number:
 `voice_seconds`, `voice_cost_millicents`, `backend_turns`, and
@@ -460,7 +543,8 @@ delegation turns keep their own token usage on their own `llm` spans, so voice
 cost and backend cost stay separately attributed rather than double-counted, and
 an incomplete finalization stays visible as `accounting_complete: 0` rather than
 reading as a measured zero-cost call. Spoken content — captions, transcript
-fragments, the composed instructions — reaches no field on any of these events.
+fragments, the composed instructions, the starting input — reaches no field on
+any of these events.
 
 Backend work inside a delegation rides the shared emitters as usual
 (`Providers.Telemetry.emit_call/3`, `Tools.Telemetry.exec/5`) with the
@@ -472,6 +556,31 @@ root open and close in `Aggregation`, phase spans via `Mapper.voice_live_span/3`
 replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
 them in lockstep with the exporter's clauses, or a `call_stop` arriving without
 its opener reads as a `:subagent` phantom root.
+
+A call in the chat leaves a **gist** (M56 §4.2), and the gist is a run kind of
+its own: one bounded summarising call made after the call has settled and its
+`call_stop` closed the call's run, so it is always a **root**, minted
+`session_id = "voice_gist:<call_uuid>"` with no `parent_session` and tied to the
+call by `call_uuid` alone. Every emission goes through
+`FermixCore.Realtime.GistTelemetry`: `[:fermix, :voice_gist, :run_start |
+:run_complete | :run_error]`, with `agent: "voice_gist"`, `session_id` and
+`call_uuid`. `run_start` carries what it summarises by size (`tasks`,
+`speech_bytes`, `input_bytes`) and `tainted`, whether anything drawn from
+Computer History reached the call; `run_complete` has `status: "written"` and
+the measurements `duration_ms` and `gist_bytes`; `run_error` has `status:
+"failed"`, the bounded reason as `error`, and `count`/`duration_ms`. What was
+said, the task results and the gist reach no field of these events. The
+summarising call itself goes through the adapters'
+`Providers.Telemetry.emit_call/3` with the same `session_id` and `agent:
+"voice_gist"`, an ordinary `llm` span whose input and output follow the
+content switch like every provider call's (the meeting summariser's
+precedent). `Trace.TelemetryHandler` registers the three as `agent_event`
+rows; `FermixOpik` binds them (`infer_kind("voice_gist:" <> _)` →
+`:voice_gist`, the root opened by `run_start` and closed by either closer in
+`Aggregation`); `mix opik.replay` skips them, as it skips the soul-curation
+bookends. The call's row written after the gist, and the boot pass that
+writes a row a dead daemon left owed (failing its pending gist), emit nothing
+of their own: the row is a companion write, logged on failure.
 
 ## Sessionless channel points (pairing, push, render, transport posture)
 
@@ -524,6 +633,12 @@ by the caller and guarded to an atom by the emitter, so no response body, URL,
 or credential can reach a trace field. `Trace.TelemetryHandler` maps it to an
 `agent_event` row keyed on `channel`; Opik does **not** subscribe, for the same
 reason as pair/push.
+iMessage is one of its emitters: `emit_transport(:imessage, :degraded |
+:recovered, …)` fires on transitions of its helper (an exit loop, the Messages
+database becoming unavailable, a missing grant or unconfirmed recipients at
+boot, a suspected reply loop) and never per failure, and a message body the
+helper could not decode is the `emit_parse(:imessage, :decode_error, …)` parse
+status, not a new event name.
 
 ## Computer-history summarizer (a headless run with no bookends)
 

@@ -56,6 +56,7 @@ defmodule FermixCore.Setup.WizardTest do
     discord = Application.fetch_env(:fermix_channels, :discord)
     slack = Application.fetch_env(:fermix_channels, :slack)
     signal = Application.fetch_env(:fermix_channels, :signal)
+    imessage = Application.fetch_env(:fermix_channels, :imessage)
     acp = Application.fetch_env(:fermix_channels, :acp)
     mobile = Application.fetch_env(:fermix_channels, :mobile)
     personalization = Application.get_env(:fermix_core, :personalization, [])
@@ -75,6 +76,7 @@ defmodule FermixCore.Setup.WizardTest do
     Application.put_env(:fermix_channels, :discord, [])
     Application.put_env(:fermix_channels, :slack, [])
     Application.put_env(:fermix_channels, :signal, [])
+    Application.put_env(:fermix_channels, :imessage, enabled: false)
     # These tests assert which channels come back enabled, so every channel must
     # start from its production baseline rather than whatever an earlier module
     # left in the global app env.
@@ -108,6 +110,7 @@ defmodule FermixCore.Setup.WizardTest do
       restore_env(:fermix_channels, :discord, discord)
       restore_env(:fermix_channels, :slack, slack)
       restore_env(:fermix_channels, :signal, signal)
+      restore_env(:fermix_channels, :imessage, imessage)
       restore_env(:fermix_channels, :acp, acp)
       restore_env(:fermix_channels, :mobile, mobile)
       Application.put_env(:fermix_core, :personalization, personalization)
@@ -429,6 +432,68 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(report.failures, &(&1.component == "channel:signal"))
   end
 
+  test "report surfaces an enabled iMessage channel and its failure" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    Application.put_env(:fermix_channels, :imessage, enabled: true)
+
+    report = Wizard.report()
+
+    assert report.status == :ready
+    assert :imessage in report.wizard.enabled_channels
+    assert Enum.any?(report.failures, &(&1.component == "channel:imessage" and not &1.gating))
+  end
+
+  # M54 §10.2 and M53 APP-5 from this channel's first release: saving the
+  # owner or the guests never switches iMessage on, and the transport is the
+  # registry's, so no `mode` is written either. The account is the helper's to
+  # derive when the recipients are confirmed, so no `posture` is written.
+  test "save_answers persists the iMessage owner and guests without switching it on" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               imessage_owner_user_id: "+1 555 123 4567",
+               imessage_allowed_sender_ids: "Friend@Example.com, +15550001111"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    imessage = Keyword.fetch!(persisted.fermix_channels, :imessage)
+
+    refute Keyword.get(imessage, :enabled) == true
+    refute Keyword.has_key?(imessage, :mode)
+    refute Keyword.has_key?(imessage, :posture)
+    assert Keyword.get(imessage, :owner_user_id) == "+15551234567"
+    assert Keyword.get(imessage, :allowed_sender_ids) == ["friend@example.com", "+15550001111"]
+  end
+
+  test "an empty guests answer clears the iMessage guest list" do
+    Application.put_env(:fermix_core, :providers,
+      openai: [auth_mode: :api_key, api_key: "sk-test-123"]
+    )
+
+    Application.put_env(:fermix_channels, :telegram, enabled: false)
+
+    Application.put_env(:fermix_channels, :imessage, allowed_sender_ids: ["friend@example.com"])
+
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard |> Wizard.save_answers(imessage_allowed_sender_ids: "")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.fetch!(persisted.fermix_channels, :imessage)[:allowed_sender_ids] == []
+  end
+
   # The ACP surface is one boolean with no secret and no interactive step, so the
   # whole wizard contract is: the answer flips `enabled`, and it shows up as an
   # enabled channel (M29 §9 item 3).
@@ -451,6 +516,64 @@ defmodule FermixCore.Setup.WizardTest do
     refute :acp in report.wizard.enabled_channels
     assert {:ok, persisted} = ConfigStore.load_runtime_config()
     assert Keyword.fetch!(persisted.fermix_channels, :acp) == [enabled: false]
+  end
+
+  # The outbound proxy (`[fermix_core.network]`): an answer sets it, a blank
+  # answer removes it, an absent answer leaves it, and a value the section would
+  # refuse at boot is refused here, with the same sentence and without the value.
+  test "save_answers persists, keeps and clears the outbound proxy" do
+    network = Application.fetch_env(:fermix_core, :network)
+    on_exit(fn -> restore_env(:fermix_core, :network, network) end)
+    Application.put_env(:fermix_core, :network, [])
+    start_memory_repo!()
+
+    assert {:ok, report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               openai_api_key: "sk-test-123",
+               proxy: "http://proxy.corp.test:3128",
+               proxy_bypass: "ollama.internal, .corp.test"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network) == [
+             proxy: "http://proxy.corp.test:3128",
+             proxy_bypass: ["ollama.internal", ".corp.test"]
+           ]
+
+    # An unrelated save leaves the section alone.
+    assert {:ok, report} = Wizard.save_answers(report.wizard, default_model: "gpt-6-astra")
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network)[:proxy] ==
+             "http://proxy.corp.test:3128"
+
+    # A blank answer removes the proxy; the bypass list stays, inert.
+    assert {:ok, _report} = Wizard.save_answers(report.wizard, proxy: "")
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+    assert Keyword.fetch!(persisted.fermix_core, :network) == [
+             proxy_bypass: ["ollama.internal", ".corp.test"]
+           ]
+  end
+
+  test "save_answers refuses a proxy the daemon could not use, without printing it" do
+    network = Application.fetch_env(:fermix_core, :network)
+    on_exit(fn -> restore_env(:fermix_core, :network, network) end)
+    Application.put_env(:fermix_core, :network, [])
+    start_memory_repo!()
+
+    error =
+      assert_raise ArgumentError, fn ->
+        Wizard.report().wizard
+        |> Wizard.save_answers(proxy: "http://user:hunter2@proxy.corp.test:3128")
+      end
+
+    assert error.message =~ "[fermix_core.network] proxy"
+    refute error.message =~ "hunter2"
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert Keyword.get(persisted.fermix_core, :network, []) == []
   end
 
   test "save_answers persists config, creates workspace directories, and updates readiness" do
@@ -1790,7 +1913,8 @@ defmodule FermixCore.Setup.WizardTest do
     assert Enum.any?(prompts, &(&1.key == :provider and &1.required?))
     assert Enum.any?(prompts, &(&1.key == :default_model and &1.required?))
     assert Enum.any?(prompts, &(&1.key == :reasoning_effort and &1.required?))
-    assert Enum.any?(prompts, &(&1.key == :fast and &1.required?))
+    # Fast mode is retired with the private Codex backend that served it.
+    refute Enum.any?(prompts, &(&1.key == :fast))
   end
 
   test "provider prompt defaults to configured provider when TOML has not persisted it yet" do
@@ -2289,7 +2413,7 @@ defmodule FermixCore.Setup.WizardTest do
   end
 
   describe "save_answers — provider/model/reasoning_effort selection" do
-    test "writes provider, default_model, reasoning_effort, and fast mode to TOML round-trip" do
+    test "writes provider, default_model and reasoning_effort to TOML round-trip" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-wizard-m410-#{System.unique_integer([:positive])}")
 
@@ -2308,8 +2432,7 @@ defmodule FermixCore.Setup.WizardTest do
         |> Wizard.save_answers(
           provider: "openai_codex",
           default_model: "gpt-5.4",
-          reasoning_effort: "medium",
-          fast: "true"
+          reasoning_effort: "medium"
         )
 
       {:ok, persisted} = ConfigStore.load_runtime_config()
@@ -2322,7 +2445,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(codex, :primary) == true
       assert Keyword.get(codex, :default_model) == "gpt-5.4"
       assert Keyword.get(codex, :reasoning_effort) == :medium
-      assert Keyword.get(codex, :fast) == true
+      refute Keyword.has_key?(codex, :fast)
     end
 
     test "default_model writes to the active provider block (per primary flag)" do

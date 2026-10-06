@@ -23,11 +23,13 @@ defmodule FermixCore.Management.SetupStateTest do
     core = Map.new(@core_keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
     telegram = Application.get_env(:fermix_channels, :telegram)
     mobile = Application.get_env(:fermix_channels, :mobile)
+    imessage = Application.get_env(:fermix_channels, :imessage)
 
     on_exit(fn ->
       Enum.each(core, fn {key, value} -> restore(:fermix_core, key, value) end)
       restore(:fermix_channels, :telegram, telegram)
       restore(:fermix_channels, :mobile, mobile)
+      restore(:fermix_channels, :imessage, imessage)
     end)
 
     :ok
@@ -158,6 +160,21 @@ defmodule FermixCore.Management.SetupStateTest do
     assert telegram["configured"] == false
     assert telegram["status"] == "setup_required"
     assert telegram["mode"] == "polling"
+  end
+
+  # M54: configured is the owner, because the recipient policy the helper
+  # confirms is built from it (the helper derives the account); the transport
+  # is the registry's, so its mode is not read from a file.
+  test "the iMessage row needs its owner, and its mode is fixed" do
+    Application.put_env(:fermix_channels, :imessage, enabled: true)
+
+    half = imessage_row(SetupState.report(sources()))
+    assert %{"enabled" => true, "configured" => false, "status" => "setup_required"} = half
+    assert half["mode"] == "subprocess"
+
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
+
+    assert %{"configured" => true, "status" => "ok"} = imessage_row(SetupState.report(sources()))
   end
 
   # The phone channel has no credential to be missing, so it is always
@@ -329,6 +346,7 @@ defmodule FermixCore.Management.SetupStateTest do
   end
 
   defp mobile_row(report), do: Enum.find(report["channels"], &(&1["name"] == "mobile"))
+  defp imessage_row(report), do: Enum.find(report["channels"], &(&1["name"] == "imessage"))
 
   defp restore(app, key, nil), do: Application.delete_env(app, key)
   defp restore(app, key, value), do: Application.put_env(app, key, value)

@@ -2,6 +2,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Acp.Identity
+  alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
@@ -10,15 +11,26 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerHistory.Taint
   alias FermixCore.ComputerUse.Safety
+  alias FermixCore.Harness.Delivery, as: HarnessDelivery
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Memory.Repo
   alias FermixCore.Providers.Error, as: ProviderError
+  alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
   alias FermixCore.Temporal.Access
+  alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.SendAttachment
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
     def start_background(_opts), do: :ok
+  end
+
+  defmodule RecordingReviewer do
+    def start_background(opts) do
+      send(self(), {:memory_review_dispatched, Keyword.fetch!(opts, :conversation_key)})
+      :ok
+    end
   end
 
   defmodule MainAgentStub do
@@ -151,6 +163,38 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       {:ok,
        %{
          content: "captured",
+         tool_calls: [],
+         provider_state: %{},
+         usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
+         model: "mock-model"
+       }}
+    end
+
+    @impl true
+    def continue(_provider_state, _tool_results, _opts), do: {:error, :unexpected_continue}
+
+    @impl true
+    def to_provider_tools(capabilities), do: capabilities
+
+    @impl true
+    def parse_tool_calls(_response), do: []
+
+    @impl true
+    def parse_response(response), do: response
+
+    @impl true
+    def supports_streaming?, do: false
+  end
+
+  # Answers with the reply its opts name, in one step.
+  defmodule ReplyAdapter do
+    @behaviour FermixCore.Providers.Adapter
+
+    @impl true
+    def chat(_messages, _capabilities, opts) do
+      {:ok,
+       %{
+         content: Keyword.fetch!(opts, :reply),
          tool_calls: [],
          provider_state: %{},
          usage: %{prompt_tokens: 10, completion_tokens: 1, total_tokens: 11},
@@ -670,6 +714,63 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  describe "commit/4 — a memory review waits for a turn the owner took" do
+    test "an owner turn dispatches the review" do
+      assert {key, _result} = commit_for_trust(:operator)
+      assert_received {:memory_review_dispatched, ^key}
+    end
+
+    test "a guest turn does not" do
+      commit_for_trust(:guest)
+      refute_received {:memory_review_dispatched, _key}
+    end
+
+    test "a turn with no trust set is least privilege here too" do
+      commit_for_trust(nil)
+      refute_received {:memory_review_dispatched, _key}
+    end
+
+    defp commit_for_trust(trust) do
+      store_name = :"turn_runner_review_store_#{System.unique_integer([:positive])}"
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "review_dispatch_#{System.unique_integer([:positive])}"
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "hello",
+        source_trust: trust
+      }
+
+      turn_state = %{
+        adapter: SummaryAdapter,
+        adapter_opts: [model: "mock-model", test_pid: self()],
+        provider: nil,
+        adapter_overrides: [],
+        conversation_store: store,
+        memory_agent_id: "main",
+        memory_owner_id: "default",
+        memory_reviewer: RecordingReviewer,
+        memory_repo: nil,
+        task_supervisor: self(),
+        main_agent_server: nil,
+        review_interval_hours: 24,
+        review_max_messages: 50,
+        review_input_token_budget: 4_000,
+        review_failure_backoff_ms: 60_000,
+        compaction_failures: %{}
+      }
+
+      {{"telegram", chat_id, :root}, TurnRunner.commit(msg, turn_state, "assistant reply", 10)}
+    end
+  end
+
   # MILESTONE_32 §13.6 / inv. 20 — a reply the model generated from an UNMASKED
   # tainted replay is itself activity-derived and must inherit the stamp. Before
   # this, `/history off` on an all-local chain left the earlier tainted turns
@@ -897,6 +998,59 @@ defmodule FermixCore.Agents.TurnRunnerTest do
         })
 
       assert context.voice_call_id == "voice_live_42"
+    end
+
+    # M56 §4.7: why a hand-off in the chat may launch a coding run. Its tools run
+    # with the chat's conversation key, so the run's delivery snapshot is the
+    # chat's and its outcome re-enters the chat as a companion turn, with no
+    # delegation to answer; the run's origin session is the hand-off's turn,
+    # which nests under the call.
+    test "a hand-off in the chat gives a coding run the chat to report back into" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-chat-hand-off", %{
+          channel: "voice",
+          metadata: %{
+            source: :voice,
+            user_id: "voice",
+            voice_call: %{
+              voice_call()
+              | conversation: "chat",
+                conversation_key: {"companion", "main", :root}
+            }
+          }
+        })
+
+      assert context.conversation_key == {"companion", "main", :root}
+      assert context.session_id == "voice_delegation_7"
+      assert context.parent_session == "voice_live_42"
+      assert HarnessSupport.harness_deliverable?(context)
+
+      assert {:ok,
+              %{
+                origin_kind: "chat",
+                delivery_mode: "origin",
+                platform: "companion",
+                destination: "main",
+                thread: nil,
+                client_origin: nil
+              }} = HarnessDelivery.resolve_snapshot(context)
+    end
+
+    # The reason a private call still may not: its conversation is the call's
+    # own, on the voice channel, and ends with the call.
+    test "a private call's hand-off would give a coding run only the call to report into" do
+      Process.put(:record_cwd_step, 0)
+
+      %{context: context} =
+        run_record_cwd_turn(:operator, "/tmp/fermix-private-hand-off", %{
+          channel: "voice",
+          metadata: %{source: :voice, user_id: "voice", voice_call: voice_call()}
+        })
+
+      assert {:ok, %{platform: "voice", destination: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"}} =
+               HarnessDelivery.resolve_snapshot(context)
     end
 
     test "voice_call_id is nil on a chat turn carrying a forged voice_call" do
@@ -1153,6 +1307,44 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert List.first(history).content == "keep this failed request"
     end
 
+    test "a guest's message is stored as the guest's; the owner's is not marked" do
+      for {trust, marked?} <- [guest: true, operator: false] do
+        registry_name = :"turn_runner_guest_registry_#{System.unique_integer([:positive])}"
+        store_name = :"turn_runner_guest_store_#{System.unique_integer([:positive])}"
+
+        start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+
+        store =
+          start_supervised!(
+            {ConversationStore, name: store_name, max_messages: :infinity, repo: nil},
+            id: store_name
+          )
+
+        msg = %{
+          channel: "telegram",
+          chat_id: "guest_marker_#{trust}",
+          sender: "someone",
+          content: "I am vegetarian",
+          source_trust: trust
+        }
+
+        turn_state =
+          turn_state(
+            adapter: FailingAdapter,
+            adapter_opts: [model: "mock-model"],
+            capability_registry: registry_name,
+            conversation_store: store
+          )
+
+        assert {:error, "adapter failed"} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+        assert [stored] =
+                 ConversationStore.get_history({"telegram", msg.chat_id, :root}, server: store)
+
+        assert Map.get(stored, :guest, false) == marked?
+      end
+    end
+
     # The M29/Buzz duplicate-reply incident was diagnosed blind: the FAILED turn
     # dropped the very message that produced it while a successful turn kept it —
     # exactly backwards. Both outcomes carry the same identity, and the same
@@ -1376,26 +1568,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert TurnRunner.error_reply(:no_auth_file) =~ "fermix auth login"
     end
 
-    test "rate-limit reply names the reset window when the body carried resets_at" do
-      resets_at = System.system_time(:second) + 1800
-
-      reply =
-        TurnRunner.error_reply(
-          ProviderError.api(:openai_codex, :codex, 429, %{
-            "error" => %{
-              "code" => "usage_limit_reached",
-              "plan_type" => "Plus",
-              "resets_at" => resets_at
-            }
-          })
-        )
-
-      assert reply =~ "usage limit"
-      assert reply =~ "plus plan"
-      assert reply =~ ~r/~\d+ min/
-    end
-
-    test "rate-limit reply falls back to generic text without a reset time" do
+    test "rate-limit reply is the generic retry text" do
       reply =
         TurnRunner.error_reply(
           ProviderError.api(:openai, :openai, 429, %{"error" => %{"message" => "slow down"}})
@@ -1498,20 +1671,23 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert reply =~ "fermix auth login --provider xai"
     end
 
-    test "keeps the re-login hint for Codex OAuth auth failures" do
+    # OpenAI Codex signs in with ChatGPT, so a 401 that survived the refresh
+    # asks for that sign-in again rather than naming a terminal command.
+    test "an OpenAI Codex auth failure asks for a new ChatGPT sign-in" do
       reply =
         TurnRunner.error_reply(
           {:provider_error,
            %{
              provider: :openai_codex,
-             adapter: :codex,
+             adapter: :chatgpt_plan,
              status: 401,
              kind: :auth,
-             message: "token expired"
+             message: "token expired",
+             auth_mode: :oauth
            }}
         )
 
-      assert reply =~ "fermix auth login"
+      assert reply == "Your ChatGPT connection needs to be renewed. Sign in again."
     end
 
     test "maps provider rate limits to an actionable retry message" do
@@ -1610,6 +1786,25 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute reply == "Sorry, I encountered an error processing your message."
     end
 
+    # A proxied host that cannot get out says so in the reply: the operator is
+    # sent to the proxy, not to the provider's status page.
+    test "maps a failed proxy hop to a reply that names the proxy, not the provider's network" do
+      refused =
+        TurnRunner.error_reply(ProviderError.transport(:openai, :responses, :proxy_auth_required))
+
+      assert refused =~ "OpenAI"
+      assert refused =~ "proxy"
+      assert refused =~ "HTTP 407"
+      refute refused =~ "proxy_auth_required"
+
+      unreachable =
+        TurnRunner.error_reply(ProviderError.transport(:anthropic, :messages, :proxy_unreachable))
+
+      assert unreachable =~ "proxy"
+      assert unreachable =~ "could not be reached"
+      refute unreachable =~ "proxy_unreachable"
+    end
+
     # MILESTONE_29 §17 phase 1 minted `code: "empty_response"` for a 200 the
     # server declared terminal that carried nothing. Left on the `%{status: …}`
     # floor clause it reads "returned HTTP 200", which sends the operator after a
@@ -1665,6 +1860,109 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert reply =~ "Sorry"
       refute reply =~ "/new"
+    end
+  end
+
+  # M57 §8: each refusal of OpenAI Codex's ChatGPT plan route is its own
+  # sentence, and the vendor's own words follow it. Built the way the adapter
+  # builds them (oauth-tagged).
+  describe "error_reply/1 — OpenAI Codex on a ChatGPT plan" do
+    @usage_limit "Your ChatGPT plan's usage limit for Fermix is reached. Review your plan or " <>
+                   "Fermix's limit in ChatGPT settings: https://chatgpt.com/settings/usage"
+
+    defp plan_error(status, code, extra \\ %{}, stage \\ :before_response) do
+      body = %{"error" => Map.merge(%{"code" => code, "message" => "Vendor says no."}, extra)}
+
+      {:provider_error, error} =
+        ProviderError.api(:openai_codex, :chatgpt_plan, status, body,
+          provider_words: "Vendor says no.",
+          stage: stage
+        )
+
+      {:provider_error, Map.put(error, :auth_mode, :oauth)}
+    end
+
+    test "the usage limit names the settings page and no reset time, before or mid-stream" do
+      for {status, stage} <- [{429, :before_response}, {200, :mid_stream}] do
+        reply =
+          TurnRunner.error_reply(
+            plan_error(status, "subscription_sharing_usage_limit_exceeded", %{}, stage)
+          )
+
+        assert reply == @usage_limit <> " ChatGPT said: \"Vendor says no.\""
+        refute reply =~ "Try again in"
+      end
+    end
+
+    test "an unavailable usage check asks to try again shortly" do
+      for code <- [
+            "subscription_sharing_usage_unavailable",
+            "subscription_sharing_user_unavailable"
+          ] do
+        assert TurnRunner.error_reply(plan_error(503, code)) =~
+                 "ChatGPT could not check your plan's usage right now. Try again shortly."
+      end
+    end
+
+    test "an ineligible account is not called an authentication failure" do
+      reply = TurnRunner.error_reply(plan_error(403, "subscription_sharing_user_not_eligible"))
+
+      assert reply =~
+               "This ChatGPT account or workspace can't use its plan in Fermix. " <>
+                 "ChatGPT Plus and Pro plans can."
+
+      refute reply =~ "authentication failed"
+    end
+
+    test "a sign-in OpenAI has not enabled says so" do
+      assert TurnRunner.error_reply(plan_error(403, "subscription_sharing_v2_client_not_enabled")) =~
+               "OpenAI has not enabled plan usage for Fermix's sign-in."
+    end
+
+    test "an unsupported capability names the param the route refused" do
+      reply =
+        TurnRunner.error_reply(
+          plan_error(400, "subscription_sharing_unsupported_capability", %{"param" => "tools"})
+        )
+
+      assert reply =~ "ChatGPT refused part of this request (`tools`)."
+    end
+
+    test "an unsupported route says the plan does not cover the request type" do
+      assert TurnRunner.error_reply(plan_error(403, "subscription_sharing_route_not_supported")) =~
+               "ChatGPT plan usage does not cover this request type."
+    end
+
+    test "an invalid user after the refresh asks for a new sign-in" do
+      assert TurnRunner.error_reply(plan_error(401, "subscription_sharing_invalid_user")) =~
+               "Your ChatGPT connection needs to be renewed. Sign in again."
+    end
+
+    test "a bare detail refusal is quoted as it came, not called a sign-in fault" do
+      {:provider_error, error} =
+        ProviderError.api(:openai_codex, :chatgpt_plan, 403, ~s({"detail":"Region not served."}),
+          provider_words: "Region not served."
+        )
+
+      reply = TurnRunner.error_reply({:provider_error, Map.put(error, :auth_mode, :oauth)})
+
+      assert reply ==
+               "ChatGPT refused the request (HTTP 403). ChatGPT said: \"Region not served.\""
+    end
+
+    test "a scheduled job gets the same sentence" do
+      reason = plan_error(429, "subscription_sharing_usage_limit_exceeded")
+
+      assert TurnRunner.error_reply(reason, surface: :job) == TurnRunner.error_reply(reason)
+    end
+
+    test "after a failover chain the last ChatGPT refusal keeps its sentence" do
+      last = plan_error(403, "subscription_sharing_user_not_eligible")
+
+      assert TurnRunner.error_reply(
+               {:all_routes_failed, [{:openai, :ignored}, {:openai_codex, last}]}
+             ) =~
+               "can't use its plan in Fermix"
     end
   end
 
@@ -1810,9 +2108,315 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
   end
 
+  # M56 §4.4: a typed chat turn during a Live call in the chat is told the call
+  # is up, in the leading system run where the date note goes, only while the
+  # snapshot MainAgent froze at checkout names the call.
+  describe "a typed turn during a call in the chat" do
+    @started_at ~U[2026-10-03 14:05:00Z]
+
+    test "is told the call is up, that it may be material, and how to stay silent" do
+      messages =
+        capture_prompt(%{channel: "companion", chat_id: "main"},
+          live_call: %{started_at: @started_at, silence_allowed?: true}
+        )
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      line_index = Enum.find_index(system_run, &(&1.content =~ "voice call"))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(line_index)
+      assert line_index > date_index
+
+      line = Enum.at(system_run, line_index).content
+      assert line =~ "started at 14:05 UTC"
+      assert line =~ "material for the call"
+      assert line =~ "Reply in writing when"
+      assert line =~ "exactly [SILENT]"
+      assert line =~ "`voice_call_context`"
+    end
+
+    # M56 §6: an older companion client would show a turn with no reply as
+    # thinking, so with one attached silence is never offered.
+    test "with an older client attached it is told to answer briefly, never silence" do
+      messages =
+        capture_prompt(%{channel: "companion", chat_id: "main"},
+          live_call: %{started_at: @started_at, silence_allowed?: false}
+        )
+
+      line = Enum.find(messages, &(&1.content =~ "voice call")).content
+      assert line =~ "started at 14:05 UTC"
+      assert line =~ "briefly"
+      refute line =~ "SILENT"
+    end
+
+    test "with no call up there is no line" do
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"})
+
+      refute Enum.any?(messages, &(&1.content =~ "voice call"))
+      refute Enum.any?(messages, &(&1.content =~ "SILENT"))
+    end
+  end
+
+  # M56 §4.2: an owner's chat turn is told the gists of the last calls, in the
+  # leading system run beside the date note; a hand-off and a guest are not.
+  describe "the recent voice calls note" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-recent-calls-#{unique}.db")
+      repo = :"tr_recent_calls_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      opts = CallRecord.repo_opts(repo)
+      uuid = "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
+      record = CallRecord.new(uuid, "openai_live")
+      :ok = CallRecord.open(record, ~U[2026-10-03 14:05:00Z], opts)
+      usage = %{voice_cost_cents: 5.0, accounting: "complete"}
+      :ok = CallRecord.close(record, :call_stop, usage, ~U[2026-10-03 14:11:00Z], opts, :gist)
+      :ok = CallRecord.record_gist(uuid, {:ok, "You booked the room for 10am.", false}, opts)
+      %{repo: repo}
+    end
+
+    test "an owner's chat turn is told the last calls' gists, after the date note", %{repo: repo} do
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"}, memory_repo: repo)
+
+      system_run = Enum.take_while(messages, &(&1.role == "system"))
+      note_index = Enum.find_index(system_run, &(&1.content =~ "Recent voice calls"))
+      date_index = Enum.find_index(system_run, &(&1.content =~ "Current date:"))
+
+      assert is_integer(note_index)
+      assert note_index == date_index + 1
+
+      assert Enum.at(system_run, note_index).content =~
+               "- 2026-10-03 14:05 UTC: You booked the room"
+    end
+
+    # M56 D9: the phone's turns run in the chat, and are owner turns of it.
+    test "a turn the phone runs in the chat is told the last calls' gists", %{repo: repo} do
+      messages =
+        capture_prompt(
+          %{channel: "mobile", chat_id: "main", conversation_key: {"companion", "main", :root}},
+          memory_repo: repo
+        )
+
+      assert Enum.any?(messages, &(&1.content =~ "- 2026-10-03 14:05 UTC: You booked the room"))
+    end
+
+    test "a hand-off is not told: it is the call", %{repo: repo} do
+      {messages, _opts} =
+        run_capture_turn(voice_msg("what was the last call about"), start_voice_store(),
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+
+    test "a guest's turn is not told", %{repo: repo} do
+      messages =
+        capture_prompt(%{channel: "telegram", chat_id: "guest-1", source_trust: :guest},
+          memory_repo: repo
+        )
+
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+
+    test "with no earlier call there is no note" do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-tr-no-calls-#{unique}.db")
+      repo = :"tr_no_calls_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path}, id: repo)
+      on_exit(fn -> FermixTestSupport.SafeRm.rm(db_path) end)
+
+      messages = capture_prompt(%{channel: "companion", chat_id: "main"}, memory_repo: repo)
+      refute Enum.any?(messages, &(&1.content =~ "Recent voice calls"))
+    end
+  end
+
+  # M56 §4.4: a turn the snapshot let end with no reply, whose reply is exactly
+  # the sentinel, tells its channel so (which then shows nothing) and says so on
+  # its turn event. The reply itself is returned as any other, for the queue to
+  # deliver and commit: history shows the turn closed.
+  describe "a silent ending" do
+    @allowed %{started_at: ~U[2026-10-03 14:05:00Z], silence_allowed?: true}
+
+    test "the sentinel on a turn allowed silence tells the channel and the turn event" do
+      {result, events, metadata} = run_reply_turn("[SILENT]", @allowed)
+
+      assert {:ok, "[SILENT]", _tokens} = result
+      assert :silent_reply in events
+      assert metadata.silent == true
+    end
+
+    test "with an older client attached the sentinel is ordinary text" do
+      {result, events, metadata} =
+        run_reply_turn("[SILENT]", %{@allowed | silence_allowed?: false})
+
+      assert {:ok, "[SILENT]", _tokens} = result
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+
+    test "outside a call the sentinel is ordinary text" do
+      {_result, events, metadata} = run_reply_turn("[SILENT]", nil)
+
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+
+    test "an answer during a call is no silent ending" do
+      {result, events, metadata} = run_reply_turn("Saved the lease.", @allowed)
+
+      assert {:ok, "Saved the lease.", _tokens} = result
+      refute :silent_reply in events
+      assert metadata.silent == false
+    end
+  end
+
+  # M56 §9: a hand-off's reply reaches the Live session before the turn is
+  # committed, so the stamp commit would put on it is told to the turn's
+  # channel first, from the same process, on a hand-off only.
+  describe "a hand-off drawn from Computer History" do
+    setup do
+      original = Application.get_env(:fermix_core, :computer_history)
+      Application.put_env(:fermix_core, :computer_history, enabled: false)
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+
+      on_exit(fn ->
+        case original do
+          nil -> Application.delete_env(:fermix_core, :computer_history)
+          value -> Application.put_env(:fermix_core, :computer_history, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "a hand-off replaying a tainted reply unmasked tells its stream, as commit stamps" do
+      {events, history} = run_provenance_turn(voice_msg("user: what was I reading"), :local)
+
+      assert :history_tainted in events
+      assert List.last(history).history_tainted == true
+    end
+
+    test "a hand-off whose tainted prior is masked, or that has none, tells nothing" do
+      {masked, history} = run_provenance_turn(voice_msg("user: what was I reading"), :remote)
+      refute :history_tainted in masked
+      refute Map.has_key?(List.last(history), :history_tainted)
+
+      {clean, _history} =
+        run_provenance_turn(voice_msg("user: book the room"), :local, prior?: false)
+
+      refute :history_tainted in clean
+    end
+
+    test "a typed turn is never told: only a hand-off's reply goes to a voice" do
+      typed = %{
+        channel: "telegram",
+        chat_id: "provenance-#{System.unique_integer([:positive])}",
+        sender: "user",
+        content: "what was I reading",
+        source_trust: :operator
+      }
+
+      {events, history} = run_provenance_turn(typed, :local)
+
+      refute :history_tainted in events
+      assert List.last(history).history_tainted == true
+    end
+  end
+
+  # One turn run and committed on a local or remote chain, its conversation
+  # holding a prior reply stamped as Computer History content unless `prior?`
+  # is false. Answers what the turn told its stream and the history after.
+  defp run_provenance_turn(msg, chain, opts \\ []) do
+    registry_name = :"tr_provenance_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+    store = start_voice_store()
+    key = ConversationKey.from(msg)
+    routes = if chain == :local, do: local_routes(), else: remote_routes()
+
+    if Keyword.get(opts, :prior?, true) do
+      :ok =
+        ConversationStore.add_message(key, "assistant", "You were reading the Q3 report.",
+          server: store,
+          metadata: Taint.metadata()
+        )
+    end
+
+    turn_state =
+      turn_state(
+        adapter: ReplyAdapter,
+        adapter_opts: [model: "mock-model", reply: "It was the Q3 report."],
+        capability_registry: registry_name,
+        conversation_store: store,
+        ordered_routes: routes,
+        memory_review?: false,
+        main_agent_server: nil
+      )
+
+    test_pid = self()
+    stream = fn event -> send(test_pid, {:stream, event}) end
+
+    assert {:ok, reply, tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end, stream)
+    TurnRunner.commit(msg, turn_state, reply, tokens)
+    {stream_events(), ConversationStore.get_history(key, server: store)}
+  end
+
+  defp run_reply_turn(reply, live_call) do
+    registry_name = :"tr_silent_reg_#{System.unique_integer([:positive])}"
+    start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+    chat_id = "silent-#{System.unique_integer([:positive])}"
+    test_pid = self()
+    handler_id = "turn-silent-#{chat_id}"
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :agent, :message],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.chat_id == chat_id, do: send(test_pid, {:turn_message, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+
+    msg = %{
+      channel: "companion",
+      chat_id: chat_id,
+      sender: "Companion owner",
+      content: "https://x.test/lease",
+      source_trust: :operator
+    }
+
+    turn_state =
+      turn_state(
+        adapter: ReplyAdapter,
+        adapter_opts: [model: "mock-model", reply: reply],
+        capability_registry: registry_name,
+        conversation_store: start_voice_store(),
+        live_call: live_call
+      )
+
+    stream = fn event -> send(test_pid, {:stream, event}) end
+    result = TurnRunner.run(msg, turn_state, fn _part -> :ok end, stream)
+    assert_receive {:turn_message, metadata}, 5_000
+    {result, stream_events(), metadata}
+  end
+
+  defp stream_events do
+    receive do
+      {:stream, event} -> [event | stream_events()]
+    after
+      0 -> []
+    end
+  end
+
   # Drive one real turn through TurnRunner and return the message list the
   # provider adapter actually received.
-  defp capture_prompt(msg_overrides) do
+  defp capture_prompt(msg_overrides, state_overrides \\ []) do
     registry_name = :"tr_prompt_reg_#{System.unique_integer([:positive])}"
     store_name = :"tr_prompt_store_#{System.unique_integer([:positive])}"
 
@@ -1838,10 +2442,12 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     turn_state =
       turn_state(
-        adapter: CapturePromptAdapter,
-        adapter_opts: [model: "mock-model", test_pid: self()],
-        capability_registry: registry_name,
-        conversation_store: store
+        [
+          adapter: CapturePromptAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        ] ++ state_overrides
       )
 
     assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
@@ -1852,6 +2458,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   # --- Voice delegations (MILESTONE_41_OPENAI_LIVE_VOICE.md §7) ---
 
   @voice_addendum "This task comes from an ongoing voice conversation."
+  @call_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+  # A private call's own conversation, keyed by the call's UUID, and the
+  # chat's, which a call joins unless it is private (M56 §4.1).
+  @private_key {"voice", "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab", :root}
+  @chat_key {"companion", "main", :root}
 
   describe "voice delegations" do
     test "the turn carries the session's turn id and the call as parent_session" do
@@ -1917,27 +2528,160 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert "main-" <> _rest = Keyword.fetch!(opts, :session_id)
     end
 
-    test "the turn's history lands in the store the snapshot names" do
+    test "the turn's history lands in the store the snapshot names, under the call's key" do
       store = start_voice_store()
-      key = {"voice", "voice_live_42", :root}
 
       run_voice_turn(store: store)
 
       assert [%{role: "user", content: "what is on my calendar"}] =
-               ConversationStore.get_history(key, server: store)
+               ConversationStore.get_history(@private_key, server: store)
+
+      assert ConversationStore.get_history({"voice", "voice_live_42", :root}, server: store) == []
     end
 
-    test "the delegation is built without the categories a call cannot deliver" do
+    # M56 §4.1: a hand-off in the chat's conversation is a turn of that
+    # conversation, so what the owner typed before it is in its history.
+    test "a hand-off in the chat's conversation reads what was typed there before it" do
+      store = start_voice_store()
+      typed = "here is the brief: https://example.com/brief"
+      :ok = ConversationStore.add_message(@chat_key, "user", typed, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "Got it.", server: store)
+
+      {messages, _opts} = run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content == typed))
+      assert %{role: "user", content: "user: open the link I sent"} = List.last(messages)
+    end
+
+    test "a typed turn after a hand-off sees its request and its reply" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      hand_off = chat_hand_off("user: what is on my calendar")
+      {_messages, _opts} = run_capture_turn(hand_off, store)
+
+      assert :ok =
+               TurnRunner.commit(
+                 hand_off,
+                 commit_state(store),
+                 "Your calendar is clear.",
+                 0
+               )
+
+      typed = %{
+        channel: "companion",
+        chat_id: "main",
+        sender: "owner",
+        content: "and tomorrow?",
+        source_trust: :operator,
+        metadata: %{}
+      }
+
+      {messages, _opts} = run_capture_turn(typed, store)
+      contents = Enum.map(messages, & &1.content)
+
+      assert "user: what is on my calendar" in contents
+      assert "Your calendar is clear." in contents
+    end
+
+    # The request is stored as what it is: asked aloud, possibly misheard, on
+    # the call named by its UUID, and kind `chat_message`, the only kind the
+    # store reloads. The trusted map is turn context (the store, the routing
+    # ids, the 1 KB addendum, a key tuple JSON cannot hold) and is not stored.
+    test "the persisted request is a chat message marked spoken, with its call" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert [row] = await_rows(repo, @chat_key, 1)
+      assert row.kind == "chat_message"
+      assert row.role == "user"
+      assert row.content == "user: open the link I sent"
+
+      assert row.metadata == %{
+               "source" => "voice",
+               "user_id" => "voice",
+               "chat_type" => "private",
+               "spoken" => true,
+               "call_uuid" => @call_uuid
+             }
+    end
+
+    test "a private call's request is stored the same way, under the call's own key" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(voice_msg("what is on my calendar"), store)
+
+      assert [row] = await_rows(repo, @private_key, 1)
+      assert row.kind == "chat_message"
+      assert %{"spoken" => true, "call_uuid" => @call_uuid} = row.metadata
+      refute Map.has_key?(row.metadata, "voice_call")
+    end
+
+    # M56 §4.1: a reply route on a voice turn is the hand-off's spoken result,
+    # so the notice would be spoken as the answer and the real answer then
+    # dropped as late. Likely in a long chat, so a hand-off never sends it.
+    test "a hand-off that compacts first sends its answer, never the notice" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.1,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"tr_voice_preflight_reg_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
+      store = start_voice_store()
+      old_content = String.duplicate("old context ", 25_000)
+      :ok = ConversationStore.add_message(@chat_key, "user", old_content, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "old answer", server: store)
+
+      turn_state =
+        turn_state(
+          adapter: PreflightAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store,
+          last_context_tokens: 50_000
+        )
+
+      test_pid = self()
+      deliver = fn part -> send(test_pid, {:delivered, part}) end
+
+      assert {:ok, "assistant after preflight", _tokens} =
+               TurnRunner.run(chat_hand_off("user: what is next"), turn_state, deliver)
+
+      assert_receive {:preflight_summary_call, _summary}, 5_000
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      assert main_text =~ "preflight summary"
+      refute_received {:delivered, _part}
+    end
+
+    test "a private call's delegation is built without the categories it cannot deliver" do
       registry = boundary_registry()
       categories = boundary_categories(voice_msg("what is on my calendar"), registry)
 
-      for excluded <- VoiceCall.excluded_categories() do
+      for excluded <- VoiceCall.excluded_categories("private") do
         refute excluded in categories,
-               "a voice delegation must not advertise a #{excluded} capability"
+               "a private call's delegation must not advertise a #{excluded} capability"
       end
 
       # The boundary excludes categories, not the whole surface.
       assert :system in categories
+    end
+
+    # M56 §4.7: a hand-off in the chat launches a coding run in the chat's own
+    # conversation, so the run's outcome re-enters the chat and is answered
+    # there; channel sends, media and fan-out stay out.
+    test "a hand-off in the chat is built with coding runs, and without the rest" do
+      registry = boundary_registry()
+      categories = boundary_categories(chat_hand_off("fix the flaky test"), registry)
+
+      assert :harness in categories
+      assert :system in categories
+
+      for excluded <- VoiceCall.excluded_categories("chat") do
+        refute excluded in categories,
+               "a hand-off in the chat must not advertise a #{excluded} capability"
+      end
     end
 
     test "a text turn on the same registry still carries every category" do
@@ -1954,26 +2698,30 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       categories = boundary_categories(msg, registry)
 
-      for category <- [:system | VoiceCall.excluded_categories()] do
+      for category <- [:system | VoiceCall.excluded_categories("private")] do
         assert category in categories, "a text turn must still advertise #{category}"
       end
     end
 
-    test "the voice prompt and the delegation read one exclusion list" do
+    test "the voice prompt and the delegation read one exclusion list, per mode" do
       # The M28 lesson, pinned: what the voice model is told about and what its
       # delegation is given come from the same list, so they cannot drift.
       registry = boundary_registry()
 
-      advertised =
-        registry
-        |> LivePrompt.eligible_capabilities()
-        |> Enum.map(& &1.metadata[:category])
-        |> Enum.uniq()
+      for {conversation, msg} <- [
+            {"private", voice_msg("what is on my calendar")},
+            {"chat", chat_hand_off("what is on my calendar")}
+          ] do
+        advertised =
+          registry
+          |> LivePrompt.eligible_capabilities(conversation)
+          |> Enum.map(& &1.metadata[:category])
+          |> Enum.uniq()
 
-      delegated = boundary_categories(voice_msg("what is on my calendar"), registry)
+        delegated = boundary_categories(msg, registry)
 
-      assert Enum.sort(advertised) == Enum.sort(delegated)
-      assert VoiceCall.excluded_categories() == [:channel, :media, :delegation, :harness]
+        assert Enum.sort(advertised) == Enum.sort(delegated)
+      end
     end
 
     test "commit skips memory review when the snapshot disables it" do
@@ -1983,6 +2731,111 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     test "commit starts memory review when the snapshot does not disable it" do
       assert_review(%{}, :assert)
     end
+  end
+
+  # M56 D9: the phone's turns run in the Mac's chat. The gateway names the
+  # chat's key on every phone message (`conversation_key`), and the message
+  # keeps the phone's channel, so one history serves both transports.
+  describe "the phone's turns in the chat" do
+    test "a phone turn reads what was typed on the Mac, and the Mac's next turn the phone's" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      typed = "the lease is due on Friday"
+      :ok = ConversationStore.add_message(@chat_key, "user", typed, server: store)
+      :ok = ConversationStore.add_message(@chat_key, "assistant", "Noted.", server: store)
+
+      phone = phone_msg("when is the lease due?")
+      {messages, _opts} = run_capture_turn(phone, store)
+
+      assert Enum.any?(messages, &(&1.role == "user" and &1.content == typed))
+      assert :ok = TurnRunner.commit(phone, commit_state(store), "On Friday.", 0)
+
+      {messages, _opts} = run_capture_turn(mac_msg("and the deposit?"), store)
+      contents = Enum.map(messages, & &1.content)
+
+      assert "when is the lease due?" in contents
+      assert "On Friday." in contents
+      assert ConversationStore.get_history({"mobile", "main", :root}, server: store) == []
+    end
+
+    test "a hand-off reads what was typed on the phone" do
+      Application.put_env(:fermix_core, :compaction, enabled: false)
+      store = start_voice_store()
+      phone = phone_msg("here is the brief: https://example.com/brief")
+      {_messages, _opts} = run_capture_turn(phone, store)
+      assert :ok = TurnRunner.commit(phone, commit_state(store), "Got it.", 0)
+
+      {messages, _opts} = run_capture_turn(chat_hand_off("user: open the link I sent"), store)
+
+      assert Enum.any?(
+               messages,
+               &(&1.role == "user" and
+                   &1.content == "here is the brief: https://example.com/brief")
+             )
+    end
+
+    # The named key is the message's routing, never its row: the row holds the
+    # phone's own metadata, under the chat's conversation.
+    test "a phone turn's request is stored in the chat's conversation, with the phone's fields" do
+      %{repo: repo, store: store} = start_durable_store()
+
+      run_capture_turn(phone_msg("from the phone"), store)
+
+      assert [row] = await_rows(repo, @chat_key, 1)
+      assert row.channel == "companion"
+      assert row.content == "from the phone"
+      assert row.metadata == %{"client_msg_id" => "c-1", "mobile_request_type" => "msg"}
+    end
+
+    # One conversation, one review: the reviewer keys its state on the key
+    # each commit hands it, and both transports hand it the chat's.
+    test "a phone turn's commit and a Mac turn's ask for the one review of the chat" do
+      store = start_voice_store()
+
+      for msg <- [phone_msg("I moved to Lisbon"), mac_msg("I prefer short answers")] do
+        TurnRunner.commit(msg, review_state(store), "Noted.", 0)
+        assert_received {:memory_review_dispatched, @chat_key}
+      end
+    end
+  end
+
+  defp phone_msg(content) do
+    %{
+      channel: "mobile",
+      chat_id: "main",
+      conversation_key: @chat_key,
+      sender: "Mobile owner",
+      content: content,
+      source_trust: :operator,
+      metadata: %{client_msg_id: "c-1", mobile_request_type: "msg"}
+    }
+  end
+
+  defp mac_msg(content) do
+    %{
+      channel: "companion",
+      chat_id: "main",
+      sender: "Companion owner",
+      content: content,
+      source_trust: :operator,
+      metadata: %{}
+    }
+  end
+
+  defp review_state(store) do
+    turn_state(
+      adapter: CaptureTurnAdapter,
+      adapter_opts: [model: "mock-model", test_pid: self()],
+      capability_registry: nil,
+      conversation_store: store,
+      memory_reviewer: RecordingReviewer,
+      main_agent_server: nil,
+      review_interval_hours: 24,
+      review_max_messages: 50,
+      review_input_token_budget: 4_000,
+      review_failure_backoff_ms: 60_000,
+      compaction_failures: %{}
+    )
   end
 
   defmodule ReviewSpy do
@@ -2072,7 +2925,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     name = :"tr_boundary_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: name}, id: name)
 
-    for category <- [:system | VoiceCall.excluded_categories()] do
+    for category <- [:system | VoiceCall.excluded_categories("private")] do
       :ok = CapabilityRegistry.register(name, boundary_capability(category))
     end
 
@@ -2143,16 +2996,18 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     run_capture_turn(msg, start_voice_store())
   end
 
-  defp run_capture_turn(msg, store) do
+  defp run_capture_turn(msg, store, state_overrides \\ []) do
     registry_name = :"tr_voice_reg_#{System.unique_integer([:positive])}"
     start_supervised!({CapabilityRegistry, name: registry_name}, id: registry_name)
 
     turn_state =
       turn_state(
-        adapter: CaptureTurnAdapter,
-        adapter_opts: [model: "mock-model", test_pid: self()],
-        capability_registry: registry_name,
-        conversation_store: store
+        [
+          adapter: CaptureTurnAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry_name,
+          conversation_store: store
+        ] ++ state_overrides
       )
 
     assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
@@ -2183,9 +3038,73 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
   defp forged_voice_call, do: %{source: :telegram, voice_call: voice_call()}
 
+  defp chat_hand_off(content) do
+    content
+    |> voice_msg()
+    |> put_in([:metadata, :voice_call, :conversation_key], @chat_key)
+    |> put_in([:metadata, :voice_call, :conversation], "chat")
+  end
+
+  # What `commit/4` reads beyond the run's snapshot: no review (MainAgent
+  # freezes `memory_review?: false` for a hand-off) and no MainAgent to tell.
+  defp commit_state(store) do
+    turn_state(
+      adapter: CaptureTurnAdapter,
+      adapter_opts: [model: "mock-model", test_pid: self()],
+      capability_registry: nil,
+      conversation_store: store,
+      memory_review?: false,
+      main_agent_server: nil
+    )
+  end
+
+  defp start_durable_store do
+    unique = System.unique_integer([:positive])
+    db_path = Path.join(System.tmp_dir!(), "fermix-tr-spoken-#{unique}.db")
+    repo = :"tr_spoken_repo_#{unique}"
+    store = :"tr_spoken_store_#{unique}"
+
+    start_supervised!({Repo, name: repo, enabled: true, database_path: db_path},
+      id: repo
+    )
+
+    start_supervised!({ConversationStore, name: store, max_messages: 128, repo: repo}, id: store)
+
+    on_exit(fn ->
+      Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+    end)
+
+    %{repo: repo, store: store}
+  end
+
+  defp await_rows(repo, {channel, chat_id, thread_scope}, expected, attempts \\ 100) do
+    selector = %{
+      agent_id: "main",
+      channel: channel,
+      chat_id: chat_id,
+      thread_scope: to_string(thread_scope),
+      kind: "chat_message"
+    }
+
+    case Repo.get_messages(selector, server: repo) do
+      {:ok, rows} when length(rows) == expected ->
+        rows
+
+      _other when attempts > 0 ->
+        Process.sleep(10)
+        await_rows(repo, {channel, chat_id, thread_scope}, expected, attempts - 1)
+
+      other ->
+        flunk("expected #{expected} persisted rows, got #{inspect(other)}")
+    end
+  end
+
   defp voice_call do
     %{
       call_id: "voice_live_42",
+      call_uuid: @call_uuid,
+      conversation: "private",
+      conversation_key: @private_key,
       delegation_id: "d-1",
       revision: 1,
       turn_session_id: "voice_delegation_7",

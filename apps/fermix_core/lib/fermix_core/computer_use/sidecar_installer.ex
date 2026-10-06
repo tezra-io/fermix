@@ -23,10 +23,13 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
 
   import Bitwise, only: [&&&: 2]
 
+  alias FermixCore.Net.Egress
+  alias FermixCore.Net.TimeoutPolicy
   alias FermixCore.Setup.ConfigStore
 
   @command "compux"
   @plugin_name "computer_use_sidecar"
+  @connect_timeout_ms 15_000
 
   @doc "The stable identifier the setup card keys off (unchanged for UX continuity)."
   @spec plugin_name() :: String.t()
@@ -37,7 +40,36 @@ defmodule FermixCore.ComputerUse.SidecarInstaller do
   baked checksum). No options — verification is baked in and non-overridable.
   """
   @spec install() :: {:ok, Path.t()} | {:error, term()}
-  def install, do: Compux.Binary.path(cache_dir: cache_root())
+  def install, do: Compux.Binary.path(cache_dir: cache_root(), fetcher: &fetch_release/1)
+
+  @doc false
+  # compux would fetch the archive itself with `:httpc`, which knows nothing of
+  # `FermixCore.Net.Egress`. Fetching it here sends the download out the way
+  # every other request leaves. What is trusted does not change: compux still
+  # checks the bytes against its baked sha256, whoever fetched them.
+  @spec fetch_release(String.t(), keyword()) :: {:ok, binary()} | {:error, term()}
+  def fetch_release(url, req_options \\ []) when is_binary(url) and is_list(req_options) do
+    request =
+      [
+        method: :get,
+        url: url,
+        # The archive exactly as served: no decompression, no decoding.
+        raw: true,
+        retry: false,
+        # compux's own connect bound.
+        connect_options: [timeout: @connect_timeout_ms],
+        receive_timeout: TimeoutPolicy.receive_timeout_for(:media_download)
+      ]
+      |> Keyword.merge(req_options)
+      |> Req.new()
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
+      {:ok, %Req.Response{status: 200, body: body}} when is_binary(body) -> {:ok, body}
+      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+      {:error, reason} -> {:error, {:http_error, reason}}
+    end
+  end
 
   @doc """
   Resolve the installed sidecar path **without downloading** — a `dev_local` build

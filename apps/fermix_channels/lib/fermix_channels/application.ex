@@ -19,6 +19,7 @@ defmodule FermixChannels.Application do
   def start(_type, _args) do
     readiness = Readiness.report()
     log_missing_ingress_authorization(readiness)
+    log_missing_helpers(readiness)
 
     # Fail fast on a misconfigured command list: a duplicate name/alias would
     # silently shadow a command via the registry's first-match lookup.
@@ -74,11 +75,19 @@ defmodule FermixChannels.Application do
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,
         FermixChannels.Gateway.Idempotency
-      ] ++ album_buffers() ++ transport_children(readiness, request_boot_epoch)
+      ] ++
+        album_buffers() ++
+        transport_children(readiness, request_boot_epoch) ++ call_row_sweep(settles?())
 
     opts = [strategy: :one_for_one, name: FermixChannels.Supervisor]
     Supervisor.start_link(children, opts)
   end
+
+  # The chat rows Live calls still owe after a restart (M56 §4.2), written
+  # last, once the companion channel that writes them and the phones' channel
+  # that hears them are up; a test tree runs the pass each test drives.
+  defp call_row_sweep(true), do: [FermixChannels.Voice.CallRowSweep]
+  defp call_row_sweep(false), do: []
 
   # One non-blocking album buffer per channel that delivers a multi-image album
   # as separate inbound messages (Telegram media groups across poll cycles;
@@ -147,6 +156,26 @@ defmodule FermixChannels.Application do
       "#{channel} ingress is enabled but no owner_user_id or allowed_*_ids list is set. " <>
         "Refusing to start the #{channel} adapter. Run /whoami from that channel and set " <>
         "fermix_channels.#{channel}.owner_user_id, then restart the daemon."
+    )
+  end
+
+  # An enabled channel whose helper is not on disk (MILESTONE_54 §14) boots
+  # without its transport and says so; `macos?:` injects the host (tests).
+  @doc false
+  @spec log_missing_helpers(Readiness.report(), keyword()) :: :ok
+  def log_missing_helpers(readiness, opts \\ [])
+
+  def log_missing_helpers(%{status: :ready}, opts) when is_list(opts) do
+    Enum.each(ChannelRegistry.missing_helpers(opts), &log_helper_refusal/1)
+    :ok
+  end
+
+  def log_missing_helpers(_readiness_report, opts) when is_list(opts), do: :ok
+
+  defp log_helper_refusal(channel) do
+    Logger.warning(
+      "#{channel} is enabled but the helper it needs is not installed. Not starting the " <>
+        "#{channel} channel. Turn #{channel} on in Channels settings to install it, then restart."
     )
   end
 end

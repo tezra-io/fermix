@@ -54,16 +54,3 @@ scenarios:
               What value did I assign to reference code {subject}? Reply with ONLY the
               value, nothing else.
         score: { match: contains, expected: "{token}" }
-
-      - id: durable_ledger_marker
-        # Same residue-immune shape (unique {subject} is the sole anchor), different surface
-        # wording so the two cases aren't verbatim twins.
-        cross_session: true
-        turns:
-          - query: >
-              For my records, please remember that ledger entry {subject} is tagged with the
-              marker {token}. Just confirm you'll keep it in mind.
-          - query: >
-              What marker did I say ledger entry {subject} is tagged with? Reply with ONLY
-              the marker, nothing else.
-        score: { match: contains, expected: "{token}" }

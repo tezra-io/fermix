@@ -29,6 +29,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.AgentLoop
   alias FermixCore.Agents.ConversationKey
   alias FermixCore.Agents.IterationLimits
+  alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
@@ -38,12 +39,15 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Compactor
   alias FermixCore.Memory.ConversationStore
+  alias FermixCore.Net.Egress
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
+  alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Realtime.RecentCalls
   alias FermixCore.Reply
   alias FermixCore.Telemetry
   alias FermixCore.Tools.HarnessSupport
@@ -171,8 +175,10 @@ defmodule FermixCore.Agents.TurnRunner do
     # A Live voice delegation never dispatches a memory review (M41 §5.2): a
     # spoken fragment is not a durable fact about the owner, and an ephemeral
     # call has no history worth mining. `MainAgent` freezes the decision into
-    # the snapshot, so a mid-call config change cannot move it.
-    if Map.get(turn_state, :memory_review?, true), do: maybe_start_memory_review(msg, turn_state)
+    # the snapshot, so a mid-call config change cannot move it. Neither does a
+    # guest's turn: a review is the owner's memory being written, and it waits
+    # for a turn the owner took.
+    if memory_review?(msg, turn_state), do: maybe_start_memory_review(msg, turn_state)
 
     result =
       maybe_auto_compact(
@@ -207,6 +213,11 @@ defmodule FermixCore.Agents.TurnRunner do
   # disagree with the section — the exact drift the live re-derivation had. The
   # context re-derivation remains only for callers without a frozen snapshot.
   defp history_taint_opt(msg, turn_state, replayed) do
+    if reply_tainted?(msg, turn_state, replayed), do: [metadata: Taint.metadata()], else: []
+  end
+
+  # The one decision above, also told ahead of a hand-off's reply (M56 §9).
+  defp reply_tainted?(msg, turn_state, replayed) do
     gate_context = %{
       source_trust: Map.get(msg, :source_trust),
       ordered_routes: Map.get(turn_state, :ordered_routes),
@@ -217,10 +228,8 @@ defmodule FermixCore.Agents.TurnRunner do
     opts = history_gate_opts(turn_state)
     routes = Map.get(turn_state, :ordered_routes)
 
-    if Taint.tainted_turn?(gate_context, opts) or
-         Taint.carries_unmasked_taint?(replayed, routes, opts),
-       do: [metadata: Taint.metadata()],
-       else: []
+    Taint.tainted_turn?(gate_context, opts) or
+      Taint.carries_unmasked_taint?(replayed, routes, opts)
   end
 
   # The turn's frozen Gate snapshot as taint opts, or `[]` for a caller that
@@ -319,6 +328,9 @@ defmodule FermixCore.Agents.TurnRunner do
     cond do
       context_length_error?(reason) ->
         context_length_reply(surface)
+
+      reply = chatgpt_plan_reply(reason) ->
+        reply
 
       auth_error?(reason) ->
         auth_reply(reason)
@@ -432,7 +444,7 @@ defmodule FermixCore.Agents.TurnRunner do
     {history, preflight_compaction} =
       maybe_preflight_auto_compact(conversation_key, state, history)
 
-    maybe_notify_preflight_compacted(preflight_compaction, deliver)
+    maybe_notify_preflight_compacted(preflight_compaction, deliver, voice_call)
     emit_history_telemetry(msg, conversation_key, history, history_duration_us)
 
     # Strict Computer History taint (MILESTONE_32 §13.6): a prior activity-derived
@@ -482,6 +494,9 @@ defmodule FermixCore.Agents.TurnRunner do
       memory_repo: state.memory_repo,
       memory_agent_id: state.memory_agent_id,
       memory_owner_id: state.memory_owner_id,
+      # A memory tool that changes USER.md or MEMORY.md invalidates the cached
+      # runtime context here, so the next turn is built from what it saved.
+      main_agent_server: Map.get(state, :main_agent_server),
       prompt_accounting: accounting,
       source_channel: msg.channel,
       source_trust: source_trust,
@@ -559,7 +574,9 @@ defmodule FermixCore.Agents.TurnRunner do
     # date note's once-a-day churn the only churn in this prompt region.
     messages = inject_channel_presentation(messages, msg)
     messages = inject_current_date(messages)
+    messages = inject_recent_calls(messages, state, source_trust, voice_call)
     messages = inject_recent_activity(messages, context)
+    messages = inject_live_call(messages, Map.get(state, :live_call))
 
     # `/ultra` is now a run-mode of the normal turn (not a separate
     # orchestrator): the tag unlocks the wider `subagents` caps via
@@ -582,10 +599,26 @@ defmodule FermixCore.Agents.TurnRunner do
       end)
 
     emit_loop_runtime_telemetry(msg, conversation_key, source_trust, loop_runtime_duration_us)
-    persist_user_message(conversation_key, msg, state)
+    tell_history_tainted(voice_call, msg, state, history, stream_callback)
+    persist_user_message(conversation_key, msg, state, voice_call)
 
-    run_normal(loop_opts, context, msg, start)
+    run_normal(loop_opts, context, msg, {start, Map.get(state, :live_call)})
   end
+
+  # M56 §9: a hand-off's reply reaches its Live session before `commit/4`
+  # stamps it, so the stamp it will carry is told to its channel first, from
+  # this process, ahead of the reply: the session must not give a reply drawn
+  # from Computer History to a voice provider that may not carry it. Decided
+  # by `reply_tainted?/3`, the decision `commit/4` stamps with, over the history
+  # this turn replays (what commit re-reads, less this turn's own, never
+  # tainted, request). A turn with no stream has no channel to tell.
+  defp tell_history_tainted({:ok, _voice_call}, msg, state, history, stream_callback)
+       when is_function(stream_callback, 1) do
+    if reply_tainted?(msg, state, history), do: stream_callback.(:history_tainted)
+    :ok
+  end
+
+  defp tell_history_tainted(_voice_call, _msg, _state, _history, _stream_callback), do: :ok
 
   defp run_profile(msg) do
     (Map.get(msg, :metadata) || %{}) |> Map.get(:run_profile)
@@ -650,11 +683,38 @@ defmodule FermixCore.Agents.TurnRunner do
   # messages to lead) so the date sits with the rest of the system prompt.
   defp inject_current_date(messages), do: append_system_note(messages, CurrentDate.note())
 
+  # The gists of the last Live calls in the chat (M56 §4.2), for an owner's
+  # chat turn, never a hand-off's: a hand-off is the call, and reads the chat.
+  # The note changes only when a call ends, so it sits beside the date note
+  # in the leading system run rather than in `extra_system_messages`: that seam
+  # is spliced ahead of the prompt memory, where each call's end would break
+  # the prompt cache for USER.md and MEMORY.md too, and it is the hand-off's
+  # own addendum, decided by the turn's voice call. Nor can it live in the
+  # cached runtime context, which nothing rebuilds when a call ends.
+  defp inject_recent_calls(messages, state, :operator, :none) do
+    note =
+      RecentCalls.note(
+        Map.get(state, :memory_repo),
+        Map.get(state, :ordered_routes),
+        history_gate_opts(state)
+      )
+
+    append_system_note(messages, note)
+  end
+
+  defp inject_recent_calls(messages, _state, _trust, _voice_call), do: messages
+
   # Per-turn Recent Activity section (MILESTONE_32 §11.1), gated by the single
   # ComputerHistory.Gate — `note/1` returns nil (a no-op here) when the Gate
   # denies it or there is no activity yet.
   defp inject_recent_activity(messages, context),
     do: append_system_note(messages, RecentActivity.note(context))
+
+  # A typed chat turn during a Live call in the chat (M56 §4.4): the line exists
+  # only while the call the snapshot froze does, and goes last in the leading
+  # system run, so a call costs the prompt cache two breaks, not one per turn.
+  defp inject_live_call(messages, live_call),
+    do: append_system_note(messages, LiveCallTurn.note(live_call))
 
   # Per-channel presentation posture (CHANNEL_LONGFORM_PRESENTATION §7). A pure
   # function of the channel and chat type — both `ConversationKey`-stable — so
@@ -701,10 +761,11 @@ defmodule FermixCore.Agents.TurnRunner do
     |> String.trim()
   end
 
-  defp run_normal(loop_opts, context, msg, start) do
+  defp run_normal(loop_opts, context, msg, {start, live_call}) do
     case AgentLoop.run(loop_opts) do
       {:ok, result} ->
         duration_ms = System.monotonic_time(:millisecond) - start
+        silent? = LiveCallTurn.silent?(live_call, result.response)
 
         :telemetry.execute(
           [:fermix, :agent, :message],
@@ -713,13 +774,14 @@ defmodule FermixCore.Agents.TurnRunner do
             total_tokens: result.total_tokens,
             duration_ms: duration_ms
           },
-          turn_message_metadata(context, msg, result)
+          context |> turn_message_metadata(msg, result) |> Map.put(:silent, silent?)
         )
 
         Logger.info(
           "Agent loop completed in #{result.iterations} iterations, #{result.total_tokens} tokens"
         )
 
+        if silent?, do: tell_silent(Keyword.get(loop_opts, :stream_callback))
         {:ok, result.response, Map.get(result, :context_tokens, 0)}
 
       {:error, reason} ->
@@ -734,6 +796,15 @@ defmodule FermixCore.Agents.TurnRunner do
         {:error, reason}
     end
   end
+
+  # M56 §4.4: the turn ends with no reply, and its channel, the one surface
+  # that streams it, is told before the reply reaches it, from this same
+  # process, so it shows nothing for the turn. The reply still goes back to
+  # the queue, which delivers and commits it as any other.
+  defp tell_silent(stream_callback) when is_function(stream_callback, 1),
+    do: stream_callback.(:silent_reply)
+
+  defp tell_silent(nil), do: :ok
 
   defp turn_message_metadata(context, msg, result) do
     context
@@ -780,10 +851,8 @@ defmodule FermixCore.Agents.TurnRunner do
     do: Map.put(metadata, :output, Telemetry.preview(response))
 
   # See `error_reply/2` for the auth-vs-generic mapping these patterns drive.
-  # (The Codex `{:auth_invalidated, _}`/`{:refresh_failed, _}` tuples are gone —
-  # the adapter now returns structured `{:provider_error, %{kind: :auth}}`.)
+  # Adapters return structured `{:provider_error, %{kind: :auth}}`.
   defp auth_error?(:no_auth_file), do: true
-  defp auth_error?(:auth_invalidated), do: true
   defp auth_error?(:refresh_failed), do: true
   defp auth_error?(:invalid_grant), do: true
   defp auth_error?({:provider_error, status, _body}) when status in [401, 403], do: true
@@ -794,7 +863,7 @@ defmodule FermixCore.Agents.TurnRunner do
   defp auth_error?(reason) when is_binary(reason) do
     String.match?(
       reason,
-      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file|auth_invalidated)\b/i
+      ~r/\b(401|403|Unauthorized|refresh_token_reused|invalid_grant|invalid_token|no_auth_file)\b/i
     )
   end
 
@@ -842,15 +911,39 @@ defmodule FermixCore.Agents.TurnRunner do
     "Authentication failed — run `fermix auth login` from the host and try again."
   end
 
+  # OpenAI Codex's ChatGPT plan route names each refusal (M57 §8), and those
+  # sentences come before the auth and status clauses: a plan refusal answered
+  # with a 403 is not a stale credential. The vendor's own words follow the
+  # sentence. A 401 or 403 with no sentence of its own (a bare `{"detail": ...}`
+  # before the stream) is quoted as it came rather than called a sign-in fault.
+  defp chatgpt_plan_reply({:provider_error, %{provider: :openai_codex} = error} = reason) do
+    case ChatGPTPlan.refusal_sentence(reason) do
+      nil -> chatgpt_words_reply(error)
+      sentence -> sentence <> chatgpt_words_suffix(error)
+    end
+  end
+
+  defp chatgpt_plan_reply(_reason), do: nil
+
+  defp chatgpt_words_reply(%{kind: :auth, status: status} = error) when status in [401, 403],
+    do: "ChatGPT refused the request (HTTP #{status})." <> chatgpt_words_suffix(error)
+
+  defp chatgpt_words_reply(_error), do: nil
+
+  defp chatgpt_words_suffix(error) do
+    case Map.get(error, :provider_words) do
+      words when is_binary(words) and words != "" -> " ChatGPT said: \"#{words}\""
+      _absent -> ""
+    end
+  end
+
   defp provider_error_reply({:provider_error, %{kind: :rate_limit} = error}) do
-    usage_limit_reply(error) ||
-      "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
+    "#{provider_label(error)} rate-limited this request. Wait briefly and retry."
   end
 
   defp provider_error_reply({:provider_error, %{kind: :quota} = error}) do
-    usage_limit_reply(error) ||
-      "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
-        "billing, or model access, then retry."
+    "#{provider_label(error)} quota or credits are exhausted. Check the provider account, " <>
+      "billing, or model access, then retry."
   end
 
   # When the server declared its failure in words (`provider_words`, set
@@ -877,7 +970,7 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # A 200 the server itself declared terminal while delivering neither text nor a
-  # tool call (`Codex.undelivered_error/2`, `code: "empty_response"`). The status
+  # tool call (`code: "empty_response"`). The status
   # floor below would render it "returned HTTP 200", which reads as a transport
   # fault that did not happen; the provider's own sentence is the diagnosis.
   defp provider_error_reply({:provider_error, %{code: "empty_response"} = error}) do
@@ -897,28 +990,18 @@ defmodule FermixCore.Agents.TurnRunner do
       "or reduce request size/effort if it persists."
   end
 
+  defp provider_error_reply({:provider_transport_error, %{kind: kind} = error})
+       when kind in [:proxy_unreachable, :proxy_refused] do
+    "#{provider_label(error)} could not be reached through the configured proxy: " <>
+      "#{Egress.describe_failure(Map.get(error, :reason))}. " <>
+      "Check the proxy and the [fermix_core.network] settings."
+  end
+
   defp provider_error_reply({:provider_transport_error, error}) when is_map(error) do
     "#{provider_label(error)} provider transport failed: #{inspect(Map.get(error, :reason))}."
   end
 
   defp provider_error_reply(_reason), do: nil
-
-  # Friendly usage-limit message when the provider's 429 body carried a reset
-  # time (OpenAI/Codex). Best-effort and provider-agnostic — nil when no reset
-  # is available, so the caller falls back to its generic text.
-  defp usage_limit_reply(%{resets_at: resets_at} = error) when is_number(resets_at) do
-    mins = max(0, round((resets_at * 1000 - System.system_time(:millisecond)) / 60_000))
-
-    "You've hit your #{provider_label(error)} usage limit#{plan_suffix(error)}. " <>
-      "Try again in ~#{mins} min."
-  end
-
-  defp usage_limit_reply(_error), do: nil
-
-  defp plan_suffix(%{plan_type: plan}) when is_binary(plan) and plan != "",
-    do: " (#{String.downcase(plan)} plan)"
-
-  defp plan_suffix(_error), do: ""
 
   defp provider_label(error) when is_map(error) do
     error
@@ -932,7 +1015,7 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp provider_message(_error), do: "Check provider logs and retry."
 
-  defp persist_user_message(conversation_key, msg, state) do
+  defp persist_user_message(conversation_key, msg, state, voice_call) do
     ConversationStore.add_message(
       conversation_key,
       "user",
@@ -941,8 +1024,32 @@ defmodule FermixCore.Agents.TurnRunner do
       sender: msg.sender,
       agent_id: state.memory_agent_id,
       owner_id: state.memory_owner_id,
-      metadata: Map.get(msg, :metadata)
+      metadata: user_message_metadata(msg, voice_call)
     )
+  end
+
+  # A Live hand-off's request is stored as what it is (M56 §4.1, D10): asked
+  # aloud and possibly misheard, on the call its UUID names, so the memory
+  # review never reads it while history and compaction do. The trusted
+  # `voice_call` map is the turn's context, not the message's: it carries the
+  # store, the routing ids, the 1 KB backend addendum and a key tuple JSON
+  # cannot hold, so it is never stored.
+  defp user_message_metadata(msg, {:ok, %{call_uuid: call_uuid}}) do
+    msg.metadata
+    |> Map.delete(:voice_call)
+    |> Map.merge(%{spoken: true, call_uuid: call_uuid})
+  end
+
+  # What a guest says is marked as theirs where it is stored, so the memory
+  # review — which reads a conversation's user messages — never distils it into
+  # the owner's memory, in a shared chat included.
+  defp user_message_metadata(msg, :none) do
+    metadata = Map.get(msg, :metadata)
+
+    case profile_trust(Map.get(msg, :source_trust)) do
+      :guest -> Map.put(metadata || %{}, :guest, true)
+      :operator -> metadata
+    end
   end
 
   defp monotonic_ms, do: System.monotonic_time(:millisecond)
@@ -1118,7 +1225,13 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  defp maybe_notify_preflight_compacted(:compacted, deliver) when is_function(deliver, 1) do
+  # A Live hand-off's reply route is its spoken result (M56 §4.1): the notice
+  # would be spoken as the answer, and the real answer then dropped as late. The
+  # trusted voice context decides, the gate a forged map never clears.
+  defp maybe_notify_preflight_compacted(:compacted, _deliver, {:ok, _voice_call}), do: :ok
+
+  defp maybe_notify_preflight_compacted(:compacted, deliver, :none)
+       when is_function(deliver, 1) do
     case deliver.(
            {:text, "Trimmed older conversation history to stay within the context window."}
          ) do
@@ -1130,7 +1243,7 @@ defmodule FermixCore.Agents.TurnRunner do
     end
   end
 
-  defp maybe_notify_preflight_compacted(_status, _deliver), do: :ok
+  defp maybe_notify_preflight_compacted(_status, _deliver, _voice_call), do: :ok
 
   defp maybe_auto_compact(conversation_key, state, compaction_target, context_tokens) do
     config = Application.get_env(:fermix_core, :compaction, [])
@@ -1398,19 +1511,19 @@ defmodule FermixCore.Agents.TurnRunner do
   end
 
   # The voice capability boundary (M41 §5.1): a Live delegation runs on the
-  # operator surface minus `VoiceCall.excluded_categories/0` — the SAME list
-  # `LivePrompt` advertises to the voice model, so prose and wire move together
-  # (the M28 lesson). One seam: a voice turn takes this profile, every other
-  # turn takes today's cached one, unchanged.
+  # operator surface minus `VoiceCall.excluded_categories/1` for its call's
+  # mode — the SAME list `LivePrompt` advertises to the voice model, so prose
+  # and wire move together (the M28 lesson). One seam: a voice turn takes this
+  # profile, every other turn takes today's cached one, unchanged.
   #
   # Built per delegation rather than added to the per-epoch cache on purpose.
   # A fourth cached variant would cost every install a build it never uses, and
   # this one is a registry read plus string assembly (the expensive half — the
   # file-backed prompt base — stays cached and is reused from `ctx`), against a
   # delegation that is seconds of speech away from the next one.
-  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, _voice_call}) do
+  defp profile_for_turn(ctx, trust, registry, _advertise_context, {:ok, voice_call}) do
     RuntimeContext.build_profile(profile_trust(trust), ctx.available_skills, registry,
-      excluded_categories: VoiceCall.excluded_categories()
+      excluded_categories: VoiceCall.excluded_categories(voice_call.conversation)
     )
   end
 
@@ -1484,6 +1597,11 @@ defmodule FermixCore.Agents.TurnRunner do
       total +
         byte_size(to_string(Map.get(message, :content) || Map.get(message, "content") || ""))
     end)
+  end
+
+  defp memory_review?(msg, turn_state) do
+    Map.get(turn_state, :memory_review?, true) and
+      profile_trust(Map.get(msg, :source_trust)) == :operator
   end
 
   defp maybe_start_memory_review(msg, state) do

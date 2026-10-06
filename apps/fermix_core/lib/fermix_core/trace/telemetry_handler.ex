@@ -18,6 +18,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
   alias FermixCore.Management.Telemetry, as: ManagementTelemetry
   alias FermixCore.Meetings.Telemetry, as: MeetingTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
+  alias FermixCore.Realtime.GistTelemetry
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.SkillCuration.Telemetry, as: SkillCurationTelemetry
   alias FermixCore.SoulCuration.Telemetry, as: SoulTelemetry
@@ -284,6 +285,7 @@ defmodule FermixCore.Trace.TelemetryHandler do
       TemporalTelemetry.trace_event_definitions() ++
       TemporalFollowupTelemetry.trace_event_definitions() ++
       LiveTelemetry.trace_event_definitions() ++
+      GistTelemetry.trace_event_definitions() ++
       ComputerUseTelemetry.trace_event_definitions()
   end
 

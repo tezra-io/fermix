@@ -19,7 +19,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 
 ## Operating Loop
 
-1. Use the default profile unless login state, user observation, or a headless-only blocker requires another.
+1. Use the default profile unless login state, user observation, a headless-only blocker, or a page's WebMCP tools or a download in the Fermix app's pane (below) requires another.
 2. `open`/`navigate` come back with the page they loaded — read it from that result, do NOT call `snapshot` next. Refs are valid only for that page state.
 3. Pass the intended `target` when multiple tabs exist.
 4. `click`, `submit`, `click_coords` and a `press` of Enter report `page` on a tab you have already snapshotted — read that instead of snapshotting again. After anything else, verify with `wait`/`get`.
@@ -43,6 +43,12 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - `webmcp_tool_threw` and `webmcp_timeout` both leave the effect UNKNOWN — the call may have landed. Read the page state (`get`/`snapshot`, or the page's own read tool) before calling it again; never blind-retry a call that changes something.
 - `webmcp_unavailable` means this page offers no tools at all: drive it with `snapshot` and `act` instead.
 
+## The Fermix App's Browser
+
+- `open`, `navigate` and `status` name the browser in `backend`: `cdp` is Chrome; `fermix_app` is the Fermix Mac app's own browser pane, where the default profile runs while the app is open.
+- The pane runs no WebMCP tools and saves no downloads (`webmcp` and `download` there only answer `unsupported_in_fermix_app`). When `backend` is `fermix_app` and the page offers WebMCP tools or you need a file from it, open the page with `profile: "fermix_chrome"`, which is always Chrome, and do it there: run `webmcp`, or click the file's link with `act` and then call `download` (below). When `backend` is `cdp`, do it where you are.
+- `fermix_chrome` keeps its own sign-ins, so a site signed in to in the pane is signed out there: tell the person when the page needs a sign-in. It is a second browser beside the pane, not a move: the pane's task stays where it is, and a pane that goes away (`host_lost`) is still reported, never redone in Chrome on your own.
+
 ## The Person's Own Tab
 
 - The default profile is Fermix's OWN managed browser. `profile: "selected_tab"` is instead ONE tab of the person's own browser, signed in as them, which they hand over by clicking the Fermix browser extension on it. Use it only when they ask about the tab they have open; for a new web task the managed profile is simpler and borrows nothing.
@@ -58,6 +64,7 @@ Use `browser` for JavaScript-capable pages. Choose the right web tool once, read
 - Reuse one tab target per flow. If popups or retries create extras, use `tabs`, then `focus` or `close`.
 - On stale/missing refs: snapshot the same target, retry once with the new ref, then report the blocker.
 - Avoid snapshot churn; do not snapshot after every successful `fill`.
+- `download` starts nothing: it clicks no link, fetches no URL and names no file, and it refuses `ref`, `url` and `path`. Start the file yourself with an `act` click on its link or button, or a `navigate` to the file's address, then call `download` to collect it. It hands back the newest finished download it has not handed back before, at once if it already finished, otherwise after waiting up to `timeout_ms` (30 seconds unless you ask for longer, two minutes at most); each file is handed back once. The result's `path` is where it was saved, in the workspace under a generated name; `suggested_filename` is the name the site gave it. A `timeout` means nothing finished in time: start the download if you have not, or call again with a longer `timeout_ms` for a large file.
 - The `screenshot` action returns the page as an image the model actually sees — use it to inspect rendered/visual state. Treat PDFs and downloads as saved artifacts (a path, not seen); read them with `file_read`. A download past the size ceiling is canceled and its partial deleted (`download_too_large`); if the browser refuses the cancel you get `download_too_large_cancel_failed` instead, meaning the transfer may still be writing — close the tab rather than retrying.
 - `console` is a read of the page like any other — a page chooses what it logs — so it is refused on a host the read policy blocks. Clear the block by navigating somewhere allowed, then read it.
 - Reads are checked at the URL the page has actually committed to, against a policy of their own — stricter than navigation on the scheme, identical on the host. Three distinct refusals, three different fixes: `read_blocked` (the live host is refused — navigate somewhere allowed and read again), `read_origin_blocked` (the document is not something this tool reads at all), `read_url_unavailable` (the live URL could not be read, so no policy could be applied — retry; usually a page that just navigated).

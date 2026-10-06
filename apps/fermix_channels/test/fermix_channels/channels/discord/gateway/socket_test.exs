@@ -3,6 +3,7 @@ defmodule FermixChannels.Channels.Discord.Gateway.SocketTest do
 
   alias FermixChannels.Channels.Discord.Gateway
   alias FermixChannels.Channels.Discord.Gateway.Socket
+  alias FermixCore.Net.Egress
 
   defmodule CapturingAgent do
     def handle_message(message, test_pid) do
@@ -150,6 +151,18 @@ defmodule FermixChannels.Channels.Discord.Gateway.SocketTest do
 
     assert is_reference(state.heartbeat_ref)
     Process.cancel_timer(state.heartbeat_ref)
+  end
+
+  # The gateway socket cannot tunnel. Behind a proxy it refuses, so the channel
+  # reports why it is down instead of dialing around the proxy.
+  describe "start_link/3 behind a proxy" do
+    test "refuses a proxied gateway before dialing" do
+      egress = Egress.new(proxy: "http://proxy.test:3128")
+
+      assert Socket.start_link("wss://gateway.discord.gg/?v=10&encoding=json", %{},
+               egress: egress
+             ) == {:error, :proxy_unsupported_transport}
+    end
   end
 
   describe "start_options/2" do

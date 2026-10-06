@@ -81,8 +81,8 @@
 (* One step = one session callback, one task finishing, one timer firing, *)
 (* or one thing OpenAI, the network or the owner does.                    *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 604b617c39b2
-\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ 2518e5b51bff
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/session_server.ex @ 94af89eca1b5
+\* SOURCE: apps/fermix_core/lib/fermix_core/realtime/openai_client.ex#start_link,send_event,close,turn_detection,decode_server_event,handle_frame,handle_cast,notify_parent @ 68769ed69762
 EXTENDS Naturals, Sequences, FiniteSets
 
 CONSTANTS
@@ -94,7 +94,7 @@ CONSTANTS
     \* Environment: what OpenAI, the network and the operator may do.
     Drops,          \* how many times the network or OpenAI may drop an open socket
     VadTurns,       \* how many more responses server VAD may start on the operator's
-                    \* speech (turn_detection create_response: true, openai_client.ex:427)
+                    \* speech (turn_detection create_response: true, openai_client.ex:432)
     Yeses,          \* 0 or 1: the owner says yes to an access-sensitive command a tool
                     \* call parked, and the session starts its confirmed run
                     \* (answer_access -> start_access_dispatch, session_server.ex:1313-1341)
@@ -231,12 +231,12 @@ NextSock ==
     ELSE None
 
 \* Socket k puts one message in the session's mailbox: an event or error
-\* (OpenAIClient.handle_frame -> notify_parent, openai_client.ex:443, :475),
+\* (OpenAIClient.handle_frame -> notify_parent, openai_client.ex:448, :480),
 \* or its EXIT.
 Emit(k, kind, c) == mbox' = Append(mbox, <<kind, k, c>>)
 
 \* send_openai/2 -> OpenAIClient.send_event (session_server.ex:1567,
-\* openai_client.ex:65): a call into the socket process, which writes the frames
+\* openai_client.ex:70): a call into the socket process, which writes the frames
 \* in order. To a socket that is closing or gone, or with no openai_pid
 \* (:1571), the send fails and is only reported (send_openai_events). The
 \* session learns which from the send's result.
@@ -595,7 +595,7 @@ ProvRead(k) ==
                    held, task, disp, sstate, vadOwed, issuer, dropsLeft, vadLeft, yesLeft, book>>
 
 \* Server VAD commits the operator's speech and starts a response
-\* (create_response: true, openai_client.ex:427). Audio only goes to openai_pid.
+\* (create_response: true, openai_client.ex:432). Audio only goes to openai_pid.
 \* With LateVadCreated its response.created leaves OpenAI in a later step.
 Vad ==
     /\ vadLeft > 0
@@ -619,7 +619,7 @@ VadCreated(k) ==
                    vadLeft, yesLeft, rejected, book>>
 
 \* The active response calls tool c (response.function_call_arguments.done,
-\* openai_client.ex:397).
+\* openai_client.ex:402).
 EmitCall(k, c) ==
     /\ alive /\ sstate[k] = "open" /\ pActive[k] /\ ~vadOwed[k] /\ issuer[c] = None
     /\ issuer' = [issuer EXCEPT ![c] = k]
@@ -629,7 +629,7 @@ EmitCall(k, c) ==
                    vadLeft, yesLeft, rejected, book>>
 
 \* The response ends: completed, or cancelled by an interrupt or by VAD
-\* (interrupt_response: true, openai_client.ex:428).
+\* (interrupt_response: true, openai_client.ex:433).
 RespDone(k) ==
     /\ alive /\ sstate[k] = "open" /\ pActive[k] /\ ~vadOwed[k]
     /\ pActive' = [pActive EXCEPT ![k] = FALSE]
@@ -639,7 +639,7 @@ RespDone(k) ==
                    vadLeft, yesLeft, rejected, book>>
 
 \* The owner says yes to the command a tool call parked: server VAD commits the
-\* utterance (input_audio_buffer.committed, openai_client.ex:377) and its
+\* utterance (input_audio_buffer.committed, openai_client.ex:382) and its
 \* transcript follows with the item id (conversation.item.input_audio_transcription.
 \* completed, :367-375), both on openai_pid, the only socket audio goes to. One
 \* step here, and one message: the binding by item id is not modelled. The
@@ -670,7 +670,7 @@ Drop(k) ==
                    book>>
 
 \* A socket the session closed (OpenAIClient.close -> {:close, state},
-\* openai_client.ex:102, :473) finishes its close handshake or hits the 5 s
+\* openai_client.ex:107, :478) finishes its close handshake or hits the 5 s
 \* close timeout, then exits like any other (websockex.ex:925-931).
 CloseDone(k) ==
     /\ alive /\ sstate[k] = "closing"

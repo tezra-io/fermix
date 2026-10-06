@@ -21,12 +21,20 @@ defmodule FermixChannels.Companion.Turns do
       draft and `send_message`), so here it is only settled;
     * `{:completed}` writes each held reply as a timeline row, announces it as
       `text_done` at its `server_seq` to the companion connections and as a
-      `row` to the phones, and completes the request;
+      `row` to the phones, and completes the request; a companion turn that
+      holds no reply ends with `turn_done` instead (companion protocol 2);
     * `{:cancelled}` and `{:failed, _}` settle the request as failed and
       announce `turn_error` to the transport that ran the turn; held text is
       dropped;
     * the queue it was handed to dying (a restart loses every outcome it held)
       ends the turn the same way, with code `interrupted`.
+
+  During a Live call in the chat, a turn of the chat's own conversation is
+  told to the call as it is handed off, and its answer as it completes
+  (`Voice.ChatMirror`, M56 §4.3). Such a turn may end with no reply (M56
+  §4.4): when its runner says so (`silent/1`, before the reply arrives, from
+  the turn's own process), its reply, exactly the sentinel, is dropped rather
+  than held, it ends with `turn_done`, and the call is told no answer.
 
   This process also owns the hand-off to the queue and every stop of a turn
   handed to it, so a `cancel` is never lost between the two. `cancel` records
@@ -83,7 +91,9 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixChannels.Voice.ChatMirror
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Agents.LiveCallTurn
   alias FermixCore.Telemetry
 
   @max_ended 64
@@ -191,6 +201,15 @@ defmodule FermixChannels.Companion.Turns do
     end
   end
 
+  @doc """
+  The tracked turn of `message` ends with no reply: its runner said so, its
+  snapshot having allowed it (M56 §4.4). Its reply that is exactly the
+  sentinel is then dropped, not held. Sent, never awaited; sent from the
+  turn's own process before its reply, so it is handled first.
+  """
+  @spec silent(Message.t()) :: :ok
+  def silent(%Message{} = message), do: GenServer.cast(__MODULE__, {:silent, message})
+
   @doc "Hold one reply of a tracked turn, or write it now for anything else."
   @spec reply(Message.t(), String.t()) :: :ok | {:error, term()}
   def reply(%Message{} = message, text) when is_binary(text) do
@@ -231,6 +250,7 @@ defmodule FermixChannels.Companion.Turns do
     attempt = message_attempt(message)
 
     cond do
+      silent_ending?(state, key, attempt, text) -> {:reply, :ok, state}
       tracked?(state, key, attempt) -> {:reply, :ok, hold(state, key, text)}
       {key, attempt} in state.ended -> {:reply, :ok, state}
       true -> {:reply, write_untracked(message, text), state}
@@ -255,6 +275,14 @@ defmodule FermixChannels.Companion.Turns do
       pid when is_pid(pid) -> {:noreply, hand_off(state, new_turn(message, pid), message)}
       nil -> {:noreply, fail(state, new_turn(message, queue), {:queue_unavailable, queue})}
     end
+  end
+
+  def handle_cast({:silent, message}, state) do
+    key = turn_key(message)
+
+    if tracked?(state, key, message_attempt(message)),
+      do: {:noreply, put_in(state.turns[key].silent?, true)},
+      else: {:noreply, state}
   end
 
   def handle_cast({:settle_unless_handed_off, key, attempt, settlement}, state) do
@@ -305,6 +333,7 @@ defmodule FermixChannels.Companion.Turns do
       {:ok, false} ->
         state = track(state, turn)
         :ok = Queue.handle_message(message, turn.queue)
+        :ok = ChatMirror.typed(turn.conversation, message.content)
         state
 
       {:error, reason} ->
@@ -378,7 +407,8 @@ defmodule FermixChannels.Companion.Turns do
       attempt: message_attempt(message),
       turn_id: Map.get(metadata, :turn_id) || "turn-" <> Map.fetch!(message, :id),
       queue: queue,
-      replies: []
+      replies: [],
+      silent?: false
     }
   end
 
@@ -397,6 +427,11 @@ defmodule FermixChannels.Companion.Turns do
   end
 
   defp tracked?(state, key, attempt), do: match?(%{attempt: ^attempt}, state.turns[key])
+
+  defp silent_ending?(state, key, attempt, text) do
+    match?(%{attempt: ^attempt, silent?: true}, state.turns[key]) and
+      LiveCallTurn.sentinel?(text)
+  end
 
   defp stop(state, key) do
     case Map.get(state.turns, key) do
@@ -429,11 +464,25 @@ defmodule FermixChannels.Companion.Turns do
 
   defp finish(state, turn, {:completed}) do
     turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1))
+    :ok = announce_no_reply(turn)
+    :ok = mirror_answer(turn)
     {settle_completed(state, turn), ended(state, turn)}
   end
 
   defp finish(state, turn, {:cancelled}), do: {nil, fail(state, turn, :cancelled)}
   defp finish(state, turn, {:failed, reason}), do: {nil, fail(state, turn, reason)}
+
+  # A companion turn that completed holding no reply has no `text_done` to end
+  # it: it ends with `turn_done`, which only a version 2 client is sent. A
+  # phone turn wrote its own rows and is only settled.
+  defp announce_no_reply(%{transport: :companion, replies: []} = turn),
+    do: Fanout.announce(turn.profile, Output.turn_done(turn.turn_id), audience: :companion)
+
+  defp announce_no_reply(_turn), do: :ok
+
+  # A turn that ended silently answered nothing for the call to hear.
+  defp mirror_answer(%{silent?: true}), do: :ok
+  defp mirror_answer(turn), do: ChatMirror.answered(turn.conversation)
 
   defp fail(state, turn, reason) do
     settle_failed(state, turn, reason)

@@ -383,7 +383,10 @@ defmodule FermixOpik.TraceFile do
       :turn_session_id,
       :status,
       :reason,
-      :max_duration_ms
+      :max_duration_ms,
+      :server_seq,
+      :shown_bytes,
+      :detached
     ])
   end
 

@@ -14,10 +14,19 @@ defmodule Mix.Tasks.Fermix.Eval.MatrixTest do
     end
 
     test "each provider lists models with the catalog default first" do
-      for provider <- Matrix.matrix() do
+      for provider <- Matrix.matrix(), provider.id != :openai_codex do
         assert provider.models != [], "#{provider.id} has no models"
         assert provider.default_model == hd(provider.models).id
       end
+    end
+
+    # OpenAI Codex signs in with ChatGPT and ships no catalog (M57 §6.2): its
+    # models are the signed-in account's, so it adds no config to the sweep.
+    test "openai_codex contributes no catalog configs and no default" do
+      codex = Enum.find(Matrix.matrix(), &(&1.id == :openai_codex))
+
+      assert codex.models == []
+      assert codex.default_model == ""
     end
 
     test "carries the descriptor auth/effort metadata, not a hand-copied list" do

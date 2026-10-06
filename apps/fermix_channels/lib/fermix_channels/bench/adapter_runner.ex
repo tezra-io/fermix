@@ -1,7 +1,10 @@
 defmodule FermixChannels.Bench.AdapterRunner do
   @moduledoc false
 
+  require Logger
+
   alias FermixChannels.Channels.Discord
+  alias FermixChannels.Channels.IMessage
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.Telegram
@@ -71,6 +74,19 @@ defmodule FermixChannels.Bench.AdapterRunner do
     },
     "signal_send_media" => %{channel: :signal, kind: :send_media, samples: @media_samples},
     "signal_e2e_text" => %{channel: :signal, kind: :e2e, samples: @e2e_samples},
+    "imessage_parse_inbound" => %{channel: :imessage, kind: :parse, samples: @adapter_samples},
+    "imessage_send_short_text" => %{
+      channel: :imessage,
+      kind: :send_short_text,
+      samples: @adapter_samples
+    },
+    "imessage_send_long_text_split" => %{
+      channel: :imessage,
+      kind: :send_long_text_split,
+      samples: @adapter_samples
+    },
+    "imessage_send_media" => %{channel: :imessage, kind: :send_media, samples: @media_samples},
+    "imessage_e2e_text" => %{channel: :imessage, kind: :e2e, samples: @e2e_samples},
     "cli_parse_inbound" => %{channel: :cli, kind: :parse, samples: @adapter_samples},
     "cli_send_short_text" => %{channel: :cli, kind: :send_short_text, samples: @adapter_samples},
     "cli_e2e_text" => %{channel: :cli, kind: :e2e, samples: @e2e_samples},
@@ -87,6 +103,32 @@ defmodule FermixChannels.Bench.AdapterRunner do
     def send_message(_account, _recipient, _text, _opts), do: :ok
     def send_attachment(_account, _recipient, _caption, _path, _opts), do: :ok
   end
+
+  # The Fermix Messages helper for the bench: every send is recorded, and the
+  # server it is addressed by is the home whose outbox the adapter stages into.
+  defmodule IMessageHelper do
+    @moduledoc false
+    @behaviour FermixChannels.Channels.IMessage.Helper
+
+    @impl true
+    def call(_home, method, _params, _timeout) when method in ["send.text", "send.file"] do
+      rowid = System.unique_integer([:positive])
+      {:ok, %{"disposition" => "recorded", "guid" => "bench-#{rowid}", "rowid" => rowid}}
+    end
+
+    @impl true
+    def attach(_home, _pid),
+      do: {:error, {:helper_unavailable, "the bench helper has no subscription", %{}}}
+
+    @impl true
+    def home(home), do: {:ok, home}
+  end
+
+  @imessage_policy %{
+    posture: :dedicated_account,
+    owner: "+15551234567",
+    handles: ["+15551234567"]
+  }
 
   @spec list_scenarios() :: [String.t()]
   def list_scenarios do
@@ -148,6 +190,10 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   defp run_sample!(%{kind: :send_long_text_split, channel: :telegram}, env, index) do
     :ok = send_text(:telegram, "123", long_markdown(index), env)
+  end
+
+  defp run_sample!(%{kind: :send_long_text_split, channel: :imessage}, env, index) do
+    :ok = send_text(:imessage, reply_target(:imessage), long_markdown(index), env)
   end
 
   defp run_sample!(%{kind: :send_media, channel: channel}, env, index) do
@@ -230,6 +276,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
     %{
       media_path: media_path,
+      imessage_home: make_imessage_home!(),
       run_id: System.unique_integer([:positive]),
       setup: %{
         environments_started: 0,
@@ -286,6 +333,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   defp stop_env(env) do
     if is_binary(Map.get(env, :media_path)), do: File.rm(env.media_path)
+    if is_binary(Map.get(env, :imessage_home)), do: remove_imessage_home(env.imessage_home)
 
     env
     |> Map.take([:queue_pid, :agent_pid, :registry_pid, :store_pid, :task_pid])
@@ -358,10 +406,12 @@ defmodule FermixChannels.Bench.AdapterRunner do
       client: SignalClient,
       client_opts: []
     )
+
+    Application.put_env(:fermix_channels, :imessage, enabled: true, owner_user_id: "+15551234567")
   end
 
   defp snapshot_channel_env do
-    Map.new([:telegram, :discord, :slack, :whatsapp, :signal], fn channel ->
+    Map.new([:telegram, :discord, :slack, :whatsapp, :signal, :imessage], fn channel ->
       {channel, Application.get_env(:fermix_channels, channel)}
     end)
   end
@@ -394,12 +444,18 @@ defmodule FermixChannels.Bench.AdapterRunner do
   defp parse_message(:signal, index), do: Signal.parse_receive_entry(signal_entry(index))
   defp parse_message(:cli, index), do: CLI.parse_input("hello cli #{index}")
 
+  defp parse_message(:imessage, index),
+    do: {:ok, IMessage.parse_batch([imessage_row(index)], @imessage_policy, %{})}
+
   defp send_text(:telegram, target, text, _env), do: Telegram.send_message(target, text)
   defp send_text(:discord, target, text, _env), do: Discord.send_message(target, text)
   defp send_text(:slack, target, text, _env), do: Slack.send_message(target, text)
   defp send_text(:whatsapp, target, text, _env), do: WhatsApp.send_message(target, text)
   defp send_text(:signal, target, text, _env), do: Signal.send_message(target, text)
   defp send_text(:cli, target, text, _env), do: CLI.send_message(target, text)
+
+  defp send_text(:imessage, target, text, env),
+    do: IMessage.send_message(target, text, helper: IMessageHelper, server: env.imessage_home)
 
   defp send_media(:telegram, target, media_part, _env),
     do: Telegram.send_media(target, media_part)
@@ -412,12 +468,16 @@ defmodule FermixChannels.Bench.AdapterRunner do
 
   defp send_media(:signal, target, media_part, _env), do: Signal.send_media(target, media_part)
 
+  defp send_media(:imessage, target, media_part, env),
+    do: IMessage.send_media(target, media_part, helper: IMessageHelper, server: env.imessage_home)
+
   defp adapter_module(:telegram), do: Telegram
   defp adapter_module(:discord), do: Discord
   defp adapter_module(:slack), do: Slack
   defp adapter_module(:whatsapp), do: WhatsApp
   defp adapter_module(:signal), do: Signal
   defp adapter_module(:cli), do: CLI
+  defp adapter_module(:imessage), do: IMessage
 
   defp reply_target(:telegram), do: "123"
   defp reply_target(:discord), do: "dm-channel-1"
@@ -425,6 +485,7 @@ defmodule FermixChannels.Bench.AdapterRunner do
   defp reply_target(:whatsapp), do: "15551234567"
   defp reply_target(:signal), do: "+15551234567"
   defp reply_target(:cli), do: "cli"
+  defp reply_target(:imessage), do: "+15551234567"
 
   defp media_part(path, index) do
     %{
@@ -565,6 +626,45 @@ defmodule FermixChannels.Bench.AdapterRunner do
         }
       }
     }
+  end
+
+  defp imessage_row(index) do
+    %{
+      "rowid" => index,
+      "guid" => "bench-imessage-#{System.unique_integer([:positive])}-#{index}",
+      "chat" => %{"identifier" => "+15551234567", "service" => "iMessage", "group" => false},
+      "sender" => %{"handle" => "+15551234567", "service" => "iMessage", "is_me" => false},
+      "date" => "2026-10-03T12:00:00Z",
+      "text" => "hello imessage #{index}",
+      "decode_error" => nil,
+      "reply_to_guid" => nil,
+      "attachments" => [],
+      "reaction" => nil
+    }
+  end
+
+  defp make_imessage_home! do
+    home =
+      Path.join(System.tmp_dir!(), "fermix-bench-imessage-#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(home)
+    home
+  end
+
+  # The adapter removes each staged outbox entry itself, so what is left is
+  # the three directories it created; they are removed one by one, never as a
+  # tree.
+  defp remove_imessage_home(home) do
+    [Path.join([home, "imessage", "outbox"]), Path.join(home, "imessage"), home]
+    |> Enum.each(fn dir ->
+      case File.rmdir(dir) do
+        result when result in [:ok, {:error, :enoent}] ->
+          :ok
+
+        {:error, reason} ->
+          Logger.warning("bench iMessage home not removed: #{dir}: #{inspect(reason)}")
+      end
+    end)
   end
 
   defp write_media_file! do

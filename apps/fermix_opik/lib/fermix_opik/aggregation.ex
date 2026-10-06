@@ -226,7 +226,9 @@ defmodule FermixOpik.Aggregation do
           chat_id: Map.get(meta, :chat_id),
           sender: Map.get(meta, :sender),
           iterations: Map.get(meas, :iterations),
-          total_tokens: Map.get(meas, :total_tokens)
+          total_tokens: Map.get(meas, :total_tokens),
+          # A chat turn during a voice call that ended with no reply (M56 §4.4).
+          silent: Map.get(meta, :silent)
         })
     })
   end
@@ -612,6 +614,25 @@ defmodule FermixOpik.Aggregation do
     end
   end
 
+  # A delegation that outlived its call (M56 §4.6) stops after the call's
+  # call_stop shipped its root, emitted by the task's new owner: attached only
+  # while the call's run is open, never opening one, which would ship as an
+  # empty phantom root. The stop stays in the JSONL trace stream either way.
+  def apply_event(
+        state,
+        [:fermix, :voice_live, :delegation_stop],
+        meas,
+        %{detached: true} = meta,
+        at
+      ) do
+    attach_if_open(
+      state,
+      meta,
+      at,
+      &Mapper.voice_live_span(meta, meas, Keyword.put(&1, :phase, :delegation_stop))
+    )
+  end
+
   # Point spans for the call's lifecycle. A `provider_error` is deliberately NOT
   # terminal: a Live moderation refusal cuts the audio and the session keeps
   # running, so closing the trace here would truncate the rest of the call.
@@ -818,6 +839,49 @@ defmodule FermixOpik.Aggregation do
       output: Map.get(meta, :output) || Map.get(meta, :error),
       status: status,
       metadata: followup_metadata(meta)
+    })
+  end
+
+  # A Live call's gist (M56 §4.2, §7) is one bounded summarising call made
+  # after the call's own run closed at `call_stop`, minted with its own
+  # `voice_gist:<call_uuid>` session: a root of its own, never nested under the
+  # call, tied to it by `call_uuid` as metadata. run_start opens it, its
+  # provider call nests via the shared session id, run_complete/run_error close
+  # it. Sizes and status only: the run carries no speech and no gist.
+  def apply_event(state, [:fermix, :voice_gist, :run_start], _meas, meta, at) do
+    case Map.get(meta, :session_id) do
+      nil ->
+        {state, []}
+
+      session_id ->
+        ctx = %{
+          parent_session: nil,
+          kind: :voice_gist,
+          name: nil,
+          input: nil,
+          trace_metadata: voice_gist_metadata(meta),
+          at: at.at,
+          mono: at.mono
+        }
+
+        {state, _ref} = ensure_session(state, session_id, ctx)
+        {state, []}
+    end
+  end
+
+  def apply_event(state, [:fermix, :voice_gist, run], meas, meta, at)
+      when run in [:run_complete, :run_error] do
+    close_root(state, meta, at, %{
+      status: Map.get(meta, :status),
+      error_info: voice_gist_error_info(run, meta),
+      metadata:
+        compact(
+          Map.merge(voice_gist_metadata(meta), %{
+            status: Map.get(meta, :status),
+            duration_ms: Map.get(meas, :duration_ms),
+            gist_bytes: Map.get(meas, :gist_bytes)
+          })
+        )
     })
   end
 
@@ -1475,6 +1539,9 @@ defmodule FermixOpik.Aggregation do
   # `:subagent` phantom root.
   defp infer_kind("voice_live:" <> _), do: :voice_live
   defp infer_kind("voice_delegation_" <> _), do: :voice_delegation
+  # A call's gist, minted in `Realtime.GistTelemetry.session_id/1` after the
+  # call's run closed: its own root, whichever of its bookends arrives first.
+  defp infer_kind("voice_gist:" <> _), do: :voice_gist
   # The computer-history summarizer (§22.4) is a headless single-call run with
   # no bookend events: its provider span creates the session, so the kind must
   # come from the id prefix or the root would read as a :subagent of nothing.
@@ -1511,6 +1578,8 @@ defmodule FermixOpik.Aggregation do
   # id is the name in both cases.
   defp wrapper_name(:voice_live, _name, session), do: session
   defp wrapper_name(:voice_delegation, _name, session), do: session
+  # "voice_gist:<call_uuid>" already says what it is and which call.
+  defp wrapper_name(:voice_gist, _name, session), do: session
   # Same shape again: the agent name is "computer_history_summarizer" and the
   # session id starts "computer_history_summarize:" — prefixing the kind would
   # say "computer history" twice.
@@ -1656,6 +1725,21 @@ defmodule FermixOpik.Aggregation do
     do: error_info("MeetingError", stringify(Map.get(metadata, :error)))
 
   defp meeting_error_info(_run, _metadata), do: nil
+
+  defp voice_gist_metadata(metadata) do
+    compact(%{
+      call_uuid: Map.get(metadata, :call_uuid),
+      tasks: Map.get(metadata, :tasks),
+      speech_bytes: Map.get(metadata, :speech_bytes),
+      input_bytes: Map.get(metadata, :input_bytes),
+      tainted: Map.get(metadata, :tainted)
+    })
+  end
+
+  defp voice_gist_error_info(:run_error, metadata),
+    do: error_info("VoiceGistError", stringify(Map.get(metadata, :error)))
+
+  defp voice_gist_error_info(_run, _metadata), do: nil
 
   defp reminder_metadata(metadata, duration_ms) do
     %{

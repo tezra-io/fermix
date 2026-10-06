@@ -21,7 +21,9 @@ description: >
   probes, ~17 minutes, ~$85. Run ONE case at a time, deliberately; `timeout_ms` is
   sized to outwait the full fan-out under load (45 min). `min_subagent_spawns` is a
   conservative floor (the model sizes the fan-out to the task; /ultra typically goes
-  much wider).
+  much wider). Two shapes are kept — a compare-and-recommend and a research-and-plan
+  with live fetching; the former second case of each (a three-cloud compare and a
+  hiring plan built on levels.fyi scraping) duplicated these at ~$85 apiece.
 defaults:
   timeout_ms: 2700000
   judge: true
@@ -34,10 +36,10 @@ defaults:
     max_duration_ms: 1800000
 
 scenarios:
-  - id: comparative_research_recommend
-    title: "Compares several options across dimensions and recommends one"
+  - id: wide_fanout_tasks
+    title: "Decomposes a broad task, fans out wide, and synthesizes one recommendation"
     severity: normal
-    tags: [ultra, fanout, research]
+    tags: [ultra, fanout, research, planning]
     cases:
       - id: databases_high_write
         query: >
@@ -49,36 +51,13 @@ scenarios:
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 3
-          reply_matches: "(?i)postgres"
+          reply_matches: "(?is)(?=.*postgres)(?=.*cassandra)(?=.*clickhouse)"
           max_cost_usd: 120
         rubric: >
           Covers all three databases (PostgreSQL, Cassandra, ClickHouse) across
           the requested dimensions (write throughput, query patterns,
           operational complexity, cost), then makes a single clear recommendation
           with concrete justification grounded in those trade-offs.
-      - id: cloud_providers_ml
-        query: >
-          /ultra I'm choosing a cloud provider for a GPU-heavy machine-learning
-          training platform. Compare AWS, Google Cloud, and Azure on GPU
-          availability and instance options, managed ML tooling, pricing and
-          spot/preemptible economics, and data-egress costs. Weigh the trade-offs
-          and recommend one provider with reasons.
-        expect:
-          tools_any: [subagents]
-          min_subagent_spawns: 3
-          reply_matches: "(?i)\\baws\\b|amazon"
-          max_cost_usd: 120
-        rubric: >
-          Compares AWS, Google Cloud, and Azure across the requested dimensions
-          (GPU availability, managed ML tooling, pricing/spot economics, egress
-          costs), then recommends a single provider with reasons tied to the
-          comparison rather than a generic answer.
-
-  - id: multipart_planning
-    title: "Decomposes a broad planning task with live research across multiple sources"
-    severity: normal
-    tags: [ultra, fanout, planning]
-    cases:
       - id: platform_migration_comparison
         query: >
           /ultra We're moving off Heroku (3 apps, ~5 million requests/month,
@@ -92,7 +71,7 @@ scenarios:
         expect:
           tools_any: [subagents]
           min_subagent_spawns: 3
-          reply_matches: "(?i)railway|fly\\.io|render"
+          reply_matches: "(?is)(?=.*railway)(?=.*fly\\.io|.*\\bfly\\b)(?=.*render)"
           max_cost_usd: 120
         rubric: >
           Fetches current pricing and docs for all three platforms (Railway,
@@ -100,24 +79,3 @@ scenarios:
           compares managed Postgres across the three, incorporates recent
           community sentiment (not just marketing copy), and ends with a single
           concrete recommendation and a migration sequence.
-      - id: hiring_senior_engineers
-        query: >
-          /ultra We need to hire 4 senior backend engineers (Go/Elixir) over the
-          next 5 months, remote-first, US timezones. Research current market
-          salary ranges from levels.fyi and similar sources, which job boards
-          (LinkedIn, Wellfound, Hired, etc.) have the best signal-to-noise for
-          this profile right now, and what the standard interview process looks
-          like at well-regarded remote-first companies in this stack. Then give
-          us a month-by-month hiring plan with realistic timelines and sourcing
-          priorities.
-        expect:
-          tools_any: [subagents]
-          min_subagent_spawns: 3
-          reply_matches: "(?i)salary|compensation|levels"
-          max_cost_usd: 120
-        rubric: >
-          Pulls current salary benchmarks from at least one live source
-          (levels.fyi or equivalent), evaluates multiple job boards by
-          signal-to-noise for this stack, references real interview process
-          norms from recent sources, and delivers a month-by-month plan with
-          concrete sourcing priorities rather than generic hiring advice.

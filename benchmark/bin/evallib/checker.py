@@ -143,6 +143,14 @@ def resolve_fixture(root: str, path: str) -> str:
     return fixture
 
 
+def resolve_state_spec(root: str, path: str) -> str:
+    """A `checker.state` spec: one JSON file under the tasks root."""
+    spec = _resolve_relative(root, path, "state spec")
+    if not os.path.isfile(spec) or not spec.endswith(".json"):
+        raise CheckerBoundaryError(f"state spec must be an existing .json file: {spec}")
+    return spec
+
+
 def _reject_fixture_symlinks(fixtures_dir: str) -> None:
     for current, dirs, files in os.walk(fixtures_dir, followlinks=False):
         for name in dirs + files:

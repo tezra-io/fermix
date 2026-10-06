@@ -28,6 +28,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   alias FermixCore.Capabilities.MCP.Remote.Endpoint
   alias FermixCore.Capabilities.MCP.Remote.Limits
   alias FermixCore.Capabilities.MCP.Remote.SSE
+  alias FermixCore.Net.Egress
   alias FermixCore.Timeouts
 
   @type t :: %__MODULE__{
@@ -54,8 +55,24 @@ defmodule FermixCore.Capabilities.MCP.Remote.Connection do
   """
   @spec open(Endpoint.t(), keyword()) :: {:ok, t()} | {:error, term()}
   def open(%Endpoint{} = endpoint, opts \\ []) when is_list(opts) do
-    with {:ok, peer} <- Endpoint.resolve(endpoint, opts) do
+    with :ok <- ensure_direct(endpoint, opts),
+         {:ok, peer} <- Endpoint.resolve(endpoint, opts) do
       connect(endpoint, peer, opts)
+    end
+  end
+
+  # The pin is the address and the name handed to Mint separately. A tunnel
+  # would need one of them named to the proxy, and naming the host would let
+  # the proxy resolve it again behind the guard, so a proxied route is refused
+  # before anything is resolved or dialed. A security block, not unreachability:
+  # it is deterministic (the owner must not retry it) and the status every
+  # surface shows then carries the reason.
+  defp ensure_direct(endpoint, opts) do
+    egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
+
+    case Egress.ensure_direct(Endpoint.uri(endpoint), egress) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:remote_security_blocked, reason}}
     end
   end
 

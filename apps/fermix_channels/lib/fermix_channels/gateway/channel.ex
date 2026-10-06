@@ -285,7 +285,28 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback delete_message(message(), message_id :: String.t()) :: :ok | {:error, term()}
 
+  @doc """
+  The owner's own inbox on a transport only the owner reaches (the Mac's chat
+  socket, the paired phones): the destination `FermixCore.Delivery.OwnerInbox`
+  answers for this channel (M56 §4.7), or `:unavailable` while the transport
+  cannot deliver. A remote platform does not implement it: its inbox derives
+  from the owner id configured for it.
+  """
+  @callback owner_inbox() :: {:ok, String.t()} | :unavailable
+
+  @doc """
+  The conversation `message` runs in when this channel's turns join another
+  transport's (M56 D9): the phone's turns run in the Mac's chat, so the one
+  timeline both draw has one agent history and one queue lane. The gateway
+  alone puts the answer on the message, over anything the message carried,
+  and `FermixCore.Agents.ConversationKey.from/1` answers it from there. A
+  channel that keeps conversations of its own does not implement it.
+  """
+  @callback joined_conversation(message()) :: FermixCore.Agents.ConversationKey.t()
+
   @optional_callbacks [
+    owner_inbox: 0,
+    joined_conversation: 1,
     start_typing: 1,
     download_attachment: 2,
     health_check: 1,

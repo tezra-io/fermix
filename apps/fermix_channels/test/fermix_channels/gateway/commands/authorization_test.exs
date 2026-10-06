@@ -56,6 +56,34 @@ defmodule FermixChannels.Gateway.Commands.AuthorizationTest do
     end
   end
 
+  describe "an iMessage command_allowlist guest" do
+    setup do
+      previous = Application.get_env(:fermix_channels, :imessage)
+
+      Application.put_env(:fermix_channels, :imessage,
+        owner_user_id: "+15551234567",
+        command_allowlist: ["guest@example.com"]
+      )
+
+      on_exit(fn ->
+        case previous do
+          nil -> Application.delete_env(:fermix_channels, :imessage)
+          config -> Application.put_env(:fermix_channels, :imessage, config)
+        end
+      end)
+    end
+
+    test "owner_only admits it through the imessage allowlist; operator_only refuses it" do
+      {message, metadata, context} = build("guest@example.com", :guest, "imessage")
+
+      assert Authorization.owner_only(message, metadata, context) == :ok
+      assert Authorization.operator_only(message, metadata, context) == {:error, :unauthorized}
+
+      {message, metadata, context} = build("other@example.com", :guest, "imessage")
+      assert Authorization.owner_only(message, metadata, context) == {:error, :unauthorized}
+    end
+  end
+
   describe "missing authorization" do
     test "both gates refuse it" do
       {message, metadata, _context} = build("owner-1", :operator)
@@ -116,13 +144,13 @@ defmodule FermixChannels.Gateway.Commands.AuthorizationTest do
     {message, metadata, %{authorization: %Decision{role: :operator, trust: :operator}}}
   end
 
-  defp build(user_id, role) do
+  defp build(user_id, role, channel \\ "telegram") do
     message =
       Message.new!(%{
         id: "msg-#{System.unique_integer([:positive])}",
         content: "/confirm ABC",
         sender: "alice",
-        channel: "telegram",
+        channel: channel,
         chat_id: "chat-1",
         reply_target: "chat-1",
         metadata: %{user_id: user_id}

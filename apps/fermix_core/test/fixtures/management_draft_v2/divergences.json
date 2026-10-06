@@ -583,6 +583,12 @@
       "why": "The OpenAI API-key provider carries a reasoning effort like the other reasoning providers; the draft drew the row only for the subscription providers. Adding it is a row the app renders through the descriptor form with no Swift work."
     },
     {
+      "method": "settings.get:providers.openai_codex",
+      "field": "rows:fast",
+      "kind": "draft_only",
+      "why": "M57: OpenAI Codex now signs in with ChatGPT and calls the public Responses API, which has no fast mode, so the engine publishes no fast row. A `fast` key an existing config.toml still carries is accepted, named at warning and dropped. The app draws one row fewer in the section; no Swift work."
+    },
+    {
       "method": "settings.get:providers.venice",
       "field": "rows:venice_api_key",
       "kind": "engine_only",
@@ -1013,6 +1019,96 @@
       "field": "rows:secret_store",
       "kind": "engine_only",
       "why": "The secrets section, under a secrets pane the draft predates, chooses the store a new secret is written to: the keyring or a private file in the Fermix home, for a Linux desktop whose login keyring stays locked after a fingerprint login. Its one row is an ordinary closed choice; an app that does not know the pane decodes it as unrecognised and draws no section for it."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:imessage_grant",
+      "kind": "engine_only",
+      "why": "M54: an iMessage grant and a recipient confirmation each wait on a person, so each is a job of its own kind with a person's budget. The draft predates both kinds; a client that has not re-vendored never starts one."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:imessage_policy_confirm",
+      "kind": "engine_only",
+      "why": "M54: an iMessage grant and a recipient confirmation each wait on a person, so each is a job of its own kind with a person's budget. The draft predates both kinds; a client that has not re-vendored never starts one."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:imessage.grant.start",
+      "kind": "engine_only",
+      "why": "M54: the iMessage methods postdate the draft. They read the Fermix Messages helper's non-prompting probe, ask for one grant, and ask the helper to confirm the saved recipients. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:imessage.permissions.get",
+      "kind": "engine_only",
+      "why": "M54: the iMessage methods postdate the draft. They read the Fermix Messages helper's non-prompting probe, ask for one grant, and ask the helper to confirm the saved recipients. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:imessage.policy.confirm",
+      "kind": "engine_only",
+      "why": "M54: the iMessage methods postdate the draft. They read the Fermix Messages helper's non-prompting probe, ask for one grant, and ask the helper to confirm the saved recipients. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:imessage.grant.start=2",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:imessage.permissions.get=2",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:imessage.policy.confirm=2",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.imessage.grant.start",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.imessage.permissions.get",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.imessage.policy.confirm",
+      "kind": "engine_only",
+      "why": "The iMessage methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "imessage.grant.start",
+      "field": "params:service",
+      "kind": "engine_only",
+      "why": "imessage.grant.start takes the one grant it asks for, `automation` or `full_disk_access`. The draft predates the method."
+    },
+    {
+      "method": "settings.get:channels.imessage",
+      "field": "rows:imessage_allowed_sender_ids",
+      "kind": "engine_only",
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.imessage",
+      "field": "rows:imessage_enabled",
+      "kind": "engine_only",
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
+    },
+    {
+      "method": "settings.get:channels.imessage",
+      "field": "rows:imessage_owner_user_id",
+      "kind": "engine_only",
+      "why": "M54: the channels.imessage section postdates the draft. The owner is a text row, the guests a list row and the switch the ordinary toggle; the account is not asked, because the helper derives it when it confirms the recipients. It exists only on a Mac. The rows are the ordinary row shape."
     }
   ]
 }

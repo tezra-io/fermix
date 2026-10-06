@@ -29,6 +29,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
   require Logger
 
   alias FermixChannels.Mobile.Push.Config
+  alias FermixCore.Net.Egress
   alias Pigeon.APNS.Notification
 
   @max_notifications 64
@@ -127,6 +128,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
       config: config,
       config_fingerprint: config_fingerprint(config),
       timeout_ms: config.timeout_ms,
+      egress: Keyword.get_lazy(opts, :egress, &Egress.active/0),
       start_dispatcher: Keyword.get(opts, :start_dispatcher, &start_pigeon_dispatcher/1),
       push: Keyword.get(opts, :push, &push_all/3),
       stop_dispatcher: Keyword.get(opts, :stop_dispatcher, &stop_dispatcher/1),
@@ -229,6 +231,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
   defp start_connection(state, attempts_left) do
     connection = %{
       owner: self(),
+      egress: state.egress,
       start_dispatcher: state.start_dispatcher,
       config: state.config,
       push: state.push,
@@ -278,7 +281,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
   defp run_connection(connection) do
     Process.flag(:trap_exit, true)
 
-    case call_dependency(:start_dispatcher, connection.start_dispatcher, [connection.config]) do
+    case start_dispatcher(connection) do
       {:ok, dispatcher} ->
         send(connection.owner, {:apns_connected, self(), {:ok, dispatcher}})
         serve(Map.put(connection, :dispatcher, dispatcher))
@@ -289,6 +292,22 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcher do
       other ->
         reason = {:invalid_push_dependency_reply, :start_dispatcher, other}
         send(connection.owner, {:apns_connected, self(), {:error, reason}})
+    end
+  end
+
+  # APNs rides Pigeon's own HTTP/2 socket, which cannot tunnel. Behind a proxy
+  # the connect is refused, so push degrades and says so, rather than leaving
+  # around the proxy.
+  defp start_dispatcher(connection) do
+    with :ok <- Egress.ensure_direct(apns_origin(connection.config), connection.egress) do
+      call_dependency(:start_dispatcher, connection.start_dispatcher, [connection.config])
+    end
+  end
+
+  defp apns_origin(config) do
+    case Config.pigeon_mode(config) do
+      :prod -> "https://api.push.apple.com"
+      :dev -> "https://api.development.push.apple.com"
     end
   end
 

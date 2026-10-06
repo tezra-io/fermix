@@ -83,14 +83,19 @@ defmodule FermixCore.Management.AuthCompletionTest do
     assert {:error, :no_token} = TokenManager.get_token(manager)
   end
 
-  test "a Codex import loads an empty manager and reconnects after logout", %{jobs: jobs} do
+  # `openai_codex` signs in with ChatGPT under the `chatgpt` profile, served by
+  # a manager under `TokenSupervisor` like every other profile. Its sign-out is
+  # ChatGPT's own: the registration holds no refresh token here, so there is no
+  # session to revoke and nothing leaves this machine.
+  test "a ChatGPT sign-in loads its empty manager and reconnects after sign-out", %{jobs: jobs} do
     manager = start_manager(:openai_codex)
     assert {:error, :no_token} = TokenManager.get_token(manager)
 
     assert {:ok, first} =
-             Auth.import_start("codex_cli",
+             Auth.start("openai_codex",
                jobs: jobs,
-               importer: importer(:openai_codex, "first")
+               login: chatgpt_login("first"),
+               live_model: &kept_model/2
              )
 
     assert terminal(first, jobs)["status"] == "completed"
@@ -99,9 +104,10 @@ defmodule FermixCore.Management.AuthCompletionTest do
     assert {:error, _reason} = TokenManager.get_token(manager)
 
     assert {:ok, second} =
-             Auth.import_start("codex_cli",
+             Auth.start("openai_codex",
                jobs: jobs,
-               importer: importer(:openai_codex, "second")
+               login: chatgpt_login("second"),
+               live_model: &kept_model/2
              )
 
     assert terminal(second, jobs)["status"] == "completed"
@@ -136,11 +142,12 @@ defmodule FermixCore.Management.AuthCompletionTest do
     assert {:ok, "second"} = TokenManager.get_token(manager)
   end
 
-  test "a refused import reload fails the job before promotion", %{jobs: jobs} do
+  test "a refused ChatGPT reload fails the job before promotion", %{jobs: jobs} do
     assert {:ok, view} =
-             Auth.import_start("codex_cli",
+             Auth.start("openai_codex",
                jobs: jobs,
-               importer: importer(:openai_codex, "new"),
+               login: chatgpt_login("new"),
+               live_model: &kept_model/2,
                reload: fn -> {:error, :eacces} end
              )
 
@@ -161,11 +168,6 @@ defmodule FermixCore.Management.AuthCompletionTest do
     assert view["status"] == "failed"
     assert view["failure"]["sentence"] =~ "credentials were stored but could not be loaded"
     assert PrimaryConfig.primary() == {:ok, :openai}
-  end
-
-  defp start_manager(:openai_codex) do
-    assert Process.whereis(TokenManager) == nil
-    start_supervised!({TokenManager, name: TokenManager, fermix_auth_path: Store.path()})
   end
 
   defp start_manager(provider) do
@@ -195,6 +197,29 @@ defmodule FermixCore.Management.AuthCompletionTest do
   end
 
   defp login(provider, token), do: fn _opts -> importer(provider, token).() end
+
+  # What a finished ChatGPT sign-in stores and answers, with plan usage granted.
+  defp chatgpt_login(token) do
+    fn _opts ->
+      entry = %{
+        auth_mode: "oauth_siwc",
+        provider: "chatgpt",
+        client_id: "oaiapp_completion",
+        subject: "user-completion",
+        account: %{email: "owner@example.com"},
+        granted_scopes: ["openid", "offline_access", "chatgpt.tokens.use.direct"],
+        tokens: %{access_token: token, refresh_token: nil},
+        expires_at: nil,
+        last_refresh: nil,
+        status: "ready"
+      }
+
+      :ok = Store.write(Store.profile(:openai_codex), entry)
+      {:ok, %{account: "owner@example.com", plan_usage: :on}}
+    end
+  end
+
+  defp kept_model(:openai_codex, []), do: {:ok, %{model: "gpt-test", changed?: false}}
 
   defp terminal(view, jobs, attempts \\ 100)
   defp terminal(%{"status" => status} = view, _jobs, _left) when status != "running", do: view

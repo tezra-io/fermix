@@ -1,7 +1,9 @@
 defmodule FermixCore.ReadinessTest do
   use ExUnit.Case, async: false
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
+  alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Env
@@ -75,6 +77,26 @@ defmodule FermixCore.ReadinessTest do
              )
     end
 
+    # OpenAI Codex's way in is Sign in with ChatGPT, so its row names the
+    # sign-in's own standing (here: never signed in) rather than a generic
+    # "configure" line or a terminal command.
+    test "an OpenAI Codex primary with no sign-in gates with the sign-in's own sentence" do
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("readiness-codex")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(home) end)
+      System.put_env("FERMIX_HOME", home)
+      Application.put_env(:fermix_core, :providers, openai_codex: [primary: true])
+      Application.put_env(:fermix_core, :personalization, seeded_personalization())
+
+      failure =
+        Enum.find(
+          Readiness.report().failures,
+          &(&1.detail_key == "provider:missing_credentials:openai_codex")
+        )
+
+      assert failure.gating
+      assert failure.action == ChatGPT.failure_sentence(:not_signed_in)
+    end
+
     # The first boot seeds personalization from the machine (`Setup.HomeSeeder`),
     # so a missing value is a nudge, never a reason to call setup unfinished.
     test "missing personalization is advisory" do
@@ -120,8 +142,8 @@ defmodule FermixCore.ReadinessTest do
   end
 
   describe "the channel table" do
-    test "publishes the five channels readiness knows about" do
-      assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal]
+    test "publishes the six channels readiness knows about" do
+      assert Readiness.channels() == [:telegram, :whatsapp, :discord, :slack, :signal, :imessage]
     end
 
     test "telegram is the one channel enabled by default" do
@@ -129,6 +151,7 @@ defmodule FermixCore.ReadinessTest do
 
       assert Readiness.channel_enabled?(:telegram)
       refute Readiness.channel_enabled?(:discord)
+      assert Keyword.fetch!(Readiness.channel_defaults(), :imessage) == false
     end
 
     test "configured follows the credentials the channel actually needs" do
@@ -138,6 +161,110 @@ defmodule FermixCore.ReadinessTest do
       Application.put_env(:fermix_channels, :telegram, enabled: true, bot_token: "t")
       assert Readiness.channel_configured?(:telegram)
     end
+  end
+
+  # M54 §14: readiness reads the saved section and whether the helper is on
+  # disk, and nothing else. The probe (grants, sign-in, the confirmed policy)
+  # spawns the helper, so it belongs to Doctor and the permissions read, never
+  # to the hot path every pane load runs.
+  describe "imessage" do
+    setup do
+      previous = Application.fetch_env(:fermix_channels, :imessage)
+      previous_plugins = Application.fetch_env(:fermix_core, :plugins)
+      home = FermixTestSupport.SafeRm.make_tmp_dir!("readiness-imessage")
+      System.put_env("FERMIX_HOME", home)
+      Application.delete_env(:fermix_core, :plugins)
+
+      on_exit(fn ->
+        restore(:fermix_channels, :imessage, previous)
+        restore(:fermix_core, :plugins, previous_plugins)
+        FermixTestSupport.SafeRm.rm_rf!(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "off by default, and off is never a failure" do
+      Application.put_env(:fermix_channels, :imessage, [])
+
+      refute Readiness.channel_enabled?(:imessage)
+      refute imessage_failure()
+    end
+
+    # The recipient policy the helper confirms is built from the owner, so an
+    # account with no owner is not configured, and the sentence names that row.
+    test "on without an owner names the setting that fixes it" do
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+
+      assert %{detail_key: "channel:imessage", gating: false, pane: "channels", action: action} =
+               imessage_failure()
+
+      assert action =~ "Apple ID or phone number"
+      refute action =~ ~r/choose/i
+    end
+
+    # The helper derives the account when the recipients are confirmed, so the
+    # owner alone configures the channel.
+    test "on with an owner is configured" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      assert Readiness.channel_configured?(:imessage)
+    end
+
+    test "configured but with no helper on disk says the helper is missing" do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      assert %{detail_key: "channel:imessage:helper", gating: false} = imessage_failure()
+    end
+
+    test "configured with the helper on disk reports nothing", %{home: home} do
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      binary =
+        Path.join([
+          home,
+          "plugins",
+          "imessage_helper",
+          HelperInstaller.pinned_version(),
+          "macos-universal",
+          "Fermix Messages.app",
+          "Contents",
+          "MacOS",
+          "fermix-messages"
+        ])
+
+      File.mkdir_p!(Path.dirname(binary))
+      File.write!(binary, "#!/bin/sh\n")
+      File.chmod!(binary, 0o755)
+
+      refute imessage_failure()
+    end
+
+    test "both of its sentences are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      assert "channel:imessage" in keys
+      assert "channel:imessage:helper" in keys
+    end
+
+    defp imessage_failure do
+      Enum.find(
+        Readiness.report().failures,
+        &String.starts_with?(&1.detail_key, "channel:imessage")
+      )
+    end
+
+    defp restore(app, key, {:ok, value}), do: Application.put_env(app, key, value)
+    defp restore(app, key, :error), do: Application.delete_env(app, key)
   end
 
   describe "personalization_failure/0" do
@@ -257,7 +384,7 @@ defmodule FermixCore.ReadinessTest do
       assert Enum.any?(report.failures, &(&1.component == "personalization" and not &1.gating))
     end
 
-    test "openai_codex readiness uses Codex auth and does not require an OpenAI API key" do
+    test "openai_codex readiness uses the ChatGPT sign-in and does not require an OpenAI API key" do
       tmp_home =
         Path.join(System.tmp_dir!(), "fermix-readiness-#{System.unique_integer([:positive])}")
 
@@ -275,13 +402,7 @@ defmodule FermixCore.ReadinessTest do
 
       Application.put_env(:fermix_channels, :telegram, enabled: false)
 
-      assert :ok =
-               Store.write(:openai_codex, %{
-                 auth_mode: "chatgpt",
-                 tokens: %{access_token: "codex-at", refresh_token: "codex-rt"},
-                 expires_at: DateTime.utc_now() |> DateTime.add(3600),
-                 last_refresh: nil
-               })
+      assert :ok = Store.write("chatgpt", chatgpt_registration())
 
       report = Readiness.report()
 
@@ -729,6 +850,24 @@ defmodule FermixCore.ReadinessTest do
   defp seed_ready_home do
     Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test", primary: true])
     Application.put_env(:fermix_core, :personalization, seeded_personalization())
+  end
+
+  # A Sign in with ChatGPT registration that can carry a turn: signed in, with
+  # plan usage granted (`Auth.ChatGPT.route_status/1` reads it as connected).
+  defp chatgpt_registration do
+    %{
+      auth_mode: "oauth_siwc",
+      provider: "chatgpt",
+      client_id: "oaiapp_R1",
+      subject: "user-sub-1",
+      account: %{email: "ada@example.test"},
+      granted_scopes:
+        ~w(chatgpt.tokens.use.direct email offline_access openid profile resource.invoke),
+      tokens: %{access_token: "AT-0", refresh_token: "RT-0"},
+      expires_at: DateTime.add(DateTime.utc_now(), 3_600, :second),
+      last_refresh: nil,
+      status: "ready"
+    }
   end
 
   defp seeded_personalization do

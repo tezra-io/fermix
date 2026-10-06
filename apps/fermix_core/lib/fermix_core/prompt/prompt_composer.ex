@@ -9,13 +9,14 @@ defmodule FermixCore.Prompt.PromptComposer do
   alias FermixCore.Prompt.BootstrapLoader
   alias FermixCore.Prompt.InjectionScan
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.Prompt.VoicePresence
 
   require Logger
 
   @type message :: %{role: String.t(), content: String.t()}
 
   @type prompt_part :: %{
-          name: :identity | :soul | :fermix | :user | :memory | :realtime | :runtime,
+          name: :identity | :soul | :fermix | :user | :memory | :realtime | :presence | :runtime,
           kind: :bootstrap | :prompt_memory | :generated,
           tier: :stable | :volatile,
           source_path: String.t() | nil,
@@ -115,6 +116,27 @@ defmodule FermixCore.Prompt.PromptComposer do
     end
   end
 
+  @doc """
+  `USER.md` and `MEMORY.md` in the `<memory-context>` frame a turn's prompt
+  carries them in, or `nil` when neither is given.
+
+  The frame has this one owner: a Live call's instructions carry the memory
+  files in it too (M56 §4.3), so recalled memory reaches the voice model framed
+  as data exactly as it reaches a turn, injection-scanned the same way.
+  """
+  @spec memory_frame(String.t(), PromptFiles.prompt_memory()) :: String.t() | nil
+  def memory_frame(agent_id, %{user: user, memory: memory}) when is_binary(agent_id) do
+    parts =
+      [
+        memory_part(:user, PromptFiles.user_path(agent_id), user),
+        memory_part(:memory, PromptFiles.memory_path(agent_id), memory)
+      ]
+      |> Enum.reject(&is_nil/1)
+      |> scan_parts()
+
+    if parts == [], do: nil, else: memory_context(parts)
+  end
+
   defp build_base_parts(agent_id, bootstrap, prompt_memory) do
     [
       bootstrap_part(:identity, :bootstrap, bootstrap.identity),
@@ -122,10 +144,15 @@ defmodule FermixCore.Prompt.PromptComposer do
       bootstrap_part(:fermix, :bootstrap, bootstrap.fermix),
       memory_part(:user, PromptFiles.user_path(agent_id), prompt_memory.user),
       memory_part(:memory, PromptFiles.memory_path(agent_id), prompt_memory.memory),
-      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime)
+      bootstrap_part(:realtime, :bootstrap, bootstrap.realtime),
+      presence_part(bootstrap.realtime)
     ]
     |> Enum.reject(&is_nil/1)
   end
+
+  # A voice call's own body, only where REALTIME.md makes it a voice call.
+  defp presence_part(nil), do: nil
+  defp presence_part(_realtime), do: part(:presence, :generated, nil, VoicePresence.text())
 
   defp bootstrap_part(_name, _kind, nil), do: nil
 
@@ -260,15 +287,14 @@ defmodule FermixCore.Prompt.PromptComposer do
 
   # Defang any wrapper tag the memory body itself carries, so recalled memory
   # cannot close the data frame early and have the text after it read as system
-  # instruction. The write path's `PromptFiles.normalize_inline/1` happens to
-  # destroy the hyphenated tag today; escaping here makes the boundary explicit
-  # at the boundary and leaves that normalizer free to change. Kept local: the
-  # tag is this module's, and a shared parameterized escaper for one caller
-  # would be indirection. A body without the tag is byte-identical.
+  # instruction. This is the only place the boundary is held: the write path
+  # (`PromptFiles`) keeps a value's punctuation, hyphens included. A model reads
+  # a tag loosely, so the match is too: any casing, any spacing inside the
+  # brackets. Kept local: the tag is this module's, and a shared parameterized
+  # escaper for one caller would be indirection. A body without the tag is
+  # byte-identical.
   defp neutralize(body) do
-    body
-    |> String.replace("</memory-context>", "</ memory-context>")
-    |> String.replace("<memory-context>", "< memory-context>")
+    Regex.replace(~r/<\s*(\/?)\s*(memory-context)\s*>/i, body, "<\\1 \\2>")
   end
 
   defp memory_section(part) do

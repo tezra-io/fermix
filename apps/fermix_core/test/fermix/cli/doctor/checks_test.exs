@@ -7,6 +7,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Net.Egress
   alias FermixCore.Setup.ConfigStore
 
   # Published NIP-19 vector (derived in nostr/key_test.exs). The nsec is here so
@@ -617,6 +618,139 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  describe "network_proxy/1" do
+    setup do
+      keys = [:network, :egress, :realtime, :meetings]
+      core = Map.new(keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
+      discord = Application.get_env(:fermix_channels, :discord)
+
+      Application.put_env(:fermix_core, :realtime, enabled: false)
+      Application.put_env(:fermix_core, :meetings, enabled: false)
+      Application.put_env(:fermix_channels, :discord, enabled: false)
+      # A CLI verb has no pools, so the active egress is the section as loaded.
+      Application.delete_env(:fermix_core, :egress)
+
+      on_exit(fn ->
+        Enum.each(core, fn
+          {key, nil} -> Application.delete_env(:fermix_core, key)
+          {key, value} -> Application.put_env(:fermix_core, key, value)
+        end)
+
+        case discord do
+          nil -> Application.delete_env(:fermix_channels, :discord)
+          value -> Application.put_env(:fermix_channels, :discord, value)
+        end
+      end)
+
+      :ok
+    end
+
+    test "is not applicable with no proxy configured and none in the environment" do
+      Application.put_env(:fermix_core, :network, [])
+
+      result = Checks.network_proxy(env: %{"PATH" => "/usr/bin"})
+
+      assert result.name == "network"
+      assert result.status == :not_applicable
+    end
+
+    # The reporting case: a shell that exports HTTPS_PROXY, a daemon that never
+    # reads it, and nothing to say why the provider cannot be reached.
+    test "warns when the environment names a proxy Fermix does not read" do
+      Application.put_env(:fermix_core, :network, [])
+
+      for name <- ["HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "ALL_PROXY"] do
+        result = Checks.network_proxy(env: %{name => "http://user:hunter2@proxy.test:3128"})
+
+        assert result.status == :warn
+        assert result.detail =~ name
+        assert result.detail =~ "[fermix_core.network]"
+        refute result.detail =~ "hunter2"
+        refute result.detail =~ "proxy.test"
+      end
+    end
+
+    test "names the proxy and what stays direct" do
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["ollama.internal"]
+      )
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :ok
+      assert result.detail =~ "http://proxy.corp.test:3128"
+      assert result.detail =~ "ollama.internal"
+    end
+
+    test "warns about an enabled feature that cannot use the proxy" do
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+      Application.put_env(:fermix_channels, :discord, enabled: true)
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "Discord"
+      assert result.detail =~ "proxy_bypass"
+      refute result.detail =~ "voice"
+    end
+
+    test "a host listed in proxy_bypass clears the warning for its feature" do
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["gateway.discord.gg"]
+      )
+
+      Application.put_env(:fermix_channels, :discord, enabled: true)
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :ok
+      refute result.detail =~ "will not connect"
+    end
+
+    # The other direction of a pending restart: the settings no longer name a
+    # proxy, and this process still sends traffic through the one it booted on.
+    test "says a removed proxy is still in force until a restart" do
+      Application.put_env(:fermix_core, :egress, Egress.new(proxy: "http://proxy.corp.test:3128"))
+      Application.put_env(:fermix_core, :network, [])
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "restart"
+      assert result.detail =~ "In force: proxy http://proxy.corp.test:3128"
+      assert result.detail =~ "Saved: no proxy"
+    end
+
+    test "says a saved proxy is waiting for a restart" do
+      Application.put_env(:fermix_core, :egress, Egress.new([]))
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :warn
+      assert result.detail =~ "restart"
+    end
+
+    # `fermix doctor` is its own process: it cannot know what a running daemon
+    # started on, so its row must not read as "in force".
+    test "says the setting is read at start" do
+      Application.put_env(:fermix_core, :network, proxy: "http://proxy.corp.test:3128")
+
+      assert Checks.network_proxy(env: %{}).detail =~ "read when Fermix starts"
+    end
+
+    test "says a bypass list with no proxy has no effect" do
+      Application.put_env(:fermix_core, :network, proxy_bypass: ["ollama.internal"])
+
+      result = Checks.network_proxy(env: %{})
+
+      assert result.status == :not_applicable
+      assert result.detail =~ "no effect"
+    end
+  end
+
   describe "routing_overrides/0" do
     setup do
       original = Application.get_env(:fermix_core, :routing, [])
@@ -663,6 +797,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "model=gpt-5.4-mini"
       assert result.detail =~ "provider=anthropic"
       assert result.detail =~ "effort=low"
+    end
+
+    # OpenAI Codex lists the signed-in account's models live, so there is no
+    # catalog to hold a pinned slug against: any slug passes here and the live
+    # route answers for it.
+    test "ok for a model pinned to OpenAI Codex, which ships no catalog" do
+      Application.put_env(:fermix_core, :routing,
+        subagent_provider: "openai_codex",
+        subagent_model: "gpt-plan-one"
+      )
+
+      result = Checks.routing_overrides()
+      assert result.status == :ok
+      assert result.detail =~ "provider=openai_codex, model=gpt-plan-one"
     end
 
     test "fails on a typo'd cron provider" do
@@ -2419,12 +2567,21 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
 
     test "warns and names only the stale profiles" do
-      :ok = Store.write(:openai_codex, token_entry(-7200))
+      :ok = Store.write(Store.profile(:openai_codex), token_entry(-7200))
       :ok = Store.write("gmail:primary", token_entry(3600))
 
       assert %{status: :warn, detail: detail} = Checks.auth_token_expiry()
-      assert detail =~ "openai_codex"
+      assert detail =~ Store.profile(:openai_codex)
       refute detail =~ "gmail:primary"
+    end
+
+    # The old Codex-client grant still sits under the bare `openai_codex` key in
+    # an upgraded auth.json, but nothing reads it any more, so it is no stale
+    # token of Fermix's.
+    test "ignores the old Codex-client entry nothing reads any more" do
+      :ok = Store.write("openai_codex", token_entry(-7200))
+
+      assert %{status: :ok} = Checks.auth_token_expiry()
     end
   end
 

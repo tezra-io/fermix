@@ -12,8 +12,9 @@ defmodule FermixChannels.Channels.Companion do
   `Companion.Output` (the same writes and events the mobile adapter makes) and
   broadcasts the logical events to every connection watching the profile,
   through the `registry/0` those connections join after their handshake. A row
-  it writes reaches the phones too (`Companion.Fanout`); an approval stays on
-  this socket, the only transport its token resolves from. A turn's replies
+  it writes reaches the phones too (`Companion.Fanout`), and a delivery is
+  pushed to them while their channel runs; an approval stays on this socket,
+  the only transport its token resolves from. A turn's replies
   and its ending go through `Companion.Turns`, which writes and announces them
   only once the queue fires the turn's outcome.
 
@@ -22,26 +23,48 @@ defmodule FermixChannels.Channels.Companion do
   relays each snapshot and every connection sends its own client the suffix it
   has not written yet; a client that connects mid-turn gets the text so far as
   its first delta. `turn_started` goes out when the loop starts.
+
+  During a Live call in the chat a turn may end with no reply (M56 §4.4): a
+  snapshot that could still become the sentinel is held back, so such a turn
+  never shows a draft, and the runner's `:silent_reply` tells `Turns` the turn
+  ends that way.
+
+  A Live call writes rows of its own through `write_call_row/3` (M56 §4.2,
+  §4.5, §4.6), the one write for them: a result shown in the chat while the
+  voice says the short version, the call's one row when it ends, its gist or
+  its task list, and the two rows of a task that outlives its call, what is
+  still running and how it ended. Core reaches it through `Voice.Bridge`, and
+  the owner of those tasks through the same bridge, never by name.
   """
 
   @behaviour FermixChannels.Gateway.Channel
 
   require Logger
 
+  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Agents.LiveCallTurn
+  alias FermixCore.Companion.Protocol
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
   alias FermixCore.Telemetry
+  alias FermixCore.Text
 
   @channel "companion"
   @profile "main"
   @registry FermixChannels.Companion.Registry
+
+  # A call row is shown whole, so its text is bounded: a runaway result is cut
+  # at the end, behind a marker, rather than refused (M56 §4.5).
+  @call_row_max_bytes 32_768
+  @call_row_cut_marker "\n\n(The rest was cut for length.)"
 
   @typedoc """
   A decoded `msg` or `command`. `:caller` is who connected, as
@@ -65,6 +88,42 @@ defmodule FermixChannels.Channels.Companion do
   @doc "The Gateway conversation a profile's companion turns run in."
   @spec conversation_key(String.t()) :: {String.t(), String.t(), :root}
   def conversation_key(profile_id) when is_binary(profile_id), do: {@channel, profile_id, :root}
+
+  @doc """
+  The owner's chat: the conversation the Mac app's turns run in, and the one a
+  Live call's hand-offs join unless the call is private (M56 §4.1). Named here,
+  where the channel and its profile live, so Core never spells either.
+  """
+  @spec chat_conversation_key() :: {String.t(), String.t(), :root}
+  def chat_conversation_key, do: conversation_key(chat_profile())
+
+  @doc "The owner's chat's profile: the timeline a Live call in the chat writes its rows to."
+  @spec chat_profile() :: String.t()
+  def chat_profile, do: @profile
+
+  @doc """
+  The owner's inbox on this channel (M56 §4.7): the chat itself. The socket
+  is the owner's alone and the row is the delivery, so it is there whether or
+  not the app is connected.
+  """
+  @impl true
+  @spec owner_inbox() :: {:ok, String.t()}
+  def owner_inbox, do: {:ok, @profile}
+
+  @doc """
+  Whether every client watching the owner's chat now reads server event
+  `type`, each connection known by the version its hello declared; true with
+  none attached. A turn may end with no reply (`turn_done`) only while this
+  holds, or a version 1 client would show it as thinking (M56 §6).
+  """
+  @spec every_client_reads?(String.t()) :: boolean()
+  def every_client_reads?(type) when is_binary(type) do
+    needs = Protocol.server_event_version(type)
+
+    @registry
+    |> Registry.lookup(@profile)
+    |> Enum.all?(fn {_connection, version} -> is_integer(version) and version >= needs end)
+  end
 
   @doc "Normalize a decoded `msg` or `command` into a gateway message."
   @spec parse_event(event()) :: {:ok, [Message.t()]} | {:error, term()}
@@ -134,6 +193,9 @@ defmodule FermixChannels.Channels.Companion do
       {kind, text} when kind in [:text_delta, :text_done] ->
         relay(profile_id, turn_id, text)
 
+      :silent_reply ->
+        Turns.silent(message)
+
       _reasoning_or_other ->
         :ok
     end
@@ -194,7 +256,9 @@ defmodule FermixChannels.Channels.Companion do
   Write one reply or delivery to the timeline and announce it. A request's
   output is fenced by its attempt, a proactive delivery is deduplicated by its
   key, and anything else (a scheduled job's result) is a plain row; whether or
-  not a client is connected, the row is the delivery.
+  not a client is connected, the row is the delivery. A delivery, one that
+  answers no request, is pushed to the phones as well while their channel
+  runs (M56 D9), as one through the phone's own channel is.
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
@@ -207,11 +271,74 @@ defmodule FermixChannels.Channels.Companion do
              {:ok, {status, row}} <-
                Output.persist_text(store(), profile_id, text, Map.new(opts)) do
           announce_written(status, profile_id, row)
+          push_delivered(status, profile_id, row, opts)
           {:ok, status}
         end
       end)
 
     emit_outbound(result, duration_us)
+  end
+
+  @doc """
+  Write one row of a GPT-Live call to `profile_id`'s timeline (M56 §4.2,
+  §4.5): `text` as an assistant text row with no media, its `metadata.call`
+  the `call` map (`Protocol.validate_call_metadata/1` is its shape, checked
+  here before anything is written). The row is keyed by what it is about, a
+  result shown for one task revision being
+  `"voice:<uuid>:<task_id>:<revision>"`, the rows of a task that outlives its
+  call that key with `:running` or `:done` after it (M56 §4.6), and the call's
+  row when it ends `"voice:<uuid>:ended"`, so a repeated write answers the row
+  already written
+  and announces nothing; a new row is announced to the Mac and the phones like
+  any other. `text` past 32 KB is cut at the end, on a character, behind
+  `call_row_cut_marker/0`.
+
+  Answers the row, whose `server_seq` the realtime wire's `task` names.
+  """
+  @spec write_call_row(String.t(), String.t(), map()) :: {:ok, map()} | {:error, term()}
+  def write_call_row(profile_id, text, call)
+      when is_binary(profile_id) and is_binary(text) and is_map(call) do
+    {result, duration_us} =
+      Telemetry.timed_us(fn ->
+        with :ok <- validate_profile(profile_id),
+             :ok <- Protocol.validate_call_metadata(call),
+             {:ok, key} <- call_row_key(call),
+             attrs = %{proactive_key: key, call: call},
+             {:ok, {status, row}} <-
+               Output.persist_text(store(), profile_id, call_row_text(text), attrs) do
+          announce_written(status, profile_id, row)
+          {:ok, {status, row}}
+        end
+      end)
+
+    with {:ok, {status, row}} <- result do
+      emit_outbound({:ok, status}, duration_us)
+      {:ok, row}
+    end
+  end
+
+  @doc "What stands at the end of a call row's text that was cut for length."
+  @spec call_row_cut_marker() :: String.t()
+  def call_row_cut_marker, do: @call_row_cut_marker
+
+  # A task's result shown during its call is keyed by its revision, the two
+  # rows of a task that outlives its call by its revision and the event, and
+  # the call's one row when it ends by the call alone.
+  defp call_row_key(%{"event" => "shared"} = call), do: {:ok, task_row_key(call)}
+
+  defp call_row_key(%{"event" => "task_running"} = call),
+    do: {:ok, task_row_key(call) <> ":running"}
+
+  defp call_row_key(%{"event" => "task_done"} = call), do: {:ok, task_row_key(call) <> ":done"}
+  defp call_row_key(%{"event" => "ended"} = call), do: {:ok, "voice:#{call["uuid"]}:ended"}
+
+  defp task_row_key(call), do: "voice:#{call["uuid"]}:#{call["task_id"]}:#{call["revision"]}"
+
+  defp call_row_text(text) when byte_size(text) <= @call_row_max_bytes, do: text
+
+  defp call_row_text(text) do
+    Text.truncate_utf8(text, @call_row_max_bytes - byte_size(@call_row_cut_marker)) <>
+      @call_row_cut_marker
   end
 
   @doc """
@@ -235,6 +362,21 @@ defmodule FermixChannels.Channels.Companion do
 
   defp announce_written(:existing, _profile, _row), do: :ok
 
+  # The phone and the Mac draw one timeline (M56 D9), so a delivery written
+  # here reaches the phones as one through the phone's own channel does: its
+  # row is pushed while the phone tree runs, and the phone's rule decides from
+  # there (no push to a connected device, nor for a row already read), so an
+  # owner watching the Mac is not pinged. A reply to a request (a slash
+  # command's answer) is its client's, and a row the store deduplicated was
+  # pushed when it was written: neither is pushed.
+  defp push_delivered(:created, profile, row, opts) do
+    if is_nil(Keyword.get(opts, :in_reply_to)) and MobileSupervisor.running?(),
+      do: Mobile.schedule_push(profile, row.server_seq),
+      else: :ok
+  end
+
+  defp push_delivered(:existing, _profile, _row, _opts), do: :ok
+
   # One durable timeline row is one delivered outbound message; a row the store
   # deduplicated was counted when it was created.
   defp emit_outbound({:ok, :created}, duration_us) do
@@ -244,8 +386,14 @@ defmodule FermixChannels.Channels.Companion do
   defp emit_outbound({:ok, :existing}, _duration_us), do: :ok
   defp emit_outbound({:error, reason}, _duration_us), do: {:error, reason}
 
-  defp relay(profile_id, turn_id, text) when is_binary(text),
-    do: stream(profile_id, turn_id, {:snapshot, text})
+  # A snapshot that could still become the sentinel waits for the next one: a
+  # turn that ends silently never shows a draft, and one that does not loses
+  # nothing, since the next snapshot, or its `text_done`, carries the text.
+  defp relay(profile_id, turn_id, text) when is_binary(text) do
+    if LiveCallTurn.sentinel_prefix?(text),
+      do: :ok,
+      else: stream(profile_id, turn_id, {:snapshot, text})
+  end
 
   defp stream(profile_id, turn_id, update),
     do: dispatch(@registry, profile_id, {:companion_stream, turn_id, update})

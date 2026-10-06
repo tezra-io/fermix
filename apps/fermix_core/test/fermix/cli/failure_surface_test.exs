@@ -3,8 +3,10 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
   import ExUnit.CaptureIO
 
+  alias Fermix.CLI
   alias Fermix.CLI.AgentsCommand
   alias Fermix.CLI.CapabilitiesCommand
+  alias Fermix.CLI.SettingsCommand
   alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StatusCommand
 
@@ -212,6 +214,57 @@ defmodule Fermix.CLI.FailureSurfaceTest do
 
     assert_receive {:exit_status, 3}
     assert stderr =~ "fermix: not running"
+  end
+
+  # The dispatcher clause and the default client together: no socket under this
+  # home, so the home-owner check finds no daemon and no marker, and the first
+  # settings call reports the daemon as not running.
+  test "settings with no daemon exits 3 through the top-level dispatcher" do
+    test_self = self()
+
+    stderr =
+      capture_io(:stderr, fn ->
+        send(test_self, {:exit_status, CLI.main(["settings"])})
+      end)
+
+    assert_receive {:exit_status, 3}
+    assert stderr =~ "fermix settings: the Fermix daemon is not running"
+    assert stderr =~ "`fermix start`"
+  end
+
+  test "settings show sends a protocol 2 settings.get over the real socket", %{
+    socket_path: socket_path
+  } do
+    test_self = self()
+
+    task =
+      serve(socket_path, fn request ->
+        send(test_self, {:request, request})
+
+        %{
+          "request_id" => request["request_id"],
+          "result" => %{"id" => "secrets", "title" => "Secrets", "rows" => []}
+        }
+      end)
+
+    stdout =
+      capture_io(fn ->
+        send(
+          test_self,
+          {:exit_status, SettingsCommand.run(["show", "secrets"], app_managed?: fn -> false end)}
+        )
+      end)
+
+    assert_receive {:exit_status, 0}
+    Task.await(task, 1_000)
+    assert stdout == "Secrets  (secrets)\n\n"
+
+    assert_receive {:request,
+                    %{
+                      "protocol_version" => 2,
+                      "method" => "settings.get",
+                      "params" => %{"section" => "secrets"}
+                    }}
   end
 
   defp serve_once(socket_path, response) do

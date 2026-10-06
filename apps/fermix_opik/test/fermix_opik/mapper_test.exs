@@ -269,6 +269,8 @@ defmodule FermixOpik.MapperTest do
 
   test "provider_string maps every Fermix provider to an Opik pricing token" do
     assert Mapper.provider_string(:openai) == "openai"
+    # OpenAI Codex on a ChatGPT plan prices as the API turn it stands in for
+    # (M57 O6); the span's own `provider` field still says openai_codex.
     assert Mapper.provider_string(:openai_codex) == "openai"
     assert Mapper.provider_string(:anthropic) == "anthropic"
     assert Mapper.provider_string(:xai) == "xai"
@@ -788,6 +790,24 @@ defmodule FermixOpik.MapperTest do
       # measurement: a point span would erase how long the backend turn took.
       assert span.start_time == Mapper.iso(Mapper.start_of(@ended, 1_200))
       assert span.end_time == Mapper.iso(@ended)
+      refute Map.has_key?(span.metadata, :server_seq)
+    end
+
+    # M56 §4.5: a result shown in the chat is named by its row and sized.
+    test "a delegation whose result was shown names the row and its size" do
+      span =
+        Mapper.voice_live_span(
+          %{delegation_id: "dlg_1", status: "completed", server_seq: 42, shown_bytes: 913},
+          %{duration_ms: 1_200},
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended,
+          phase: :delegation_stop
+        )
+
+      assert span.metadata.server_seq == 42
+      assert span.metadata.shown_bytes == 913
     end
 
     test "a phase with no duration is a point span and drops absent keys" do

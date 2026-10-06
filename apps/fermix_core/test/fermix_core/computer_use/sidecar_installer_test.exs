@@ -131,4 +131,52 @@ defmodule FermixCore.ComputerUse.SidecarInstallerTest do
                fetcher: fn _url -> {:error, :network_disabled_in_tests} end
              )
   end
+
+  # compux's own fetcher dials with `:httpc` and would ignore the egress policy;
+  # `install/0` hands it this one instead.
+  describe "fetch_release/2" do
+    test "returns the archive exactly as served" do
+      archive = <<31, 139, 8, 0, 0, 0, 0, 0, 0, 3, 1, 2, 3>>
+
+      adapter = fn request ->
+        response =
+          Req.Response.new(
+            status: 200,
+            headers: [{"content-type", "application/gzip"}, {"content-encoding", "gzip"}],
+            body: archive
+          )
+
+        {request, response}
+      end
+
+      assert SidecarInstaller.fetch_release("https://github.test/compux.tar.gz", adapter: adapter) ==
+               {:ok, archive}
+    end
+
+    test "keeps compux's error shapes for a refused or failed download" do
+      not_found = fn request -> {request, Req.Response.new(status: 404, body: "")} end
+      dropped = fn request -> {request, %Req.TransportError{reason: :closed}} end
+
+      assert SidecarInstaller.fetch_release("https://github.test/x", adapter: not_found) ==
+               {:error, {:http_status, 404}}
+
+      assert SidecarInstaller.fetch_release("https://github.test/x", adapter: dropped) ==
+               {:error, {:http_error, %Req.TransportError{reason: :closed}}}
+    end
+
+    test "is routed by the egress policy like every other request" do
+      parent = self()
+
+      adapter = fn request ->
+        send(parent, {:steps, Keyword.keys(request.request_steps)})
+        {request, Req.Response.new(status: 200, body: "ok")}
+      end
+
+      assert {:ok, "ok"} =
+               SidecarInstaller.fetch_release("https://github.test/x", adapter: adapter)
+
+      assert_receive {:steps, steps}
+      assert :fermix_egress in steps
+    end
+  end
 end

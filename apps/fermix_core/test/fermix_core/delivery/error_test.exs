@@ -26,6 +26,7 @@ defmodule FermixCore.Delivery.ErrorTest do
     :connection_refused,
     :connection_reset,
     :network_unreachable,
+    :proxy_unavailable,
     :timeout
   ]
 
@@ -105,6 +106,21 @@ defmodule FermixCore.Delivery.ErrorTest do
         assert {:error, {:transport, ^expected}} =
                  Error.normalize({:error, %Req.TransportError{reason: raw}}),
                "expected transport #{inspect(raw)} to map to #{inspect(expected)}"
+      end
+    end
+
+    # The configured proxy refused the tunnel, never answered, or could not be
+    # reached: one retryable kind of its own, so a reminder is neither lost to
+    # a "contract violation" nor blamed on the channel's host.
+    test "a failed proxy hop maps to :proxy_unavailable" do
+      for reason <- [
+            :proxy_unreachable,
+            :proxy_auth_required,
+            :proxy_refused,
+            :proxy_needs_https
+          ] do
+        assert {:error, {:transport, :proxy_unavailable}} =
+                 Error.normalize({:error, %Req.TransportError{reason: reason}})
       end
     end
 

@@ -1,0 +1,6 @@
+{"id":9,"method":"send.text","params":{"to":"+15551234567","text":"Here is the answer.","idempotency_key":"turn:t-42:1:text:0"}}
+{"id":9,"result":{"disposition":"recorded","guid":"A9B8C7D6-0002-4E5F-8A9B-0C1D2E3F4A5B","rowid":4023}}
+{"id":9,"result":{"disposition":"uncertain"}}
+{"id":9,"result":{"disposition":"uncertain","class":"send_timeout"}}
+{"id":9,"result":{"disposition":"failed","class":"chat_not_found"}}
+{"id":9,"error":{"kind":"policy_violation","message":"recipient is outside the confirmed policy","data":{"handle":"+15559999999"}}}

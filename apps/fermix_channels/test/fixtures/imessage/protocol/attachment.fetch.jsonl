@@ -1,0 +1,3 @@
+{"id":11,"method":"attachment.fetch","params":{"message_guid":"F1C2E3A4-0002-4B5C-9D6E-7F8091A2B3C4","index":0,"convert":true}}
+{"id":11,"result":{"path":"/Users/owner/.fermix/imessage/inbox/F1C2E3A4-0002-4B5C-9D6E-7F8091A2B3C4/0-Audio_Message.m4a","mime":"audio/mp4","bytes":51234}}
+{"id":11,"error":{"kind":"attachment_not_admitted","message":"no admitted message carries that attachment","data":{}}}

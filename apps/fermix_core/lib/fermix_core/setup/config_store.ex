@@ -12,8 +12,10 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.IMessage
   alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
@@ -25,6 +27,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
+  alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -120,6 +123,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: Application.get_env(:fermix_core, :jobs, []),
         routing: Application.get_env(:fermix_core, :routing, []),
         compaction: Application.get_env(:fermix_core, :compaction, []),
+        network: Application.get_env(:fermix_core, :network, []),
         harness: Application.get_env(:fermix_core, :harness, []),
         browser: Application.get_env(:fermix_core, :browser, []),
         skill_curation: Application.get_env(:fermix_core, :skill_curation, []),
@@ -144,19 +148,47 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: Application.get_env(:fermix_channels, :slack, []),
         signal: Application.get_env(:fermix_channels, :signal, []),
         acp: Application.get_env(:fermix_channels, :acp, []),
-        mobile: Application.get_env(:fermix_channels, :mobile, [])
+        mobile: Application.get_env(:fermix_channels, :mobile, []),
+        imessage: Application.get_env(:fermix_channels, :imessage, [])
       ],
       fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
     |> persistable_snapshot()
   end
 
+  @doc """
+  Reads and normalizes the settings file.
+
+  A value a normalizer refuses raises with the key named. A section the file
+  enables on a host that cannot run it answers a typed error instead: an
+  enabled `[fermix_channels.imessage]` off a Mac is
+  `{:error, {:unsupported_platform, :imessage}}`. `macos?:` names the host for a
+  test; every other caller reads the real one.
+  """
   @spec load_runtime_config(keyword()) :: {:ok, runtime_config()} | {:error, term()}
   def load_runtime_config(opts \\ []) do
     case File.read(path()) do
-      {:ok, contents} -> {:ok, maybe_resolve_keyring(parse_document(contents), opts)}
+      {:ok, contents} -> platform_checked(parse_document(contents), opts)
       {:error, :enoent} -> {:ok, empty_runtime_config()}
       {:error, reason} -> {:error, reason}
+    end
+  end
+
+  @doc """
+  The sentence a load refusal is reported with: a typed platform refusal in its
+  operator words, any other reason as its term.
+  """
+  @spec load_error_sentence(term()) :: String.t()
+  def load_error_sentence({:unsupported_platform, :imessage} = reason),
+    do: IMessage.error_message(reason)
+
+  def load_error_sentence(reason), do: inspect(reason)
+
+  defp platform_checked(snapshot, opts) do
+    imessage = Keyword.get(snapshot.fermix_channels, :imessage, [])
+
+    with :ok <- IMessage.check_platform(imessage, opts) do
+      {:ok, maybe_resolve_keyring(snapshot, opts)}
     end
   end
 
@@ -215,6 +247,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_jobs_config(Keyword.get(persisted.fermix_core, :jobs, []))
     apply_routing_config(Keyword.get(persisted.fermix_core, :routing, []))
     apply_compaction_config(Keyword.get(persisted.fermix_core, :compaction, []))
+    apply_network_config(Keyword.get(persisted.fermix_core, :network, []))
     apply_harness_config(Keyword.get(persisted.fermix_core, :harness, []))
     apply_browser_config(Keyword.get(persisted.fermix_core, :browser, []))
     apply_skill_curation_config(Keyword.get(persisted.fermix_core, :skill_curation, []))
@@ -239,6 +272,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:signal, Keyword.get(persisted.fermix_channels, :signal, []))
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
+    apply_channel_config(:imessage, Keyword.get(persisted.fermix_channels, :imessage, []))
     apply_web_config(Map.get(persisted, :fermix_web, []))
   end
 
@@ -287,7 +321,7 @@ defmodule FermixCore.Setup.ConfigStore do
   @spec bootstrap_runtime_config() :: :ok | {:error, term()}
   @spec bootstrap_runtime_config(keyword()) :: :ok | {:error, term()}
   def bootstrap_runtime_config(opts \\ []) do
-    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised])),
+    with {:ok, snapshot} <- load_runtime_config(Keyword.take(opts, [:supervised, :macos?])),
          :ok <- apply_snapshot(snapshot, opts),
          # This is the boot read of the file, which is what the external-change
          # baseline means: the values in application environment now came from
@@ -391,6 +425,11 @@ defmodule FermixCore.Setup.ConfigStore do
           |> Map.get(:fermix_core, [])
           |> Keyword.get(:compaction, [])
           |> normalize_compaction(),
+        network:
+          snapshot
+          |> Map.get(:fermix_core, [])
+          |> Keyword.get(:network, [])
+          |> normalize_network(),
         harness:
           snapshot
           |> Map.get(:fermix_core, [])
@@ -507,7 +546,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:mobile, [])
-          |> normalize_mobile()
+          |> normalize_mobile(),
+        imessage:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:imessage, [])
+          |> normalize_imessage()
       ],
       fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
@@ -597,6 +641,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: [],
         routing: [],
         compaction: [],
+        network: [],
         harness: [],
         browser: [],
         skill_curation: [],
@@ -621,7 +666,8 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: [],
         signal: [],
         acp: [],
-        mobile: []
+        mobile: [],
+        imessage: []
       ],
       fermix_web: []
     }
@@ -857,6 +903,15 @@ defmodule FermixCore.Setup.ConfigStore do
     :ok
   end
 
+  # Replace (not merge): the section has no compile-time baseline, so a proxy
+  # removed from the file must be removed here too. This is the persisted
+  # setting; the egress a running daemon dials through is the one
+  # `Egress.activate/0` recorded at boot, and changes only on a restart.
+  defp apply_network_config(network_config) do
+    Application.put_env(:fermix_core, :network, network_config)
+    :ok
+  end
+
   # Replace (not merge): the harness section has no compile-time baseline, so the
   # persisted keyword — already fully normalized by persistable_snapshot — is the
   # complete intended state (same rationale as routing/computer_use).
@@ -1017,6 +1072,7 @@ defmodule FermixCore.Setup.ConfigStore do
     jobs = Keyword.get(fermix_core, :jobs, [])
     routing = Keyword.get(fermix_core, :routing, [])
     compaction = Keyword.get(fermix_core, :compaction, [])
+    network = Keyword.get(fermix_core, :network, [])
     harness = Keyword.get(fermix_core, :harness, [])
     browser = Keyword.get(fermix_core, :browser, [])
     skill_curation = Keyword.get(fermix_core, :skill_curation, [])
@@ -1059,6 +1115,7 @@ defmodule FermixCore.Setup.ConfigStore do
       ),
       render_section(["fermix_core", "routing"], routing),
       render_section(["fermix_core", "compaction"], compaction),
+      render_section(["fermix_core", "network"], network),
       render_section(["fermix_core", "harness"], harness),
       render_section(["fermix_core", "browser"], browser),
       render_section(["fermix_core", "skill_curation"], skill_curation),
@@ -1088,6 +1145,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "signal"], Keyword.get(channels, :signal, [])),
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
+      render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
       render_section(["fermix_web"], web)
     ]
     |> List.flatten()
@@ -1282,6 +1340,7 @@ defmodule FermixCore.Setup.ConfigStore do
           Enum.map(Descriptor.all(), fn descriptor ->
             raw = get_in(document, ["fermix_core", "providers", Atom.to_string(descriptor.id)])
             validate_provider_section_keys!(raw, descriptor)
+            warn_retired_provider_keys(raw, descriptor)
             {descriptor.id, normalize_provider_block(raw, descriptor)}
           end),
         personalization:
@@ -1290,6 +1349,7 @@ defmodule FermixCore.Setup.ConfigStore do
         jobs: normalize_jobs(get_in(document, ["fermix_core", "jobs"])),
         routing: normalize_routing(get_in(document, ["fermix_core", "routing"])),
         compaction: normalize_compaction(get_in(document, ["fermix_core", "compaction"])),
+        network: normalize_network(get_in(document, ["fermix_core", "network"])),
         harness: normalize_harness(get_in(document, ["fermix_core", "harness"])),
         browser: normalize_browser(get_in(document, ["fermix_core", "browser"])),
         skill_curation:
@@ -1318,7 +1378,8 @@ defmodule FermixCore.Setup.ConfigStore do
         slack: normalize_slack(get_in(document, ["fermix_channels", "slack"])),
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
-        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"]))
+        mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"])),
+        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"]))
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
@@ -1425,7 +1486,6 @@ defmodule FermixCore.Setup.ConfigStore do
   defp normalize_provider_value(:base_url, value), do: normalize_string(value)
   defp normalize_provider_value(:default_model, value), do: normalize_string(value)
   defp normalize_provider_value(:auth_mode, value), do: normalize_auth_mode(value)
-  defp normalize_provider_value(:fast, value), do: normalize_bool(value)
   defp normalize_provider_value(:primary, value), do: normalize_bool(value)
 
   defp normalize_provider_value(:reasoning_effort, value),
@@ -1434,13 +1494,17 @@ defmodule FermixCore.Setup.ConfigStore do
   # User-authored TOML keys outside the descriptor's allowlist raise at
   # the parse boundary — a typo'd key must never be silently dropped
   # (M12 §4; Code Rule 6). The legacy `provider = ...` key keeps its more
-  # specific migration message.
+  # specific migration message. A key the descriptor retired is accepted here
+  # (an existing config.toml must keep booting), named once by
+  # `warn_retired_provider_keys/2`, and dropped by `normalize_provider_block/2`,
+  # which reads only the live keys, so the next save writes the block without it.
   defp validate_provider_section_keys!(nil, _descriptor), do: :ok
 
   defp validate_provider_section_keys!(config, descriptor) when is_map(config) do
     if descriptor.id == :openai and has_provider_key?(config), do: raise_old_provider_layout!()
 
-    allowed = MapSet.new(descriptor.config_keys, &Atom.to_string/1)
+    allowed =
+      MapSet.new(descriptor.config_keys ++ descriptor.retired_config_keys, &Atom.to_string/1)
 
     unknown =
       config
@@ -1460,6 +1524,26 @@ defmodule FermixCore.Setup.ConfigStore do
       """
     end
   end
+
+  defp warn_retired_provider_keys(nil, _descriptor), do: :ok
+
+  defp warn_retired_provider_keys(config, descriptor) when is_map(config) do
+    present = Enum.filter(descriptor.retired_config_keys, &present_key?(config, &1))
+
+    if present != [] do
+      Logger.warning(
+        "config.toml [fermix_core.providers.#{descriptor.id}] key(s) " <>
+          "#{Enum.map_join(present, ", ", &Atom.to_string/1)} are retired: this build no " <>
+          "longer reads them, so they are ignored, and the next settings save writes the " <>
+          "file without them."
+      )
+    end
+
+    :ok
+  end
+
+  defp present_key?(config, key),
+    do: Map.has_key?(config, Atom.to_string(key)) or Map.has_key?(config, key)
 
   defp normalize_realtime(config) do
     config
@@ -1995,24 +2079,51 @@ defmodule FermixCore.Setup.ConfigStore do
   # `Media.Registry` then fails loud with the supported list. Stricter than
   # `normalize_web_search_backend/1`'s silent-nil because a mistyped media
   # backend has no keyless fallback to limp along on.
+  #
+  # A backend this build retired is not a typo: an existing config.toml that
+  # names it must keep booting. It is accepted, named once at warning with the
+  # backends that replace it, and dropped, which leaves the image tool with no
+  # backend (it refuses until one is chosen) and the next save writes the file
+  # without it (the `ComputerHistory.Config.retired_keys/0` precedent). The
+  # live set is the media registry's, never a second list maintained here.
+  @retired_image_backends ~w(openai_codex)
+
   defp normalize_image_backend(nil), do: nil
 
   defp normalize_image_backend(value) when is_atom(value),
     do: normalize_image_backend(Atom.to_string(value))
 
   defp normalize_image_backend(value) when is_binary(value) do
-    case value |> String.trim() |> String.downcase() do
-      backend when backend in ~w(openai xai google openai_codex) ->
+    backend = value |> String.trim() |> String.downcase()
+
+    cond do
+      backend in image_backend_names() ->
         backend
 
-      other ->
-        raise ArgumentError, """
-        config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(other)}.
+      backend in @retired_image_backends ->
+        warn_retired_image_backend(backend)
 
-        Allowed backends: google, openai, openai_codex, xai.
+      true ->
+        raise ArgumentError, """
+        config.toml [fermix_core.tools.generate_image] has an unknown backend: #{inspect(backend)}.
+
+        Allowed backends: #{Enum.join(image_backend_names(), ", ")}.
         Remove or fix `backend`; the daemon will not boot until this is fixed.
         """
     end
+  end
+
+  defp image_backend_names, do: :image |> MediaRegistry.providers() |> Enum.sort()
+
+  defp warn_retired_image_backend(backend) do
+    Logger.warning(
+      "config.toml [fermix_core.tools.generate_image] backend #{inspect(backend)} is retired: " <>
+        "this build no longer has it, so image generation stays off until you choose " <>
+        "#{Enum.join(image_backend_names(), ", ")} in setup, and the next settings save " <>
+        "writes the file without it."
+    )
+
+    nil
   end
 
   # Canonical enum + per-provider mapping live in ReasoningEffort.
@@ -2177,6 +2288,11 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_compaction(config), do: CompactionConfig.normalize(config)
+
+  # `[fermix_core.network]` (the outbound proxy). `Egress.normalize/1` validates
+  # every value and refuses an unknown key: a misspelt `proxy` must stop the
+  # boot, not leave the daemon dialing direct on a host that may not (Rule #12).
+  defp normalize_network(config), do: Egress.normalize(config)
 
   # `[fermix_core.harness]` (coding-harness substrate). Value validation lives in
   # HarnessConfig.normalize (fail-loud per key). Unknown keys are rejected here at
@@ -2474,6 +2590,114 @@ defmodule FermixCore.Setup.ConfigStore do
 
   defp normalize_acp(config) do
     put_if_present([], :enabled, lookup(config, "enabled", :enabled))
+  end
+
+  # The iMessage channel (M54 §11). Every value that would otherwise be dropped
+  # or guessed refuses the load with its key named: an id that is not a quoted
+  # string (M53 OWN-2: an unquoted `+1555…` is a TOML integer that has already
+  # lost its `+`), `"draft"` streaming on a channel that cannot edit, and the
+  # `posture` key an earlier build wrote. The account is no longer chosen: the
+  # helper derives it when it confirms the recipients, so a leftover `posture`
+  # is refused by name rather than silently ignored. Handles are normalized
+  # here, once, so the owner the authorizer compares and the one the helper
+  # confirmed are the same string. `mode` is not a key: the registry fixes the
+  # transport.
+  defp normalize_imessage(nil), do: []
+
+  defp normalize_imessage(config) when is_map(config) or is_list(config) do
+    refuse_imessage_posture!(lookup(config, "posture", :posture))
+
+    []
+    |> put_if_present(:enabled, imessage_enabled(lookup(config, "enabled", :enabled)))
+    |> put_if_present(
+      :owner_user_id,
+      imessage_owner(lookup(config, "owner_user_id", :owner_user_id))
+    )
+    |> put_if_present(
+      :allowed_sender_ids,
+      imessage_ids(lookup(config, "allowed_sender_ids", :allowed_sender_ids), :allowed_sender_ids)
+    )
+    |> put_if_present(
+      :command_allowlist,
+      imessage_ids(lookup(config, "command_allowlist", :command_allowlist), :command_allowlist)
+    )
+    |> put_streaming(config)
+    # `put_if_present/3` prepends; reversed, the section renders in the order
+    # the keys are documented in.
+    |> Enum.reverse()
+    |> validate_imessage!()
+  end
+
+  defp normalize_imessage(config) do
+    raise ArgumentError,
+          "invalid fermix_channels.imessage #{inspect(config)}; expected a table"
+  end
+
+  defp imessage_enabled(value) when is_nil(value) or is_boolean(value), do: value
+
+  defp imessage_enabled(value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.enabled #{inspect(value)} must be true or false"
+  end
+
+  defp refuse_imessage_posture!(nil), do: :ok
+
+  defp refuse_imessage_posture!(_value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.posture is no longer used; remove it. Fermix Messages " <>
+            "works out the account when you confirm who Fermix may message"
+  end
+
+  defp imessage_owner(nil), do: nil
+  defp imessage_owner(value) when is_binary(value), do: imessage_handle(value)
+
+  defp imessage_owner(value) do
+    raise ArgumentError,
+          "fermix_channels.imessage.owner_user_id must be a quoted string, " <>
+            "such as \"+15551234567\"; got #{inspect(value)}"
+  end
+
+  defp imessage_ids(nil, _key), do: nil
+
+  defp imessage_ids(ids, key) when is_list(ids) do
+    if Enum.all?(ids, &is_binary/1) do
+      ids |> Enum.map(&imessage_handle/1) |> Enum.reject(&is_nil/1)
+    else
+      refuse_imessage_ids(ids, key)
+    end
+  end
+
+  defp imessage_ids(ids, key), do: refuse_imessage_ids(ids, key)
+
+  defp refuse_imessage_ids(ids, key) do
+    raise ArgumentError,
+          "fermix_channels.imessage.#{key} must list quoted strings, " <>
+            "such as [\"+15551234567\"]; got #{inspect(ids)}"
+  end
+
+  defp imessage_handle(value) do
+    case {String.trim(value), IMessage.normalize_handle(value)} do
+      {"", _} -> nil
+      {_handle, {:ok, normalized}} -> normalized
+      {handle, {:error, :invalid_handle}} -> refuse_imessage_handle(handle)
+    end
+  end
+
+  defp refuse_imessage_handle(handle) do
+    raise ArgumentError,
+          "fermix_channels.imessage: #{inspect(handle)} is not an iMessage handle; " <>
+            "expected a phone number with its country code, such as \"+15551234567\", " <>
+            "or an email address"
+  end
+
+  defp validate_imessage!(fields) do
+    if Keyword.get(fields, :streaming) == "draft" do
+      raise ArgumentError,
+            "fermix_channels.imessage.streaming \"draft\" is not supported: iMessage " <>
+              "cannot edit a sent message; expected \"block\" or \"off\""
+    end
+
+    fields
   end
 
   defp normalize_mobile(nil), do: []

@@ -6,6 +6,7 @@ defmodule FermixCore.Tools.WebFetch do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Guard
   alias FermixCore.Tools.HtmlText
   alias FermixCore.Tools.Support
@@ -102,7 +103,7 @@ defmodule FermixCore.Tools.WebFetch do
   end
 
   defp fetch(pinned, context, redirects) do
-    case Req.get(pinned.url, request_options(context, pinned)) do
+    case request(pinned, context) do
       {:ok, %{status: status} = response} when status in 200..299 ->
         render_response(response)
 
@@ -113,9 +114,17 @@ defmodule FermixCore.Tools.WebFetch do
         Support.error("network: HTTP #{status}")
 
       {:error, reason} ->
-        Support.error("network: #{inspect(reason)}")
+        Support.error("network: #{describe_failure(reason)}")
     end
   end
+
+  # A failed proxy hop has a sentence the model can act on (an `http://` page
+  # behind a proxy is the common one: its `https://` address works).
+  defp describe_failure(%Req.TransportError{reason: reason} = error) do
+    if Egress.proxy_failure?(reason), do: Egress.describe_failure(reason), else: inspect(error)
+  end
+
+  defp describe_failure(reason), do: inspect(reason)
 
   defp render_response(%{private: %{fermix_body_cap: :too_large}}) do
     Support.error("too_large: response body exceeded #{@max_body_bytes} bytes")
@@ -195,6 +204,20 @@ defmodule FermixCore.Tools.WebFetch do
   end
 
   defp original_url(%{url: url}), do: url
+
+  # `pinned.url` carries the address the guard validated, so behind a proxy an
+  # HTTPS tunnel is opened to that address and the name stays inside it (SNI and
+  # `Host`). Plain HTTP has no tunnel to keep the name in, so `Net.Egress`
+  # refuses that hop rather than hand the proxy a name to resolve.
+  defp request(pinned, context) do
+    [method: :get, url: pinned.url]
+    |> Keyword.merge(request_options(context, pinned))
+    |> Req.new()
+    |> Egress.attach(:direct, egress(context))
+    |> Req.request()
+  end
+
+  defp egress(context), do: Map.get_lazy(context, :net_egress, &Egress.active/0)
 
   defp request_options(context, pinned) do
     context

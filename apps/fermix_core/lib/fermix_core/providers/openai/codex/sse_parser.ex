@@ -1,7 +1,9 @@
 defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   @moduledoc false
 
-  # Parses a Codex Responses SSE body into a body-shaped map
+  # Parses a streamed Responses SSE body (OpenAI Codex's route,
+  # `OpenAI.ChatGPTPlan`; the module keeps the Codex name it was born under)
+  # into a body-shaped map
   # `%{"output" => [items], "usage" => map(), "model" => string | nil,
   #    "status" => string | nil, "failure" => map() | nil}`
   # equivalent to what `OpenAI.Responses` receives synchronously, so the
@@ -13,6 +15,10 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # empty output list as empty text, so both shapes render as a valid empty turn.
   # `"failure"` carries the terminal event's own account of why (`error` or
   # `incomplete_details`), which used to be dropped by the catch-all.
+  # `"terminal_event"` names the event that set `"status"` (`response.completed`,
+  # `response.failed`, `error`, ...), because a stream-level `error` event and a
+  # `response.failed` both read `"failed"` and are different outcomes to a caller
+  # that reports them apart (ChatGPT plan usage, M57 §6.1).
   #
   # Two entry points:
   #
@@ -47,7 +53,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   #   * `response.output_text.delta`           — append to that item's text
   #     buffer
   #   * `response.output_item.done`            — finalize the item; the
-  #     `item` field is the canonical finalized shape (Codex sends complete
+  #     `item` field is the canonical finalized shape (the server sends complete
   #     `arguments` / `content` here), but if those are missing we fall
   #     back to the buffered deltas
   #   * `response.completed` / `response.done` — capture final usage and
@@ -66,30 +72,23 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
   # detect this by checking transport-level errors before calling parse/1.
   #
   # `leftover` is capped at `@max_leftover_bytes`. The only wall-clock bound on
-  # this stream is an IDLE window (`Codex.receive_timeout_for/1`), which a peer
+  # this stream is an IDLE window (the adapter's `receive_timeout`), which a peer
   # that trickles bytes never trips, so an event body that never reaches its
   # `\n\n` boundary would grow the binary for as long as the peer kept sending.
   #
   # Passing the cap latches `status: "failed"` + `failure` AND sets
-  # `overflowed?`, which `Codex.collect_sse/3` reads to return `{:halt, acc}`.
+  # `overflowed?`, which `ChatGPTPlan`'s `:into` collector reads to return
+  # `{:halt, acc}`.
   # The two halves are one fix: the cap bounds the MEMORY, the halt ends the
   # TRANSFER. Bounding memory alone leaves the request hanging forever on a
   # trickling peer — the conversation's single-flight slot and a pooled
   # connection held indefinitely, which is the denial the cap exists to close.
   # Anything parsed before the cap is still returned.
   #
-  # What the caller does with the latched failure depends on what the turn
-  # DELIVERED, and the two arms differ in how loud they are:
-  #
-  #   * nothing delivered — `Codex.undelivered_error/2` mints a `ProviderError`
-  #     carrying this message, which `Agents.TurnRunner` quotes to the operator.
-  #   * text or a tool call already delivered — `Codex.warn_truncated/3` logs a
-  #     warning and RETURNS the turn, so the operator sees a possibly-truncated
-  #     answer explained only in the log. That is deliberate, not an oversight:
-  #     erroring would discard delivered content and dead-end a continuation,
-  #     and no layer recovers it — `AgentLoop.continue_with_retry/3` runs
-  #     `eligible?: fn _ -> false end`, and `Jobs.Runner` refuses the whole-loop
-  #     replay once tools have started.
+  # The caller treats the latched failure as the stream's declared failure:
+  # `ChatGPTPlan` delivers only on `response.completed`, so it mints a
+  # `ProviderError` carrying this message, which `Agents.TurnRunner` quotes to
+  # the operator.
 
   @max_leftover_bytes 1_048_576
 
@@ -101,6 +100,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
             model: nil,
             status: nil,
             failure: nil,
+            terminal_event: nil,
             leftover: "",
             overflowed?: false,
             delta_callback: nil
@@ -149,7 +149,7 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
         failure: %{
           "code" => "sse_event_too_large",
           "message" =>
-            "Codex sent #{byte_size(leftover)} bytes of a single SSE event with no event " <>
+            "The stream sent #{byte_size(leftover)} bytes of a single SSE event with no event " <>
               "boundary, past the #{@max_leftover_bytes}-byte parser ceiling. The rest of the " <>
               "stream was abandoned; whatever parsed before it is kept."
         }
@@ -253,7 +253,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
       state
       | usage: resp["usage"] || state.usage,
         model: resp["model"] || state.model,
-        status: resp["status"] || "completed"
+        status: resp["status"] || "completed",
+        terminal_event: type
     }
   end
 
@@ -271,13 +272,14 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
         # caller now RETURNS that turn when output arrived — so its usage has to be
         # real, not the zero an absent map renders as.
         usage: resp["usage"] || state.usage,
-        model: resp["model"] || state.model
+        model: resp["model"] || state.model,
+        terminal_event: type
     }
   end
 
   # A stream-level error carries its payload inline rather than under "response".
   defp reduce_event(%{"type" => "error"} = event, state),
-    do: %{state | status: "failed", failure: Map.delete(event, "type")}
+    do: %{state | status: "failed", failure: Map.delete(event, "type"), terminal_event: "error"}
 
   defp reduce_event(_event, state), do: state
 
@@ -375,7 +377,8 @@ defmodule FermixCore.Providers.OpenAI.Codex.SSEParser do
       "usage" => state.usage,
       "model" => state.model,
       "status" => state.status,
-      "failure" => state.failure
+      "failure" => state.failure,
+      "terminal_event" => state.terminal_event
     }
   end
 

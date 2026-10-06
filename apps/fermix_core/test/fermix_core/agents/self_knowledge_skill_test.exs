@@ -61,6 +61,42 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The proxy has no pane and no setup flag, so the skill is the only place an
+  # operator's question about it can be answered, and it must not promise a
+  # surface that does not exist or an environment variable Fermix ignores.
+  test "documents the outbound proxy, where it is set and what it does not cover" do
+    body = File.read!(self_knowledge_path())
+    reference = File.read!(config_reference_path())
+
+    assert body =~ "[fermix_core.network]"
+    assert body =~ "does not read `HTTPS_PROXY`"
+
+    for required <- [
+          "[fermix_core.network]",
+          "proxy_bypass",
+          "HTTPS_PROXY",
+          "never prints the value",
+          "Nothing falls back to a direct connection",
+          "no Mac Settings pane",
+          "fermix doctor"
+        ] do
+      assert reference =~ required, "config self-knowledge does not mention #{required}"
+    end
+
+    assert reference =~ "fermix setup --proxy"
+  end
+
+  # On a server reached over SSH the terminal verb is the settings surface, and
+  # a secret enters it only through `secret set`, prompted or piped, so the
+  # reference must name both or the agent answers with an argument.
+  test "documents fermix settings and how a secret enters it" do
+    reference = File.read!(config_reference_path())
+
+    for required <- ["fermix settings", "secret set", "--stdin"] do
+      assert reference =~ required, "config self-knowledge does not mention #{required}"
+    end
+  end
+
   test "documents the mobile companion setup and its v1 boundaries" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(mobile_reference_path())
@@ -361,6 +397,53 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # iMessage is the one channel whose setup is macOS permissions rather than
+  # platform credentials, and the one that refuses Linux outright, so "how do I
+  # connect iMessage?" and "why is it silent?" are answered only if the grants,
+  # the recipient confirmation and the probe fields are named. Each string is a
+  # pane, a key, a probe field or a doctor row, not a phrasing.
+  test "documents iMessage: its permissions, the recipient confirmation and the Mac-only rule" do
+    paragraph = channels_paragraph()
+    reference = channel_setup_reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+    presentation = "channel_presentation" |> reference_path() |> File.read!()
+
+    for required <- ["iMessage", "Fermix Messages", "Full Disk Access", "Automation"] do
+      assert paragraph =~ required, "the Channels paragraph does not mention #{required}"
+    end
+
+    for required <- [
+          "## iMessage",
+          "Fermix Messages",
+          "Full Disk Access",
+          "Messages data",
+          "Messages automation",
+          "Awaiting confirmation",
+          "Confirm…",
+          "separate Apple ID",
+          "Sign Messages in with a separate Apple ID for Fermix",
+          "[fermix_channels.imessage]",
+          "allowed_sender_ids",
+          "full_disk_access",
+          "user_session",
+          "signed_in",
+          "policy_matches_config",
+          "imessage_helper",
+          "imessage_permissions",
+          "Linux"
+        ] do
+      assert reference =~ required, "channel_setup reference does not mention #{required}"
+    end
+
+    # The account is derived by the helper, never chosen: no surface names a
+    # posture setting any more.
+    for gone <- ["--imessage-posture", "posture =", "own_account"] do
+      refute reference =~ gone, "channel_setup reference still names #{gone}"
+      refute paragraph =~ gone, "the Channels paragraph still names #{gone}"
+    end
+
+    assert presentation =~ "iMessage"
+  end
+
   defp channels_paragraph do
     self_knowledge_path()
     |> File.read!()
@@ -379,6 +462,10 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     |> String.split("\n")
     |> Enum.filter(&String.starts_with?(&1, "- Service:"))
     |> Enum.join("\n")
+  end
+
+  defp config_reference_path do
+    Path.expand("../../../priv/skills/self_knowledge/references/config.md", __DIR__)
   end
 
   defp providers_reference_path do

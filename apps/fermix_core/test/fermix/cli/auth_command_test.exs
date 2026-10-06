@@ -2,6 +2,7 @@ defmodule Fermix.CLI.AuthCommandTest do
   use ExUnit.Case, async: false
 
   alias Fermix.CLI.AuthCommand
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Wizard
@@ -25,89 +26,264 @@ defmodule Fermix.CLI.AuthCommandTest do
     {:ok, dir: dir}
   end
 
+  # codex is `openai_codex`, which signs in with ChatGPT: status reads the
+  # registration's standing, never its tokens.
   describe "auth status" do
     test "reports not-logged-in when the auth file is missing" do
       output = capture_out(fn -> AuthCommand.run(["status"]) end)
-      assert output =~ "not logged in"
+      assert output =~ "not logged in (no ChatGPT sign-in in "
     end
 
-    test "prints stored entry fields when present", %{dir: dir} do
-      seed_codex_entry(dir, "AT", "RT", future_iso(3600))
+    test "prints the ChatGPT account and its state", %{dir: dir} do
+      seed_chatgpt(dir)
+
+      output = capture_out(fn -> AuthCommand.run(["status", "--provider", "codex"]) end)
+
+      assert output ==
+               "provider: openai_codex (Sign in with ChatGPT)\n" <>
+                 "account: owner@example.com\nstate: connected\n"
+    end
+
+    test "a sign-in without plan usage says what to turn on", %{dir: dir} do
+      seed_chatgpt(dir, granted_scopes: ["openid", "email", "offline_access"])
 
       output = capture_out(fn -> AuthCommand.run(["status"]) end)
-      assert output =~ "provider: openai_codex"
-      assert output =~ "auth_mode: chatgpt"
-      assert output =~ "expires_at: "
+      assert output =~ "state: plan_off\n"
+      assert output =~ ChatGPT.failure_sentence(:plan_usage_off)
+    end
+
+    # A Codex-client sign-in an older build stored is not read any more.
+    test "an old Codex-client entry is not a sign-in", %{dir: dir} do
+      seed_old_codex_entry(dir)
+
+      output = capture_out(fn -> AuthCommand.run(["status"]) end)
+      assert output =~ "not logged in"
+    end
+  end
+
+  describe "auth login (codex, Sign in with ChatGPT)" do
+    # A host with no browser: the opener fails, the address is printed, and a
+    # line typed at the prompt reaches the waiting sign-in as a pasted address.
+    test "a pasted address reaches the sign-in when no browser opens" do
+      parent = self()
+      pasted = "http://127.0.0.1:1455/auth/callback?code=C&state=S"
+
+      login = fn opts ->
+        send(parent, {:login_opts, Keyword.delete(opts, :puts)})
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.openai.com/api/accounts/authorize?x=1")
+
+        receive do
+          {:chatgpt_callback, url} -> send(parent, {:pasted, url})
+        after
+          2_000 -> flunk("no pasted address reached the sign-in")
+        end
+
+        {:ok, %{account: "owner@example.com", plan_usage: :on}}
+      end
+
+      seams = [
+        login: login,
+        read_line: lines(["  #{pasted}  \n"]),
+        browser: fn _url -> {:error, {:opener_failed, 3, "no display"}} end,
+        live_model: &kept_model/2
+      ]
+
+      {status, output} = run_out(["login", "--port", "1455", "--timeout", "30"], seams)
+
+      assert status == 0
+      assert_received {:pasted, ^pasted}
+      assert_received {:login_opts, opts}
+      assert Keyword.fetch!(opts, :port) == 1455
+      assert Keyword.fetch!(opts, :timeout_ms) == 30_000
+
+      assert output =~
+               "Open this address in a browser to sign in to ChatGPT:\n" <>
+                 "  https://auth.openai.com/api/accounts/authorize?x=1\n" <>
+                 "Or paste the address your browser ended on:\n"
+
+      assert output =~ "Signed in to ChatGPT as owner@example.com."
+    end
+
+    test "--no-browser prints the address and opens nothing" do
+      login = fn opts ->
+        :ok = Keyword.fetch!(opts, :opener).("https://auth.openai.com/api/accounts/authorize")
+        {:ok, %{account: nil, plan_usage: :on}}
+      end
+
+      seams = [
+        login: login,
+        read_line: lines([]),
+        browser: fn _url -> flunk("--no-browser must open nothing") end,
+        live_model: &kept_model/2
+      ]
+
+      {status, output} = run_out(["login", "--provider", "codex", "--no-browser"], seams)
+
+      assert status == 0
+      assert output =~ "Open this address in a browser to sign in to ChatGPT:\n"
+      assert output =~ "Signed in to ChatGPT. Tokens saved to "
+    end
+
+    # The configured model must be one the signed-in account lists, so a
+    # terminal sign-in checks it as the wizard and the apps' sign-in do.
+    test "a sign-in replaces a model the account does not list, and says so" do
+      seams = [
+        login: fn _opts -> {:ok, %{account: nil, plan_usage: :on}} end,
+        read_line: lines([]),
+        browser: fn _url -> :ok end,
+        live_model: fn :openai_codex, [] -> {:ok, %{model: "gpt-plan-one", changed?: true}} end
+      ]
+
+      {status, output} = run_out(["login"], seams)
+
+      assert status == 0
+
+      assert output =~
+               "Default model set to gpt-plan-one, the first one your ChatGPT account lists."
+    end
+
+    test "a model listing that fails leaves the sign-in standing and says so" do
+      seams = [
+        login: fn _opts -> {:ok, %{account: nil, plan_usage: :on}} end,
+        read_line: lines([]),
+        browser: fn _url -> :ok end,
+        live_model: fn :openai_codex, [] -> {:error, "ChatGPT did not answer."} end
+      ]
+
+      {status, output} = run_out(["login"], seams)
+
+      assert status == 0
+      assert output =~ "The default model was not checked against your ChatGPT account."
+      assert output =~ "ChatGPT did not answer."
+    end
+
+    test "a sign-in without plan usage fails and says what to turn on" do
+      seams = [
+        login: fn _opts -> {:ok, %{account: "owner@example.com", plan_usage: :off}} end,
+        read_line: lines([])
+      ]
+
+      {status, stderr} = run_err(["login"], seams)
+
+      assert status == 1
+      assert stderr == "fermix auth: #{ChatGPT.failure_sentence(:plan_usage_off)}\n"
+    end
+
+    test "a failed sign-in prints the sign-in's own sentence" do
+      seams = [login: fn _opts -> {:error, :access_denied} end, read_line: lines([])]
+
+      {status, stderr} = run_err(["login"], seams)
+
+      assert status == 1
+      assert stderr == "fermix auth: login failed: Sign-in was cancelled in the browser.\n"
     end
   end
 
   describe "auth logout" do
-    test "removes the openai_codex entry but keeps other providers", %{dir: dir} do
-      seed_full_doc(dir)
+    # ChatGPT's own sign-out: the tokens go, the registration and every other
+    # profile stay. With no refresh token there is no session to revoke, so
+    # nothing leaves this machine.
+    test "clears the ChatGPT tokens, keeps the registration and other providers", %{dir: dir} do
+      path = seed_chatgpt(dir, tokens: %{access_token: "AT", refresh_token: nil})
 
-      assert 0 == capture_out_status(fn -> AuthCommand.run(["logout"]) end)
+      :ok =
+        Store.write(
+          "openai",
+          %{
+            auth_mode: "api_key",
+            tokens: %{access_token: "sk-test", refresh_token: nil},
+            expires_at: nil,
+            last_refresh: nil
+          },
+          path
+        )
 
-      path = Path.join(dir, "auth.json")
+      assert {0, output} = run_out(["logout"], [])
+
+      assert output == "Logged out of ChatGPT. Cleared its tokens in #{path}.\n"
       data = path |> File.read!() |> Jason.decode!()
-      refute Map.has_key?(data["providers"], "openai_codex")
+      assert data["providers"]["chatgpt"]["status"] == "signed_out"
+      assert data["providers"]["chatgpt"]["client_id"] == "oaiapp_cli"
+      assert data["providers"]["chatgpt"]["tokens"]["access_token"] == nil
       assert Map.has_key?(data["providers"], "openai")
       assert {:ok, %{mode: mode}} = File.stat(path)
       assert Bitwise.band(mode, 0o777) == 0o600
     end
 
-    test "is a no-op when the auth file is missing" do
-      output = capture_out(fn -> AuthCommand.run(["logout"]) end)
-      assert output =~ "Already logged out"
+    test "a revoke OpenAI did not confirm still signs out, and says where to finish", %{
+      dir: dir
+    } do
+      seed_chatgpt(dir)
+      seams = [logout: fn [] -> {:ok, %{revoked: false}} end]
+
+      assert {0, output} = run_out(["logout", "--provider", "codex"], seams)
+      assert output == ChatGPT.failure_sentence(:revoke_not_confirmed) <> "\n"
     end
 
-    # No daemon answers in this home, so the logout is the local one alone. Codex
-    # has no auth-mode route, so nothing waits for a daemon restart and no
-    # restart is asked for.
+    test "a sign-out that fails says so and exits non-zero", %{dir: dir} do
+      seed_chatgpt(dir)
+      seams = [logout: fn [] -> {:error, :profile_busy} end]
+
+      {status, stderr} = run_err(["logout"], seams)
+
+      assert status == 1
+      assert stderr == "fermix auth: logout failed: #{Store.busy_sentence()}\n"
+    end
+
+    test "is a no-op when the auth file is missing" do
+      seams = [logout: fn [] -> flunk("nothing to sign out of") end]
+
+      output = capture_out(fn -> AuthCommand.run(["logout"], seams) end)
+      assert output =~ "Already logged out (no ChatGPT sign-in in "
+    end
+
+    # No daemon answers in this home, so the logout is the local one alone.
+    # Codex has no auth-mode route, so no restart is asked for.
     test "with no daemon running, the logout and its message are the local ones", %{dir: dir} do
-      seed_codex_entry(dir, "AT", "RT", future_iso(3600))
-      path = Path.join(dir, "auth.json")
+      path = seed_chatgpt(dir)
+      seams = [logout: fn [] -> {:ok, %{revoked: true}} end]
 
       stderr =
         capture_err(fn ->
-          output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
+          output = capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 0 end)
 
-          assert output == "Logged out. Removed openai_codex entry from #{path}.\n"
+          assert output == "Logged out of ChatGPT. Cleared its tokens in #{path}.\n"
         end)
 
       assert stderr == ""
-      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex, path)
     end
   end
 
-  # TOKEN-6: the CLI deletes the entry itself, then tells a running daemon to
-  # drop the tokens it still holds for that profile, the way the plugin verbs
-  # ask it to re-apply their config.
+  # TOKEN-6: the CLI signs the profile out itself, then tells a running daemon
+  # to drop the tokens it still holds for that profile, the way the plugin
+  # verbs ask it to re-apply their config. The ChatGPT sign-in lives under
+  # the `chatgpt` profile.
   describe "auth logout with a running daemon" do
     setup do
       %{home: FakeDaemonSocket.fermix_home!()}
     end
 
     test "tells the daemon to forget the signed-out profile", %{home: home} do
-      seed_codex_entry(home, "AT", "RT", future_iso(3600))
+      seed_chatgpt(home)
       daemon = FakeDaemonSocket.serve_once(home, %{"status" => "ok"})
+      seams = [logout: fn [] -> {:ok, %{revoked: true}} end]
 
       stderr =
         capture_err(fn ->
-          output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
-          assert output =~ "Logged out. Removed openai_codex entry"
+          output = capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 0 end)
+          assert output =~ "Logged out of ChatGPT."
         end)
 
       assert_receive {:fake_daemon_request,
-                      %{"method" => "auth_forget", "params" => %{"profile" => "openai_codex"}}}
+                      %{"method" => "auth_forget", "params" => %{"profile" => "chatgpt"}}}
 
       Task.await(daemon)
-      assert stderr =~ "daemon dropped any tokens it held for openai_codex"
-      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex)
+      assert stderr =~ "daemon dropped any tokens it held for chatgpt"
     end
 
-    # A previous logout whose daemon call failed leaves the entry gone and the
+    # A previous logout whose daemon call failed leaves the tokens gone and the
     # daemon holding the account; running the logout again must reach it.
-    test "tells the daemon even when the entry is already gone", %{home: home} do
+    test "tells the daemon even when no sign-in is stored", %{home: home} do
       daemon = FakeDaemonSocket.serve_once(home, %{"status" => "ok"})
 
       capture_err(fn ->
@@ -116,35 +292,33 @@ defmodule Fermix.CLI.AuthCommandTest do
       end)
 
       assert_receive {:fake_daemon_request,
-                      %{"method" => "auth_forget", "params" => %{"profile" => "openai_codex"}}}
+                      %{"method" => "auth_forget", "params" => %{"profile" => "chatgpt"}}}
 
       Task.await(daemon)
     end
 
-    test "a daemon that cannot forget fails the logout loudly, and says the entry is gone",
+    test "a daemon that cannot forget fails the logout loudly, and says the tokens are gone",
          %{home: home} do
-      seed_codex_entry(home, "AT", "RT", future_iso(3600))
-      path = Path.join(home, "auth.json")
+      path = seed_chatgpt(home)
       daemon = FakeDaemonSocket.serve_once(home, %{"status" => "error", "reason" => "wedged"})
+      seams = [logout: fn [] -> {:ok, %{revoked: true}} end]
 
       stderr =
         capture_err(fn ->
-          capture_out(fn -> assert AuthCommand.run(["logout"]) == 1 end)
+          capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 1 end)
         end)
 
       assert_receive {:fake_daemon_request, %{"method" => "auth_forget"}}
       Task.await(daemon)
 
-      assert stderr =~ "fermix auth: removed the openai_codex entry from #{path}"
-      assert stderr =~ "the running daemon could not drop its openai_codex tokens: wedged"
+      assert stderr =~ "fermix auth: cleared the ChatGPT tokens in #{path}"
+      assert stderr =~ "the running daemon could not drop its chatgpt tokens: wedged"
 
       # Production runs the daemon from the macOS app, so the CLI restart is
       # offered only for a daemon the operator runs.
       assert stderr =~
                "Restart the daemon (from the Fermix app, or `fermix restart` for a daemon " <>
                  "you run yourself)."
-
-      assert {:error, {:provider_missing, _}} = Store.read(:openai_codex, path)
     end
   end
 
@@ -440,38 +614,38 @@ defmodule Fermix.CLI.AuthCommandTest do
     end
   end
 
-  defp seed_codex_entry(dir, access, refresh, expires_iso) do
+  # A finished Sign in with ChatGPT under the `chatgpt` profile, plan usage
+  # granted unless `overrides` say otherwise.
+  defp seed_chatgpt(dir, overrides \\ []) do
     path = Path.join(dir, "auth.json")
 
-    File.write!(
-      path,
-      Jason.encode!(%{
-        "version" => 1,
-        "providers" => %{
-          "openai_codex" => %{
-            "auth_mode" => "chatgpt",
-            "tokens" => %{"access_token" => access, "refresh_token" => refresh},
-            "expires_at" => expires_iso,
-            "last_refresh" => future_iso(0)
-          }
-        }
-      })
-    )
+    entry =
+      Map.merge(
+        %{
+          auth_mode: "oauth_siwc",
+          provider: "chatgpt",
+          client_id: "oaiapp_cli",
+          subject: "user-cli",
+          account: %{email: "owner@example.com"},
+          granted_scopes: ["openid", "email", "offline_access", "chatgpt.tokens.use.direct"],
+          tokens: %{access_token: "AT", refresh_token: "RT"},
+          expires_at: nil,
+          last_refresh: nil,
+          status: "ready"
+        },
+        Map.new(overrides)
+      )
 
-    {:ok, _} = Store.read(:openai_codex, path)
+    :ok = Store.write(Store.profile(:openai_codex), entry, path)
     path
   end
 
-  defp seed_full_doc(dir) do
+  defp seed_old_codex_entry(dir) do
     File.write!(
       Path.join(dir, "auth.json"),
       Jason.encode!(%{
         "version" => 1,
         "providers" => %{
-          "openai" => %{
-            "auth_mode" => "api_key",
-            "tokens" => %{"access_token" => "sk-test", "refresh_token" => nil}
-          },
           "openai_codex" => %{
             "auth_mode" => "chatgpt",
             "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
@@ -480,6 +654,37 @@ defmodule Fermix.CLI.AuthCommandTest do
         }
       })
     )
+  end
+
+  # Answers `lines` in order, then end of input, as standard input would.
+  defp lines(lines) do
+    {:ok, agent} = Agent.start_link(fn -> lines end)
+
+    fn ->
+      Agent.get_and_update(agent, fn
+        [] -> {:eof, []}
+        [line | rest] -> {line, rest}
+      end)
+    end
+  end
+
+  defp run_out(argv, seams) do
+    parent = self()
+    output = capture_out(fn -> send(parent, {:status, AuthCommand.run(argv, seams)}) end)
+    assert_received {:status, status}
+    {status, output}
+  end
+
+  defp run_err(argv, seams) do
+    parent = self()
+
+    stderr =
+      capture_err(fn ->
+        capture_out(fn -> send(parent, {:status, AuthCommand.run(argv, seams)}) end)
+      end)
+
+    assert_received {:status, status}
+    {status, stderr}
   end
 
   defp future_iso(seconds) do
@@ -498,6 +703,8 @@ defmodule Fermix.CLI.AuthCommandTest do
 
   defp restore_secret_writer(nil), do: Application.delete_env(:fermix_core, :secret_writer)
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
+
+  defp kept_model(:openai_codex, []), do: {:ok, %{model: "gpt-plan-one", changed?: false}}
 
   defp capture_out(fun), do: ExUnit.CaptureIO.capture_io(:stdio, fun)
 

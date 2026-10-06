@@ -14,8 +14,9 @@ description: >
   resolve against a reminder actually DELIVERED into the caller's conversation
   within 24h — no such row can exist in a fresh eval home). Those paths are
   pinned by the hermetic ExUnit tier (temporal/ + tools/ suites). Events created
-  here carry far-future dates and every management case ends by removing what it
-  created, so nothing comes due inside an eval window.
+  here resolve to dates outside any eval window (the next occurrence of a month
+  and day, weeks to months out) and every management case ends by removing
+  what it created, so nothing comes due while a run is in progress.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -66,7 +67,11 @@ scenarios:
     tags: [temporal, routing]
     cases:
       - id: work_is_a_job
-        query: "Check flight prices to Lisbon tomorrow morning and tell me the cheapest option."
+        # "Check flight prices to Lisbon tomorrow morning" read two ways (a
+        # check to run tomorrow, or a check now for tomorrow-morning flights),
+        # and the second reading is a web search today, not a job. The time
+        # phrase now fronts the sentence so the only reading is future work.
+        query: "Tomorrow at 8am, check flight prices to Lisbon for me and message me the cheapest option."
         expect:
           tools_any: [schedule_job]
           tools_none: [event_store]
@@ -283,7 +288,7 @@ scenarios:
           - query: "Push the ticket pickup to November 6, same time."
             expect:
               tools_any: [event_update]
-              reply_matches: "(?i)november 6|nov 6"
+              reply_matches: "(?i)november 6|nov\\.? 6|6(?:th)? nov"
           - query: "Remove the ticket pickup reminder, I no longer need it."
             expect:
               tools_any: [event_remove]

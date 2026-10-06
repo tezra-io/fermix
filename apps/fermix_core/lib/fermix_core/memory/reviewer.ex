@@ -19,6 +19,8 @@ defmodule FermixCore.Memory.Reviewer do
 
   @nothing_to_save "Nothing to save."
   @reviewer_agent "memory_reviewer"
+  @elision_marker "\n[the middle of this message is omitted: it is longer than one review reads]\n"
+  @max_partial_bytes 3
 
   @spec start_background(keyword()) :: :ok | {:error, term()}
   def start_background(opts) when is_list(opts) do
@@ -236,8 +238,8 @@ defmodule FermixCore.Memory.Reviewer do
           {:cont, append_packed(acc, message, line, line_bytes)}
 
         acc.messages == [] ->
-          truncated = truncate_to_valid_utf8(line, budget_bytes)
-          {:halt, append_packed(acc, message, truncated, byte_size(truncated))}
+          elided = elide_middle(line, budget_bytes)
+          {:halt, append_packed(acc, message, elided, byte_size(elided))}
 
         true ->
           {:halt, acc}
@@ -248,23 +250,41 @@ defmodule FermixCore.Memory.Reviewer do
     |> then(&Map.put(&1, :input_tokens, div(&1.bytes + 3, 4)))
   end
 
-  # Byte-budget truncation must not split a multi-byte UTF-8 codepoint, or
-  # the resulting binary fails JSON encoding in the provider request. Trim
-  # trailing partial bytes back to a valid boundary (≤3 bytes for UTF-8).
-  defp truncate_to_valid_utf8(binary, max_bytes) when byte_size(binary) <= max_bytes, do: binary
+  # A single message larger than the whole budget is reviewed by its head and
+  # its tail: what someone wants kept is said before or after a long paste, not
+  # in the middle of it. The cursor still advances past the message, so one
+  # oversized paste can never stall a conversation's review.
+  defp elide_middle(line, budget_bytes) do
+    keep_bytes = max(budget_bytes - byte_size(@elision_marker), 0)
+    head_bytes = div(keep_bytes, 2)
+    tail_bytes = keep_bytes - head_bytes
 
-  defp truncate_to_valid_utf8(binary, max_bytes) do
-    binary
-    |> binary_part(0, max_bytes)
-    |> drop_trailing_partial()
+    head = line |> binary_part(0, head_bytes) |> drop_trailing_partial()
+
+    tail =
+      line
+      |> binary_part(byte_size(line) - tail_bytes, tail_bytes)
+      |> drop_leading_partial(@max_partial_bytes)
+
+    head <> @elision_marker <> tail
   end
 
+  # A byte cut must not split a multi-byte UTF-8 codepoint, or the resulting
+  # binary fails JSON encoding in the provider request. Trim the partial bytes
+  # back to a valid boundary (≤3 bytes for UTF-8).
   defp drop_trailing_partial(binary) do
     if String.valid?(binary) do
       binary
     else
       drop_trailing_partial(binary_part(binary, 0, byte_size(binary) - 1))
     end
+  end
+
+  defp drop_leading_partial(binary, 0), do: binary
+  defp drop_leading_partial(<<>>, _left), do: <<>>
+
+  defp drop_leading_partial(<<_byte, rest::binary>> = binary, left) do
+    if String.valid?(binary), do: binary, else: drop_leading_partial(rest, left - 1)
   end
 
   defp append_packed(acc, message, line, line_bytes) do
@@ -289,12 +309,7 @@ defmodule FermixCore.Memory.Reviewer do
 
   defp prompt_entry?(row), do: Admission.prompt_target(row) in ["user_md", "memory_md"]
 
-  defp empty_entry_summary(ctx) do
-    %{
-      user: %{lines: [], used: 0, cap: ctx.user_char_cap},
-      memory: %{lines: [], used: 0, cap: ctx.memory_char_cap}
-    }
-  end
+  defp empty_entry_summary(ctx), do: build_entry_summary([], ctx)
 
   defp build_entry_summary(rows, ctx) do
     entries =
@@ -302,19 +317,22 @@ defmodule FermixCore.Memory.Reviewer do
       |> Enum.filter(&prompt_entry?/1)
       |> Enum.map(&entry_data/1)
 
+    rows_used = PromptFiles.section_usage(rows)
+
     %{
-      user: bucket_summary(entries, "user", ctx.user_char_cap),
-      memory: bucket_summary(entries, "memory", ctx.memory_char_cap)
+      user: bucket_summary(entries, "user", ctx.user_char_cap, rows_used.user),
+      memory: bucket_summary(entries, "memory", ctx.memory_char_cap, rows_used.memory)
     }
   end
 
-  defp bucket_summary(entries, bucket, cap) do
+  defp bucket_summary(entries, bucket, cap, rows_used) do
     bucket_entries = Enum.filter(entries, &(&1.bucket == bucket))
 
     %{
       lines: Enum.map(bucket_entries, & &1.line),
       used: Enum.reduce(bucket_entries, 0, &(&1.chars + &2)),
-      cap: cap
+      cap: cap,
+      rows: Enum.map_join(rows_used, ", ", &"#{&1.category} #{&1.used}/#{&1.cap}")
     }
   end
 
@@ -337,10 +355,10 @@ defmodule FermixCore.Memory.Reviewer do
         role: "user",
         content: """
         Current memory:
-        <user_md used="#{entries.user.used}/#{entries.user.cap} chars">
+        <user_md used="#{entries.user.used}/#{entries.user.cap} chars" rows="#{entries.user.rows}">
         #{Enum.join(entries.user.lines, "\n")}
         </user_md>
-        <memory_md used="#{entries.memory.used}/#{entries.memory.cap} chars">
+        <memory_md used="#{entries.memory.used}/#{entries.memory.cap} chars" rows="#{entries.memory.rows}">
         #{Enum.join(entries.memory.lines, "\n")}
         </memory_md>
 
@@ -361,7 +379,7 @@ defmodule FermixCore.Memory.Reviewer do
     - one-shot answers the user did not ask you to keep (explanations, calculations, trivia);
     - precise location: a street address or exact coordinates — the city, region, or postal code they name is profile, their doorstep is not;
     - secrets, credentials, and transient one-off task details.
-    Each value is one short declarative clause — no preamble, no hedging, no restating what its category already implies. Prefer a single general fact over several narrow ones, and merge duplicates. Stay well under each file's char budget.
+    Each value is one short declarative clause — no preamble, no hedging, no restating what its category already implies. Prefer a single general fact over several narrow ones, and merge duplicates. Stay well under each file's char budget and each category's row limit: rows past a limit drop out of the prompt, oldest first.
 
     Keep memory current, not append-only:
     - When a message refines, updates, or contradicts an existing row, replace or archive it by id instead of adding — the latest statement wins.

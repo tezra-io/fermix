@@ -46,6 +46,16 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert schema["x-max-line-bytes"] == Protocol.max_line_bytes()
   end
 
+  # A client below an event's version is never sent it (M56 §6), so the
+  # export names that version where it is not 1, as the module does.
+  test "each server event def names the version that brought it", %{schema: schema} do
+    for type <- Protocol.server_events() do
+      assert Map.get(schema["$defs"][type], "x-since-version", 1) ==
+               Protocol.server_event_version(type),
+             "#{type} names a different version than the protocol module"
+    end
+  end
+
   test "every per-event def is reachable from a discriminator" do
     raw = File.read!(@schema_path)
     schema = Jason.decode!(raw)
@@ -118,6 +128,116 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       update_in(mobile["$defs"]["historyMessage"], ["properties"], &Map.delete(&1, "truncated"))
 
     assert schema["$defs"]["historyMessage"] == phone_message
+  end
+
+  # M56 §6: additive and optional on version 1, as a history message carries
+  # them; a Live call's row is drawn from them.
+  test "the Mac's row publishes kind and metadata, and a golden row carries a call", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    row = schema["$defs"]["row"]
+
+    for field <- ~w(kind metadata) do
+      assert row["properties"][field] == schema["$defs"]["historyMessage"]["properties"][field]
+      refute field in row["required"]
+    end
+
+    golden = @server_fixtures |> jsonl() |> Enum.find(&get_in(&1, ["metadata", "call"]))
+
+    assert %{"type" => "row", "kind" => "text", "metadata" => %{"call" => call}} = golden
+    assert :ok = Protocol.validate_call_metadata(call)
+    assert call["event"] == "shared"
+
+    # The same row as history pages it, the shape every client reads it in.
+    paged =
+      @server_fixtures
+      |> jsonl()
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(&get_in(&1, ["metadata", "call"]))
+
+    assert %{"role" => "assistant", "kind" => "text", "media_refs" => []} = paged
+    assert paged["metadata"]["call"] == call
+    assert paged["content"] == golden["text"]
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+
+    for key <- ~w(uuid event task_id revision state duration_s voice_cost_cents accounting) do
+      assert calls =~ "| `#{key}` |", "PROTOCOL.md has no row for call.#{key}"
+    end
+
+    refute protocol =~ "This wire's `row` is unchanged"
+  end
+
+  # M56 §4.2: the call's one row when it ends, as the Mac hears it and as a
+  # history page carries it: with its gist, and with its task list when the
+  # gist could not be made.
+  test "golden ended rows carry a call's gist or its task list, as row and history", %{
+    protocol: protocol
+  } do
+    server = jsonl(@server_fixtures)
+    ended? = &(get_in(&1, ["metadata", "call", "event"]) == "ended")
+
+    assert %{"type" => "row", "kind" => "text", "metadata" => %{"call" => call}} =
+             row = Enum.find(server, ended?)
+
+    assert :ok = Protocol.validate_call_metadata(call)
+    assert call["gist_status"] == "written"
+    assert [sentence, _gist] = String.split(row["text"], "\n\n")
+    assert sentence == "Voice call, 6 minutes"
+
+    paged =
+      server
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(ended?)
+
+    assert %{"role" => "assistant", "kind" => "text", "media_refs" => []} = paged
+    assert :ok = Protocol.validate_call_metadata(paged["metadata"]["call"])
+    assert paged["metadata"]["call"]["gist_status"] == "failed"
+    assert paged["content"] =~ ~r/\AVoice call, 2 minutes\n\n- Completed: /
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+
+    for key <- ~w(engine gist_status) do
+      assert calls =~ "| `#{key}` |", "PROTOCOL.md has no row for call.#{key}"
+    end
+  end
+
+  # M56 §4.6, §6: a version 2 cancel may stop a task that outlived its call,
+  # named by its three ids; its acknowledgement is that task's done row.
+  test "cancel publishes task_ref as a version 2 field, with a golden and its rows", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    task_ref = schema["$defs"]["cancel"]["properties"]["task_ref"]
+
+    assert task_ref["type"] == "object"
+    assert task_ref["x-since-version"] == 2
+    assert Enum.sort(task_ref["required"]) == ~w(call_uuid revision task_id)
+    refute "task_ref" in schema["$defs"]["cancel"]["required"]
+
+    golden =
+      @client_fixtures
+      |> jsonl()
+      |> Enum.find(&(&1["type"] == "cancel" and Map.has_key?(&1, "task_ref")))
+
+    assert %{"task_ref" => %{"call_uuid" => _uuid, "task_id" => _id, "revision" => _rev}} =
+             golden
+
+    server = jsonl(@server_fixtures)
+
+    for event <- ~w(task_running task_done) do
+      row = Enum.find(server, &(get_in(&1, ["metadata", "call", "event"]) == event))
+      assert %{"type" => "row", "kind" => "text"} = row, "no golden #{event} row"
+      assert :ok = Protocol.validate_call_metadata(row["metadata"]["call"])
+    end
+
+    [_before, calls] = String.split(protocol, "### A Live call's rows", parts: 2)
+    assert calls =~ "`task_running`"
+    assert calls =~ "`task_done`"
+    assert protocol =~ "`task_ref`"
   end
 
   test "the golden fixtures cover every event of the catalog by direction" do

@@ -314,6 +314,24 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
   end
 
+  # The voice bridge Channels registers, standing in: it answers how a turn of
+  # each conversation is told of a call in the chat, as the test sets it, and
+  # reports every key and channel it is asked about.
+  defmodule LiveCallBridge do
+    @name __MODULE__.State
+
+    def start(test_pid, answer),
+      do: Agent.start_link(fn -> %{test_pid: test_pid, answer: answer} end, name: @name)
+
+    def set(answer), do: Agent.update(@name, &%{&1 | answer: answer})
+
+    def chat_call(key, channel) do
+      %{test_pid: test_pid, answer: answer} = Agent.get(@name, & &1)
+      send(test_pid, {:chat_call_asked, key, channel})
+      answer
+    end
+  end
+
   defmodule ReviewProbe do
     @state :main_agent_review_probe
 
@@ -1114,15 +1132,15 @@ defmodule FermixCore.Agents.MainAgentTest do
       assert error_msg =~ "fermix auth login"
     end
 
-    test "sends an auth-specific reply when the Codex refresh chain fails", %{agent: agent} do
-      # The Codex adapter returns a residual structured :auth error once its
-      # internal refresh+retry is exhausted (no more {:auth_invalidated, _}).
+    test "sends a sign-in reply when the OpenAI Codex refresh chain fails", %{agent: agent} do
+      # OpenAI Codex signs in with ChatGPT; its adapter returns a residual
+      # structured :auth error once its one refresh+retry is exhausted.
       MockProvider.set_responses([
         {:error,
          ProviderError.auth(
            :openai_codex,
-           :codex,
-           "Codex auth invalidated; refresh exhausted"
+           :chatgpt_plan,
+           "OpenAI Codex auth invalidated; refresh exhausted"
          )}
       ])
 
@@ -1130,7 +1148,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       run_turn(msg, agent)
 
       assert_receive {:reply, error_msg}, 5_000
-      assert error_msg =~ "Authentication failed"
+      assert error_msg == "Your ChatGPT connection needs to be renewed. Sign in again."
     end
 
     test "uses thread-aware conversation identity", %{
@@ -1227,7 +1245,7 @@ defmodule FermixCore.Agents.MainAgentTest do
       send(review_pid, :continue_review)
     end
 
-    test "passes source trust through to background review", %{
+    test "a guest's turn starts no review; the owner's passes its trust through", %{
       skill_registry: skill_registry,
       conv_store: conv_store,
       task_supervisor: task_supervisor
@@ -1250,16 +1268,25 @@ defmodule FermixCore.Agents.MainAgentTest do
           id: agent_name
         )
 
-      MockProvider.set_responses([mock_response("Shared chat reply")])
+      MockProvider.set_responses([
+        mock_response("Shared chat reply"),
+        mock_response("Owner reply")
+      ])
 
+      # A review writes the owner's memory, so it waits for a turn the owner took.
       run_turn(
         make_message("Remember this from the group chat", source_trust: :guest),
         agent_name
       )
 
       assert_receive {:reply, "Shared chat reply"}, 5_000
+      refute_receive {:memory_review_started, _opts, _pid}, 200
+
+      run_turn(make_message("Remember this for me", source_trust: :operator), agent_name)
+
+      assert_receive {:reply, "Owner reply"}, 5_000
       assert_receive {:memory_review_started, review_opts, _pid}, 5_000
-      assert Keyword.get(review_opts, :source_trust) == :guest
+      assert Keyword.get(review_opts, :source_trust) == :operator
     end
 
     test "keeps reply handling successful when background review fails to start", %{
@@ -1917,6 +1944,96 @@ defmodule FermixCore.Agents.MainAgentTest do
     end
   end
 
+  # M56 §4.4: a message typed in the chat during a Live call in the chat is told
+  # that the call is up. The daemon decides from its own registry, through the
+  # bridge, never from the message, and freezes the answer into the snapshot
+  # at checkout: a message that waited in the queue is judged when it runs.
+  describe "a typed turn during a call in the chat" do
+    @call %{started_at: ~U[2026-10-03 14:05:00Z], silence_allowed?: true}
+
+    setup ctx do
+      {:ok, _bridge} = LiveCallBridge.start(self(), {:ok, @call})
+      agent_name = :"live_call_main_agent_#{System.unique_integer([:positive])}"
+
+      {:ok, _} =
+        start_supervised(
+          {MainAgent,
+           [
+             name: agent_name,
+             provider: MockProvider,
+             skill_registry: ctx.skill_registry,
+             conversation_store: ctx.conv_store,
+             task_supervisor: ctx.task_supervisor,
+             voice_bridge: LiveCallBridge
+           ]},
+          id: agent_name
+        )
+
+      %{live_agent: agent_name}
+    end
+
+    # The channel rides with the key: whether a turn may end with no reply is
+    # a question of the wire that runs it (M56 D9), which Channels answers.
+    test "an owner's turn checked out during the call carries it, asked by its key and channel",
+         ctx do
+      msg = make_message("use this link", chat_id: "main", source_trust: :operator)
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert turn_state.live_call == @call
+      assert_received {:chat_call_asked, {"telegram", "main", :root}, "telegram"}
+    end
+
+    test "the answer is the one at checkout, whenever the message was made", ctx do
+      msg = make_message("queued before the call", source_trust: :operator)
+      LiveCallBridge.set(:none)
+      {:ok, before_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      LiveCallBridge.set({:ok, @call})
+      {:ok, during_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      LiveCallBridge.set(:none)
+      {:ok, after_call, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert before_call.live_call == nil
+      assert during_call.live_call == @call
+      assert after_call.live_call == nil
+    end
+
+    test "a hand-off is the call's own turn, never told of it", ctx do
+      store = start_voice_store()
+
+      {:ok, turn_state, _cache} =
+        MainAgent.checkout_turn_state(ctx.live_agent, voice_message("read my inbox", store))
+
+      assert turn_state.live_call == nil
+      refute_received {:chat_call_asked, _key, _channel}
+    end
+
+    test "a guest's turn is never told of the call", ctx do
+      msg = make_message("hello", source_trust: :guest)
+
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(ctx.live_agent, msg)
+
+      assert turn_state.live_call == nil
+      refute_received {:chat_call_asked, _key, _channel}
+    end
+
+    test "with no bridge registered no call is up", %{agent: agent} do
+      registered = Application.get_env(:fermix_core, :voice_bridge)
+      Application.delete_env(:fermix_core, :voice_bridge)
+
+      on_exit(fn ->
+        if registered, do: Application.put_env(:fermix_core, :voice_bridge, registered)
+      end)
+
+      msg = make_message("hello", source_trust: :operator)
+      {:ok, turn_state, _cache} = MainAgent.checkout_turn_state(agent, msg)
+
+      assert turn_state.live_call == nil
+    end
+  end
+
   defp voice_message(content, store, call_id \\ "voice_live_1") do
     make_message(content,
       channel: "voice",
@@ -1935,6 +2052,9 @@ defmodule FermixCore.Agents.MainAgentTest do
   defp voice_call(call_id, store) do
     %{
       call_id: call_id,
+      call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab",
+      conversation: "private",
+      conversation_key: {"voice", call_id, :root},
       delegation_id: "d-1",
       revision: 1,
       turn_session_id: "voice_delegation_1",

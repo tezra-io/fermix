@@ -21,6 +21,12 @@ defmodule FermixChannels.Companion.Connection do
   the connection closes. A request that fails is answered with one `error` and
   the connection stays open.
 
+  The version its hello declared is the connection's value in that registry,
+  and it is never sent a server event a later version brought
+  (`Protocol.server_event_version/1`): a version 1 client never sees
+  `turn_done`, and whoever asks whether a turn may end with no reply reads the
+  versions attached there (M56 §6).
+
   ## Who is on the other end (SIDE-V1)
 
   When the socket is handed over, before any line is read, the connection
@@ -53,6 +59,7 @@ defmodule FermixChannels.Companion.Connection do
   # line a client reads.
   @max_page_bytes 60 * 1_024
   @handover_timeout_ms 5_000
+  @task_not_running_message "No task of that call is still running under that revision."
 
   # The closed vocabulary of `error.reason` this socket sends, besides
   # `unsupported_protocol_version`, `max_clients_reached` (the endpoint's),
@@ -252,7 +259,7 @@ defmodule FermixChannels.Companion.Connection do
   defp join(version, state) do
     {min, max} = Protocol.supported_version_range()
 
-    with {:ok, _owner} <- Registry.register(state.registry, @profile, nil),
+    with {:ok, _owner} <- Registry.register(state.registry, @profile, version),
          :ok <- send_event("server_hello", %{"min_version" => min, "max_version" => max}, state),
          :ok <- send_pending_approvals(state) do
       {:cont, %{state | version: version}}
@@ -371,9 +378,17 @@ defmodule FermixChannels.Companion.Connection do
 
   defp write_event(%{"t" => type} = event, state) do
     case Protocol.encode_server_event(type, Map.delete(event, "t")) do
-      {:ok, line} -> write_line(line, state)
+      {:ok, line} -> write_in_version(type, line, state)
       {:error, reason} -> drop_event(type, reason, state)
     end
+  end
+
+  # An event a later version brought is not this client's to read: it is not
+  # sent, and is no error.
+  defp write_in_version(type, line, state) do
+    if Protocol.server_event_version(type) <= state.version,
+      do: write_line(line, state),
+      else: {:noreply, state}
   end
 
   defp write_line(line, state) do
@@ -423,7 +438,7 @@ defmodule FermixChannels.Companion.Connection do
   end
 
   defp forget_stream(%{"t" => type, "turn_id" => turn_id}, state)
-       when type in ["text_done", "turn_error"],
+       when type in ["text_done", "turn_error", "turn_done"],
        do: %{state | streams: Map.delete(state.streams, turn_id)}
 
   defp forget_stream(_event, state), do: state
@@ -460,6 +475,11 @@ defmodule FermixChannels.Companion.Connection do
 
   defp error_fields(reason) when reason in @named_reasons,
     do: %{"reason" => Atom.to_string(reason)}
+
+  # A cancel by `task_ref` that names no GPT-Live task still running under
+  # exactly those ids (M56 §4.6): its own sentence, the connection kept.
+  defp error_fields(:task_not_running),
+    do: %{"reason" => "request_failed", "message" => @task_not_running_message}
 
   # A failure reason can carry an exception and its stacktrace: the message is
   # bounded so the error that reports it can always be written.

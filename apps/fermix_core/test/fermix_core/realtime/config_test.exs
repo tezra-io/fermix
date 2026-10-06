@@ -303,12 +303,54 @@ defmodule FermixCore.Realtime.ConfigTest do
             [],
             [enabled: true, voice: "cedar", max_session_minutes: 20],
             [engine: "openai_live"],
-            [engine: "openai_live", enabled: true, voice: "beacon", persist_transcripts: true]
+            [engine: "openai_live", enabled: true, voice: "beacon", persist_transcripts: true],
+            [engine: "openai_live", conversation: "private"],
+            [engine: "openai_live", conversation: "chat"]
           ] do
         normalized = Config.normalize(seed)
 
         assert normalized |> Config.to_keyword() |> Config.normalize() == normalized
       end
+    end
+  end
+
+  # M56 §5: where a Live call's hand-offs run. Absent means the chat's
+  # conversation, and the key is written out only once someone sets it, so an
+  # unset key and a chosen one stay apart (`persist_transcripts` is written on
+  # every save, which is why it could not carry this).
+  describe "the conversation setting (M56)" do
+    test "absent under Live means the chat, and nothing is written" do
+      config = Config.normalize(engine: "openai_live")
+
+      assert config.conversation == nil
+      assert Config.conversation(config) == "chat"
+      refute Keyword.has_key?(Config.to_keyword(config), :conversation)
+    end
+
+    test "a value someone set is kept and written out, the default included" do
+      for value <- ~w(chat private) do
+        config = Config.normalize(engine: "openai_live", conversation: value)
+
+        assert Config.conversation(config) == value
+        assert Keyword.get(Config.to_keyword(config), :conversation) == value
+      end
+    end
+
+    test "a value outside the two is refused by name" do
+      assert_raise ArgumentError,
+                   ~s(realtime.conversation must be one of chat, private, got: "shared"),
+                   fn -> Config.normalize(engine: "openai_live", conversation: "shared") end
+    end
+
+    test "under the Realtime engine it is refused as a Live-only setting, not ignored" do
+      assert_raise ArgumentError,
+                   "realtime.conversation is a Live-only setting; remove it from " <>
+                     ~s([fermix_core.realtime] or set engine = "openai_live"),
+                   fn -> Config.normalize(engine: "openai_realtime", conversation: "chat") end
+
+      config = Config.normalize(engine: "openai_realtime")
+      assert config.conversation == nil
+      refute Keyword.has_key?(Config.to_keyword(config), :conversation)
     end
   end
 end

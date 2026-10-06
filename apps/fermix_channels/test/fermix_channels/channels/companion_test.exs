@@ -11,6 +11,7 @@ defmodule FermixChannels.Channels.CompanionTest do
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Source
+  alias FermixCore.Delivery.ChannelSend
 
   @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
 
@@ -108,6 +109,13 @@ defmodule FermixChannels.Channels.CompanionTest do
       {:ok, %{status: "failed"}}
     end
 
+    # The page a push reads its preview from: the one row the test wrote.
+    def history_page(profile, opts) do
+      seq = Keyword.fetch!(opts, :after_seq) + 1
+      row = %{profile_id: profile, server_seq: seq, content: "your 9am summary"}
+      {:ok, %{messages: [row]}}
+    end
+
     # A request is cancelled when the test recorded a cancel on it.
     def get_client_request(profile, client_id, _opts) do
       cancelled = :persistent_term.get({__MODULE__, :cancelled}, [])
@@ -149,6 +157,15 @@ defmodule FermixChannels.Channels.CompanionTest do
     end)
 
     {:ok, approvals: approvals}
+  end
+
+  # M56 §4.7: what `Delivery.OwnerInbox` answers for this channel. The socket
+  # is the owner's alone and the row is the delivery, so the chat is the
+  # owner's inbox whether or not the app is connected.
+  describe "owner_inbox/0" do
+    test "is the owner's chat, connected or not" do
+      assert Companion.owner_inbox() == {:ok, Companion.chat_profile()}
+    end
   end
 
   describe "registry entry" do
@@ -287,6 +304,52 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert_receive {:companion_stream, "turn-mac-1", :reset}
     assert_receive {:companion_stream, "turn-mac-1", {:snapshot, "Hello"}}
     refute_receive {:companion_stream, _turn, {:snapshot, "thinking"}}
+  end
+
+  # M56 §4.4: a reply that may still become the sentinel never reaches a
+  # client as a draft, so a turn that ends silently shows nothing on its way.
+  test "a snapshot that could still become [SILENT] is held back from the draft" do
+    stream = Companion.build_raw_stream_callback(request_message())
+
+    stream.({:text_delta, "["})
+    stream.({:text_delta, "[SIL"})
+    stream.({:text_done, "[SILENT]"})
+    refute_receive {:companion_stream, _turn, {:snapshot, _text}}, 100
+
+    stream.({:text_delta, "[Note] the"})
+    assert_receive {:companion_stream, "turn-mac-1", {:snapshot, "[Note] the"}}
+  end
+
+  test "a turn ended silently writes no row and ends with turn_done" do
+    handler = attach_message_telemetry()
+    on_exit(fn -> :telemetry.detach(handler) end)
+    message = track(request_message())
+    stream = Companion.build_raw_stream_callback(message)
+    reply = Companion.build_text_reply(message)
+
+    stream.(:silent_reply)
+    assert :ok = reply.("[SILENT]")
+    assert :ok = Companion.build_turn_result(message).({:completed})
+
+    assert_receive {:companion_event, %{"t" => "turn_done", "turn_id" => "turn-mac-1"}}
+    assert_receive {:completed, "main", "mac-1", 3}
+    refute_received {:client_output, _profile, _id, _attempt, _key, _attrs}
+    refute_received {:companion_event, %{"t" => "text_done"}}
+    refute_received {:telemetry, _measurements, %{direction: :outbound}}
+  end
+
+  # Only the turn its runner said ends silently: anywhere else the sentinel is
+  # ordinary text, written and shown.
+  test "the sentinel on a turn not told it ends silently is a row like any reply" do
+    message = track(request_message())
+    reply = Companion.build_text_reply(message)
+
+    assert :ok = reply.("[SILENT]")
+    assert :ok = Companion.build_turn_result(message).({:completed})
+
+    assert_receive {:client_output, "main", "mac-1", 3, _key, %{content: "[SILENT]"}}
+    assert_receive {:companion_event, %{"t" => "text_done", "text" => "[SILENT]"}}
+    refute_received {:companion_event, %{"t" => "turn_done"}}
   end
 
   test "a turn's replies are written and announced only once the queue completes it" do
@@ -509,6 +572,84 @@ defmodule FermixChannels.Channels.CompanionTest do
     assert {:error, :unsupported_profile} = Companion.send_message("work", "x", [])
   end
 
+  # M56 D9: the phone and the Mac draw one timeline, and a delivery to it
+  # through this channel reaches the phones as one through the phone's own
+  # channel does: its row is pushed while the phone tree runs, and the
+  # phone's rule decides from there (no push to a connected device, nor for a
+  # row already read).
+  describe "a delivery to the chat and the phones" do
+    setup do
+      test_pid = self()
+      env = ~w(mobile_store mobile_push mobile_push_launcher)a
+      previous = Map.new(env, &{&1, Application.fetch_env(:fermix_channels, &1)})
+      Application.put_env(:fermix_channels, :mobile_store, StoreStub)
+
+      Application.put_env(:fermix_channels, :mobile_push, fn profile, seq, preview ->
+        send(test_pid, {:push_notify, profile, seq, preview})
+        {:ok, %{status: :sent, sent: 1}}
+      end)
+
+      Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
+
+      on_exit(fn ->
+        Enum.each(previous, fn
+          {key, {:ok, value}} -> Application.put_env(:fermix_channels, key, value)
+          {key, :error} -> Application.delete_env(:fermix_channels, key)
+        end)
+      end)
+
+      :ok
+    end
+
+    test "is pushed once while the phone tree runs" do
+      start_phone_tree()
+
+      assert :ok = Companion.send_message("main", "your 9am summary", [])
+
+      assert_receive {:push_notify, "main", 41, "your 9am summary"}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    # A scheduled job's result reaches the chat through the shared send.
+    test "a job delivered to the chat is pushed once while the phone tree runs" do
+      start_phone_tree()
+
+      assert :ok =
+               ChannelSend.send("companion", "main", "your 9am summary", [],
+                 channels: %{"companion" => Companion}
+               )
+
+      assert_receive {:push_notify, "main", 41, "your 9am summary"}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    test "is pushed to nobody while the phone tree is down" do
+      assert :ok = Companion.send_message("main", "your 9am summary", [])
+
+      assert_receive {:append, "main", _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    test "a delivery the store already holds under its key is not pushed again" do
+      start_phone_tree()
+
+      assert :ok = Companion.send_message("main", "your 9am summary", proactive_key: "job-1")
+
+      assert_receive {:proactive, "main", "job-1", _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+
+    # A reply to a request is its client's answer, not a delivery.
+    test "a slash command's answer is not pushed" do
+      start_phone_tree()
+
+      assert :ok = Companion.build_text_reply(request_message()).("Approved.")
+
+      assert_receive {:client_output, "main", "mac-1", 3, _key, _attrs}
+      refute_receive {:push_notify, _profile, _seq, _preview}, 100
+    end
+  end
+
   test "tool activity and approvals reach the profile, with no null fields", %{
     approvals: approvals
   } do
@@ -578,6 +719,15 @@ defmodule FermixChannels.Channels.CompanionTest do
       chat_id: "main",
       reply_target: "main",
       metadata: %{client_msg_id: "mac-1", companion_attempt: 3, turn_id: "turn-mac-1"}
+    })
+  end
+
+  # The phone tree runs while its supervisor's name is registered.
+  defp start_phone_tree do
+    start_supervised!(%{
+      id: :phone_tree,
+      start:
+        {Agent, :start_link, [fn -> :phone_tree end, [name: FermixChannels.Mobile.Supervisor]]}
     })
   end
 

@@ -750,7 +750,7 @@ defmodule FermixCore.Browser.BrowserObserveTest do
   end
 
   # The opt-out, for a page opened to be screenshotted, printed or driven
-  # through its own tools: today's result, and nothing looked at.
+  # through its own tools: the tab, and nothing looked at.
   test "observe false returns the tab alone and reads no page", %{pid: pid} do
     assert {:ok, _} = req(pid, "start")
     assert {:ok, %{"tabs" => [tab]}} = req(pid, "tabs")
@@ -762,9 +762,10 @@ defmodule FermixCore.Browser.BrowserObserveTest do
     assert {:ok, navigated} =
              req(pid, "navigate", %{"url" => "https://example.com/form", "observe" => false})
 
-    # Byte for byte the tab row both verbs answered with before this change.
-    assert opened == tab
-    assert navigated == tab
+    # The tab row, and the browser that served it (`ProfileServer` names it on
+    # every open and navigate): nothing of the page.
+    assert opened == Map.put(tab, "backend", "cdp")
+    assert navigated == Map.put(tab, "backend", "cdp")
 
     refute_received {:cdp, "Accessibility.getFullAXTree", _params, _timeout}
   end

@@ -14,21 +14,30 @@ defmodule FermixChannels.Channels.VoiceTest do
 
   alias FermixChannels.Channels.Voice
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.Voice.Detached
 
-  defp register(call_id, delegation_id, revision) do
+  @call_uuid "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b"
+
+  defp register(call_id, delegation_id, revision),
+    do: register_route({call_id, delegation_id}, revision, :session)
+
+  # A detached task's route, as `Voice.Detached` holds it once the session has
+  # handed the task over (M56 §4.6).
+  defp register_detached(delegation_id, revision),
+    do: register_route(Detached.route(@call_uuid, delegation_id), revision, :detached)
+
+  defp register_route(key, revision, owner) do
     test_pid = self()
 
     callbacks = %{
       progress: fn text -> send(test_pid, {:progress, text}) && :ok end,
       activity: fn event -> send(test_pid, {:activity, event}) && :ok end,
-      result: fn outcome -> send(test_pid, {:result, outcome}) && :ok end
+      history_tainted: fn -> send(test_pid, {owner, :history_tainted}) && :ok end,
+      result: fn outcome -> send(test_pid, {owner, {:result, outcome}}) && :ok end
     }
 
     {:ok, _owner} =
-      Registry.register(Voice.registry(), {call_id, delegation_id}, %{
-        revision: revision,
-        callbacks: callbacks
-      })
+      Registry.register(Voice.registry(), key, %{revision: revision, callbacks: callbacks})
 
     # The test process owns the entry, so ERTS releases it when the test ends —
     # the same lifetime a Live session's entries have.
@@ -46,7 +55,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       metadata: %{
         source: :voice,
         user_id: "voice",
-        voice_call: %{delegation_id: delegation_id, revision: revision}
+        voice_call: %{call_uuid: @call_uuid, delegation_id: delegation_id, revision: revision}
       }
     })
   end
@@ -78,7 +87,25 @@ defmodule FermixChannels.Channels.VoiceTest do
       assert callback.({:reasoning_delta, "thinking"}) == :ok
 
       refute_receive {:progress, _text}, 100
-      refute_receive {:result, _outcome}, 100
+      refute_receive {_owner, {:result, _outcome}}, 100
+    end
+
+    # M56 §9: the one thing the stream carries to the session, told by the
+    # runner before the reply: the reply is drawn from Computer History.
+    test "the raw stream callback tells the session a reply is drawn from Computer History" do
+      id = call_id()
+      :ok = register(id, "d-1", 1)
+      callback = Voice.build_raw_stream_callback(message(id, "d-1", 1))
+
+      assert callback.(:history_tainted) == :ok
+      assert_receive {:session, :history_tainted}, 1_000
+
+      superseded = call_id()
+      :ok = register(superseded, "d-1", 2)
+      stale = Voice.build_raw_stream_callback(message(superseded, "d-1", 1))
+
+      assert stale.(:history_tainted) == {:error, :superseded_revision}
+      refute_receive {:session, :history_tainted}, 100
     end
   end
 
@@ -111,7 +138,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       :ok = register(id, "d-1", 1)
 
       assert Voice.build_text_reply(message(id, "d-1", 1)).("the calendar is clear") == :ok
-      assert_receive {:result, {:ok, "the calendar is clear"}}, 1_000
+      assert_receive {:session, {:result, {:ok, "the calendar is clear"}}}, 1_000
     end
 
     test "activity reaches the delegation's activity callback" do
@@ -129,7 +156,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       :ok = register(id, "d-1", 1)
 
       assert Voice.build_turn_result(message(id, "d-1", 1)).({:cancelled}) == :ok
-      assert_receive {:result, {:cancelled}}, 1_000
+      assert_receive {:session, {:result, {:cancelled}}}, 1_000
     end
 
     test "a failed turn reaches the session as Core's own sentence" do
@@ -139,7 +166,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       assert Voice.build_turn_result(message(id, "d-1", 1)).({:failed, :context_length_exceeded}) ==
                :ok
 
-      assert_receive {:result, {:error, message}}, 1_000
+      assert_receive {:session, {:result, {:error, message}}}, 1_000
       assert message =~ "context window"
     end
 
@@ -148,7 +175,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       :ok = register(id, "d-1", 1)
 
       assert Voice.build_turn_result(message(id, "d-1", 1)).({:completed}) == :ok
-      refute_receive {:result, _outcome}, 100
+      refute_receive {_owner, {:result, _outcome}}, 100
     end
 
     test "an event for a superseded revision is dropped" do
@@ -158,7 +185,7 @@ defmodule FermixChannels.Channels.VoiceTest do
       assert Voice.build_text_reply(message(id, "d-1", 1)).("stale answer") ==
                {:error, :superseded_revision}
 
-      refute_receive {:result, _outcome}, 100
+      refute_receive {_owner, {:result, _outcome}}, 100
     end
 
     test "an event for a call with no routing entry is dropped" do
@@ -167,7 +194,40 @@ defmodule FermixChannels.Channels.VoiceTest do
       assert Voice.build_text_reply(message(id, "d-1", 1)).("orphan answer") ==
                {:error, :call_closed}
 
-      refute_receive {:result, _outcome}, 100
+      refute_receive {_owner, {:result, _outcome}}, 100
+    end
+
+    # M56 §4.6: the session's route first, then the route of the task's
+    # detached owner, so a reply never falls between the two.
+    test "a reply with no session route reaches the task's detached owner" do
+      id = call_id()
+      :ok = register_detached("d-1", 1)
+
+      assert Voice.build_text_reply(message(id, "d-1", 1)).("the venue has parking") == :ok
+      assert_receive {:detached, {:result, {:ok, "the venue has parking"}}}, 1_000
+
+      assert Voice.build_turn_result(message(id, "d-1", 1)).({:cancelled}) == :ok
+      assert_receive {:detached, {:result, {:cancelled}}}, 1_000
+    end
+
+    test "the session's route is read before the detached one" do
+      id = call_id()
+      :ok = register(id, "d-1", 1)
+      :ok = register_detached("d-1", 1)
+
+      assert Voice.build_text_reply(message(id, "d-1", 1)).("said on the call") == :ok
+      assert_receive {:session, {:result, {:ok, "said on the call"}}}, 1_000
+      refute_receive {:detached, _event}, 100
+    end
+
+    test "the detached owner fences its task's revision as the session does" do
+      id = call_id()
+      :ok = register_detached("d-1", 2)
+
+      assert Voice.build_text_reply(message(id, "d-1", 1)).("stale answer") ==
+               {:error, :superseded_revision}
+
+      refute_receive {_owner, {:result, _outcome}}, 100
     end
 
     test "a delivery with no fence is refused loudly" do
@@ -180,7 +240,7 @@ defmodule FermixChannels.Channels.VoiceTest do
         end)
 
       assert log =~ "no delegation fence"
-      refute_receive {:result, _outcome}, 100
+      refute_receive {_owner, {:result, _outcome}}, 100
     end
   end
 end

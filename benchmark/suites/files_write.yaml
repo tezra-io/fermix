@@ -3,14 +3,16 @@ risk: isolated_mutation
 title: "Filesystem writes — create and edit scratch files"
 description: >
   Exercises the assistant's ability to write to the daemon workspace: creating a
-  small text file at an eval-scoped scratch path, and adding/appending a line to a
-  file. These cases create REAL scratch files in the daemon's workspace under
-  eval_scratch/ — they are clearly temporary, eval-owned paths and are safe to
-  leave behind. Gates are tolerant of the model's route: a brand-new file may go
-  through file_write, while adding a line to an existing file may use either
-  file_edit or file_write depending on how the model frames the change, so the
-  edit/append scenario accepts both. We assert the relevant write tool fired and
-  that the reply confirms the create/edit, but never pin exact tool order.
+  small text file at an eval-scoped scratch path, and adding a line to a file it
+  made a moment earlier. These cases create REAL scratch files in the daemon's
+  workspace under eval_scratch/ — clearly temporary, eval-owned paths that are
+  safe to leave behind, and named with the run id so a read-back can only be
+  satisfied by this run's write, never by a previous run's leftovers. The model
+  picks the write route (file_write, file_edit, or a shell redirect are all
+  valid), so the tool gates list every route and the outcome is graded by
+  having the agent read the file back in a later turn: a read tool must fire,
+  the planted line must come back, and the reply must not say the file is
+  missing.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -20,67 +22,78 @@ defaults:
 
 scenarios:
   - id: create_scratch_file
-    title: "Creates a small text file at a scratch path"
-    # critical: file writes are a core tool; deterministic (file_write span) so a broken
-    # write path fails the run instead of passing green.
+    title: "Creates a small text file at a scratch path and reads it back"
+    # critical: file writes are a core tool; the read-back turn is deterministic
+    # (a read span plus the planted line) so a broken write path fails the run
+    # instead of passing green on a confident "created".
     severity: critical
     tags: [files, write, core]
     cases:
       - id: notes_file
-        query: "Create a small text file at eval_scratch/notes.txt with the single line: hello from fermix"
+        turns:
+          - query: "Create a small text file at eval_scratch/notes-__EVAL_RUN_ID__.txt with the single line: hello from fermix __EVAL_RUN_ID__"
+            expect:
+              tools_any: [file_write, shell]
+          - query: "What's in that file now? Quote it back to me."
+            expect:
+              tools_any: [file_read, shell, content_search, glob_search]
+              reply_matches: "hello from fermix __EVAL_RUN_ID__"
+              reply_not_matches: "(?i)(doesn'?t|does not|no longer) exist|not found|no such file|couldn'?t find"
         expect:
-          tools_any: [file_write]
-          reply_matches: "(?i)created|wrote|written|saved|notes\\.txt"
-          max_cost_usd: 0.5
-          max_duration_ms: 90000
-        rubric: "Confirms it created eval_scratch/notes.txt containing the line 'hello from fermix'."
+          max_cost_usd: 0.8
+          max_duration_ms: 150000
+        rubric: "Creates eval_scratch/notes-<run id>.txt with the requested single line and, asked what is in it, reads the file back and quotes that line rather than repeating the request from memory."
       - id: todo_file
-        query: "Please make a new file eval_scratch/todo.txt and put 'buy milk' in it."
+        turns:
+          - query: "Please make a new file eval_scratch/todo-__EVAL_RUN_ID__.txt and put 'buy milk __EVAL_RUN_ID__' in it."
+            expect:
+              tools_any: [file_write, shell]
+          - query: "Read it back to me, please."
+            expect:
+              tools_any: [file_read, shell, content_search, glob_search]
+              reply_matches: "buy milk __EVAL_RUN_ID__"
+              reply_not_matches: "(?i)(doesn'?t|does not|no longer) exist|not found|no such file|couldn'?t find"
         expect:
-          tools_any: [file_write]
-          reply_matches: "(?i)created|made|wrote|written|saved|todo\\.txt"
-          max_cost_usd: 0.5
-          max_duration_ms: 90000
-        rubric: "Confirms it created eval_scratch/todo.txt containing 'buy milk'."
-      - id: greeting_file
-        query: "Write a text file to eval_scratch/greeting.txt whose contents are exactly: good morning"
-        expect:
-          tools_any: [file_write]
-          reply_matches: "(?i)wrote|written|created|saved|greeting\\.txt"
-          max_cost_usd: 0.5
-          max_duration_ms: 90000
-        rubric: "Confirms it wrote eval_scratch/greeting.txt containing 'good morning'."
+          max_cost_usd: 0.8
+          max_duration_ms: 150000
+        rubric: "Creates eval_scratch/todo-<run id>.txt containing the 'buy milk' line and, asked to read it back, reads the file and quotes that line."
 
   - id: create_then_append
-    title: "Creates a file, then adds a line to it"
+    title: "Creates a file, adds a line to it, then reads both lines back"
     severity: normal
     tags: [files, write, edit]
     cases:
       - id: shopping_list
         turns:
-          - query: "Create a file at eval_scratch/shopping.txt with one line: apples"
+          - query: "Create a file at eval_scratch/shopping-__EVAL_RUN_ID__.txt with one line: apples"
             expect:
-              tools_any: [file_write]
-              reply_matches: "(?i)created|wrote|written|saved|shopping\\.txt"
+              tools_any: [file_write, shell]
           - query: "Now add a second line to that file that says: bananas"
             expect:
-              tools_any: [file_edit, file_write]
-              reply_matches: "(?i)added|appended|updated|edited|bananas"
+              tools_any: [file_edit, file_write, shell]
+          - query: "Show me the whole file as it is now."
+            expect:
+              tools_any: [file_read, shell, content_search, glob_search]
+              reply_matches: '(?is)(?=.*\bapples\b)(?=.*\bbananas\b)'
+              reply_not_matches: "(?i)(doesn'?t|does not|no longer) exist|not found|no such file|couldn'?t find"
         expect:
-          max_cost_usd: 1.0
-          max_duration_ms: 150000
-        rubric: "Creates eval_scratch/shopping.txt with 'apples', then adds a 'bananas' line, confirming the update."
+          max_cost_usd: 1.2
+          max_duration_ms: 200000
+        rubric: "Creates the shopping file with 'apples', adds a 'bananas' line without losing the first, and the final read-back shows both lines in order."
       - id: log_file
         turns:
-          - query: "Make a new file eval_scratch/log.txt containing the line: start"
+          - query: "Make a new file eval_scratch/log-__EVAL_RUN_ID__.txt containing the line: boot ok"
             expect:
-              tools_any: [file_write]
-              reply_matches: "(?i)created|made|wrote|written|saved|log\\.txt"
-          - query: "Append a line to eval_scratch/log.txt that reads: end"
+              tools_any: [file_write, shell]
+          - query: "Append a line to eval_scratch/log-__EVAL_RUN_ID__.txt that reads: shutdown ok"
             expect:
-              tools_any: [file_edit, file_write]
-              reply_matches: "(?i)appended|added|updated|edited|end"
+              tools_any: [file_edit, file_write, shell]
+          - query: "What does that log file contain now?"
+            expect:
+              tools_any: [file_read, shell, content_search, glob_search]
+              reply_matches: "(?is)(?=.*boot ok)(?=.*shutdown ok)"
+              reply_not_matches: "(?i)(doesn'?t|does not|no longer) exist|not found|no such file|couldn'?t find"
         expect:
-          max_cost_usd: 1.0
-          max_duration_ms: 150000
-        rubric: "Creates eval_scratch/log.txt with 'start', then appends an 'end' line, confirming the change."
+          max_cost_usd: 1.2
+          max_duration_ms: 200000
+        rubric: "Creates the log file with 'boot ok', appends 'shutdown ok' after it, and the final read-back shows both lines with the original intact."

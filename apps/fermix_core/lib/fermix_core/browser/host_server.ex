@@ -70,7 +70,6 @@ defmodule FermixCore.Browser.HostServer do
   # The `act` kinds that can restructure a page enough to be worth a look
   # afterwards, as in Chrome; `press` is decided by its key.
   @observing_kinds ~w(click submit click_coords)
-  @download_buffer 10
   @reason_chars 200
 
   @cancelled_sentence "The person cancelled the browser task in the Fermix app."
@@ -96,7 +95,6 @@ defmodule FermixCore.Browser.HostServer do
       ref_maps: %{},
       observations: %{},
       dialogs: [],
-      downloads: [],
       resolved: %{}
     }
   end
@@ -134,8 +132,7 @@ defmodule FermixCore.Browser.HostServer do
         active: nil,
         ref_maps: %{},
         observations: %{},
-        dialogs: [],
-        downloads: []
+        dialogs: []
     }
   end
 
@@ -305,6 +302,11 @@ defmodule FermixCore.Browser.HostServer do
   @impl true
   def webmcp(_args, _context, state), do: refuse(:webmcp, state)
 
+  # The app saves no download for a task on this wire (`Capabilities`), so its
+  # `download.*` events are dropped with the rest it only informs us of.
+  @impl true
+  def download(_args, _context, state), do: refuse(:downloads, state)
+
   @impl true
   def dialog(%{"decision" => decision} = args, context, state)
       when decision in ["accept", "dismiss"] do
@@ -357,16 +359,6 @@ defmodule FermixCore.Browser.HostServer do
            {:ok, _result, state} <- request(state, "page.upload", payload, action_timeout(state)) do
         {:ok, %{"ok" => true, "target" => tab.id, "uploaded" => Path.basename(path)}, state}
       end
-    end)
-  end
-
-  @impl true
-  def download(args, context, state) do
-    operate(context, state, fn state ->
-      config = state.config
-      timeout = bounded(args["timeout_ms"], config.download_default_ms, config.download_max_ms)
-      deadline = System.monotonic_time(:millisecond) + timeout
-      await_download(state, deadline)
     end)
   end
 
@@ -861,12 +853,6 @@ defmodule FermixCore.Browser.HostServer do
     end
   end
 
-  defp record_event("download.finished", %{"tab_id" => wire} = payload, state) do
-    if Map.has_key?(state.tabs, public_id(state, wire)),
-      do: %{state | downloads: Enum.take(state.downloads ++ [payload], -@download_buffer)},
-      else: state
-  end
-
   defp record_event(_type, _payload, state), do: state
 
   # ── act ────────────────────────────────────────────────────────────────────
@@ -1045,60 +1031,12 @@ defmodule FermixCore.Browser.HostServer do
     {:ok, Map.merge(artifact, %{"ok" => true, "target" => tab.id}), state}
   end
 
-  defp await_download(%{downloads: [download | rest]} = state, _deadline),
-    do: download_reply(download, %{state | downloads: rest})
-
-  # Only a finished download is taken out of the mailbox; the app's other
-  # events wait for the server's own turn at them.
-  defp await_download(%{task: task} = state, deadline) do
-    remaining = max(deadline - System.monotonic_time(:millisecond), 0)
-    connection = task.connection
-    connection_ref = task.connection_ref
-
-    receive do
-      {:browser_host_event, ^connection, "download.finished", payload} ->
-        "download.finished" |> record_event(payload, state) |> await_download(deadline)
-
-      {:DOWN, ^connection_ref, :process, _pid, _reason} ->
-        lose(state, "the app disconnected")
-
-      {:browser_host_stopping, ^connection} ->
-        lose(state, "the app is quitting")
-
-      {:browser_host_cancelled, ^connection, _reason} ->
-        lose_cancelled(state)
-    after
-      remaining -> {:error, Error.new("timeout", "download timed out"), state}
-    end
-  end
-
-  defp download_reply(%{"state" => "completed", "path" => path} = download, state) do
-    if String.starts_with?(path, download_dir(state) <> "/") do
-      {:ok, %{"ok" => true, "download" => download_view(download)}, state}
-    else
-      {:error, Error.new("download_failed", "The Fermix app saved the download elsewhere."),
-       state}
-    end
-  end
-
-  defp download_reply(download, state) do
-    reason = Map.get(download, "reason", download["state"])
-    {:error, Error.new("download_failed", "The download did not finish: #{reason}."), state}
-  end
-
-  defp download_view(download) do
-    %{
-      "guid" => download["download_id"],
-      "path" => download["path"],
-      "bytes" => download["bytes"],
-      "state" => download["state"]
-    }
-  end
-
   defp artifact_dir(state, kind) do
     Path.join([ConfigStore.workspace_paths().browser, "artifacts", state.owner_key, kind])
   end
 
+  # Named on every `tab.open` because protocol 1 requires the field; the app
+  # saves nothing there for a task (`download/3`).
   defp download_dir(state) do
     Path.join([ConfigStore.workspace_paths().browser, "downloads", state.owner_key])
   end

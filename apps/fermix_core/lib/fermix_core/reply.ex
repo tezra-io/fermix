@@ -102,6 +102,10 @@ defmodule FermixCore.Reply do
     "channel host was unreachable from this network"
   end
 
+  def format_delivery_error({:transport, :proxy_unavailable}) do
+    "the configured proxy refused the connection or could not be reached"
+  end
+
   def format_delivery_error({:transport, :timeout}) do
     "channel did not answer before the request timed out"
   end

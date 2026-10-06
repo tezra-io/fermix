@@ -42,7 +42,12 @@ defmodule FermixCore.Realtime.DeviceIdentity do
     end
   end
 
-  defp generate_uuid do
+  @doc """
+  A random version 4 UUID, lowercase: the form a device id and a Live call's
+  durable identity are minted in.
+  """
+  @spec generate_uuid() :: String.t()
+  def generate_uuid do
     <<a::32, b::16, c::16, d::16, e::48>> = :crypto.strong_rand_bytes(16)
     c = Bitwise.bor(Bitwise.band(c, 0x0FFF), 0x4000)
     d = Bitwise.bor(Bitwise.band(d, 0x3FFF), 0x8000)

@@ -107,4 +107,17 @@ defmodule FermixCore.Prompt.IdentityNameTest do
     put_name("fermi")
     assert :ok = IdentityName.reconcile(bootstrap_dir: Path.join(base_dir, "nonexistent"))
   end
+
+  # The one reader of the configured name: the reconcile and the Live call's
+  # name line (M56 §4.3) agree on what counts as set.
+  test "configured_name/0 is the trimmed name, or nil when unset or blank" do
+    put_name("  Nova ")
+    assert IdentityName.configured_name() == "Nova"
+
+    put_name("   ")
+    assert IdentityName.configured_name() == nil
+
+    Application.delete_env(:fermix_core, :agent)
+    assert IdentityName.configured_name() == nil
+  end
 end

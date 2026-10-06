@@ -1505,5 +1505,467 @@ def test_cron_job_output_refuses_without_evidence(tmp_path):
     assert r.score == 0.0 and "no evidence file" in r.detail
 
 
+
+# --- cap_tool_discovery: deferred MCP tools and on-demand skills ---------------
+
+sys.path.insert(0, os.path.join(BENCH, "suites", "capability", "fixtures", "mcp"))
+import halden_ops  # noqa: E402
+
+SHIPMENT = {"script": "suites/capability/checkers/tool_discovery_shipment.py", "mode": "json"}
+LEDGER = {"script": "suites/capability/checkers/tool_discovery_ledger.py", "mode": "json"}
+RECEIPTS = {"script": "suites/capability/checkers/receipt_filing.py", "mode": "json"}
+SHIP_TOOL = "mcp_halden_ops_shipment_status"
+LEDGER_TOOL = "mcp_halden_ops_ledger_add_entry"
+
+
+def _tool_span(name, payload, status="ok"):
+    """A deferred-tool span as Opik records it: the server's JSON text wrapped as {"text": …}."""
+    return _span(name, status=status, out=json.dumps({"text": json.dumps(payload)}))
+
+
+def _discovery_score(tmp_path, spec, evidence):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply=evidence["reply"], evidence=evidence)
+
+
+def _shipment_reply(facts, eta_text=None):
+    return f"It's with {facts['carrier']}, {facts['status']}, due {eta_text or facts['eta']}."
+
+
+def test_shipment_reference_reply_passes_with_iso_or_written_date(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    span = _tool_span(SHIP_TOOL, facts)
+    month = ["january", "february", "march", "april", "may", "june", "july", "august",
+             "september", "october", "november", "december"][int(facts["eta"][5:7]) - 1]
+    written = f"{month.title()} {int(facts['eta'][8:])}"
+    for eta_text in (None, written):
+        r = _discovery_score(tmp_path, SHIPMENT,
+                             _ev(spans=[span], reply=_shipment_reply(facts, eta_text)))
+        assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("spelling", ["{m3} {d:02d}", "{m3}. {d}", "{month} {d}th",
+                                      "the {d}th of {month}", "{mm:02d}/{d:02d}"])
+def test_shipment_accepts_every_common_spelling_of_the_date(tmp_path, spelling):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    mm, d = int(facts["eta"][5:7]), int(facts["eta"][8:])
+    month = ["January", "February", "March", "April", "May", "June", "July", "August",
+             "September", "October", "November", "December"][mm - 1]
+    text = spelling.format(month=month, m3=month[:3], d=d, mm=mm)
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[_tool_span(SHIP_TOOL, facts)],
+                                                 reply=_shipment_reply(facts, text)))
+    assert r.error is None and r.score == 1.0, (text, r.detail)
+
+
+def test_shipment_date_match_respects_word_boundaries(tmp_path):
+    # A tracking number whose delivery date is April 1: "4/12" and "April 12" must not
+    # pass for it, "4/1" must.
+    token = next(f"TOK-{n}" for n in range(1000)
+                 if halden_ops.shipment_facts(f"TOK-{n}")["eta"] == "2027-04-01")
+    facts = halden_ops.shipment_facts(token)
+    span = _tool_span(SHIP_TOOL, facts)
+    for text, want in (("4/12", 0.0), ("April 12", 0.0), ("4/1", 1.0)):
+        r = _discovery_score(tmp_path, SHIPMENT,
+                             _ev(token=token, spans=[span], reply=_shipment_reply(facts, text)))
+        assert r.score == want, (text, r.detail)
+
+
+def test_shipment_rejects_a_right_looking_answer_without_the_tool(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[], reply=_shipment_reply(facts)))
+    assert r.score == 0.0 and "no successful" in r.detail
+
+
+def test_shipment_rejects_a_lookup_of_a_different_shipment(tmp_path):
+    other = halden_ops.shipment_facts("SOMETHING-ELSE")
+    r = _discovery_score(tmp_path, SHIPMENT,
+                         _ev(spans=[_tool_span(SHIP_TOOL, other)], reply=_shipment_reply(other)))
+    assert r.score == 0.0
+
+
+def test_shipment_rejects_a_reply_that_drops_the_date(tmp_path):
+    facts = halden_ops.shipment_facts("TOK-DEADBEEF")
+    r = _discovery_score(tmp_path, SHIPMENT, _ev(spans=[_tool_span(SHIP_TOOL, facts)],
+                                                 reply=f"It's with {facts['carrier']}."))
+    assert r.score == 0.0 and "delivery date" in r.detail
+
+
+def _entry(**overrides):
+    entry = {"date": "2027-03-03", "amount_cents": 4250, "category": "meals",
+             "memo": "team lunch, receipt TOK-DEADBEEF"}
+    entry.update(overrides)
+    return {"entry_id": "L-1", "recorded": entry}
+
+
+def test_ledger_reference_entry_passes_after_a_rejected_guess(tmp_path):
+    # The shape a refused call really has on the trace (pilot 2026-10-01): an error span
+    # whose text wraps the server's payload.
+    rejected = _span(LEDGER_TOOL, status="error",
+                     out="MCP tool 'halden_ops/ledger_add_entry' reported an error: "
+                         '{"error": "category must be one of: meals, travel"}')
+    r = _discovery_score(tmp_path, LEDGER,
+                         _ev(spans=[rejected, _tool_span(LEDGER_TOOL, _entry())], reply="logged"))
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+def test_ledger_rejects_wrong_fields_and_double_booking(tmp_path):
+    wrong = _ev(spans=[_tool_span(LEDGER_TOOL, _entry(amount_cents=42))], reply="logged")
+    assert _discovery_score(tmp_path, LEDGER, wrong).score == 0.0
+    twice = _ev(spans=[_tool_span(LEDGER_TOOL, _entry()), _tool_span(LEDGER_TOOL, _entry())],
+                reply="logged")
+    r = _discovery_score(tmp_path, LEDGER, twice)
+    assert r.score == 0.0 and "twice" in r.detail
+
+
+def test_ledger_rejects_a_claim_with_no_accepted_entry(tmp_path):
+    r = _discovery_score(tmp_path, LEDGER, _ev(spans=[], reply="Logged it to the ledger."))
+    assert r.score == 0.0
+
+
+GOOD_SHEET = ("date;vendor;amount_cents;code\n2027-03-02;Blue Fern Cafe;1840;M2\n"
+              "2027-03-02;Ridewell;2310;T7\n2027-03-05;Draftboard;1500;S4\n")
+
+
+def _sheet_score(tmp_path, text):
+    ws = tmp_path / "ws"
+    if text is not None:
+        (ws / "expenses").mkdir(parents=True)
+        (ws / "expenses" / "2027-03.csv").write_text(text)
+    else:
+        ws.mkdir()
+    return checker.run_checker(BENCH, RECEIPTS, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply="filed", evidence=_ev(reply="filed"))
+
+
+def test_receipt_sheet_following_the_skill_passes(tmp_path):
+    r = _sheet_score(tmp_path, GOOD_SHEET)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("text, reason", [
+    (None, "no expenses"),
+    (GOOD_SHEET.replace(";", ","), "first line"),
+    (GOOD_SHEET.replace("1840", "18.40"), "rows differ"),
+    (GOOD_SHEET.replace(";M2", ";meals"), "rows differ"),
+    (GOOD_SHEET + "2027-03-05;Draftboard;1500;S4\n", "twice"),
+])
+def test_receipt_sheet_without_the_skills_rules_fails(tmp_path, text, reason):
+    r = _sheet_score(tmp_path, text)
+    assert r.score == 0.0 and reason in r.detail
+
+
+# --- real-use tier: generic checkers fed by checker.expect --------------------
+
+REPLY_TERMS = {"script": "suites/capability/checkers/reply_terms.py", "mode": "json"}
+DRAFT_FILES = {"script": "suites/capability/checkers/draft_files.py", "mode": "json"}
+HOME_STATE = {"script": "suites/capability/checkers/home_state_file.py", "mode": "json"}
+OUTBOX_ONCE = {"script": "suites/capability/checkers/outbox_once.py", "mode": "json"}
+
+
+def _gold_run(tmp_path, spec, expect, reply="done", home=None):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = {**_ev(reply=reply), "expect": expect}
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws),
+                               fermix_home=str(home or tmp_path), reply=reply,
+                               evidence=evidence)
+
+
+def test_reply_terms_grades_required_any_and_excluded_terms(tmp_path):
+    gold = {"include_all": ["9", "52"], "include_any": ["retention", "hosted"],
+            "exclude": ["60 ft"]}
+    ok = _gold_run(tmp_path, REPLY_TERMS, gold, "9 dives, max 52 ft; hosted, no retention")
+    assert ok.error is None and ok.score == 1.0, ok.detail
+    for reply in ("19 dives, max 52 ft, hosted",          # 9 only inside 19
+                  "9 dives, max 52 ft",                   # none of the any-terms
+                  "9 dives, 52 ft deep, hosted, 60 ft max"):  # an excluded term
+        assert _gold_run(tmp_path, REPLY_TERMS, gold, reply).score == 0.0, reply
+
+
+def test_a_gold_checker_refuses_a_task_without_checker_expect(tmp_path):
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    r = checker.run_checker(BENCH, REPLY_TERMS, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                            reply="x", evidence=_ev(reply="x"))
+    assert r.score == 0.0 and "checker.expect" in r.detail
+
+
+DRAFT_GOLD = {"dir": "drafts", "groups": [["reefline", "14"], ["blue hollow", "15", "17"]],
+              "exclude": ["16"]}
+
+
+def _drafts(tmp_path, files):
+    folder = tmp_path / "ws" / "drafts"
+    folder.mkdir(parents=True)
+    for name, text in files.items():
+        (folder / name).write_text(text)
+    return _gold_run(tmp_path, DRAFT_FILES, DRAFT_GOLD)
+
+
+def test_one_draft_per_operator_passes(tmp_path):
+    r = _drafts(tmp_path, {"reefline.txt": "Hi Reefline, I'm diving with you on the 14th.",
+                           "blue.txt": "Hi Blue Hollow, I'm with you on the 15th and 17th."})
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("files", [
+    {"a.txt": "Reefline, the 14th", "b.txt": "Blue Hollow, the 15th",
+     "c.txt": "Blue Hollow, the 17th"},                               # three, not two
+    {"a.txt": "Reefline, the 14th", "b.txt": "Blue Hollow, 15th, 16th and 17th"},  # rest day
+    {"a.txt": "Reefline 14th and Blue Hollow 15th, 17th", "b.txt": "notes"},  # one covers both
+])
+def test_drafts_that_merge_split_or_book_the_rest_day_fail(tmp_path, files):
+    assert _drafts(tmp_path, files).score == 0.0
+
+
+def test_home_state_file_reads_the_actions_end_state(tmp_path):
+    gold = {"path": "workspace/garage.state", "equals": "state=open"}
+    (tmp_path / "workspace").mkdir()
+    assert _gold_run(tmp_path, HOME_STATE, gold).score == 0.0          # never ran
+    (tmp_path / "workspace" / "garage.state").write_text("state=closed\n")
+    assert _gold_run(tmp_path, HOME_STATE, gold).score == 0.0
+    (tmp_path / "workspace" / "garage.state").write_text("state=open\n")
+    r = _gold_run(tmp_path, HOME_STATE, gold)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+JOBS_STATE = {"script": "suites/capability/checkers/jobs_state.py", "mode": "json"}
+REMINDERS_STATE = {"script": "suites/capability/checkers/reminders_state.py", "mode": "json"}
+WEATHER = {"id": "morning_weather_1", "name": "morning weather", "description": None,
+           "schedule_expr": "0 7 * * *", "timezone": "America/New_York",
+           "task_prompt": "Check the forecast for Port Halden.", "skill_name": None,
+           "timeout_seconds": 300, "expires_at": "2027-06-01T07:00:00Z"}
+
+
+def _memory_db(home, jobs=(), events=()):
+    import sqlite3
+    conn = sqlite3.connect(str(home / "memory.db"))
+    conn.execute("CREATE TABLE scheduled_jobs (id, name, description, schedule_expr, timezone, "
+                 "task_prompt, skill_name, timeout_seconds, expires_at)")
+    conn.execute("CREATE TABLE temporal_events (id, title, description, kind, local_time, "
+                 "next_occurrence_on, recurrence_kind, reminder_plan_json, status)")
+    for job in jobs:
+        conn.execute("INSERT INTO scheduled_jobs VALUES (?,?,?,?,?,?,?,?,?)",
+                     [job[k] for k in WEATHER])
+    for event in events:
+        conn.execute("INSERT INTO temporal_events VALUES (?,?,?,?,?,?,?,?,?)", event)
+    conn.commit()
+    conn.close()
+
+
+def _state_run(tmp_path, spec, expect, state, reply="done"):
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    evidence = {**_ev(reply=reply), "expect": expect, "state": state}
+    return checker.run_checker(BENCH, spec, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                               reply=reply, evidence=evidence)
+
+
+JOB_STATE = {"today": "2026-10-02", "zone": "America/New_York", "jobs": {"weather": WEATHER}}
+EDIT_GOLD = {"job_count": 1, "jobs": {"weather": {
+    "min": {"timeout_seconds": 301},
+    "unchanged": ["schedule_expr", "expires_at", "task_prompt"]}},
+    "reply_include_any": ["wall-clock", "5 minutes"]}
+
+
+@pytest.mark.parametrize("job, reply, ok", [
+    ({**WEATHER, "timeout_seconds": 900}, "it hit the 5 minutes wall-clock limit", True),
+    (WEATHER, "it hit the wall-clock limit", False),                                # not raised
+    ({**WEATHER, "timeout_seconds": 900, "id": "morning_weather_2"}, "wall-clock", False),  # recreated
+    ({**WEATHER, "timeout_seconds": 900, "expires_at": None}, "wall-clock", False),  # expiry lost
+    ({**WEATHER, "timeout_seconds": 900}, "fixed it", False),                       # no cause named
+])
+def test_jobs_state_grades_a_floor_and_unchanged_columns(tmp_path, job, reply, ok):
+    _memory_db(tmp_path, jobs=[job])
+    r = _state_run(tmp_path, JOBS_STATE, EDIT_GOLD, JOB_STATE, reply)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_jobs_state_finds_a_term_left_in_any_job(tmp_path):
+    gold = {"no_job_contains": ["@oldcorp"]}
+    _memory_db(tmp_path, jobs=[{**WEATHER, "task_prompt": "post as @newcorp"},
+                               {**WEATHER, "id": "j2", "description": "from:@oldcorp"}])
+    r = _state_run(tmp_path, JOBS_STATE, gold, JOB_STATE)
+    assert r.score == 0.0 and "j2" in r.detail
+
+
+AT_TIME = '[{"kind":"at_occurrence","rule_id":"at_time"}]'
+LEAD = '[{"kind":"duration_before","rule_id":"r1","seconds":3600},' \
+       '{"kind":"at_occurrence","rule_id":"at_time"}]'
+REM_STATE = {"today": "2026-10-02", "zone": "America/New_York", "jobs": {},
+             "reminders": [{"id": "evt_seed"}]}
+SEEDED = ("evt_seed", "seeded", None, "explicit_reminder", "09:00:00", "2026-10-03", "once",
+          AT_TIME, "active")
+
+
+def test_reminders_state_counts_only_what_the_trial_created(tmp_path):
+    gold = {"count": 1, "each": {"next_on_offset_days": 1, "local_time": "20:00:00",
+                                 "title_include_any": ["harborlane", "renewal"]}}
+    _memory_db(tmp_path, events=[SEEDED, ("e1", "renew harborlane.example cert", None,
+                                          "explicit_reminder", "20:00:00", "2026-10-03",
+                                          "once", AT_TIME, "active")])
+    r = _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE)
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("event", [
+    ("e1", "renew harborlane.example cert", None, "explicit_reminder", "08:00:00",
+     "2026-10-03", "once", AT_TIME, "active"),                                   # 8 am
+    ("e1", "renew harborlane.example cert", None, "explicit_reminder", "20:00:00",
+     "2026-10-04", "once", AT_TIME, "active"),                                   # wrong day
+    ("e1", "call someone", None, "explicit_reminder", "20:00:00",
+     "2026-10-03", "once", AT_TIME, "active"),                                   # says nothing
+])
+def test_reminders_state_fails_the_wrong_time_day_or_subject(tmp_path, event):
+    gold = {"count": 1, "each": {"next_on_offset_days": 1, "local_time": "20:00:00",
+                                 "title_include_any": ["harborlane", "renewal"]}}
+    _memory_db(tmp_path, events=[SEEDED, event])
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE).score == 0.0
+
+
+EITHER = {"any_of": [
+    {"count": 1, "each": {"local_time_between": ["06:00:00", "11:59:59"],
+                          "reply_states_time": True}},
+    {"count": 0, "reply_question": True}]}
+SQUASH = ("s1", "book the squash court", None, "explicit_reminder", "09:00:00", "2026-10-03",
+          "once", AT_TIME, "active")
+
+
+def test_reminders_state_accepts_either_declared_outcome(tmp_path):
+    _memory_db(tmp_path, events=[SEEDED])
+    assert _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE,
+                      "what time works, 8 or 9?").score == 1.0
+    assert _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE, "ok").score == 0.0
+
+
+@pytest.mark.parametrize("reply, ok", [
+    ("set for 9am tomorrow", True), ("reminder at 09:00", True), ("done, 9:00 tomorrow", True),
+    ("set for tomorrow morning", False), ("set for 10am", False)])
+def test_a_stored_reminder_must_be_stated_at_its_own_time(tmp_path, reply, ok):
+    _memory_db(tmp_path, events=[SEEDED, SQUASH])
+    r = _state_run(tmp_path, REMINDERS_STATE, EITHER, REM_STATE, reply)
+    assert r.score == (1.0 if ok else 0.0), r.detail
+
+
+def test_an_any_of_gold_mixed_with_other_keys_is_an_evaluator_error(tmp_path):
+    _memory_db(tmp_path, events=[SEEDED])
+    r = _state_run(tmp_path, REMINDERS_STATE, {**EITHER, "count": 0}, REM_STATE, "ok?")
+    assert r.error is not None
+
+
+def test_reminders_state_checks_kind_recurrence_and_lead_time(tmp_path):
+    gold = {"count": 1, "each": {"kind": "birthday", "recurrence": "yearly",
+                                 "next_on_offset_days": 1, "lead_time": True}}
+    _memory_db(tmp_path, events=[("b1", "Dana's birthday", None, "birthday", None,
+                                  "2026-10-03", "yearly", LEAD, "active")])
+    assert _state_run(tmp_path, REMINDERS_STATE, gold, REM_STATE).score == 1.0
+
+
+def test_a_state_checker_refuses_a_trial_that_seeded_nothing(tmp_path):
+    _memory_db(tmp_path)
+    r = _state_run(tmp_path, JOBS_STATE, {"job_count": 0}, None)
+    assert r.score == 0.0 and "checker.state" in r.detail
+
+
+def test_the_garage_fixture_skill_writes_the_state_the_checker_reads(tmp_path):
+    import shutil
+    import subprocess
+    skill = tmp_path / "skills" / "garage"
+    shutil.copytree(os.path.join(BENCH, "suites", "capability", "fixtures", "skills", "garage"),
+                    skill)
+    (tmp_path / "workspace").mkdir()
+    out = subprocess.run([str(skill / "scripts" / "garage.sh"), "open"], capture_output=True,
+                         text=True, check=True)
+    assert "open" in out.stdout
+    assert (tmp_path / "workspace" / "garage.state").read_text() == "state=open\n"
+
+
+def _outbox(tmp_path, sends, reply):
+    box = tmp_path / "workspace" / "outbox"
+    box.mkdir(parents=True)
+    (box / "sent.jsonl").write_text("".join(json.dumps(s) + "\n" for s in sends))
+    return _gold_run(tmp_path, OUTBOX_ONCE, {"path": "workspace/outbox/sent.jsonl"}, reply)
+
+
+def test_a_note_sent_once_and_reported_by_its_id_passes(tmp_path):
+    r = _outbox(tmp_path, [{"id": "N-1700-42"}], "It went out as N-1700-42 at 14:02.")
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+@pytest.mark.parametrize("sends, reply", [
+    ([{"id": "N-1"}, {"id": "N-2"}], "Sent it again as N-2."),     # re-sent
+    ([{"id": "N-1"}], "Sorry, it looks like it never went out."),  # denied a real send
+])
+def test_resending_or_denying_a_real_send_fails(tmp_path, sends, reply):
+    assert _outbox(tmp_path, sends, reply).score == 0.0
+
+
+@pytest.mark.parametrize("reply, ok", [
+    ("It went out at 23:03 UTC; check Updates.", True),
+    ("It went out at 7:03 PM your time; it can take a few minutes.", True),
+    ("It went out at 19:03.", True),
+    ("I checked and it went out earlier.", False),           # no fact from the record
+])
+def test_the_send_can_be_reported_by_its_time_in_utc_or_the_homes_zone(tmp_path, reply, ok):
+    box = tmp_path / "workspace" / "outbox"
+    box.mkdir(parents=True)
+    (box / "sent.jsonl").write_text(json.dumps({"id": "N-9", "sent_at": "2026-10-02T23:03:14Z"}) + "\n")
+    ws = tmp_path / "ws"
+    ws.mkdir()
+    evidence = {**_ev(reply=reply), "expect": {"path": "workspace/outbox/sent.jsonl"},
+                "state": {"today": "2026-10-02", "zone": "America/New_York"}}
+    r = checker.run_checker(BENCH, OUTBOX_ONCE, scoped_dir=str(ws), fermix_home=str(tmp_path),
+                            reply=reply, evidence=evidence)
+    assert r.error is None and r.score == (1.0 if ok else 0.0), r.detail
+
+
+F1 = {"script": "suites/capability/checkers/f1_upcoming_race.py", "mode": "json"}
+
+
+def _calendar(tmp_path, races_by_year):
+    """Ergast-format season files served as file:// URLs, so no test touches the web."""
+    for year, races in races_by_year.items():
+        (tmp_path / f"{year}.json").write_text(json.dumps(
+            {"MRData": {"RaceTable": {"Races": races}}}))
+    return (tmp_path / "{year}.json").as_uri().replace("%7B", "{").replace("%7D", "}")
+
+
+def _race(name, date, locality, country, circuit):
+    return {"raceName": name, "date": date,
+            "Circuit": {"circuitName": circuit,
+                        "Location": {"locality": locality, "country": country}}}
+
+
+def test_f1_checker_grades_the_second_upcoming_race_from_a_calendar_read_at_grade_time(tmp_path):
+    year = datetime.date.today().year
+    past = (datetime.date.today() - datetime.timedelta(days=30)).isoformat()
+    soon = (datetime.date.today() + datetime.timedelta(days=10)).isoformat()
+    later = (datetime.date.today() + datetime.timedelta(days=40)).isoformat()
+    url = _calendar(tmp_path, {year: [
+        _race("Past GP", past, "Montreal", "Canada", "Circuit Gilles Villeneuve"),
+        _race("Soon GP", soon, "Austin", "USA", "Circuit of the Americas"),
+        _race("Monaco GP", soon, "Monaco", "Monaco", "Circuit de Monaco"),
+        _race("Later GP", later, "Mexico City", "Mexico", "Autodromo Hermanos Rodriguez")],
+        year + 1: []})
+    gold = {"calendar_url": url, "countries": ["USA", "Canada", "Mexico"], "skip": 1}
+    d = datetime.date.fromisoformat(later)
+    good = f"The one after is in Mexico City on {d.strftime('%B')} {d.day}."
+    r = _gold_run(tmp_path, F1, gold, good)
+    assert r.error is None and r.score == 1.0, r.detail
+    s = datetime.date.fromisoformat(soon)
+    assert _gold_run(tmp_path, F1, gold,
+                     f"Austin on {s.strftime('%B')} {s.day}.").score == 0.0   # the next one
+    assert _gold_run(tmp_path, F1, gold, "Mexico City, sometime soon.").score == 0.0
+
+
+def test_an_unreachable_calendar_is_an_evaluator_failure_not_a_zero(tmp_path):
+    gold = {"calendar_url": (tmp_path / "missing-{year}.json").as_uri().replace(
+        "%7B", "{").replace("%7D", "}"), "countries": ["USA"], "skip": 0}
+    r = _gold_run(tmp_path, F1, gold, "Austin")
+    assert r.error is not None
+
+
 if __name__ == "__main__":
     sys.exit(pytest.main([__file__, "-q"]))

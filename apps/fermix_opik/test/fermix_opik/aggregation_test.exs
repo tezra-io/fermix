@@ -444,6 +444,26 @@ defmodule FermixOpik.AggregationTest do
     refute Enum.any?(spans, &String.starts_with?(&1.name, "stream:"))
   end
 
+  # M56 §4.4: a chat turn during a voice call may end with no reply; the turn's
+  # root says so, so a turn that answered nothing reads as chosen, not lost.
+  test "a turn that ended with no reply says so on its root" do
+    {_state, closed} =
+      run([
+        {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 9},
+         %{
+           channel: :companion,
+           chat_id: "main",
+           sender: "Companion owner",
+           session_id: "main-56",
+           agent: "main",
+           silent: true
+         }}
+      ])
+
+    assert [%{trace: trace}] = closed
+    assert trace.metadata.silent == true
+  end
+
   # The M29/Buzz duplicate-reply incident: the one trace worth reading — the
   # failed turn — carried no input, no status and nothing filterable, so a reader
   # could only find it by eyeballing output text.
@@ -2161,6 +2181,49 @@ defmodule FermixOpik.AggregationTest do
       assert trace.name == "voice_live:1"
     end
 
+    # M56 §4.6: a task that outlived its call stops after the call's root
+    # shipped at call_stop, emitted by its new owner. Attached while the call's
+    # run is open, it never opens a run of its own: on a closed or forgotten
+    # call it would be an empty phantom root.
+    test "a detached delegation's stop never mints a root of its own" do
+      detached_stop =
+        {@voice_live_delegation_stop, %{duration_ms: 1_800_000},
+         voice_live_meta(%{
+           delegation_id: "dlg_9",
+           revision: 1,
+           turn_session_id: @voice_delegation_session,
+           status: "timed_out",
+           detached: true
+         })}
+
+      {state, closed} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          {@voice_live_stop, %{voice_seconds: 62, accounting_complete: 1},
+           voice_live_meta(%{reason: "call_stop"})},
+          detached_stop
+        ])
+
+      assert [%{trace: %{name: "voice_live:1"}}] = closed
+      assert state.traces == %{}
+
+      {forgotten, none} = run([detached_stop])
+      assert none == []
+      assert forgotten.traces == %{}
+      refute Map.has_key?(forgotten.sessions, @voice_live_call)
+
+      {open, []} =
+        run([
+          {@voice_live_start, %{}, voice_live_meta(%{max_duration_ms: 900_000})},
+          detached_stop
+        ])
+
+      [%{spans: spans}] = Map.values(open.traces)
+      stopped = span_named(spans, "voice_live:delegation_stop")
+      assert stopped.metadata.detached == true
+      assert stopped.metadata.status == "timed_out"
+    end
+
     # Without the prefix clause a call_stop that arrived after a daemon restart
     # would mint a root `infer_kind/1` reads as `:subagent` — the phantom-root
     # shape the computer-history clause exists to prevent.
@@ -2174,6 +2237,83 @@ defmodule FermixOpik.AggregationTest do
       assert [%{trace: trace}] = closed
       assert trace.tags == ["voice_live"]
       assert trace.name == "voice_live:1"
+    end
+  end
+
+  @voice_gist_start [:fermix, :voice_gist, :run_start]
+  @voice_gist_complete [:fermix, :voice_gist, :run_complete]
+  @voice_gist_error [:fermix, :voice_gist, :run_error]
+  @voice_gist_session "voice_gist:6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+
+  # The emitter's own metadata shape (FermixCore.Realtime.GistTelemetry),
+  # mirrored by hand like `voice_live_meta/1`.
+  defp voice_gist_meta(extra) do
+    Map.merge(
+      %{
+        agent: "voice_gist",
+        session_id: @voice_gist_session,
+        call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+      },
+      extra
+    )
+  end
+
+  # M56 §7: a call's gist is made after the call's run closed, so it is a root
+  # of its own, nesting only its own provider call, never under the call.
+  describe "a call's gist" do
+    test "the reporter subscribes to every voice_gist event" do
+      for event <- [@voice_gist_start, @voice_gist_complete, @voice_gist_error] do
+        assert event in FermixOpik.Reporter.events(),
+               "#{inspect(event)} is not subscribed, so the run is invisible to Opik"
+      end
+    end
+
+    test "a gist is one root trace nesting its summarising call, closed with its sizes" do
+      {_state, closed} =
+        run([
+          {@voice_live_stop, %{voice_seconds: 62}, voice_live_meta(%{reason: "call_stop"})},
+          {@voice_gist_start, %{},
+           voice_gist_meta(%{tasks: 2, speech_bytes: 900, input_bytes: 1_100, tainted: false})},
+          {[:fermix, :provider, :call], %{duration_ms: 1_800},
+           %{
+             provider: :openai,
+             model: "gpt-5",
+             status: :ok,
+             agent: "voice_gist",
+             session_id: @voice_gist_session,
+             tokens: %{prompt: 300, completion: 80}
+           }},
+          {@voice_gist_complete, %{duration_ms: 2_000, gist_bytes: 310},
+           voice_gist_meta(%{status: "written"})}
+        ])
+
+      gist = Enum.find(closed, &(&1.trace.name == @voice_gist_session))
+      assert %{trace: trace, spans: spans} = gist
+      assert trace.tags == ["voice_gist"]
+      assert trace.metadata.call_uuid == "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+      assert trace.metadata.status == "written"
+      assert trace.metadata.gist_bytes == 310
+      assert trace.metadata.input_bytes == 1_100
+      assert [llm] = spans_of_type(spans, "llm")
+      assert llm.trace_id == trace.id
+
+      wrapper = span_named(spans, @voice_gist_session)
+      refute Map.has_key?(wrapper, :parent_span_id)
+    end
+
+    # Without the prefix clause an error arriving with no opener would mint a
+    # root `infer_kind/1` reads as `:subagent`.
+    test "a gist that failed with no opener still closes as a voice_gist root, failed" do
+      {_state, closed} =
+        run([
+          {@voice_gist_error, %{count: 1, duration_ms: 60_000},
+           voice_gist_meta(%{status: "failed", error: "timeout"})}
+        ])
+
+      assert [%{trace: trace}] = closed
+      assert trace.tags == ["voice_gist"]
+      assert trace.metadata.status == "failed"
+      assert trace.error_info.message == "timeout"
     end
   end
 

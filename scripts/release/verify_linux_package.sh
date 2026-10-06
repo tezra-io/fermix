@@ -165,6 +165,16 @@ printf '%s\n' "$status_after"
 [ "$(json_field "$status_after" result.binding.home)" = "$home" ] ||
   report "$status_after" "the bound home is not the one that was asked for"
 
+# A management client reaches the packaged daemon: a read-only `settings show`
+# over the socket of the bound home, at a path with a space and a percent
+# character. The client dials $FERMIX_HOME, not the service binding, so the home
+# is named the way an owner with a non-default home names it.
+settings_output="$(FERMIX_HOME="$home" fermix settings show secrets --json)" ||
+  report "$settings_output" "fermix settings show refused against the packaged daemon"
+printf '%s\n' "$settings_output"
+[ "$(json_field "$settings_output" id)" = "secrets" ] ||
+  report "$settings_output" "fermix settings show secrets did not answer with the secrets section"
+
 uninstall_output="$(fermix service uninstall --json)" ||
   report "$uninstall_output" "service uninstall refused"
 printf '%s\n' "$uninstall_output"

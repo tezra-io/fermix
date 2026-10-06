@@ -10,10 +10,17 @@ description: >
 
   STATUS: drafts. They live under candidates/ so they NEVER enter a headline sweep (excluded
   from the default glob; only loaded with --candidates). Validate before promoting them into a
-  real suite: run against BOTH a flagship and a mini at --trials 10+, and KEEP a task only if
-  the flagship is high + stable (pass^k ~ 1) AND the mini is meaningfully lower AND a failing
-  trace shows a real capability miss (not a scorer quirk). Cut anything both models ace
-  (saturated) or that the flagship can't do reliably (that's noise, not difficulty).
+  real suite. Keep a task when a person can say WHY it is hard before any model has run it,
+  its failing traces show a real capability miss (not a scorer quirk), and repeated trials of
+  one model agree with each other. Judge the TIER, not each task, against model results: the
+  strongest model at its highest effort should land well below 100% over the tier (aim for
+  60-80%) and a mini clearly lower. Never keep or cut a single task because of how one model
+  scored on it: selecting on observed scores measures those models' failure patterns, and
+  keeping only tasks the flagship passes reliably rebuilds a saturated tier.
+
+  These are self-contained puzzles: they measure the bare model's reasoning, not Fermix
+  working on someone's behalf. The ranked tier is being rebuilt from real usage instead (see
+  the README, capability section); keep these only if they still add signal beside it.
 
     uv run bin/run_capability.py --candidates --suite cap_hard --trials 10 --threshold 1.0
 

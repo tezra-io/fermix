@@ -68,9 +68,33 @@ defmodule FermixCore.Realtime.LiveTranscript do
     transcript
     |> fragments()
     |> Enum.filter(&(&1.end_ms >= offset_ms - window_ms))
-    |> Enum.sort_by(& &1.start_ms)
-    |> Enum.chunk_by(& &1.speaker)
-    |> Enum.map_join("\n", &format_run/1)
+    |> labelled()
+  end
+
+  @doc """
+  Speaker-labelled text, as `context_since/3` writes it, for everything that
+  ended after `since_ms`, or everything held when `since_ms` is `nil`.
+
+  What a hand-off in the chat's conversation sends and persists (M56 §4.1):
+  the exchange since the previous hand-off, however long ago it was, rather
+  than a window that overlaps the request before it. Bounded by the buffer:
+  speech older than the newest 128 fragments is no longer here to read.
+  """
+  @spec exchange_since(t(), non_neg_integer() | nil) :: String.t()
+  def exchange_since(%__MODULE__{} = transcript, since_ms)
+      when is_nil(since_ms) or (is_integer(since_ms) and since_ms >= 0) do
+    transcript
+    |> fragments()
+    |> Enum.filter(&(is_nil(since_ms) or &1.end_ms > since_ms))
+    |> labelled()
+  end
+
+  @doc "When the newest speech held, anyone's, ended, or `nil` before anyone spoke."
+  @spec latest_end_ms(t()) :: non_neg_integer() | nil
+  def latest_end_ms(%__MODULE__{fragments: fragments}) do
+    fragments
+    |> Enum.map(& &1.end_ms)
+    |> Enum.max(fn -> nil end)
   end
 
   @doc "When the operator last stopped speaking, or `nil` if they never did."
@@ -117,6 +141,13 @@ defmodule FermixCore.Realtime.LiveTranscript do
       nil -> false
       end_ms -> end_ms >= offset_ms - window_ms
     end
+  end
+
+  defp labelled(fragments) do
+    fragments
+    |> Enum.sort_by(& &1.start_ms)
+    |> Enum.chunk_by(& &1.speaker)
+    |> Enum.map_join("\n", &format_run/1)
   end
 
   defp format_run([%{speaker: speaker} | _rest] = run) do

@@ -9,9 +9,9 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   It composes three existing seams and adds no delivery path of its own:
 
     1. `FermixCore.Delivery.OwnerInbox.resolve/1`, the one answer to "where is
-       the owner's inbox". Only a Telegram, Signal or WhatsApp inbox qualifies:
-       on those the DM's chat id is the owner's user id, so the owner's
-       `/confirm` there passes the pending record's origin check.
+       the owner's inbox". Only a Telegram, Signal, WhatsApp or iMessage inbox
+       qualifies: on those the DM's chat id is the owner's user id, so the
+       owner's `/confirm` there passes the pending record's origin check.
     2. `Commands.Sandbox.store_pending_grant/2`, binding the token to that DM.
        A repeat while the token lives answers `:existing` and sends nothing.
     3. `Gateway.Delivery`, the single channel-delivery path, so Telegram renders
@@ -30,7 +30,7 @@ defmodule FermixChannels.Gateway.OwnerInboxApproval do
   alias FermixCore.Capabilities.AccessGate
   alias FermixCore.Delivery.OwnerInbox
 
-  @dm_platforms ["telegram", "signal", "whatsapp"]
+  @dm_platforms ["telegram", "signal", "whatsapp", "imessage"]
 
   @type request :: %{access_sensitive: String.t(), prompt: String.t()}
 

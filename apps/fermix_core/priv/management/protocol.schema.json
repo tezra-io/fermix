@@ -118,7 +118,10 @@
     "mobile.pair.cancel": 2,
     "mobile.devices.list": 2,
     "mobile.devices.revoke": 2,
-    "browser.install.start": 2
+    "browser.install.start": 2,
+    "imessage.permissions.get": 2,
+    "imessage.grant.start": 2,
+    "imessage.policy.confirm": 2
   },
   "$defs": {
     "request": {
@@ -179,7 +182,10 @@
             "mobile.pair.cancel",
             "mobile.devices.list",
             "mobile.devices.revoke",
-            "browser.install.start"
+            "browser.install.start",
+            "imessage.permissions.get",
+            "imessage.grant.start",
+            "imessage.policy.confirm"
           ]
         },
         "params": { "type": "object" }
@@ -507,6 +513,27 @@
             "properties": { "method": { "const": "browser.install.start" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/browser_install_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "imessage.permissions.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/imessage_permissions_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "imessage.grant.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/imessage_grant_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "imessage.policy.confirm" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/imessage_policy_confirm_params" } } }
         }
       ]
     },
@@ -618,7 +645,10 @@
         { "$ref": "#/$defs/mobile_pair_cancel_result" },
         { "$ref": "#/$defs/mobile_devices_list_result" },
         { "$ref": "#/$defs/mobile_devices_revoke_result" },
-        { "$ref": "#/$defs/browser_install_start_result" }
+        { "$ref": "#/$defs/browser_install_start_result" },
+        { "$ref": "#/$defs/imessage_permissions_get_result" },
+        { "$ref": "#/$defs/imessage_grant_start_result" },
+        { "$ref": "#/$defs/imessage_policy_confirm_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -1620,7 +1650,9 @@
         "capability_install",
         "meetings_signin",
         "computer_use_grant",
-        "browser_install"
+        "browser_install",
+        "imessage_grant",
+        "imessage_policy_confirm"
       ]
     },
     "jobStatus": {
@@ -2127,7 +2159,7 @@
       "required": ["target"],
       "additionalProperties": false,
       "properties": {
-        "target": { "enum": ["computer_use_sidecar", "meetbot", "local_stt"] }
+        "target": { "enum": ["computer_use_sidecar", "meetbot", "local_stt", "imessage_helper"] }
       }
     },
     "capabilities_install_start_result": { "$ref": "#/$defs/jobView" },
@@ -2163,6 +2195,58 @@
         "installed": { "type": "boolean" },
         "screen_capture": { "type": "boolean" },
         "input_control": { "type": "boolean" },
+        "probed_at": { "type": ["string", "null"] }
+      }
+    },
+    "imessage_permissions_get_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "imessage_permissions_get_result": { "$ref": "#/$defs/imessagePermissions" },
+    "imessage_grant_start_params": {
+      "type": "object",
+      "required": ["service"],
+      "additionalProperties": false,
+      "properties": {
+        "service": { "enum": ["automation", "full_disk_access"] }
+      }
+    },
+    "imessage_grant_start_result": { "$ref": "#/$defs/jobView" },
+    "imessage_policy_confirm_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "imessage_policy_confirm_result": { "$ref": "#/$defs/jobView" },
+    "imessagePermissions": {
+      "type": "object",
+      "description": "The Fermix Messages helper's non-prompting probe. With `installed: false` every other field is null. `signed_in` is null while Automation is not granted, because the helper cannot ask Messages without it. `policy_matches_config` is false unless the confirmed recipients are exactly the saved ones: that is the state \"Awaiting confirmation\". A grant or confirmation job completes with this same object as its `result`; a confirmation adds `outcome`.",
+      "required": [
+        "installed",
+        "helper_version",
+        "full_disk_access",
+        "db",
+        "automation",
+        "messages_running",
+        "signed_in",
+        "user_session",
+        "policy",
+        "policy_matches_config",
+        "probed_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "installed": { "type": "boolean" },
+        "helper_version": { "type": ["string", "null"] },
+        "full_disk_access": { "enum": ["granted", "denied", null] },
+        "db": { "enum": ["readable", "missing", "unreadable", "schema_unexpected", null] },
+        "automation": { "enum": ["granted", "denied", "not_determined", "unknown", null] },
+        "messages_running": { "type": ["boolean", "null"] },
+        "signed_in": { "type": ["boolean", "null"] },
+        "user_session": { "type": ["boolean", "null"] },
+        "policy": { "enum": ["confirmed", "unconfirmed", "absent", null] },
+        "policy_matches_config": { "type": ["boolean", "null"] },
         "probed_at": { "type": ["string", "null"] }
       }
     },

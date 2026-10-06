@@ -10,6 +10,7 @@ Run: `uv run bin/test_seed_home.py`."""
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import sys
 import tomllib
@@ -141,6 +142,91 @@ def _populate_state(home):
         (home / name).write_text("stale\n")
 
 
+_DEV = {"fermix_core": {"profile": "fermix-dev", "providers": {
+    "openai_codex": {"primary": True, "default_model": "gpt-6.1-sol", "auth_mode": "oauth"},
+    "anthropic": {"primary": False, "default_model": "claude-opus-4-8",
+                  "reasoning_effort": "xhigh", "auth_mode": "oauth"},
+    "mistral": {"primary": False, "default_model": "mistral-large-latest",
+                "api_key": "@keyring"},
+    "broken": {"primary": False}}}}
+
+
+def test_dev_provider_scores_a_named_block_with_its_own_model_and_auth():
+    pid, blk, profile = seed.dev_provider(_DEV, "anthropic")
+    assert (pid, blk["default_model"], blk["auth_mode"], profile) == (
+        "anthropic", "claude-opus-4-8", "oauth", "fermix-dev")
+    doc = tomllib.loads(seed.render_config("/tmp/x-eval", pid, blk, profile))
+    block = doc["fermix_core"]["providers"]["anthropic"]
+    assert block["primary"] is True and block["reasoning_effort"] == "xhigh"
+
+
+def test_dev_provider_keeps_the_keychain_sentinel_for_an_api_key_block():
+    pid, blk, profile = seed.dev_provider(_DEV, "mistral")
+    doc = tomllib.loads(seed.render_config("/tmp/x-eval", pid, blk, profile))
+    assert doc["fermix_core"]["providers"]["mistral"]["api_key"] == "@keyring"
+    assert doc["fermix_core"]["profile"] == "fermix-dev"
+
+
+@pytest.mark.parametrize("pid", ["nope", "broken"])
+def test_dev_provider_refuses_an_unknown_or_modelless_block(pid):
+    with pytest.raises(SystemExit):
+        seed.dev_provider(_DEV, pid)
+
+
+def test_render_config_wires_the_tool_discovery_fixture_server():
+    # cap_tool_discovery needs one deferred surface in a home that has no plugins.
+    doc = tomllib.loads(seed.render_config(
+        "/tmp/x-eval", "openai", {"default_model": "gpt-5.6-luna"}, None))
+    server = doc["mcp"]["servers"]["halden_ops"]
+    assert server["command"] == "/usr/bin/env"
+    python, script, flag, state = server["args"]
+    assert python == "python3" and os.path.isfile(script) and script.endswith("halden_ops.py")
+    assert (flag, state) == ("--state-dir", "/tmp/x-eval/eval-mcp/halden_ops")
+    # The daemon refuses boot on the removed `approved` key; MCP tools are visible by default.
+    assert "approved" not in server
+
+
+def test_install_skills_lays_down_the_bundled_and_fixture_skills(tmp_path):
+    # SkillRegistry seeds its bundled skills only into an EMPTY dir, so installing a
+    # fixture skill alone would leave the eval home without self-knowledge.
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    seed.install_skills(str(home))
+    installed = sorted(p.name for p in (home / "skills").iterdir())
+    bundled = sorted(p for p in os.listdir(seed.BUNDLED_SKILLS_DIR)
+                     if os.path.isfile(os.path.join(seed.BUNDLED_SKILLS_DIR, p, "SKILL.md")))
+    assert set(bundled) <= set(installed) and "receipt-filing" in installed
+    assert (home / "skills" / "receipt-filing" / "SKILL.md").is_file()
+
+
+def test_install_skills_adds_the_private_holdouts_skills(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    private = tmp_path / "fermix-eval-private"
+    (private / "skills" / "notes-mailer").mkdir(parents=True)
+    (private / "skills" / "notes-mailer" / "SKILL.md").write_text("---\nname: notes-mailer\n---\n")
+    seed.install_skills(str(home), str(private))
+    assert (home / "skills" / "notes-mailer" / "SKILL.md").is_file()
+    assert (home / "skills" / "receipt-filing" / "SKILL.md").is_file()
+
+
+def test_a_skill_named_in_two_sources_is_refused_not_silently_overwritten(tmp_path):
+    home = tmp_path / "x-eval"
+    home.mkdir()
+    private = tmp_path / "fermix-eval-private"
+    (private / "skills" / "garage").mkdir(parents=True)          # also a public fixture
+    (private / "skills" / "garage" / "SKILL.md").write_text("---\nname: garage\n---\n")
+    with pytest.raises(SystemExit):
+        seed.install_skills(str(home), str(private))
+
+
+def test_install_skills_refuses_a_skills_dir_that_was_not_reset(tmp_path):
+    home = tmp_path / "x-eval"
+    (home / "skills").mkdir(parents=True)
+    with pytest.raises(SystemExit):
+        seed.install_skills(str(home))
+
+
 def test_reset_state_removes_every_durable_state_path(tmp_path):
     # A trial is only independent if it starts from the baseline: a skill, a memory
     # row, a scheduled job or an event left by the previous sweep changes what the
@@ -218,6 +304,30 @@ def test_reset_state_refuses_a_symlinked_home(tmp_path):
     with pytest.raises(SystemExit):
         seed.reset_state(str(link))
     assert (real / "memory.db").exists()
+
+
+def test_openai_codex_copies_its_sign_in_with_chatgpt_entry(tmp_path, monkeypatch):
+    # openai_codex signs in with ChatGPT, whose entry the auth store keeps under
+    # `chatgpt`; an older Codex-client entry under `openai_codex` is never read.
+    dev = tmp_path / "dev"
+    dev.mkdir()
+    chatgpt = {"auth_mode": "oauth_siwc", "client_id": "oaiapp_seed", "status": "ready"}
+    stale = {"auth_mode": "chatgpt", "status": "ready"}
+    (dev / "auth.json").write_text(json.dumps(
+        {"version": 2, "providers": {"chatgpt": chatgpt, "openai_codex": stale}}))
+    monkeypatch.setattr(seed, "DEV_HOME", str(dev))
+    home = tmp_path / "x-eval"
+    home.mkdir()
+
+    seed.copy_oauth_token(str(home), "openai_codex")
+
+    copied = json.loads((home / "auth.json").read_text())
+    assert copied == {"version": 2, "providers": {"chatgpt": chatgpt}}
+    assert (home / "auth.json").stat().st_mode & 0o777 == 0o600
+
+
+def test_no_separate_chatgpt_provider_is_seeded():
+    assert "chatgpt" not in seed._OAUTH_PROFILE_KEY
 
 
 def test_browser_and_harness_state_are_part_of_the_baseline():

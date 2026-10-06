@@ -1,0 +1,121 @@
+suite: cap_tool_discovery
+risk: isolated_mutation
+title: "Capability — tools and skills that load on demand"
+description: >
+  Fermix keeps most of what it can do out of the prompt. Plugin and MCP tools are
+  listed by name and their schemas load on demand through tool_search,
+  tool_describe and tool_call; skills are listed by name and description and their
+  instructions load through skill_view. This suite checks that a model can reach a
+  capability it first has to look up, so a model that only works when everything
+  is spelled out in the prompt shows up here.
+
+  Every task is graded on the outcome, never on the route: calling a deferred tool
+  directly, reading its schema first, or searching for it all pass when the work is
+  done. Two cases are route-shaped and labelled: a sanity case that asks for
+  tool_search outright (strong models reach listed names without searching, so
+  nothing else proves the bridge works on every model), and the last scenario's
+  call budget, which keeps discovery from turning an obvious request into a toll.
+
+  PRECONDITION: the capability home seeded by bin/seed_capability_home.py, which
+  configures the halden_ops fixture MCP server (fixtures/mcp/halden_ops.py: an
+  invented supply company, ten tools, state under the home's eval-mcp dir) and
+  installs the receipt-filing fixture skill (fixtures/skills/receipt-filing).
+  Tool-schema deferral is on by default. The server derives its answers from the
+  request and the runner substitutes a fresh tracking or receipt number per trial,
+  so nothing here can be guessed or remembered. Every value is invented.
+defaults:
+  judge: false
+  timeout_ms: 240000
+
+scenarios:
+  - id: deferred_mcp_tool
+    title: "Reach a deferred MCP tool and use what it returns"
+    severity: normal
+    tags: [capability, tool_search, deferral, mcp]
+    cases:
+      - id: shipment_status_by_tracking_number
+        query: >
+          wheres the halden shipment {token} at? when should it land
+        requires_tools: [mcp_halden_ops_shipment_status]
+        checker:
+          script: "suites/capability/checkers/tool_discovery_shipment.py"
+          mode: json
+          timeout_ms: 30000
+
+      - id: ledger_entry_with_its_schema
+        # The tool wants integer cents and a category from a fixed list. tool_describe
+        # shows types but not the allowed values today, so a model typically learns
+        # the list from the server's validation error and must recover from it.
+        # Graded on the entry the server accepted, which its result echoes.
+        query: >
+          log a 42.50 team lunch to the halden ledger for mar 3 2027, receipt {token}
+        requires_tools: [mcp_halden_ops_ledger_add_entry]
+        checker:
+          script: "suites/capability/checkers/tool_discovery_ledger.py"
+          mode: json
+          timeout_ms: 30000
+
+  - id: capability_not_named_by_the_request
+    title: "Find the tool when the request's words are not in its name"
+    severity: normal
+    tags: [capability, tool_search, deferral, mcp]
+    cases:
+      - id: account_manager_at_a_supplier
+        # The prompt lists deferred tools by name only. Nothing named "account
+        # manager" exists; the supplier_contact tool's description says it, which is
+        # what tool_search matches on. Outcome graded: the answer comes only from
+        # that tool (an invented name).
+        query: >
+          whos our account manager at copperline supply? need to email them
+        requires_tools: [mcp_halden_ops_supplier_contact]
+        score: { match: contains, expected: "Sam Ortega" }
+
+  - id: search_bridge_sanity
+    title: "SANITY: tool_search itself returns a usable tool (explicitly asked)"
+    severity: normal
+    tags: [capability, tool_search, deferral, sanity]
+    cases:
+      - id: search_then_use
+        # The suite's one labelled route case. Strong models reach deferred tools by
+        # name without searching (the prompt lists names), so nothing else here
+        # proves the search bridge works on every model; this asks for it outright.
+        query: >
+          use tool_search to find which halden tool gives warehouse opening hours, then
+          tell me the harbor site's hours
+        requires_tools_all: [tool_search, mcp_halden_ops_warehouse_hours]
+        # Any spelling of 06:00-20:00 ("6:00 AM-8:00 PM", "6am to 8pm"): the first
+        # pilot's correct "6:00 AM" failed a literal "06:00".
+        score: { match: regex, expected: '(?i)(\b0?6(:00)?\s*a\.?m\.?|\b06:00)[\s\S]{0,40}(\b8(:00)?\s*p\.?m\.?|\b20:00)' }
+
+  - id: skill_body_on_demand
+    title: "Follow a skill whose instructions are not in the prompt"
+    severity: normal
+    tags: [capability, skills, deferral]
+    cases:
+      - id: file_receipts_the_skill_way
+        # Only the receipt-filing skill's description is in the prompt; its sheet
+        # path, semicolon header, cents and finance codes live in its body.
+        query: >
+          file these receipts in my expenses folder {ws}: blue fern cafe 18.40 lunch on
+          mar 2 2027, ridewell 23.10 ride on mar 2 2027, draftboard 15.00 software on
+          mar 5 2027
+        checker:
+          script: "suites/capability/checkers/receipt_filing.py"
+          mode: json
+          timeout_ms: 30000
+
+  - id: obvious_request_no_detour
+    title: "An obvious request does not pay a discovery toll"
+    severity: normal
+    tags: [capability, tool_search, deferral, efficiency]
+    cases:
+      - id: whos_on_call
+        # Labelled route constraint: at most one discovery hop before the call
+        # (call directly, or describe then call, or search then call). A
+        # search-describe-call chain for a one-line question fails.
+        query: >
+          whos on call at halden this week?
+        requires_tools: [mcp_halden_ops_team_on_call]
+        expect:
+          max_tool_calls: 2
+        score: { match: contains, expected: "Robin Vale" }

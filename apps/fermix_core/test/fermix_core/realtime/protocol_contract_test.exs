@@ -16,6 +16,7 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
   @schema_path Application.app_dir(:fermix_core, "priv/realtime/protocol.schema.json")
   @client_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/client_events.jsonl")
   @server_fixtures Application.app_dir(:fermix_core, "priv/realtime/fixtures/server_events.jsonl")
+  @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
 
   setup_all do
     %{schema: @schema_path |> File.read!() |> Jason.decode!()}
@@ -74,6 +75,116 @@ defmodule FermixCore.Realtime.ProtocolContractTest do
 
     for field <- ~w(delegation_id revision status) do
       assert field in defs["task"]["required"]
+    end
+  end
+
+  # Additive and optional: an older companion ignores a field it does not know,
+  # so the wire stays at version 2. A Realtime call's frames never carry it.
+  test "call_ready, task and usage publish the call UUID as an optional field", %{
+    schema: schema
+  } do
+    for name <- ~w(call_ready task usage) do
+      definition = schema["$defs"][name]
+
+      assert %{"type" => "string", "format" => "uuid"} = definition["properties"]["call_uuid"],
+             "#{name} does not publish call_uuid"
+
+      refute "call_uuid" in definition["required"], "#{name} requires call_uuid"
+    end
+  end
+
+  # M56 §6: whether a Live call's hand-offs join the chat. Additive and
+  # optional, like the UUID: an older companion ignores it.
+  test "call_ready publishes the call's conversation as an optional field", %{schema: schema} do
+    definition = schema["$defs"]["call_ready"]
+
+    assert %{"enum" => ["chat", "private"]} = definition["properties"]["conversation"]
+    refute "conversation" in definition["required"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "call_ready"))
+
+    assert golden["conversation"] == "chat"
+  end
+
+  # M56 §6: the chat row a task's result was shown at. Additive and optional:
+  # an older companion ignores it, and nothing shown leaves it absent.
+  test "task publishes the chat row its result was shown at as an optional field", %{
+    schema: schema
+  } do
+    definition = schema["$defs"]["task"]
+
+    assert %{"type" => "integer", "minimum" => 1} = definition["properties"]["server_seq"]
+    refute "server_seq" in definition["required"]
+
+    shown =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["type"] == "task" and Map.has_key?(&1, "server_seq")))
+
+    assert %{"status" => "completed", "server_seq" => seq} = shown
+    assert is_integer(seq) and seq > 0
+  end
+
+  # M56 §4.6, §6: a call in the chat's tasks outlive it, and the session says
+  # so on the frame that detaches one. Both additive and optional: an older
+  # companion ignores them.
+  test "call_ready says whether tasks outlive the call, and task that one was detached", %{
+    schema: schema
+  } do
+    ready = schema["$defs"]["call_ready"]
+    task = schema["$defs"]["task"]
+
+    assert %{"type" => "boolean"} = ready["properties"]["tasks_outlive_call"]
+    refute "tasks_outlive_call" in ready["required"]
+    assert %{"type" => "boolean"} = task["properties"]["detached"]
+    refute "detached" in task["required"]
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"tasks_outlive_call" => true} = Enum.find(golden, &(&1["type"] == "call_ready"))
+
+    assert %{"status" => "running", "detached" => true} =
+             Enum.find(golden, &(&1["type"] == "task" and Map.has_key?(&1, "detached")))
+  end
+
+  test "the one-call refusal is a published error reason with a golden row", %{schema: schema} do
+    reason = Protocol.call_in_progress()
+
+    assert reason == "call_in_progress"
+    assert schema["$defs"]["error"]["properties"]["reason"]["description"] =~ reason
+
+    golden =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    assert %{"type" => "error", "reason" => reason} in golden
+  end
+
+  test "the golden Live frames carry the call UUID" do
+    server_frames =
+      @server_fixtures
+      |> fixture_lines()
+      |> Enum.map(&Jason.decode!/1)
+
+    live_frames =
+      Enum.filter(server_frames, fn frame ->
+        frame["type"] in ~w(call_ready task) or
+          (frame["type"] == "usage" and frame["status"] == "live")
+      end)
+
+    assert length(live_frames) == 5
+
+    for frame <- live_frames do
+      assert frame["call_uuid"] =~ @uuid_v4, "golden #{frame["type"]} has no call_uuid"
     end
   end
 

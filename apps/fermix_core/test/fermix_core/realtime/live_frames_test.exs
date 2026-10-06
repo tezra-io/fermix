@@ -5,15 +5,17 @@ defmodule FermixCore.Realtime.LiveFramesTest do
   alias FermixCore.Realtime.LiveLedger
   alias FermixCore.Realtime.Protocol
 
+  @call_uuid "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+
   test "every frame this module builds is a type the protocol publishes" do
     frames = [
       LiveFrames.state("listening"),
       LiveFrames.audio_delta("AAAA"),
       LiveFrames.playback_stop(),
       LiveFrames.caption("user", "hi", 0, 100),
-      LiveFrames.call_ready("openai_live", "voice_live:1", nil, nil),
-      LiveFrames.task("dg_1", 1, "running", nil),
-      LiveFrames.usage(LiveLedger.usage_payload(LiveLedger.new(100, 0))),
+      LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil),
+      LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil),
+      LiveFrames.usage(@call_uuid, LiveLedger.usage_payload(LiveLedger.new(100, 0))),
       LiveFrames.error(:cost_limit)
     ]
 
@@ -22,43 +24,114 @@ defmodule FermixCore.Realtime.LiveFramesTest do
     end
   end
 
-  describe "call_ready/4" do
+  describe "call_ready/6" do
     test "omits the provider session and expiry while they are unknown" do
-      frame = LiveFrames.call_ready("openai_live", "voice_live:1", nil, nil)
+      frame = LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil)
 
       assert frame == %{
                type: "call_ready",
                engine: "openai_live",
                call_id: "voice_live:1",
+               call_uuid: @call_uuid,
+               conversation: "chat",
+               tasks_outlive_call: true,
                captions: true
              }
     end
 
+    # M56 §4.6, §6: a call in the chat's tasks finish into the chat after it
+    # ends; a private call's die with it.
+    test "says whether the call's tasks outlive it" do
+      chat = LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "chat", nil, nil)
+
+      private =
+        LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "private", nil, nil)
+
+      assert chat.tasks_outlive_call == true
+      assert private.tasks_outlive_call == false
+    end
+
+    # M56 §6: whether the call's hand-offs join the chat or keep to the call.
+    test "names the conversation the call's hand-offs run in" do
+      for conversation <- ~w(chat private) do
+        frame =
+          LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, conversation, nil, nil)
+
+        assert frame.conversation == conversation
+      end
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.call_ready("openai_live", "voice_live:1", @call_uuid, "shared", nil, nil)
+      end
+    end
+
     test "carries them once the provider reported them" do
-      frame = LiveFrames.call_ready("openai_live", "voice_live:1", "sess_1", 1_788_000_000)
+      frame =
+        LiveFrames.call_ready(
+          "openai_live",
+          "voice_live:1",
+          @call_uuid,
+          "chat",
+          "sess_1",
+          1_788_000_000
+        )
 
       assert frame.provider_session_id == "sess_1"
       assert frame.expires_at == 1_788_000_000
     end
   end
 
-  describe "task/4" do
+  describe "task/5" do
     test "omits an absent summary and bounds a long one to the wire's limit" do
-      assert LiveFrames.task("dg_1", 1, "running", nil) == %{
+      assert LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil) == %{
                type: "task",
+               call_uuid: @call_uuid,
                delegation_id: "dg_1",
                revision: 1,
                status: "running"
              }
 
-      long = LiveFrames.task("dg_1", 2, "completed", String.duplicate("a", 900))
+      long = LiveFrames.task(@call_uuid, "dg_1", 2, "completed", String.duplicate("a", 900))
 
       assert String.length(long.summary) == 240
       assert String.ends_with?(long.summary, "…")
     end
 
     test "refuses a status the protocol does not publish" do
-      assert_raise FunctionClauseError, fn -> LiveFrames.task("dg_1", 1, "queued", nil) end
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.task(@call_uuid, "dg_1", 1, "queued", nil)
+      end
+    end
+
+    # M56 §6: the row a result was shown at, so the app can say it is in the
+    # chat. Additive and optional: absent when nothing was shown.
+    test "names the chat row a result was shown at" do
+      frame = LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "It is in the chat.", 42)
+
+      assert frame.server_seq == 42
+
+      refute Map.has_key?(
+               LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "Done.", nil),
+               :server_seq
+             )
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.task(@call_uuid, "dg_1", 1, "completed", nil, 0)
+      end
+    end
+
+    # M56 §4.6, §6: the frame the session sends as a running task is handed
+    # over to finish into the chat. Additive and optional: absent otherwise.
+    test "says a running task was detached from the call" do
+      frame = LiveFrames.task(@call_uuid, "dg_1", 1, "running", "In the chat.", nil, true)
+
+      assert frame.detached == true
+      assert frame.status == "running"
+      refute Map.has_key?(LiveFrames.task(@call_uuid, "dg_1", 1, "running", nil), :detached)
+
+      assert_raise FunctionClauseError, fn ->
+        LiveFrames.task(@call_uuid, "dg_1", 1, "completed", "Done.", nil, true)
+      end
     end
   end
 
@@ -69,13 +142,19 @@ defmodule FermixCore.Realtime.LiveFramesTest do
     end
   end
 
-  describe "usage/2" do
+  describe "usage/3" do
     test "passes the ledger payload through and can override the status" do
       payload = LiveLedger.usage_payload(LiveLedger.new(100, 0))
 
-      assert LiveFrames.usage(payload).status == "live"
-      assert LiveFrames.usage(payload, "limit_reached").status == "limit_reached"
-      assert LiveFrames.usage(payload).backend_cost == "unknown"
+      assert LiveFrames.usage(@call_uuid, payload).status == "live"
+      assert LiveFrames.usage(@call_uuid, payload, "limit_reached").status == "limit_reached"
+      assert LiveFrames.usage(@call_uuid, payload).backend_cost == "unknown"
+    end
+
+    test "names the call the bill belongs to" do
+      payload = LiveLedger.usage_payload(LiveLedger.new(100, 0))
+
+      assert LiveFrames.usage(@call_uuid, payload).call_uuid == @call_uuid
     end
   end
 

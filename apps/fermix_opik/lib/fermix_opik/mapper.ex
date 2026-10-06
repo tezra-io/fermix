@@ -320,7 +320,9 @@ defmodule FermixOpik.Mapper do
   it names correlation ids only: a Live call holds captions, transcript
   fragments and the composed instructions, and none of them may reach a span.
   `delegation_stop` carries `duration_ms`, so a delegation span has real extent
-  rather than collapsing the backend turn's elapsed time to a point.
+  rather than collapsing the backend turn's elapsed time to a point, and, for
+  a result shown in the chat, the row's `server_seq` and the `shown_bytes`,
+  never the text.
   """
   @spec voice_live_span(map(), map(), keyword()) :: map()
   def voice_live_span(metadata, measurements, opts) do
@@ -347,7 +349,10 @@ defmodule FermixOpik.Mapper do
           revision: Map.get(metadata, :revision),
           turn_session_id: Map.get(metadata, :turn_session_id),
           status: stringify(Map.get(metadata, :status)),
-          reason: stringify(Map.get(metadata, :reason))
+          reason: stringify(Map.get(metadata, :reason)),
+          server_seq: Map.get(metadata, :server_seq),
+          shown_bytes: Map.get(metadata, :shown_bytes),
+          detached: Map.get(metadata, :detached)
         })
     }
     |> drop_nil()
@@ -588,6 +593,10 @@ defmodule FermixOpik.Mapper do
   @spec provider_string(atom() | String.t() | nil) :: String.t() | nil
   def provider_string(nil), do: nil
   def provider_string(:openai), do: "openai"
+  # OpenAI Codex runs on the person's ChatGPT plan (M57 §9, O6), billed to the
+  # plan, not per token; the OpenAI token prices it at what the turn would have
+  # cost on the API, and the span keeps `provider: openai_codex` for anyone
+  # separating plan-billed spend.
   def provider_string(:openai_codex), do: "openai"
   def provider_string(:anthropic), do: "anthropic"
   def provider_string(:xai), do: "xai"

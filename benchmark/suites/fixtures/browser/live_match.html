@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>WebMCP live match fixture</title>
+<!-- An empty data: icon, so the page requests nothing at all: a browser's
+     automatic /favicon.ico fetch would 404 and put a console error in front of
+     anyone debugging a failing case. -->
+<link rel="icon" href="data:,">
+<style>
+  body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem auto; max-width: 40rem; }
+</style>
+</head>
+<body>
+<h1>WebMCP live match fixture</h1>
+<p>
+  This page follows a football match as it is played and offers it to agents as
+  one WebMCP tool. The events are not shown on the page: the only way to follow
+  the match is to call <code>match_wait</code> again for each next event.
+</p>
+<p id="status">Registering tools…</p>
+<p id="fixture-status"></p>
+
+<script src="fixture.js"></script>
+<script>
+// Fixture for following a page through its own wait tool, the shape of a game's
+// `chess_wait`: the SAME call with the SAME arguments, again and again, each
+// answer new. Served by the runner-owned fixture server under this case
+// attempt's token; suites/browser.yaml addresses it with __EVAL_FIXTURE_URL__.
+//
+// The result is in the seventh event only, so reaching it takes seven identical
+// calls in a row: past the agent loop's kill threshold of five unless the loop
+// counts a repeat only since the call last returned something new.
+//
+// The match lives in a closure and nowhere else: no localStorage, no
+// sessionStorage, no cookies, no network beyond the fixture report. Every page
+// load therefore starts from kick-off, so a trial cannot inherit the previous
+// trial's progress.
+(function () {
+  "use strict";
+
+  // The shim, verbatim from shimmed.html. Installed only when the native API is
+  // absent, so native always wins.
+  if (!document.modelContext) {
+    const tools = [];
+    Object.defineProperty(document, 'modelContext', { configurable: true, value: {
+      registerTool: (tool) => { tools.push(tool); return Promise.resolve(); },
+      unregisterTool: (name) => { const i = tools.findIndex((t) => t.name === name); if (i >= 0) tools.splice(i, 1); },
+      getTools: () => Promise.resolve(tools.map((t) => ({ ...t, window }))),
+      executeTool: (tool, input) => Promise.resolve(tool.execute(typeof input === 'string' ? JSON.parse(input || '{}') : input || {})).then((r) => JSON.stringify(r)),
+    }});
+  }
+
+  const EVENTS = [
+    'Kick-off: Harbour Kestrels v Millbrook Foxes.',
+    "12': goal, Kestrels. Kestrels 1-0 Foxes.",
+    "29': goal, Foxes. Kestrels 1-1 Foxes.",
+    "51': goal, Foxes. Kestrels 1-2 Foxes.",
+    "67': goal, Kestrels. Kestrels 2-2 Foxes.",
+    "88': goal, Kestrels. Kestrels 3-2 Foxes.",
+    'Full time: Kestrels 3-2 Foxes. Player of the match: Odalys Brandt.',
+  ];
+  const WAIT_MS = 400;
+  const status = document.getElementById('status');
+  let delivered = 0;
+
+  // Each call waits a moment, as a real wait does, then hands over the next
+  // event. Past the final whistle it answers the final event again, unchanged.
+  function next() {
+    return new Promise((resolve) => setTimeout(resolve, WAIT_MS)).then(() => {
+      delivered = Math.min(delivered + 1, EVENTS.length);
+      // What the PAGE handed over, for a `fixture_state` assertion that does not
+      // have to trust the reply: 7 means the agent followed it to the end.
+      fixtureReport('match.delivered', delivered);
+      return {
+        ok: true,
+        seq: delivered,
+        event: EVENTS[delivered - 1],
+        final: delivered === EVENTS.length,
+      };
+    });
+  }
+
+  // The page's own state, readable without trusting a tool's return value.
+  window.__fixture = {
+    page: 'live_match',
+    events: EVENTS.length,
+    get delivered() { return delivered; },
+  };
+
+  // Registered synchronously while this script evaluates, so the tool is
+  // listable as soon as the document is ready.
+  document.modelContext.registerTool({
+    name: 'match_wait',
+    description: 'Wait for the next event of the match and return it. Call it again for each ' +
+      'next event; `final` is true once the final whistle has gone.',
+    inputSchema: { type: 'object', properties: {} },
+    execute: () => next(),
+  });
+
+  status.textContent = 'This page offers one tool: match_wait.';
+}());
+</script>
+</body>
+</html>

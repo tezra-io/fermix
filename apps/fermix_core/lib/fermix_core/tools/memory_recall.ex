@@ -55,7 +55,8 @@ defmodule FermixCore.Tools.MemoryRecall do
           type: "string",
           enum: ["current", "owner", "all"],
           description:
-            "Search scope for lexical recall. Defaults to current; raw Search.query/2 defaults to all."
+            "Search scope. current (default): this conversation's notes. owner: the user's " <>
+              "profile. all: every memory. Results show each memory's id."
         },
         source: %{
           type: "string",
@@ -246,7 +247,7 @@ defmodule FermixCore.Tools.MemoryRecall do
   end
 
   defp format_search_result(%{source: :memories} = result) do
-    "[memories rank=#{format_rank(result.rank)}] scope=#{result.scope_type} " <>
+    "[memories rank=#{format_rank(result.rank)}] id=#{result.id} scope=#{result.scope_type} " <>
       "key=#{result.key} category=#{result.category} #{source_metadata(result)} " <>
       "value=#{render_memory_value(result)}"
   end

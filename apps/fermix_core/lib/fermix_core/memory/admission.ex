@@ -12,6 +12,13 @@ defmodule FermixCore.Memory.Admission do
   @memory_promoted_categories MapSet.new(~w(context directive))
   @valid_categories MapSet.union(@user_promoted_categories, @memory_promoted_categories)
 
+  @doc """
+  The durable categories, profile first: the four about the user, then the two
+  about the work.
+  """
+  @spec categories() :: [String.t()]
+  def categories, do: ~w(identity preference interest goal context directive)
+
   @spec prompt_target(map()) :: String.t()
   def prompt_target(%{category: category, scope_type: scope_type})
       when is_binary(category) and is_binary(scope_type) do

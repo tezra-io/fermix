@@ -24,6 +24,7 @@ defmodule FermixCore.Providers.Selection do
 
   require Logger
 
+  alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Descriptor
@@ -88,7 +89,11 @@ defmodule FermixCore.Providers.Selection do
   """
   @spec configured?(ModelCatalog.provider(), keyword()) :: boolean()
   def configured?(:openai, block), do: present?(Keyword.get(block, :api_key))
-  def configured?(:openai_codex, _block), do: codex_profile_usable?()
+
+  # OpenAI Codex signs in with ChatGPT, and plan usage is the precondition, not
+  # a sign-in alone (M57 D7): a registration that declined plan usage, or needs
+  # reconnecting, cannot carry a turn.
+  def configured?(:openai_codex, _block), do: route_usable?(&ChatGPT.route_status/1)
 
   def configured?(:anthropic, block),
     do: key_or_oauth_configured?(block, Store.profile(:anthropic))
@@ -189,12 +194,7 @@ defmodule FermixCore.Providers.Selection do
     end
   end
 
-  defp codex_profile_usable? do
-    case Store.read(:openai_codex) do
-      {:ok, entry} -> present?(entry.tokens.access_token)
-      {:error, _reason} -> false
-    end
-  end
+  defp route_usable?(route_status), do: match?(:ok, route_status.([]))
 
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(nil), do: false

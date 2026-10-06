@@ -107,6 +107,8 @@ defmodule FermixCore.Memory.RepoJobRunsMigrationTest do
 
     :ok = Sqlite3.execute(conn, Repo.base_schema_sql())
     :ok = Sqlite3.execute(conn, Repo.jobs_schema_sql())
+    # The review state a v28 store holds: migration 39 rewrites its rows.
+    :ok = Sqlite3.execute(conn, Repo.memory_review_schema_sql())
     # The mobile tables a v28 store holds: a later migration (33) alters one.
     :ok = Sqlite3.execute(conn, MobileSql.schema_sql())
     :ok = Sqlite3.execute(conn, MobileSql.client_message_schema_sql())

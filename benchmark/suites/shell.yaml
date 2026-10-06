@@ -3,13 +3,15 @@ risk: host_readonly
 title: "Shell — safe, read-only command execution"
 description: >
   Exercises the assistant's ability to answer questions that require running a
-  harmless, read-only-ish local command via the shell tool: the current date and
-  time, listing a directory, counting lines in a file, checking disk usage, and a
-  plain echo. Every command here is non-destructive. Gates are tolerant of the
-  model's route — it may phrase the result differently, choose a slightly
-  different flag, or run one or two commands — so each case asserts the shell tool
-  was used plus a plausible result token in the reply, never an exact command
-  string. Budgets reflect cheap, single-shot local lookups.
+  harmless, read-only local command: the current time, the machine's hostname,
+  listing a directory, counting lines in a file, and checking disk usage. Every
+  command here is non-destructive. Gates grade the outcome — a clock time, a
+  number with a unit, an exact line count — and tolerate the model's route
+  (shell or a read tool, whichever fits); nothing asserts an exact command
+  string. The date alone is NOT asked for: the system prompt carries a
+  date-only note (FermixCore.Prompt.CurrentDate), so answering that without a
+  command is correct, and a case that gated it on a shell span failed clean
+  product. Budgets reflect cheap, single-shot local lookups.
 defaults:
   timeout_ms: 120000
   judge: true
@@ -18,35 +20,29 @@ defaults:
     no_tool_errors: true
 
 scenarios:
-  - id: datetime_and_echo
-    title: "Reports the current date/time and echoes literal text"
+  - id: clock_and_host
+    title: "Reports the current time and the machine's hostname"
     severity: normal
     tags: [shell, core]
     cases:
+      # The precise time is not in the prompt (the note is date-only, on
+      # purpose), so a clock reading has to come from a command.
       - id: current_datetime
         query: "What's the current date and time on this machine?"
         expect:
           tools_any: [shell]
-          reply_matches: "(?i)20[0-9]{2}|:[0-5][0-9]|UTC|GMT|am|pm"
+          reply_matches: '\d{1,2}:\d{2}'
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "Reports the machine's current date and/or time, obtained by running a command rather than guessed."
-      - id: today_date_only
-        query: "What's today's date on this machine?"
+        rubric: "Reports the machine's current date and time, with the time taken from a command's output rather than guessed."
+      - id: hostname
+        query: "What's the hostname of this machine?"
         expect:
           tools_any: [shell]
-          reply_matches: "(?i)20[0-9]{2}|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec|mon|tue|wed|thu|fri|sat|sun"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to|not able to) (determine|find|get|access|tell)"
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "States today's date based on a command's output, not a guess."
-      - id: echo_hello
-        query: "Can you print the text 'hello world' to the terminal for me?"
-        expect:
-          tools_any: [shell]
-          reply_matches: "(?i)hello world"
-          max_cost_usd: 0.3
-          max_duration_ms: 60000
-        rubric: "Runs echo and reports the output 'hello world'."
+        rubric: "States the machine's hostname as a command reported it; a guess or a refusal fails."
 
   - id: inspect_directory
     title: "Lists files and counts lines in a file"
@@ -56,28 +52,27 @@ scenarios:
       - id: list_files
         query: "List the files in the current directory."
         expect:
-          tools_any: [shell]
-          reply_matches: "(?i)\\.|/|file|director|empty|no files|total"
+          tools_any: [shell, glob_search]
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "Lists the contents of the current working directory from a command's output."
+        rubric: "Lists the contents of the current working directory from a listing command's output, naming real entries; an empty directory reported as empty is fine, invented names are not."
       - id: list_files_phrasing_two
         query: "What files do I have here in this folder right now?"
         expect:
-          tools_any: [shell]
-          reply_matches: "(?i)\\.|/|file|director|empty|no files|total|here"
+          tools_any: [shell, glob_search]
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "Reports the files present in the current directory, obtained by running a listing command."
+        rubric: "Reports the files present in the current directory, obtained by running a listing command, without inventing entries."
+      # A bundled fixture with a fixed line count, so the gate is the exact
+      # number: README.md changes with every commit and the old gate accepted
+      # any digit at all.
       - id: count_lines
-        query: "How many lines are in __EVAL_REPO_ROOT__/README.md?"
+        query: "How many lines are in __EVAL_REPO_ROOT__/benchmark/suites/fixtures/context/ledger_large.txt?"
         expect:
-          tools_any: [shell]
-          no_tool_errors: false  # model may glob_search to locate README first; errors are exploratory, not failures
-          reply_matches: "(?i)[0-9]+\\s*(lines?)?|no such file|not found|doesn't exist|couldn't find"
-          max_cost_usd: 0.3
-          max_duration_ms: 60000
-        rubric: "Reports a line count for the README via a counting command, or clearly states the file was not found — without fabricating a number."
+          reply_matches: '\b6,?000\b'
+          max_cost_usd: 0.5
+          max_duration_ms: 90000
+        rubric: "Reports exactly 6000 lines, counted by a command over the file rather than estimated."
 
   - id: disk_usage
     title: "Reports disk usage"
@@ -88,15 +83,15 @@ scenarios:
         query: "What's my disk usage on this machine?"
         expect:
           tools_any: [shell]
-          reply_matches: "(?i)[0-9].*(%|[KMGT]i?B|byte)|used|available|free|capacity"
+          reply_matches: '[0-9]+(\.[0-9]+)?\s*(%|[KMGT]i?B\b|bytes?)'
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "Reports disk usage (used/available/percentage) from a command's output rather than guessing."
+        rubric: "Reports disk usage (used/available/percentage) with figures from a command's output rather than guessing."
       - id: disk_space_phrasing_two
         query: "How much free disk space do I have left on this machine?"
         expect:
           tools_any: [shell]
-          reply_matches: "(?i)[0-9].*(%|[KMGT]i?B|byte)|free|available|remaining|left|space"
+          reply_matches: '[0-9]+(\.[0-9]+)?\s*(%|[KMGT]i?B\b|bytes?)'
           max_cost_usd: 0.3
           max_duration_ms: 60000
-        rubric: "Reports remaining free disk space based on a real command's output."
+        rubric: "Reports remaining free disk space with a figure from a real command's output."

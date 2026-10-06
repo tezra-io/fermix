@@ -55,6 +55,51 @@ defmodule FermixCore.Realtime.LiveTranscriptTest do
     end
   end
 
+  # What a hand-off in the chat's conversation persists (M56 §4.1): the
+  # exchange since the previous hand-off, not an overlapping time window.
+  describe "exchange_since/2" do
+    test "is the whole held exchange when no hand-off came before" do
+      transcript =
+        LiveTranscript.new()
+        |> LiveTranscript.append(:user, "hi there", 0, 900)
+        |> LiveTranscript.append(:assistant, "hello", 1_000, 1_500)
+        |> LiveTranscript.append(:user, "open the link", 40_000, 41_000)
+
+      assert LiveTranscript.exchange_since(transcript, nil) ==
+               "user: hi there\nassistant: hello\nuser: open the link"
+    end
+
+    test "is only what ended after the previous hand-off, however long ago" do
+      transcript =
+        LiveTranscript.new()
+        |> LiveTranscript.append(:user, "book the room", 0, 2_000)
+        |> LiveTranscript.append(:assistant, "booked", 5_000, 6_000)
+        |> LiveTranscript.append(:user, "and email Ana", 90_000, 92_000)
+
+      assert LiveTranscript.exchange_since(transcript, 2_000) ==
+               "assistant: booked\nuser: and email Ana"
+    end
+
+    test "is empty when nothing was said since" do
+      transcript = LiveTranscript.append(LiveTranscript.new(), :user, "done", 0, 500)
+
+      assert LiveTranscript.exchange_since(transcript, 500) == ""
+    end
+  end
+
+  describe "latest_end_ms/1" do
+    test "is the newest end of anyone's speech, or nil before anyone spoke" do
+      assert LiveTranscript.latest_end_ms(LiveTranscript.new()) == nil
+
+      transcript =
+        LiveTranscript.new()
+        |> LiveTranscript.append(:user, "hi", 0, 500)
+        |> LiveTranscript.append(:assistant, "hello", 600, 1_400)
+
+      assert LiveTranscript.latest_end_ms(transcript) == 1_400
+    end
+  end
+
   describe "sufficient?/3" do
     test "is true when a user fragment ends within the window" do
       transcript = LiveTranscript.append(LiveTranscript.new(), :user, "yes", 3_000, 3_400)

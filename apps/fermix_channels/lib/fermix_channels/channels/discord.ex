@@ -20,6 +20,7 @@ defmodule FermixChannels.Channels.Discord do
   alias FermixChannels.Gateway.RetryHint
   alias FermixChannels.Outbound.Splitter
   alias FermixChannels.Telemetry, as: ChannelTelemetry
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.HttpClient
   alias FermixCore.Telemetry
 
@@ -653,6 +654,7 @@ defmodule FermixChannels.Channels.Discord do
         Req.new(url: "#{@api_base}/gateway/bot", method: :get)
         |> Req.Request.put_header("authorization", "Bot #{token}")
         |> Req.merge(req_options(opts))
+        |> Egress.attach(:direct)
         |> Req.request()
 
       case result do

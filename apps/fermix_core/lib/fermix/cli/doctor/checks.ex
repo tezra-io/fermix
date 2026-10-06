@@ -34,7 +34,12 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Harness.Identity
   alias FermixCore.Harness.Ledger, as: HarnessLedger
   alias FermixCore.Harness.Vendors, as: HarnessVendors
+  alias FermixCore.IMessage
+  alias FermixCore.IMessage.Control, as: IMessageControl
+  alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
+  alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Net.Egress
   alias FermixCore.Nostr.Key, as: NostrKey
   alias FermixCore.Plugins.Config, as: PluginConfig
   alias FermixCore.Plugins.Dist.McpSource
@@ -1184,7 +1189,13 @@ defmodule Fermix.CLI.Doctor.Checks do
       connect_options: [timeout: timeout_ms, transport_opts: [verify: :verify_none]]
     ]
 
-    case Req.get(url, request_opts) do
+    request =
+      [method: :get, url: url]
+      |> Keyword.merge(request_opts)
+      |> Req.new()
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
       {:ok, %Req.Response{status: 200, body: %{"fermix" => "mobile", "v" => v}}}
       when is_integer(v) and v > 0 ->
         :ok
@@ -1469,6 +1480,162 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp rtms_lane(true), do: "zoom rtms configured"
   defp rtms_lane(false), do: "zoom rtms not configured"
+
+  @doc """
+  The Fermix Messages helper (M54 §10.4): whether it is installed, the version
+  this build pins, and the `codesign --verify --deep --strict` plus Team ID
+  check the installer itself runs. Never spawns the helper. Off a Mac the
+  channel does not exist, so the row does not apply.
+
+  Seams: `macos?:`, `enabled?:`, `bundle:` (a `HelperInstaller.bundle_path/0`
+  answer) and `verify:` (a bundle path to `:ok | {:error, reason}`).
+  """
+  @spec imessage_helper(keyword()) :: result()
+  def imessage_helper(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) do
+      imessage_helper_row(
+        Keyword.get_lazy(opts, :bundle, &IMessageHelper.bundle_path/0),
+        Keyword.get_lazy(opts, :enabled?, &imessage_enabled?/0),
+        Keyword.get(opts, :verify, &IMessageHelper.verify_bundle/1)
+      )
+    else
+      not_applicable("imessage helper", "iMessage runs only on a Mac")
+    end
+  end
+
+  defp imessage_helper_row({:error, :not_installed}, false, _verify),
+    do: ok("imessage helper", "Fermix Messages is not installed; iMessage is off")
+
+  defp imessage_helper_row({:error, :not_installed}, true, _verify) do
+    warn(
+      "imessage helper",
+      "iMessage is on but Fermix Messages is not installed; turn iMessage on in the app " <>
+        "to install it"
+    )
+  end
+
+  defp imessage_helper_row({:ok, app}, _enabled?, verify), do: verified_helper_row(verify.(app))
+
+  defp verified_helper_row(:ok) do
+    ok(
+      "imessage helper",
+      "Fermix Messages installed (pinned #{IMessageHelper.pinned_version()}); " <>
+        "signature verified for team #{IMessageHelper.team_id()}"
+    )
+  end
+
+  defp verified_helper_row({:error, {:helper_unverified, reason}}) do
+    fail(
+      "imessage helper",
+      "Fermix Messages (pinned #{IMessageHelper.pinned_version()}) failed signature " <>
+        "verification: #{unverified_reason(reason)}; reinstall it"
+    )
+  end
+
+  defp unverified_reason(:team_id_mismatch), do: "signed by another team"
+  defp unverified_reason(reason) when is_binary(reason), do: reason
+
+  @doc """
+  The Fermix Messages probe (M54 §10.4): one entry per grant, the Messages
+  account and session, and the recipient confirmation, naming the identity to
+  grant exactly. Never prompts: the probe asks with `askUserIfNeeded: false`.
+
+  Full Disk Access missing (or a database that cannot be read) fails the row;
+  any other gap warns, because the channel reads but cannot yet answer. Probes
+  only while iMessage is on and the helper is installed.
+
+  Seams: `macos?:`, `enabled?:`, `installed?:`, `config:` (the saved section),
+  `probe:` and `policy:` (zero-arity `Control.probe/1` and `Control.policy_get/1`).
+  """
+  @spec imessage_permissions(keyword()) :: result()
+  def imessage_permissions(opts \\ []) when is_list(opts) do
+    cond do
+      not Keyword.get_lazy(opts, :macos?, &IMessage.macos?/0) ->
+        not_applicable("imessage permissions", "iMessage runs only on a Mac")
+
+      not Keyword.get_lazy(opts, :enabled?, &imessage_enabled?/0) ->
+        ok("imessage permissions", "iMessage is off; nothing was probed")
+
+      not Keyword.get_lazy(opts, :installed?, &IMessageHelper.installed?/0) ->
+        warn("imessage permissions", "Fermix Messages is not installed, so nothing was probed")
+
+      true ->
+        imessage_probed(opts)
+    end
+  end
+
+  defp imessage_probed(opts) do
+    probe = Keyword.get(opts, :probe, fn -> IMessageControl.probe() end)
+
+    case probe.() do
+      {:ok, state} ->
+        imessage_permissions_row(state, imessage_policy_matches?(state, opts))
+
+      {:error, reason} ->
+        fail("imessage permissions", "could not probe Fermix Messages: #{inspect(reason)}")
+    end
+  end
+
+  # The stored policy is read only when the probe says one is confirmed: absent
+  # or unconfirmed already means "awaiting confirmation".
+  defp imessage_policy_matches?(%{policy: :confirmed}, opts) do
+    reader = Keyword.get(opts, :policy, fn -> IMessageControl.policy_get() end)
+    config = Keyword.get_lazy(opts, :config, &imessage_config/0)
+
+    case reader.() do
+      {:ok, policy} -> IMessageControl.policy_matches_config?(policy, config)
+      {:error, _reason} -> false
+    end
+  end
+
+  defp imessage_policy_matches?(_state, _opts), do: false
+
+  defp imessage_permissions_row(state, matches?) do
+    detail =
+      Enum.join(
+        [
+          "Full Disk Access: " <> fda_word(state.full_disk_access),
+          "Messages data: " <> Atom.to_string(state.db),
+          "automation: " <> automation_word(state.automation),
+          "signed in: " <> yes_no_unknown(state.signed_in),
+          "user session: " <> yes_no_unknown(state.user_session),
+          "recipients: " <> recipients_word(state.policy, matches?)
+        ],
+        "; "
+      )
+
+    imessage_status(state, matches?).("imessage permissions", detail)
+  end
+
+  defp imessage_status(%{full_disk_access: :denied}, _matches?), do: &fail/2
+  defp imessage_status(%{db: db}, _matches?) when db != :readable, do: &fail/2
+
+  defp imessage_status(state, matches?) do
+    ready? =
+      state.automation == :granted and state.signed_in == true and state.user_session and matches?
+
+    if ready?, do: &ok/2, else: &warn/2
+  end
+
+  defp fda_word(:granted), do: "granted"
+  defp fda_word(:denied), do: "not granted; grant Fermix Messages, in Full Disk Access"
+
+  defp automation_word(:granted), do: "granted"
+  defp automation_word(:denied), do: "denied; allow Fermix Messages to control Messages"
+  defp automation_word(:not_determined), do: "not asked yet; use Grant to raise the prompt"
+  defp automation_word(:unknown), do: "unknown; open Messages, then probe again"
+
+  defp yes_no_unknown(true), do: "yes"
+  defp yes_no_unknown(false), do: "no"
+  defp yes_no_unknown(:unknown), do: "unknown"
+
+  defp recipients_word(:confirmed, true), do: "confirmed"
+  defp recipients_word(:confirmed, false), do: "differ from settings; awaiting confirmation"
+  defp recipients_word(_policy, _matches?), do: "not confirmed; awaiting confirmation"
+
+  defp imessage_enabled?, do: Keyword.get(imessage_config(), :enabled) == true
+
+  defp imessage_config, do: Application.get_env(:fermix_channels, :imessage, [])
 
   @doc """
   Computer-use OS-permission state (docs/design/COMPUTER_USE_V2.md, Phase A). The
@@ -2679,7 +2846,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp runtime_config_snapshot do
     case ConfigStore.load_runtime_config(resolve_secrets: false) do
       {:ok, snapshot} -> {:ok, snapshot}
-      {:error, reason} -> {:error, inspect(reason)}
+      {:error, reason} -> {:error, ConfigStore.load_error_sentence(reason)}
     end
   rescue
     error in [ArgumentError, RuntimeError] -> {:error, Exception.message(error)}
@@ -2915,6 +3082,115 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  @proxy_env_names ~w(HTTPS_PROXY https_proxy HTTP_PROXY http_proxy ALL_PROXY all_proxy)
+
+  @doc """
+  The outbound proxy (`[fermix_core.network]`): which one is set, what stays
+  direct, and what cannot use it.
+
+  Also the one place that says Fermix does not read `HTTPS_PROXY`: a host whose
+  shell exports it and whose daemon cannot reach a provider looks, from every
+  other check, like a provider outage. The variable is named, never printed.
+
+  It describes the settings this process loaded. Run inside the daemon (the
+  app's Doctor), it also sees when those differ from the egress the daemon
+  started on. `fermix doctor` is its own process with no such history, so its
+  row says the setting is read at start rather than claim it is in force. An
+  unusable section never reaches here: the settings loader refuses it first.
+  """
+  @spec network_proxy(keyword()) :: result()
+  def network_proxy(opts \\ []) when is_list(opts) do
+    env = Keyword.get_lazy(opts, :env, &System.get_env/0)
+    saved = Egress.new(Application.get_env(:fermix_core, :network, []))
+    active = Egress.active()
+
+    cond do
+      saved != active -> warn("network", network_restart_detail(saved, active))
+      Egress.describe(saved) == nil -> network_without_proxy(env, saved)
+      true -> network_with_proxy(saved)
+    end
+  end
+
+  # Either direction: a proxy saved and not yet in force, or one removed from
+  # the settings that this process still sends traffic through.
+  defp network_restart_detail(saved, active) do
+    "the saved network settings take effect when Fermix restarts. " <>
+      "Saved: #{network_label(saved)}. In force: #{network_label(active)}."
+  end
+
+  defp network_label(egress) do
+    case Egress.describe(egress) do
+      nil -> "no proxy"
+      proxy -> "proxy #{proxy}"
+    end
+  end
+
+  defp network_without_proxy(env, saved) do
+    case Enum.find(@proxy_env_names, &(Map.get(env, &1, "") != "")) do
+      nil ->
+        not_applicable("network", "no outbound proxy configured" <> unused_bypass_note(saved))
+
+      name ->
+        warn(
+          "network",
+          "this environment sets #{name}, which Fermix does not read. To send traffic " <>
+            "through a proxy, set proxy under [fermix_core.network] in config.toml and restart."
+        )
+    end
+  end
+
+  defp unused_bypass_note(%Egress{bypass: []}), do: ""
+  defp unused_bypass_note(%Egress{}), do: " (proxy_bypass is set and has no effect without proxy)"
+
+  defp network_with_proxy(saved) do
+    summary =
+      "#{network_label(saved)}, read when Fermix starts; direct: #{direct_summary(saved)}"
+
+    case features_refused_by_proxy(saved) do
+      [] ->
+        ok(
+          "network",
+          "#{summary}. Voice, Discord, Zoom capture, streaming transcription, remote MCP " <>
+            "plugins and phone push cannot use a proxy."
+        )
+
+      refused ->
+        warn(
+          "network",
+          "#{summary}. These are on and cannot use a proxy, so they will not connect: " <>
+            "#{Enum.join(refused, ", ")}. If this machine reaches their hosts directly, " <>
+            "list those hosts in proxy_bypass."
+        )
+    end
+  end
+
+  defp direct_summary(%Egress{bypass: []}), do: "this machine and private addresses"
+
+  defp direct_summary(%Egress{bypass: bypass}),
+    do: "this machine, private addresses, #{Enum.join(bypass, ", ")}"
+
+  # The features an operator turned on whose transport refuses a proxied route
+  # (`Egress.ensure_direct/2`), asked of the route itself, so a host listed in
+  # `proxy_bypass` clears the warning.
+  defp features_refused_by_proxy(egress) do
+    [
+      {"voice", "wss://api.openai.com", RealtimeConfig.enabled?()},
+      {"Discord", "wss://gateway.discord.gg", channel_enabled?(:discord)},
+      {"Zoom capture", "wss://ws.zoom.us", MeetingsConfig.enabled?()}
+    ]
+    |> Enum.filter(fn {_name, url, enabled?} ->
+      enabled? and Egress.ensure_direct(url, egress) != :ok
+    end)
+    |> Enum.map(fn {name, _url, _enabled?} -> name end)
+  end
+
+  defp channel_enabled?(channel) do
+    case CoreConfig.channel(channel) do
+      {:ok, config} -> Keyword.get(config, :enabled, false) == true
+      _absent -> false
+    end
+  end
+
   @doc """
   Validates the `[fermix_core.routing]` `subagent_*`/`cron_*`/`meeting_*`
   model-routing keys. A typo'd provider/effort — especially in the UI-less
@@ -2968,10 +3244,17 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp validate_routing_model(%{provider: provider, model: model})
        when is_atom(provider) and not is_nil(provider) and is_binary(model) do
-    if ModelCatalog.known_model?(provider, model) do
-      :ok
-    else
-      {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
+    cond do
+      ModelCatalog.known_model?(provider, model) ->
+        :ok
+
+      # A provider that ships no catalog (OpenAI Codex lists the signed-in
+      # account's models live) has nothing to check a slug against here.
+      ModelCatalog.models_for(provider) == [] ->
+        :ok
+
+      true ->
+        {:error, "= #{inspect(model)} is not a model offered by provider #{inspect(provider)}"}
     end
   end
 

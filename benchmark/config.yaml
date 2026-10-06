@@ -40,10 +40,20 @@ judge:
   # `fermix:OPENAI_API_KEY`), so no extra setup. The judge model MUST differ from
   # the candidate model. Opik still reports each candidate turn's token usage/cost.
   backend: "openai"
-  model: "gpt-5.4-mini"
+  model: "gpt-6-luna"
   # Judge runs only when enabled here OR `--judge` is passed. Off by default so a
   # run makes fewer real model calls.
   enabled: false
+
+private_suites:
+  # The private holdout: the scored real-use tier's tasks, fixtures and gold answers,
+  # kept off this public repo so no agent can search them up and no model trains on
+  # them. `make capability-auto` clones or fast-forwards it here, installs its skills
+  # in the eval home and scores it as its own `:private` row after the public sweep
+  # (CAPABILITY_PRIVATE=0 leaves it out); `make capability-private` runs it alone
+  # against an isolated daemon. CI never touches it.
+  dir: "~/projects/fermix-eval-private"
+  remote: "git@github.com:tezra-io/fermix-eval-private.git"
 
 usage_limit:
   # When the daemon's model hits a usage/rate/quota limit mid-sweep, Fermix returns

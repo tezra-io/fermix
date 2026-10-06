@@ -2,6 +2,7 @@ defmodule FermixChannels.AdapterTelemetryTest do
   use ExUnit.Case, async: false
 
   alias FermixChannels.Channels.Discord
+  alias FermixChannels.Channels.IMessage
   alias FermixChannels.Channels.Signal
   alias FermixChannels.Channels.Slack
   alias FermixChannels.Channels.Telegram
@@ -12,6 +13,18 @@ defmodule FermixChannels.AdapterTelemetryTest do
     def send_message(_account, _recipient, _text, _opts), do: :ok
     def send_attachment(_account, _recipient, _caption, _path, _opts), do: :ok
   end
+
+  # The Fermix Messages helper's answer to a send it recorded (MILESTONE_54 §8.2).
+  defmodule IMessageHelper do
+    def call(_server, "send.text", _params, _timeout),
+      do: {:ok, %{"disposition" => "recorded", "guid" => "sent-1", "rowid" => 1}}
+  end
+
+  @imessage_policy %{
+    posture: :dedicated_account,
+    owner: "+15551234567",
+    handles: ["+15551234567"]
+  }
 
   setup do
     Req.Test.set_req_test_to_shared()
@@ -54,6 +67,10 @@ defmodule FermixChannels.AdapterTelemetryTest do
     assert_event(:cli, [:fermix, :channel, :parse], :ok)
     assert_message_event(:cli, :inbound)
 
+    assert [_] = IMessage.parse_batch([imessage_row()], @imessage_policy, %{})
+    assert_event(:imessage, [:fermix, :channel, :parse], :ok)
+    assert_message_event(:imessage, :inbound)
+
     :telemetry.detach(handler_id)
   end
 
@@ -85,6 +102,15 @@ defmodule FermixChannels.AdapterTelemetryTest do
              )
 
     assert_message_event(:signal, :outbound)
+
+    assert :ok =
+             IMessage.send_message("+15551234567", "hello",
+               helper: IMessageHelper,
+               server: :imessage_telemetry_helper
+             )
+
+    assert_event(:imessage, [:fermix, :channel, :render], :ok)
+    assert_message_event(:imessage, :outbound)
 
     :telemetry.detach(handler_id)
   end
@@ -177,6 +203,21 @@ defmodule FermixChannels.AdapterTelemetryTest do
   defp response_body("/api/chat.postMessage"), do: %{"ok" => true}
   defp response_body("/upload"), do: %{"ok" => true}
   defp response_body(_path), do: %{"ok" => true, "id" => "media-1"}
+
+  defp imessage_row do
+    %{
+      "rowid" => 4021,
+      "guid" => "telemetry-#{System.unique_integer([:positive])}",
+      "chat" => %{"identifier" => "+15551234567", "service" => "iMessage", "group" => false},
+      "sender" => %{"handle" => "+15551234567", "service" => "iMessage", "is_me" => false},
+      "date" => "2026-10-03T12:00:00Z",
+      "text" => "hello",
+      "decode_error" => nil,
+      "reply_to_guid" => nil,
+      "attachments" => [],
+      "reaction" => nil
+    }
+  end
 
   defp telegram_update do
     %{

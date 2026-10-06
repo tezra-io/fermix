@@ -260,6 +260,21 @@ defmodule FermixChannels.Channels.MobileTest do
     {:ok, approvals: approvals}
   end
 
+  # M56 §4.7: what `Delivery.OwnerInbox` answers for this channel. A send to
+  # the phones is a row and a push, and the push needs the phone channel, so
+  # the inbox is there only while it runs (`Mobile.Supervisor.running?/1`).
+  describe "owner_inbox/0" do
+    test "is the shared chat's profile only while the phone channel runs" do
+      assert MobileSupervisor.running?()
+      assert Mobile.owner_inbox() == {:ok, "main"}
+
+      :ok = stop_supervised(:phone_subtree)
+
+      refute MobileSupervisor.running?()
+      assert Mobile.owner_inbox() == :unavailable
+    end
+  end
+
   describe "parse_event/1" do
     test "normalizes a message onto the shared main profile conversation" do
       event = %{

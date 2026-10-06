@@ -149,7 +149,8 @@ defmodule FermixCore.Management.SetupState do
         whatsapp: Application.get_env(:fermix_channels, :whatsapp, []),
         discord: Application.get_env(:fermix_channels, :discord, []),
         slack: Application.get_env(:fermix_channels, :slack, []),
-        signal: Application.get_env(:fermix_channels, :signal, [])
+        signal: Application.get_env(:fermix_channels, :signal, []),
+        imessage: Application.get_env(:fermix_channels, :imessage, [])
       ]
     }
   end
@@ -222,6 +223,10 @@ defmodule FermixCore.Management.SetupState do
   defp channel_status(true, false), do: "setup_required"
 
   defp channel_mode(_channel, false), do: nil
+
+  # iMessage has one transport, the helper over stdio, which the registry fixes
+  # rather than the settings file (M54 §11).
+  defp channel_mode(:imessage, true), do: "subprocess"
 
   defp channel_mode(channel, true) do
     case Config.channel(channel) do

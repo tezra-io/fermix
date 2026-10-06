@@ -3,7 +3,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
   import ExUnit.CaptureLog, only: [with_log: 1]
 
-  alias FermixCore.Auth.CodexToken
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
 
@@ -38,6 +37,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
   defp start_manager(opts) do
     name = :"tm_#{System.unique_integer([:positive])}"
     opts = Keyword.put(opts, :name, name)
+    opts = Keyword.put_new(opts, :auth_profile, "xai_oauth")
     opts = Keyword.put_new(opts, :req_options, plug: &__MODULE__.noop_plug/1)
     start_supervised!({TokenManager, opts})
     name
@@ -48,15 +48,16 @@ defmodule FermixCore.Auth.TokenManagerTest do
   end
 
   describe "init — loading tokens" do
-    test "loads from fermix auth file (new openai_codex provider shape)" do
+    test "loads the profile's entry from the fermix auth file" do
       dir = tmp_dir()
 
       fermix_path =
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
               "expires_at" => future_iso8601(3600)
             }
@@ -65,43 +66,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
 
       name = start_manager(fermix_auth_path: fermix_path)
       assert {:ok, "AT"} = TokenManager.get_token(name)
-
-      FermixTestSupport.SafeRm.rm_rf!(dir)
-    end
-
-    test "does not load openai provider tokens as Codex credentials" do
-      dir = tmp_dir()
-
-      fermix_path =
-        write_auth_file(dir, "fermix_auth.json", %{
-          "version" => 1,
-          "providers" => %{
-            "openai" => %{
-              "auth_mode" => "chatgpt",
-              "tokens" => %{"access_token" => "legacy_nested", "refresh_token" => "rt"},
-              "expires_at" => future_iso8601(3600)
-            }
-          }
-        })
-
-      name = start_manager(fermix_auth_path: fermix_path)
-      assert {:error, :no_token} = TokenManager.get_token(name)
-
-      FermixTestSupport.SafeRm.rm_rf!(dir)
-    end
-
-    test "migrates flat M3-era shape (top-level tokens) to nested provider scope" do
-      dir = tmp_dir()
-
-      fermix_path =
-        write_auth_file(dir, "fermix_auth.json", %{
-          "auth_mode" => "chatgpt",
-          "tokens" => %{"access_token" => "legacy_at", "refresh_token" => "legacy_rt"},
-          "expires_at" => future_iso8601(3600)
-        })
-
-      name = start_manager(fermix_auth_path: fermix_path)
-      assert {:ok, "legacy_at"} = TokenManager.get_token(name)
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
@@ -121,8 +85,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "cached", "refresh_token" => "rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -144,8 +109,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
               "expires_at" => future_iso8601(1)
             }
@@ -185,8 +151,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "tok"},
               "expires_at" => future_iso8601(3600)
             }
@@ -206,8 +173,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -223,8 +191,8 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert {:ok, "new_at"} = TokenManager.refresh(name)
       assert {:ok, raw} = File.read(fermix_path)
       data = Jason.decode!(raw)
-      assert data["providers"]["openai_codex"]["tokens"]["access_token"] == "new_at"
-      assert data["providers"]["openai_codex"]["tokens"]["refresh_token"] == "new_rt"
+      assert data["providers"]["xai_oauth"]["tokens"]["access_token"] == "new_at"
+      assert data["providers"]["xai_oauth"]["tokens"]["refresh_token"] == "new_rt"
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
@@ -440,15 +408,16 @@ defmodule FermixCore.Auth.TokenManagerTest do
       )
     end
 
-    test "marks state invalidated and surfaces :auth_invalidated to callers" do
+    test "marks state invalidated and surfaces :reauthorization_required to callers" do
       dir = tmp_dir()
 
       fermix_path =
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
               "expires_at" => future_iso8601(3600)
             }
@@ -462,10 +431,10 @@ defmodule FermixCore.Auth.TokenManagerTest do
         )
 
       assert {:ok, "AT"} = TokenManager.get_token(name)
-      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
-      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+      assert {:error, :reauthorization_required} = TokenManager.get_token(name)
       # subsequent refresh attempts short-circuit instead of re-hitting the network
-      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
     end
   end
 
@@ -478,8 +447,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
               "expires_at" => future_iso8601(2)
             }
@@ -504,8 +474,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "soon", "refresh_token" => "rt"},
               "expires_at" => future_iso8601(2)
             }
@@ -531,8 +502,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -545,8 +517,8 @@ defmodule FermixCore.Auth.TokenManagerTest do
       assert :ok = TokenManager.forget(name)
 
       assert {:ok, %{loaded?: false, invalidated?: true}} = TokenManager.status(name)
-      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
-      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
+      assert {:error, :reauthorization_required} = TokenManager.get_token(name)
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
     end
@@ -560,8 +532,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -586,8 +559,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "stale_at", "refresh_token" => "stale_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -602,8 +576,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         Jason.encode!(%{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "fresh_at", "refresh_token" => "fresh_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -624,8 +599,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
               "expires_at" => future_iso8601(3600)
             }
@@ -638,16 +614,17 @@ defmodule FermixCore.Auth.TokenManagerTest do
           req_options: [plug: &__MODULE__.permanent_401_plug/1]
         )
 
-      assert {:error, :auth_invalidated} = TokenManager.refresh(name)
-      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      assert {:error, :reauthorization_required} = TokenManager.refresh(name)
+      assert {:error, :reauthorization_required} = TokenManager.get_token(name)
 
       File.write!(
         fermix_path,
         Jason.encode!(%{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "recovered_at", "refresh_token" => "recovered_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -668,8 +645,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "fermix_auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "AT", "refresh_token" => "RT"},
               "expires_at" => future_iso8601(3600)
             }
@@ -695,36 +673,40 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
-              "expires_at" => future_iso8601(5)
+              "expires_at" => future_iso8601(30)
             }
           }
         })
 
-      # ~500ms of headroom before the margin — the one-shot timer fires well
-      # before the 5s expiry, and nothing calls get_token (so this is purely the
-      # proactive path, not a lazy on-use refresh).
+      # 3 s of headroom before the margin. init/1 arms the one-shot timer only
+      # while expiry minus the margin is still ahead, and the write above and
+      # init's read queue on the VM's one file server first: with the 500 ms
+      # this had, a loaded runner reached init with the window spent, no timer
+      # was armed, and no wait could pass. Nothing calls get_token, so this is
+      # purely the proactive path, not a lazy on-use refresh.
       start_manager(
         fermix_auth_path: path,
         req_options: [plug: &__MODULE__.refresh_plug/1],
-        proactive_refresh_margin_ms: 4_500
+        proactive_refresh_margin_ms: 27_000
       )
 
       # Only the background timer can write new_at here. The refresh behind it
       # takes lockfiles, then writes and renames auth.json, and those filename
       # calls queue on the VM's one file server with every concurrent test's,
-      # so a loaded runner held it past 2 s. The poll still returns the moment
-      # the refresh lands.
+      # so a loaded runner held it past 2 s. The bound leaves the refresh 10 s
+      # after its timer, and the poll still returns the moment it lands.
       assert eventually(
                fn ->
                  match?(
                    {:ok, %{tokens: %{access_token: "new_at"}}},
-                   Store.read(:openai_codex, path)
+                   Store.read("xai_oauth", path)
                  )
                end,
-               10_000
+               13_000
              )
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
@@ -737,8 +719,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "at", "refresh_token" => "rt_A"},
               "expires_at" => future_iso8601(3600)
             }
@@ -769,8 +752,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
       write_auth_file(dir, "auth.json", %{
         "version" => 1,
         "providers" => %{
-          "openai_codex" => %{
-            "auth_mode" => "chatgpt",
+          "xai_oauth" => %{
+            "auth_mode" => "oauth_pkce",
+            "provider" => "xai",
             "tokens" => %{"access_token" => "at", "refresh_token" => "rt_B"},
             "expires_at" => future_iso8601(3600)
           }
@@ -783,65 +767,6 @@ defmodule FermixCore.Auth.TokenManagerTest do
       refute body =~ "rt_A", "refresh must not reuse the stale in-memory token"
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
-    end
-  end
-
-  # TOKEN-2 (tla/specs/token_refresh, check 09): `fermix doctor`, `fermix
-  # setup` and the Codex image backend refresh through `CodexToken`, outside the
-  # manager. One that reads the entry while the manager's own refresh is in
-  # flight presents the refresh token the manager is consuming, and Codex
-  # revokes the session. Under the profile lock it waits, re-reads the
-  # manager's rotation, finds it fresh and sends nothing.
-  describe "a second refresher of the Codex profile" do
-    test "waits for the manager's refresh in flight, then serves its rotation" do
-      dir = tmp_dir()
-      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
-
-      path =
-        write_auth_file(dir, "auth.json", %{
-          "version" => 1,
-          "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
-              "tokens" => %{"access_token" => "at_0", "refresh_token" => "rt_0"},
-              "expires_at" => future_iso8601(5)
-            }
-          }
-        })
-
-      test_pid = self()
-
-      manager_plug = fn conn ->
-        send(test_pid, {:in_flight, self()})
-
-        receive do
-          :release -> :ok
-        end
-
-        rotated(conn, "at_1", "rt_1")
-      end
-
-      cli_plug = fn conn ->
-        {:ok, body, conn} = Plug.Conn.read_body(conn)
-        send(test_pid, {:cli_sent, body})
-        Plug.Conn.send_resp(conn, 400, ~s({"error":{"code":"refresh_token_reused"}}))
-      end
-
-      name = start_manager(fermix_auth_path: path, req_options: [plug: manager_plug])
-      manager = Task.async(fn -> TokenManager.refresh(name) end)
-      assert_receive {:in_flight, plug_pid}
-
-      cli =
-        Task.async(fn ->
-          CodexToken.get_token(fermix_auth_path: path, refresh_req_options: [plug: cli_plug])
-        end)
-
-      refute_receive {:cli_sent, _body}, 300
-
-      send(plug_pid, :release)
-      assert {:ok, "at_1"} = Task.await(manager)
-      assert {:ok, "at_1"} = Task.await(cli)
-      refute_received {:cli_sent, _body}
     end
   end
 
@@ -858,8 +783,9 @@ defmodule FermixCore.Auth.TokenManagerTest do
         write_auth_file(dir, "auth.json", %{
           "version" => 1,
           "providers" => %{
-            "openai_codex" => %{
-              "auth_mode" => "chatgpt",
+            "xai_oauth" => %{
+              "auth_mode" => "oauth_pkce",
+              "provider" => "xai",
               "tokens" => %{"access_token" => "live_at", "refresh_token" => "live_rt"},
               "expires_at" => future_iso8601(3600)
             }
@@ -876,25 +802,16 @@ defmodule FermixCore.Auth.TokenManagerTest do
       name = start_manager(fermix_auth_path: path, req_options: [plug: plug])
       assert {:ok, "live_at"} = TokenManager.get_token(name)
 
-      :ok = Store.delete_provider(:openai_codex, path)
+      :ok = Store.delete_provider("xai_oauth", path)
 
       {result, log} = with_log(fn -> TokenManager.refresh(name) end)
 
-      assert {:error, :auth_invalidated} = result
-      assert log =~ "openai_codex"
+      assert {:error, :reauthorization_required} = result
+      assert log =~ "xai_oauth"
       refute_received :refresh_sent
-      assert {:error, {:provider_missing, :openai_codex}} = Store.read(:openai_codex, path)
-      assert {:error, :auth_invalidated} = TokenManager.get_token(name)
+      assert {:error, {:provider_missing, "xai_oauth"}} = Store.read("xai_oauth", path)
+      assert {:error, :reauthorization_required} = TokenManager.get_token(name)
     end
-  end
-
-  defp rotated(conn, access, refresh) do
-    conn
-    |> Plug.Conn.put_resp_content_type("application/json")
-    |> Plug.Conn.send_resp(
-      200,
-      Jason.encode!(%{"access_token" => access, "refresh_token" => refresh, "expires_in" => 3600})
-    )
   end
 
   defp eventually(fun, deadline_ms) do

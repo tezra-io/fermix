@@ -25,6 +25,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
+  alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
 
   @protocol_doc Application.app_dir(:fermix_core, "priv/management/PROTOCOL.md")
@@ -314,6 +315,29 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert shape(finished) == shape(fixture_result("computer_use.grant.start", %{}))
   end
 
+  # The iMessage grant and confirmation goldens are terminal job views, because
+  # each job's whole answer is the probe it finishes with (plus, for a
+  # confirmation, its outcome). Each runs the real job against the live registry
+  # with only the helper injected.
+  test "the golden iMessage grant and confirmation results are the ones their jobs finish with" do
+    cases = [
+      {"imessage.grant.start", %{"service" => "automation"}},
+      {"imessage.policy.confirm", %{}}
+    ]
+
+    for {method, params} <- cases do
+      jobs = jobs()
+      request = %{request_id: "req-1", protocol_version: 2, method: method, params: params}
+      opts = [operation_opts: [jobs: jobs] ++ imessage_sources()]
+
+      assert {:ok, started} = Router.route(request, opts)
+      assert {:ok, finished} = eventually_terminal(jobs, started["job_id"])
+
+      assert finished["status"] == "completed"
+      assert shape(finished) == shape(fixture_result(method, params))
+    end
+  end
+
   # The browser download's goldens are its two terminal views: the one a client
   # reads the browser's name from, and the one it reads the daemon's sentence
   # from. Each is the job the real run finishes with, against the live registry,
@@ -360,8 +384,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # The section inventory is what three consumers walk, so a fixture that lists
   # a section the daemon does not serve, or omits one it does, is a client
   # rendering a pane that answers nothing.
+  # The export is the Mac's inventory: `channels.imessage` exists only there
+  # (M54 §12), and the app that vendors this contract is a Mac app. The host is
+  # named rather than inherited so every CI leg compares the same list.
   test "the golden section inventory is the one the daemon publishes" do
-    published = Enum.map(Settings.sections(), & &1.id)
+    published = Enum.map(Settings.sections(macos?: true), & &1.id)
 
     fixture =
       "settings.sections"
@@ -392,9 +419,43 @@ defmodule FermixCore.Management.ProtocolContractTest do
         |> Enum.map(&Row.option(&1.id, &1.label))
 
       assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
-      assert Enum.any?(row["options"], &(&1["value"] == row["value"])), result["id"]
+      assert_holds_offered_model(row, result["id"])
     end
   end
+
+  # The voice section's rows depend on the engine, and the section's first
+  # golden runs the default one, so the rows only Live publishes (its backend
+  # and whether calls join the chat, M56 §6) have a golden of their own. It is
+  # the producer's own answer for a Live block: the same rows in the same
+  # order, and the conversation row exactly.
+  test "the golden Live voice section is the one the daemon publishes under Live" do
+    realtime = [enabled: false, engine: "openai_live", model: "gpt-live-1", voice: "marin"]
+    providers = [openai: [primary: true, default_model: "gpt-5.4"]]
+
+    snapshot =
+      Map.update(ConfigStore.current_snapshot(), :fermix_core, [], fn core ->
+        core
+        |> Keyword.put(:realtime, realtime)
+        |> Keyword.put(:providers, providers)
+        |> Keyword.put(:agent, [])
+      end)
+
+    {:ok, live} = Settings.get("realtime", snapshot: snapshot)
+    golden = named_fixture_result("settings_get_realtime_live")
+
+    assert Enum.map(golden["rows"], & &1["key"]) == Enum.map(live["rows"], & &1["key"])
+
+    assert Enum.find(golden["rows"], &(&1["key"] == "realtime_conversation")) ==
+             Enum.find(live["rows"], &(&1["key"] == "realtime_conversation"))
+  end
+
+  # A provider whose models are discovered live (OpenAI Codex) ships no catalog,
+  # so its section offers nothing and holds the empty value until one is chosen.
+  defp assert_holds_offered_model(%{"options" => [], "value" => value}, id),
+    do: assert(value == "", id)
+
+  defp assert_holds_offered_model(row, id),
+    do: assert(Enum.any?(row["options"], &(&1["value"] == row["value"])), id)
 
   # Every kind and format a row may carry is pinned to the module, so a kind
   # added in Elixir fails here rather than reaching a client that cannot render
@@ -635,6 +696,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
        [operation_opts: [jobs: [server: jobs_server()], probe: probe()]]},
       {"computer_use.permissions.get", %{},
        [operation_opts: [probe: fn -> {:ok, permissions()} end]]},
+      {"imessage.permissions.get", %{}, [operation_opts: imessage_sources()]},
       # The listing runs against the daemon's own registry and baked catalog with
       # no seam at all: it reads and writes nothing, so the shape under test is
       # the live projection rather than an injected stand-in.
@@ -845,8 +907,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # reads the vendored fixture for the keys it binds, so a section with no
   # golden result is a pane whose keys nothing on the far side is held to.
   defp settings_cases do
-    for section <- Settings.sections(),
-        do: {"settings.get", %{"section" => section.id}, []}
+    for section <- Settings.sections(macos?: true),
+        do: {"settings.get", %{"section" => section.id}, [macos?: true]}
   end
 
   # Sources, never rendered rows: the projection under test is the daemon's.
@@ -881,6 +943,41 @@ defmodule FermixCore.Management.ProtocolContractTest do
     %{state: :probed, screen_capture: true, input_control: false, platform: "macos"}
   end
 
+  # Sources for the iMessage methods: the helper's probe, its stored policy and
+  # the saved section, never a rendered view.
+  defp imessage_sources do
+    probe = %{
+      helper_version: "0.1.0",
+      full_disk_access: :granted,
+      db: :readable,
+      automation: :granted,
+      messages_running: true,
+      signed_in: true,
+      user_session: true,
+      policy: :confirmed,
+      self_aliases: nil
+    }
+
+    policy = %{
+      posture: :dedicated_account,
+      owner_handle: "+15551234567",
+      handles: ["+15551234567"],
+      confirmed_at: "2026-10-03T12:00:00Z"
+    }
+
+    [
+      macos?: true,
+      installed?: fn -> true end,
+      config: [owner_user_id: "+15551234567"],
+      probe: fn -> {:ok, probe} end,
+      grant: fn _service -> {:ok, probe} end,
+      policy: fn -> {:ok, policy} end,
+      policy_set: fn _policy ->
+        {:ok, %{confirmed_at: "2026-10-03T12:00:00Z", posture: :dedicated_account}}
+      end
+    ]
+  end
+
   defp jobs_server do
     tasks = :"contract_jobs_tasks_#{unique()}"
     start_supervised!({Task.Supervisor, name: tasks}, id: tasks)
@@ -898,7 +995,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # owned by the case's own task supervisor and stops with it.
   defp blocking_login do
     fn login_opts ->
-      :ok = Keyword.fetch!(login_opts, :oauth_opener).("https://auth.example/authorize")
+      :ok = Keyword.fetch!(login_opts, :opener).("https://auth.example/authorize")
       block()
     end
   end

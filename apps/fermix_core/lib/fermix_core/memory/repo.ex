@@ -12,6 +12,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
+  alias FermixCore.Memory.Repo.VoiceCallsSql
   alias FermixCore.Memory.Scope
   alias FermixCore.Timeouts
 
@@ -51,6 +52,9 @@ defmodule FermixCore.Memory.Repo do
   @companion_cancel_migration_version 34
   @harness_vendor_config_migration_version 35
   @mobile_media_index_migration_version 36
+  @voice_calls_migration_version 37
+  @voice_call_gist_taint_migration_version 38
+  @phone_joins_chat_migration_version 39
   @sqlite_open_intent :readwritecreate
 
   @base_schema_sql """
@@ -333,6 +337,48 @@ defmodule FermixCore.Memory.Repo do
       WHERE job_runs.job_id = scheduled_jobs.id
         AND job_runs.status IN ('queued', 'running')
     );
+  """
+
+  # One-time move of the phone's agent history into the Mac's chat (M56 D9):
+  # from this release the phone's turns run in `{"companion", "main", :root}`,
+  # so every row it kept under `{"mobile", "main", :root}` joins that
+  # conversation. A row keeps its id and its time, and a history is read in
+  # time order (`created_at`, then `id`), so the two transports' rows
+  # interleave as they were said; the review reads by id, which grows with
+  # time, so it sees them in the same order. The conversation's review state
+  # is one cursor: where both exist, the one further ahead is kept, so the
+  # review never re-reads the other's history from where it lagged (at its
+  # 40 messages a run that would hold it back as long as the lag), and a
+  # phone that lagged has its messages between the two cursors left
+  # unreviewed. Checkpoint resources stay under their old scope: they are
+  # audit records nothing reads back, and the summaries they record are rows
+  # of the history that moves. Core names both conversations here as the
+  # stored data it rewrites, once; routing never spells either.
+  @phone_joins_chat_sql """
+  DELETE FROM memory_review_state
+  WHERE channel = 'companion' AND chat_id = 'main' AND thread_scope = 'root'
+    AND EXISTS (
+      SELECT 1 FROM memory_review_state AS phone
+      WHERE phone.agent_id = memory_review_state.agent_id
+        AND phone.owner_id = memory_review_state.owner_id
+        AND phone.channel = 'mobile' AND phone.chat_id = 'main'
+        AND phone.thread_scope = 'root'
+        AND COALESCE(phone.last_reviewed_message_id, 0) >
+            COALESCE(memory_review_state.last_reviewed_message_id, 0)
+    );
+  DELETE FROM memory_review_state
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root'
+    AND EXISTS (
+      SELECT 1 FROM memory_review_state AS chat
+      WHERE chat.agent_id = memory_review_state.agent_id
+        AND chat.owner_id = memory_review_state.owner_id
+        AND chat.channel = 'companion' AND chat.chat_id = 'main'
+        AND chat.thread_scope = 'root'
+    );
+  UPDATE memory_review_state SET channel = 'companion'
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root';
+  UPDATE messages SET channel = 'companion'
+  WHERE channel = 'mobile' AND chat_id = 'main' AND thread_scope = 'root';
   """
 
   # Prompt-resource rename: the agent operating-rules file moved from
@@ -1124,6 +1170,7 @@ defmodule FermixCore.Memory.Repo do
   @type scheduled_job_row :: map()
   @type job_run_row :: map()
   @type meeting_row :: map()
+  @type voice_call_row :: map()
   @type memory_source_row :: map()
   @type harness_run_attrs :: map()
   @type harness_run_row :: map()
@@ -2924,6 +2971,151 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  @doc """
+  Opens a Live call's record (M56 §4.2): no tasks yet, no end, and the gist
+  and chat-row states at `none`.
+
+  `attrs`: `%{uuid, engine, started_at, created_at}`, the instants as
+  `DateTime`s. Every read returns the tasks decoded as `tasks`.
+  """
+  @spec create_voice_call(map(), keyword()) :: {:ok, voice_call_row()} | {:error, term()}
+  def create_voice_call(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, row} <- VoiceCallsSql.normalize_insert(attrs),
+         {:ok, created} <- call({:create_voice_call, row}, opts) do
+      VoiceCallsSql.decode(created)
+    end
+  end
+
+  @doc "Writes a record's whole task list, as the session holds it now."
+  @spec update_voice_call_tasks(String.t(), [map()], keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def update_voice_call_tasks(uuid, tasks, opts \\ []) when is_binary(uuid) do
+    with {:ok, tasks_json} <- VoiceCallsSql.normalize_tasks(tasks),
+         {:ok, updated} <- call({:update_voice_call_tasks, uuid, tasks_json}, opts) do
+      VoiceCallsSql.decode(updated)
+    end
+  end
+
+  @doc """
+  Closes an open record, once: `fields` is `%{ended_at, end_reason,
+  voice_cost_cents, accounting, tasks, gist_status, row_state}`, a `nil` cost
+  meaning unknown, and the last two what the call owes the chat (M56 §4.2):
+  `gist_status` `none` or `pending`, `row_state` `none` or `row_pending`.
+  `{:error, :not_found}` when no open record has this UUID.
+  """
+  @spec close_voice_call(String.t(), map(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def close_voice_call(uuid, fields, opts \\ []) when is_binary(uuid) and is_map(fields) do
+    with {:ok, params} <- VoiceCallsSql.normalize_close(fields),
+         {:ok, closed} <- call({:close_voice_call, uuid, params}, opts) do
+      VoiceCallsSql.decode(closed)
+    end
+  end
+
+  @doc """
+  Writes the gist a close left pending, with whether it was drawn from
+  Computer History, and marks it `written`. `{:error, :not_found}` unless the
+  gist is still pending: written or failed is final.
+  """
+  @spec write_voice_call_gist(String.t(), String.t(), boolean(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def write_voice_call_gist(uuid, gist, tainted?, opts \\ []) when is_binary(uuid) do
+    with {:ok, params} <- VoiceCallsSql.normalize_gist(gist, tainted?),
+         {:ok, row} <- call({:write_voice_call_gist, uuid, params}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc "Fails the gist a close left pending. `{:error, :not_found}` unless it is still pending."
+  @spec fail_voice_call_gist(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def fail_voice_call_gist(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:fail_voice_call_gist, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc "Marks an owed chat row written. `{:error, :not_found}` unless it is still owed."
+  @spec mark_voice_call_row_written(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def mark_voice_call_row_written(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:mark_voice_call_row_written, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc """
+  The closed records still owing their chat row that started before `cutoff`,
+  oldest first, at most `VoiceCallsSql.list_limit/0` of them: the rows a boot
+  writes.
+  """
+  @spec list_owed_voice_call_rows(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_owed_voice_call_rows(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_owed_voice_call_rows, stamp}, opts) do
+      decode_voice_calls(rows)
+    end
+  end
+
+  @doc """
+  The closed records holding a task still `detached` that started before
+  `cutoff`, oldest first, at most `VoiceCallsSql.list_limit/0` of them: the
+  tasks a restart left with no owner, whose rows a boot writes (M56 §4.6).
+  """
+  @spec list_detached_voice_calls(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_detached_voice_calls(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_detached_voice_calls, stamp}, opts) do
+      decode_voice_calls(rows)
+    end
+  end
+
+  @spec get_voice_call(String.t(), keyword()) ::
+          {:ok, voice_call_row()} | {:error, :not_found | term()}
+  def get_voice_call(uuid, opts \\ []) when is_binary(uuid) do
+    with {:ok, row} <- call({:get_voice_call, uuid}, opts) do
+      VoiceCallsSql.decode(row)
+    end
+  end
+
+  @doc """
+  The open records started before `cutoff`, oldest first, at most
+  `VoiceCallsSql.list_limit/0` of them: the ones a boot sweep closes.
+  """
+  @spec list_open_voice_calls(DateTime.t(), keyword()) ::
+          {:ok, [voice_call_row()]} | {:error, term()}
+  def list_open_voice_calls(%DateTime{} = cutoff, opts \\ []) do
+    with {:ok, stamp} <- VoiceCallsSql.normalize_cutoff(cutoff),
+         {:ok, rows} <- call({:list_open_voice_calls, stamp}, opts) do
+      decode_voice_calls(rows)
+    end
+  end
+
+  @doc """
+  The gists of the newest Live calls that have one, newest first, at most
+  `limit`, each `%{started_at, gist, tainted}`: what a call in the chat's
+  conversation starts with (M56 §4.3) and the chat's turn is told (§4.2).
+  """
+  @spec list_voice_call_gists(pos_integer(), keyword()) ::
+          {:ok, [%{started_at: String.t(), gist: String.t(), tainted: boolean()}]}
+          | {:error, term()}
+  def list_voice_call_gists(limit, opts \\ []) do
+    with {:ok, limit} <- VoiceCallsSql.normalize_limit(limit) do
+      call({:list_voice_call_gists, limit}, opts)
+    end
+  end
+
+  defp decode_voice_calls(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case VoiceCallsSql.decode(row) do
+        {:ok, decoded} -> {:cont, {:ok, acc ++ [decoded]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -2955,6 +3147,15 @@ defmodule FermixCore.Memory.Repo do
     @harness_runs_schema_sql <>
       @harness_continuation_schema_sql <> @harness_client_origin_schema_sql
   end
+
+  @doc """
+  The `memory_review_state` table as a store holds it from migration 9 on,
+  with the archive columns that migration gives `memories`. Public for the
+  same reason as `base_schema_sql/0`: a later migration rewrites its rows (39
+  moves the phone's review state into the Mac's chat).
+  """
+  @spec memory_review_schema_sql() :: String.t()
+  def memory_review_schema_sql, do: @memory_review_schema_sql
 
   @spec journal_mode(keyword()) :: {:ok, String.t()} | {:error, term()}
   def journal_mode(opts \\ []) do
@@ -3928,6 +4129,61 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:create_voice_call, row}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.insert(&1, row))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:update_voice_call_tasks, uuid, tasks_json}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.update_tasks(&1, uuid, tasks_json))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:close_voice_call, uuid, params}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.close(&1, uuid, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:get_voice_call, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.fetch(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_open_voice_calls, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_open(&1, cutoff))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_voice_call_gists, limit}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.recent_gists(&1, limit))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:write_voice_call_gist, uuid, params}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.write_gist(&1, uuid, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:fail_voice_call_gist, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.fail_gist(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:mark_voice_call_row_written, uuid}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.mark_row_written(&1, uuid))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_owed_voice_call_rows, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_owed_rows(&1, cutoff))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:list_detached_voice_calls, cutoff}, _from, state) do
+    reply = with_connection(state, &VoiceCallsSql.list_detached(&1, cutoff))
+    {:reply, reply, state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4028,8 +4284,66 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_companion_migration(conn, versions),
          :ok <- apply_companion_cancel_migration(conn, versions),
          :ok <- apply_harness_vendor_config_migration(conn, versions),
-         :ok <- apply_mobile_media_index_migration(conn, versions) do
+         :ok <- apply_mobile_media_index_migration(conn, versions),
+         :ok <- apply_voice_calls_migration(conn, versions),
+         :ok <- apply_voice_call_gist_taint_migration(conn, versions),
+         :ok <- apply_phone_joins_chat_migration(conn, versions) do
       :ok
+    end
+  end
+
+  # The phone's history joins the Mac's chat (M56 D9), with its version in one
+  # transaction, so it runs once: a later open finds the version, and a second
+  # run would find no phone row to move.
+  defp apply_phone_joins_chat_migration(conn, versions) do
+    if Enum.member?(versions, @phone_joins_chat_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{@phone_joins_chat_sql}
+        INSERT INTO schema_migrations(version) VALUES (#{@phone_joins_chat_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # Whether a call's gist was drawn from Computer History (M56 §9), a column
+  # beside the gist, with its version in one transaction.
+  defp apply_voice_call_gist_taint_migration(conn, versions) do
+    if Enum.member?(versions, @voice_call_gist_taint_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{VoiceCallsSql.gist_taint_schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@voice_call_gist_taint_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # One Live call's durable record (M56 §4.2), its table and version in one
+  # transaction.
+  defp apply_voice_calls_migration(conn, versions) do
+    if Enum.member?(versions, @voice_calls_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{VoiceCallsSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@voice_calls_migration_version});
+        COMMIT;
+        """
+      )
     end
   end
 
@@ -4918,6 +5232,14 @@ defmodule FermixCore.Memory.Repo do
     end
   end
 
+  # The memory review's input: what the owner said. A message a guest sent
+  # carries `"guest": true` in its metadata (`ConversationStore`) and is never
+  # selected, so nothing a guest says is distilled into the owner's memory. A
+  # request the owner asked aloud on a Live call carries `"spoken": true` and is
+  # never selected either (M56 D10): a spoken fragment, possibly misheard, is
+  # not a durable fact. History replay and compaction still read both. The
+  # filters are in the query, not after it, so a run of such messages can never
+  # fill the page and stall the review cursor behind them.
   defp fetch_user_messages_after(conn, selector, last_id, limit) do
     review_selector = normalize_memory_review_selector(selector)
 
@@ -4934,6 +5256,16 @@ defmodule FermixCore.Memory.Repo do
                AND thread_scope = ?
                AND role = 'user'
                AND id > ?
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.guest') END,
+                     0
+                   ) != 1
+               AND COALESCE(
+                     CASE WHEN json_valid(metadata_json)
+                          THEN json_extract(metadata_json, '$.spoken') END,
+                     0
+                   ) != 1
              ORDER BY id ASC
              LIMIT ?
              """,

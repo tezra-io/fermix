@@ -35,13 +35,24 @@ defmodule FermixCore.Realtime.Protocol do
   @min_supported_version max(1, @protocol_version - 1)
 
   @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel)
-  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta tool_event usage error playback_stop call_ready caption task)
+  @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
+
+  # One call per daemon: a `call_start` while another Live call is up or still
+  # settling is refused with this `error.reason`.
+  @call_in_progress "call_in_progress"
 
   @type event :: %{type: String.t(), payload: map()}
 
   @doc "The daemon's current wire protocol version."
   @spec protocol_version() :: pos_integer()
   def protocol_version, do: @protocol_version
+
+  @doc """
+  The `error.reason` that refuses a `call_start` while another Live call is up
+  or still settling. Terminal: the connection closes after it.
+  """
+  @spec call_in_progress() :: String.t()
+  def call_in_progress, do: @call_in_progress
 
   @doc "Inclusive `{min, max}` protocol versions the daemon accepts (an N/N-1 window)."
   @spec supported_version_range() :: {pos_integer(), pos_integer()}

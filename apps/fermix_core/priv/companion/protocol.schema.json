@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 1,
-  "x-supported-version-range": { "min": 1, "max": 1 },
+  "x-protocol-version": 2,
+  "x-supported-version-range": { "min": 1, "max": 2 },
   "x-max-line-bytes": 65536,
   "$defs": {
     "clientEvent": {
@@ -67,6 +67,7 @@
             "tool_event",
             "text_done",
             "turn_error",
+            "turn_done",
             "row",
             "approval",
             "approval_resolved",
@@ -105,6 +106,10 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "turn_error" } } },
           "then": { "$ref": "#/$defs/turn_error" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "turn_done" } } },
+          "then": { "$ref": "#/$defs/turn_done" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "row" } } },
@@ -178,7 +183,21 @@
       "properties": {
         "type": { "const": "cancel" },
         "profile_id": { "type": "string", "minLength": 1 },
-        "client_msg_id": { "type": "string", "minLength": 1 }
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "task_ref": {
+          "type": "object",
+          "x-since-version": 2,
+          "description": "Version 2. A GPT-Live task that outlived its call, named by the three ids its task_running row carries: stops that task's turn and no other, and client_msg_id then names the cancel itself, no request. Acknowledged by the task's task_done row; a task that is not running under exactly these ids is refused with request_failed.",
+          "required": ["call_uuid", "task_id", "revision"],
+          "properties": {
+            "call_uuid": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+            },
+            "task_id": { "type": "string", "minLength": 1 },
+            "revision": { "type": "integer", "minimum": 1 }
+          }
+        }
       }
     },
     "history_pull": {
@@ -289,9 +308,19 @@
         "message": { "type": "string", "minLength": 1, "maxLength": 512, "x-max-bytes": 512 }
       }
     },
+    "turn_done": {
+      "type": "object",
+      "description": "Version 2. The turn completed and wrote no reply: it ends the turn's draft with nothing kept. Live-only, like turn_error, and sent only to a connection whose hello declared version 2.",
+      "x-since-version": 2,
+      "required": ["type", "turn_id"],
+      "properties": {
+        "type": { "const": "turn_done" },
+        "turn_id": { "type": "string", "minLength": 1 }
+      }
+    },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone and the reply to a phone's turn), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox.",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind and metadata are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
       "properties": {
         "type": { "const": "row" },
@@ -300,7 +329,9 @@
         "role": { "type": "string", "minLength": 1 },
         "text": { "type": "string" },
         "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
-        "client_msg_id": { "type": "string", "minLength": 1 }
+        "client_msg_id": { "type": "string", "minLength": 1 },
+        "kind": { "type": "string", "minLength": 1 },
+        "metadata": { "type": "object" }
       }
     },
     "approval": {

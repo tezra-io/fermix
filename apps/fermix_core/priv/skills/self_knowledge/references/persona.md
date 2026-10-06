@@ -7,6 +7,7 @@
 - Change them: Mac Settings > Personality > About you (**Your name**, **Time zone**, **Style**, **Call the assistant**); browser setup; the terminal wizard (`fermix setup`), which offers the machine's time zone as the default. No setup flag or env var sets them; a headless install writes `[fermix_core.personalization]` `user_name`, `timezone`, `communication_style` in `config.toml`.
 - The assistant's name is identity, not a preference: it lives in `[fermix_core.agent] name` (default `fermix`), seeds `IDENTITY.md` (the first block of the system prompt) and is written into its `**Name:**` line on every daemon start, so a changed name takes effect after a restart. A blank name and any other edit to `IDENTITY.md` are left alone.
 - Each turn and each scheduled run carries today's date (UTC, labelled with the configured time zone), so the agent never runs `date` just to know the day. Date only: a clock time would break provider prompt caching every turn. The precise time comes from `date`.
+- A GPT-Live voice call is told, as it starts, the assistant's name, these values, the date and `USER.md` and `MEMORY.md`, but not `SOUL.md` (`voice` reference).
 
 ## Prompt files
 

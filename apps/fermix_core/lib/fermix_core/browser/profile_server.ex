@@ -23,6 +23,12 @@ defmodule FermixCore.Browser.ProfileServer do
 
   Every request's context carries `:caller`, the process that made the call.
 
+  The profile's status and every `open` and `navigate` result name the browser
+  that served them in `backend`, the label the registry records for the
+  profile (`Backend.label/1`): `fermix_app` for the app's pane, `cdp` for
+  Chrome. Those are the results a page is first seen in, so whether its WebMCP
+  tools can run here is known before anything is refused.
+
   Callers reach this process directly (via the registry); the manager only
   starts/evicts it. Requests are serialized per scope by the GenServer.
   """
@@ -53,6 +59,9 @@ defmodule FermixCore.Browser.ProfileServer do
     "act" => :act,
     "webmcp" => :webmcp
   }
+
+  # The operations whose result names the browser, beside the status.
+  @named_operations ~w(open navigate)
 
   # The browser-wide verbs a mode may withhold, and the capability that
   # withholds each. `open` is refused before the backend runs anything; these
@@ -205,7 +214,7 @@ defmodule FermixCore.Browser.ProfileServer do
 
     case apply(state.backend, callback, [args, context, state.backend_state]) do
       {:ok, result, backend_state} ->
-        {{:ok, result}, put_backend(state, backend_state)}
+        {{:ok, name_browser(action, result, state)}, put_backend(state, backend_state)}
 
       {failure, %Error{} = error, backend_state} when failure in [:error, :reap] ->
         {{failure, error}, put_backend(state, backend_state)}
@@ -234,9 +243,16 @@ defmodule FermixCore.Browser.ProfileServer do
   defp status_map(state) do
     Map.merge(
       state.backend.status(state.backend_state),
-      %{"ok" => true, "profile" => state.profile_name}
+      %{"ok" => true, "profile" => state.profile_name, "backend" => backend_label(state)}
     )
   end
+
+  defp name_browser(action, result, state) when action in @named_operations,
+    do: Map.put(result, "backend", backend_label(state))
+
+  defp name_browser(_action, result, _state), do: result
+
+  defp backend_label(state), do: state.mode |> Backend.label() |> Atom.to_string()
 
   defp schedule_idle(%{idle_ref: ref} = state) do
     if is_reference(ref), do: Process.cancel_timer(ref)

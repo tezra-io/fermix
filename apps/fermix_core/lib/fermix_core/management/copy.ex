@@ -57,6 +57,12 @@ defmodule FermixCore.Management.Copy do
   # change. Provider labels are derived below rather than repeated here.
   @proper_nouns [
     "Fermix Computer Use",
+    "Fermix Messages",
+    "Apple ID",
+    "Apple",
+    "Full Disk Access",
+    "Automation",
+    "Messages",
     "Claude Code",
     "New York",
     "Los Angeles",

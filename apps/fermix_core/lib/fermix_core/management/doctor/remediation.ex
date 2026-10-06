@@ -86,6 +86,22 @@ defmodule FermixCore.Management.Doctor.Remediation do
       title: "Another Fermix owns this service",
       body: "The background service answering is a different build than the one installed here.",
       action: %{kind: "none", target: nil}
+    },
+    # M54 §10.4. The permissions row fails while Messages data cannot be read,
+    # and warns once it can but Fermix cannot answer yet; each opens the one
+    # pane that holds the grant it names.
+    "imessage_permissions.failed" => %{
+      title: "Allow Fermix Messages in Full Disk Access",
+      body:
+        "Fermix cannot read your iMessages until Fermix Messages is turned on in Full Disk Access.",
+      action: %{kind: "system_settings", target: "Privacy_AllFiles"}
+    },
+    "imessage_permissions.warning" => %{
+      title: "Let Fermix Messages control Messages",
+      body:
+        "Fermix reads your iMessages but cannot answer yet. Allow Fermix Messages under " <>
+          "Automation, then confirm who Fermix may message.",
+      action: %{kind: "system_settings", target: "Privacy_Automation"}
     }
   }
 

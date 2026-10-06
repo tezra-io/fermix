@@ -7,13 +7,19 @@ defmodule FermixChannels.Gateway.PolicyTest do
 
   use ExUnit.Case, async: false
 
+  alias FermixChannels.Channels.Mobile
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Mobile.DeviceStore
+  alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Memory.ConversationStore
 
+  # The phone's adapter as the gateway reads it: the conversation its messages
+  # run in is the real adapter's answer, and nothing it replies leaves the test.
   defmodule MobileChannel do
+    defdelegate joined_conversation(message), to: FermixChannels.Channels.Mobile
     def build_text_reply(%Message{}), do: fn _text -> :ok end
     def build_media_reply(%Message{}), do: fn _media -> :ok end
     def stream_capability, do: :draft_edit
@@ -138,6 +144,28 @@ defmodule FermixChannels.Gateway.PolicyTest do
 
     on_exit(fn -> :telemetry.detach(handler_id) end)
     :ok
+  end
+
+  # Only the adapter of a channel whose turns join another transport's
+  # conversation names one, at ingest; nothing a message arrives with does.
+  test "a conversation a message arrives carrying is dropped at ingest" do
+    register(%{name: "opted_out", commands?: false})
+
+    message =
+      "hello"
+      |> message([])
+      |> Map.put(:conversation_key, {"companion", "main", :root})
+
+    assert :ok =
+             Gateway.ingest([message],
+               channel: PlainChannel,
+               agent: CapturingAgent,
+               agent_server: self()
+             )
+
+    assert_receive {:agent_message, agent_message}
+    assert agent_message.conversation_key == nil
+    assert ConversationKey.from(agent_message) == {"opted_out", "chat-1", :root}
   end
 
   describe "commands? registry field" do
@@ -353,6 +381,80 @@ defmodule FermixChannels.Gateway.PolicyTest do
       assert {:ok, pending} = Confirmations.take(token)
       assert pending.ingress_context == ingress_context
       refute Map.has_key?(agent_message.metadata, :ingress_context)
+    end
+
+    # M56 D9: the phone's turns run in the Mac's chat. The gateway names that
+    # conversation from the phone's own adapter on every message it ingests
+    # through it, whoever built the message (a resumed grant is built by no
+    # phone event), while the channel, the proof that authorizes it and the
+    # route an approval is answered on stay the phone's.
+    test "a phone message runs in the chat's conversation and is still the phone's" do
+      ingress_context = %{transport: :mobile, authenticated_device_id: pair_device!()}
+
+      message =
+        message("hello", channel: "mobile", chat_id: "main", reply_target: "main", metadata: %{})
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: Mobile,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 ingress_context: ingress_context
+               )
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.conversation_key == {"companion", "main", :root}
+      assert ConversationKey.from(agent_message) == {"companion", "main", :root}
+      assert agent_message.channel == "mobile"
+      assert agent_message.source_trust == :operator
+
+      assert {:ok, token, :new} =
+               agent_message.approval_fn.(%{
+                 path: "/tmp/phone-approved-root",
+                 reason: "the phone's request needs it",
+                 diff: "allowed_roots + /tmp/phone-approved-root"
+               })
+
+      assert {:ok, pending} = Confirmations.take(token)
+      assert pending.channel == "mobile"
+      assert pending.ingress_context == ingress_context
+    end
+
+    test "a phone message without the phone's proof is refused, whatever conversation it runs in" do
+      message = message("hello", channel: "mobile", chat_id: "main", reply_target: "main")
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: Mobile,
+                 agent: CapturingAgent,
+                 agent_server: self()
+               )
+
+      refute_receive {:agent_message, _message}
+    end
+
+    # The command path keys the conversation its turn runs in: /new from the
+    # phone starts the one history afresh, the Mac's half included.
+    test "a command from the phone keys the chat's conversation, as its turn does" do
+      store = start_supervised!({ConversationStore, name: nil, repo: nil})
+
+      :ok =
+        ConversationStore.add_message({"companion", "main", :root}, "user", "hi", server: store)
+
+      message =
+        message("/new", channel: "mobile", chat_id: "main", reply_target: "main", metadata: %{})
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: MobileChannel,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 conversation_store: store,
+                 ingress_context: %{transport: :mobile, authenticated_device_id: pair_device!()}
+               )
+
+      assert ConversationStore.get_history({"companion", "main", :root}, server: store) == []
+      refute_receive {:agent_message, _message}
     end
 
     test "proof for another transport cannot authorize mobile" do

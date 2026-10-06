@@ -26,8 +26,8 @@ defmodule FermixCore.Realtime.SessionControl do
   # error, never as a GenServer.call exit here.
   #
   # `cancel_task` and `call_stop` wait with no timeout. On Live no finite one
-  # covers them: both reach `Gateway.Queue`'s conversation stop through the
-  # voice bridge, and that stop waits with no timeout for a busy Queue. The
+  # covers them: both reach `Gateway.Queue`'s stop of a hand-off's turn through
+  # the voice bridge, and that stop waits with no timeout for a busy Queue. The
   # Realtime `call_stop` has a finite bound (it sends a frame and releases what
   # the call holds), but it shares this API with Live, and that is what makes
   # it wait the same way. Each engine keeps its handler for them bounded

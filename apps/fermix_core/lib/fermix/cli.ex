@@ -29,6 +29,7 @@ defmodule Fermix.CLI do
   alias Fermix.CLI.Run
   alias Fermix.CLI.SandboxCommand
   alias Fermix.CLI.ServiceCommand
+  alias Fermix.CLI.SettingsCommand
   alias Fermix.CLI.Setup
   alias Fermix.CLI.SkillsCommand
   alias Fermix.CLI.StartCommand
@@ -84,6 +85,7 @@ defmodule Fermix.CLI do
   defp dispatch("plugins", rest), do: PluginsCommand.run(rest)
   defp dispatch("pair", rest), do: PairCommand.run(rest)
   defp dispatch("devices", rest), do: DevicesCommand.run(rest)
+  defp dispatch("settings", rest), do: SettingsCommand.run(rest)
   defp dispatch("logs", rest), do: LogsCommand.run(rest)
   defp dispatch("memory", rest), do: MemoryCommand.run(rest)
   defp dispatch("upgrade", rest), do: UpgradeCommand.run(rest)
@@ -102,14 +104,14 @@ defmodule Fermix.CLI do
 
     Usage:
       fermix setup [--web|--cli|--terminal] [--no-browser] [--no-service] [--user|--system] [--rotate-token]
-                   [--print-state] [--reconfigure] [--migrate-secrets] [--import-codex]
+                   [--print-state] [--reconfigure] [--migrate-secrets]
                    [--secret-store keyring|file]
                    [--openai-api-key VALUE] [--anthropic-api-key VALUE] [--xai-api-key VALUE]
                    [--provider #{Enum.map_join(ModelCatalog.providers(), "|", &Atom.to_string/1)}]
                    [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]
-                   [--fast|--no-fast]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]
                    [--acp-enabled|--no-acp-enabled]
+                   [--proxy http://HOST:PORT] [--proxy-bypass HOST,.SUFFIX,...]
                    [--telegram-bot-token VALUE] ...
       fermix auth   login   [--no-browser] [--port N] [--timeout SECONDS]
       fermix auth   status
@@ -139,6 +141,13 @@ defmodule Fermix.CLI do
       fermix pair                                  Pair a phone companion device
       fermix devices list                          List paired phones
       fermix devices revoke DEVICE_ID              Revoke a paired phone
+      fermix settings [list] [--json]              List the running daemon's settings sections
+      fermix settings show SECTION [--info] [--json]  Show one section's rows and values
+      fermix settings set SECTION KEY=VALUE... [--json]  Change keys in one section
+      fermix settings secret set ID [--stdin] [--json]  Store a secret (masked prompt or piped)
+      fermix settings secret clear ID [--json]     Forget a stored secret
+      fermix settings primary [PROVIDER] [--json]  Show providers or make one the primary
+      fermix settings reload [--json]              Read config.toml again after an outside edit
       fermix memory review --now [--conversation KEY] [--json]
       fermix memory restore ID [--json]
       fermix logs   [-f] [-n LINES]                Show daemon log file

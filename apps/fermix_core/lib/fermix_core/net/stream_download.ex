@@ -10,6 +10,8 @@ defmodule FermixCore.Net.StreamDownload do
   an error tuple, never a partial success.
   """
 
+  alias FermixCore.Net.Egress
+
   @chunk_bytes 64 * 1024
   # Idle cap: fail a stalled/dead connection rather than holding the plugin
   # store lock (and an open socket) indefinitely. Bounds *idle* time between
@@ -27,7 +29,13 @@ defmodule FermixCore.Net.StreamDownload do
       when is_binary(url) and is_binary(path) and is_list(req_options) do
     base = [raw: true, into: File.stream!(path), receive_timeout: @receive_timeout_ms]
 
-    case Req.get(url, base ++ req_options) do
+    request =
+      [method: :get, url: url]
+      |> Keyword.merge(base ++ req_options)
+      |> Req.new()
+      |> Egress.attach(:direct)
+
+    case Req.request(request) do
       {:ok, %Req.Response{status: 200}} -> :ok
       {:ok, %Req.Response{status: status}} -> {:error, {:download_status, status, url}}
       {:error, reason} -> {:error, {:download_failed, reason, url}}

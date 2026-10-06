@@ -318,6 +318,22 @@ defmodule FermixOpik.TraceFileTest do
              )
 
     assert meta.status == "failed"
+
+    # M56 §4.5: a result shown in the chat replays its row and its size.
+    assert {_event, _measurements, shown} =
+             TraceFile.normalize(
+               "agent_event",
+               Map.merge(base, %{
+                 "event" => "voice_live_delegation_stop",
+                 "session_id" => "voice_live:1",
+                 "status" => "completed",
+                 "server_seq" => 42,
+                 "shown_bytes" => 913
+               })
+             )
+
+    assert shown.server_seq == 42
+    assert shown.shown_bytes == 913
   end
 
   # A computer-use session's whole record in the JSONL is these five rows, and

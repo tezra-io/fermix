@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcherTest do
 
   alias FermixChannels.Mobile.Push.Config
   alias FermixChannels.Mobile.Push.PigeonDispatcher
+  alias FermixCore.Net.Egress
   alias Pigeon.APNS.Notification
 
   test "connects on the first batch, owns one dispatcher, serializes batches, closes it" do
@@ -97,6 +98,31 @@ defmodule FermixChannels.Mobile.Push.PigeonDispatcherTest do
 
     assert {:error, :push_dispatcher_config_mismatch} =
              PigeonDispatcher.dispatch(server, [], changed)
+  end
+
+  # Pigeon's socket cannot tunnel. Behind a proxy the connect is refused before
+  # Pigeon is started, and push degrades instead of dialing around the proxy.
+  test "behind a proxy the APNs connect is refused, never made around it" do
+    config = config()
+    server = unique_name()
+
+    start_supervised!(
+      {PigeonDispatcher,
+       name: server,
+       config: config,
+       egress: Egress.new(proxy: "http://proxy.test:3128"),
+       start_dispatcher: fn _ -> flunk("Pigeon was started on a proxied route") end,
+       push: fn _, _, _ -> flunk("a push was sent on a proxied route") end,
+       stop_dispatcher: fn _ -> :ok end}
+    )
+
+    notification = %Notification{device_token: "token", topic: "io.tezra.fermix"}
+
+    {result, log} =
+      with_log(fn -> PigeonDispatcher.dispatch(server, [notification], config) end)
+
+    assert result == {:error, {:push_unavailable, :connect_failed}}
+    assert log =~ "proxy_unsupported_transport"
   end
 
   test "a raising push dependency is reported with its exception type and stacktrace" do

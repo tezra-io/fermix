@@ -14,6 +14,13 @@
 # without MESSAGE_CONTENT, messages return with EMPTY content (not an error), so
 # a "lists messages but they're blank" result means the intent is missing.
 #
+# GATES: the read span is the outcome under test and `reply_not_matches` is the
+# failure signal; the positive vocabularies that used to sit beside them could
+# not fail and were dropped. The no-search scenario gates on the span that
+# proves history was actually read — listing guilds or channels alone used to
+# pass it — and its rubric is judged (a rubric under `judge: false` scores
+# INCOMPLETE forever).
+#
 # PRIVACY NOTE: server/channel/message/member data lands in local Opik traces
 # (the dev daemon captures content). Local-only; clean one run with --purge-run <run-id>.
 suite: discord
@@ -40,13 +47,11 @@ scenarios:
         query: "What Discord servers is my bot in?"
         expect:
           tools_any: [discord_list_guilds]
-          reply_matches: "(?i)server|guild|member|it'?s in|no servers"
           reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret|not connected|use (the )?browser)\\b"
       - id: list_channels
         query: "List the channels in my Discord server."
         expect:
-          tools_any: [discord_list_channels, discord_list_guilds]
-          reply_matches: "(?i)channel|#|text|voice|category|no channels"
+          tools_any: [discord_list_channels]
           reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret|use (the )?browser)\\b"
 
   - id: discord_read
@@ -57,14 +62,12 @@ scenarios:
       - id: channel_messages
         query: "Catch me up on the recent messages in one of my Discord channels."
         expect:
-          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
-          reply_matches: "(?i)message|said|recent|discussed|nothing|no (messages|activity)"
+          tools_any: [discord_channel_messages]
           reply_not_matches: "(?i)\\b(unable to (access|read)|i can'?t (access|read)|use (the )?browser|web search)\\b"
       - id: list_members
         query: "Who's in my Discord server?"
         expect:
-          tools_any: [discord_list_members, discord_list_guilds]
-          reply_matches: "(?i)member|user|people|@|server"
+          tools_any: [discord_list_members]
           reply_not_matches: "(?i)\\b(unable to (access|list)|i can'?t (access|list)|needs?[ -]secret)\\b"
 
   - id: discord_no_search
@@ -75,16 +78,23 @@ scenarios:
       - id: search_falls_back_to_history
         query: "Find recent Discord messages mentioning the release in my server."
         timeout_ms: 300000
+        judge: true
         expect:
-          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
+          tools_any: [discord_channel_messages]
           reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
+        rubric: >
+          Reads channel history and reports which messages (if any) mention the
+          release, naming the channel they came from; it does not refuse for
+          want of a search feature and does not invent messages.
       - id: keyword_lookup_reads_history
         query: "Can you search Discord for any mention of 'hotfix' in the past week?"
         timeout_ms: 300000
+        judge: true
         expect:
-          tools_any: [discord_channel_messages, discord_list_channels, discord_list_guilds]
+          tools_any: [discord_channel_messages]
           reply_not_matches: "(?i)\\b(unable to (access|search)|i can'?t (access|search)|use (the )?browser)\\b"
         rubric: >
           When the user asks to "search" Discord for a keyword, the agent reads
           channel history (discord_channel_messages) and scans the results, rather
-          than refusing or using a non-existent search endpoint.
+          than refusing or using a non-existent search endpoint. An honest "no
+          mention found" after reading is a pass; an invented hit is not.

@@ -4,8 +4,8 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 1
-    assert Protocol.supported_version_range() == {1, 1}
+    assert Protocol.protocol_version() == 2
+    assert Protocol.supported_version_range() == {1, 2}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
@@ -13,7 +13,31 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                row approval approval_resolved read_state history_page search_results error)
+                turn_done row approval approval_resolved read_state history_page search_results
+                error)
+  end
+
+  # M56 §6: a turn that ends with no reply needs a frame an older client would
+  # not survive, so it goes only to a connection that declared version 2.
+  test "every server event names the version that brought it, turn_done version 2" do
+    assert Protocol.server_event_version("turn_done") == 2
+
+    for type <- Protocol.server_events() -- ["turn_done"] do
+      assert Protocol.server_event_version(type) == 1, "#{type} is not a version 1 event"
+    end
+
+    refute "turn_done" in Protocol.shared_server_events()
+  end
+
+  test "turn_done names the turn it ends and nothing else" do
+    assert {:ok, line} = Protocol.encode_server_event("turn_done", %{"turn_id" => "turn-mac-1"})
+    assert Jason.decode!(line) == %{"type" => "turn_done", "turn_id" => "turn-mac-1"}
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_event("turn_done", %{})
+
+    assert {:error, {:invalid_field, "turn_id"}} =
+             Protocol.encode_server_event("turn_done", %{"turn_id" => ""})
   end
 
   test "the shared chat events are a subset of both catalogs" do
@@ -25,10 +49,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally" do
+  test "negotiates directionally, version 1 and version 2 both accepted" do
     assert :ok = Protocol.negotiate(1)
+    assert :ok = Protocol.negotiate(2)
     assert {:error, :client_too_old} = Protocol.negotiate(0)
-    assert {:error, :client_too_new} = Protocol.negotiate(2)
+    assert {:error, :client_too_new} = Protocol.negotiate(3)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -103,6 +128,34 @@ defmodule FermixCore.Companion.ProtocolTest do
              decode(%{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 4})
   end
 
+  # M56 §4.6, §6: a version 2 cancel may name a task that outlived its call
+  # by its three ids instead of a request.
+  test "cancel may name a detached voice task by its call, task and revision" do
+    task_ref = %{
+      "call_uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "task_id" => "dg_1",
+      "revision" => 2
+    }
+
+    base = %{"type" => "cancel", "profile_id" => "main", "client_msg_id" => "mac-9"}
+
+    assert {:ok, %{payload: %{"task_ref" => ^task_ref}}} =
+             decode(Map.put(base, "task_ref", task_ref))
+
+    for bad <- [
+          "dg_1",
+          Map.delete(task_ref, "call_uuid"),
+          %{task_ref | "call_uuid" => "not-a-uuid"},
+          %{task_ref | "task_id" => ""},
+          %{task_ref | "revision" => 0},
+          %{task_ref | "revision" => "2"},
+          Map.put(task_ref, "turn_id", "turn-1")
+        ] do
+      assert {:error, {:invalid_field, "task_ref"}} = decode(Map.put(base, "task_ref", bad)),
+             "accepted task_ref #{inspect(bad)}"
+    end
+  end
+
   test "malformed and unknown lines fail loudly" do
     assert {:error, :invalid_json} = Protocol.decode_client_event("{")
     assert {:error, :invalid_event} = Protocol.decode_client_event("[1]")
@@ -112,18 +165,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 1})
+             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 2})
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 1
+             "max_version" => 2
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 2})
+             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 1})
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do
@@ -197,6 +250,129 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert {:error, {:missing_field, "ts"}} =
              Protocol.encode_server_event("row", Map.delete(row, "ts"))
+  end
+
+  # M56 §6: the Mac's row carries a history message's kind and metadata, as
+  # the phone's always has.
+  test "a row may carry its kind and metadata" do
+    row = %{
+      "profile_id" => "main",
+      "server_seq" => 15,
+      "role" => "assistant",
+      "text" => "It is at https://x.test/form.",
+      "ts" => "2026-10-03T10:00:00Z",
+      "kind" => "text",
+      "metadata" => %{"call" => shared_call()}
+    }
+
+    assert {:ok, _line} = Protocol.encode_server_event("row", row)
+
+    assert {:error, {:invalid_field, "kind"}} =
+             Protocol.encode_server_event("row", %{row | "kind" => ""})
+
+    assert {:error, {:invalid_field, "metadata"}} =
+             Protocol.encode_server_event("row", %{row | "metadata" => "call"})
+  end
+
+  describe "validate_call_metadata/1" do
+    test "a result shown in the chat names the call, the event and its task" do
+      assert :ok = Protocol.validate_call_metadata(shared_call())
+    end
+
+    test "every key of the design's call map is accepted with its type" do
+      done =
+        Map.merge(shared_call(), %{"event" => "task_done", "state" => "timed_out"})
+
+      assert :ok = Protocol.validate_call_metadata(ended_call())
+      assert :ok = Protocol.validate_call_metadata(%{shared_call() | "event" => "task_running"})
+      assert :ok = Protocol.validate_call_metadata(done)
+    end
+
+    # M56 §4.2: the call's one row when it ends names its engine, its length,
+    # its bill's accounting and what became of its gist; the cost is absent
+    # when it is unknown.
+    test "a call's ended row names its engine, length, accounting and gist" do
+      for gist_status <- ~w(written failed none) do
+        assert :ok =
+                 Protocol.validate_call_metadata(%{ended_call() | "gist_status" => gist_status})
+      end
+
+      assert :ok = Protocol.validate_call_metadata(Map.delete(ended_call(), "voice_cost_cents"))
+
+      for key <- ~w(engine duration_s accounting gist_status) do
+        assert {:error, {:missing_field, "call." <> ^key}} =
+                 Protocol.validate_call_metadata(Map.delete(ended_call(), key))
+      end
+    end
+
+    test "the call and the event are required, and the event is one of four" do
+      assert {:error, {:missing_field, "call.uuid"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "uuid"))
+
+      assert {:error, {:missing_field, "call.event"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "event"))
+
+      assert {:error, {:invalid_field, "call.event"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "event" => "spoken"})
+
+      assert {:error, {:invalid_field, "call.uuid"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "uuid" => "call-7"})
+    end
+
+    test "a task's event names the task and its revision; a task's end names its state" do
+      assert {:error, {:missing_field, "call.task_id"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "task_id"))
+
+      assert {:error, {:missing_field, "call.revision"}} =
+               Protocol.validate_call_metadata(Map.delete(shared_call(), "revision"))
+
+      assert {:error, {:missing_field, "call.state"}} =
+               Protocol.validate_call_metadata(%{shared_call() | "event" => "task_done"})
+    end
+
+    test "each field is refused in a shape other than its own" do
+      for {key, value} <- [
+            {"task_id", ""},
+            {"revision", 0},
+            {"state", "running"},
+            {"duration_s", -1},
+            {"voice_cost_cents", "0.5"},
+            {"accounting", "running"},
+            {"engine", ""},
+            {"gist_status", "pending"}
+          ] do
+        assert {:error, {:invalid_field, "call." <> ^key}} =
+                 Protocol.validate_call_metadata(Map.put(shared_call(), key, value))
+      end
+    end
+
+    test "a key the call map does not have is refused, and so is anything not a map" do
+      assert {:error, {:unknown_field, "call.text"}} =
+               Protocol.validate_call_metadata(Map.put(shared_call(), "text", "hi"))
+
+      assert {:error, {:invalid_field, "call"}} = Protocol.validate_call_metadata(nil)
+    end
+  end
+
+  defp ended_call do
+    %{
+      "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "event" => "ended",
+      "engine" => "openai_live",
+      "duration_s" => 360,
+      "voice_cost_cents" => 30.125,
+      "accounting" => "complete",
+      "gist_status" => "written"
+    }
+  end
+
+  defp shared_call do
+    %{
+      "uuid" => "3f2b8c1e-5a4d-4e6f-9b8a-7c6d5e4f3a2b",
+      "event" => "shared",
+      "task_id" => "dg_01H9",
+      "revision" => 1
+    }
   end
 
   test "payload validation is available to another envelope without the type key" do

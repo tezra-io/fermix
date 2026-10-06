@@ -13,6 +13,7 @@ defmodule FermixCore.Jobs.RunnerTest do
   alias FermixCore.Jobs.Runner
   alias FermixCore.Jobs.RunnerSupervisor
   alias FermixCore.Memory.Repo
+  alias FermixCore.Net.Egress
 
   defmodule RecordingAdapter do
     @behaviour FermixCore.Providers.Adapter
@@ -2020,6 +2021,38 @@ defmodule FermixCore.Jobs.RunnerTest do
       assert stored_run.final_response == "ran after network came up"
     end
 
+    # Behind a proxy the provider's own address is not reachable at all, so a
+    # probe aimed at it would burn its whole budget before every job. The hop
+    # that matters is the proxy.
+    test "probes the proxy when the route leaves through one", %{
+      repo: repo,
+      capability_registry: capability_registry,
+      output_base_dir: output_base_dir
+    } do
+      parent = self()
+
+      probe = fn host, port, _timeout ->
+        send(parent, {:readiness_probe, host, port})
+        :ok
+      end
+
+      assert {:ok, {job, run}} =
+               create_claimed_job(repo, name: "Readiness Proxied", task_prompt: "Run.")
+
+      start_readiness_runner(job, run,
+        repo: repo,
+        capability_registry: capability_registry,
+        output_base_dir: output_base_dir,
+        readiness_host: "api.test",
+        readiness_port: 443,
+        readiness_opts: [probe_fn: probe, interval_ms: 10, budget_ms: 1_000],
+        egress: Egress.new(proxy: "http://proxy.test:3128")
+      )
+
+      assert_receive {:readiness_probe, "proxy.test", 3128}
+      assert {:ok, %{status: "ok"}} = Repo.get_job_run(run.id, server: repo)
+    end
+
     test "skips the readiness probe when the gate is disabled", %{
       repo: repo,
       capability_registry: capability_registry,
@@ -2074,7 +2107,8 @@ defmodule FermixCore.Jobs.RunnerTest do
           network_readiness_enabled: Keyword.get(opts, :network_readiness_enabled, true),
           readiness_host: Keyword.get(opts, :readiness_host),
           readiness_port: Keyword.get(opts, :readiness_port),
-          readiness_opts: Keyword.get(opts, :readiness_opts, [])
+          readiness_opts: Keyword.get(opts, :readiness_opts, []),
+          egress: Keyword.get(opts, :egress, Egress.new([]))
         )
 
       assert_receive {:EXIT, ^pid, :normal}, 2_000

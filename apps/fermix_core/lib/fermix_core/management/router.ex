@@ -15,6 +15,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Diagnostics
   alias FermixCore.Management.Doctor
+  alias FermixCore.Management.IMessage
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
@@ -35,7 +36,7 @@ defmodule FermixCore.Management.Router do
     hello overview.get setup.session.create lifecycle.prepare diagnostics.build setup.state.get
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
-    mobile.devices.list browser.install.start
+    mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -58,6 +59,7 @@ defmodule FermixCore.Management.Router do
   @mobile_session_params ~w(session_id)
   @mobile_decide_params ~w(session_id approved)
   @mobile_device_params ~w(device_id)
+  @imessage_grant_params ~w(service)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
@@ -178,6 +180,14 @@ defmodule FermixCore.Management.Router do
   defp route_known("mobile.devices.list", %{}, opts), do: mobile(&Mobile.devices_list/1, opts)
   defp route_known("mobile.devices.revoke", params, opts), do: mobile_revoke(params, opts)
   defp route_known("browser.install.start", %{}, opts), do: browser_install(opts)
+
+  defp route_known("imessage.permissions.get", %{}, opts),
+    do: operation_result(IMessage.permissions(operation_opts(opts)))
+
+  defp route_known("imessage.grant.start", params, opts), do: imessage_grant(params, opts)
+
+  defp route_known("imessage.policy.confirm", %{}, opts),
+    do: operation_result(IMessage.policy_confirm(operation_opts(opts)))
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -351,6 +361,12 @@ defmodule FermixCore.Management.Router do
   defp computer_use_permissions(opts),
     do: operation_result(ComputerUse.permissions(operation_opts(opts)))
 
+  defp imessage_grant(params, opts) do
+    with {:ok, service} <- fetch_string(params, "service", @imessage_grant_params) do
+      operation_result(IMessage.grant_start(service, operation_opts(opts)))
+    end
+  end
+
   defp mobile(verb, opts) when is_function(verb, 1),
     do: operation_result(verb.(mobile_opts(opts)))
 
@@ -405,7 +421,8 @@ defmodule FermixCore.Management.Router do
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
 
   defp settings_sections(opts) do
-    inventory = Keyword.get(opts, :settings_sections, &Settings.sections/0)
+    inventory =
+      Keyword.get(opts, :settings_sections, fn -> Settings.sections(settings_opts(opts)) end)
 
     sections =
       Enum.map(inventory.(), fn section ->
@@ -519,7 +536,7 @@ defmodule FermixCore.Management.Router do
     end
   end
 
-  defp settings_opts(opts), do: Keyword.take(opts, [:snapshot, :supervised])
+  defp settings_opts(opts), do: Keyword.take(opts, [:snapshot, :supervised, :macos?])
 
   defp invalid_params(field), do: {:error, :invalid_params, %{"field" => field}}
 

@@ -4,8 +4,16 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   alias FermixCore.Capabilities.AccessGate.Pending, as: AccessPending
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Memory.Repo
+  alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Realtime.CallRegistry
+  alias FermixCore.Realtime.CallSpeech
+  alias FermixCore.Realtime.CallSweep
   alias FermixCore.Realtime.Config
+  alias FermixCore.Realtime.LiveChat
   alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.LiveText
+  alias FermixCore.Realtime.LiveTranscript
   alias FermixCore.Realtime.OpenAILiveClient
   alias FermixCore.Realtime.SessionControl
 
@@ -13,6 +21,10 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
   @live_title "# LIVE.md — Live Voice Companion"
   @closed_seconds 120.5
+  @uuid_v4 ~r/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+  # This module's own registry, started fresh for every test: the daemon's is
+  # under the realtime supervisor, which the suite never starts.
+  @call_registry Module.concat(__MODULE__, CallRegistry)
 
   defmodule FakeLiveClient do
     @moduledoc """
@@ -92,9 +104,54 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     # product does not have.
     def start(test_pid) do
       Agent.start(
-        fn -> %{test_pid: test_pid, submits: [], cancels: [], closed: 0, callbacks: %{}} end,
+        fn ->
+          %{
+            test_pid: test_pid,
+            submits: [],
+            cancels: [],
+            closed: 0,
+            callbacks: %{},
+            window: {:ok, %{messages: [], gists: []}},
+            show: {:ok, 42},
+            detach: :forward
+          }
+        end,
         name: __MODULE__
       )
+    end
+
+    @doc "What the next `conversation_window/1` answers."
+    def set_window(result), do: Agent.update(__MODULE__, &%{&1 | window: result})
+
+    @doc "What the next `show/2` answers."
+    def set_show(result), do: Agent.update(__MODULE__, &%{&1 | show: result})
+
+    @doc "What `detach/3` answers: a forward to the test, or a refusal."
+    def set_detach(result), do: Agent.update(__MODULE__, &%{&1 | detach: result})
+
+    # The new owner of a detached task (M56 §4.6), stood in for by the test:
+    # what the session forwards to it reaches the test.
+    @impl true
+    def detach(_handle, task_ref, task) do
+      test_pid = test_pid()
+      send(test_pid, {:bridge_detach, task_ref, task})
+
+      case Agent.get(__MODULE__, & &1.detach) do
+        :forward -> {:ok, fn event -> send(test_pid, {:forwarded, task_ref, event}) && :ok end}
+        refusal -> refusal
+      end
+    end
+
+    @impl true
+    def show(call, text) do
+      send(test_pid(), {:bridge_show, call, text})
+      Agent.get(__MODULE__, & &1.show)
+    end
+
+    @impl true
+    def conversation_window(bounds) do
+      send(test_pid(), {:bridge_window, bounds})
+      Agent.get(__MODULE__, & &1.window)
     end
 
     def stop do
@@ -103,6 +160,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         pid -> Agent.stop(pid)
       end
     end
+
+    @impl true
+    def call_active?, do: false
+
+    @impl true
+    def chat_call(_key, _channel), do: :none
 
     @impl true
     def open_call(call) do
@@ -149,6 +212,13 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       :ok
     end
 
+    @doc "The delegation's turn read Computer History content, as its runner tells it."
+    def fire_tainted(delegation_id) do
+      callbacks = Agent.get(__MODULE__, &Map.fetch!(&1.callbacks, delegation_id))
+      callbacks.history_tainted.()
+      :ok
+    end
+
     defp test_pid, do: Agent.get(__MODULE__, & &1.test_pid)
   end
 
@@ -156,13 +226,49 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     @behaviour FermixCore.Realtime.VoiceBridge
 
     @impl true
+    def conversation_window(_bounds), do: {:ok, %{messages: [], gists: []}}
+    @impl true
+    def call_active?, do: false
+    @impl true
+    def chat_call(_key, _channel), do: :none
+    @impl true
     def open_call(_call), do: {:error, :no_queue}
+    @impl true
+    def show(_call, _text), do: {:error, :no_timeline}
     @impl true
     def submit(_handle, _request, _callbacks), do: {:error, :queue_down}
     @impl true
     def cancel(_handle, _ref), do: :ok
     @impl true
+    def detach(_handle, _ref, _task), do: {:error, :no_owner}
+    @impl true
     def close_call(_handle), do: :ok
+  end
+
+  defmodule GistAdapter do
+    @moduledoc """
+    The provider a call's gist is made on (M56 §4.2), bound into the gist's
+    route so no real adapter is ever resolved: it tells the test what it was
+    sent and answers as the test says, or waits for the test to release it.
+    """
+
+    def chat(messages, _tools, opts) do
+      test_pid = Keyword.fetch!(opts, :test_pid)
+      send(test_pid, {:gist_call, messages, opts})
+
+      case Keyword.fetch!(opts, :answer) do
+        {:await, answer} -> await(test_pid, answer)
+        answer -> answer
+      end
+    end
+
+    defp await(test_pid, answer) do
+      send(test_pid, {:awaiting_gist, self()})
+
+      receive do
+        :release -> answer
+      end
+    end
   end
 
   defmodule RefusingLiveClient do
@@ -190,6 +296,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     {:ok, _bridge} = FakeBridge.start(self())
     on_exit(&FakeBridge.stop/0)
     start_supervised!(%{id: :fake_live_client, start: {FakeLiveClient, :start_agent, [self()]}})
+    start_supervised!({CallRegistry, name: @call_registry})
     clock = start_supervised!({Agent, fn -> 0 end}, id: :live_clock)
     %{clock: clock}
   end
@@ -238,6 +345,54 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       keys = payload |> Map.keys() |> Enum.map(&to_string/1)
       assert Enum.sort(keys) == ~w(audio delegation instructions model store)
+    end
+
+    # M56 §4.3 (D5): generated in code at the start of every call, after
+    # LIVE.md, so an owner's edit to LIVE.md can never shadow it.
+    test "the instructions name the assistant and the owner and carry today's date", %{
+      clock: clock
+    } do
+      saved = Map.new([:agent, :personalization], &{&1, Application.fetch_env(:fermix_core, &1)})
+      on_exit(fn -> Enum.each(saved, &restore_core_env/1) end)
+      Application.put_env(:fermix_core, :agent, name: "Nova")
+      Application.put_env(:fermix_core, :personalization, user_name: "Sujeeth")
+
+      session =
+        start_session(clock: clock, prompt: nil, capability_registry: start_capability_registry())
+
+      :ok = SessionControl.call_start(session)
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+
+      assert payload.instructions =~ "Your name is Nova."
+      assert payload.instructions =~ "## The owner\n\n- Name: Sujeeth"
+      assert payload.instructions =~ CurrentDate.note()
+    end
+
+    # M56 §4.5: the voice learns from the generated instructions, not LIVE.md,
+    # that a result it cannot say is put in the chat; a private call shows none.
+    test "a call in the chat is told results it cannot say go to the chat, a private call not",
+         %{clock: clock} do
+      registry = start_capability_registry()
+      chat = start_session(clock: clock, prompt: nil, capability_registry: registry)
+      :ok = SessionControl.call_start(chat)
+      [%{type: "session.start", session: chat_start}] = FakeLiveClient.events()
+      end_call(chat)
+
+      private =
+        start_session(
+          clock: clock,
+          prompt: nil,
+          capability_registry: registry,
+          config: live_config(conversation: "private")
+        )
+
+      :ok = SessionControl.call_start(private)
+
+      %{session: private_start} =
+        FakeLiveClient.events() |> Enum.filter(&(&1.type == "session.start")) |> List.last()
+
+      assert chat_start.instructions =~ "in the owner's chat"
+      refute private_start.instructions =~ "in the owner's chat"
     end
 
     test "a v1-shaped realtime key never appears in any Live payload", %{clock: clock} do
@@ -324,25 +479,196 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # M56 §4.3 (D5, D6): a call in the chat's conversation starts with the chat
+  # as `session.input`, read through the bridge before `session.start`.
+  describe "what a call starts with" do
+    test "a chat call's session.start carries what the bridge reads of the chat", %{
+      clock: clock
+    } do
+      window = %{
+        messages: [
+          %{role: "user", content: "here is the lease: https://x.test/lease"},
+          %{role: "assistant", content: "Got it."}
+        ],
+        gists: [
+          %{
+            gist: "Booked the dentist.",
+            tainted: false,
+            started_at: "2026-10-02T09:00:00.000000Z"
+          }
+        ]
+      }
+
+      FakeBridge.set_window({:ok, window})
+      session = start_session(clock: clock)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_received {:bridge_window, %{messages: 6, gists: 3}}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      assert payload.input == LiveChat.input(window)
+
+      assert Enum.map(payload.input, & &1.role) ==
+               ~w(developer user assistant developer)
+    end
+
+    test "an empty chat sends no session.input", %{clock: clock} do
+      session = start_session(clock: clock)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_received {:bridge_window, _bounds}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      refute Map.has_key?(payload, :input)
+    end
+
+    # M56 §5: a private call is kept apart from the chat, in both directions.
+    test "a private call reads nothing of the chat and sends no input", %{clock: clock} do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+
+      :ok = SessionControl.call_start(session)
+
+      refute_received {:bridge_window, _bounds}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      refute Map.has_key?(payload, :input)
+    end
+
+    # The same as a LIVE.md that cannot be read: the call does not start on
+    # half of what it was meant to know, and the reason is on the frame.
+    test "a chat the bridge cannot read refuses the call before any socket opens", %{
+      clock: clock
+    } do
+      FakeBridge.set_window({:error, :store_unavailable})
+      session = start_session(clock: clock)
+
+      assert {:error, :store_unavailable} = SessionControl.call_start(session)
+
+      assert_receive {:realtime, %{type: "error", reason: "store_unavailable"}}
+      assert FakeLiveClient.events() == []
+    end
+
+    # M56 §8: one retry without the input, logged; the call proceeds. Before
+    # `session.started` only `session.start` has been sent, and the provider's
+    # error names the field it refused in `param`.
+    test "a start refused over its input is sent once more without it", %{clock: clock} do
+      scope = "voice_live:input_#{System.unique_integer([:positive, :monotonic])}"
+      attach_provider_error_handler(scope)
+
+      FakeBridge.set_window(
+        {:ok, %{messages: [%{role: "user", content: "the lease"}], gists: []}}
+      )
+
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      [%{type: "session.start", session: first}] = FakeLiveClient.events()
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.input[0].content")}})
+      sync(session)
+
+      assert [_first, %{type: "session.start", session: second}] = FakeLiveClient.events()
+      refute Map.has_key?(second, :input)
+      assert second.instructions == first.instructions
+
+      # Logged with the field and the code, never the vendor's message, which
+      # may quote the chat text it refused.
+      assert_receive {:provider_error, %{reason: reason}}
+      assert reason =~ "session.input"
+      refute reason =~ "the lease"
+
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready"}}
+    end
+
+    test "a second refusal over the input is not retried again", %{clock: clock} do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.input")}})
+      send(session, {:openai_live_event, {:error, input_refusal("session.input")}})
+      sync(session)
+
+      assert [%{type: "session.start"}, %{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    test "a refusal naming any other field, or of a start with no input, is not retried", %{
+      clock: clock
+    } do
+      FakeBridge.set_window({:ok, %{messages: [%{role: "user", content: "x"}], gists: []}})
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      send(session, {:openai_live_event, {:error, input_refusal("session.audio.output.voice")}})
+      send(session, {:openai_live_event, {:error, input_refusal("session.input_audio")}})
+      sync(session)
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+
+      end_call(session)
+      FakeBridge.set_window({:ok, %{messages: [], gists: []}})
+      bare = start_session(clock: clock)
+      :ok = SessionControl.call_start(bare)
+
+      send(bare, {:openai_live_event, {:error, input_refusal("session.input")}})
+      sync(bare)
+      assert Enum.count(FakeLiveClient.events(), &(&1.type == "session.start")) == 2
+    end
+
+    test "call_start says how large the instructions and the input are, never what", %{
+      clock: clock
+    } do
+      scope = "voice_live:sizes_#{System.unique_integer([:positive, :monotonic])}"
+      attach_call_start_handler([scope])
+      window = %{messages: [%{role: "user", content: "a private link"}], gists: []}
+      FakeBridge.set_window({:ok, window})
+      session = start_session(clock: clock, session_scope: scope)
+
+      :ok = SessionControl.call_start(session)
+
+      assert_receive {:call_start, metadata}
+      [%{type: "session.start", session: payload}] = FakeLiveClient.events()
+      assert metadata.instructions_bytes == byte_size(payload.instructions)
+      assert %{input_items: 2, input_bytes: input_bytes} = metadata
+      assert input_bytes == LiveChat.input_size(payload.input).input_bytes
+      refute inspect(metadata) =~ "private link"
+    end
+  end
+
   describe "session.started" do
     test "announces call_ready then listening and opens the bridge call", %{clock: clock} do
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
 
-      assert_receive {:bridge_open_call, %{call_id: call_id, persist?: false}}
+      assert_receive {:bridge_open_call, %{call_id: call_id, persist?: false} = call}
 
       assert_receive {:realtime,
                       %{
                         type: "call_ready",
                         engine: "openai_live",
                         call_id: ^call_id,
+                        conversation: "chat",
                         provider_session_id: "sess_live_1",
                         expires_at: 1_060,
                         captions: true
                       }}
 
       assert_receive {:realtime, %{type: "state", state: "listening"}}
+
+      # The bridge is told the call's durable identity and, the setting being
+      # unset, that its hand-offs join the chat (M56 §4.1, §5).
+      assert call.call_uuid == :sys.get_state(session).call_uuid
+      assert call.conversation == "chat"
+    end
+
+    test "a private call opens its bridge call as private", %{clock: clock} do
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, config: config)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert_receive {:bridge_open_call, %{conversation: "private"}}
+      assert_receive {:realtime, %{type: "call_ready", conversation: "private"}}
     end
 
     test "expires_at shorter than max_session_minutes wins", %{clock: clock} do
@@ -359,6 +685,765 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       start_provider_session(session, expires_at: 99_999)
 
       assert :sys.get_state(session).max_duration_ms == 15 * 60_000
+    end
+  end
+
+  describe "call identity" do
+    test "one UUID names the call on call_ready, every task and every usage frame", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: uuid}}
+      assert uuid =~ @uuid_v4
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_1", status: "running", call_uuid: ^uuid}}
+
+      assert :ok = SessionControl.call_stop(session)
+
+      # The frame that hands the running task over to the chat (M56 §4.6).
+      assert_receive {:realtime, %{type: "task", detached: true, call_uuid: ^uuid}}
+      assert_receive {:realtime, %{type: "usage", accounting: "complete", call_uuid: ^uuid}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    test "each call mints its own UUID and keeps the counter as its trace session id", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      first_scope = "voice_live:identity_#{System.unique_integer([:positive, :monotonic])}"
+      second_scope = "voice_live:identity_#{System.unique_integer([:positive, :monotonic])}"
+      attach_call_start_handler([first_scope, second_scope])
+
+      first = start_session(clock: clock, session_scope: first_scope)
+      :ok = SessionControl.call_start(first)
+      assert_receive {:call_start, %{session_id: ^first_scope, call_uuid: first_uuid}}
+      :ok = SessionControl.call_stop(first)
+      assert_receive {:EXIT, ^first, {:shutdown, :call_stop}}
+
+      second = start_session(clock: clock, session_scope: second_scope)
+      :ok = SessionControl.call_start(second)
+      assert_receive {:call_start, %{session_id: ^second_scope, call_uuid: second_uuid}}
+
+      assert first_uuid =~ @uuid_v4
+      assert second_uuid =~ @uuid_v4
+      refute first_uuid == second_uuid
+    end
+  end
+
+  describe "one call per daemon" do
+    test "the call is in the registry under its UUID while it is up, and gone after", %{
+      clock: clock
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: uuid}}
+
+      assert CallRegistry.lookup(@call_registry, uuid) == {:ok, session}
+
+      assert {:ok, %{call_uuid: ^uuid, conversation: "chat", session: ^session}} =
+               CallRegistry.active(@call_registry)
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert CallRegistry.lookup(@call_registry, uuid) == :none
+      assert CallRegistry.active(@call_registry) == :none
+    end
+
+    # M56 §4.4: whoever reads the call in progress tells a call in the chat
+    # from a private one, and when it started, without asking the session.
+    test "the claim names the call's conversation and its start", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      before = DateTime.utc_now()
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+
+      assert {:ok, %{conversation: "private", started_at: started_at, session: ^session}} =
+               CallRegistry.active(@call_registry)
+
+      assert DateTime.compare(started_at, before) in [:gt, :eq]
+      assert DateTime.compare(started_at, DateTime.utc_now()) in [:lt, :eq]
+      end_call(session)
+    end
+
+    test "a second session is refused while a call is up", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      first = start_session(clock: clock)
+      :ok = SessionControl.call_start(first)
+      start_provider_session(first)
+
+      assert {:error, :call_in_progress} =
+               LiveSessionServer.start_link(session_opts(clock: clock))
+
+      # The refused start touched nothing of the call that is up.
+      assert {:ok, %{session: ^first}} = CallRegistry.active(@call_registry)
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    test "a second session is refused while the first is still settling", %{clock: clock} do
+      Process.flag(:trap_exit, true)
+      first = start_session(clock: clock, close_deadline_ms: 5_000)
+      :ok = SessionControl.call_start(first)
+      start_provider_session(first)
+      FakeLiveClient.silence_close()
+
+      stopper = Task.async(fn -> SessionControl.call_stop(first) end)
+
+      # `idle` is the first thing a settle does; the settle then waits for
+      # `session.closed`, which the provider has not sent.
+      assert_receive {:realtime, %{type: "state", state: "idle"}}
+
+      assert {:error, :call_in_progress} =
+               LiveSessionServer.start_link(session_opts(clock: clock))
+
+      send(first, {:openai_live_event, {:session_closed, "close_requested", 10.0}})
+      assert :ok = Task.await(stopper)
+      assert_receive {:EXIT, ^first, {:shutdown, :call_stop}}
+
+      second = start_session(clock: clock)
+      assert {:ok, %{session: ^second}} = CallRegistry.active(@call_registry)
+    end
+  end
+
+  describe "the call record" do
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-record-#{unique}.db")
+      repo = :"live_record_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      %{repo: repo}
+    end
+
+    # `persist_transcripts` is off here: it gates verbatim captions, not this.
+    test "a call writes its record, every task state, and closes before the final usage", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+
+      assert {:ok, %{engine: "openai_live", ended_at: nil, tasks: [], started_at: started_at}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      # The record starts when the claim does: the call has one start.
+      assert {:ok, %{started_at: claimed_at}} = CallRegistry.active(@call_registry)
+      assert {:ok, ^claimed_at, 0} = DateTime.from_iso8601(started_at)
+
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      # The fake bridge reports the submit from inside it, before the session
+      # writes the task as running: wait for the session to finish the event.
+      sync(session)
+
+      assert record_tasks(repo, uuid) == [
+               %{
+                 "task_id" => "dg_1",
+                 "revision" => 1,
+                 "state" => "running",
+                 "request" => "user: book the room",
+                 "summary" => nil
+               }
+             ]
+
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 4_400}})
+      send(session, {:openai_live_event, {:delegation_created, "dg_3", 4_600}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_3", status: "failed"}}
+
+      assert task_states(record_tasks(repo, uuid)) ==
+               [{"dg_1", "running"}, {"dg_2", "created"}, {"dg_3", "failed"}]
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:realtime, %{type: "usage", accounting: "complete", voice_cost_cents: cost}}
+
+      # Written before that frame went out, from the same settled ledger.
+      assert {:ok, record} = Repo.get_voice_call(uuid, server: repo)
+      assert %{end_reason: "call_stop", accounting: "complete", voice_cost_cents: ^cost} = record
+      assert is_binary(record.ended_at)
+
+      # A call in the chat hands the task still running over (M56 §4.6).
+      assert task_states(record.tasks) ==
+               [{"dg_1", "completed"}, {"dg_2", "detached"}, {"dg_3", "failed"}]
+
+      assert Enum.map(record.tasks, & &1["summary"]) ==
+               ["The room is booked for 10am.", "The result will be in the chat.", "busy"]
+
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    # M56 §5: a private call is kept apart from the chat, and its record keeps
+    # the states and summaries only, never the words.
+    test "a private call's record keeps no request words", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, record_repo: repo, config: config)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      assert [
+               %{
+                 "task_id" => "dg_1",
+                 "state" => "completed",
+                 "request" => nil,
+                 "summary" => "The room is booked for 10am."
+               }
+             ] = record_tasks(repo, uuid)
+
+      end_call(session)
+    end
+
+    test "a call the daemon ends is closed with its reason and an unsettled bill", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo, close_deadline_ms: 20)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      uuid = :sys.get_state(session).call_uuid
+      FakeLiveClient.silence_close()
+
+      send(session, {:openai_live_disconnect, %{reason: {:remote, :closed}}})
+      assert_receive {:EXIT, ^session, {:shutdown, :provider_disconnected}}
+
+      assert {:ok, %{end_reason: "provider_disconnected", accounting: "incomplete"}} =
+               Repo.get_voice_call(uuid, server: repo)
+    end
+
+    # The stage's gate: a kill leaves a closed record with its tasks marked.
+    test "a call killed mid-task is closed by the next boot's sweep, its task failed", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      uuid = :sys.get_state(session).call_uuid
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      sync(session)
+
+      Process.exit(session, :kill)
+      assert_receive {:EXIT, ^session, :killed}
+
+      assert {:ok, %{ended_at: nil, tasks: [%{"state" => "running"}]}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      {:ok, sweep} = CallSweep.start_link(record_repo: repo)
+      ref = Process.monitor(sweep)
+      assert_receive {:DOWN, ^ref, :process, ^sweep, :normal}, 5_000
+
+      assert {:ok,
+              %{
+                end_reason: "daemon_restarted",
+                accounting: "incomplete",
+                voice_cost_cents: nil,
+                tasks: [
+                  %{
+                    "task_id" => "dg_1",
+                    "state" => "failed",
+                    "summary" => "daemon_restarted",
+                    "request" => "user: book the room"
+                  }
+                ]
+              }} = Repo.get_voice_call(uuid, server: repo)
+    end
+
+    test "a call the provider refused leaves no record", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+
+      session =
+        start_session(clock: clock, record_repo: repo, live_client: RefusingLiveClient)
+
+      uuid = :sys.get_state(session).call_uuid
+
+      assert {:error, :provider_refused} = SessionControl.call_start(session)
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert Repo.get_voice_call(uuid, server: repo) == {:error, :not_found}
+    end
+  end
+
+  # M56 §4.2: a call in the chat leaves a gist and one chat row. The record is
+  # closed with the settled cost and what the call owes first; the gist is
+  # made by a task the session never waits on; the row is written once the
+  # gist is made or has failed.
+  describe "the gist and the call's row" do
+    @gist "You asked to book the room and it is booked for 10am. Nothing is open."
+
+    setup do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-gist-#{unique}.db")
+      repo = :"live_gist_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+      original = Application.get_env(:fermix_core, :computer_history)
+
+      on_exit(fn ->
+        restore_core_env({:computer_history, if(original, do: {:ok, original}, else: :error)})
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      # History on, OpenAI not granted.
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+      %{repo: repo}
+    end
+
+    test "the record closes owing its gist and row, and the stop never waits on the gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      gist = gist_opts({:await, {:ok, %{content: @gist}}})
+      session = start_session(clock: clock, record_repo: repo, gist: gist)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      # The summariser is held: the stop still returns, and the session goes.
+      assert :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+      assert_receive {:awaiting_gist, summariser}
+
+      assert {:ok, %{voice_cost_cents: cost} = closed} = Repo.get_voice_call(uuid, server: repo)
+      assert is_number(cost)
+      assert %{gist_status: "pending", row_state: "row_pending"} = closed
+      refute_received {:bridge_show, %{"event" => "ended"}, _text}
+
+      # What it summarises is the snapshot the session took as it settled.
+      assert_received {:gist_call, [_system, %{content: content}], _opts}
+      assert content =~ "user: book the room"
+      assert content =~ "- completed: The room is booked for 10am."
+
+      send(summariser, :release)
+      assert_receive {:bridge_show, call, text}, 2_000
+
+      assert %{"uuid" => ^uuid, "event" => "ended", "gist_status" => "written"} = call
+      assert call["voice_cost_cents"] == cost
+      assert text == "Voice call, under a minute\n\n" <> @gist
+
+      assert %{gist: @gist, gist_tainted: false, row_state: "row_written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a gist that fails leaves the row its task list", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo, gist: gist_opts({:error, :busy}))
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended", "gist_status" => "failed"}, text}, 2_000
+      assert text == "Voice call, under a minute\n\n- Completed: The room is booked for 10am."
+      assert %{gist: nil} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call that said nothing writes its row alone, with no model call", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended", "gist_status" => "none"}, text}, 2_000
+      assert text == "Voice call, under a minute"
+      refute_received {:gist_call, _messages, _opts}
+      assert %{gist_status: "none"} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    # M56 §5: a private call leaves no gist and no row, and nothing of it is
+    # summarised.
+    test "a private call makes no gist and writes no row", %{clock: clock, repo: repo} do
+      Process.flag(:trap_exit, true)
+      config = live_config(conversation: "private")
+      session = start_session(clock: clock, record_repo: repo, config: config)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "book the room", 1_000, 4_000)
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert {:ok, %{gist_status: "none", row_state: "none", gist: nil}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      refute_receive {:gist_call, _messages, _opts}, 200
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    test "a call whose provider session never started writes no row", %{
+      clock: clock,
+      repo: repo
+    } do
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+
+      send(session, :start_deadline)
+      assert_receive {:EXIT, ^session, {:shutdown, :provider_refused}}
+
+      assert {:ok, %{end_reason: "provider_refused", gist_status: "none", row_state: "none"}} =
+               Repo.get_voice_call(uuid, server: repo)
+
+      refute_receive {:gist_call, _messages, _opts}, 200
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    # M56 §9: provenance follows derived text. Whatever drawn from Computer
+    # History reached the call (a task's reply, a mirrored answer, what it
+    # started with) marks its gist.
+    test "a reply drawn from Computer History marks the call's gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "what was I reading", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_show, %{"event" => "ended"}, _text}, 2_000
+
+      assert %{gist_tainted: true, gist_status: "written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "an answer drawn from Computer History mirrored into the call marks its gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+
+      answer = %{
+        role: "assistant",
+        content: "You were reading the Q3 report.",
+        history_tainted: true
+      }
+
+      :ok = LiveSessionServer.chat_answered(session, answer)
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: true} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call that started with content drawn from Computer History marks its gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+
+      FakeBridge.set_window(
+        {:ok,
+         %{
+           messages: [
+             %{
+               role: "assistant",
+               content: "You were reading the Q3 report.",
+               history_tainted: true
+             }
+           ],
+           gists: []
+         }}
+      )
+
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: true} = await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+
+    test "a call nothing drawn from Computer History reached leaves an unmarked gist", %{
+      clock: clock,
+      repo: repo
+    } do
+      grant_openai_history()
+      Process.flag(:trap_exit, true)
+      session = start_session(clock: clock, record_repo: repo)
+      :ok = SessionControl.call_start(session)
+      uuid = :sys.get_state(session).call_uuid
+      start_provider_session(session)
+      speak(session, "hello", 1_000, 2_000)
+      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved."})
+      :ok = SessionControl.call_stop(session)
+
+      assert %{gist_tainted: false, gist_status: "written"} =
+               await_record(repo, uuid, &(&1.row_state == "row_written"))
+    end
+  end
+
+  defp grant_openai_history do
+    Application.put_env(:fermix_core, :computer_history,
+      enabled: true,
+      summarizer: :local,
+      remote_summaries: [:openai]
+    )
+  end
+
+  # M56 §4.6: a task still running when a call in the chat ends finishes into
+  # the chat. The session hands it over in order: the record says it is
+  # detached, the bridge's owner takes its route, then the call closes.
+  describe "a task that outlives its call" do
+    setup %{clock: clock} do
+      unique = System.unique_integer([:positive])
+      db_path = Path.join(System.tmp_dir!(), "fermix-live-detach-#{unique}.db")
+      repo = :"live_detach_repo_#{unique}"
+      start_supervised!({Repo, name: repo, enabled: true, database_path: db_path})
+
+      on_exit(fn ->
+        Enum.each([db_path, "#{db_path}-wal", "#{db_path}-shm"], &FermixTestSupport.SafeRm.rm/1)
+      end)
+
+      Process.flag(:trap_exit, true)
+      %{repo: repo, clock: clock}
+    end
+
+    test "call_ready says a call in the chat's tasks outlive it, a private call's not", ctx do
+      session = start_session(clock: ctx.clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", tasks_outlive_call: true}}
+      end_call(session)
+
+      private = start_session(clock: ctx.clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(private)
+      start_provider_session(private)
+      assert_receive {:realtime, %{type: "call_ready", tasks_outlive_call: false}}
+      end_call(private)
+    end
+
+    test "the running task is handed over, not cancelled, before the call closes", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      Agent.update(ctx.clock, fn _now -> 7_000 end)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_detach, {:task, "dg_1"}, task}
+
+      assert %{
+               delegation_id: "dg_1",
+               revision: 1,
+               request: "user: book the room",
+               elapsed_ms: 7_000,
+               record_opts: record_opts
+             } = task
+
+      assert task.turn_session_id =~ ~r/^voice_delegation_\d+$/
+      assert Keyword.get(record_opts, :server) == ctx.repo
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_1",
+                        status: "running",
+                        detached: true,
+                        summary: "The result will be in the chat."
+                      }}
+
+      assert_receive {:bridge_close_call, _handle}
+      assert_receive {:realtime, %{type: "usage", accounting: "complete"}}
+      refute_received {:bridge_cancel, _task_ref}
+      refute_received {:realtime, %{type: "task", delegation_id: "dg_1", status: "cancelled"}}
+
+      assert [%{"state" => "detached", "destination" => "chat"}] = record_tasks(ctx.repo, uuid)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+    end
+
+    test "the voice is told once, before the call closes, that the work goes on in the chat",
+         ctx do
+      session = start_session(clock: ctx.clock)
+      running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      events = FakeLiveClient.events()
+      close = Enum.find_index(events, &(&1.type == "session.close"))
+
+      told =
+        events
+        |> Enum.with_index()
+        |> Enum.filter(fn {event, _index} ->
+          event.type == "session.thinking.append" and event.delegation_id == nil and
+            event.content =~ "in the owner's chat"
+        end)
+
+      assert [{line, index}] = told
+      assert index < close
+      assert byte_size(line.content) <= 1_200
+    end
+
+    test "nothing running at the end tells the voice nothing", ctx do
+      session = start_session(clock: ctx.clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      end_call(session)
+
+      refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.thinking.append"))
+      refute_received {:bridge_detach, _ref, _task}
+    end
+
+    test "a waiting task whose words were heard is started behind it and handed over", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      speak(session, "and find parking", 4_300, 5_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 5_200}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "pending"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: text}}
+      assert text =~ "find parking"
+      assert_receive {:bridge_detach, {:task, "dg_2"}, %{delegation_id: "dg_2"}}
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", detached: true}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert task_states(record_tasks(ctx.repo, uuid)) ==
+               [{"dg_1", "detached"}, {"dg_2", "detached"}]
+    end
+
+    test "a waiting task whose words were not heard is dropped and reads as dropped", ctx do
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+      # Raised long after the owner last spoke: nothing heard asked for it.
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 90_000}})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", status: "pending"}}
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_2", status: "failed", summary: summary}}
+
+      assert summary =~ "Dropped"
+      refute_received {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert [_first, %{"task_id" => "dg_2", "state" => "failed", "summary" => ^summary}] =
+               record_tasks(ctx.repo, uuid)
+    end
+
+    test "a task its owner will not take is cancelled as before, its reason recorded", ctx do
+      FakeBridge.set_detach({:error, :full})
+      session = start_session(clock: ctx.clock, record_repo: ctx.repo)
+      %{uuid: uuid} = running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+
+      assert_receive {:realtime,
+                      %{type: "task", delegation_id: "dg_1", status: "cancelled", summary: reason}}
+
+      assert reason =~ "Not kept after the call"
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+
+      assert [%{"state" => "cancelled", "summary" => ^reason}] = record_tasks(ctx.repo, uuid)
+      refute Enum.any?(FakeLiveClient.events(), &(&1.type == "session.thinking.append"))
+    end
+
+    # A reply that reached the session as it settled, before its route was
+    # released, never becomes a spoken result: the session hands it on.
+    test "a reply that reaches the session as it settles goes to the task's new owner", ctx do
+      FakeLiveClient.silence_close()
+      session = start_session(clock: ctx.clock, close_deadline_ms: 300)
+      running_task(session)
+
+      # The stop answers once the session is gone, so it is asked from aside
+      # while the reply lands; the session is waiting for `session.closed`.
+      stop = Task.async(fn -> SessionControl.call_stop(session) end)
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Parking is north."})
+
+      assert :ok = Task.await(stop, 2_000)
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}, 2_000
+      assert_receive {:forwarded, {:task, "dg_1"}, :history_tainted}
+      assert_receive {:forwarded, {:task, "dg_1"}, {:result, {:ok, "Parking is north."}}}
+      assert commentary("dg_1") == []
+      refute_received {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+    end
+
+    test "a private call cancels its running task as before", ctx do
+      session = start_session(clock: ctx.clock, config: live_config(conversation: "private"))
+      running_task(session)
+
+      :ok = SessionControl.call_stop(session)
+
+      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "cancelled"}}
+      refute_received {:bridge_detach, _ref, _task}
+      assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
     end
   end
 
@@ -471,6 +1556,213 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
   end
 
+  # M56 §4.1: in the chat's conversation the request a hand-off persists is the
+  # exchange since the previous hand-off, speaker labelled and bounded, not the
+  # overlapping 30 second window; one text is sent and recorded. A private call
+  # keeps today's window, and its record keeps no words (M56 §5).
+  describe "the request a hand-off sends" do
+    test "in the chat it is the exchange since the previous hand-off", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1", text: first}}
+      assert first == "user: book the room"
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked for ten."})
+
+      send(
+        session,
+        {:openai_live_event, {:transcript_delta, :assistant, "booked ", 5_000, 6_000}}
+      )
+
+      speak(session, "and email Ana", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+
+      # The 30 second window would repeat "book the room"; the exchange does not.
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: second}}
+      assert second == "assistant: booked \nuser: and email Ana"
+    end
+
+    # Live can raise two tasks from one sentence. The second has no word of
+    # the owner's after the first went out, and a request without the words
+    # that asked for it is no request (an empty user turn is refused by a
+    # provider), so it is sent the window a private call reads.
+    test "a second hand-off from the same sentence is sent that sentence", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room and email Ana", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 4_400}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+
+      send(session, {:openai_live_event, {:transcript_delta, :assistant, "on it", 4_500, 5_000}})
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked."})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: text}}
+      assert text == "user: book the room and email Ana\nassistant: on it"
+    end
+
+    test "a long exchange is cut from the front to 4 KB behind a marker", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, String.duplicate("blah ", 1_000), 1_000, 20_000)
+      speak(session, "use that link", 20_000, 21_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 21_200}})
+
+      assert_receive {:bridge_submit, _handle, %{text: text}}
+      assert byte_size(text) <= 4_096
+      assert String.starts_with?(text, LiveText.cut_marker())
+      assert String.ends_with?(text, "use that link")
+    end
+
+    test "a private call sends the 30 second window, as before", %{clock: clock} do
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "Booked for ten."})
+
+      speak(session, "and email Ana", 8_000, 9_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_2", 9_200}})
+
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2", text: second}}
+      # Fragments of one speaker join verbatim, as they always have.
+      assert second == "user: book the roomand email Ana"
+    end
+  end
+
+  # M56 §4.3: a message typed in the chat during a call, and its answer, reach
+  # the voice model as session-wide quiet context, so "use that link" said
+  # aloud has something to hand off. Channels finds the call and casts here.
+  describe "the chat mirrored into a call" do
+    test "a typed message and its answer are thinking appends for the whole session", %{
+      clock: clock
+    } do
+      session = listening_session(clock)
+
+      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
+      :ok = LiveSessionServer.chat_answered(session, %{role: "assistant", content: "Saved it."})
+      sync(session)
+
+      assert [typed, answered] = Enum.filter(FakeLiveClient.events(), &mirror?/1)
+
+      assert %{
+               delegation_id: nil,
+               content: "The owner typed in the chat: use https://x.test/lease"
+             } = typed
+
+      assert %{delegation_id: nil, content: "Fermix answered in the chat: Saved it."} = answered
+
+      # Tracked like every other append, so a refusal of it is explained.
+      pending = :sys.get_state(session).pending_appends
+      assert {answered.event_id, :thinking, nil} in pending
+    end
+
+    test "an answer drawn from Computer History never reaches the voice", %{clock: clock} do
+      session = listening_session(clock)
+
+      tainted = %{
+        role: "assistant",
+        content: "You were reading the Q3 report.",
+        history_tainted: true
+      }
+
+      :ok = LiveSessionServer.chat_answered(session, tainted)
+      sync(session)
+
+      assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
+    end
+
+    test "nothing is mirrored before the provider session is up", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      :ok = LiveSessionServer.chat_typed(session, "too early")
+      sync(session)
+
+      assert [%{type: "session.start"}] = FakeLiveClient.events()
+    end
+
+    # M56 §4.4: a private call gets no mirror; the chat does not know it exists.
+    test "nothing is mirrored into a private call", %{clock: clock} do
+      session = listening_session(clock, config: live_config(conversation: "private"))
+
+      :ok = LiveSessionServer.chat_typed(session, "use https://x.test/lease")
+      sync(session)
+
+      assert Enum.filter(FakeLiveClient.events(), &mirror?/1) == []
+    end
+  end
+
+  # M56 §4.4: what a typed chat turn reads of the call in progress
+  # (`voice_call_context`), from the session that holds it.
+  describe "the call's context" do
+    test "names the start, the time since, the tasks and everything said", %{clock: clock} do
+      session = listening_session(clock)
+      {:ok, %{started_at: started_at}} = CallRegistry.active(@call_registry)
+
+      speak(session, "book the room", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+      Agent.update(clock, fn _ms -> 372_000 end)
+
+      assert {:ok, context} = LiveSessionServer.call_context(session, 1_000)
+
+      assert context.started_at == started_at
+      assert context.elapsed_ms == 372_000
+
+      assert [
+               %{
+                 "task_id" => "dg_1",
+                 "revision" => 1,
+                 "state" => "completed",
+                 "summary" => "The room is booked for 10am."
+               }
+             ] = context.tasks
+
+      assert CallSpeech.text(context.speech) == "user: book the room"
+    end
+
+    # The 128-fragment window a hand-off reads forgets the start of a long
+    # call; what the call said is kept whole, up to its byte bound.
+    test "keeps the whole call, not the hand-off window", %{clock: clock} do
+      session = listening_session(clock)
+
+      for index <- 1..200 do
+        send(
+          session,
+          {:openai_live_event,
+           {:transcript_delta, :user, " word#{index}", index * 100, index * 100 + 50}}
+        )
+      end
+
+      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert CallSpeech.text(speech) =~ ~r/^user:  word1 word2 .* word200$/
+      assert length(LiveTranscript.fragments(:sys.get_state(session).transcript)) == 128
+    end
+
+    # M56 §10: `conversation = "private"` is today's behaviour, so a private
+    # call keeps nothing of what was said beyond the hand-off window.
+    test "a private call keeps no call-long speech", %{clock: clock} do
+      session = listening_session(clock, config: live_config(conversation: "private"))
+      speak(session, "a private aside", 1_000, 2_000)
+
+      assert {:ok, %{speech: speech}} = LiveSessionServer.call_context(session, 1_000)
+      assert CallSpeech.text(speech) == ""
+    end
+  end
+
   describe "delegations" do
     setup %{clock: clock} do
       session = start_session(clock: clock)
@@ -524,8 +1816,10 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
     end
 
     test "a delegation before sufficient context waits once then asks for a repeat", %{
-      clock: clock
+      clock: clock,
+      session: setup_call
     } do
+      end_call(setup_call)
       session = start_session(clock: clock, context_wait_ms: 10)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
@@ -552,7 +1846,11 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
              )
     end
 
-    test "a delegation whose context lands during the wait is submitted", %{clock: clock} do
+    test "a delegation whose context lands during the wait is submitted", %{
+      clock: clock,
+      session: setup_call
+    } do
+      end_call(setup_call)
       session = start_session(clock: clock, context_wait_ms: 50)
       :ok = SessionControl.call_start(session)
       start_provider_session(session)
@@ -681,6 +1979,219 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
 
       assert FakeBridge.cancels() == []
       assert :sys.get_state(session).delegations.active.id == "dg_1"
+    end
+  end
+
+  # M56 §4.5: what cannot be said aloud is written to the chat while the voice
+  # says the short version, and the task frame names the row. §9: a reply drawn
+  # from Computer History reaches the voice only when OpenAI may carry it.
+  describe "a result shown in the chat" do
+    @delimiter LiveText.shown_delimiter()
+    @in_chat "The full result is in the chat."
+
+    setup %{clock: clock} do
+      original = Application.fetch_env(:fermix_core, :computer_history)
+      on_exit(fn -> restore_core_env({:computer_history, original}) end)
+      # History on, OpenAI not granted: the voice may not carry a tainted reply.
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+
+      scope = "voice_live:shown_#{System.unique_integer([:positive, :monotonic])}"
+      attach_delegation_stop_handler(scope)
+      session = start_session(clock: clock, session_scope: scope)
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      assert_receive {:realtime, %{type: "call_ready", call_uuid: call_uuid}}
+      speak(session, "find the sign-up form", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, _request}
+      %{session: session, call_uuid: call_uuid}
+    end
+
+    test "the line before the delimiter is said and the rest is shown once, at its row", ctx do
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, call, "It is at https://x.test/form."}
+
+      assert call == %{
+               "uuid" => ctx.call_uuid,
+               "event" => "shared",
+               "task_id" => "dg_1",
+               "revision" => 1
+             }
+
+      assert_receive {:realtime,
+                      %{
+                        type: "task",
+                        delegation_id: "dg_1",
+                        status: "completed",
+                        summary: "I found the form.",
+                        server_seq: 42
+                      }}
+
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == "I found the form. " <> @in_chat
+      refute_received {:bridge_show, _call, _text}
+    end
+
+    test "with no delimiter a link is said in a sentence and the whole reply is shown", ctx do
+      reply = "The form is at https://x.test/form. It asks for a name. And a city."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, _call, ^reply}
+      assert_receive {:realtime, %{type: "task", status: "completed", server_seq: 42}}
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == reply <> " " <> @in_chat
+      sync(ctx.session)
+    end
+
+    test "a short plain reply is said only: nothing is shown and no row is named", ctx do
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "The room is booked for 10am."})
+
+      assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+      refute Map.has_key?(task, :server_seq)
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: "The room is booked for 10am."}] = commentary("dg_1")
+      sync(ctx.session)
+    end
+
+    # Never say it is in the chat when it is not.
+    test "a write that fails is logged and the line is said as it was, with no row named" do
+      FakeBridge.set_show({:error, :disk_full})
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+          assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+          refute Map.has_key?(task, :server_seq)
+          assert task.summary == "I found the form."
+        end)
+
+      assert log =~ "could not be shown in the chat"
+      assert log =~ "disk_full"
+      assert [%{content: "I found the form."}] = commentary("dg_1")
+    end
+
+    test "the delegation's stop event names the row and its size, never its text", ctx do
+      reply = "I found the form.\n#{@delimiter}\nIt is at https://x.test/form."
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:delegation_stop, metadata}
+      assert metadata.server_seq == 42
+      assert metadata.shown_bytes == byte_size("It is at https://x.test/form.")
+      refute inspect(metadata) =~ "x.test"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is shown whole and the voice says only where",
+         ctx do
+      reply = "You were on the form.\n#{@delimiter}\nIt was https://x.test/form."
+
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:bridge_show, _call, shown}
+      assert shown == "You were on the form.\n\nIt was https://x.test/form."
+
+      assert_receive {:realtime,
+                      %{type: "task", summary: "The result is in the chat.", server_seq: 42}}
+
+      assert [%{content: "The result is in the chat."}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "x.test"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History that cannot be shown is not said either", ctx do
+      FakeBridge.set_show({:error, :disk_full})
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        :ok = FakeBridge.fire_tainted("dg_1")
+        :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+        assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+        assert task.summary == "The result could not be put in the chat."
+      end)
+
+      assert [%{content: "The result could not be put in the chat."}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "Q3"
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is said when OpenAI is granted history", ctx do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+
+      assert_receive {:realtime, %{type: "task", summary: "You were reading the Q3 report."}}
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: "You were reading the Q3 report."}] = commentary("dg_1")
+      sync(ctx.session)
+    end
+
+    test "the mark ends with its task: the next task's reply is said as any other", ctx do
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "completed"}}
+
+      speak(ctx.session, "and book the room", 5_000, 6_000)
+      send(ctx.session, {:openai_live_event, {:delegation_created, "dg_2", 6_200}})
+      assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_2"}}
+      :ok = FakeBridge.fire("dg_2", :result, {:ok, "The room is booked."})
+
+      assert_receive {:realtime, %{type: "task", delegation_id: "dg_2", summary: summary}}
+      assert summary == "The room is booked."
+    end
+  end
+
+  # A private call shows nothing (M56 §5): every reply is spoken, cut to a
+  # sentence, as before.
+  describe "a result on a private call" do
+    setup %{clock: clock} do
+      original = Application.fetch_env(:fermix_core, :computer_history)
+      on_exit(fn -> restore_core_env({:computer_history, original}) end)
+      Application.put_env(:fermix_core, :computer_history, enabled: true, summarizer: :local)
+
+      session = start_session(clock: clock, config: live_config(conversation: "private"))
+      :ok = SessionControl.call_start(session)
+      start_provider_session(session)
+      speak(session, "find the sign-up form", 1_000, 4_000)
+      send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+      assert_receive {:bridge_submit, _handle, _request}
+      %{session: session}
+    end
+
+    test "a reply with a link is said cut to a sentence and nothing is shown", ctx do
+      reply = "The form is at https://x.test/form. " <> String.duplicate("It asks a lot. ", 200)
+
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, reply})
+
+      assert_receive {:realtime, %{type: "task", status: "completed"} = task}
+      refute Map.has_key?(task, :server_seq)
+      assert task.summary == LiveText.summary(reply, 240)
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: spoken}] = commentary("dg_1")
+      assert spoken == LiveText.sentence(reply, 1_500)
+      sync(ctx.session)
+    end
+
+    test "a reply drawn from Computer History is neither said nor shown", ctx do
+      :ok = FakeBridge.fire_tainted("dg_1")
+      :ok = FakeBridge.fire("dg_1", :result, {:ok, "You were reading the Q3 report."})
+
+      assert_receive {:realtime, %{type: "task", status: "completed", summary: summary}}
+      assert summary =~ "computer history"
+      refute_received {:bridge_show, _call, _text}
+      assert [%{content: ^summary}] = commentary("dg_1")
+      refute inspect(FakeLiveClient.events()) =~ "Q3"
+      sync(ctx.session)
     end
   end
 
@@ -1128,7 +2639,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert :ok = SessionControl.call_stop(session)
 
       assert_receive {:realtime, %{type: "state", state: "idle"}}
-      assert_receive {:bridge_cancel, {:task, "dg_1"}}
+      assert_receive {:bridge_detach, {:task, "dg_1"}, _task}
       assert_receive {:bridge_close_call, _handle}
 
       assert_receive {:realtime,
@@ -1263,6 +2774,42 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   ## Helpers
 
   defp start_session(opts) do
+    {:ok, session} = LiveSessionServer.start_link(session_opts(opts))
+
+    # A session settles its call in `terminate/2`, which runs as the test
+    # process exits. Registered AFTER the bridge's own cleanup, so it runs
+    # BEFORE it (on_exit is LIFO): the fakes outlive the call they served.
+    on_exit(fn -> await_down(session) end)
+    session
+  end
+
+  defp record_tasks(repo, uuid) do
+    {:ok, %{tasks: tasks}} = Repo.get_voice_call(uuid, server: repo)
+    tasks
+  end
+
+  defp task_states(tasks), do: Enum.map(tasks, &{&1["task_id"], &1["state"]})
+
+  # A call in progress with one task submitted and running.
+  defp running_task(session) do
+    :ok = SessionControl.call_start(session)
+    start_provider_session(session)
+    speak(session, "book the room", 1_000, 4_000)
+    send(session, {:openai_live_event, {:delegation_created, "dg_1", 4_200}})
+    assert_receive {:bridge_submit, _handle, %{delegation_id: "dg_1"}}
+    assert_receive {:realtime, %{type: "task", delegation_id: "dg_1", status: "running"}}
+    %{uuid: :sys.get_state(session).call_uuid}
+  end
+
+  # One call per daemon: a test that needs a session of its own first ends the
+  # call its describe's setup started.
+  defp end_call(session) do
+    Process.flag(:trap_exit, true)
+    :ok = SessionControl.call_stop(session)
+    assert_receive {:EXIT, ^session, {:shutdown, :call_stop}}
+  end
+
+  defp session_opts(opts) do
     config = Keyword.get(opts, :config) || live_config()
 
     defaults = [
@@ -1273,23 +2820,18 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       session_scope: "voice_live:#{System.unique_integer([:positive, :monotonic])}",
       live_client: FakeLiveClient,
       voice_bridge: FakeBridge,
+      call_registry: @call_registry,
       prompt: "# LIVE.md\n\nBackend tools:\n- Web: web_search",
-      unix_clock: fn -> 1_000 end
+      unix_clock: fn -> 1_000 end,
+      # Every session in this suite makes its gist on a fake: none ever calls
+      # a real provider.
+      gist: gist_opts({:ok, %{content: "You talked about the room."}})
     ]
 
-    session_opts =
-      defaults
-      |> Keyword.merge(opts)
-      |> Keyword.update!(:clock, fn agent -> fn -> Agent.get(agent, & &1) end end)
-      |> Keyword.put(:config, config)
-
-    {:ok, session} = LiveSessionServer.start_link(session_opts)
-
-    # A session settles its call in `terminate/2`, which runs as the test
-    # process exits. Registered AFTER the bridge's own cleanup, so it runs
-    # BEFORE it (on_exit is LIFO): the fakes outlive the call they served.
-    on_exit(fn -> await_down(session) end)
-    session
+    defaults
+    |> Keyword.merge(opts)
+    |> Keyword.update!(:clock, fn agent -> fn -> Agent.get(agent, & &1) end end)
+    |> Keyword.put(:config, config)
   end
 
   # The session emits from its OWN process, so the handler cannot filter on
@@ -1304,6 +2846,79 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       [:fermix, :voice_live, :provider_error],
       fn _event, _measurements, metadata, _config ->
         if metadata.session_id == call_id, do: send(test_pid, {:provider_error, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok
+  end
+
+  # Pinned to this call's id, for the same reason as the handler above.
+  defp attach_delegation_stop_handler(call_id) do
+    handler_id = "live-session-delegation-stop-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :voice_live, :delegation_stop],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.session_id == call_id, do: send(test_pid, {:delegation_stop, metadata})
+      end,
+      nil
+    )
+
+    on_exit(fn -> :telemetry.detach(handler_id) end)
+    :ok
+  end
+
+  @gist_route %{
+    provider: :openai,
+    model: "gpt-test",
+    auth_mode: :api_key,
+    base_url: "https://api.openai.com/v1"
+  }
+
+  defp gist_opts(answer),
+    do: [routes: [{@gist_route, [adapter: GistAdapter, test_pid: self(), answer: answer]}]]
+
+  # The gist and the row are written by a task after the session has gone; a
+  # bounded wait for the record to reach what the test expects.
+  defp await_record(repo, uuid, done?, tries \\ 100)
+
+  defp await_record(repo, uuid, _done?, 0) do
+    flunk("the record never settled: #{inspect(Repo.get_voice_call(uuid, server: repo))}")
+  end
+
+  defp await_record(repo, uuid, done?, tries) do
+    {:ok, record} = Repo.get_voice_call(uuid, server: repo)
+
+    if done?.(record) do
+      record
+    else
+      Process.sleep(20)
+      await_record(repo, uuid, done?, tries - 1)
+    end
+  end
+
+  # The commentary appends a delegation put on the Live wire: what the voice
+  # was given to say for it.
+  defp commentary(delegation_id) do
+    Enum.filter(FakeLiveClient.events(), fn event ->
+      event.type == "session.commentary.append" and event.delegation_id == delegation_id
+    end)
+  end
+
+  # Pinned to these calls' ids, for the same reason as the handler above.
+  defp attach_call_start_handler(call_ids) do
+    handler_id = "live-session-call-start-#{System.unique_integer([:positive])}"
+    test_pid = self()
+
+    :telemetry.attach(
+      handler_id,
+      [:fermix, :voice_live, :call_start],
+      fn _event, _measurements, metadata, _config ->
+        if metadata.session_id in call_ids, do: send(test_pid, {:call_start, metadata})
       end,
       nil
     )
@@ -1330,7 +2945,8 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       voice: "marin",
       max_session_minutes: 15,
       max_estimated_cost_cents_per_session: Keyword.get(opts, :cost_cents, 100),
-      persist_transcripts: Keyword.get(opts, :persist_transcripts, false)
+      persist_transcripts: Keyword.get(opts, :persist_transcripts, false),
+      conversation: Keyword.get(opts, :conversation)
     )
   end
 
@@ -1350,6 +2966,23 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
         }}}
     )
   end
+
+  defp mirror?(%{type: "session.thinking.append", delegation_id: nil}), do: true
+  defp mirror?(_event), do: false
+
+  # The provider's answer to a start whose input it will not take, in the
+  # shape its Live guide documents for a refused command.
+  defp input_refusal(param) do
+    %{
+      "type" => "invalid_request_error",
+      "code" => "invalid_value",
+      "message" => "Invalid value: 'the lease'.",
+      "param" => param
+    }
+  end
+
+  defp restore_core_env({key, {:ok, value}}), do: Application.put_env(:fermix_core, key, value)
+  defp restore_core_env({key, :error}), do: Application.delete_env(:fermix_core, key)
 
   defp restore_voice_bridge(nil), do: Application.delete_env(:fermix_core, :voice_bridge)
 

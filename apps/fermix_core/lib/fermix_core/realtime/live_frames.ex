@@ -22,6 +22,7 @@ defmodule FermixCore.Realtime.LiveFrames do
   @states ~w(idle listening speaking muted thinking reconnecting)
   @task_statuses ~w(pending running completed failed cancelled)
   @speakers ~w(user assistant)
+  @conversations ~w(chat private)
 
   # The wire's own bound on `task.summary`.
   @summary_max_chars 240
@@ -47,33 +48,85 @@ defmodule FermixCore.Realtime.LiveFrames do
     %{type: "caption", speaker: speaker, delta: delta, start_ms: start_ms, end_ms: end_ms}
   end
 
-  @doc "The provider session is up and the call can carry audio."
-  @spec call_ready(String.t(), String.t(), String.t() | nil, integer() | nil) :: map()
-  def call_ready(engine, call_id, provider_session_id, expires_at)
-      when is_binary(engine) and is_binary(call_id) do
+  @doc """
+  The provider session is up and the call can carry audio.
+
+  `call_uuid` is the call's durable identity, the key of its record; `call_id`
+  stays the trace session id. Every frame of the call that names it carries
+  the same UUID. `conversation` says whether the call's hand-offs join the
+  chat (`"chat"`) or keep to a conversation of the call's own (`"private"`,
+  M56 §5), so a client can say a private call is not kept in the chat.
+  `tasks_outlive_call` follows from it (M56 §4.6): a task still running when a
+  call in the chat ends finishes into the chat, and a private call's tasks
+  end with the call.
+  """
+  @spec call_ready(
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t(),
+          String.t() | nil,
+          integer() | nil
+        ) :: map()
+  def call_ready(engine, call_id, call_uuid, conversation, provider_session_id, expires_at)
+      when is_binary(engine) and is_binary(call_id) and is_binary(call_uuid) and
+             conversation in @conversations do
     compact(%{
       type: "call_ready",
       engine: engine,
       call_id: call_id,
+      call_uuid: call_uuid,
+      conversation: conversation,
+      tasks_outlive_call: conversation == "chat",
       provider_session_id: provider_session_id,
       expires_at: expires_at,
       captions: true
     })
   end
 
-  @doc "One backend delegation's lifecycle. `summary` is bounded to the wire's limit."
-  @spec task(String.t(), pos_integer(), String.t(), String.t() | nil) :: map()
-  def task(delegation_id, revision, status, summary)
-      when is_binary(delegation_id) and delegation_id != "" and
-             is_integer(revision) and revision >= 1 and status in @task_statuses do
+  @doc """
+  One backend delegation's lifecycle. `summary` is bounded to the wire's
+  limit. `server_seq` names the chat row its result was shown at (M56 §4.5),
+  absent when nothing was shown. `detached?` marks the one frame the session
+  sends, as its call ends, for a task that is still `running` and will
+  finish into the chat instead (M56 §4.6); absent on every other frame.
+  """
+  @spec task(
+          String.t(),
+          String.t(),
+          pos_integer(),
+          String.t(),
+          String.t() | nil,
+          pos_integer() | nil,
+          boolean()
+        ) :: map()
+  def task(
+        call_uuid,
+        delegation_id,
+        revision,
+        status,
+        summary,
+        server_seq \\ nil,
+        detached? \\ false
+      )
+      when is_binary(call_uuid) and is_binary(delegation_id) and delegation_id != "" and
+             is_integer(revision) and revision >= 1 and status in @task_statuses and
+             (is_nil(server_seq) or (is_integer(server_seq) and server_seq > 0)) do
     compact(%{
       type: "task",
+      call_uuid: call_uuid,
       delegation_id: delegation_id,
       revision: revision,
       status: status,
-      summary: LiveText.summary(summary, @summary_max_chars)
+      summary: LiveText.summary(summary, @summary_max_chars),
+      server_seq: server_seq,
+      detached: detached(detached?, status)
     })
   end
+
+  # Only a task still running is handed over; the flag is absent otherwise.
+  defp detached(false, _status), do: nil
+  defp detached(true, "running"), do: true
 
   @doc """
   The call's spend, from `LiveLedger.usage_payload/1`.
@@ -82,10 +135,11 @@ defmodule FermixCore.Realtime.LiveFrames do
   ceiling kill, so the companion can tell a routine update from the reason the
   call is ending.
   """
-  @spec usage(map(), String.t() | nil) :: map()
-  def usage(payload, status \\ nil) when is_map(payload) do
+  @spec usage(String.t(), map(), String.t() | nil) :: map()
+  def usage(call_uuid, payload, status \\ nil) when is_binary(call_uuid) and is_map(payload) do
     payload
     |> Map.put(:type, "usage")
+    |> Map.put(:call_uuid, call_uuid)
     |> put_status(status)
   end
 

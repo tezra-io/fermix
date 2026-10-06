@@ -5,6 +5,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
   alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
+  alias FermixCore.Realtime.GistTelemetry
   alias FermixCore.Realtime.LiveTelemetry
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
   alias FermixCore.Trace
@@ -738,7 +739,12 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
 
     delegation = %{delegation_id: "dlg_1", revision: 1, turn_session_id: "voice_delegation_7"}
 
-    LiveTelemetry.call_start(meta, 900_000)
+    LiveTelemetry.call_start(meta, 900_000, %{
+      instructions_bytes: 2_861,
+      input_items: 0,
+      input_bytes: 0
+    })
+
     LiveTelemetry.session_started(meta)
     LiveTelemetry.delegation_start(meta, delegation)
     LiveTelemetry.delegation_stop(meta, delegation, "completed", 1_200)
@@ -788,6 +794,41 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert call_stop["backend_turns"] == 2
     assert call_stop["accounting_complete"] == 1
     assert call_stop["reason"] == "call_stop"
+  end
+
+  # A call's gist (M56 §7) is a run of its own, and these three rows are its
+  # only record besides its provider call: sizes and status, never content.
+  test "every voice_gist bookend reaches the JSONL trace stream", %{dir: dir, server: server} do
+    run = %{
+      session_id: GistTelemetry.session_id("6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"),
+      call_uuid: "6f1c2a4e-9b3d-4c5e-8a7f-0123456789ab"
+    }
+
+    GistTelemetry.run_start(run, %{
+      tasks: 2,
+      speech_bytes: 900,
+      input_bytes: 1_100,
+      tainted?: false
+    })
+
+    GistTelemetry.run_complete(run, %{duration_ms: 2_000, gist_bytes: 300})
+    GistTelemetry.run_error(run, :timeout, 60_000)
+
+    sync(server)
+
+    rows =
+      dir
+      |> read_entries(:agent_event)
+      |> Enum.filter(&String.starts_with?(&1["event"] || "", "voice_gist_"))
+
+    assert Enum.map(rows, & &1["event"]) ==
+             Enum.map(GistTelemetry.trace_event_definitions(), & &1.trace_event)
+
+    assert Enum.all?(rows, &(&1["agent"] == "voice_gist"))
+    assert Enum.all?(rows, &(&1["session_id"] == run.session_id))
+    assert find_entry!(rows, &(&1["event"] == "voice_gist_run_start"))["input_bytes"] == 1_100
+    assert find_entry!(rows, &(&1["event"] == "voice_gist_run_complete"))["gist_bytes"] == 300
+    assert find_entry!(rows, &(&1["event"] == "voice_gist_run_error"))["error"] == "timeout"
   end
 
   # A computer-use session's only record is these five rows: nothing else says a

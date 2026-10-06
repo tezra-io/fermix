@@ -67,7 +67,8 @@ All figures are published list prices in US dollars per MILLION tokens, standard
 Venice's was read 2026-09-19 and carries its own line below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
 read from the same first-party pages that day, and gpt-6.1-sol on its release
-day, 2026-09-29:
+day, 2026-09-29. The OpenRouter and Venice entries added with the catalog's
+2026-10-03 refresh were read from each one's public listing that day:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
@@ -96,23 +97,26 @@ day, 2026-09-29:
               aliases resolve to the current build of each tier: large -> Mistral
               Large 3, medium -> Mistral Medium 3.5, small -> Mistral Small 4.
               Cached input is -90% on all three tiers.
-  OpenRouter  first-party per-model pages, openrouter.ai/<vendor>/<model>;
+  OpenRouter  first-party per-model pages, openrouter.ai/<vendor>/<model>, and
+              for the 2026-10-03 additions the public listing
+              `GET https://openrouter.ai/api/v1/models` (`pricing`, per token);
               OpenRouter adds no per-token markup. `moonshotai/kimi-k3` is a
               FLOOR rather than a fixed rate: K3 is open-weight and served by
               roughly 15 endpoints, and the page's headline is the cheapest of
               them, so that one entry can UNDER-state what the account paid.
   Venice      `GET https://api.venice.ai/api/v1/models?type=text` (first-party
               and public — the listing answers 200 with no key), read
-              2026-09-19. Every figure is the vendor's own
-              `model_spec.pricing.{input,output,cache_input}.usd`, already in
-              dollars per MTok, so these are transcribed from the API rather
-              than from a marketing page. Venice DOES publish a `cache_write`
-              leg, on 26 of its 117 text models — and every one of those 26 is
-              an `anonymized` id proxied to another vendor (Claude, GPT,
-              Gemini, Qwen). Not one of the 68 `private` models publishes that
-              leg, and all eight carded here are private. An absent key is the
-              vendor saying nothing, not the vendor saying "no premium", so
-              those write legs are unestablished.
+              2026-09-19, and for grok-4-7 2026-10-03. Every figure is the
+              vendor's own `model_spec.pricing.{input,output,cache_input}.usd`,
+              already in dollars per MTok, so these are transcribed from the API
+              rather than from a marketing page. Venice DOES publish a
+              `cache_write` leg, on 26 of its 117 text models — and every one of
+              those 26 is an `anonymized` id proxied to another vendor (Claude,
+              GPT, Gemini, Qwen). Not one of the 68 `private` models publishes
+              that leg (nor, on 2026-10-03, any of the 70), and all nine carded
+              here are private. An absent key is the vendor saying nothing, not
+              the vendor saying "no premium", so those write legs are
+              unestablished.
 
 Two known bounds, both accepted rather than modelled:
 
@@ -375,40 +379,50 @@ _MISTRAL_RATES: dict[str, Rate] = {
 # direct entry: `openai/gpt-5.5` bills a written token as ordinary input exactly
 # as `("openai", "gpt-5.5")` does, and the Anthropic slugs carry the same
 # published write price as theirs. Only `moonshotai/kimi-k3` (no direct entry)
-# and `x-ai/grok-4.3` (xAI publishes no cache-write line at all, so `("xai",
-# "grok-4.3")` has none either) leave that leg unestablished.
+# and `x-ai/grok-4.7` and `x-ai/grok-4.3` (xAI publishes no cache-write line at
+# all, so their `xai` entries have none either) leave that leg unestablished.
 _OPENROUTER_RATES: dict[str, Rate] = {
     # A FLOOR, not a fixed rate: K3 is open-weight and served by roughly 15
     # endpoints, and this headline is the cheapest of them, so this one entry
     # can UNDER-state what the account was actually billed.
     "moonshotai/kimi-k3": Rate(2.55, 12.75, 0.256),
     "anthropic/claude-sonnet-4.6": Rate(3.00, 15.00, 0.30, 3.75),
+    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.20, 2.50),
+    "anthropic/claude-fable-5.1": Rate(10.00, 50.00, 0.25, 12.50),
     "anthropic/claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
+    "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),
     "anthropic/claude-opus-4.8": Rate(5.00, 25.00, 0.50, 6.25),
+    "openai/gpt-6-astra": Rate(10.00, 50.00, 1.00, 12.50),
+    "openai/gpt-6.1-sol": Rate(2.00, 10.00, 0.10, 2.50),
+    "openai/gpt-6-luna": Rate(0.10, 0.50, 0.01, 0.125),
     "openai/gpt-5.5": Rate(5.00, 30.00, 0.50, BILLS_AT_INPUT_RATE),
+    "x-ai/grok-4.7": Rate(2.00, 6.00, 0.50),
     "x-ai/grok-4.3": Rate(1.25, 2.50, 0.20),
 }
 
-# The curated `@venice` catalog list, all eight of them `private` open-weight
+# The curated `@venice` catalog list, all nine of them `private` open-weight
 # models on Venice-contracted GPUs. Venice's cached-input discount is PER MODEL,
 # not a house rate: it runs from -98% (deepseek-v4-1-flash, 0.0075 against 0.375
-# input) through -90% (the Kimi K3 pair) to -75% (grok-4-6). No ratio derives one
-# leg from another, so every figure is transcribed from the listing's own
-# `model_spec.pricing`; do not "fix" deepseek's 0.0075 up to a tenth of input.
+# input) through -90% (the Kimi K3 pair) to -75% (the Grok pair). No ratio
+# derives one leg from another, so every figure is transcribed from the
+# listing's own `model_spec.pricing`; do not "fix" deepseek's 0.0075 up to a
+# tenth of input.
 #
 # Every write leg is `None` — unestablished, and deliberately not
 # BILLS_AT_INPUT_RATE. Venice publishes `cache_write` on 26 text models, every
 # one of them an `anonymized` proxied id, and on none of its 68 `private` ones,
-# which is all eight below. The adapter emits no write count today, so the
+# which is all nine below. The adapter emits no write count today, so the
 # absence costs nothing until one arrives, at which point the card refuses
 # rather than invents.
 #
 # `e2ee-kimi-k3-p` and `kimi-k3` share one rate because Venice prices the TEE
-# surface identically to the plain one; it is not a copy-paste slip.
+# surface identically to the plain one; it is not a copy-paste slip. The two
+# Grok entries share one because Venice lists the same figures for both.
 _VENICE_RATES: dict[str, Rate] = {
-    # Standard tier only, like every entry here: Venice reprices grok-4-6 above
+    # Standard tier only, like every entry here: Venice reprices both Groks above
     # a 200k input threshold (4.53 in / 1.13 cached / 13.60 out), the same
     # long-context cliff the card deliberately does not model for OpenAI or xAI.
+    "grok-4-7": Rate(2.27, 6.80, 0.57),
     "grok-4-6": Rate(2.27, 6.80, 0.57),
     "deepseek-v4-1-flash": Rate(0.375, 1.50, 0.0075),
     "z-ai-glm-5-3-flash": Rate(0.15, 0.50, 0.03),
@@ -456,21 +470,28 @@ UNPRICED_PENDING_RATE: dict[str, str] = {
 }
 
 
+# The adapters of the ChatGPT-plan route: "chatgpt_plan" is OpenAI Codex's
+# (Sign in with ChatGPT), "codex" the retired Codex-client adapter that older
+# spans still carry.
+_CODEX_ROUTE_ADAPTERS = frozenset({"chatgpt_plan", "codex"})
+
+
 def provider_route(provider: str, adapter: str | None) -> str:
     """The billing route a span belongs to.
 
-    The ONLY adapter value that selects a route is the literal "codex", which
-    marks the ChatGPT-subscription OAuth path. Every other adapter — including
-    values that happen to read like provider tokens ("openai", "openai_codex")
-    and the 852 adapter-less spans a census found on realtime and legacy
-    modules — leaves the route as the span's own `provider`, so nothing is
-    promoted to a metered API route by a field that was never a route selector.
+    The ONLY adapter values that select a route are the literals in
+    `_CODEX_ROUTE_ADAPTERS`, which mark the ChatGPT-plan OAuth path. Every other
+    adapter — including values that happen to read like provider tokens
+    ("openai", "openai_codex") and the 852 adapter-less spans a census found on
+    realtime and legacy modules — leaves the route as the span's own `provider`,
+    so nothing is promoted to a metered API route by a field that was never a
+    route selector.
     """
     if not isinstance(provider, str) or not provider:
         raise ValueError(f"provider_route: provider must be a non-empty string, got {provider!r}")
     if adapter is not None and not isinstance(adapter, str):
         raise TypeError(f"provider_route: adapter must be a string or None, got {adapter!r}")
-    return "openai_codex" if adapter == "codex" else provider
+    return "openai_codex" if adapter in _CODEX_ROUTE_ADAPTERS else provider
 
 
 def classification(route: str, model: str) -> str:

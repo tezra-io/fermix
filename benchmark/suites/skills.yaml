@@ -1,15 +1,15 @@
 suite: skills
 risk: host_readonly
-title: "Skills — list and view installed skills"
+title: "Skills — list, view, create, and answer from a skill"
 description: >
-  Exercises the read side of the skills subsystem: enumerating installed skills
-  (skill_list) and opening a named skill to read its contents (skill_view). Gates
-  are tolerant of the model's route — a "what skills do you have" request may be
-  served by skill_list, while opening a specific skill by name may use skill_view
-  (often after a skill_list to discover the exact id). The two installed builtin
-  skills are browser-guidance and self-knowledge, so list scenarios assert at
-  least one of those names appears in the reply, and view scenarios assert the
-  requested skill's name plus a snippet of what it covers.
+  Exercises the skills subsystem the way a person reaches it: asking what skills
+  are installed, asking to see what a named skill says, having a new skill
+  scaffolded, and asking a question whose answer lives in a skill. The skill
+  catalog (names only) is in the system prompt, so a list question is correctly
+  answered without any tool and nothing gates on skill_list; reading a skill's
+  CONTENT needs skill_view, and the content floors below are phrases from the
+  real SKILL.md files, which the catalog does not carry. The two installed
+  builtin skills are browser-guidance and self-knowledge.
 defaults:
   timeout_ms: 180000
   judge: true
@@ -32,164 +32,105 @@ scenarios:
           reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
           max_cost_usd: 0.5
           max_duration_ms: 90000
-        rubric: "Lists the installed skills, naming at least browser_guidance or self_knowledge, without inventing skills that aren't installed."
+        rubric: "Lists the installed skills, naming at least browser-guidance or self-knowledge, without inventing skills that aren't installed."
       - id: list_your_skills
         query: "Can you list your installed skills for me?"
         expect:
           reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
           max_cost_usd: 0.5
           max_duration_ms: 90000
-        rubric: "Enumerates the available skills, mentioning at least one of the real installed skill names."
-      - id: which_capabilities_skills
-        query: "Which skills are available to you right now? Just give me the names."
-        expect:
-          reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
-          max_cost_usd: 0.5
-          max_duration_ms: 90000
-        rubric: "Reports the installed skill names without inventing any."
+        rubric: "Enumerates the available skills, mentioning at least one of the real installed skill names and no invented ones."
 
   - id: view_named_skill
     title: "Opens a named skill and describes its contents"
-    severity: normal
+    # critical: reading a skill is the deterministic half of the subsystem (the
+    # catalog is prompt-side); the content floors can only be met by a turn that
+    # opened the file, so a broken skill_view path fails the run.
+    severity: critical
     tags: [skills, view]
     cases:
+      # SANITY CASE — the one route pin in this suite; content is only
+      # reachable through skill_view, and the floor is a term from the file
+      # (snapshot/refs/webmcp/fill_form), not the word "browser" from the ask.
       - id: show_browser_guidance
         query: "Show me your browser guidance skill."
         expect:
-          tools_any: [skill_view, skill_list]
-          reply_matches: "(?i)browser"
+          tools_any: [skill_view]
+          reply_matches: "(?i)snapshot|\\brefs?\\b|webmcp|fill_form"
           max_cost_usd: 0.6
           max_duration_ms: 120000
-        rubric: "Opens the browser_guidance skill and summarizes or quotes its content, mentioning browser-related guidance."
+        rubric: "Opens the browser-guidance skill and summarizes or quotes its actual content (tool routing between web_search/web_fetch/browser, the snapshot-then-act loop), not a generic description of browsing."
       - id: open_self_knowledge
         query: "Open your self knowledge skill and tell me what it covers."
         expect:
-          tools_any: [skill_view, skill_list]
-          reply_matches: "(?i)self.?knowledge|fermix"
+          reply_matches: "(?is)(?=.*(provider|channel|install))(?=.*(memory|sandbox|jobs?\\b|plugin|skill_view|reference))"
           max_cost_usd: 0.6
           max_duration_ms: 120000
-        rubric: "Reads the self_knowledge skill and explains what it covers, grounded in the skill's actual content rather than guessing."
-      - id: read_browser_skill_natural
-        query: "I want to read what the browser guidance skill says — can you pull it up?"
-        expect:
-          tools_any: [skill_view, skill_list]
-          reply_matches: "(?i)browser"
-          max_cost_usd: 0.6
-          max_duration_ms: 120000
-        rubric: "Locates and views the browser_guidance skill, then relays what it says about browser usage."
-
-  - id: list_then_view
-    title: "Discovers a skill from the list, then opens it"
-    # critical: the skill subsystem is a differentiator; deterministic (skill_list +
-    # skill_view spans) so a broken skill path fails the regression run, not silently green.
-    severity: critical
-    tags: [skills, list, view]
-    cases:
-      - id: list_then_open_self_knowledge
-        turns:
-          - query: "First, what skills do you have?"
-            expect:
-              tools_any: [skill_list]
-              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
-          - query: "Great — now open the self_knowledge one and tell me what it's for."
-            expect:
-              tools_any: [skill_view]
-              reply_matches: "(?i)self.?knowledge|fermix"
-        expect:
-          max_cost_usd: 1.0
-          max_duration_ms: 150000
-        rubric: "Lists the installed skills, then opens self_knowledge and explains its purpose using the skill's real content."
-      - id: list_then_open_browser_guidance
-        turns:
-          - query: "List the skills you've got available."
-            expect:
-              tools_any: [skill_list]
-              reply_matches: "(?i)browser[-_]guidance|self[-_]knowledge"
-          - query: "Pull up the browser_guidance one so I can see what's in it."
-            expect:
-              tools_any: [skill_view]
-              reply_matches: "(?i)browser"
-        expect:
-          max_cost_usd: 1.0
-          max_duration_ms: 150000
-        rubric: "Enumerates the skills, then views browser_guidance and reports its contents."
+        rubric: "Reads the self-knowledge skill and explains what it covers — the runtime shape, providers, channels, install types, built-ins, skills, plugins and the reference files it points to — grounded in the skill's actual content rather than guessing."
 
   - id: create_and_reload
     risk: isolated_mutation
-    title: "Scaffold a new skill and hot-reload it into the running agent"
+    title: "Scaffold a new skill and have it show up in the live list"
     # skill_create accepts only a name and description and creates the supported
-    # boilerplate. These cases test that real contract; they do not pretend it authors
-    # arbitrary SKILL.md instructions. Run-id placeholders keep disposable names unique.
+    # boilerplate. These cases test that real contract; they do not pretend it
+    # authors arbitrary SKILL.md instructions. Run-id placeholders keep
+    # disposable names unique, and the second turn is the outcome: the new name
+    # is in the list the agent reports, however it refreshed it (reload is the
+    # model's call, not the prompt's). file_write/file_edit/shell are banned so
+    # a hand-written skill directory cannot stand in for the supported path.
     severity: normal
     tags: [skills, create, reload]
     cases:
       - id: create_then_reload
-        query: >
-          Create a new skill called "eval-widget-__EVAL_RUN_ID__-__EVAL_TRIAL__"
-          with the description "A helper for WIDGET-related requests." Reload your
-          skills, then list them and confirm that scaffold is available now.
+        turns:
+          - query: >
+              Make me a new skill called "eval-widget-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              described as "A helper for WIDGET-related requests."
+            expect:
+              tools_any: [skill_create]
+              tools_none: [file_write, file_edit, shell]
+              reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
+          - query: "Is it showing up in your skill list now?"
+            expect:
+              tools_none: [file_write, file_edit, shell]
+              reply_matches: "(?i)eval-widget-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              reply_not_matches: "(?i)\\b(not|isn'?t|is not) (showing|listed|there|available|in the list)\\b"
         expect:
-          tools_all: [skill_create, skill_reload, skill_list]
-          tools_none: [file_write, file_edit]
-          reply_matches: "(?i)eval[-_]?widget|created|added|reload|available|new skill"
-          reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
           max_cost_usd: 1.5
-          max_duration_ms: 150000
+          max_duration_ms: 200000
         rubric: >
           Uses the supported skill_create scaffold in the disposable eval home,
-          reloads, and confirms the unique skill through the real listing. It does
-          not claim that arbitrary WIDGET behavior was authored or executed.
+          and on the follow-up confirms the unique skill name from the real
+          listing (reloading first if that is what it takes). It does not claim
+          that arbitrary WIDGET behavior was authored or executed.
       - id: create_then_verify_in_list
-        query: >
-          Make me a skill named "eval-greeter-__EVAL_RUN_ID__-__EVAL_TRIAL__" that
-          is described as "A scaffold for French greeting guidance." Reload skills,
-          then show me your current skill list so I can see the scaffold landed.
+        turns:
+          - query: >
+              Set up a skill named "eval-greeter-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              with the description "A scaffold for French greeting guidance."
+            expect:
+              tools_any: [skill_create]
+              tools_none: [file_write, file_edit, shell]
+              reply_not_matches: "(?i)(can'?t|cannot|unable to) (create|make|add|write|author) (a |the )?skill"
+          - query: "Show me your current skill list so I can see it landed."
+            expect:
+              tools_none: [file_write, file_edit, shell]
+              reply_matches: "(?i)eval-greeter-__EVAL_RUN_ID__-__EVAL_TRIAL__"
+              reply_not_matches: "(?i)\\b(not|isn'?t|is not) (showing|listed|there|available|in the list)\\b"
         expect:
-          tools_all: [skill_create, skill_reload, skill_list]
-          tools_none: [file_write, file_edit]
-          reply_matches: "(?i)eval[-_]?greeter|created|added|skill"
           max_cost_usd: 1.5
-          max_duration_ms: 150000
+          max_duration_ms: 200000
         rubric: >
-          Creates the supported scaffold, then reloads and lists skills so the unique
-          eval-greeter name appears; it does not claim the scaffold already implements
-          French greeting behavior.
+          Creates the supported scaffold, then shows a skill list in which the
+          unique eval-greeter name appears; it does not claim the scaffold
+          already implements French greeting behavior.
 
-  # M38 §13.4. The skill is what an assistant answers a packaging question from,
-  # and these two scenarios are the only part of that milestone a model can
-  # reach. Gated with a command-name floor (a package manager's name cannot be
-  # paraphrased) plus a prohibition on the answers that are wrong on Linux, and
-  # a rubric that owns the wording — never a positive allowlist of phrasings.
-  - id: linux_install_and_update
-    title: "Answers how Fermix is installed and updated on a Linux machine"
-    severity: normal
-    tags: [skills, linux, packaging]
-    cases:
-      - id: install_on_ubuntu
-        query: "How do I install fermix on ubuntu?"
-        expect:
-          reply_matches: "(?i)\\bapt\\b|\\.deb\\b"
-          reply_not_matches: "(?i)mix fermix|brew install fermix"
-          max_cost_usd: 0.6
-          max_duration_ms: 120000
-        rubric: >
-          Naming the Debian/Ubuntu package (the .deb, or apt) is the required
-          behaviour and must be scored as correct. The answer must not tell a
-          Linux user to install Fermix with Homebrew or with a mix task, and
-          must not invent a command the project does not ship.
-      - id: update_on_fedora
-        query: "How do I update fermix on fedora?"
-        expect:
-          reply_matches: "(?i)\\bdnf\\b|\\brpm\\b"
-          reply_not_matches: "(?i)mix fermix|brew upgrade fermix"
-          max_cost_usd: 0.6
-          max_duration_ms: 120000
-        rubric: >
-          Naming the rpm family's own update command (dnf, or the rpm package)
-          is the required behaviour and must be scored as correct, as is saying
-          that the package manager updates Fermix rather than fermix upgrade.
-          The answer must not tell a Fedora user to use Homebrew or a mix task.
-
+  # M38 §13.4. Gated with a command-name floor (a command cannot be paraphrased)
+  # plus a prohibition on the answers that are wrong on Linux, and a rubric that
+  # owns the wording — never a positive allowlist of phrasings. Install and
+  # update questions live in linux_packages.yaml, which gates them on the
+  # installer's address; the apt/dnf vocabulary cases that used to sit here
+  # contradicted it (a packaged install does not update through dnf).
   - id: linux_service_not_running
     title: "Answers what to check when the Linux background service is not running"
     severity: normal

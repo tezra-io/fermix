@@ -38,7 +38,6 @@ scenarios:
         query: "Are any coding runs happening right now?"
         expect:
           tools_any: [list_coding_runs]
-          reply_matches: "(?i)no |none|nothing|not.*running|running|active|in.flight|coding run"
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: >
@@ -48,7 +47,6 @@ scenarios:
         query: "What's the status of my coding agents — anything in flight?"
         expect:
           tools_any: [list_coding_runs, get_coding_run]
-          reply_matches: "(?i)no |none|nothing|not.*running|running|active|in.flight|coding run"
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: >
@@ -68,18 +66,21 @@ scenarios:
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: "Answers directly; no coding-harness delegation for a trivial lookup."
-      - id: echo_no_delegation
-        query: "Run a quick shell command for me: echo the text 'harness check' and show me the output."
+      # Reworded: the old prompt named the shell and said "quick"; a one-line
+      # command is still a one-line command when the user just asks for it.
+      - id: uname_no_delegation
+        query: "What does `uname -a` say on this machine?"
         expect:
           tools_none: [codex_run, claude_code_run, codex_cloud_run]
-          reply_matches: "(?i)harness check"
+          reply_matches: "(?i)darwin|linux"
           max_cost_usd: 0.3
           max_duration_ms: 60000
         rubric: >
-          Runs a direct shell command and reports the output; does not launch a
+          Runs the command directly and reports its output; does not launch a
           coding agent (or any heavier machinery) for a one-liner.
+      # Reworded: "without making a big thing of it" spelled out the restraint.
       - id: quick_calc_no_delegation
-        query: "Without making a big thing of it: how many characters are in the word 'orchestration'?"
+        query: "How many letters are in the word 'orchestration'?"
         expect:
           tools_none: [codex_run, claude_code_run, codex_cloud_run]
           reply_matches: "13"
@@ -110,7 +111,6 @@ scenarios:
           - query: "What's on the first line of that project's README?"
             expect:
               tools_none: [codex_run, claude_code_run, codex_cloud_run]
-              reply_matches: "(?i)fib|cli|readme|#|eval"
           - query: >-
               Now get a coding agent reviewing eval-harness-reviewpad in the
               background — I want its take on the code. Just tell me once it's
@@ -121,11 +121,9 @@ scenarios:
               # babysit the run — polling is what tripped the repeat guard live.
               tools_none: [get_coding_run]
               tool_inputs_match_all: ["eval-harness-reviewpad"]
-              reply_matches: "(?i)start|kick|running|background|run"
           - query: "How's that review going?"
             expect:
               tools_any: [get_coding_run, list_coding_runs]
-              reply_matches: "(?i)running|progress|working|complete|finish|done|fail"
           - query: "That's enough — cancel it and confirm it's stopped."
             expect:
               tools_any: [cancel_coding_run]
@@ -160,13 +158,11 @@ scenarios:
               tools_any: [codex_run, claude_code_run]
               tools_none: [get_coding_run]
               tool_inputs_match_all: ["eval-harness-writepad"]
-              reply_matches: "(?i)start|kick|running|background|underway|run"
           - query: >-
               Check on it — if it's finished, tell me what actually changed in
               the repo; if it's still going, say so plainly.
             expect:
               tools_any: [get_coding_run, list_coding_runs, shell]
-              reply_matches: "(?i)running|progress|still|complete|finish|done|commit|chang|flag|fail"
           - query: >-
               Wrap up: if that run is still going, cancel it and confirm;
               otherwise show me the git log of eval-harness-writepad so I can

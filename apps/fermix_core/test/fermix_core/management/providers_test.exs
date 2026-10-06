@@ -1,6 +1,8 @@
 defmodule FermixCore.Management.ProvidersTest do
   use ExUnit.Case, async: true
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Providers
 
@@ -125,8 +127,13 @@ defmodule FermixCore.Management.ProvidersTest do
       live = fn :ollama, _opts -> {:error, "connection refused"} end
       params = %{"provider" => "ollama", "live" => true}
 
-      assert {:error, {:unavailable, "model_listing"}} =
-               Providers.models(params, live_models: live)
+      log =
+        capture_log(fn ->
+          assert {:error, {:unavailable, "model_listing"}} =
+                   Providers.models(params, live_models: live)
+        end)
+
+      assert log =~ "management providers: the ollama model list was not read: connection refused"
     end
 
     test "a live listing answers with the live label" do
@@ -172,7 +179,7 @@ defmodule FermixCore.Management.ProvidersTest do
       assert {:ok, page} = Providers.models(%{"provider" => "venice", "live" => false})
 
       assert page["source"] == "catalog"
-      assert hd(page["models"]) == %{"id" => "grok-4-6", "label" => "Grok 4.6 · Private"}
+      assert hd(page["models"]) == %{"id" => "grok-4-7", "label" => "Grok 4.7 · Private"}
 
       assert Enum.all?(page["models"], &String.contains?(&1["label"], " · Private"))
     end
@@ -261,6 +268,37 @@ defmodule FermixCore.Management.ProvidersTest do
       assert metadata.model == "claude-opus-5"
       assert metadata.status == "ok"
       assert is_integer(measurements.duration_ms)
+    end
+
+    # The OpenAI Codex probe runs through the adapter, which emits the call
+    # itself; a second event from the wrapper would count one call twice.
+    test "an OpenAI Codex probe gets the job's session id and the wrapper emits nothing", %{
+      jobs: jobs
+    } do
+      handler = :"codex_probe_telemetry_#{System.unique_integer([:positive])}"
+      owner = self()
+
+      :telemetry.attach(
+        handler,
+        [:fermix, :provider, :call],
+        fn _event, _measurements, metadata, _config ->
+          send(owner, {:provider_call, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler) end)
+
+      probe = fn :openai_codex, opts ->
+        send(owner, {:probe_session, Keyword.fetch!(opts, :session_id)})
+        {:ok, %{model: "gpt-plan", latency_ms: 2}}
+      end
+
+      assert {:ok, started} = Providers.probe_start("openai_codex", jobs: jobs, probe: probe)
+      job_id = started["job_id"]
+
+      assert_receive {:probe_session, ^job_id}
+      refute_receive {:provider_call, %{session_id: ^job_id}}, 200
     end
 
     test "a second probe of the same provider is refused as busy", %{jobs: jobs} do

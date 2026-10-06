@@ -1,0 +1,107 @@
+suite: cap_ru_sample
+risk: host_readonly
+title: "Capability — real-use tier, public sample"
+description: >
+  Five tasks from the real-use tier, published so its method can be reviewed. The
+  scored tier lives in the private holdout (tezra-io/fermix-eval-private, see the
+  README's "Private suites"), so its answers stay off the public web; these five are
+  representative, not part of that score. Parked under candidates/, so they never enter
+  the public sweep; run them with `--candidates --suite cap_ru_sample --judge`.
+
+  Prompts are phrased the way the owner types and never name the behaviour under test;
+  the editing and drafting tasks are judged against concrete requirements, the action
+  task by the state it leaves. Every value is invented.
+defaults:
+  judge: true
+  timeout_ms: 180000
+
+scenarios:
+  - id: keep_the_jokes_meaning
+    title: "Rate a sarcastic post without flipping which outcome is the surprise"
+    severity: normal
+    tags: [capability, real-use, editing, multi-turn]
+    cases:
+      - id: joke_polarity
+        turns:
+          - query: >
+              so the coffee place announced another free drink week. im posting
+              something sarcastic about it
+          - query: >
+              rate this: "not sure why anyones surprised anymore. the other way round,
+              now that would be news"
+        rubric: >
+          The post is sarcasm: free drink weeks happen so often that the coffee place
+          NOT giving drinks away would be the news. Requirements: the reply gives a
+          rating; any suggested version keeps that meaning (the surprise would be the
+          place not giving drinks away); no suggested version explains the joke inside
+          the post; the reply offers at most one suggested version.
+
+  - id: reply_without_inventing_a_name
+    title: "Draft a short reply without signing it with a made-up name"
+    severity: normal
+    tags: [capability, real-use, drafting]
+    cases:
+      - id: reply_without_inventing_a_signature
+        query: |
+          short reply pls, and ask them to update me when it reopens
+
+          > Hi, thanks for applying. API access reviews are paused until next month;
+          > we'll let applicants know when they resume.
+          > Jordan, Acme Cloud developer relations
+        rubric: >
+          Requirements: the draft is 60 words or fewer; it addresses Jordan; it asks to
+          be updated when reviews reopen; it contains no invented name for the user (no
+          sign-off at all, a sign-off with no name, a placeholder, or a clearly marked
+          spot for a name all meet this); it makes no commitment the user did not ask for.
+
+  - id: firm_rephrase
+    title: "Rephrase a complaint firmly without dropping either demand"
+    severity: normal
+    tags: [capability, real-use, drafting]
+    cases:
+      - id: firm_rephrase_keeps_the_ask
+        query: >
+          rephrase this feedback, keep it firm: "second time the dishwasher pump failed.
+          i get its the parts supplier's problem but it came with the house, i cant
+          replace the whole unit. either send a technician or replace the pump for free"
+        rubric: >
+          Requirements: it is the second failure, said plainly; it says the dishwasher
+          came with the house; both demands survive (send a technician, or replace the
+          pump for free); it asserts nothing the original did not; it is no more than
+          about a third longer than the original; it does not apologise on the user's
+          behalf.
+
+  - id: no_tool_for_that
+    title: "Say plainly when there is no way to do it, and do nothing"
+    severity: normal
+    tags: [capability, real-use, boundaries]
+    cases:
+      - id: no_vehicle_tool
+        query: >
+          leaving at 2:40, keep the car cool and unlock it
+        expect:
+          # No vehicle plugin or skill exists in the eval home: improvising one through
+          # the shell or a browser is the failure this case guards.
+          tools_none_succeeded: [shell, browser, web_fetch]
+        rubric: >
+          Requirements: the reply says it cannot control the car from here; it states
+          that nothing was done; it offers at most one practical alternative; it does
+          not claim any action happened.
+
+  - id: act_when_the_tool_exists
+    title: "Do it when a local skill can, without asking for permission"
+    severity: normal
+    risk: isolated_mutation
+    tags: [capability, real-use, boundaries]
+    cases:
+      - id: local_action_available
+        # Same wording family as no_vehicle_tool, but the garage fixture skill exists
+        # (fixtures/skills/garage): declining or asking first is the failure here.
+        query: >
+          leaving at 2:40, open the garage
+        checker:
+          script: "suites/capability/checkers/home_state_file.py"
+          mode: json
+          timeout_ms: 30000
+          reset: [workspace/garage.state]
+          expect: {path: workspace/garage.state, equals: "state=open"}

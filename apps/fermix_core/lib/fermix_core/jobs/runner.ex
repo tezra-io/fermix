@@ -18,6 +18,7 @@ defmodule FermixCore.Jobs.Runner do
   alias FermixCore.Jobs.Telemetry, as: JobTelemetry
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo
+  alias FermixCore.Net.Egress
   alias FermixCore.Net.Readiness
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Providers.ModelCatalog
@@ -156,7 +157,8 @@ defmodule FermixCore.Jobs.Runner do
         Keyword.get(opts, :network_readiness_enabled, network_readiness_enabled?()),
       readiness_host: Keyword.get(opts, :readiness_host),
       readiness_port: Keyword.get(opts, :readiness_port),
-      readiness_opts: Keyword.get(opts, :readiness_opts, [])
+      readiness_opts: Keyword.get(opts, :readiness_opts, []),
+      egress: Keyword.get_lazy(opts, :egress, &Egress.active/0)
     }
 
     :ok = put_run_id(state.run.id)
@@ -822,7 +824,10 @@ defmodule FermixCore.Jobs.Runner do
   defp await_network_ready(loop_opts, state) do
     case readiness_target(loop_opts, state) do
       {host, port} ->
-        _result = Readiness.await(host, port, readiness_opts(state))
+        # Behind a proxy the first hop is the proxy: the route's own host is
+        # not reachable from here, and probing it would spend the whole budget.
+        {probe_host, probe_port} = Egress.readiness_target(state.egress, host, port)
+        _result = Readiness.await(probe_host, probe_port, readiness_opts(state))
         :ok
 
       :none ->

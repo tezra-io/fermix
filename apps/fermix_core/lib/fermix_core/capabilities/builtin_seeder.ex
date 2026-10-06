@@ -64,8 +64,12 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.ModelRoutingConfig,
     FermixCore.Tools.ToolHelp,
     FermixCore.Tools.MemoryStore,
+    FermixCore.Tools.MemoryForget,
     FermixCore.Tools.MemoryRecall,
     FermixCore.Tools.RecallActivity,
+    # Seeded unconditionally; `advertise?/1` offers it only while a Live call in
+    # the chat is up (M56 §4.4), and `execute/2` re-checks the call.
+    FermixCore.Tools.VoiceCallContext,
     FermixCore.Tools.ToolResultRecall,
     FermixCore.Tools.ScheduleJob,
     FermixCore.Tools.UpdateJob,
@@ -80,6 +84,9 @@ defmodule FermixCore.Capabilities.BuiltinSeeder do
     FermixCore.Tools.Browser,
     FermixCore.Tools.SendAttachment,
     FermixCore.Tools.React,
+    # Seeded unconditionally; `advertise?/1` offers it only while a delivery
+    # channel has an inbox of the owner's (M56 §4.7).
+    FermixCore.Tools.SendToChannel,
     FermixCore.Tools.GenerateImage,
     FermixCore.Tools.RequestDirectoryAccess,
     # The temporal-event family; keep `@event_tool_modules` in step.

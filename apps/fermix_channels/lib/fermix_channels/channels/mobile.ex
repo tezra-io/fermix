@@ -10,12 +10,18 @@ defmodule FermixChannels.Channels.Mobile do
   A turn streams and writes its own rows as it runs; `Companion.Turns` settles
   its request from the queue's outcome, and this adapter adds only the phone's
   own effect of a completed turn, its push.
+
+  A phone turn runs in the Mac's chat (`joined_conversation/1`, M56 D9): one
+  agent history and one queue lane for the one timeline both draw. The
+  channel stays `mobile`, so the phone's authorization, approval cards,
+  stream, push and link previews stay its own.
   """
 
   @behaviour FermixChannels.Gateway.Channel
 
   require Logger
 
+  alias FermixChannels.Channels.Companion
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
@@ -234,6 +240,29 @@ defmodule FermixChannels.Channels.Mobile do
 
   @impl true
   def start_typing(profile_id) when is_binary(profile_id), do: :ok
+
+  @doc """
+  The owner's inbox on this channel (M56 §4.7): the shared chat's profile,
+  only while the phone channel runs. A send here is a row and its push, and
+  with the channel off it would be a row the Mac alone hears, which is the
+  companion channel's send, not this one's.
+  """
+  @impl true
+  @spec owner_inbox() :: {:ok, String.t()} | :unavailable
+  def owner_inbox do
+    if MobileSupervisor.running?(), do: {:ok, @profile}, else: :unavailable
+  end
+
+  @doc """
+  The conversation a phone message runs in (M56 D9): the Mac's chat of the
+  same profile, so the phone's turns and the Mac's share one agent history and
+  wait for each other in one queue lane, as they share one timeline. The
+  gateway puts it on every message it ingests through this adapter, a resumed
+  request's included.
+  """
+  @impl true
+  @spec joined_conversation(Message.t()) :: {String.t(), String.t(), :root}
+  def joined_conversation(%Message{chat_id: profile}), do: Companion.conversation_key(profile)
 
   @impl true
   def health_check(opts) when is_list(opts) do

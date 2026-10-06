@@ -55,11 +55,9 @@ defmodule FermixCore.Management.Settings.Tools do
   @image_labels %{
     "openai" => "OpenAI",
     "xai" => "SpaceXAI",
-    "google" => "Google",
-    "openai_codex" => "ChatGPT"
+    "google" => "Google"
   }
 
-  # ChatGPT signs in through the Codex provider and has no key of its own.
   @image_secrets %{
     "openai" => :openai_api_key,
     "xai" => :xai_api_key,
@@ -165,7 +163,7 @@ defmodule FermixCore.Management.Settings.Tools do
 
   def rows("generate_image", snapshot) do
     block = Source.tool(snapshot, :generate_image)
-    backend = Source.string(block, :backend, "openai")
+    backend = Source.string(block, :backend)
     restart = Row.restart?(:tools)
 
     [

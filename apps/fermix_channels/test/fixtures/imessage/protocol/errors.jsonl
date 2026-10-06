@@ -1,0 +1,22 @@
+{"id":20,"error":{"kind":"not_initialized","message":"initialize must be the first call","data":{}}}
+{"id":20,"error":{"kind":"protocol_mismatch","message":"protocol mismatch","data":{"helper":2,"client":1}}}
+{"id":20,"error":{"kind":"permission_denied","message":"Full Disk Access is not granted","data":{"service":"full_disk_access"}}}
+{"id":20,"error":{"kind":"db_missing","message":"chat.db does not exist","data":{}}}
+{"id":20,"error":{"kind":"db_unreadable","message":"chat.db is locked","data":{}}}
+{"id":20,"error":{"kind":"db_schema_unexpected","message":"columns missing","data":{"missing":["message.attributedBody"]}}}
+{"id":20,"error":{"kind":"policy_absent","message":"no recipient policy","data":{}}}
+{"id":20,"error":{"kind":"policy_unconfirmed","message":"policy differs from the confirmed item","data":{}}}
+{"id":20,"error":{"kind":"policy_refused","message":"cancelled","data":{}}}
+{"id":20,"error":{"kind":"policy_violation","message":"outside the policy","data":{"handle":"+15559999999"}}}
+{"id":20,"error":{"kind":"owner_not_self","message":"not a self alias","data":{}}}
+{"id":20,"error":{"kind":"owner_is_this_mac","message":"Messages on this Mac is signed in as this address. Sign Messages in with a separate Apple ID for Fermix, then confirm again.","data":{}}}
+{"id":20,"error":{"kind":"not_signed_in","message":"Messages is not signed in","data":{}}}
+{"id":20,"error":{"kind":"no_user_session","message":"no console session","data":{}}}
+{"id":20,"error":{"kind":"service_not_imessage","message":"SMS-only chat","data":{"handle":"+15551234567"}}}
+{"id":20,"error":{"kind":"chat_not_found","message":"no direct chat","data":{"handle":"+15551234567"}}}
+{"id":20,"error":{"kind":"automation_refused","message":"Not authorized to send Apple events to Messages. (-1743)","data":{}}}
+{"id":20,"error":{"kind":"send_timeout","message":"osascript did not return within 20 s","data":{}}}
+{"id":20,"error":{"kind":"path_refused","message":"symlink in path","data":{}}}
+{"id":20,"error":{"kind":"attachment_not_admitted","message":"not admitted","data":{}}}
+{"id":20,"error":{"kind":"attachment_too_large","message":"over 100 MB","data":{"bytes":104857601}}}
+{"id":20,"error":{"kind":"busy","message":"more than 32 outstanding requests","data":{}}}

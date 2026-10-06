@@ -12,6 +12,7 @@ defmodule FermixCore.Plugins.Auth do
   alias FermixCore.Auth.Store
   alias FermixCore.Auth.TokenManager
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Auth.Telemetry, as: AuthTelemetry
   alias FermixCore.Plugins.Config
   alias FermixCore.Plugins.Plugin
@@ -257,7 +258,7 @@ defmodule FermixCore.Plugins.Auth do
         ] ++ RefreshClient.request_bounds()
       )
 
-    case request |> Req.merge(req_options) |> Req.request() do
+    case request |> Req.merge(req_options) |> Egress.attach(:direct) |> Req.request() do
       {:ok, %{status: 200, body: body}} when is_map(body) -> region_at(body, probe.path)
       {:ok, %{status: 421, body: body}} -> {:wrong_region, refused_region(provider, body)}
       {:ok, %{status: status}} -> {:error, {:region_probe_failed, status}}

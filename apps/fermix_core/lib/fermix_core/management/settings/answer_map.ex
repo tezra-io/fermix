@@ -60,8 +60,8 @@ defmodule FermixCore.Management.Settings.AnswerMap do
   @doc """
   Answers this section always carries, whatever the operator changed.
 
-  A provider section names which provider is being edited, because the model,
-  effort and fast keys are shared across providers and target whichever one the
+  A provider section names which provider is being edited, because the model
+  and effort keys are shared across providers and target whichever one the
   answer set names.
   """
   @spec context(String.t()) :: [answer()]

@@ -354,9 +354,10 @@ row carries at most 4, and has the key only when it has one.
 
 A `row` is the same message with `text` in place of `content`, plus
 `profile_id`. It is the companion socket's `row` event, which on that wire
-carries only `server_seq`, `role`, `text`, `ts` and `client_msg_id`; on this
-wire it carries the whole message, so a phone shows a row it did not write as
-a history page would.
+carries only `server_seq`, `role`, `text`, `ts`, `client_msg_id`, `kind` and
+`metadata`; on this wire it carries the whole message, so a phone shows a row
+it did not write as a history page would. A GPT-Live call's row carries
+`metadata.call` (`priv/companion/PROTOCOL.md`, *A Live call's rows*).
 
 ## One timeline
 

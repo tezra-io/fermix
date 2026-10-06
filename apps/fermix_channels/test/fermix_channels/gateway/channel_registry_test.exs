@@ -4,10 +4,39 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Source
+  alias FermixCore.IMessage.HelperInstaller
+  alias FermixTestSupport.SafeRm
 
   defmodule FakeChild do
     @moduledoc false
   end
+
+  # A fake Fermix Messages bundle where `HelperInstaller.installed?/0` looks
+  # for the pinned version under the test's own FERMIX_HOME.
+  defp lay_helper!(home) do
+    binary =
+      Path.join([
+        home,
+        "plugins",
+        "imessage_helper",
+        HelperInstaller.pinned_version(),
+        "macos-universal",
+        "Fermix Messages.app",
+        "Contents",
+        "MacOS",
+        "fermix-messages"
+      ])
+
+    File.mkdir_p!(Path.dirname(binary))
+    File.write!(binary, "#!/bin/sh\n")
+    File.chmod!(binary, 0o755)
+  end
+
+  defp restore_app_env(app, key, nil), do: Application.delete_env(app, key)
+  defp restore_app_env(app, key, value), do: Application.put_env(app, key, value)
+
+  defp restore_fermix_home(nil), do: System.delete_env("FERMIX_HOME")
+  defp restore_fermix_home(value), do: System.put_env("FERMIX_HOME", value)
 
   # A `trust: :local_operator` entry shaped like the acp channel M29 adds: a
   # remote?-true lifecycle with a same-user local transport and no ingress list.
@@ -41,6 +70,7 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.channel_key("discord") == :discord
       assert ChannelRegistry.channel_key("signal") == :signal
       assert ChannelRegistry.channel_key("mobile") == :mobile
+      assert ChannelRegistry.channel_key("imessage") == :imessage
     end
 
     test "is nil for local and unknown channels" do
@@ -154,8 +184,11 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       # transport is a same-user socket, so it belongs to this list. `voice` is
       # remote for the same reason but carries no config key at all, so it
       # contributes nothing — a key list must never contain a nil.
+      # `imessage` is listed on every host: this is the static set of keys an
+      # ingress check may name. Whether its transport runs is the platform
+      # gate's question (`transport_children/2`), not this list's.
       assert Enum.sort(remote) ==
-               [:acp, :discord, :mobile, :signal, :slack, :telegram, :whatsapp]
+               [:acp, :discord, :imessage, :mobile, :signal, :slack, :telegram, :whatsapp]
 
       refute nil in remote
     end
@@ -194,6 +227,109 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
   describe "transport_children/1" do
     test "returns no children when readiness is not ready" do
       assert ChannelRegistry.transport_children(%{status: :setup_required, failures: []}) == []
+    end
+  end
+
+  # MILESTONE_54 §12: the helper reads the Messages of the Mac it runs on, so the
+  # entry carries `platform: :macos` and the platform is always injected here.
+  describe "the imessage channel" do
+    setup do
+      previous = Application.get_env(:fermix_channels, :imessage)
+      previous_home = System.get_env("FERMIX_HOME")
+      previous_plugins = Application.get_env(:fermix_core, :plugins)
+      home = SafeRm.make_tmp_dir!("channel-registry-imessage")
+      System.put_env("FERMIX_HOME", home)
+      Application.delete_env(:fermix_core, :plugins)
+
+      on_exit(fn ->
+        restore_app_env(:fermix_channels, :imessage, previous)
+        restore_app_env(:fermix_core, :plugins, previous_plugins)
+        restore_fermix_home(previous_home)
+        SafeRm.rm_rf(home)
+      end)
+
+      %{home: home}
+    end
+
+    test "is a remote subprocess channel, supervised as a unit, for the Mac only" do
+      imessage = Enum.find(ChannelRegistry.channels(), &(&1.name == "imessage"))
+
+      assert imessage.config_key == :imessage
+      assert imessage.adapter == FermixChannels.Channels.IMessage
+      assert imessage.remote? == true
+      assert imessage.transport == :subprocess
+      assert imessage.child == FermixChannels.Channels.IMessage.Supervisor
+      assert imessage.platform == :macos
+      assert ChannelRegistry.trust("imessage") == nil
+      assert ChannelRegistry.commands?("imessage")
+    end
+
+    test "platform_ok?/2 answers from the injected platform alone" do
+      imessage = Enum.find(ChannelRegistry.channels(), &(&1.name == "imessage"))
+      telegram = Enum.find(ChannelRegistry.channels(), &(&1.name == "telegram"))
+
+      assert ChannelRegistry.platform_ok?(imessage, macos?: true)
+      refute ChannelRegistry.platform_ok?(imessage, macos?: false)
+      assert ChannelRegistry.platform_ok?(telegram, macos?: false)
+      assert ChannelRegistry.platform_ok?(telegram, macos?: true)
+    end
+
+    test "starts on a Mac once enabled with an owner and the helper on disk", %{home: home} do
+      child = {FermixChannels.Channels.IMessage.Supervisor, []}
+      lay_helper!(home)
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      assert child in ChannelRegistry.transport_children(%{status: :ready}, macos?: true)
+      refute :imessage in ChannelRegistry.missing_helpers(macos?: true)
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: false,
+        owner_user_id: "+15551234567"
+      )
+
+      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: true)
+    end
+
+    # MILESTONE_54 §14: an enabled channel whose helper is not on disk is not
+    # started and is named instead, never a failed channels application at
+    # boot. The pin moves with every helper release, so an upgrade meets this.
+    test "is not started without the helper on disk, and is named as missing it" do
+      child = {FermixChannels.Channels.IMessage.Supervisor, []}
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: true)
+      assert ChannelRegistry.missing_helpers(macos?: true) == [:imessage]
+      assert ChannelRegistry.missing_helpers(macos?: false) == []
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: false,
+        owner_user_id: "+15551234567"
+      )
+
+      assert ChannelRegistry.missing_helpers(macos?: true) == []
+    end
+
+    test "never starts on Linux, and Linux never reports it as missing an owner" do
+      child = {FermixChannels.Channels.IMessage.Supervisor, []}
+
+      Application.put_env(:fermix_channels, :imessage,
+        enabled: true,
+        owner_user_id: "+15551234567"
+      )
+
+      refute child in ChannelRegistry.transport_children(%{status: :ready}, macos?: false)
+
+      Application.put_env(:fermix_channels, :imessage, enabled: true)
+      refute :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: false)
+      assert :imessage in ChannelRegistry.missing_ingress_authorizations(macos?: true)
     end
   end
 

@@ -52,7 +52,7 @@ defmodule FermixCore.Management.SettingsTest do
     :secret_writer,
     :secret_store
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile]
+  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
     key kind label footer info value present options min max step restart read_only suggestions
@@ -103,8 +103,10 @@ defmodule FermixCore.Management.SettingsTest do
       end
     end
 
+    # On a Mac, every channel readiness knows has a section. iMessage is the
+    # one that exists only there, so the host is named rather than inherited.
     test "publishes one section per channel plus the editors surface" do
-      sections = Settings.sections()
+      sections = Settings.sections(macos?: true)
 
       for channel <- Readiness.channels() do
         assert Enum.any?(sections, &(&1.id == "channels.#{channel}"))
@@ -288,6 +290,16 @@ defmodule FermixCore.Management.SettingsTest do
       assert %{"value" => "oauth", "kind" => "choice"} = row("providers.anthropic", "auth_mode")
     end
 
+    # The image tool refuses to run without a saved backend, so the row must not
+    # name one it would not call.
+    test "an image backend never chosen reads as not set" do
+      Application.put_env(:fermix_core, :tools, generate_image: [model: "gpt-image-2"])
+
+      assert %{"value" => ""} = row("generate_image", "image_backend")
+      assert %{"value" => "gpt-image-2", "options" => []} = row("generate_image", "image_model")
+      refute Enum.any?(rows("generate_image"), &(&1["kind"] == "secret"))
+    end
+
     # The picker's value is the model in force, so a provider nobody has chosen
     # a model for still shows the one the daemon will call.
     test "a model row names the catalog default until a model is chosen" do
@@ -310,10 +322,37 @@ defmodule FermixCore.Management.SettingsTest do
       assert "claude-sonnet-5-5" in published.("providers.anthropic")
       assert "grok-4.7" in published.("providers.xai")
 
-      for section <- ["providers.openai", "providers.openai_codex"] do
-        assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.(section) == []
-        refute "gpt-6-sol" in published.(section)
-      end
+      assert ["gpt-6.1-sol", "gpt-6-luna"] -- published.("providers.openai") == []
+      refute "gpt-6-sol" in published.("providers.openai")
+
+      assert [
+               "anthropic/claude-sonnet-5.5",
+               "anthropic/claude-fable-5.1",
+               "anthropic/claude-opus-5.5",
+               "openai/gpt-6-astra",
+               "openai/gpt-6.1-sol",
+               "openai/gpt-6-luna",
+               "x-ai/grok-4.7"
+             ] -- published.("providers.openrouter") == []
+
+      refute "openai/gpt-6-sol" in published.("providers.openrouter")
+      assert "grok-4-7" in published.("providers.venice")
+    end
+
+    # OpenAI Codex lists the signed-in account's models live: its model row
+    # offers nothing shipped, holds the empty value until a model is chosen,
+    # and fast mode is retired, so no toggle is published.
+    test "the openai_codex section offers no shipped models and no fast toggle" do
+      Application.put_env(:fermix_core, :providers, openai_codex: [fast: true])
+      model = row("providers.openai_codex", "default_model")
+
+      assert model["options"] == []
+      assert model["value"] == ""
+
+      assert Enum.map(rows("providers.openai_codex"), & &1["key"]) == [
+               "default_model",
+               "reasoning_effort"
+             ]
     end
 
     # The explanation behind the model row's info control is the descriptor's,
@@ -490,6 +529,7 @@ defmodule FermixCore.Management.SettingsTest do
                "realtime_model",
                "realtime_voice",
                "realtime_backend",
+               "realtime_conversation",
                "openai_api_key",
                "realtime_max_session_minutes",
                "realtime_max_cost_cents",
@@ -538,6 +578,50 @@ defmodule FermixCore.Management.SettingsTest do
       )
 
       assert %{"value" => "Not configured"} = row("realtime", "realtime_backend")
+    end
+
+    # M56 §5 and §6: one row under Live says whether a call's hand-offs run in
+    # the chat's conversation. Absent in the file means the chat, so the row
+    # shows the value in force rather than a blank.
+    test "the Live engine says whether voice calls join the chat, the chat by default" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert %{
+               "kind" => "choice",
+               "label" => "Voice calls join the chat",
+               "value" => "chat",
+               "read_only" => false
+             } = row("realtime", "realtime_conversation")
+
+      assert option_values("realtime", "realtime_conversation") == ["chat", "private"]
+    end
+
+    test "choosing a private call writes the key and reads back" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1"
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_conversation" => "private"})
+
+      assert result["applied"] == ["realtime_conversation"]
+      assert result["side_effects"] == []
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :conversation) == "private"
+      assert %{"value" => "private"} = row("realtime", "realtime_conversation")
+
+      assert {:error, {:invalid_params, "realtime_conversation", _sentence}} =
+               Settings.apply("realtime", %{"realtime_conversation" => "shared"})
+    end
+
+    test "the Realtime engine publishes no conversation row" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
+
+      refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
     end
   end
 
@@ -651,6 +735,29 @@ defmodule FermixCore.Management.SettingsTest do
       assert "realtime_voice" in result["applied"]
       assert "The voice changed to marin." in result["side_effects"]
       assert %{"value" => "marin"} = row("realtime", "realtime_voice")
+    end
+
+    # The setting is Live-only and refused under Realtime, so the switch drops
+    # it, and says so: a private call quietly becoming a chat call on the way
+    # back is a change the owner did not type.
+    test "choosing a Realtime model drops a chosen conversation and names it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "marin",
+        conversation: "private"
+      )
+
+      assert {:ok, result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      refute Keyword.has_key?(Application.get_env(:fermix_core, :realtime), :conversation)
+      assert "realtime_conversation" in result["applied"]
+
+      assert "Whether voice calls join the chat was reset because this engine does not use it." in result[
+               "side_effects"
+             ]
     end
 
     test "a voice both engines ship survives the switch and is never named" do
@@ -958,6 +1065,86 @@ defmodule FermixCore.Management.SettingsTest do
     end
   end
 
+  # M54 §12. The account is not asked: the helper derives it when the
+  # recipients are confirmed. The guests are a list, and saving any row never
+  # turns the channel on: only its own switch does (M53 APP-5, from this
+  # channel's first release).
+  describe "the iMessage section" do
+    test "exists on a Mac and nowhere else" do
+      assert %{id: "channels.imessage", pane: "channels", title: "iMessage"} in Settings.sections(
+               macos?: true
+             )
+
+      refute Enum.any?(Settings.sections(macos?: false), &(&1.id == "channels.imessage"))
+
+      assert Settings.get("channels.imessage", macos?: false) ==
+               {:error, {:unknown_section, "channels.imessage"}}
+
+      assert {:error, {:unknown_section, "channels.imessage"}} =
+               Settings.apply("channels.imessage", %{"imessage_enabled" => true}, macos?: false)
+    end
+
+    test "publishes the owner, the guests and the switch, and no account choice" do
+      Application.put_env(:fermix_channels, :imessage, enabled: false)
+
+      assert Enum.map(rows("channels.imessage"), &{&1["key"], &1["kind"], &1["value"]}) == [
+               {"imessage_owner_user_id", "text", ""},
+               {"imessage_allowed_sender_ids", "list", []},
+               {"imessage_enabled", "toggle", false}
+             ]
+
+      assert %{
+               "label" => "Your Apple ID or phone number",
+               "footer" => "The address your iPhone sends iMessages from."
+             } = row("channels.imessage", "imessage_owner_user_id")
+
+      assert %{"label" => "Guests", "footer" => "Others who may message Fermix here."} =
+               row("channels.imessage", "imessage_allowed_sender_ids")
+
+      assert Enum.all?(rows("channels.imessage"), & &1["restart"])
+    end
+
+    test "saved guests read back as their handles" do
+      Application.put_env(:fermix_channels, :imessage,
+        owner_user_id: "+15551234567",
+        allowed_sender_ids: ["friend@example.com"]
+      )
+
+      assert %{"value" => "+15551234567"} = row("channels.imessage", "imessage_owner_user_id")
+
+      assert %{"value" => ["friend@example.com"]} =
+               row("channels.imessage", "imessage_allowed_sender_ids")
+    end
+
+    test "an account choice is no setting of the section" do
+      assert {:error, {:invalid_params, "imessage_posture", _sentence}} =
+               Settings.apply("channels.imessage", %{"imessage_posture" => "dedicated_account"},
+                 macos?: true
+               )
+    end
+
+    test "saving the owner and the guests never switches the channel on" do
+      Application.put_env(:fermix_channels, :imessage, enabled: false)
+
+      assert {:ok, _applied} =
+               Settings.apply(
+                 "channels.imessage",
+                 %{
+                   "imessage_owner_user_id" => "+1 555 123 4567",
+                   "imessage_allowed_sender_ids" => ["Friend@Example.com"]
+                 },
+                 macos?: true
+               )
+
+      section = Application.get_env(:fermix_channels, :imessage)
+      assert section[:enabled] == false
+      refute Keyword.has_key?(section, :posture)
+      assert section[:owner_user_id] == "+15551234567"
+      assert section[:allowed_sender_ids] == ["friend@example.com"]
+      refute Keyword.has_key?(section, :mode)
+    end
+  end
+
   # The phone channel is a section of its own, not an inventory channel: it has
   # no credential, and its rows are a switch, a port and an address.
   describe "the phone section" do
@@ -1172,11 +1359,15 @@ defmodule FermixCore.Management.SettingsTest do
       assert Application.get_env(:fermix_core, :browser) == nil
     end
 
+    # `fermix_chrome` is a profile a task names for a page's WebMCP tools, not a
+    # way tasks run, so the choice neither publishes nor takes it.
     test "how tasks run takes only the managed profiles it publishes" do
-      assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
-               Settings.apply("browser", %{"browser_default_profile" => "selected_tab"})
+      for profile <- ["selected_tab", "fermix_chrome"] do
+        assert {:error, {:invalid_params, "browser_default_profile", sentence}} =
+                 Settings.apply("browser", %{"browser_default_profile" => profile})
 
-      assert sentence == "This setting takes one of its published values."
+        assert sentence == "This setting takes one of its published values."
+      end
     end
 
     test "the browser in force is shown here and changed elsewhere" do
@@ -1613,8 +1804,10 @@ defmodule FermixCore.Management.SettingsTest do
   defp shape([head | _rest]), do: [shape(head)]
   defp shape(_value), do: :scalar
 
+  # Read as on a Mac, so a section that exists only there reads the same on
+  # every CI leg; the platform gate itself has its own cases.
   defp rows(id) do
-    {:ok, %{"rows" => rows}} = Settings.get(id)
+    {:ok, %{"rows" => rows}} = Settings.get(id, macos?: true)
     rows
   end
 

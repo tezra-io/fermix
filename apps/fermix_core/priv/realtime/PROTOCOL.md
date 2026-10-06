@@ -35,6 +35,9 @@ Current values (see the schema's `x-protocol-version` / `x-supported-version-ran
 | daemon `min_version` | `1` |
 | daemon `max_version` | `2` |
 
+Unknown fields are ignored by older peers, so an additive optional field does
+not need a version bump.
+
 ### Version 2 — the Live engine
 
 Version 2 adds the frames the `openai_live` engine needs: `task_cancel` from the
@@ -162,15 +165,16 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `server_hello` | `min_version`, `max_version` | Handshake reply; advertises the accepted range. |
 | `state` | `state` (`idle` \| `listening` \| `speaking` \| `muted` \| `thinking` \| `reconnecting`) | Turn/session state. The vocabulary is OPEN and additive: a client that does not recognise a value falls back to its idle presentation, so the daemon may add one without a version bump — but it must never invent a value it has not documented here, or older clients silently render the call as idle. |
 | `audio_delta` | `audio` (base64 PCM16) | A chunk of assistant voice output. |
-| `transcript_delta` | `text` | Incremental transcript of the assistant's speech. |
-| `assistant_text_delta` | `text` | Incremental assistant text. |
+| `transcript_delta` | `text`, `role` (`user`) | Realtime only. The user's whole utterance, once the provider has transcribed it. |
+| `assistant_text_delta` | `text` | Realtime only. Incremental assistant text: the reply's words as they stream. |
+| `assistant_text_done` | `text` | Realtime only. The reply's whole text, once its words are done. It follows the reply's deltas and is never itself a delta. |
 | `tool_event` | `status`, `reason?` | A tool call's lifecycle. |
-| `usage` | token/cost fields | Per-turn usage. Live adds `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
-| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
+| `usage` | token/cost fields | Per-turn usage. Live adds `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
+| `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another Live call is up (see *One call at a time*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
-| `call_ready` | `engine`, `call_id`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
+| `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, Live only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (Live only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
-| `task` | `delegation_id`, `revision`, `status`, `summary?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. |
+| `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?`, `server_seq?`, `detached?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. `server_seq` (Live, a call in the chat) is the chat timeline row the result was shown at: a result too long to say, or that cannot be said (a link, code, a table), is written to the chat whole while the voice says a short line, so a client can say the result is in the chat. Absent when nothing was shown. `detached` (Live, a call in the chat) is `true` on the one `running` frame the daemon sends as the call ends for a task that will finish into the chat; no later `task` frame names it, since the call is over. Absent on every other frame. |
 
 ## Live call sequence
 
@@ -190,7 +194,7 @@ the voice in the audio, never from audio merely arriving.
 ```
 pet  -> daemon:  call_start
                  daemon opens the provider session and the backend bridge
-daemon -> pet:   call_ready { engine: "openai_live", call_id, provider_session_id?, expires_at?, captions }
+daemon -> pet:   call_ready { engine: "openai_live", call_id, call_uuid, conversation, tasks_outlive_call, provider_session_id?, expires_at?, captions }
 daemon -> pet:   state { state: "listening" }
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
@@ -199,11 +203,12 @@ daemon -> pet:   audio_delta … / state { speaking }
 daemon -> pet:   state { state: "listening" }      (the reply has had time to play out)
 daemon -> pet:   task { delegation_id, revision, status: "running" }      (backend work started)
 pet  -> daemon:  task_cancel { delegation_id }                            (optional)
-daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary? }
+daemon -> pet:   task { …, status: "completed" | "failed" | "cancelled", summary?, server_seq? }
 daemon -> pet:   usage { status: "live", voice_seconds, voice_cost_cents, backend_turns,
                          backend_cost: "unknown", accounting: "running" }
 pet  -> daemon:  call_stop
 daemon -> pet:   state { state: "idle" }
+daemon -> pet:   task { …, status: "running", summary?, detached: true }  (a call in the chat: a task still running)
 daemon -> pet:   usage { …, accounting: "complete" | "incomplete" }       (final)
 ```
 
@@ -216,3 +221,28 @@ says the provider never reported a terminal duration, and an incomplete total is
 never overwritten with zero. A call the daemon ends itself (cost ceiling, session
 expiry, max duration, provider disconnect) sends the same `state: "idle"` and
 final `usage`, followed by `error` carrying the matching `kind`.
+
+## A task that outlives its call
+
+In a call in the chat (`call_ready.tasks_outlive_call: true`) a task still
+running when the call ends, however it ends, is not cancelled. The daemon
+sends one `task { status: "running", detached: true }` for it after
+`state: "idle"` and before the final `usage`, and the task finishes into the
+chat: its result is written there as a row, and the owner can cancel it from
+the chat (`priv/companion/PROTOCOL.md`, *A Live call's rows*). A task that was
+still waiting is started behind it when its words were heard, and otherwise
+ends `failed`. Nothing more about either reaches this socket: the call is over.
+A private call's tasks are cancelled when it ends, as before.
+
+## One call at a time
+
+The daemon holds one Live call. A `call_start` on another connection while a
+call is up, or still settling (its provider session closing and its bill being
+settled), is refused before any session starts with
+
+```json
+{"type":"error","reason":"call_in_progress"}
+```
+
+and the connection closes. The call that was up is untouched. A repeated
+`call_start` on the connection that holds the call is not a second call.

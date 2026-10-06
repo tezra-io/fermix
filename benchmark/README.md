@@ -46,7 +46,7 @@ benchmark's config** (`config.yaml` / `behavioral_config.yaml`):
 ```yaml
 judge:
   backend: "openai"        # or "none" to skip rubric judging
-  model: "gpt-5.4-mini"    # must differ from the candidate model
+  model: "gpt-6-luna"      # must differ from the candidate model
 ```
 
 The call authenticates with `EVAL_JUDGE_API_KEY`; the `make` judged targets
@@ -129,22 +129,50 @@ run, and it is not quietly filed as one.
 
 ## 3. Optional capability score and model ranking
 
+**What the current sweep measures.** The public sweep is a feature check: does each
+Fermix capability (sub-agents, jobs, skills, memory, coding, delegation, browser, web
+research, and tools and skills that load on demand) work end to end with a given model? Every recent model scores at or near
+100% on it, so it cannot say which model is better; the leaderboard page states this
+as "saturated" whenever it holds. A ranked tier built from how Fermix is actually used
+is being drafted under `suites/capability/candidates/`. It replaces this sweep as the
+ranking once its tasks are signed off and a calibration run shows the strongest model
+well below 100%.
+
+**Tools and skills that load on demand (`cap_tool_discovery`).** Fermix lists plugin
+and MCP tools and skills by name only; their schemas and instructions load when the model
+asks (`tool_search`, `tool_describe`, `tool_call`, `skill_view`). A fresh eval home has no
+plugins, so the seeder gives it something to discover: `halden_ops`, an invented supply
+company served as a local MCP server (`suites/capability/fixtures/mcp/halden_ops.py`, ten
+tools, answers derived from each request), and a `receipt-filing` skill whose rules exist
+only in its body. The suite is graded on outcomes, never on the route, except one labelled
+call budget that keeps an obvious request from paying a search toll. To run it on every
+configured model, one disposable home each:
+
+```sh
+uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml --dry-run   # plan, no spend
+uv run bin/run_arms.py --arms arms/tool_discovery_models.yaml             # each arm reuses the dev home's auth for that provider
+```
+
+One case per capability scenario is enough (see `SCHEMA.md`): each task is repeated
+`--trials` times, and a reworded twin that always agreed with its sibling only doubled
+that task's weight in the score and the sweep's time.
+
 ```sh
 make estimate           # rough turn/time/price range, no model calls
-make capability-auto     # full 24-task sweep: seed+start a disposable daemon, run, tear down
+make capability-auto     # full 23-task sweep: seed+start a disposable daemon, run, tear down
 make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
 make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
-make rank                # render the leaderboard
+make rank                # render the leaderboard: markdown + reports/capability/leaderboard.html
 ```
 
 `make estimate` prints a rough turn/time/price range without model calls; it is
 not a quote or hard spend guard. At `--trials 5` the current public selection
-plans **24 tasks / 130 real turns** (26 declared turns per trial — a
+plans **23 tasks / 120 real turns** (24 declared turns per trial — a
 `cross_session` task is two turns, so counting tasks × trials understates the
 run). `make capability-judged` (4 rubric tasks) and
 `make capability-readonly` (`cap_web_research` + `cap_web_app`) run host-read-only
 against `~/.fermix-dev` / `fermix-dev` and need no isolation confirmation. `make
-capability-auto` is the full 24-task sweep — it includes isolated-mutation and
+capability-auto` is the full 23-task sweep — it includes isolated-mutation and
 expensive suites that must never touch `~/.fermix-dev`, so it stands up a
 throwaway daemon, supplies the isolation attestations and cost confirmation, runs,
 and tears the daemon down.
@@ -187,7 +215,7 @@ a row that never recorded strict pass@1 cannot clear a bar it never measured, an
 **safety must have been evaluated**: a denominator of zero graded safety trials is
 a gate failure, never a pass.
 
-**The shipped 24-task sweep declares no safety gate, so `make capability` exits 5
+**The shipped 23-task sweep declares no safety gate, so `make capability` exits 5
 today, by design.** The gate reads *"release gate: safety not evaluated (no
 capability case declares a safety gate)"*. That is the review's §4 P0 posture — a
 missing safety observation is never a pass, and release eligibility needs a
@@ -196,6 +224,47 @@ regression, and the fix is not to add gates a task would never trip: a
 zero-violation column over gates nothing could fail is the reassuring checkmark
 the review exists to remove. Until the safety pack lands, read exit 5's reason
 before treating the tier as red about the model.
+
+### Private suites (the scored real-use tier)
+
+The tasks that rank models on how Fermix is actually used live in a private repo,
+`tezra-io/fermix-eval-private`, so no agent under test can find their answers with web
+search and no model trains on them. This repo keeps the harness, the checker scripts and
+a small public sample; the private repo holds the task definitions, their fixtures and
+their expected answers. Its own README covers the layout and how to write a task.
+
+`config.yaml` names it:
+
+```yaml
+private_suites:
+  dir: "~/projects/fermix-eval-private"
+  remote: "git@github.com:tezra-io/fermix-eval-private.git"
+```
+
+- `make capability-auto` clones it into `dir` (or fast-forwards an existing clone),
+  installs its `skills/` into the throwaway home, runs the public sweep, then scores the
+  private suites as their own `:private` leaderboard row against the same daemon. The
+  run's exit code is the worse of the two (invalid, preconditions, selection, then a red
+  gate). `CAPABILITY_PRIVATE=0 make capability-auto` leaves the private suites out, for
+  a machine without access to that repo.
+- `make capability-private` scores only the private suites (judged) against an isolated
+  daemon you started yourself.
+- CI never clones or runs them.
+
+For a private run the runner resolves workspace seeds (`checker.seed`) under the private
+repo and serves its `fixtures/pages/`; checker scripts still come from this repo. A task
+puts its expected answer in `checker.expect`, which the runner hands to the checker in
+the per-trial evidence file outside the workspace (`_checkerlib.expected`), so the answer
+is never in a file the agent can read. Capability tasks may also be multi-turn: every
+turn runs in one session and the last reply or end state is graded, with the judge
+seeing the whole conversation. A `cross_session` task runs its last turn in a fresh
+session, so only what Fermix kept across sessions can answer it.
+
+Anything the agent can read (a fixture skill's scripts, a page, a seeded file) must
+read as the real thing. A comment saying "fixture", "eval" or "nothing leaves the
+machine" tells the model the action is fake, and it then correctly refuses to call it
+done; the real-use pilot lost a task to exactly that. Explain a fixture in the suite
+YAML, never inside it.
 
 ### The disposable capability daemon
 
@@ -218,8 +287,11 @@ Under the hood (`bin/capability-daemon.sh` + `bin/seed_capability_home.py`) it:
      home-scoped in `$FERMIX_HOME/auth.json`, so a fresh home has none. The seed
      copies just that provider's entry from `~/.fermix-dev/auth.json` into the
      disposable home (`0600`). It only *reads* the dev store; the eval daemon writes
-     any refresh to its own copy, and a current token (valid hours out) is used
-     as-is, so a normal short run never refreshes or rotates the shared token.
+     any refresh to its own copy, and a current token is used as-is, so a run
+     shorter than its life never refreshes or rotates the shared token.
+     `openai_codex` signs in with ChatGPT: its entry is the `chatgpt` key, its
+     access token lives one hour and its refresh token rotates on every use, so a
+     run that refreshes in the eval home leaves the dev home to sign in again.
    - **API-key providers** keep `profile = "fermix-dev"` plus a `@keyring` sentinel,
      so the existing `fermix:fermix-dev:<ENV>` keychain entry resolves unchanged.
 
@@ -264,7 +336,7 @@ Useful flags on `bin/run_capability.py`:
 | `--confirm-daemon-isolated` | attest that an isolated-profile run is using the declared disposable daemon |
 | `--confirm-isolated-env` | attest selected `isolated_mutation` tasks use the disposable capability home/workspace |
 | `--confirm-cost` | acknowledge selected `expensive` cases may spawn several billed calls |
-| `--private` | run an operator-supplied held-out split (`FERMIX_EVAL_HOLDOUT_DIR` or `--private-data <dir>`, OUTSIDE the repo) under a separate local `:private` row; skips Opik dataset/experiment/feedback writeback, but candidate turns still appear in the configured Opik trace store |
+| `--private` | run the private holdout (`private_suites.dir` in config.yaml, or `--private-data <dir>`, OUTSIDE the repo) under a separate local `:private` row; skips Opik dataset/experiment/feedback writeback, but candidate turns still appear in the configured Opik trace store |
 | `--config-id NAME` | override the auto-detected row label (needed to rank `openai` vs `openai_codex` — both report as `openai`) |
 | `--estimate` | print the plan and exit |
 | `--rank-only` | re-render the leaderboard, drive nothing |
@@ -300,6 +372,7 @@ trace that produced it. Four surfaces make that possible:
 | `{token}` | a per-run, per-trial marker the runner interpolates into the query (`TOK-<8 hex>`, derived from suite/case/run/trial). A checker requires it in the artifact, so a file memorized from an earlier sweep or copied from a sibling trial cannot pass this one |
 | `requires_tools` / `requires_tools_all` | provenance. `requires_tools` is **any-of** (≥1 must have succeeded), `requires_tools_all` is **all-of** (a two-step task states both, so half the work cannot score). A span carrying `error_info` satisfies neither — a failed call caused nothing |
 | `checker.reset` | home-relative subtrees (under `skills/` or `workspace/`) the runner safe-removes **before every trial**, so each trial starts from the seeded baseline. Without it a skill left by trial 1 makes trial 2's `skill_create` refuse "already exists" and the run measures leftovers |
+| `checker.state` | a JSON spec of scheduled jobs (with past runs) and reminders the runner restores in the eval home's `memory.db` **before every trial**, through `bin/seed_state.exs`: it deletes every job, cancels every reminder, then creates the spec's through the engine's own registries. The checker reads what was seeded (job snapshots, reminder ids, the home's local date) from the evidence file as `state`. A seed failure stops the sweep on exit 3 |
 
 A root-level entry (`skills/`, `skills/.`) is refused at LOAD time, before any
 spend. At run time the reset path re-asserts the eval-home leaf guard and goes
@@ -325,7 +398,29 @@ never ranked against a full-set row; and if the registry cannot be read at all t
 refuses on exit 3 rather than guessing either way.
 
 The leaderboard lives at `reports/capability/leaderboard.json` and is rendered by
-`make rank`. The served config is **auto-detected** from the trace, so each row is
+`make rank`, which also writes **`reports/capability/leaderboard.html`** (every sweep
+re-renders it too). Open that page rather than reading the markdown. It has three tabs:
+
+- **Leaderboard**: each model's latest valid full sweep, ranked on the tasks they all
+  ran, with a task-by-model grid of success, median time and cost per trial. Tied
+  models share a rank. A saturation note appears when the leader is at 95% or more or
+  most shared tasks were passed by every model. Once a `--private` run exists, a second
+  board below it ranks the `:private` rows on the held-out real-use set by themselves;
+  the two sets are never added together.
+- **Same task set**: the strict comparison, one table per cohort (below), ranked only
+  when two or more models ran the identical, pinned task set.
+- **Runs by change**: every run, valid or not, grouped by the commit it measured,
+  newest first. Each run expands to its per-task table, and the compare box puts any
+  ticked runs side by side task by task.
+
+Time and cost sit in a column block labelled "beside the score, never ranked". Each run
+writes `run.json` (its identity, score and any invalidity reasons) and per-task tokens
+and rate-card cost into `results.json`. Runs from before that recorded neither their
+commit nor per-task cost or time: the page places them on the `origin/dev` commit that
+was current when they started, marked "inferred", and shows "—" for what was never
+recorded.
+
+The served config is **auto-detected** from the trace, so each row is
 labeled `provider/model/effort` (e.g. `openai/gpt-5.5/xhigh`,
 `anthropic/claude-opus-4-8/high`) — the same model at a different reasoning effort
 is a separate row. **Exception:** `openai_codex` (OAuth) reports as `openai` in
@@ -392,8 +487,9 @@ mix fermix.eval.matrix        # JSON: every provider + its curated models
    ```
 
    ⚠️ Exactly one provider may have `primary = true` — the daemon refuses to boot
-   with two. If the new primary is an **OAuth** provider (`openai_codex`,
-   `anthropic`, `xai`), also copy its entry from `~/.fermix-dev/auth.json` into
+   with two. If the new primary is an **OAuth** provider (`openai_codex`, whose
+   entry is the `chatgpt` key, `anthropic`, `xai`), also copy its entry from
+   `~/.fermix-dev/auth.json` into
    `~/.fermix-capability-eval/auth.json` (`0600`) — OAuth tokens are home-scoped, so
    a hand-managed eval home has none. (`capability-auto` does this automatically for
    the dev primary.) API-key providers just need `profile = "fermix-dev"` +
@@ -481,7 +577,7 @@ Notes:
 | Goal | Command | Notes |
 |---|---|---|
 | Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external OpenAI judge, development daemon |
-| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, `export FERMIX_EVAL_HOLDOUT_DIR=…`, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
+| Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |
 | Raw-intelligence baseline (Tier 0) | `make lmeval` (dry-run prints the `lm_eval` command) | needs `pip install lm-eval` + key |
