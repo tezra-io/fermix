@@ -462,6 +462,11 @@ UNPRICED_PENDING_RATE: dict[str, str] = {
     "openrouter/qwen3:32b":
         "qwen3:32b is an Ollama tag, not an OpenRouter id (that would be "
         "qwen/qwen3-32b) — establish which model the route really served before pricing it",
+    "mistral/mistral-large-4-0":
+        "Mistral Large 4, a public preview since 2026-10-06 billed at a two-week 50%-off "
+        "launch rate; mistral.ai/pricing/api was unreachable when the catalog added it, "
+        "and secondary listings quote $1.36/$4.18 per Mtok list. Card it from the "
+        "first-party page once the launch rate ends",
     "xai/grok-code-fast-1":
         "absent from xAI's current model list (docs.x.ai/docs/models) — retired or "
         "renamed. Its successor grok-build-0.1 IS carded, under its own slug; this one "

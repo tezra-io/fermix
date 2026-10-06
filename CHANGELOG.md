@@ -117,6 +117,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider already set to one of these models by hand now compacts
   conversations at that model's known context window instead of the shorter
   one Fermix assumes for a model it does not know.
+- **Mistral offers Mistral Large 4.** The Mistral provider's model list adds
+  Mistral Large 4 (`mistral-large-4-0`), Mistral's public preview, beside the
+  rolling Large, Medium and Small tiers, and its default stays Mistral Large.
+  Fermix compacts a Mistral Large 4 conversation at the 524,288-token window
+  Mistral's API serves.
 - **Every browser sign-in ends on a Fermix page.** OpenAI Codex, Grok and
   every plugin's sign-in return to one self-contained page with the Fermix
   pet that follows the browser's light or dark scheme, instead of a bare
