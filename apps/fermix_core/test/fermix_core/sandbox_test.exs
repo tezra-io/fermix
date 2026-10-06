@@ -189,8 +189,8 @@ defmodule FermixCore.SandboxTest do
       end)
 
     assert Sandbox.read_paths(candidates, :content_search, context) == expected
-    # Only the in-root file survives; protected, escaped, and symlink-loop
-    # candidates are all excluded (the loop proves fail-closed).
+    # Only the in-root file survives; protected, escaped, and invalid
+    # candidates are all excluded (the invalid path proves fail-closed).
     assert expected == [allowed]
 
     FermixTestSupport.SafeRm.rm_rf!(home)
@@ -230,7 +230,7 @@ defmodule FermixCore.SandboxTest do
 
     assert_received {^ref, :deny, {:protected_path, _protected}}
     assert_received {^ref, :deny, {:outside_root, _escaped}}
-    assert_received {^ref, :deny, {:too_many_symlinks, _looped}}
+    assert_received {^ref, :deny, :enotdir}
     # The allowed candidate must NOT emit — allow is dropped in the batch path.
     refute_received {^ref, :allow, _reason}
 
@@ -239,7 +239,7 @@ defmodule FermixCore.SandboxTest do
 
   # A tree with one allowed file and three distinct deny/error shapes: a file
   # under a protected home dir, a file reached through a symlink escaping the
-  # root, and a symlink loop (canonicalization error → fail-closed).
+  # root, and a path through a regular file (canonicalization error → fail-closed).
   defp read_paths_fixture do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-read-paths")
 
@@ -256,8 +256,10 @@ defmodule FermixCore.SandboxTest do
     File.ln_s!(outside, Path.join(home, "link"))
     escaped = Path.join(home, "link/escape.txt")
 
-    File.ln_s!("loop", Path.join(home, "loop"))
-    looped = Path.join(home, "loop/file.txt")
+    # Fail resolution with ENOTDIR without repeatedly walking every ancestor
+    # through a 64-hop symlink loop under concurrent filesystem load. The hop
+    # limit itself is covered by PathPolicyTest.
+    invalid = Path.join(allowed, "file.txt")
 
     # `outside` lives only to back the escaping symlink; the symlink target is
     # captured, so cleaning it here keeps the fixture self-contained.
@@ -274,7 +276,7 @@ defmodule FermixCore.SandboxTest do
       home: home,
       context: context,
       allowed: allowed,
-      candidates: [allowed, protected, escaped, looped]
+      candidates: [allowed, protected, escaped, invalid]
     }
   end
 end
