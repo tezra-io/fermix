@@ -128,10 +128,12 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
         id: :acp_queue
       )
 
+    # Protocol tests use the production handshake budget. Only the missing-hello
+    # test shortens it; a 200 ms deadline otherwise races a loaded CI runner.
     start_supervised!(
       {Acp.Supervisor,
        socket_path: socket_path,
-       peer_opts: [agent: Queue, agent_server: queue, hello_timeout_ms: 200]},
+       peer_opts: [agent: Queue, agent_server: queue]},
       id: :acp_supervisor
     )
 
@@ -201,12 +203,13 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     end
 
     test "refuses a hello that never arrives", ctx do
+      ctx = restart_acp(ctx, hello_timeout_ms: 200)
       client = connect(ctx)
 
       assert %{"fermix_bridge_ack" => %{"status" => "error", "message" => message}} =
                recv_frame(client, 3_000)
 
-      assert message =~ "handshake"
+      assert message == "no bridge handshake within 200ms"
       assert closed?(client)
     end
   end
@@ -1286,7 +1289,7 @@ defmodule FermixChannels.Channels.Acp.PeerTest do
     start_supervised!(
       {Acp.Supervisor,
        socket_path: ctx.socket_path,
-       peer_opts: [agent: Queue, agent_server: ctx.queue, hello_timeout_ms: 200] ++ peer_opts},
+       peer_opts: [agent: Queue, agent_server: ctx.queue] ++ peer_opts},
       id: :acp_supervisor
     )
 
