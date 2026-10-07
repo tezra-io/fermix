@@ -122,6 +122,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   rolling Large, Medium and Small tiers, and its default stays Mistral Large.
   Fermix compacts a Mistral Large 4 conversation at the 524,288-token window
   Mistral's API serves.
+- **The catalog offers Games 1.1.0.** Ask Fermix to keep playing, watch a
+  game or play it to the end, and the Games plugin now plays the game through
+  on the page's own waits instead of declining to loop on them; move by move
+  stays the default in a chat and on a voice call. It hands the turn back
+  after three waits in a row that bring nothing new. A new install gets
+  1.1.0; an installed 1.0.0 moves with `fermix plugins upgrade games`.
 - **Every browser sign-in ends on a Fermix page.** OpenAI Codex, Grok and
   every plugin's sign-in return to one self-contained page with the Fermix
   pet that follows the browser's light or dark scheme, instead of a bare
