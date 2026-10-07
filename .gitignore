@@ -102,3 +102,4 @@ packaging/linux/out/
 # The Zig setup action restores its cache into the workspace root, and the
 # package build refuses a checkout that is not exactly the commit.
 /.zig-cache/
+packaging/*
