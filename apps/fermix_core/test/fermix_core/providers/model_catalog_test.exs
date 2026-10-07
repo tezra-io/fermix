@@ -110,6 +110,20 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.default_model_for(:anthropic) == "claude-sonnet-4-6"
     end
 
+    test "Mistral Large 4 is offered without moving the Mistral default" do
+      ids = Enum.map(ModelCatalog.models_for(:mistral), & &1.id)
+
+      assert ids == [
+               "mistral-large-latest",
+               "mistral-large-4-0",
+               "mistral-medium-latest",
+               "mistral-small-latest"
+             ]
+
+      assert ModelCatalog.default_model_for(:mistral) == "mistral-large-latest"
+      assert ModelCatalog.context_window_for(:mistral, "mistral-large-4-0") == 524_288
+    end
+
     test "the xAI list is ordered newest generation first" do
       ids = Enum.map(ModelCatalog.models_for(:xai), & &1.id)
 

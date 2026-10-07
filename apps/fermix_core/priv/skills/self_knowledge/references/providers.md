@@ -34,7 +34,7 @@ An unknown key in any provider block, or an unknown legacy provider, fails loud 
 - **Anthropic**: subscription requests identify as Claude Code and auto-refresh with one 401 retry. Every request sends prompt-cache breakpoints and asks for adaptive thinking where the model supports it (none for Haiku 4.5). Output caps at 16,384 tokens.
 - **Grok**: a 403 means the plan lacks API access, not a stale token. Some Grok models reject an effort field and get none.
 - **OpenRouter**: vendor-prefixed ids (`anthropic/claude-sonnet-4.6`); attribution headers `HTTP-Referer: https://fermix.sh`, `X-Title: Fermix`; no effort field.
-- **Mistral**: three rolling tiers (`mistral-large-latest`, `-medium-latest`, `-small-latest`); no effort field.
+- **Mistral**: three rolling tiers (`mistral-large-latest`, `-medium-latest`, `-small-latest`) plus the pinned Mistral Large 4 public preview (`mistral-large-4-0`, compacted at the 524,288-token window Mistral's API serves); the default stays `mistral-large-latest`; no effort field.
 - **Venice**: `https://api.venice.ai/api/v1`; Venice's own system prompt and inline thinking are turned off on every request; its end-to-end encrypted mode is not used (it disables tools). Default model `grok-4-7`. The Doctor probe reads `/api_keys/rate_limits`.
 - **Ollama**: 300 s receive timeout. The Doctor probe also reads `/api/show` and fails when the served `num_ctx` is below the catalog window (fix: `OLLAMA_CONTEXT_LENGTH` or a Modelfile `num_ctx`); a 404 means the model is not pulled (`ollama pull <model>`).
 
