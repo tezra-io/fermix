@@ -18,7 +18,7 @@
 
 - `/ultra` is a run mode of the normal turn, not a separate orchestrator: it tags the turn and adds an exhaustive-mode prompt that drives breadth (many narrow probes) and best-of-N depth (independent `subagents` on the same hard sub-problem, keeping the best-supported answer). Workers nest under the parent trace and stay brief by instruction.
 - `subagents` takes a one-shot `model`; the main agent never changes its own model.
-- Repeated identical tool calls trip the loop detector.
+- Repeated identical tool calls trip the loop detector: the fifth identical call in a row ends the turn. A page's WebMCP tool (`browser` `webmcp` `call`) counts its repeats only since it last returned something new, so following a page's own wait (watching a game) goes on while each answer is new; an unchanged answer, a repeated timeout included, still counts.
 - These caps are internal constants, not `config.toml` settings.
 
 ## Deferred tool schemas

@@ -574,7 +574,8 @@ defmodule FermixCore.AgentLoop do
       state = %{
         state
         | tool_failures: state.tool_failures + failures,
-          context: record_outside_sources(context, turn.tool_calls, state)
+          context: record_outside_sources(context, turn.tool_calls, state),
+          loop_detector: record_tool_runs(state, turn.tool_calls, tool_results)
       }
 
       if sole_terminal? and blank?(turn.content) do
@@ -1375,38 +1376,113 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
+  # The proposed batch is weighed against the runs already in the window as if
+  # each call were made in turn, so identical calls in one batch count too. The
+  # batch joins the window only once it ran (`record_tool_runs/3`), carrying what
+  # each call returned.
   defp update_detector(detector, signatures) do
     detector = %{detector | warning: nil, kill_signature: nil}
 
-    Enum.reduce(signatures, detector, fn signature, current ->
-      recent = Enum.take([signature | current.recent], current.window)
-      windowed = Enum.count(recent, &(&1 == signature))
-      consecutive = recent |> Enum.take_while(&(&1 == signature)) |> length()
-      warned = MapSet.member?(current.warned, signature)
+    {detector, _runs} =
+      Enum.reduce(signatures, {detector, detector.recent}, fn signature, {current, runs} ->
+        runs = Enum.take([proposed_run(signature) | runs], current.window)
+        {flag_repeat(current, signature, runs), runs}
+      end)
 
-      cond do
-        # Kill only on an unbroken run: any different call in between means the
-        # model is alternating work with re-observation, which the tool contract
-        # itself mandates (fresh screenshot after every state-changing action;
-        # NOT-delivered recovery re-sends identical coordinates). Interleaved
-        # repetition gets the one-time warning below and stays bounded by the
-        # iteration cap — a windowed kill ends healthy turns mid-work.
-        consecutive >= current.kill_threshold ->
-          %{current | recent: recent, kill_signature: signature}
+    detector
+  end
 
-        windowed >= current.warn_threshold and not warned ->
-          %{
-            current
-            | recent: recent,
-              warning: signature,
-              warned: MapSet.put(current.warned, signature)
-          }
+  defp flag_repeat(detector, signature, runs) do
+    windowed =
+      runs
+      |> Enum.filter(&(&1.signature == signature))
+      |> since_progress()
+      |> length()
 
-        true ->
-          %{current | recent: recent}
-      end
+    consecutive =
+      runs
+      |> Enum.take_while(&(&1.signature == signature))
+      |> since_progress()
+      |> length()
+
+    warned = MapSet.member?(detector.warned, signature)
+
+    cond do
+      # Kill only on an unbroken run: any different call in between means the
+      # model is alternating work with re-observation, which the tool contract
+      # itself mandates (fresh screenshot after every state-changing action;
+      # NOT-delivered recovery re-sends identical coordinates). Interleaved
+      # repetition gets the one-time warning below and stays bounded by the
+      # iteration cap — a windowed kill ends healthy turns mid-work.
+      consecutive >= detector.kill_threshold ->
+        %{detector | kill_signature: signature}
+
+      windowed >= detector.warn_threshold and not warned ->
+        %{detector | warning: signature, warned: MapSet.put(detector.warned, signature)}
+
+      true ->
+        detector
+    end
+  end
+
+  # The runs a repeat counts, newest first: back to and including the newest one
+  # that returned something new. Only a call whose tool weighs progress by its
+  # result has such runs, so every other call counts all of its runs.
+  defp since_progress(runs) do
+    {unchanged, rest} = Enum.split_while(runs, &(not &1.progress?))
+    unchanged ++ Enum.take(rest, 1)
+  end
+
+  defp proposed_run(signature), do: %{signature: signature, digest: nil, progress?: false}
+
+  # After the batch ran, its calls join the window in the order they ran. A call
+  # whose tool weighs progress by its result (`progress_by_result?/1`: a page's
+  # WebMCP tool, whose wait returns the next position of a game) keeps a digest
+  # of what it returned, and a run that returned something this call has not
+  # returned within the window is progress.
+  defp record_tool_runs(state, tool_calls, tool_results) do
+    tool_calls
+    |> Enum.zip(tool_results)
+    |> Enum.reduce(state.loop_detector, fn {tool_call, %{output: output}}, detector ->
+      record_run(detector, tool_signature(tool_call), result_digest(tool_call, output, state))
     end)
   end
+
+  defp record_run(detector, signature, digest) do
+    run = %{
+      signature: signature,
+      digest: digest,
+      progress?: new_result?(detector.recent, signature, digest)
+    }
+
+    %{detector | recent: Enum.take([run | detector.recent], detector.window)}
+  end
+
+  defp new_result?(_runs, _signature, nil), do: false
+
+  defp new_result?(runs, signature, digest),
+    do: not Enum.any?(runs, &(&1.signature == signature and &1.digest == digest))
+
+  defp result_digest(tool_call, output, state) do
+    if progress_by_result?(tool_call, state), do: :erlang.phash2(output), else: nil
+  end
+
+  # Asked of the tool's module via `function_exported?`, the convention of
+  # `terminal?/0`; a tool without the hook counts every repeat.
+  defp progress_by_result?(%{name: name, arguments: arguments}, state) do
+    case Map.fetch(state.capabilities_by_name, name) do
+      {:ok, capability} -> capability_progress_by_result?(capability, parse_arguments(arguments))
+      :error -> false
+    end
+  end
+
+  defp capability_progress_by_result?(%Capability{executor: {mod, _fun, _extra}}, {:ok, args})
+       when is_atom(mod) and is_map(args) do
+    function_exported?(mod, :progress_by_result?, 1) and mod.progress_by_result?(args)
+  end
+
+  # Arguments that did not parse never reached the tool: there is nothing to weigh.
+  defp capability_progress_by_result?(_capability, _parsed), do: false
 
   defp tool_signature(%{name: name, arguments: arguments}) do
     {name, normalize_arguments(arguments)}

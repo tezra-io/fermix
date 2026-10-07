@@ -1013,6 +1013,10 @@ _ACCEPTED_BLANKS = (
     # blanking says so out loud. Fix the attribution upstream, then delete these lines.
     ("openrouter", "gpt-5.4-mini"),
     ("openrouter", "qwen3:32b"),
+    # A public preview on a two-week launch discount whose first-party list price
+    # was not read when the catalog added it. Card it from mistral.ai/pricing/api
+    # once the launch rate ends, then delete this line.
+    ("mistral", "mistral-large-4-0"),
 )
 
 

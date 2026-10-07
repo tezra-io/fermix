@@ -4,10 +4,110 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.14.0] - 2026-10-06
 
 ### Added
 
+- **iMessage is a channel, on the Mac.** Text Fermix from your iPhone like
+  a contact. A signed helper app, Fermix Messages, reads and sends through
+  Messages on the Mac Fermix runs on and holds the two macOS permissions the
+  channel needs (Full Disk Access and Automation for Messages), so they
+  belong to it rather than to Fermix, Terminal or Homebrew and survive
+  Fermix updates. Fermix never opens the Messages database itself. Setup
+  asks for two things only: your Apple ID or phone number, and any guests;
+  Fermix Messages works out the account and shows its own dialog naming
+  every address before anyone can be messaged. Messages on that Mac must be
+  signed in to a separate Apple ID used only by Fermix: an owner address
+  that is this Mac's own is refused with a sentence saying so. Turning the
+  channel on downloads, verifies and places Fermix Messages 0.1.2. Direct
+  conversations only, with text, photos, files and voice notes both ways;
+  group chats and SMS are ignored. Doctor gains `imessage_helper` and
+  `imessage_permissions` rows. Browser setup, `fermix setup` and
+  `[fermix_channels.imessage]` set it up today; the Mac app's own iMessage
+  rows arrive with the app release that pins this engine. On Linux the
+  channel does not exist, and a config that turns it on refuses to start.
+- **`fermix settings` changes every setting from a terminal.** On a
+  headless host reached over SSH, search, coding agents, memory,
+  personalization and every other section no longer need the browser setup
+  page through a tunnel or a hand edit of `config.toml`: `fermix settings
+  list`, `show SECTION`, `set SECTION KEY=VALUE…`, `secret set|clear ID`,
+  `primary [PROVIDER]` and `reload`, each with `--json`. It goes through the
+  running service, so validation and restart notices are the apps' own, and
+  it exits 3 without writing anything when no service answers. A secret is
+  never taken from the command line: it is read from a masked prompt or
+  `--stdin`, and a command that carries one is refused with a note to
+  rotate it. A home the Fermix app manages refuses the verb and points at
+  the app's Settings.
+- **Fermix can reach the internet through an HTTP proxy.**
+  `[fermix_core.network] proxy` and `proxy_bypass`, or `fermix setup
+  --proxy http://host:port [--proxy-bypass host,.suffix]`, route every
+  outbound request through the proxy; HTTPS is tunnelled, so TLS is still
+  verified end to end. There is no fallback: a proxy that fails fails the
+  request, and connections that cannot be tunnelled (WebSocket clients, the
+  pinned remote MCP connector, Apple push) are refused rather than dialled
+  directly. Proxy credentials are not supported, child processes are not
+  given the proxy, and the daemon does not read `HTTPS_PROXY`; Doctor warns
+  when the environment sets one.
+- **"Remember this" reaches long-term memory at once.** `memory_store` with
+  a category saves a fact to your profile, in the prompt from the next turn
+  in every conversation, and with an id it corrects a row the background
+  review wrote. The new `memory_forget` takes a row out of the profile and
+  every recall at once; it is archived, not erased. Before, a remembered
+  fact waited up to a day for the review, and a correction left the old
+  line in the prompt until then. Each result says what happened: saved
+  long-term, saved as a note for this conversation, kept only for this
+  session, or refused with the reason.
+- **"Send it to my Telegram."** The new `send_to_channel` tool sends a text
+  to your own inbox on the channel you name: your direct chat on Telegram,
+  Signal or WhatsApp, Slack or Discord through a configured default target,
+  the Mac chat, or the phone while its channel runs. It never sends to
+  another chat, and a channel with no inbox of yours is refused with the
+  channels that have one, rather than sent somewhere else. Only the owner
+  has it.
+- **GPT-Live voice calls join the Mac chat.** A task handed off on a call
+  now runs in the chat's own conversation: it reads what you typed before
+  it ("use that link"), the chat's next message reads what was asked aloud,
+  and a task and a typed message wait for each other. A call starts knowing
+  the assistant's name, your name, time zone and today's date, your memory
+  files, the chat's six newest messages and the gists of the last three
+  calls. While a call is up, what you type in the chat is passed to the
+  voice quietly, a message that is only material for the call may get no
+  reply, and the new `voice_call_context` tool reads the call in progress.
+  This is the default; **Voice calls join the chat** set to No
+  (`[fermix_core.realtime] conversation = "private"`) keeps each call apart
+  as before. What was said aloud is never read by the memory review.
+- **What a call cannot say is shown in the chat.** A task's answer is said
+  as one short line, and a link, code, a table, a list or a long answer is
+  written whole to the chat, with the voice told it is there. An answer
+  drawn from computer history is shown, never said, unless OpenAI is granted
+  history.
+- **Each call leaves a gist.** When a call in the chat ends, Fermix writes a
+  few sentences on what was asked, done, decided and left open, and the chat
+  gets one row for the call: its length, cost and gist. The next call starts
+  with the gists of the last three, and your turns on any channel are told
+  them, so "what was the last call about?" has an answer. If the daemon
+  stops before a finished call's row is written, the next start writes it.
+- **Work handed off on a call finishes after the call.** A task still running
+  when a call in the chat ends is no longer cancelled: the chat gets a "Still
+  working on" row, then its result, and the phone gets a push. At most eight
+  are kept, each for up to 30 minutes after the call; one is cancelled from
+  the app by its ids or with `/stop`. A call in the chat may also start a
+  coding run, which reports back into the chat, and send a result to one of
+  your channels when you ask. A private call's tasks still end with the call,
+  and it still cannot start a coding run.
+- **The phone and the Mac share one chat.** Turns typed on the phone run in
+  the Mac chat's conversation, with one history and one queue: either reads
+  what was said on the other, a cancel on either stops only its own turn,
+  and `/new` on either clears both. The phone's earlier history joins the
+  chat once, at the upgrade, interleaved by time. A scheduled job or other
+  delivery to the chat is pushed to a phone that is away while the phone
+  channel runs.
+- **Browser tasks have a Chrome profile for what the app's pane cannot do.**
+  The built-in `fermix_chrome` profile always runs in Fermix's managed
+  Chrome, never in the Fermix app's browser pane, and keeps its own sign-ins.
+  A page's WebMCP tools and downloads are done there; the browser's status
+  and every `open` and `navigate` result name the browser in `backend`, and
+  the pane's refusal names `fermix_chrome` as the next move.
 - **OpenRouter and Venice suggest the newest models.** OpenRouter's list adds
   Claude Sonnet 5.5, Claude Fable 5.1, Claude Opus 5.5, GPT-6 Astra, GPT-6.1
   Sol, GPT-6 Luna and Grok 4.7 beside the models it already offered, and its
@@ -17,9 +117,108 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   provider already set to one of these models by hand now compacts
   conversations at that model's known context window instead of the shorter
   one Fermix assumes for a model it does not know.
+- **Mistral offers Mistral Large 4.** The Mistral provider's model list adds
+  Mistral Large 4 (`mistral-large-4-0`), Mistral's public preview, beside the
+  rolling Large, Medium and Small tiers, and its default stays Mistral Large.
+  Fermix compacts a Mistral Large 4 conversation at the 524,288-token window
+  Mistral's API serves.
+- **The catalog offers Games 1.1.0.** Ask Fermix to keep playing, watch a
+  game or play it to the end, and the Games plugin now plays the game through
+  on the page's own waits instead of declining to loop on them; move by move
+  stays the default in a chat and on a voice call. It hands the turn back
+  after three waits in a row that bring nothing new. A new install gets
+  1.1.0; an installed 1.0.0 moves with `fermix plugins upgrade games`.
+- **Every browser sign-in ends on a Fermix page.** OpenAI Codex, Grok and
+  every plugin's sign-in return to one self-contained page with the Fermix
+  pet that follows the browser's light or dark scheme, instead of a bare
+  white page. It says the sign-in reached Fermix rather than claiming it
+  finished, and a failure no longer sends you to a terminal a web or app
+  sign-in does not have.
+- **The voice knows the pet is its body.** Both voice engines are told that
+  the Fermix app's pet is the model itself, so a call no longer denies the
+  pet when you mention it.
+
+### Changed
+
+- **OpenAI Codex signs in with ChatGPT. Sign in once more after
+  upgrading.** OpenAI Codex keeps its place and its settings, but now uses
+  OpenAI's Sign in with ChatGPT and the public Responses API, billed to your
+  ChatGPT Plus or Pro plan, with usage you can see and cap at
+  chatgpt.com/settings/usage (**Manage usage**). A sign-in made through the
+  older Codex-client sign-in is no longer read, which is why you sign in
+  again. `fermix auth login` and the terminal wizard print the address and
+  also take the address a browser on another computer ended on, pasted
+  back. Models are listed live from your account.
+  The route carries no image generation, voice, transcription or file
+  uploads, and a plan that cannot be used is refused without failover. The
+  Codex CLI's own login, which `codex_run` uses, is separate.
+- **A server's setup asks where to keep secrets first.** With no display
+  and no usable keyring, the terminal wizard now asks for the secret store
+  before anything else, with the private file store as the default, instead
+  of collecting every answer and then discarding them when the keyring
+  refused the save. Desktops and an explicit `--secret-store` are unchanged.
+- **Your profile files keep more of what Fermix knows.** `USER.md` keeps
+  10 identity, 16 preference, 8 interest and 8 goal rows, and `MEMORY.md`
+  16 Working Rules and 40 Context rows, inside the same size caps; rows were
+  being dropped long before the files were full. The review is told how
+  many rows each category uses, so it consolidates before a row drops out.
+- **One GPT-Live call at a time.** Starting a call from another window or
+  Mac while one is up, or still ending, is refused with `call_in_progress`,
+  and the call that was up carries on. Before, each connection could hold a
+  billed call of its own.
+
+### Removed
+
+- **Import Codex sign-in, Fast mode and the Codex image backend.** Importing
+  the Codex CLI's sign-in is no longer supported. `fast` under
+  `[fermix_core.providers.openai_codex]` and `[fermix_core.tools.generate_image]
+  backend = "openai_codex"` are accepted from an existing config and dropped
+  at load with a warning; image generation then needs another backend
+  (OpenAI, SpaceXAI or Google) chosen in Settings.
 
 ### Fixed
 
+- **A guest's messages stay out of the owner's memory.** Anyone on a
+  channel's allow-list who is not the owner was sent `USER.md` and
+  `MEMORY.md` with every turn, and what they said was reviewed into the
+  owner's profile. A guest's turn now carries neither file and is never
+  reviewed. Messages guests sent before the upgrade are not marked, and a
+  backlog of them may still be reviewed once.
+- **Profile files keep their punctuation.** `USER.md` and `MEMORY.md` no
+  longer turn `-` and `_` into spaces ("UTC-5" became "UTC 5", and dates and
+  paths were mangled). A single pasted message larger than the review's
+  budget is now read at its head and its tail, so a preference at the end of
+  a long paste is no longer skipped.
+- **A refused sender can be found in the log.** The "ingress denied" line
+  now names the sender id the gateway compared, with the display name and
+  chat id, so the id to enter as owner or guest can be read off the refused
+  message. Each value is quoted, so a display name cannot forge a log line.
+- **A sign-in that times out says so on Linux too.** A browser sign-in that
+  reached its deadline could report an accept failure instead of a timeout.
+- **A private GPT-Live call no longer picks up an earlier call's history.**
+  With **Keep transcripts** on, a private call's history was keyed by a call
+  number that restarts with the daemon, so a call after a restart could read
+  an earlier call's turns. It is now keyed by the call's own id.
+- **A voice task that compacts its conversation says its answer.** The
+  compaction notice was spoken as the task's answer, and the real answer was
+  then dropped as late.
+- **A job a private call's task schedules to report "here" is refused when
+  asked for.** Its target was the call's own conversation, which ends with
+  the call, so every run failed. Creating it now says to name a channel or
+  make it silent. From a call in the chat the job reports into the chat.
+- **Downloads in the browser fail fast and say how.** In the Fermix app's
+  pane, `download` waited out its budget for a file the pane never saves; it
+  is now refused at once and points to `fermix_chrome`. `download` collects a
+  file a click or a navigation already started, and now refuses `ref`, `url`
+  and `path`, which read as if it could start one, with the move that does.
+- **Watching a game no longer ends the turn after four waits.** A page's own
+  wait tool, such as a game's, is the same call every time, and five identical
+  calls in a row ended the turn with "Repeated tool call loop detected", so
+  following a game stopped after four waits however much was happening. A
+  repeated call to a page's WebMCP tool now counts only since it last returned
+  something new: while each wait brings a new position the agent keeps
+  following, and a wait that keeps answering the same thing, or keeps timing
+  out, still ends the turn. Every other tool counts its repeats as before.
 - **A voice reply's whole text arrives once, as its own event.** The Realtime
   engine sent a finished reply's text as one more `assistant_text_delta` after
   its deltas, so a client joining the deltas showed the reply twice. It now

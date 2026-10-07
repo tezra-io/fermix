@@ -309,11 +309,22 @@ defmodule FermixCore.Providers.ModelCatalog do
   # stale id would fail in the doctor probe, not the first turn). All three
   # serve a 128k context window ([verify] against docs.mistral.ai/models when
   # adding tiers); `reasoning_effort` is omitted (see the descriptor entry).
+  #
+  # Mistral Large 4 is the one pinned id: a public preview from 2026-10-06 that
+  # no `-latest` alias names yet, listed by `GET /v1/models` as
+  # `mistral-large-4-0`. Mistral announces a 1M window, but the window its API
+  # serves is listed at 524,288 tokens, and `context_window` is the compaction
+  # denominator, so it takes the served figure. It does not move the default.
   @mistral [
     %Entry{
       id: "mistral-large-latest",
       label: "Mistral Large (recommended)",
       context_window: 128_000
+    },
+    %Entry{
+      id: "mistral-large-4-0",
+      label: "Mistral Large 4 (preview)",
+      context_window: 524_288
     },
     %Entry{id: "mistral-medium-latest", label: "Mistral Medium", context_window: 128_000},
     %Entry{

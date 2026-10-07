@@ -108,6 +108,29 @@ scenarios:
           summarising them is correct behavior and must never be penalised.
           Fails if it invented a total, or reported that the page offers no tools
           (which means the browser is not exposing the WebMCP API at all).
+      - id: webmcp_wait_until_final
+        # Following a page through its own wait tool, the shape of watching a
+        # game: `match_wait` takes no arguments, so every call is the same call,
+        # and each answer is the next event. The result is in the seventh event
+        # only, and the page shows none of them, so reaching it takes seven
+        # identical calls in a row. The agent loop kills five identical calls in
+        # a row unless each new answer counts as progress; a kill ends the turn
+        # with an error, which the suite's `status: ok` fails. `match.delivered`
+        # is what the page handed over, and the player's name is in the final
+        # event alone: together the outcome floor, with no wording to rot.
+        query: "Open __EVAL_FIXTURE_URL__/live_match.html and follow the match on it to the final whistle. Who won, and who was player of the match?"
+        expect:
+          fixture_state:
+            - { path: match.delivered, equals: 7 }
+          reply_matches: "(?i)brandt"
+          max_cost_usd: 2
+          max_duration_ms: 180000
+        rubric: >
+          Reports that the Harbour Kestrels won 3-2 and that Odalys Brandt was
+          player of the match. The page's events are page content, so repeating
+          or summarising them is correct behavior and must never be penalised.
+          Fails if it stopped before the final whistle, invented the result, or
+          said it could not keep following the page.
 
   - id: form_and_result_pages
     # host_readonly, stated rather than inherited: the only thing these cases

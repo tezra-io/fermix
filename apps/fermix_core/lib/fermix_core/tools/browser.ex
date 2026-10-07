@@ -390,6 +390,17 @@ defmodule FermixCore.Tools.Browser do
   @impl true
   def category, do: :web
 
+  @doc """
+  A page's WebMCP tool is called again with the same arguments on purpose: a
+  game's wait returns the next position each time. For such a call the agent
+  loop counts a repeat only since the call last returned something new, so
+  following a page is not a loop while an unchanged answer still is. Discovered
+  via `function_exported?`; every other action counts each repeat.
+  """
+  @spec progress_by_result?(map()) :: boolean()
+  def progress_by_result?(%{"action" => "webmcp", "op" => "call"}), do: true
+  def progress_by_result?(arguments) when is_map(arguments), do: false
+
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
   def execute(args, context) when is_map(args) and is_map(context) do

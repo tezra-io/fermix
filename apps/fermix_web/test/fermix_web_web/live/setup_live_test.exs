@@ -4882,7 +4882,7 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       assert html =~ "Installing hackerdemo"
 
-      html = render_until(view, "Plugin enabled.")
+      html = render_until_enabled(view)
       assert html =~ ~s(data-plugin-name="hackerdemo")
       refute html =~ ~s(data-catalog-name="hackerdemo")
 
@@ -5420,7 +5420,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> element(~s|button[phx-click="plugin_enable"][phx-value-name="vaultdemo"]|)
       |> render_click()
 
-      html = render_until(view, "Plugin enabled.")
+      html = render_until_enabled(view)
       assert html =~ ~s(data-plugin-name="vaultdemo")
       assert html =~ "Needs config"
       assert html =~ "Path to your vault"
@@ -5465,7 +5465,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       |> element(~s|button[phx-click="plugin_enable"][phx-value-name="vaultdemo"]|)
       |> render_click()
 
-      render_until(view, "Plugin enabled.")
+      render_until_enabled(view)
 
       html =
         view
@@ -5864,7 +5864,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     |> element(~s|button[phx-click="plugin_enable"][phx-value-name="#{name}"]|)
     |> render_click()
 
-    render_until(view, "Plugin enabled.")
+    render_until_enabled(view)
     view
   end
 
@@ -6275,6 +6275,12 @@ defmodule FermixWebWeb.SetupLiveTest do
 
     Map.put(tool, "descriptor_sha256", digest)
   end
+
+  # A catalog install runs off the LiveView in a task (fetch, verify, extract,
+  # enable) and "Plugin enabled." lands only once it finishes. On a loaded macOS
+  # runner that overran the default half second, so this wait allows five; the
+  # poll still returns as soon as the flash renders.
+  defp render_until_enabled(view), do: render_until(view, "Plugin enabled.", 200)
 
   defp render_until(view, expected, attempts \\ 20)
 

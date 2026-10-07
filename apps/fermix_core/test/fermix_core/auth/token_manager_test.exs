@@ -677,25 +677,28 @@ defmodule FermixCore.Auth.TokenManagerTest do
               "auth_mode" => "oauth_pkce",
               "provider" => "xai",
               "tokens" => %{"access_token" => "old_at", "refresh_token" => "old_rt"},
-              "expires_at" => future_iso8601(5)
+              "expires_at" => future_iso8601(30)
             }
           }
         })
 
-      # ~500ms of headroom before the margin — the one-shot timer fires well
-      # before the 5s expiry, and nothing calls get_token (so this is purely the
-      # proactive path, not a lazy on-use refresh).
+      # 3 s of headroom before the margin. init/1 arms the one-shot timer only
+      # while expiry minus the margin is still ahead, and the write above and
+      # init's read queue on the VM's one file server first: with the 500 ms
+      # this had, a loaded runner reached init with the window spent, no timer
+      # was armed, and no wait could pass. Nothing calls get_token, so this is
+      # purely the proactive path, not a lazy on-use refresh.
       start_manager(
         fermix_auth_path: path,
         req_options: [plug: &__MODULE__.refresh_plug/1],
-        proactive_refresh_margin_ms: 4_500
+        proactive_refresh_margin_ms: 27_000
       )
 
       # Only the background timer can write new_at here. The refresh behind it
       # takes lockfiles, then writes and renames auth.json, and those filename
       # calls queue on the VM's one file server with every concurrent test's,
-      # so a loaded runner held it past 2 s. The poll still returns the moment
-      # the refresh lands.
+      # so a loaded runner held it past 2 s. The bound leaves the refresh 10 s
+      # after its timer, and the poll still returns the moment it lands.
       assert eventually(
                fn ->
                  match?(
@@ -703,7 +706,7 @@ defmodule FermixCore.Auth.TokenManagerTest do
                    Store.read("xai_oauth", path)
                  )
                end,
-               10_000
+               13_000
              )
 
       FermixTestSupport.SafeRm.rm_rf!(dir)
