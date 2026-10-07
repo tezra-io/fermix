@@ -239,13 +239,13 @@ class VerifyStandaloneTest(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("auth logout did not report the removed entry", result.stderr)
 
-    def test_rejects_a_logout_that_leaves_the_entry(self):
-        self._write_artifact(create_disclaim=True, auth_logout="keeps_entry")
+    def test_rejects_a_logout_that_leaves_the_tokens(self):
+        self._write_artifact(create_disclaim=True, auth_logout="keeps_tokens")
 
         result = self._run("macos_aarch64")
 
         self.assertNotEqual(result.returncode, 0)
-        self.assertIn("left the openai_codex entry in auth.json", result.stderr)
+        self.assertIn("left the ChatGPT tokens in auth.json", result.stderr)
 
     def test_rejects_a_logout_that_leaves_a_lockfile(self):
         self._write_artifact(create_disclaim=True, auth_logout="leaves_lock")
@@ -565,28 +565,31 @@ class VerifyStandaloneTest(unittest.TestCase):
             )
         raise ValueError(f"unknown plugins clear behaviour: {plugins_clear}")
 
-    # The real verb's shape: the seeded Codex entry leaves auth.json, the
-    # sentence names it, and no lockfile stays beside auth.json.
+    # The real verb's shape: the seeded ChatGPT sign-in's tokens leave auth.json
+    # while its registration stays, signed out; the sentence says so, and no
+    # lockfile stays beside auth.json.
     def _auth_logout_behaviour(self, auth_logout):
         argv = '  [ "$*" = "auth logout" ] || exit 64\n'
-        removed = (
-            "  printf '{\"version\": 2, \"providers\": {}}\\n'"
+        cleared = (
+            "  printf '{\"version\": 2, \"providers\": {\"chatgpt\": "
+            "{\"auth_mode\": \"oauth_siwc\", \"status\": \"signed_out\", "
+            "\"tokens\": {\"access_token\": null, \"refresh_token\": null}}}}\\n'"
             ' > "$FERMIX_HOME/auth.json"\n'
         )
         reported = (
-            "  printf 'Logged out. Removed openai_codex entry from %s.\\n'"
+            "  printf 'Logged out of ChatGPT. Cleared its tokens in %s.\\n'"
             ' "$FERMIX_HOME/auth.json"\n'
         )
         lock = '  : > "$FERMIX_HOME/auth.json.lock"\n'
         done = "  exit 0\n"
         if auth_logout == "removes":
-            return argv + removed + reported + done
+            return argv + cleared + reported + done
         if auth_logout == "silent":
-            return argv + removed + done
-        if auth_logout == "keeps_entry":
+            return argv + cleared + done
+        if auth_logout == "keeps_tokens":
             return argv + reported + done
         if auth_logout == "leaves_lock":
-            return argv + removed + lock + reported + done
+            return argv + cleared + lock + reported + done
         raise ValueError(f"unknown auth logout behaviour: {auth_logout}")
 
     def _unknown_keychain_argv_is_refused(self):
