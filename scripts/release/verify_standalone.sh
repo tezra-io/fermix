@@ -151,13 +151,17 @@ grep -Fq "delete-generic-password -a fermix -s fermix:$profile:FERMIX_PLUGIN_DIS
 # releases those locks and reads a missing socket as "no daemon". It runs before
 # the migrate-to-app stage because that stage ends the script on a Linux target.
 #
-# The home is a fresh one with one seeded Codex entry and no daemon. Codex has no
-# auth-mode route to revert, so the verb touches no config and no keychain: it
-# must exit 0, remove the entry and leave no lockfile.
+# The home is a fresh one with one seeded ChatGPT sign-in, the `chatgpt`
+# registration `openai_codex` signs in with, and no daemon. An entry an older
+# build stored under `openai_codex` is no longer read, so seeding one proves
+# nothing. The sign-in holds an access token and no refresh token: there is no
+# renewable session to revoke, so the verb makes no network call. ChatGPT has
+# no auth-mode route to revert, so it touches no config and no keychain: it
+# must exit 0, clear the tokens and leave no lockfile.
 logout_home="$runtime_root/logout-home"
 mkdir -m 700 "$logout_home"
 cat > "$logout_home/auth.json" <<'AUTH'
-{"version": 2, "providers": {"openai_codex": {"auth_mode": "chatgpt", "tokens": {"access_token": "verify-at", "refresh_token": "verify-rt"}}}}
+{"version": 2, "providers": {"chatgpt": {"auth_mode": "oauth_siwc", "provider": "chatgpt", "client_id": "verify-client", "subject": "verify-subject", "account": {"email": "verify@example.com"}, "granted_scopes": ["openid", "email", "offline_access", "chatgpt.tokens.use.direct"], "tokens": {"access_token": "verify-at", "refresh_token": null}, "expires_at": null, "last_refresh": null, "status": "ready"}}}
 AUTH
 chmod 600 "$logout_home/auth.json"
 
@@ -172,11 +176,11 @@ printf '%s\n' "$logout_output"
 
 [ "$logout_status" -eq 0 ] || fail "auth logout must exit 0 in the throwaway world, got $logout_status"
 case "$logout_output" in
-  *"Logged out. Removed openai_codex entry"*) ;;
+  *"Logged out of ChatGPT. Cleared its tokens in"*) ;;
   *) fail "auth logout did not report the removed entry" ;;
 esac
-if grep -Fq '"openai_codex"' "$logout_home/auth.json"; then
-  fail "auth logout left the openai_codex entry in auth.json"
+if grep -Fq 'verify-at' "$logout_home/auth.json"; then
+  fail "auth logout left the ChatGPT tokens in auth.json"
 fi
 logout_locks="$(find "$logout_home" -name '*.lock' -print)"
 [ -z "$logout_locks" ] || fail "auth logout left a lockfile behind: $logout_locks"
