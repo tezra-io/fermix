@@ -895,6 +895,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     wait_until(fn -> CallRegistry.active(registry) != :none end)
     {:ok, %{session: session}} = CallRegistry.active(registry)
 
+    # The first call listens from the moment it is accepted.
+    assert {:ok, listening} = recv_line(first)
+    assert Jason.decode!(String.trim(listening)) == %{"type" => "state", "state" => "listening"}
+
     {:ok, second} = connect(socket_path)
     :ok = handshake(second, 2)
     :ok = :gen_tcp.send(second, ~s({"type":"call_start"}\n))

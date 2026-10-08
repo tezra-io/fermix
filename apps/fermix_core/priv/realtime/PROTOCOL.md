@@ -172,7 +172,7 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 | `usage` | token/cost fields | Per-turn usage. Live adds `call_uuid`, `status: "live"`, `voice_seconds`, `voice_cost_cents` (3 decimals), `backend_turns`, `backend_cost: "unknown"` and `accounting` (`complete` \| `incomplete` \| `running`). Unknown is not zero: a backend on a subscription allowance reports `unknown`, never `0`. |
 | `error` | `reason`, plus context fields | A failure; the daemon closes the connection after most errors. `reason: "call_in_progress"` refuses a `call_start` while another Live call is up (see *One call at a time*). Optional `kind` (`update_required` \| `provider_refused` \| `cost_limit` \| `session_expired` \| `close_timeout` \| `bridge_unavailable` \| `max_session_duration` \| `provider_disconnected`) is the typed failure, and optional `detail` carries the vendor's own bounded sentence. |
 | `playback_stop` | — | The assistant's audio playback has stopped. |
-| `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established and the call can carry audio. `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, Live only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (Live only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
+| `call_ready` | `engine`, `call_id`, `call_uuid?`, `conversation?`, `tasks_outlive_call?`, `provider_session_id?`, `expires_at?`, `captions` | **v2.** The provider session is established. Under `openai_live` the call carries audio from the `listening` before it (see *Live call sequence*). `call_uuid` is the call's durable identity and the key of its record, the same on every `task` and `usage` of the call; `call_id` stays the trace session id and restarts with the daemon. `conversation` (`chat` \| `private`, Live only) says where the call's tasks run: `chat`, the chat's own conversation, where a task reads what was typed and the chat later reads what was asked aloud; `private`, a conversation of the call's own, kept apart from the chat. `tasks_outlive_call` (Live only) is `true` for a call in the chat: a task still running when the call ends is not cancelled but finishes into the chat (see *A task that outlives its call*); `false` for a private call, whose tasks end with it. `expires_at` is unix seconds and is absent when the provider did not say; `captions` is true when `caption` frames will follow. |
 | `caption` | `speaker` (`user` \| `assistant`), `delta`, `start_ms`, `end_ms` | **v2.** One verbatim transcript fragment. Concatenate `delta` bytes as received — never trim them or insert spaces — and allow user and assistant captions to overlap in time. A missing fragment is not proof of silence. |
 | `task` | `call_uuid?`, `delegation_id`, `revision`, `status`, `summary?`, `server_seq?`, `detached?` | **v2.** Lifecycle of one backend delegation: `pending` \| `running` \| `completed` \| `failed` \| `cancelled`. `revision` fences a re-asked task so a late frame from an earlier revision can be dropped. `summary` is bounded to 240 characters. Backend progress belongs here, outside the spoken captions. `server_seq` (Live, a call in the chat) is the chat timeline row the result was shown at: a result too long to say, or that cannot be said (a link, code, a table), is written to the chat whole while the voice says a short line, so a client can say the result is in the chat. Absent when nothing was shown. `detached` (Live, a call in the chat) is `true` on the one `running` frame the daemon sends as the call ends for a task that will finish into the chat; no later `task` frame names it, since the call is over. Absent on every other frame. |
 
@@ -181,6 +181,13 @@ words heard during a reply, or for 2 s after it, as the operator's turn.
 Under `openai_live` the daemon speaks to the pet in this order. Every frame
 except `call_ready` is optional and may repeat; there is no spoken-response
 completion event, so nothing here waits for one.
+
+The daemon says `listening` as soon as it has accepted the call, before the
+provider session is up, which takes the provider over a second: a pet streams
+from that `listening` as it always does, and the daemon holds the audio, up to
+ten seconds of it, until `call_ready`, then passes it on in order. So the
+operator can speak as soon as the pet listens and the first words reach the
+voice. A start that fails after that `listening` says so with an `error`.
 
 Live publishes no turn boundaries either, so the daemon reads the turn from the
 audio and words it relays: `thinking` once Live's recognition has stopped
@@ -193,10 +200,11 @@ the voice in the audio, never from audio merely arriving.
 
 ```
 pet  -> daemon:  call_start
-                 daemon opens the provider session and the backend bridge
-daemon -> pet:   call_ready { engine: "openai_live", call_id, call_uuid, conversation, tasks_outlive_call, provider_session_id?, expires_at?, captions }
-daemon -> pet:   state { state: "listening" }
+daemon -> pet:   state { state: "listening" }      (the call is accepted)
 pet  -> daemon:  audio_chunk …                     (continuous PCM, including silence)
+                 daemon opens the provider session and the backend bridge, holding the audio
+daemon -> pet:   call_ready { engine: "openai_live", call_id, call_uuid, conversation, tasks_outlive_call, provider_session_id?, expires_at?, captions }
+                 daemon passes the held audio on, in order, then each chunk as it arrives
 daemon -> pet:   caption …                         (user and assistant fragments, overlapping)
 daemon -> pet:   state { state: "thinking" }       (the operator has stopped speaking)
 daemon -> pet:   audio_delta … / state { speaking }

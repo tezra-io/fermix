@@ -310,20 +310,46 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
       assert [%{type: "session.start"}] = FakeLiveClient.events()
     end
 
-    test "audio before session.started is dropped and never sent", %{clock: clock} do
+    test "listening is said at call_start, before the provider session is up", %{clock: clock} do
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
 
+      assert_received {:realtime, %{type: "state", state: "listening"}}
+      refute_received {:realtime, %{type: "call_ready"}}
+    end
+
+    test "audio said while the session starts is held, then sent first and in order",
+         %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.audio_chunk(session, <<0, 0>>)
+      :ok = SessionControl.call_start(session)
+
       :ok = SessionControl.audio_chunk(session, <<1, 2, 3, 4>>)
+      :ok = SessionControl.audio_chunk(session, <<5, 6, 7, 8>>)
       sync(session)
 
       assert [%{type: "session.start"}] = FakeLiveClient.events()
 
       start_provider_session(session)
-      :ok = SessionControl.audio_chunk(session, <<1, 2, 3, 4>>)
+      :ok = SessionControl.audio_chunk(session, <<9, 10, 11, 12>>)
       sync(session)
 
-      assert Enum.any?(FakeLiveClient.events(), &(&1.type == "session.input_audio.append"))
+      # The chunk from before call_start had no call to hold it.
+      assert appended_audio() == [<<1, 2, 3, 4>>, <<5, 6, 7, 8>>, <<9, 10, 11, 12>>]
+      assert %{held_audio: [], held_audio_bytes: 0} = :sys.get_state(session)
+    end
+
+    test "the held microphone is bounded, and a muted chunk is never held", %{clock: clock} do
+      session = start_session(clock: clock)
+      :ok = SessionControl.call_start(session)
+
+      :ok = SessionControl.audio_chunk(session, :binary.copy(<<0, 0>>, 240_000))
+      :ok = SessionControl.audio_chunk(session, <<1, 2>>)
+      assert :sys.get_state(session).held_audio_bytes == 480_000
+
+      :ok = SessionControl.mute(session, true)
+      :ok = SessionControl.audio_chunk(session, <<3, 4>>)
+      assert length(:sys.get_state(session).held_audio) == 1
     end
 
     test "the session.start payload carries the LIVE.md prompt and no Realtime-only key", %{
@@ -635,9 +661,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   end
 
   describe "session.started" do
-    test "announces call_ready then listening and opens the bridge call", %{clock: clock} do
+    test "announces call_ready and opens the bridge call, listening already said", %{
+      clock: clock
+    } do
       session = start_session(clock: clock)
       :ok = SessionControl.call_start(session)
+      assert_received {:realtime, %{type: "state", state: "listening"}}
       start_provider_session(session)
 
       assert_receive {:bridge_open_call, %{call_id: call_id, persist?: false} = call}
@@ -653,7 +682,7 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
                         captions: true
                       }}
 
-      assert_receive {:realtime, %{type: "state", state: "listening"}}
+      refute_received {:realtime, %{type: "state", state: "listening"}}
 
       # The bridge is told the call's durable identity and, the setting being
       # unset, that its hand-offs join the chat (M56 §4.1, §5).
@@ -2997,6 +3026,12 @@ defmodule FermixCore.Realtime.LiveSessionServerTest do
   # A synchronous round trip through the session's own mailbox: everything sent
   # before it has been handled by the time it returns. No sleeps.
   defp sync(session), do: :sys.get_state(session)
+
+  # Every microphone chunk the provider was sent, in order.
+  defp appended_audio do
+    for %{type: "session.input_audio.append", audio: audio} <- FakeLiveClient.events(),
+        do: Base.decode64!(audio)
+  end
 
   # A started call on the provider's side, its first `listening` consumed.
   defp listening_session(clock, opts \\ []) do
