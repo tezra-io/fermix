@@ -52,8 +52,11 @@ defmodule FermixChannels.Mobile.EventRouter do
     Requests.request(event, transport, opts)
   end
 
-  defp dispatch(%{type: "history_pull", payload: payload}, transport, opts),
-    do: Requests.history(payload, transport, opts)
+  defp dispatch(%{type: "history_pull", payload: payload}, transport, opts) do
+    sink = Keyword.fetch!(opts, :event_sink)
+    shaped = fn target, page -> sink.(target, mobile_page(page, payload)) end
+    Requests.history(payload, transport, Keyword.put(opts, :event_sink, shaped))
+  end
 
   defp dispatch(%{type: "read_state", payload: payload}, _transport, opts),
     do: Requests.read_state(payload, opts)
@@ -69,6 +72,23 @@ defmodule FermixChannels.Mobile.EventRouter do
     do: {:error, {:unsupported_event, type}}
 
   defp dispatch(_event, _transport, _opts), do: {:error, :invalid_event}
+
+  # A page on this wire (mobile protocol 2) always carries `next_after_seq`,
+  # and a backward one names its cursor `prev_before_seq`: the oldest row
+  # sent, when an older row exists. A backward page's `next_after_seq` is
+  # its newest row, or the row just before `before_seq` when it is empty.
+  defp mobile_page(%{"t" => "history_page"} = page, %{"before_seq" => before_seq}) do
+    {older, page} = Map.pop(page, "next_before_seq")
+
+    page
+    |> Map.put("next_after_seq", newest_seq(page["messages"], before_seq - 1))
+    |> maybe_put("prev_before_seq", older)
+  end
+
+  defp mobile_page(page, _payload), do: page
+
+  defp newest_seq([], empty), do: empty
+  defp newest_seq(messages, _empty), do: List.last(messages)["server_seq"]
 
   defp transport(device_id, context, opts) do
     reply_to = {:device, device_id}
@@ -147,4 +167,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp authenticated_device(_context), do: {:error, :unauthenticated_mobile_transport}
 
   defp store(opts), do: Keyword.get(opts, :store, Timeline)
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

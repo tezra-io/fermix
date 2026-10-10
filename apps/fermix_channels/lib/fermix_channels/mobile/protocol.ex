@@ -16,7 +16,8 @@ defmodule FermixChannels.Mobile.Protocol do
   `shared_server_events/0`) are validated by that module, the chat
   vocabulary's one owner; this module validates the mobile transport's own
   events (hello, pairing, attachments and media, push, ack, keepalive) and the
-  `history_pull`/`history_page` pair, whose mobile shape has no backward cursor.
+  `history_pull`/`history_page` pair, whose mobile page always carries
+  `next_after_seq` and names its backward cursor `prev_before_seq`.
 
   A logical server event whose header would exceed the 4 KiB cap travels as one
   contiguous run of `event_part` frames: each raw tail is a slice of the
@@ -60,7 +61,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "attach_begin" => ~w(attach_id kind mime size_bytes sha256),
     "attach_chunk" => ~w(attach_id index),
     "attach_end" => ~w(attach_id sha256),
-    "history_pull" => ~w(profile_id after_seq limit),
+    "history_pull" => ~w(profile_id limit),
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "ack" => ~w(server_seq),
@@ -78,7 +79,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "media_end" => ~w(ref sha256),
     "reaction" => ~w(in_reply_to emoji),
     "link_preview" => ~w(in_reply_to url site title),
-    "history_page" => ~w(profile_id messages),
+    "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
     "notice" => ~w(kind text),
     "pair_approved" => ~w(device_id candidates profiles push_salt),
     "pair_denied" => ~w(reason),
@@ -514,10 +515,24 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_history_pull(payload) do
     with :ok <- nonempty(payload, "profile_id"),
-         :ok <- nonnegative_u64(payload, "after_seq") do
+         :ok <- history_cursor(payload) do
       integer_range(payload, "limit", 1, 200)
     end
   end
+
+  # Exactly one cursor: `after_seq` pages forward (the catch-up read), and
+  # `before_seq` pages backward from it (a fresh phone's newest page, then
+  # older ones).
+  defp history_cursor(%{"after_seq" => _after, "before_seq" => _before}),
+    do: {:error, {:invalid_field, "before_seq"}}
+
+  defp history_cursor(%{"before_seq" => _before} = payload),
+    do: positive_u64(payload, "before_seq")
+
+  defp history_cursor(%{"after_seq" => _after} = payload),
+    do: nonnegative_u64(payload, "after_seq")
+
+  defp history_cursor(_payload), do: {:error, {:missing_field, "after_seq"}}
 
   defp validate_push(payload) do
     with :ok <- nonempty(payload, "apns_token") do
@@ -654,8 +669,10 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_history_page(payload) do
     with :ok <- nonempty(payload, "profile_id"),
-         :ok <- list_field(payload, "messages") do
-      optional_nonnegative_u64(payload, "next_after_seq")
+         :ok <- list_field(payload, "messages"),
+         :ok <- nonnegative_u64(payload, "next_after_seq"),
+         :ok <- nonnegative_u64(payload, "history_head_seq") do
+      optional_positive_u64(payload, "prev_before_seq")
     end
   end
 
@@ -759,8 +776,8 @@ defmodule FermixChannels.Mobile.Protocol do
   defp positive_u64(payload, field), do: integer_range(payload, field, 1, @max_u64)
   defp nonnegative_u64(payload, field), do: integer_range(payload, field, 0, @max_u64)
 
-  defp optional_nonnegative_u64(payload, field) do
-    if Map.has_key?(payload, field), do: nonnegative_u64(payload, field), else: :ok
+  defp optional_positive_u64(payload, field) do
+    if Map.has_key?(payload, field), do: positive_u64(payload, field), else: :ok
   end
 
   defp integer_range(payload, field, min, max) do

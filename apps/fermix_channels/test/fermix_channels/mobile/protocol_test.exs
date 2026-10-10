@@ -103,7 +103,12 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "media_refs" => []
     }
 
-    payload = %{"profile_id" => "main", "messages" => [row], "next_after_seq" => 4}
+    payload = %{
+      "profile_id" => "main",
+      "messages" => [row],
+      "next_after_seq" => 4,
+      "history_head_seq" => 4
+    }
 
     assert {:ok, frames} = Protocol.encode_server_event("history_page", payload, 1, <<>>, [])
     event = reassemble(frames)
@@ -222,6 +227,52 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                  "limit" => 201
                })
              )
+  end
+
+  # Mobile protocol 2: a pull pages forward from `after_seq` or backward from
+  # `before_seq`, never both, and a page always carries both of its cursors.
+  test "a history pull takes exactly one cursor, and a page carries its cursors" do
+    pull = %{"profile_id" => "main", "limit" => 50}
+
+    assert {:ok, %{payload: %{"before_seq" => 9}}} =
+             Protocol.decode_client_frame(
+               client_frame("history_pull", 1, Map.put(pull, "before_seq", 9))
+             )
+
+    assert {:error, {:invalid_field, "before_seq"}} =
+             Protocol.decode_client_frame(
+               client_frame(
+                 "history_pull",
+                 1,
+                 Map.merge(pull, %{"after_seq" => 0, "before_seq" => 9})
+               )
+             )
+
+    assert {:error, {:invalid_field, "before_seq"}} =
+             Protocol.decode_client_frame(
+               client_frame("history_pull", 1, Map.put(pull, "before_seq", 0))
+             )
+
+    assert {:error, {:missing_field, "after_seq"}} =
+             Protocol.decode_client_frame(client_frame("history_pull", 1, pull))
+
+    page = %{
+      "profile_id" => "main",
+      "messages" => [],
+      "next_after_seq" => 8,
+      "history_head_seq" => 12,
+      "prev_before_seq" => 3
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("history_page", page, 1)
+
+    for field <- ~w(next_after_seq history_head_seq) do
+      assert {:error, {:missing_field, ^field}} =
+               Protocol.encode_server_frame("history_page", Map.delete(page, field), 1)
+    end
+
+    assert {:error, {:invalid_field, "prev_before_seq"}} =
+             Protocol.encode_server_frame("history_page", %{page | "prev_before_seq" => 0}, 1)
   end
 
   test "attach_begin carries the hash required for pre-transfer dedup" do

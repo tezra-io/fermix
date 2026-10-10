@@ -138,8 +138,10 @@
     },
     "history_pull": {
       "allOf": [{"$ref": "#/$defs/envelope"}],
-      "required": ["v", "t", "seq", "profile_id", "after_seq", "limit"],
-      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}
+      "description": "Exactly one cursor: after_seq pages forward, before_seq pages backward.",
+      "required": ["v", "t", "seq", "profile_id", "limit"],
+      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "before_seq": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+      "oneOf": [{"required": ["after_seq"]}, {"required": ["before_seq"]}]
     },
     "media_fetch": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "ref"],
@@ -328,12 +330,13 @@
     },
     "history_page": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "messages", "next_after_seq", "history_head_seq"],
-      "description": "Messages oldest first. next_after_seq is the last message sent, or the cursor asked for on an empty page. A page holds at most limit messages and at most 256 KiB of them, so it can hold fewer: pull again from next_after_seq while it is below history_head_seq.",
+      "description": "Messages oldest first. next_after_seq is the newest message sent, or on an empty page the after_seq asked for, or before_seq - 1. A backward page carries prev_before_seq, its oldest message, only while an older one exists. A page holds at most limit messages and at most 256 KiB of them, so it can hold fewer: pull again from next_after_seq while it is below history_head_seq, and back from prev_before_seq.",
       "properties": {
         "t": {"const": "history_page"}, "profile_id": {"type": "string", "minLength": 1},
         "messages": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/historyMessage"}},
         "next_after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-        "history_head_seq": {"type": "integer", "minimum": 0}
+        "history_head_seq": {"type": "integer", "minimum": 0},
+        "prev_before_seq": {"type": "integer", "minimum": 1}
       }
     },
     "notice": {

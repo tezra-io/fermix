@@ -279,7 +279,7 @@ accepts it.
 | `attach_end` | `attach_id`, `sha256` | host verifies announced size and digest |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | uses the normal command registry; `name` is lowercase letters, digits and `_` |
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
-| `history_pull` | `profile_id`, `after_seq`, `limit` | limit is 1–200; `after_seq` is any unsigned 64-bit value |
+| `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
 | `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
@@ -330,7 +330,7 @@ A client must not upload chunks after `present`.
 | `approval_resolved` | `approval_id`, `outcome` | approved, denied, or expired |
 | `link_preview` | `in_reply_to`, `url`, `site`, `title`; `description?`, `image_ref?` | host-resolved preview of the row at `in_reply_to` |
 | `read_state` | `profile_id`, `read_up_to_seq` | the frontier, after any client moved it |
-| `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq` | exact server-sequence cursor page |
+| `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
 | `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64 |
 | `pair_denied` | `reason` | terminal pairing refusal |
@@ -398,7 +398,10 @@ Every row is announced live to every connected phone as it is written:
 A client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `hello_ack`, and again
-  while a page's `next_after_seq` is below its `history_head_seq`;
+  while a page's `next_after_seq` is below its `history_head_seq`; a client
+  with no rows yet pulls the newest page instead,
+  `history_pull{before_seq: history_head_seq + 1}`, and older pages as it
+  needs them;
 - applies a live row (a `row`, or a `text_done` at its `server_seq`) when its
   seq is `cursor + 1`, drops one at or below the cursor, and on a gap pulls
   from the cursor instead of showing it;
@@ -419,6 +422,14 @@ page, and `history_head_seq` is the newest row. A cursor above 2^63-1 (the
 largest row number the store holds) is one past every row: the page is empty
 and echoes it. A page over 4,096 bytes arrives as an `event_part` run; a row
 whose own content passes 1 MiB arrives alone, cut and marked `truncated`.
+
+`history_pull{before_seq, limit}` pages backward: it answers the newest rows
+before `before_seq`, oldest first, under the same bounds, keeping the newest
+rows when the byte budget cuts it. `prev_before_seq` is its oldest row, and
+it is present only while an older row exists: pull back from it for the page
+before. `next_after_seq` is its newest row, or `before_seq - 1` on an empty
+page. A pull with both cursors, or neither, is a malformed frame (close
+`1002`).
 
 ### Read state
 

@@ -8,6 +8,7 @@
 {"v":2,"t":"cancel","seq":9,"profile_id":"main","client_msg_id":"client-1"}
 {"v":2,"t":"history_pull","seq":10,"profile_id":"main","after_seq":0,"limit":200}
 {"v":2,"t":"history_pull","seq":11,"profile_id":"main","after_seq":18446744073709551615,"limit":50}
+{"v":2,"t":"history_pull","seq":11,"profile_id":"main","before_seq":19,"limit":50}
 {"v":2,"t":"media_fetch","seq":12,"ref":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
 {"v":2,"t":"push_register","seq":13,"apns_token":"0123456789abcdef","environment":"development"}
 {"v":2,"t":"ack","seq":14,"server_seq":12}

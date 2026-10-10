@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.EventRouter
+  alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
@@ -562,6 +563,55 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                      %{"t" => "history_page", "messages" => [%{"server_seq" => 5}]}}
   end
 
+  # A fresh phone pulls the newest page first, then older ones (mobile protocol
+  # 2): a backward page names its cursor `prev_before_seq`, only while an older
+  # row exists, and carries `next_after_seq` as every page on this wire does.
+  test "a backward pull answers the newest rows before the cursor, in the phone's page shape",
+       ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+
+    for index <- 1..5 do
+      assert {:ok, _row} =
+               Timeline.append("main", %{role: "user", content: "row #{index}"}, store_opts)
+    end
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+
+    newest = backward_page(6, 2, opts, ctx)
+    assert Enum.map(newest["messages"], & &1["server_seq"]) == [4, 5]
+    assert newest["prev_before_seq"] == 4
+    assert newest["next_after_seq"] == 5
+    assert newest["history_head_seq"] == 5
+    refute Map.has_key?(newest, "next_before_seq")
+
+    oldest = backward_page(3, 5, opts, ctx)
+    assert Enum.map(oldest["messages"], & &1["server_seq"]) == [1, 2]
+    refute Map.has_key?(oldest, "prev_before_seq")
+    assert oldest["next_after_seq"] == 2
+
+    empty = backward_page(1, 5, opts, ctx)
+    assert empty["messages"] == []
+    refute Map.has_key?(empty, "prev_before_seq")
+    assert empty["next_after_seq"] == 0
+  end
+
+  test "a backward page cut to the byte budget keeps its newest rows", ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+    long = String.duplicate("x", 100 * 1_024)
+
+    for _row <- 1..4 do
+      assert {:ok, _row} =
+               Timeline.append("main", %{role: "assistant", content: long}, store_opts)
+    end
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+    page = backward_page(5, 10, opts, ctx)
+
+    assert Enum.map(page["messages"], & &1["server_seq"]) == [3, 4]
+    assert page["prev_before_seq"] == 3
+    assert page["next_after_seq"] == 4
+  end
+
   # One wire object, one rule: an absent optional field is an absent key, never
   # an explicit null. `Channels.Mobile` already omits it, so the inbound side
   # must too or the client sees two shapes for the same `mediaRef`.
@@ -958,6 +1008,19 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     }
   end
 
+  # Every page the router answers is one the phone's codec encodes.
+  defp backward_page(before_seq, limit, opts, ctx) do
+    payload = %{"profile_id" => "main", "before_seq" => before_seq, "limit" => limit}
+    assert :ok = EventRouter.route(decoded("history_pull", payload), ctx.context, opts)
+
+    assert_received {:event, {:device, "device-1"}, %{"t" => "history_page"} = page}
+
+    assert {:ok, _frames} =
+             Protocol.encode_server_event("history_page", Map.delete(page, "t"), 1, <<>>, [])
+
+    page
+  end
+
   defp decoded(type, payload),
-    do: %{type: type, payload: payload, seq: 1, version: 1, bytes: <<>>}
+    do: %{type: type, payload: payload, seq: 2, version: 2, bytes: <<>>}
 end
