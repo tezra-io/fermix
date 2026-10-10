@@ -55,7 +55,7 @@ defmodule FermixChannels.Mobile.Management do
   @type request_view :: %{
           device_name: String.t(),
           model: String.t(),
-          platform: nil,
+          platform: String.t(),
           app_version: String.t(),
           sas: String.t(),
           build_role: nil,
@@ -563,15 +563,16 @@ defmodule FermixChannels.Mobile.Management do
 
   defp session_failure(_status), do: nil
 
-  # Attestation arrives with the Android daemon work; until then every field
-  # it fills is present and empty, so the view already has its final shape.
+  # The platform is the phone's own word. What only a verified attestation
+  # can tell is present and empty until the daemon checks one (M51 D3), so
+  # the view already has its final shape.
   defp request_view(nil), do: nil
 
   defp request_view(request) do
     %{
       device_name: request.name,
       model: request.model,
-      platform: nil,
+      platform: request.platform,
       app_version: request.app_version,
       sas: request.sas,
       build_role: nil,
@@ -710,7 +711,8 @@ defmodule FermixChannels.Mobile.Management do
     with {:ok, gateway_public} <- binary_field(identity, :gateway_public_key, 32),
          {:ok, fingerprint} <- binary_field(identity, :tls_fingerprint, 32),
          {:ok, secret} <- binary_field(window, :secret, 32),
-         {:ok, name} <- host_label(opts) do
+         {:ok, name} <- host_label(opts),
+         {:ok, profile} <- profile_label(opts) do
       # Discovery orders candidates best first, so the link keeps the likeliest
       # routes, as hello_ack does, and stays a QR code a phone can scan.
       addresses =
@@ -718,13 +720,14 @@ defmodule FermixChannels.Mobile.Management do
 
       query =
         URI.encode_query([
-          {"v", "1"},
+          {"v", "2"},
           {"candidates", Jason.encode!(addresses)},
           {"port", Integer.to_string(port)},
           {"tls_fp", Base.encode16(fingerprint, case: :lower)},
           {"gateway_pk", Base.encode64(gateway_public)},
           {"secret", Base.encode64(secret)},
-          {"name", name}
+          {"name", name},
+          {"profile", profile}
         ])
 
       {:ok, "fermix://pair?" <> query}
@@ -744,6 +747,17 @@ defmodule FermixChannels.Mobile.Management do
       host when is_binary(host) and host != "" -> {:ok, host}
       {:error, reason} -> {:error, {:hostname_unavailable, reason}}
       other -> {:error, {:invalid_hostname, other}}
+    end
+  end
+
+  # The configured profile (`[fermix_core] profile`), which tells this home
+  # from another on the same host, so the phone can name the instance it pairs.
+  defp profile_label(opts) do
+    case Keyword.get_lazy(opts, :profile, fn ->
+           Application.get_env(:fermix_core, :profile, "general")
+         end) do
+      profile when is_binary(profile) and profile != "" -> {:ok, profile}
+      other -> {:error, {:invalid_profile, other}}
     end
   end
 

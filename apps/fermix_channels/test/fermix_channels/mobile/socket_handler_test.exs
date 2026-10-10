@@ -46,14 +46,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "hello must match authenticated identity before registry attachment" do
     hello = %{
-      version: 1,
+      version: 2,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "different-device",
         "app_version" => "1.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1
+        "protocol_v" => 2
       },
       bytes: <<>>
     }
@@ -79,14 +79,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     hello = %{
-      version: 1,
+      version: 2,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "paired-device",
         "app_version" => "1.0",
         "last_server_seq" => 87,
-        "protocol_v" => 1
+        "protocol_v" => 2
       },
       bytes: <<>>
     }
@@ -124,14 +124,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   test "hello_ack advertises the configured media ceiling" do
     hello = %{
-      version: 1,
+      version: 2,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "paired-device",
         "app_version" => "1.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1
+        "protocol_v" => 2
       },
       bytes: <<>>
     }
@@ -184,14 +184,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
-             version: 1,
+             version: 2,
              type: "hello",
              seq: 1,
              payload: %{
                "device_id" => "paired-device",
                "app_version" => "1.0",
                "last_server_seq" => 0,
-               "protocol_v" => 1
+               "protocol_v" => 2
              },
              bytes: <<>>
            }}
@@ -231,14 +231,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         decode_client: fn "plaintext", _opts ->
           {:ok,
            %{
-             version: 1,
+             version: 2,
              type: "hello",
              seq: 1,
              payload: %{
                "device_id" => "paired-device",
                "app_version" => "1.0",
                "last_server_seq" => 0,
-               "protocol_v" => 1
+               "protocol_v" => 2
              },
              bytes: <<>>
            }}
@@ -337,14 +337,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         profile_id: "work",
         media_store: store,
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
         decode_client: fn "request", _opts ->
           {:ok,
            %{
              type: "media_fetch",
-             version: 1,
+             version: 2,
              seq: 1,
              payload: %{"ref" => digest},
              bytes: <<>>
@@ -410,14 +410,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         # The stub cipher is its own nonce: every encryption advances it, so the
         # frame the client finally receives shows exactly how far it moved.
         noise: 0,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn 0, "request" -> {:ok, "request", 0} end,
         decode_client: fn "request", _opts ->
           {:ok,
            %{
              type: "media_fetch",
-             version: 1,
+             version: 2,
              seq: 1,
              payload: %{"ref" => digest},
              bytes: <<>>
@@ -473,7 +473,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           {:ok,
            %{
              type: "media_fetch",
-             version: 1,
+             version: 2,
              seq: 1,
              payload: %{"ref" => digest},
              bytes: <<>>
@@ -650,7 +650,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           {:ok,
            %{
              type: "push_register",
-             version: 1,
+             version: 2,
              seq: 1,
              payload: %{"apns_token" => "token", "environment" => "development"},
              bytes: <<>>
@@ -689,7 +689,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           {:ok,
            %{
              type: "push_register",
-             version: 1,
+             version: 2,
              seq: 1,
              payload: %{"apns_token" => "token", "environment" => "production"},
              bytes: <<>>
@@ -713,12 +713,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
-          "first", _opts -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
-          "second", _opts -> {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+          "first", _opts -> {:ok, %{type: "ping", version: 2, seq: 1, payload: %{}, bytes: <<>>}}
+          "second", _opts -> {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
         end,
         event_router: fn
           %{seq: 1}, _context, _opts -> {:error, :busy}
@@ -744,12 +744,12 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
           "msg", _opts -> {:ok, client_msg("c1", 1)}
-          "ping", _opts -> {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+          "ping", _opts -> {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
         end,
         event_router: fn event, _context, _opts ->
           send(test_pid, {:routed, event.type, self()})
@@ -778,7 +778,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
@@ -824,7 +824,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         device_registry: :registry,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "msg" -> {:ok, "msg", :noise} end,
@@ -863,7 +863,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         device_registry: registry,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, "msg" -> {:ok, "msg", :noise} end,
@@ -904,7 +904,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn <<seq>>, _opts -> {:ok, client_msg("c#{seq}", seq)} end,
@@ -914,7 +914,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           send(test_pid, {:launched, pid})
           {:ok, pid}
         end,
-        encode_server: fn "error", payload, 1, <<>>, 1 ->
+        encode_server: fn "error", payload, 1, <<>>, 2 ->
           assert payload["code"] == "request_failed"
           assert payload["client_msg_id"] == "c1"
           send(test_pid, {:error_message, payload["message"]})
@@ -948,13 +948,13 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn <<seq>>, _opts -> {:ok, client_msg("c#{seq}", seq)} end,
         event_router: fn _event, _context, _opts -> :ok end,
         run_request: fn _job -> {:ok, worker} end,
-        encode_server: fn "error", payload, 1, <<>>, 1 ->
+        encode_server: fn "error", payload, 1, <<>>, 2 ->
           assert payload["code"] == "request_backlog_full"
           {:ok, "error-frame"}
         end,
@@ -985,13 +985,13 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
           {:ok,
            %{
              type: "hello",
-             version: 1,
+             version: 2,
              seq: 2,
              payload: %{
                "device_id" => "paired-device",
                "app_version" => "1.0",
                "last_server_seq" => 0,
-               "protocol_v" => 1
+               "protocol_v" => 2
              },
              bytes: <<>>
            }}
@@ -1137,14 +1137,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, ciphertext -> {:ok, ciphertext, :noise} end,
         decode_client: fn
-          "first", _opts -> {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
-          "second", _opts -> {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
+          "first", _opts -> {:ok, %{type: "ping", version: 2, seq: 1, payload: %{}, bytes: <<>>}}
+          "second", _opts -> {:ok, %{type: "ping", version: 3, seq: 2, payload: %{}, bytes: <<>>}}
         end,
         event_router: fn _event, _context, _opts -> :ok end
       })
 
     assert {:ok, state} = SocketHandler.handle_in({"first", opcode: :binary}, state)
-    assert state.negotiated_version == 1
+    assert state.negotiated_version == 2
 
     assert {:stop, :protocol_version_mismatch, {1002, "mobile protocol error"}, next} =
              SocketHandler.handle_in({"second", opcode: :binary}, state)
@@ -1206,13 +1206,13 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         pair_manager: :pair,
         pairing_session_id: "pair-session",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         client_seq: 1,
         decrypt: fn :noise, "ping" -> {:ok, "ping", :noise1} end,
         decode_client: fn "ping", _opts ->
-          {:ok, %{type: "ping", version: 1, seq: 2, payload: %{}, bytes: <<>>}}
+          {:ok, %{type: "ping", version: 2, seq: 2, payload: %{}, bytes: <<>>}}
         end,
-        encode_server: fn "pong", %{}, 1, <<>>, 1 -> {:ok, "pong-frame"} end,
+        encode_server: fn "pong", %{}, 1, <<>>, 2 -> {:ok, "pong-frame"} end,
         encrypt: fn :noise1, "pong-frame" -> {:ok, "encrypted-pong", :noise2} end,
         record_pair_failure: fn :pair, "pair-session" ->
           send(test_pid, :failure_recorded)
@@ -1236,14 +1236,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         pair_manager: :pair,
         pairing_session_id: "pair-session",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         client_seq: 1,
         decrypt: fn :noise, "early" -> {:ok, "early", :noise1} end,
         decode_client: fn "early", _opts ->
           {:ok,
            %{
              type: "msg",
-             version: 1,
+             version: 2,
              seq: 2,
              payload: %{"client_msg_id" => "c1", "profile_id" => "main", "text" => "hi"},
              bytes: <<>>
@@ -1348,7 +1348,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         noise: :noise,
         decrypt: fn :noise, "ping" -> {:ok, "ping", :noise} end,
         decode_client: fn "ping", _opts ->
-          {:ok, %{type: "ping", version: 1, seq: 1, payload: %{}, bytes: <<>>}}
+          {:ok, %{type: "ping", version: 2, seq: 1, payload: %{}, bytes: <<>>}}
         end,
         authorize_socket: fn :registry, "revoked-device", ^test_pid ->
           {:error, {:device_not_authorized, {:device_not_found, "revoked-device"}}}
@@ -1416,8 +1416,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       device_id: "device",
       noise: 0,
       server_seq: 4,
-      negotiated_version: 1,
-      encode_server: fn "notice", _payload, 5, <<>>, 1 -> {:error, :encoder_unavailable} end,
+      negotiated_version: 2,
+      encode_server: fn "notice", _payload, 5, <<>>, 2 -> {:error, :encoder_unavailable} end,
       encrypt: fn nonce, plaintext -> {:ok, {nonce, plaintext}, nonce + 1} end
     }
 
@@ -1449,7 +1449,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         device_id: "device",
         noise: 0,
         server_seq: 4,
-        negotiated_version: 1,
+        negotiated_version: 2,
         encrypt: fn nonce, plaintext -> {:ok, plaintext, nonce + 1} end
       })
 
@@ -1473,7 +1473,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "device",
         noise: 0,
-        negotiated_version: 1,
+        negotiated_version: 2,
         encrypt: fn
           0, plaintext -> {:ok, plaintext, 1}
           1, _plaintext -> {:error, :nonce_exhausted}
@@ -1562,10 +1562,16 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
     request = %{
       type: "pair_request",
-      version: 1,
+      version: 2,
       seq: 1,
-      payload: %{"device_name" => "Phone", "model" => "iPhone17,1", "app_version" => "1.0"},
-      bytes: <<>>
+      payload: %{
+        "device_name" => "Phone",
+        "model" => "iPhone17,1",
+        "app_version" => "1.0",
+        "platform" => "ios",
+        "attestation" => %{"kind" => "apple_app_attest", "cert_lengths" => [5]}
+      },
+      bytes: "chain"
     }
 
     {:ok, state} =
@@ -1583,7 +1589,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         end,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
         decode_client: fn "request", _opts -> {:ok, request} end,
-        submit_pair: fn :pair, "pair-session", _attrs -> {:ok, %{}} end,
+        submit_pair: fn :pair, "pair-session", %{platform: "ios"} -> {:ok, %{}} end,
         discover: fn -> {:ok, []} end,
         encode_server: fn "pair_approved", _payload, 1 -> {:ok, "approved"} end,
         encrypt: fn :noise, "approved" -> {:ok, "encrypted-approved", :noise} end
@@ -1603,7 +1609,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert deciding.phase == :await_pair_decision
     assert_received {:deadline_cancelled, ^upgrade_timer}
 
-    decision = {:mobile_pair_decision, "pair-session", {:ok, %{device_id: "new-device"}}}
+    device = %{device_id: "new-device", apns_key_salt: <<9::256>>}
+    decision = {:mobile_pair_decision, "pair-session", {:ok, device}}
 
     assert {:push, {:binary, "encrypted-approved"}, approved} =
              SocketHandler.handle_info(decision, deciding)
@@ -1669,11 +1676,11 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     test_pid = self()
 
     hello =
-      client_frame(2, "hello", 1, %{
+      client_frame(3, "hello", 1, %{
         "device_id" => "paired-device",
         "app_version" => "9.0",
         "last_server_seq" => 0,
-        "protocol_v" => 2
+        "protocol_v" => 3
       })
 
     {:ok, state} =
@@ -1694,18 +1701,18 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
             {1002, "unsupported mobile protocol version"}, [{:binary, frame}], _next} =
              SocketHandler.handle_in({hello, opcode: :binary}, state)
 
-    assert {%{"v" => 1, "t" => "error", "seq" => 1} = refusal, <<>>} = decode_server_frame(frame)
+    assert {%{"v" => 2, "t" => "error", "seq" => 1} = refusal, <<>>} = decode_server_frame(frame)
     assert refusal["code"] == "unsupported_protocol_version"
     assert refusal["direction"] == "client_too_new"
-    assert refusal["client_version"] == 2
-    assert refusal["min_version"] == 1
-    assert refusal["max_version"] == 1
+    assert refusal["client_version"] == 3
+    assert refusal["min_version"] == 2
+    assert refusal["max_version"] == 2
     refute_received :attached
   end
 
   test "a pair_request outside the version window is refused typed and is no failed pairing" do
     test_pid = self()
-    request = client_frame(0, "pair_request", 1, %{"device_name" => "a", "model" => "b"})
+    request = client_frame(1, "pair_request", 1, %{"device_name" => "a", "model" => "b"})
 
     {:ok, state} =
       SocketHandler.init(%{
@@ -1831,17 +1838,19 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :await_pair_decision,
         pairing_session_id: "pair-session",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         profile_name: "Orbit",
         discover: fn -> {:ok, candidates} end,
         encode_server: fn "pair_approved", payload, 1 ->
           assert length(payload["candidates"]) == 16
+          assert payload["push_salt"] == Base.encode64(<<9::256>>)
           {:ok, "approved"}
         end,
         encrypt: fn :noise, "approved" -> {:ok, "encrypted-approved", :noise} end
       })
 
-    decision = {:mobile_pair_decision, "pair-session", {:ok, %{device_id: "new-device"}}}
+    device = %{device_id: "new-device", apns_key_salt: <<9::256>>}
+    decision = {:mobile_pair_decision, "pair-session", {:ok, device}}
 
     assert {:push, {:binary, "encrypted-approved"}, next} =
              SocketHandler.handle_info(decision, state)
@@ -1851,14 +1860,14 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
   defp hello_state(overrides) do
     hello = %{
-      version: 1,
+      version: 2,
       type: "hello",
       seq: 1,
       payload: %{
         "device_id" => "paired-device",
         "app_version" => "1.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1
+        "protocol_v" => 2
       },
       bytes: <<>>
     }
@@ -1933,7 +1942,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         profile_id: "main",
         media_store: store,
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, frame -> {:ok, frame, :noise} end,
         encrypt: fn :noise, plaintext -> {:ok, plaintext, :noise} end,
@@ -1962,7 +1971,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   defp client_msg(client_msg_id, seq) do
     %{
       type: "msg",
-      version: 1,
+      version: 2,
       seq: seq,
       payload: %{
         "client_msg_id" => client_msg_id,
@@ -2011,7 +2020,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :ready,
         device_id: "paired-device",
         noise: :noise,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
         decrypt: fn :noise, frame -> {:ok, frame, :noise} end,
         event_router: fn _event, _context, _opts -> {:error, reason} end,
@@ -2030,7 +2039,7 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   end
 
   defp encode_client_frame(type, payload, seq) do
-    header = payload |> Map.merge(%{"v" => 1, "t" => type, "seq" => seq}) |> Jason.encode!()
+    header = payload |> Map.merge(%{"v" => 2, "t" => type, "seq" => seq}) |> Jason.encode!()
     <<byte_size(header)::unsigned-big-32, header::binary>>
   end
 

@@ -237,11 +237,11 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     card = Map.put(Output.approval(%{kind: :sandbox, text: "Allow?", token: "T"}), "ttl_s", 12)
     state = hello_state(ipv4_candidates(20), pending_approvals: fn "main" -> [card] end)
 
-    {frames, _state} = pushed(SocketHandler.handle_in({hello_frame(1), opcode: :binary}, state))
+    {frames, _state} = pushed(SocketHandler.handle_in({hello_frame(2), opcode: :binary}, state))
     assert [%{"t" => "hello_ack"} = ack, %{"t" => "approval"}] = assert_frames!(frames, schema)
     assert length(ack["candidates"]) == 16
 
-    refused = SocketHandler.handle_in({hello_frame(2), opcode: :binary}, hello_state([], []))
+    refused = SocketHandler.handle_in({hello_frame(1), opcode: :binary}, hello_state([], []))
     assert {:stop, _reason, {1002, _text}, _frames, _state} = refused
     {frames, _state} = pushed(refused)
     assert [%{"code" => "unsupported_protocol_version"}] = assert_frames!(frames, schema)
@@ -336,7 +336,8 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     {frames, next} = pushed(SocketHandler.handle_in(pairing_ping(), state))
     assert [%{"t" => "pong"}] = assert_frames!(frames, schema)
 
-    approval = {:mobile_pair_decision, "pair-session", {:ok, %{device_id: "new-device"}}}
+    device = %{device_id: "new-device", apns_key_salt: :crypto.strong_rand_bytes(32)}
+    approval = {:mobile_pair_decision, "pair-session", {:ok, device}}
     {frames, _state} = pushed(SocketHandler.handle_info(approval, next))
     assert [%{"t" => "pair_approved", "candidates" => sent}] = assert_frames!(frames, schema)
     assert length(sent) == 16
@@ -362,7 +363,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       state = hello_state(ipv4_candidates(16), profile_name: String.duplicate("N", 128))
 
       {[frame], _state} =
-        pushed(SocketHandler.handle_in({hello_frame(1), opcode: :binary}, state))
+        pushed(SocketHandler.handle_in({hello_frame(2), opcode: :binary}, state))
 
       assert byte_size(frame) - 4 <= Protocol.max_header_bytes()
       assert [%{"caps" => %{"commands" => commands}}] = assert_frames!([frame], schema)
@@ -373,7 +374,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
       candidates = Enum.take(magicdns_candidates(8) ++ ipv4_candidates(8), 16)
       state = hello_state(candidates, profile_name: String.duplicate("N", 128))
 
-      {frames, _state} = pushed(SocketHandler.handle_in({hello_frame(1), opcode: :binary}, state))
+      {frames, _state} = pushed(SocketHandler.handle_in({hello_frame(2), opcode: :binary}, state))
       assert [%{"candidates" => sent}] = assert_frames!(frames, schema)
       assert length(sent) == 16
     end
@@ -480,7 +481,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   end
 
   defp client(state, type, payload),
-    do: {frame(1, type, state.client_seq + 1, payload), opcode: :binary}
+    do: {frame(2, type, state.client_seq + 1, payload), opcode: :binary}
 
   defp frame(version, type, seq, payload) do
     json = payload |> Map.merge(%{"v" => version, "t" => type, "seq" => seq}) |> Jason.encode!()
@@ -538,7 +539,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         device_id: @device,
         profile_id: "main",
         media_store: store,
-        negotiated_version: 1,
+        negotiated_version: 2,
         authorize_socket: fn _registry, @device, _pid -> :ok end,
         media_descriptor: fn
           "main", ^digest -> {:ok, media_descriptor(digest, store)}
@@ -558,7 +559,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         phase: :await_pair_decision,
         pairing_session_id: "pair-session",
         client_seq: 1,
-        negotiated_version: 1,
+        negotiated_version: 2,
         discover: fn -> {:ok, candidates} end,
         schedule_handshake_deadline: fn _message, _delay -> make_ref() end,
         cancel_handshake_deadline: fn _ref -> false end

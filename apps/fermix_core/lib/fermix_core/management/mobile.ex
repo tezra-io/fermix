@@ -52,7 +52,7 @@ defmodule FermixCore.Management.Mobile do
   @device_store_sentence "The paired-device list could not be read. See the daemon log."
   @start_sentence "The pairing window could not be opened. See the daemon log."
   @disconnected_sentence "The phone disconnected before you decided. Start pairing again."
-  @no_attestation_sentence "This phone sent no secure-hardware proof."
+  @unchecked_attestation_sentence "Fermix does not check a phone's secure hardware yet."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
@@ -76,7 +76,7 @@ defmodule FermixCore.Management.Mobile do
       @device_store_sentence,
       @start_sentence,
       @disconnected_sentence,
-      @no_attestation_sentence,
+      @unchecked_attestation_sentence,
       @no_request_sentence,
       @unknown_device_sentence,
       @owner_only_sentence
@@ -300,7 +300,7 @@ defmodule FermixCore.Management.Mobile do
   end
 
   defp attestation(:unavailable),
-    do: %{"status" => "unavailable", "sentence" => @no_attestation_sentence}
+    do: %{"status" => "unavailable", "sentence" => @unchecked_attestation_sentence}
 
   defp outcome_view(nil), do: nil
 

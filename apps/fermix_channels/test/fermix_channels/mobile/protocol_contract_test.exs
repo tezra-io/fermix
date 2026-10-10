@@ -74,6 +74,21 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M51 D1: a pairing presents its attestation as the request's raw tail, and
+  # is answered with the push salt the phone derives its push key from.
+  test "schema pins the pairing request's attestation and the approval's push salt",
+       %{schema: schema} do
+    defs = schema["$defs"]
+    request = defs["pair_request"]
+
+    assert request["x-raw-bytes"] == true
+    assert "platform" in request["required"] and "attestation" in request["required"]
+    assert request["properties"]["platform"]["enum"] == ~w(ios android)
+    assert request["x-max-attestation-chain-bytes"] == Protocol.max_attestation_chain_bytes()
+    assert defs["attestation"]["properties"]["cert_lengths"]["maxItems"] == 6
+    assert "push_salt" in defs["pair_approved"]["required"]
+  end
+
   # D1(b) and D1(e): every error message is bounded, and every list of
   # candidates a phone is given keeps the same best-first few.
   test "schema pins the error message and candidate bounds the daemon keeps", %{schema: schema} do
@@ -270,8 +285,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
              server_errors(server_event("history_page", page), schema)
 
     refute server_errors(server_event("future_event", %{}), schema) == []
-    refute server_errors(%{"v" => 1, "t" => "pong", "seq" => 0}, schema) == []
-    assert server_errors(%{"v" => 1, "t" => "pong", "seq" => 1}, schema) == []
+    refute server_errors(%{"v" => 2, "t" => "pong", "seq" => 0}, schema) == []
+    assert server_errors(%{"v" => 2, "t" => "pong", "seq" => 1}, schema) == []
 
     bad_caps = %{"commands" => [%{"name" => "help"}], "max_media_bytes" => 1}
     hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", bad_caps))
@@ -334,7 +349,9 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       [%{"query" => query}] = jsonl(@pairing_links)
 
       for {field, value} <- [
-            {"v", "2"},
+            {"v", "1"},
+            {"v", "3"},
+            {"profile", ""},
             {"candidates", "not json"},
             {"candidates", ~s({"host":"x"})},
             {"candidates", Jason.encode!(List.duplicate("192.168.1.8", 17))},
@@ -351,6 +368,14 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
                  [],
                "a pairing link with #{field}=#{value} was accepted"
       end
+
+      refute WireSchema.errors(
+               Map.delete(query, "profile"),
+               WireSchema.ref("pairingLink"),
+               schema
+             ) ==
+               [],
+             "a pairing link with no profile was accepted"
     end
   end
 
@@ -446,14 +471,14 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   end
 
   defp server_event(type, payload) do
-    Map.merge(payload, %{"v" => 1, "t" => type, "seq" => 1})
+    Map.merge(payload, %{"v" => 2, "t" => type, "seq" => 1})
   end
 
   defp hello_ack_payload do
     %{
       "session_id" => "session",
-      "min_version" => 1,
-      "max_version" => 1,
+      "min_version" => 2,
+      "max_version" => 2,
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -499,7 +524,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
         {:ok, {{0, 0, 0, 0}, String.to_integer(query["port"])}}
       end,
       discover: fn -> {:ok, candidates} end,
-      host_label: fn -> query["name"] end
+      host_label: fn -> query["name"] end,
+      profile: query["profile"]
     ]
   end
 

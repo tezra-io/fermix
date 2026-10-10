@@ -657,6 +657,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
       name: payload["device_name"],
       model: payload["model"],
       app_version: payload["app_version"],
+      platform: payload["platform"],
       noise_pk: state.pairing_remote_static,
       sas: state.pairing_sas,
       socket_pid: self()
@@ -670,11 +671,14 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
   defp submit_pair_request(_event, _state), do: {:error, :pair_request_required}
 
+  # The push salt is the device's own, for the key its notifications are
+  # encrypted under (see *Push notifications* in the protocol).
   defp handle_pair_decision(session_id, {:ok, device}, %{pairing_session_id: session_id} = state) do
     payload = %{
       "device_id" => value(device, :device_id),
       "candidates" => current_candidates(state),
-      "profiles" => profiles(state)
+      "profiles" => profiles(state),
+      "push_salt" => Base.encode64(value(device, :apns_key_salt))
     }
 
     # The owner's decision can come at any time in the window, so the hello

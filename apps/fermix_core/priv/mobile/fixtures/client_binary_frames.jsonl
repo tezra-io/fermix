@@ -1,1 +1,2 @@
-{"header":{"v":1,"t":"attach_chunk","seq":4,"attach_id":"attach-1","index":0},"bytes_b64":"MTIzNA=="}
+{"header":{"v":2,"t":"attach_chunk","seq":4,"attach_id":"attach-1","index":0},"bytes_b64":"MTIzNA=="}
+{"header":{"v":2,"t":"pair_request","seq":1,"device_name":"Owner's Pixel","model":"Google Pixel 9 Pro","app_version":"1.0.0","platform":"android","attestation":{"kind":"android_keymint","cert_lengths":[16,12,4]}},"bytes_b64":"TEVBRi1DRVJUSUZJQ0FURUlOVEVSTUVESUFURVJPT1Q="}

@@ -113,15 +113,19 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     {client, socket} = complete_handshake(client, socket)
     assert socket.phase == :await_pair_request
 
+    chain = "leaf certificate" <> "root certificate"
+
     request = %{
-      "device_name" => "Contract iPhone",
-      "model" => "iPhone17,1",
-      "app_version" => "1.0.0"
+      "device_name" => "Contract Pixel",
+      "model" => "Google Pixel 9 Pro",
+      "app_version" => "1.0.0",
+      "platform" => "android",
+      "attestation" => %{"kind" => "android_keymint", "cert_lengths" => [16, 16]}
     }
 
-    request_plaintext = encode_client_frame("pair_request", request, 1)
+    request_plaintext = encode_client_frame("pair_request", request, 1, chain)
 
-    assert {:ok, %{type: "pair_request", seq: 1}} =
+    assert {:ok, %{type: "pair_request", seq: 1, bytes: ^chain}} =
              Protocol.decode_client_frame(request_plaintext)
 
     assert {:ok, request_ciphertext, client} = Noise.encrypt(client, request_plaintext)
@@ -133,6 +137,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert {:ok, pending} = PairManager.await_request(pair_manager, window.session_id, 100)
     assert pending.noise_pk == device.public
     assert pending.sas == Noise.sas(client)
+    assert pending.platform == "android"
 
     assert {:ok, device_record} = PairManager.approve(pair_manager, window.session_id)
 
@@ -147,6 +152,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert approved["t"] == "pair_approved"
     assert approved["seq"] == 1
     assert approved["device_id"] == @new_device_id
+    assert Base.decode64!(approved["push_salt"]) == device_record.apns_key_salt
 
     hello = %{
       "device_id" => @new_device_id,
@@ -267,13 +273,13 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     {header, client, socket}
   end
 
-  defp encode_client_frame(type, payload, seq) do
+  defp encode_client_frame(type, payload, seq, bytes \\ <<>>) do
     header =
       payload
       |> Map.merge(%{"v" => Protocol.protocol_version(), "t" => type, "seq" => seq})
       |> Jason.encode!()
 
-    <<byte_size(header)::unsigned-big-32, header::binary>>
+    <<byte_size(header)::unsigned-big-32, header::binary, bytes::binary>>
   end
 
   defp decode_server_frame(<<header_size::unsigned-big-32, rest::binary>>) do

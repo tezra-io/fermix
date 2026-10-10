@@ -65,7 +65,7 @@ defmodule FermixCore.Management.MobileTest do
              }
     end
 
-    test "a waiting phone carries its request, with no secure-hardware proof yet" do
+    test "a waiting phone carries its request, its secure hardware not checked yet" do
       session = session(:awaiting_decision, request: request())
 
       assert {:ok, view} = Mobile.pair_get(@session_id, fake({:ok, session}))
@@ -75,14 +75,14 @@ defmodule FermixCore.Management.MobileTest do
       assert view["request"] == %{
                "device_name" => "Sam's phone",
                "model" => "Google Pixel 9 Pro",
-               "platform" => nil,
+               "platform" => "android",
                "app_version" => "1.0.0",
                "sas" => "481062",
                "build_role" => nil,
                "boot_state" => nil,
                "attestation" => %{
                  "status" => "unavailable",
-                 "sentence" => "This phone sent no secure-hardware proof."
+                 "sentence" => "Fermix does not check a phone's secure hardware yet."
                }
              }
 
@@ -453,7 +453,7 @@ defmodule FermixCore.Management.MobileTest do
              "The paired-device list could not be read. See the daemon log.",
              "The pairing window could not be opened. See the daemon log.",
              "The phone disconnected before you decided. Start pairing again.",
-             "This phone sent no secure-hardware proof.",
+             "Fermix does not check a phone's secure hardware yet.",
              "No phone is waiting for a decision.",
              "No paired phone has that id.",
              "Only the owner can pair or forget a phone; run this from your own terminal."
@@ -492,7 +492,7 @@ defmodule FermixCore.Management.MobileTest do
     %{
       device_name: "Sam's phone",
       model: "Google Pixel 9 Pro",
-      platform: nil,
+      platform: "android",
       app_version: "1.0.0",
       sas: "481062",
       build_role: nil,

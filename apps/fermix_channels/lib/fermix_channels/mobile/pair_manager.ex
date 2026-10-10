@@ -38,12 +38,15 @@ defmodule FermixChannels.Mobile.PairManager do
   @max_retained 8
   @retention_ms 300_000
   @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
+  # The phone's own word for what it runs on, as its `pair_request` says it.
+  @platforms ~w(ios android)
 
   @type session_id :: String.t()
   @type request :: %{
           name: String.t(),
           model: String.t(),
           app_version: String.t(),
+          platform: String.t(),
           noise_pk: <<_::256>>,
           sas: String.t(),
           socket_pid: pid()
@@ -52,6 +55,7 @@ defmodule FermixChannels.Mobile.PairManager do
           name: String.t(),
           model: String.t(),
           app_version: String.t(),
+          platform: String.t(),
           noise_pk: <<_::256>>,
           sas: String.t()
         }
@@ -599,6 +603,7 @@ defmodule FermixChannels.Mobile.PairManager do
       name: field(attrs, :name, "device_name"),
       model: field(attrs, :model, "model"),
       app_version: field(attrs, :app_version, "app_version"),
+      platform: field(attrs, :platform, "platform"),
       noise_pk: field(attrs, :noise_pk, "noise_pk"),
       sas: field(attrs, :sas, "sas"),
       socket_pid: field(attrs, :socket_pid, "socket_pid")
@@ -611,6 +616,7 @@ defmodule FermixChannels.Mobile.PairManager do
     with :ok <- validate_text(:name, request.name),
          :ok <- validate_text(:model, request.model),
          :ok <- validate_text(:app_version, request.app_version),
+         :ok <- validate_platform(request.platform),
          :ok <- validate_noise_pk(request.noise_pk),
          :ok <- validate_sas(request.sas),
          :ok <- validate_socket(request.socket_pid) do
@@ -637,6 +643,9 @@ defmodule FermixChannels.Mobile.PairManager do
 
   defp control_character_error(field),
     do: {:error, {:invalid_pair_request, {field, :control_characters}}}
+
+  defp validate_platform(platform) when platform in @platforms, do: :ok
+  defp validate_platform(_platform), do: {:error, {:invalid_pair_request, :platform}}
 
   defp validate_noise_pk(pk) when is_binary(pk) and byte_size(pk) == 32, do: :ok
   defp validate_noise_pk(_pk), do: {:error, {:invalid_pair_request, :noise_pk}}

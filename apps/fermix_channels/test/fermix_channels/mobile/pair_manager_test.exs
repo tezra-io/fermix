@@ -141,6 +141,22 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:ok, %{request: nil}} = PairManager.current(ctx.manager)
   end
 
+  # The owner reads the platform beside the code to compare, so only the
+  # phone's own two words enter the window.
+  test "a request names the platform the phone runs on, one of the two a phone can be", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    for platform <- ["windows", "", nil] do
+      assert {:error, {:invalid_pair_request, :platform}} =
+               submit(ctx, %{platform: platform})
+    end
+
+    assert {:ok, %{platform: "android"}} = submit(ctx, %{platform: "android"})
+
+    assert {:ok, %{request: %{platform: "android"}}} =
+             PairManager.session(ctx.manager, "pair-session")
+  end
+
   test "one intake bound rejects oversized device text before the owner is prompted", ctx do
     assert {:ok, _window} = PairManager.open(ctx.manager)
 
@@ -713,6 +729,7 @@ defmodule FermixChannels.Mobile.PairManagerTest do
         name: "Sujeeth's iPhone",
         model: "iPhone17,1",
         app_version: "1.0",
+        platform: "ios",
         noise_pk: <<4::256>>,
         sas: "047291",
         socket_pid: self()

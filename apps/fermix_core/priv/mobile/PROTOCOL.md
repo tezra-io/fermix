@@ -76,9 +76,9 @@ bytes because a Noise message is at most 65,535 bytes and ChaChaPoly adds a
 16-byte tag. Therefore a maximum-size raw chunk may carry at most a 4,075-byte
 header including its four-byte length prefix.
 
-Only `attach_chunk` (client to daemon), `media_chunk` and `event_part` (daemon
-to client) carry raw bytes, and theirs is never empty. Every other event must
-have an empty raw tail. Binary golden fixtures represent the actual frame as
+Only `attach_chunk` and `pair_request` (client to daemon), and `media_chunk`
+and `event_part` (daemon to client) carry raw bytes, and theirs is never empty.
+Every other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
 `{header, bytes_b64}` only so JSONL can store it; that wrapper is not sent on
 the wire.
 
@@ -89,7 +89,7 @@ history page, a `hello_ack` with long candidate names, an error with a long
 message) is sent as one run of `event_part` frames instead of one frame:
 
 ```json
-{"v":1,"t":"event_part","seq":S,"index":I,"count":N}
+{"v":2,"t":"event_part","seq":S,"index":I,"count":N}
 ```
 
 - The run is `N` frames, `2 ≤ N ≤ 18`, with `index` `0` to `N-1` in order and
@@ -143,16 +143,17 @@ pairing handshake both sides show a six-digit SAS derived exactly as follows:
 A pairing session runs in this order:
 
 1. The phone sends `pair_request` (`seq` 1) within the handshake deadline, 10 s
-   after the upgrade. A peer that finishes the handshake and sends nothing is
-   closed with `1008`, and that counts as a failed pairing attempt from its
-   address.
+   after the upgrade, with its secure-hardware attestation (see *Attestation*
+   below). A peer that finishes the handshake and sends nothing is closed with
+   `1008`, and that counts as a failed pairing attempt from its address.
 2. The owner compares the SAS and decides. A pairing window lasts at most 120
    seconds. While the owner decides, the daemon answers `ping` with `pong` and
    refuses every other event, so a keepalive never has to stop; an idle
    disconnect while a decision is pending is not a failed pairing handshake.
-3. Approved: `pair_approved{device_id, candidates[], profiles[]}`. The phone
-   then sends `hello` on the same session (its next `seq`) within a fresh 10 s,
-   and the session goes on as a paired one.
+3. Approved: `pair_approved{device_id, candidates[], profiles[], push_salt}`,
+   where `push_salt` is the device's 32-byte push salt in standard base64 (see
+   *Push notifications*). The phone then sends `hello` on the same session (its
+   next `seq`) within a fresh 10 s, and the session goes on as a paired one.
 4. Not approved: `pair_denied{reason}`, then close `4003` with the text
    `pairing <reason>`. `reason` is one word, the one the management protocol
    uses for the same ending: `denied` (the owner said no), `timeout` (the
@@ -167,6 +168,17 @@ request waits for the owner. A window remembers at most 1,024 addresses; a
 failure from another address is not counted. A `pair_request` from the same
 phone key as the one waiting replaces it, and the older socket is closed with
 `4001`. A phone that was approved but never said `hello` can pair again.
+
+### Attestation
+
+`pair_request` names the phone's `platform` (`ios` or `android`) and carries
+its `attestation{kind, cert_lengths[]}`: `kind` is `android_keymint` or
+`apple_app_attest`, and the frame's raw tail is the attestation's DER
+certificate chain, leaf first. `cert_lengths` holds each certificate's length,
+1 to 6 of them, and they sum to the tail, which is at most 16 KiB. A request
+whose chain breaks these bounds is a failed pairing attempt, closed with
+`1002`. This daemon checks the chain's shape and does not verify it yet: the
+owner's pairing prompt says so, and `pair_denied` never names an attestation.
 
 The shared deterministic `noise_vectors.json` pins X25519 keys, both handshake
 messages, handshake hashes, SAS values, and the first transport ciphertext for
@@ -187,7 +199,7 @@ The owner's QR code, and the `uri` of the management protocol's
 `mobile.pair.start`, carry one link:
 
 ```text
-fermix://pair?v=1&candidates=<JSON array>&port=<port>&tls_fp=<hex>&gateway_pk=<base64>&secret=<base64>&name=<name>
+fermix://pair?v=2&candidates=<JSON array>&port=<port>&tls_fp=<hex>&gateway_pk=<base64>&secret=<base64>&name=<name>&profile=<profile>
 ```
 
 The query is `application/x-www-form-urlencoded`: a space is `+`, and a `+`,
@@ -196,13 +208,14 @@ decoder. An unknown parameter is ignored, so the link can gain one.
 
 | Parameter | Value |
 |---|---|
-| `v` | `1`, this link format |
+| `v` | `2`, this link format; a phone refuses a link of format `1`, which a daemon serving protocol 1 wrote |
 | `candidates` | a JSON array of at most 16 hosts to try, best first: tailnet MagicDNS names, then tailnet addresses, then private LAN addresses. Like `hello_ack`'s, it keeps the best 16 of what the host finds; unlike them, these carry no interface or scope. |
 | `port` | the listener's TCP port, in decimal |
 | `tls_fp` | the SHA-256 of the listener's TLS certificate (DER), 64 lowercase hex digits; the phone pins it |
 | `gateway_pk` | the gateway's X25519 static public key, 32 bytes, standard base64 with padding |
 | `secret` | the one-time 32-byte pairing PSK, standard base64 with padding |
 | `name` | the host's name, for the phone to show |
+| `profile` | the daemon's configured profile (`[fermix_core] profile`, `general` unless set), which tells two Fermix homes on one host apart |
 
 The phone connects to `wss://<candidate>:<port>/ws`, trusts the certificate
 whose SHA-256 is `tls_fp`, and runs `IKpsk2` against `gateway_pk` with
@@ -216,12 +229,14 @@ with its decoded fields; its secret and keys are test material only.
 Every JSON header has these required fields:
 
 ```json
-{"v":1,"t":"event_name","seq":1}
+{"v":2,"t":"event_name","seq":1}
 ```
 
 - `v` is the event schema version.
-- `t` is a closed event name. An unknown value receives an `unsupported` error;
-  it is never silently ignored.
+- `t` is a closed event name. An unknown client `t` receives an `unsupported`
+  error; it is never silently ignored. A client ignores a server `t` it does
+  not know: it logs it and reads on, so a daemon can add a server event
+  without a version bump.
 - `seq` is an unsigned 64-bit integer. It starts at 1, increases by exactly one
   per sender within a Noise session, and resets only with a new session. An
   `event_part` frame takes one `seq` like any other frame. The codec validates
@@ -232,16 +247,18 @@ Every JSON header has these required fields:
 The first encrypted event in a paired session is `hello` and its `seq` is 1.
 `hello.protocol_v` must equal the envelope `v`, and every later frame of the
 session carries the same `v`. The daemon replies with `hello_ack` containing
-`min_version` and `max_version`. The supported window is **N/N-1**: the current
-protocol and previous protocol (or just 1 before a second version exists). No
-other event is serviced before hello and a second hello is terminal.
+`min_version` and `max_version`. This daemon serves protocol 2 alone: protocol 1
+shipped in daemons but no phone app ever spoke it, so the window is the current
+version rather than **N/N-1**, the current protocol and the previous one, which
+it becomes from the next version on. No other event is serviced before hello
+and a second hello is terminal.
 
 A `hello` or `pair_request` whose `v` is outside the window is answered with a
 typed refusal, then close `1002` with the text `unsupported mobile protocol
 version`. The refusal is encoded at the daemon's own version, `seq` 1:
 
 ```json
-{"v":1,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"v":2,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":2}
 ```
 
 `direction` is `client_too_old` (the app must update) or `client_too_new`
@@ -267,7 +284,7 @@ accepts it.
 | `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
-| `pair_request` | `device_name`, `model`, `app_version` | first event inside an IKpsk2 pairing session; each field is ≤128 bytes of valid UTF-8 and must contain no C0/C1/DEL control characters |
+| `pair_request` | `device_name`, `model`, `app_version`, `platform`, `attestation{kind, cert_lengths[]}` + raw bytes | first event inside an IKpsk2 pairing session; each text field is ≤128 bytes of valid UTF-8 and must contain no C0/C1/DEL control characters; the raw bytes are the attestation chain (see *Attestation*) |
 | `unpair` | — | best-effort self-removal; host CLI remains authoritative |
 | `ping` | — | keepalive |
 
@@ -315,7 +332,7 @@ A client must not upload chunks after `present`.
 | `read_state` | `profile_id`, `read_up_to_seq` | the frontier, after any client moved it |
 | `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq` | exact server-sequence cursor page |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
-| `pair_approved` | `device_id`, `candidates[]`, `profiles[]` | completes pairing |
+| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64 |
 | `pair_denied` | `reason` | terminal pairing refusal |
 | `error` | `code`, `message`; `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | a refusal; message ≤512 bytes; see *Errors* |
 | `pong` | — | keepalive response |
@@ -545,7 +562,8 @@ push_key = HKDF-SHA256(salt: apns_key_salt, ikm: shared, info: "fermix-push-v1",
 ```
 
 `apns_key_salt` is the 32-byte per-device salt stored in `devices.toml`, so two
-devices paired to the same gateway never share a key. The device derives the
+devices paired to the same gateway never share a key; `pair_approved` gives it
+to the phone as `push_salt`. The device derives the
 identical key from its own side as `X25519(device_static_private,
 gateway_static_public)`.
 

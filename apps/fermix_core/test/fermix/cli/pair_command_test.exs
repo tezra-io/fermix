@@ -6,7 +6,7 @@ defmodule Fermix.CLI.PairCommandTest do
   @session_id "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
   @uri "fermix://pair?v=1&port=4031&secret=one-time"
-  @no_proof "This phone sent no secure-hardware proof."
+  @unchecked "Fermix does not check a phone's secure hardware yet."
 
   test "renders the QR, waits for a phone, and approves only after the code is confirmed" do
     script = %{
@@ -25,7 +25,7 @@ defmodule Fermix.CLI.PairCommandTest do
     assert stdout =~ "██"
     assert stdout =~ "expires in 120s"
     assert stdout =~ "Manual pairing URI: #{@uri}"
-    assert stdout =~ @no_proof
+    assert stdout =~ @unchecked
 
     assert stdout =~
              "Google Pixel 9 Pro 'Sam's phone' requests pairing. Phone shows 481062. Approve? [y/N]"
@@ -375,7 +375,7 @@ defmodule Fermix.CLI.PairCommandTest do
         "sas" => "481062",
         "build_role" => nil,
         "boot_state" => nil,
-        "attestation" => %{"status" => "unavailable", "sentence" => @no_proof}
+        "attestation" => %{"status" => "unavailable", "sentence" => @unchecked}
       },
       fields
     )

@@ -36,7 +36,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
       discover: fn ->
         {:ok, [%{address: "192.168.1.8", interface: "en0", scope: :lan}]}
       end,
-      host_label: fn -> "workstation" end
+      host_label: fn -> "workstation" end,
+      profile: "fermix-macos"
     ]
 
     assert {:ok, result} = Management.begin_pairing(opts)
@@ -47,9 +48,10 @@ defmodule FermixChannels.Mobile.ManagementTest do
     refute Map.has_key?(result, :secret)
 
     query = result.uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
-    assert query["v"] == "1"
+    assert query["v"] == "2"
     assert query["port"] == "40321"
     assert query["name"] == "workstation"
+    assert query["profile"] == "fermix-macos"
     assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
     assert Base.decode64!(query["gateway_pk"]) == <<1::256>>
     assert Base.decode64!(query["secret"]) == <<3::256>>
@@ -390,7 +392,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert view.request == %{
                device_name: "Pixel 9 Pro",
                model: "Google Pixel 9 Pro",
-               platform: nil,
+               platform: "android",
                app_version: "1.0.0",
                sas: "481062",
                build_role: nil,
@@ -1109,6 +1111,7 @@ defmodule FermixChannels.Mobile.ManagementTest do
                name: "Pixel 9 Pro",
                model: "Google Pixel 9 Pro",
                app_version: "1.0.0",
+               platform: "android",
                noise_pk: <<5::256>>,
                sas: "481062",
                socket_pid: socket
