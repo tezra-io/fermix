@@ -28,7 +28,7 @@
         "t": {"enum": [
           "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
           "history_pull", "media_fetch", "push_register", "ack", "read_state",
-          "pair_request", "unpair", "ping"
+          "request_status", "pair_request", "unpair", "ping"
         ]}
       },
       "allOf": [
@@ -44,6 +44,7 @@
         {"if": {"properties": {"t": {"const": "push_register"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_register"}},
         {"if": {"properties": {"t": {"const": "ack"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ack"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
+        {"if": {"properties": {"t": {"const": "request_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status"}},
         {"if": {"properties": {"t": {"const": "pair_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_request"}},
         {"if": {"properties": {"t": {"const": "unpair"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/unpair"}},
         {"if": {"properties": {"t": {"const": "ping"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ping"}}
@@ -57,8 +58,8 @@
           "hello_ack", "accepted", "attach_status", "turn_started", "text_delta",
           "tool_event", "text_done", "turn_done", "media_begin", "media_chunk", "media_end",
           "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
-          "read_state", "history_page", "notice", "pair_approved", "pair_denied",
-          "error", "pong", "event_part"
+          "read_state", "history_page", "request_status_page", "notice", "pair_approved",
+          "pair_denied", "error", "pong", "event_part"
         ]}
       },
       "allOf": [
@@ -81,6 +82,7 @@
         {"if": {"properties": {"t": {"const": "link_preview"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/link_preview"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
         {"if": {"properties": {"t": {"const": "history_page"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/history_page"}},
+        {"if": {"properties": {"t": {"const": "request_status_page"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status_page"}},
         {"if": {"properties": {"t": {"const": "notice"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/notice"}},
         {"if": {"properties": {"t": {"const": "pair_approved"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_approved"}},
         {"if": {"properties": {"t": {"const": "pair_denied"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_denied"}},
@@ -159,6 +161,10 @@
     "read_state": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "read_up_to_seq"],
       "properties": {"t": {"const": "read_state"}, "profile_id": {"type": "string", "minLength": 1}, "read_up_to_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
+    },
+    "request_status": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "client_msg_ids"],
+      "properties": {"t": {"const": "request_status"}, "client_msg_ids": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "minLength": 1}}}
     },
     "pair_request": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
@@ -344,6 +350,22 @@
         "next_after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
         "history_head_seq": {"type": "integer", "minimum": 0},
         "prev_before_seq": {"type": "integer", "minimum": 1}
+      }
+    },
+    "request_status_page": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "requests"],
+      "description": "The answer to request_status: each request it named that the daemon holds, in the order asked; an id it does not hold is left out.",
+      "properties": {"t": {"const": "request_status_page"}, "requests": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/requestOutcome"}}}
+    },
+    "requestOutcome": {
+      "type": "object", "required": ["client_msg_id", "status"],
+      "description": "error is the word of a failed request: cancelled when it was stopped, request_failed otherwise.",
+      "properties": {
+        "client_msg_id": {"type": "string", "minLength": 1},
+        "status": {"enum": ["accepted", "running", "completed", "failed"]},
+        "turn_id": {"type": "string", "minLength": 1},
+        "result_server_seq": {"type": "integer", "minimum": 1},
+        "error": {"type": "string", "minLength": 1}
       }
     },
     "notice": {

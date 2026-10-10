@@ -5,12 +5,13 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state pair_request unpair ping
+    push_register ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
+    link_preview read_state history_page request_status_page notice pair_approved pair_denied
+    error pong event_part
   )
 
   # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
@@ -570,6 +571,46 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     delta = %{"turn_id" => "turn-c-1", "text" => "Hello there", "replace" => true}
     assert {:ok, frame} = Protocol.encode_server_frame("text_delta", delta, 2)
     assert {:ok, %{header: %{"replace" => true}}} = decode_frame(frame)
+  end
+
+  # A reconnecting phone asks how the requests it never saw end stand.
+  test "request_status names 1 to 32 requests, and its page says how each stands" do
+    ids = ["c-1", "c-2"]
+
+    assert {:ok, %{type: "request_status", payload: %{"client_msg_ids" => ^ids}}} =
+             Protocol.decode_client_frame(
+               client_frame("request_status", 1, %{"client_msg_ids" => ids})
+             )
+
+    for bad <- [[], List.duplicate("c-1", 33), [""], [1], "c-1"] do
+      assert {:error, {:invalid_field, "client_msg_ids"}} =
+               Protocol.decode_client_frame(
+                 client_frame("request_status", 1, %{"client_msg_ids" => bad})
+               )
+    end
+
+    requests = [
+      %{"client_msg_id" => "c-1", "status" => "completed", "result_server_seq" => 14},
+      %{"client_msg_id" => "c-2", "status" => "failed", "error" => "cancelled"},
+      %{"client_msg_id" => "c-3", "status" => "running", "turn_id" => "turn-c-3"}
+    ]
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("request_status_page", %{"requests" => requests}, 1)
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("request_status_page", %{"requests" => []}, 1)
+
+    for bad <- [
+          [%{"client_msg_id" => "c-1", "status" => "lost"}],
+          [%{"client_msg_id" => "", "status" => "running"}],
+          [%{"client_msg_id" => "c-1", "status" => "failed", "error" => ""}],
+          [%{"client_msg_id" => "c-1", "status" => "completed", "result_server_seq" => 0}],
+          List.duplicate(hd(requests), 33)
+        ] do
+      assert {:error, {:invalid_field, "requests"}} =
+               Protocol.encode_server_frame("request_status_page", %{"requests" => bad}, 1)
+    end
   end
 
   test "a request's error names the request it ends" do

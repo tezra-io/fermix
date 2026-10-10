@@ -23,6 +23,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   # A page above the 4 KiB header travels as continuation frames; this bounds
   # the one event they carry.
   @max_page_bytes 256 * 1_024
+  # The one profile (`PROTOCOL.md`); `request_status` names none.
+  @profile "main"
 
   @type ingress_context :: %{
           required(:transport) => :mobile,
@@ -65,6 +67,13 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp dispatch(%{type: "cancel", payload: payload}, _transport, opts),
     do: Requests.cancel(payload, opts)
 
+  defp dispatch(%{type: "request_status", payload: %{"client_msg_ids" => ids}}, transport, opts) do
+    with {:ok, requests} <- request_outcomes(ids, opts) do
+      page = %{"t" => "request_status_page", "requests" => requests}
+      Keyword.fetch!(opts, :event_sink).(transport.reply_to, page)
+    end
+  end
+
   defp dispatch(%{type: "ping"}, transport, opts) do
     Keyword.fetch!(opts, :event_sink).(transport.reply_to, %{"t" => "pong"})
   end
@@ -90,6 +99,37 @@ defmodule FermixChannels.Mobile.EventRouter do
 
   defp newest_seq([], empty), do: empty
   defp newest_seq(messages, _empty), do: List.last(messages)["server_seq"]
+
+  # How each request a reconnecting phone asks after stands, read from its
+  # durable claim, in the order asked. An id the daemon never claimed (or
+  # whose claim expired) is left out.
+  defp request_outcomes(ids, opts) do
+    ids
+    |> Enum.reduce_while({:ok, []}, fn id, {:ok, outcomes} ->
+      case store(opts).get_client_request(@profile, id, Keyword.get(opts, :store_opts, [])) do
+        {:ok, request} -> {:cont, {:ok, [request_outcome(request) | outcomes]}}
+        {:error, :not_found} -> {:cont, {:ok, outcomes}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, outcomes} -> {:ok, Enum.reverse(outcomes)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
+  defp request_outcome(request) do
+    %{"client_msg_id" => request.client_msg_id, "status" => request.status}
+    |> maybe_put("turn_id", request.turn_id)
+    |> maybe_put("result_server_seq", request.result_server_seq)
+    |> maybe_put("error", failure_code(request))
+  end
+
+  # A failed request's word, as its turn's `turn_error` would have carried
+  # it: `cancelled` when it was stopped, `request_failed` otherwise.
+  defp failure_code(%{status: "failed", cancelled_at: %DateTime{}}), do: "cancelled"
+  defp failure_code(%{status: "failed"}), do: "request_failed"
+  defp failure_code(_request), do: nil
 
   defp transport(device_id, context, opts) do
     reply_to = {:device, device_id}

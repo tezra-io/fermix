@@ -199,6 +199,10 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     end
   end
 
+  defmodule BrokenRequestStore do
+    def get_client_request("main", _id, _opts), do: {:error, :repo_unavailable}
+  end
+
   defmodule CrashingMediaStore do
     def attachment(_server, "raise-1"), do: raise("attachment store exploded")
     def attachment(_server, "exit-1"), do: exit(:attachment_store_down)
@@ -569,6 +573,73 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert_received {:event, {:device, "device-1"},
                      %{"t" => "history_page", "messages" => [%{"server_seq" => 5}]}}
+  end
+
+  # A reconnecting phone asks how the requests it never saw end stand, and
+  # ends the turns of those that ended while it was away (mobile protocol 2).
+  test "request_status answers each held request from its durable claim, in order", ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+    claim = store_opts ++ [transport: "mobile", authenticated_device_id: "device-1"]
+
+    for id <- ~w(waiting running done failed stopped) do
+      payload = %{"client_msg_id" => id, "profile_id" => "main"}
+
+      assert {:ok, {:claimed, _request}} =
+               Timeline.claim_client_request("main", id, "msg", payload, claim)
+    end
+
+    for id <- ~w(running done failed stopped) do
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", id, "boot-1", store_opts)
+    end
+
+    done = %{result_server_seq: 7, turn_id: "turn-done"}
+    assert {:ok, _done} = Timeline.complete_client_request("main", "done", 1, done, store_opts)
+    failure = %{error: %{type: "msg", reason: ":timeout"}}
+    assert {:ok, _failed} = Timeline.fail_client_request("main", "failed", 1, failure, store_opts)
+
+    assert {:ok, {:marked, _stopped}} =
+             Timeline.cancel_client_request("main", "stopped", store_opts)
+
+    assert {:ok, _stopped} =
+             Timeline.fail_client_request("main", "stopped", 1, failure, store_opts)
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+    ids = ~w(done never waiting running failed stopped)
+    status = decoded("request_status", %{"client_msg_ids" => ids})
+    assert :ok = EventRouter.route(status, ctx.context, opts)
+
+    assert_received {:event, {:device, "device-1"}, %{"t" => "request_status_page"} = page}
+
+    assert page["requests"] == [
+             %{
+               "client_msg_id" => "done",
+               "status" => "completed",
+               "turn_id" => "turn-done",
+               "result_server_seq" => 7
+             },
+             %{"client_msg_id" => "waiting", "status" => "accepted"},
+             %{"client_msg_id" => "running", "status" => "running"},
+             %{"client_msg_id" => "failed", "status" => "failed", "error" => "request_failed"},
+             %{"client_msg_id" => "stopped", "status" => "failed", "error" => "cancelled"}
+           ]
+
+    assert {:ok, _frames} =
+             Protocol.encode_server_event(
+               "request_status_page",
+               Map.delete(page, "t"),
+               1,
+               <<>>,
+               []
+             )
+  end
+
+  test "request_status fails loudly when the store cannot answer", ctx do
+    opts = Keyword.put(ctx.opts, :store, BrokenRequestStore)
+    status = decoded("request_status", %{"client_msg_ids" => ["any"]})
+
+    assert {:error, :repo_unavailable} = EventRouter.route(status, ctx.context, opts)
+    refute_received {:event, _target, %{"t" => "request_status_page"}}
   end
 
   # A fresh phone pulls the newest page first, then older ones (mobile protocol

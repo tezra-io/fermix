@@ -202,6 +202,15 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     # A turn's ending, as `Companion.Turns` sends it once the turn completes.
     assert [%{"t" => "turn_done"}] =
              assert_on_the_wire!(Output.turn_done("turn-client-7"), schema)
+
+    # How a reconnecting phone's requests stand, as the router answers it.
+    outcomes = [
+      %{"client_msg_id" => "client-7", "status" => "completed", "result_server_seq" => 9},
+      %{"client_msg_id" => "client-8", "status" => "failed", "error" => "cancelled"}
+    ]
+
+    page = %{"t" => "request_status_page", "requests" => outcomes}
+    assert [%{"requests" => ^outcomes}] = assert_on_the_wire!(page, schema)
   end
 
   test "an approval, its re-send with the time it has left, and its expiry", %{schema: schema} do

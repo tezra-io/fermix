@@ -6,6 +6,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ## [Unreleased]
 
+### Added
+
+- **Pair the Android app and chat with it.** The phone channel now speaks
+  the Android app's protocol. The app scans the pairing code, you compare
+  the six-digit code it shows and approve, and the chat works turn after
+  turn: replies stream in, every turn ends so your next message goes out,
+  older history loads as you scroll back, and a phone that reconnects
+  learns how the messages it sent while away ended. Jobs and reminders reach
+  the phone as messages of their own. The pairing code names the Fermix
+  profile, so two Fermix homes on one computer pair as two. Fermix takes the
+  phone's secure-hardware proof without checking it yet, and the approval
+  prompt says so.
+
 ### Changed
 
 - **The phone channel is on by default.** A new install listens for paired

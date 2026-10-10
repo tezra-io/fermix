@@ -43,15 +43,18 @@ defmodule FermixChannels.Mobile.Protocol do
   @attestation_kinds ~w(android_keymint apple_app_attest)
   @max_attestation_certs 6
   @max_attestation_chain_bytes 16 * 1_024
+  @max_status_requests 32
+  @request_states ~w(accepted running completed failed)
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state pair_request unpair ping
+    push_register ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
     hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
+    link_preview read_state history_page request_status_page notice pair_approved pair_denied
+    error pong event_part
   )
   @raw_client_events ~w(attach_chunk pair_request)
   @raw_server_events ~w(media_chunk event_part)
@@ -65,6 +68,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "ack" => ~w(server_seq),
+    "request_status" => ~w(client_msg_ids),
     "pair_request" => ~w(device_name model app_version platform attestation),
     "unpair" => [],
     "ping" => []
@@ -81,6 +85,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "reaction" => ~w(in_reply_to emoji),
     "link_preview" => ~w(in_reply_to url site title),
     "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
+    "request_status_page" => ~w(requests),
     "notice" => ~w(kind text),
     "pair_approved" => ~w(device_id candidates profiles push_salt),
     "pair_denied" => ~w(reason),
@@ -480,6 +485,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
+
+  defp validate_client_payload("request_status", payload, _max),
+    do: validate_request_status(payload)
+
   defp validate_client_payload("pair_request", payload, _max), do: validate_pair_request(payload)
   defp validate_client_payload(type, _payload, _max) when type in ~w(unpair ping), do: :ok
 
@@ -534,6 +543,16 @@ defmodule FermixChannels.Mobile.Protocol do
     do: nonnegative_u64(payload, "after_seq")
 
   defp history_cursor(_payload), do: {:error, {:missing_field, "after_seq"}}
+
+  # How requests stand, asked after a reconnect: 1 to 32 client message ids.
+  defp validate_request_status(%{"client_msg_ids" => ids})
+       when is_list(ids) and length(ids) in 1..@max_status_requests do
+    if Enum.all?(ids, &(is_binary(&1) and &1 != "")),
+      do: :ok,
+      else: {:error, {:invalid_field, "client_msg_ids"}}
+  end
+
+  defp validate_request_status(_payload), do: {:error, {:invalid_field, "client_msg_ids"}}
 
   defp validate_push(payload) do
     with :ok <- nonempty(payload, "apns_token") do
@@ -600,6 +619,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_server_payload("reaction", payload), do: strings(payload, ~w(in_reply_to emoji))
   defp validate_server_payload("link_preview", payload), do: validate_link_preview(payload)
   defp validate_server_payload("history_page", payload), do: validate_history_page(payload)
+
+  defp validate_server_payload("request_status_page", payload),
+    do: validate_request_status_page(payload)
+
   defp validate_server_payload("notice", payload), do: strings(payload, ~w(kind text))
   defp validate_server_payload("pair_approved", payload), do: validate_pair_approved(payload)
   defp validate_server_payload("pair_denied", payload), do: nonempty(payload, "reason")
@@ -679,6 +702,29 @@ defmodule FermixChannels.Mobile.Protocol do
       optional_positive_u64(payload, "prev_before_seq")
     end
   end
+
+  defp validate_request_status_page(%{"requests" => requests})
+       when is_list(requests) and length(requests) <= @max_status_requests do
+    if Enum.all?(requests, &request_outcome?/1),
+      do: :ok,
+      else: {:error, {:invalid_field, "requests"}}
+  end
+
+  defp validate_request_status_page(_payload), do: {:error, {:invalid_field, "requests"}}
+
+  defp request_outcome?(%{"client_msg_id" => id, "status" => status} = outcome)
+       when is_binary(id) and id != "" and status in @request_states do
+    Enum.all?(
+      [
+        optional_nonempty(outcome, "turn_id"),
+        optional_positive_u64(outcome, "result_server_seq"),
+        optional_nonempty(outcome, "error")
+      ],
+      &(&1 == :ok)
+    )
+  end
+
+  defp request_outcome?(_outcome), do: false
 
   defp validate_pair_approved(payload) do
     with :ok <- nonempty(payload, "device_id"),

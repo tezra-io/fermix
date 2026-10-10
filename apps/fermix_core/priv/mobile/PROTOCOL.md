@@ -284,6 +284,7 @@ accepts it.
 | `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
+| `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
 | `pair_request` | `device_name`, `model`, `app_version`, `platform`, `attestation{kind, cert_lengths[]}` + raw bytes | first event inside an IKpsk2 pairing session; each text field is ≤128 bytes of valid UTF-8 and must contain no C0/C1/DEL control characters; the raw bytes are the attestation chain (see *Attestation*) |
 | `unpair` | — | best-effort self-removal; host CLI remains authoritative |
 | `ping` | — | keepalive |
@@ -303,6 +304,7 @@ What each is answered with:
 | `cancel`, `ack`, `push_register` | nothing; a refused one is an `error` |
 | `read_state` | the frontier as `read_state`, to every client of the profile, this one included |
 | `history_pull` | `history_page` |
+| `request_status` | `request_status_page` |
 | `media_fetch` | the blob as `media_begin`, `media_chunk`s and `media_end`, or an `error` naming its `ref` |
 | `unpair` | close `4003` |
 | `ping` | `pong` |
@@ -332,6 +334,7 @@ A client must not upload chunks after `present`.
 | `link_preview` | `in_reply_to`, `url`, `site`, `title`; `description?`, `image_ref?` | host-resolved preview of the row at `in_reply_to` |
 | `read_state` | `profile_id`, `read_up_to_seq` | the frontier, after any client moved it |
 | `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
+| `request_status_page` | `requests[]` | how each request `request_status` named stands |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
 | `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64 |
 | `pair_denied` | `reason` | terminal pairing refusal |
@@ -441,6 +444,21 @@ forward and never past the newest row: the daemon stores
 `min(max(stored, reported), history_head_seq)` and sends the result as
 `read_state` to every client of the profile, on both transports. A frontier
 stored past the newest row earlier comes back to it on the next report.
+
+## Requests after a reconnect
+
+A phone that reconnects with a request it never saw end (one still in its
+outbox, or a turn it still shows) asks how it stands:
+`request_status{client_msg_ids: [...]}`, 1 to 32 ids. The answer is
+`request_status_page{requests: [...]}`, one entry for each id the daemon holds,
+in the order asked; an id it does not hold (never claimed, or cleared once its
+24-hour claim ran out) is left out. An entry is `{client_msg_id, status}`, `status` one of
+`accepted`, `running`, `completed` or `failed`, with `turn_id?`,
+`result_server_seq?` (the request's reply row) and, on a failed one, `error`:
+`cancelled` when it was stopped, `request_failed` otherwise. A completed or
+failed request ended while the phone was away, so it ends the turn the phone
+shows for it; an accepted or running one goes on, and its stream and ending
+arrive as usual.
 
 ## Streaming a turn
 

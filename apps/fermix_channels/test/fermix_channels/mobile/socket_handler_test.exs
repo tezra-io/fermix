@@ -1013,6 +1013,33 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert next.server_seq == 1
   end
 
+  # A reconnecting phone asks how its requests stand before it drains its
+  # outbox: a known event, answered by the router, never the terminal refusal.
+  test "a request_status on a paired socket reaches the router and the session stays up" do
+    test_pid = self()
+    status = encode_client_frame("request_status", %{"client_msg_ids" => ["c1", "c2"]}, 1)
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        phase: :ready,
+        device_id: "paired-device",
+        noise: :noise,
+        authorize_socket: fn _registry, "paired-device", _pid -> :ok end,
+        decrypt: fn :noise, ^status -> {:ok, status, :noise} end,
+        event_router: fn event, context, _opts ->
+          send(test_pid, {:routed, event.type, event.payload, context})
+          :ok
+        end
+      })
+
+    assert {:ok, next} = SocketHandler.handle_in({status, opcode: :binary}, state)
+
+    assert_received {:routed, "request_status", %{"client_msg_ids" => ["c1", "c2"]},
+                     %{transport: :mobile, authenticated_device_id: "paired-device"}}
+
+    assert next.client_seq == 1
+  end
+
   test "an unknown authenticated event emits unsupported and closes" do
     unknown = encode_client_frame("future_event", %{}, 1)
 

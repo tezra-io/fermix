@@ -13,5 +13,6 @@
 {"v":2,"t":"push_register","seq":13,"apns_token":"0123456789abcdef","environment":"development"}
 {"v":2,"t":"ack","seq":14,"server_seq":12}
 {"v":2,"t":"read_state","seq":15,"profile_id":"main","read_up_to_seq":12}
+{"v":2,"t":"request_status","seq":15,"client_msg_ids":["client-1","client-2","client-9"]}
 {"v":2,"t":"ping","seq":16}
 {"v":2,"t":"unpair","seq":17}
