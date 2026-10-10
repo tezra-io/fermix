@@ -615,8 +615,9 @@ def test_fable_5_1_caches_at_a_tenth_of_its_siblings_read_rate():
 
 
 def test_opus_5_5_caches_at_half_the_standard_read_rate():
-    # Read first-party 2026-09-22: the vendor's table footnotes Opus 5.5 alone at
-    # 0.05x input for cache hits; its write leg is the standard 1.25x. It also
+    # Read first-party 2026-09-22: the vendor's table footnotes Opus 5.5 (and,
+    # since its release, Sonnet 5.5) at 0.05x input for cache hits; its write
+    # leg is the standard 1.25x. It also
     # undercuts Opus 5, so pricing it by analogy to its predecessor overstates it.
     new = pricing.CARD[("anthropic", "claude-opus-5-5")]
     old = pricing.CARD[("anthropic", "claude-opus-5")]
@@ -625,6 +626,18 @@ def test_opus_5_5_caches_at_half_the_standard_read_rate():
     assert new.cache_write_per_mtok == pytest.approx(1.25 * new.input_per_mtok)
     assert new.input_per_mtok < old.input_per_mtok
     assert new.output_per_mtok < old.output_per_mtok
+
+
+def test_sonnet_5_5_caches_at_half_the_standard_read_rate():
+    # Read first-party 2026-10-10: the vendor's table footnotes Sonnet 5.5 with
+    # Opus 5.5 at 0.05x input for cache hits. Sonnet 5 keeps the standard 0.1x,
+    # so pricing Sonnet 5.5's reads by analogy to its predecessor doubles them.
+    new = pricing.CARD[("anthropic", "claude-sonnet-5-5")]
+    old = pricing.CARD[("anthropic", "claude-sonnet-5")]
+    assert (new.input_per_mtok, new.output_per_mtok) == (2.00, 10.00)
+    assert new.cached_input_per_mtok == pytest.approx(0.05 * new.input_per_mtok)
+    assert new.cache_write_per_mtok == pytest.approx(1.25 * new.input_per_mtok)
+    assert old.cached_input_per_mtok == pytest.approx(0.1 * old.input_per_mtok)
 
 
 def test_claude_sonnet_5_carries_the_vendors_standard_price_on_every_leg():

@@ -153,7 +153,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-10-10"
+CARD_VERSION = "2026-10-10.2"
 
 
 class LlmSpanUsage(Protocol):
@@ -322,18 +322,21 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
     # the cheaper one — so pricing a Sonnet by analogy to its predecessor
     # overstates it by 50%, the same wrong number the cancelled rise would give.
     "claude-sonnet-5": Rate(2.00, 10.00, 0.20, 2.50),
-    # Read first-party 2026-09-29, its release day: Sonnet 5's four legs
-    # exactly, on the standard 0.1x read tier.
-    "claude-sonnet-5-5": Rate(2.00, 10.00, 0.20, 2.50),
+    # Sonnet 5's input, output and write legs, but 0.10 cache read is 0.05x
+    # input, half Sonnet 5's: the vendor's pricing table (re-read first-party
+    # 2026-10-10) footnotes Sonnet 5.5 with Opus 5.5 on that tier. It was
+    # carded at 0.20 on its release day. Do not "fix" the read back to 0.20.
+    "claude-sonnet-5-5": Rate(2.00, 10.00, 0.10, 2.50),
     # 0.20 cache read is 0.05x input, half the standard 0.1x, and it is correct:
-    # the vendor's pricing table footnotes Opus 5.5 alone on that tier. It also
-    # UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
+    # the vendor's pricing table footnotes Opus 5.5 and Sonnet 5.5 on that tier.
+    # It also UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
     "claude-opus-5-5": Rate(4.00, 20.00, 0.20, 5.00),
     "claude-opus-5": Rate(5.00, 25.00, 0.50, 6.25),
     # 0.25 cache read is 0.025x input, a tenth of what the sibling below pays,
     # and it is correct: the vendor's pricing table footnotes Fable 5.1 and
     # Mythos 5.1 as the only models on the 0.025x read tier, and everything else
-    # but Opus 5.5 (0.05x, above) at the standard 0.1x. Do not "fix" it to 1.00.
+    # but Opus 5.5 and Sonnet 5.5 (0.05x, above) at the standard 0.1x. Do not
+    # "fix" it to 1.00.
     "claude-fable-5-1": Rate(10.00, 50.00, 0.25, 12.50),
     "claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "claude-haiku-4-5": Rate(1.00, 5.00, 0.10, 1.25),
@@ -394,7 +397,7 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     # can UNDER-state what the account was actually billed.
     "moonshotai/kimi-k3": Rate(2.55, 12.75, 0.256),
     "anthropic/claude-sonnet-4.6": Rate(3.00, 15.00, 0.30, 3.75),
-    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.20, 2.50),
+    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.10, 2.50),
     "anthropic/claude-fable-5.1": Rate(10.00, 50.00, 0.25, 12.50),
     "anthropic/claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),
