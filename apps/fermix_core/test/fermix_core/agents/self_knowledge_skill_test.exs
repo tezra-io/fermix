@@ -120,8 +120,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   end
 
   # The channel's surface is the management protocol: a settings section and
-  # the `mobile.*` methods a desktop Phone pane would be built on, with the
-  # config flag the route on a host with no pane. The self-reference must
+  # the `mobile.*` methods the Mac app's Phone row is built on, with the config
+  # flag the route on a host with no pane. The self-reference must
   # name both, must say pairing on an app-managed Mac is the app's, and must not
   # point an owner at surfaces that do not exist. The refutations name concrete
   # withdrawn artifacts rather than a phrasing allowlist, so a true sentence
@@ -139,6 +139,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert text =~ "mobile.*"
       assert text =~ "fermix pair"
       assert text =~ "never the CLI"
+      assert text =~ "Phone row"
+      refute text =~ "Phone pane on them yet"
       refute text =~ "Channels page"
       refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"

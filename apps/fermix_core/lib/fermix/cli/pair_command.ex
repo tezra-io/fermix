@@ -12,6 +12,7 @@ defmodule Fermix.CLI.PairCommand do
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.TerminalQR
   alias FermixCore.Management.Mobile
 
@@ -45,20 +46,21 @@ defmodule Fermix.CLI.PairCommand do
 
   defp pair(io, deps) do
     case call(deps, "mobile.pair.start", %{}) do
-      {:ok, %{"state" => "failed"} = view} -> refused_start(view, io)
+      {:ok, %{"state" => "failed"} = view} -> refused_start(view, io, deps)
       {:ok, view} -> opened(view, io, deps)
       {:error, reason} -> start_error(reason, io)
     end
   end
 
   # Nothing was opened, so there is nothing to cancel.
-  defp refused_start(%{"failure" => %{"sentence" => sentence}}, io) when is_binary(sentence) do
+  defp refused_start(%{"failure" => %{"sentence" => sentence}}, io, deps)
+       when is_binary(sentence) do
     IO.puts(io.stderr, "fermix pair: #{scrub(sentence)}")
-    if sentence == Mobile.off_sentence(), do: IO.puts(io.stderr, enable_hint())
+    if sentence == Mobile.off_sentence(), do: IO.puts(io.stderr, enable_hint(deps))
     1
   end
 
-  defp refused_start(_view, io),
+  defp refused_start(_view, io, _deps),
     do: fail(io, "fermix pair: the daemon answered an invalid pairing refusal")
 
   defp start_error(:not_running, io), do: daemon_not_running(io)
@@ -250,7 +252,8 @@ defmodule Fermix.CLI.PairCommand do
   defp deps(opts) do
     %{
       client: Keyword.get(opts, :client, &Client.request_v1/3),
-      sleep: Keyword.get(opts, :poll_sleep, &Process.sleep/1)
+      sleep: Keyword.get(opts, :poll_sleep, &Process.sleep/1),
+      app_managed?: Keyword.get(opts, :app_managed?, &HomeOwner.app_managed?/0)
     }
   end
 
@@ -276,10 +279,17 @@ defmodule Fermix.CLI.PairCommand do
     1
   end
 
-  # The phone channel's switch on a host managed without the desktop app.
-  defp enable_hint do
-    "set `enabled = true` under `[fermix_channels.mobile]` in config.toml, " <>
-      "then run `fermix restart`"
+  # The phone channel's switch. On an app-managed home it is the app's Phone row,
+  # which turns the channel on and pairs in one place, never config.toml or the
+  # CLI; on a host managed without the desktop app it lives in config.toml.
+  defp enable_hint(deps) do
+    if deps.app_managed?.() do
+      "pair from Fermix.app instead: the Phone row in its Channels settings turns " <>
+        "the channel on and shows the pairing code"
+    else
+      "set `enabled = true` under `[fermix_channels.mobile]` in config.toml, " <>
+        "then run `fermix restart`"
+    end
   end
 
   defp valid_session_id?(value),

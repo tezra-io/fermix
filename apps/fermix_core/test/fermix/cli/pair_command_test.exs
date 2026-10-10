@@ -87,6 +87,25 @@ defmodule Fermix.CLI.PairCommandTest do
     refute_received {:call, "mobile.pair.cancel", _params, _opts}
   end
 
+  # An app-managed home's switch is the app's, never config.toml or the CLI:
+  # the Phone row turns the channel on and pairs in one place.
+  test "a channel that is off on an app-managed home points to the app" do
+    script = %{
+      "mobile.pair.start" => [failed_start("unavailable", "The mobile channel is turned off.")]
+    }
+
+    {status, stdout, stderr} = run_pair(script, "", app_managed?: fn -> true end)
+
+    assert status == 1
+    assert stdout == ""
+    assert stderr =~ "fermix pair: The mobile channel is turned off."
+    assert stderr =~ "Fermix.app"
+    assert stderr =~ "Phone"
+    refute stderr =~ "config.toml"
+    refute stderr =~ "fermix restart"
+    refute_received {:call, "mobile.pair.get", _params, _opts}
+  end
+
   test "any other refused start prints the daemon's sentence alone" do
     sentence = "The mobile channel has not started yet. Restart Fermix to apply the change."
     script = %{"mobile.pair.start" => [failed_start("unavailable", sentence)]}
@@ -288,7 +307,7 @@ defmodule Fermix.CLI.PairCommandTest do
     }
   end
 
-  defp run_pair(script, input) do
+  defp run_pair(script, input, opts \\ []) do
     test_pid = self()
     daemon = start_supervised!({Agent, fn -> script end})
     {:ok, stdin} = StringIO.open(input)
@@ -306,7 +325,8 @@ defmodule Fermix.CLI.PairCommandTest do
         poll_sleep: fn ms -> send(test_pid, {:slept, ms}) end,
         stdin: stdin,
         stdout: stdout,
-        stderr: stderr
+        stderr: stderr,
+        app_managed?: Keyword.get(opts, :app_managed?, fn -> false end)
       )
 
     {status, output(stdout), output(stderr)}

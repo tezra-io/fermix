@@ -65,6 +65,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   address, with its Tailscale name. A reconnect also no longer fails when
   the computer cannot list its addresses for a moment: the phone keeps the
   routes it already has.
+- **On a Mac, pairing help points to the app.** With the phone channel
+  off, `fermix pair` against a home Fermix.app manages said to edit
+  `config.toml` and run `fermix restart`. It now points to the Phone row in
+  the app's Channels settings, which turns the channel on and pairs in one
+  place. Doctor's repair for a half-created phone identity names the same
+  row on a Mac app engine instead of `fermix pair`.
 - **A compacted chat keeps answering on Anthropic.** Compaction saved its
   checkpoint summary with the time it ran, later than the turns it kept, so
   once the chat reloaded from disk the summary came after them. Anthropic

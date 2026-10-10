@@ -11,7 +11,7 @@ On by default: an absent `[fermix_channels.mobile]` section, or one without `ena
 - the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns` (the "Announce on the local network" row, off by default). A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
 - the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
 
-No desktop app draws a Phone pane on them yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host whose `config.toml` says `enabled = false`:
+The Mac app's Phone row in its Channels settings is built on them: it turns the channel on (restarting Fermix after saying so) and pairs a phone in one place. The Linux app has no Phone pane yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host whose `config.toml` says `enabled = false`:
 
 ```toml
 [fermix_channels.mobile]
