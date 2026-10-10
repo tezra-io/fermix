@@ -3095,6 +3095,30 @@ defmodule FermixCore.AgentLoopTest do
       assert result.total_tokens == 3 * 10 + 40_000 + 10 + 10
     end
 
+    # A 1M Claude window would hold 850,000 tokens at the default threshold;
+    # its 200,000-token compaction ceiling is the line inside a turn too.
+    test "a route with a compaction ceiling digests at the ceiling, not at the threshold",
+         %{registry: registry} do
+      register_caps(registry, [BigTool, FermixCore.Tools.ToolResultRecall])
+
+      set_mock_responses(
+        four_big_steps(total_tokens: 210_000) ++ [turn("DIGEST-1"), turn("done")]
+      )
+
+      claude = %{
+        provider: :anthropic,
+        model: "claude-opus-5-5",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, route_key: claude)
+
+      assert [_digest_call] = digest_calls()
+      assert %{"call_1" => _digest} = substitutions_of(List.last(mock_continues()))
+    end
+
     test "a digest no shorter than its result marks it not compressible, once",
          %{registry: registry} do
       register_caps(registry, [BigTool])

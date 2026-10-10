@@ -1436,6 +1436,69 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute main_text =~ old_content
     end
 
+    # 0.85 of a 1M Claude window is 850,000; the model's 200,000-token
+    # compaction ceiling is the line whatever the threshold.
+    test "preflight compacts a Claude conversation at its ceiling, under the threshold" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.85,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"turn_runner_ceiling_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_ceiling_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "preflight_ceiling"
+      conversation_key = {"telegram", chat_id, :root}
+      # Over half the ceiling by estimate, so the compactor has work to do.
+      old_content = String.duplicate("old context ", 40_000)
+
+      ConversationStore.add_message(conversation_key, "user", old_content, server: store)
+      ConversationStore.add_message(conversation_key, "assistant", "old answer", server: store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      claude = %{
+        provider: :anthropic,
+        model: "claude-opus-5-5",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      turn_state =
+        turn_state(
+          adapter: nil,
+          ordered_routes: [
+            {claude, [adapter: PreflightAdapter, model: "claude-opus-5-5", test_pid: self()]}
+          ],
+          capability_registry: registry_name,
+          conversation_store: store,
+          last_context_tokens: 210_000
+        )
+
+      deliver = fn {:text, text} -> send(self(), {:reply, text}) end
+
+      assert {:ok, "assistant after preflight", _context_tokens} =
+               TurnRunner.run(msg, turn_state, deliver)
+
+      assert_receive {:preflight_summary_call, _summary_text}, 5_000
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      refute main_text =~ old_content
+    end
+
     test "preflight skips when the carried context_tokens is under threshold, despite large history" do
       Application.put_env(:fermix_core, :compaction,
         enabled: true,

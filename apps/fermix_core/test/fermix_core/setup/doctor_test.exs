@@ -863,6 +863,17 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert %{provider: :openai, model: "gpt-5.5", context_window: 1_050_000} in report.catalog
     end
+
+    test "a model with a compaction ceiling reports the ceiling as the trigger" do
+      Application.put_env(:fermix_core, :compaction, enabled: true, threshold: 0.8)
+      put_provider(:anthropic, default_model: "claude-sonnet-4-6")
+      set_active(:anthropic)
+
+      report = Doctor.compaction_report()
+
+      assert report.context_window == 1_000_000
+      assert report.compact_at_tokens == 200_000
+    end
   end
 
   describe "command_owner_report/0" do

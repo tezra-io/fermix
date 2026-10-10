@@ -85,6 +85,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     "4.8",
     "opus-5",
     "sonnet-5",
+    "haiku-5",
     "fable",
     "mythos"
   ]
@@ -92,7 +93,8 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   # is sent explicitly (reasoning_effort alone only calibrates token spend);
   # older models (haiku-4-5 and earlier) reject the adaptive type, so the
   # param is allowlist-gated — an unknown model gets today's no-thinking wire.
-  # Opus 5 thinks by default, where the explicit adaptive type is equivalent.
+  # Opus 5 and Haiku 5.5 think by default, where the explicit adaptive type is
+  # equivalent.
   @adaptive_thinking_substrings [
     "4-6",
     "4.6",
@@ -102,6 +104,7 @@ defmodule FermixCore.Providers.Anthropic.Messages do
     "4.8",
     "opus-5",
     "sonnet-5",
+    "haiku-5",
     "fable",
     "mythos"
   ]

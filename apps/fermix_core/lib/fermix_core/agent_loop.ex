@@ -241,6 +241,7 @@ defmodule FermixCore.AgentLoop do
       substitutions: %{},
       not_compressible: MapSet.new(),
       context_window: Keyword.get(opts, :context_window),
+      compaction_ceiling: nil,
       last_usage: %{prompt: 0, completion: 0},
       task: task_excerpt(Keyword.fetch!(opts, :messages)),
       loop_detector: loop_detector_state(opts),
@@ -347,14 +348,17 @@ defmodule FermixCore.AgentLoop do
       | adapter: adapter || Adapter.for_route(route_key),
         route_key: route_key,
         adapter_opts: adapter_opts,
-        context_window: state.context_window || catalog_window(route_key)
+        context_window: state.context_window || catalog_window(route_key),
+        compaction_ceiling:
+          ModelCatalog.compaction_ceiling_for(route_key.provider, route_key.model)
     }
   end
 
   # An explicit `context_window` (tests, callers that know better) wins over
   # the catalog; the catalog answers a default for a model it does not know,
   # quietly: this runs on every route bind, and the unknown-model event
-  # already fires where the model was chosen.
+  # already fires where the model was chosen. The compaction ceiling always
+  # comes from the catalog (none for a model it does not know).
   defp catalog_window(%{provider: provider, model: model}),
     do: ModelCatalog.context_window_for(provider, model, unknown_model_telemetry: false)
 
@@ -751,8 +755,9 @@ defmodule FermixCore.AgentLoop do
 
   # §3.4: the next request is the last one the provider measured, plus the
   # reply it produced, plus the results about to be appended. Held under
-  # `threshold × context_window` by digesting older results, oldest step
-  # first. Images are not estimated; screenshot retention bounds them.
+  # `threshold × context_window`, never above the model's compaction ceiling
+  # (`ModelCatalog.compact_at_tokens/3`), by digesting older results, oldest
+  # step first. Images are not estimated; screenshot retention bounds them.
   defp keep_within_budget(tool_results, state) do
     estimate = context_estimate(tool_results, state)
     budget = context_budget(state)
@@ -769,8 +774,9 @@ defmodule FermixCore.AgentLoop do
     state.last_usage.prompt + state.last_usage.completion + div(new_bytes, @bytes_per_token)
   end
 
-  defp context_budget(%{context_window: window}) when is_integer(window) and window > 0,
-    do: trunc(CompactionConfig.threshold() * window)
+  defp context_budget(%{context_window: window, compaction_ceiling: ceiling})
+       when is_integer(window) and window > 0,
+       do: ModelCatalog.compact_at_tokens(window, ceiling, CompactionConfig.threshold())
 
   # One step per pass; a substituted or not-compressible result leaves the
   # candidate set, so the passes are bounded by the eligible steps.

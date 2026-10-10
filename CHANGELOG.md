@@ -18,6 +18,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   profile, so the app can tell two Fermix homes on one computer apart. Fermix
   takes the phone's secure-hardware proof without checking it yet, and the
   approval prompt says so.
+- **Claude Haiku 5.5 is in the Anthropic model list** (`claude-haiku-5-5`),
+  the fastest and cheapest Claude. Above 100,000 prompt tokens Anthropic
+  bills it at five times the price, so a conversation on it compacts at
+  100,000 tokens. Claude Haiku 4.5 stays in the list.
 
 ### Changed
 
@@ -30,6 +34,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   `enabled = true`, and restart. Set `enabled = false` to keep the listener
   off. Doctor shows the channel with no phone paired as passing ("on, no
   phone paired yet") instead of a warning.
+- **Claude conversations compact at 200,000 tokens instead of 850,000.**
+  Claude models take a million tokens at the standard price, but every call
+  costs what it carries, and a chat message that arrives after the prompt
+  cache expired pays to resend the whole conversation. Every Claude model
+  with a million-token window but Haiku 5.5 (100,000, above), direct or
+  through OpenRouter, now compacts when a conversation reaches 200,000
+  tokens, whatever the compaction threshold says (a threshold low enough to
+  come first still does), and a long task digests older tool results at the
+  same line. A request over it is still sent, so no task is refused that
+  the model could read. Doctor shows the line as "compact at 200000
+  tokens". Claude Haiku 4.5, whose window is 200,000, still compacts at the
+  threshold.
 
 ### Fixed
 

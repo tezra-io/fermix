@@ -1194,10 +1194,10 @@ defmodule FermixCore.Agents.TurnRunner do
          context_tokens
        ) do
     {_adapter, [{lead_key, _lead_opts} | _rest]} = target = compaction_target(state)
-    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
 
-    if context_tokens / context_window >= threshold do
+    if context_tokens >=
+         ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
       compact_preflight_history(conversation_key, history, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
@@ -1272,10 +1272,10 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_auto_compact_now(conversation_key, state, compaction_target, config, context_tokens) do
     {_adapter, [{lead_key, _lead_opts} | _rest]} = compaction_target
-    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
 
-    if context_tokens / context_window >= threshold do
+    if context_tokens >=
+         ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
       compact_when_over_threshold(conversation_key, state, compaction_target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
@@ -1361,7 +1361,7 @@ defmodule FermixCore.Agents.TurnRunner do
         Compactor.compact(history,
           enabled: true,
           token_budget:
-            trunc(0.5 * ModelCatalog.context_window_for(route_key.provider, route_key.model)),
+            trunc(0.5 * ModelCatalog.context_budget_for(route_key.provider, route_key.model)),
           route: {route_key, compaction_adapter_opts(adapter_opts, config)},
           adapter: adapter || route_adapter,
           context: compaction_context(conversation_key, state)

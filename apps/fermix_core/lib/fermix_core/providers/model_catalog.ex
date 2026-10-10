@@ -117,11 +117,22 @@ defmodule FermixCore.Providers.ModelCatalog do
   ]
 
   # Context windows are the API defaults the adapter actually gets (it does not
-  # send the `context-1m` beta header, design doc §8) — compaction thresholds key
-  # off these. The 4.6+ generation (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8,
-  # Sonnet 5.5, Sonnet 4.6) ships the full 1M window by default at standard pricing; only
-  # Haiku 4.5 is 200k. (Older Sonnet 4/4.5 still need the beta for 1M, but they
-  # are not in this catalog.)
+  # send the `context-1m` beta header, design doc §8). The 4.6+ generation
+  # (Opus 5.5, Opus 5, Fable 5.1, Fable 5, Opus 4.8, Sonnet 5.5, Sonnet 4.6) and
+  # Haiku 5.5 take 1M tokens; Haiku 4.5 takes 200k.
+  #
+  # `compaction_ceiling` is where those 1M models compact, whatever the
+  # threshold: `compact_at_tokens/3` takes the lower of threshold * window and
+  # the ceiling. No price cliff sets 200_000 for the 4.6+ generation (1M is
+  # standard-priced): a call costs what it carries, and at 0.85 of 1M a
+  # conversation carried up to 850k tokens. A chat turn that arrives after the
+  # prompt cache expired re-writes all of it at 1.25x input, and every step of a
+  # cron run re-reads it. Haiku 5.5's 100_000 IS a cliff: above 100,000 prompt
+  # tokens (cache reads and writes included) its input and output are billed
+  # at 5x, so it compacts there; the gate is one turn late by construction (see
+  # the OpenAI note above), so one turn can cross it before compaction runs.
+  # Haiku 4.5's real window is 200k, so it compacts at the threshold of it.
+  # Do not "correct" a ceiling upward.
   #
   # max_output_tokens are the per-model output ceilings Anthropic requires on
   # every request (Hermes reference values — verify against current Anthropic
@@ -139,47 +150,61 @@ defmodule FermixCore.Providers.ModelCatalog do
       id: "claude-sonnet-4-6",
       label: "Claude Sonnet 4.6 (recommended)",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 64_000
     },
     %Entry{
       id: "claude-sonnet-5-5",
       label: "Claude Sonnet 5.5",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-fable-5-1",
       label: "Claude Fable 5.1",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-fable-5",
       label: "Claude Fable 5",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 64_000
     },
     %Entry{
       id: "claude-opus-5-5",
       label: "Claude Opus 5.5 (best quality)",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-opus-5",
       label: "Claude Opus 5",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
       max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-opus-4-8",
       label: "Claude Opus 4.8",
       context_window: 1_000_000,
+      compaction_ceiling: 200_000,
+      max_output_tokens: 128_000
+    },
+    %Entry{
+      id: "claude-haiku-5-5",
+      label: "Claude Haiku 5.5 (fastest)",
+      context_window: 1_000_000,
+      compaction_ceiling: 100_000,
       max_output_tokens: 128_000
     },
     %Entry{
       id: "claude-haiku-4-5",
-      label: "Claude Haiku 4.5 (fastest)",
+      label: "Claude Haiku 4.5",
       context_window: 200_000,
       max_output_tokens: 64_000
     }
@@ -253,7 +278,8 @@ defmodule FermixCore.Providers.ModelCatalog do
   #
   # A vendor line's newer models sit beside its older entries, which stay
   # because a person may have configured them, in the vendor list's own order;
-  # the head follows the Anthropic default. The GPT-6 entries take @openai's
+  # the head follows the Anthropic default. The Claude entries take
+  # @anthropic's 200_000 compaction ceiling. The GPT-6 entries take @openai's
   # 320_000 calibration, not the listed 1,050,000: OpenRouter bills them at the
   # same 2x/1.5x above 272k input tokens (its listing's pricing override, read
   # 2026-10-03).
@@ -261,32 +287,38 @@ defmodule FermixCore.Providers.ModelCatalog do
     %Entry{
       id: "anthropic/claude-sonnet-4.6",
       label: "Claude Sonnet 4.6 via OpenRouter (default)",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "anthropic/claude-sonnet-5.5",
       label: "Claude Sonnet 5.5 via OpenRouter",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "anthropic/claude-fable-5.1",
       label: "Claude Fable 5.1 via OpenRouter",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "anthropic/claude-fable-5",
       label: "Claude Fable 5 via OpenRouter",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "anthropic/claude-opus-5.5",
       label: "Claude Opus 5.5 via OpenRouter",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "anthropic/claude-opus-4.8",
       label: "Claude Opus 4.8 via OpenRouter",
-      context_window: 1_000_000
+      context_window: 1_000_000,
+      compaction_ceiling: 200_000
     },
     %Entry{
       id: "openai/gpt-6-astra",
@@ -490,6 +522,56 @@ defmodule FermixCore.Providers.ModelCatalog do
           do: emit_unknown_model(provider, model_id)
 
         @unknown_model_default_ctx
+    end
+  end
+
+  @doc """
+  The model's compaction ceiling (`Entry.compaction_ceiling`), or `nil` for a
+  model without one, an unknown model included.
+  """
+  @spec compaction_ceiling_for(atom(), String.t()) :: pos_integer() | nil
+  def compaction_ceiling_for(provider, model_id) when is_binary(model_id) do
+    case find_entry(provider, model_id) do
+      %Entry{compaction_ceiling: ceiling} -> ceiling
+      nil -> nil
+    end
+  end
+
+  @doc """
+  The prompt size, in tokens, at which a conversation compacts: `threshold`
+  of `window`, never above `ceiling`. The one rule for the trigger between
+  turns, the budget inside a turn, and what Doctor reports.
+  """
+  @spec compact_at_tokens(pos_integer(), pos_integer() | nil, number()) :: pos_integer()
+  def compact_at_tokens(window, nil, threshold)
+      when is_integer(window) and window > 0 and is_number(threshold) and threshold > 0,
+      do: trunc(threshold * window)
+
+  def compact_at_tokens(window, ceiling, threshold)
+      when is_integer(ceiling) and ceiling > 0,
+      do: min(compact_at_tokens(window, nil, threshold), ceiling)
+
+  @doc "`compact_at_tokens/3` for a catalog model."
+  @spec compact_at_tokens_for(atom(), String.t(), number()) :: pos_integer()
+  def compact_at_tokens_for(provider, model_id, threshold) when is_binary(model_id) do
+    compact_at_tokens(
+      context_window_for(provider, model_id),
+      compaction_ceiling_for(provider, model_id),
+      threshold
+    )
+  end
+
+  @doc """
+  The context a conversation on this model is kept within: its window, or its
+  compaction ceiling when that is lower. Compaction aims at half of it.
+  """
+  @spec context_budget_for(atom(), String.t()) :: pos_integer()
+  def context_budget_for(provider, model_id) when is_binary(model_id) do
+    window = context_window_for(provider, model_id)
+
+    case compaction_ceiling_for(provider, model_id) do
+      nil -> window
+      ceiling -> min(window, ceiling)
     end
   end
 

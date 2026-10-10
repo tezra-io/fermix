@@ -155,11 +155,11 @@ defmodule FermixChannels.Gateway.Commands.Compact do
   end
 
   defp forced_compact_budget(context, {route_key, _adapter_opts}) do
-    context_window =
+    context_budget =
       Map.get(context, :context_window) ||
-        ModelCatalog.context_window_for(route_key.provider, route_key.model)
+        ModelCatalog.context_budget_for(route_key.provider, route_key.model)
 
-    trunc(context_window * 0.5)
+    trunc(context_budget * 0.5)
   end
 
   defp compaction_context(conversation_key, context) do
