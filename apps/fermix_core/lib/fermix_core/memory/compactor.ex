@@ -68,7 +68,9 @@ defmodule FermixCore.Memory.Compactor do
     else
       with {:ok, summary, cache} <- summary_for(older, budget, opts) do
         tainted? = Map.get(cache || %{}, :tainted?, any_tainted?(older))
-        summary_message = maybe_taint_summary(checkpoint_message(summary), tainted?)
+
+        summary_message =
+          maybe_taint_summary(checkpoint_message(summary, List.last(older)), tainted?)
 
         {:ok,
          %{
@@ -244,7 +246,7 @@ defmodule FermixCore.Memory.Compactor do
   # user message always outranks summary content. The persisted checkpoint row
   # stores the raw summary, so the note never leaks into the next compaction's
   # prior.
-  defp checkpoint_message(summary) do
+  defp checkpoint_message(summary, last_summarized) do
     %{
       role: "system",
       content:
@@ -255,7 +257,19 @@ defmodule FermixCore.Memory.Compactor do
           "wins any conflict with it. Facts marked [tool: name] came from tool " <>
           "results; unmarked claims are conversational and unverified.]\n" <> summary
     }
+    |> put_checkpoint_timestamp(last_summarized)
   end
+
+  # History reloads from SQLite in created_at order and the kept turns keep
+  # their original times, so the checkpoint takes the time of the last turn it
+  # summarizes: it reloads ahead of the kept turns. Unstamped, the store would
+  # persist it as "now", after them, and a system message that no longer leads
+  # the transcript is refused by the Anthropic adapter. A history that carries
+  # no timestamps (an in-memory list never persisted) has nothing to order by.
+  defp put_checkpoint_timestamp(message, %{timestamp: %DateTime{} = timestamp}),
+    do: Map.put(message, :timestamp, timestamp)
+
+  defp put_checkpoint_timestamp(message, _unstamped), do: message
 
   defp checkpoint_summary_message?(message) do
     role(message) == "system" and

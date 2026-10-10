@@ -18,6 +18,17 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   off. Doctor shows the channel with no phone paired as passing ("on, no
   phone paired yet") instead of a warning.
 
+### Fixed
+
+- **A compacted chat keeps answering on Anthropic.** Compaction saved its
+  checkpoint summary with the time it ran, later than the turns it kept, so
+  once the chat reloaded from disk the summary came after them. Anthropic
+  refused that order, and every message in the chat got "Sorry, I
+  encountered an error processing your message." The summary now takes the
+  time of the last turn it covers and reloads first. A chat compacted before
+  this fix keeps its misplaced summary: send `/new` in it, or make a provider
+  other than Anthropic primary until you do.
+
 ## [0.14.0] - 2026-10-06
 
 ### Added

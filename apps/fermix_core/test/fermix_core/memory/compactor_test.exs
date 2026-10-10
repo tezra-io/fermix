@@ -2,6 +2,7 @@ defmodule FermixCore.Memory.CompactorTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Memory.Compactor
+  alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Resource.Registry
 
@@ -202,6 +203,52 @@ defmodule FermixCore.Memory.CompactorTest do
              "token_budget" => 80,
              "description" => "Compacted 2 messages into checkpoint summary"
            }
+  end
+
+  # History reloads from SQLite in created_at order, and the turns a compaction
+  # keeps carry their original times. An unstamped checkpoint was persisted as
+  # "now" and reloaded after them, so the Anthropic adapter refused the
+  # transcript (a system message that no longer led it) on every later turn.
+  test "the checkpoint keeps its place when the compacted history reloads from sqlite",
+       %{repo: repo} do
+    stub_summaries(["summary 1"])
+    key = {"telegram", "chat-reload", :root}
+    store = :"compactor_store_#{System.unique_integer([:positive])}"
+
+    start_supervised!(%{
+      id: store,
+      start: {ConversationStore, :start_link, [[name: store, max_messages: 5, repo: repo]]}
+    })
+
+    history = [
+      %{
+        role: "user",
+        content: String.duplicate("old user ", 80),
+        timestamp: ~U[2026-03-02 09:14:05.000000Z]
+      },
+      %{
+        role: "assistant",
+        content: String.duplicate("old assistant ", 80),
+        timestamp: ~U[2026-03-02 09:15:41.000000Z]
+      },
+      %{role: "user", content: "latest question", timestamp: ~U[2026-03-04 18:02:17.000000Z]}
+    ]
+
+    assert {:ok, %{compacted?: true, messages: [checkpoint, latest]}} =
+             Compactor.compact(history,
+               enabled: true,
+               token_budget: 80,
+               route: route(),
+               context: context(repo, chat_id: "chat-reload")
+             )
+
+    assert checkpoint.timestamp == ~U[2026-03-02 09:15:41.000000Z]
+
+    assert :ok = ConversationStore.replace_history(key, [checkpoint, latest], server: store)
+    wait_for_chat_rows(repo, key, 2)
+
+    assert {:ok, rows} = Repo.get_messages(chat_selector(key), server: repo, limit: 10)
+    assert Enum.map(rows, & &1.content) == [checkpoint.content, "latest question"]
   end
 
   test "summarizer is role-fenced and asks for tool attribution (M10 P2)", %{repo: repo} do
@@ -697,6 +744,34 @@ defmodule FermixCore.Memory.CompactorTest do
       memory_owner_id: "default",
       conversation_key: {"telegram", chat_id, thread_scope}
     }
+  end
+
+  defp chat_selector({channel, chat_id, thread_scope}) do
+    %{
+      agent_id: "main",
+      channel: channel,
+      chat_id: chat_id,
+      thread_scope: thread_scope,
+      kind: "chat_message"
+    }
+  end
+
+  # The store's sqlite write is async; poll a bounded number of times.
+  defp wait_for_chat_rows(repo, key, expected, attempts \\ 50)
+
+  defp wait_for_chat_rows(repo, key, expected, attempts) when attempts > 0 do
+    case Repo.message_count(chat_selector(key), server: repo) do
+      {:ok, ^expected} ->
+        :ok
+
+      _other ->
+        Process.sleep(10)
+        wait_for_chat_rows(repo, key, expected, attempts - 1)
+    end
+  end
+
+  defp wait_for_chat_rows(repo, key, expected, 0) do
+    flunk("timed out waiting for #{expected} persisted rows: #{inspect({repo, key})}")
   end
 
   defp checkpoint_selector do
