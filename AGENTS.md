@@ -16,6 +16,7 @@ Umbrella project; one BEAM VM, no HTTP bridge, everything OTP-supervised. Persis
 - The approved design is the plan: implement against it, don't quietly re-design mid-flight.
 - Repo reality conflicts with the design, or the request has several readings → surface it before coding.
 - State assumptions explicitly; never pick silently.
+- Work on `dev` directly in this checkout: commit there and push it once the gates are green. No branch and no worktree, for you or for any agent you start, unless the owner asks for one; when the owner does, merge it back into `dev` once the work is done and remove both.
 
 ## Execution Contract
 - Behavior change → write or update a failing test first.
