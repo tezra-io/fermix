@@ -216,6 +216,43 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
       assert "function_call_output" in types
     end
 
+    # With `store: false` nothing is kept server-side, so a step that omits
+    # `instructions` runs without the system prompt.
+    test "every step of the loop re-sends the instructions the turn started with" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_body, Jason.decode!(body)})
+        Req.Test.json(conn, function_call_response_body())
+      end)
+
+      messages = [
+        %{role: "system", content: "You are Grok here"},
+        %{role: "user", content: "go"}
+      ]
+
+      {:ok, turn1} = Responses.chat(messages, [capability()], chat_opts())
+
+      {:ok, turn2} =
+        Responses.continue(
+          turn1.provider_state,
+          [%{call_id: "call_xyz", output: "a"}],
+          chat_opts()
+        )
+
+      {:ok, _turn3} =
+        Responses.continue(
+          turn2.provider_state,
+          [%{call_id: "call_xyz", output: "b"}],
+          chat_opts()
+        )
+
+      for _step <- 1..3 do
+        assert_receive {:request_body, %{"instructions" => "You are Grok here"}}
+      end
+    end
+
     test "continue/3 substitutes digested tool results in the replayed history only" do
       test_pid = self()
 
@@ -232,6 +269,7 @@ defmodule FermixCore.Providers.XAI.ResponsesTest do
       ]
 
       provider_state = %{
+        instructions: nil,
         input: prior_input,
         output_items: [],
         tools: [],

@@ -372,6 +372,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       end)
 
       provider_state = %{
+        instructions: nil,
         input: [%{role: "user", content: [%{type: "input_text", text: "Hi"}]}],
         output_items: [
           %{
@@ -395,6 +396,42 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
         )
 
       assert turn.content == "Hello user"
+    end
+
+    # With `store: false` nothing is kept server-side, so a step that omits
+    # `instructions` runs without the system prompt.
+    test "every step of the loop re-sends the instructions the turn started with" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:request_body, Jason.decode!(body)})
+        Req.Test.json(conn, function_call_response_body())
+      end)
+
+      opts = [
+        api_key: "sk-test",
+        model: "gpt-5.4-mini",
+        base_url: "https://api.openai.com/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      messages = [
+        %{role: "system", content: "You are helpful"},
+        %{role: "user", content: "Hi"}
+      ]
+
+      {:ok, turn1} = Responses.chat(messages, [capability()], opts)
+
+      {:ok, turn2} =
+        Responses.continue(turn1.provider_state, [%{call_id: "call_xyz", output: "a"}], opts)
+
+      {:ok, _turn3} =
+        Responses.continue(turn2.provider_state, [%{call_id: "call_xyz", output: "b"}], opts)
+
+      for _step <- 1..3 do
+        assert_receive {:request_body, %{"instructions" => "You are helpful"}}
+      end
     end
 
     # IN_LOOP_CONTEXT_OVERFLOW.md §3.3: the loop's `call_id => digest` map
@@ -457,6 +494,7 @@ defmodule FermixCore.Providers.OpenAI.ResponsesTest do
       end)
 
       provider_state = %{
+        instructions: nil,
         input: substitution_prior_input(),
         output_items: [
           %{

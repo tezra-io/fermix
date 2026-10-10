@@ -45,6 +45,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   time of the last turn it covers and reloads first. A chat compacted before
   this fix keeps its misplaced summary: send `/new` in it, or make a provider
   other than Anthropic primary until you do.
+- **Multi-step tasks keep their instructions on OpenAI and SpaceXAI.** On the
+  OpenAI API and on SpaceXAI, every model call after the first in a task
+  was sent without Fermix's instructions (persona, rules, memory and tool
+  guidance), so a task that used tools worked through its later steps
+  without them, and the provider could not reuse its cached copy of the
+  request's opening. Every call now carries them. OpenAI Codex was not
+  affected.
 
 ## [0.14.0] - 2026-10-06
 

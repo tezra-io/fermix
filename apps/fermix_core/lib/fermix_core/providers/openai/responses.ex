@@ -13,12 +13,15 @@ defmodule FermixCore.Providers.OpenAI.Responses do
   | `reasoning`          | model → us | `id`, `encrypted_content`                   |
 
   Continuation:
-    1. `chat/3` posts initial `input` + `tools`. Returns `provider_state`
-       holding the prior input, every output item, and the tools list.
+    1. `chat/3` posts `instructions` + initial `input` + `tools`. Returns
+       `provider_state` holding the instructions, the prior input, every
+       output item, and the tools list.
     2. `AgentLoop` executes tool calls and hands results back to
        `continue/3`.
     3. `continue/3` builds next `input = prior_input ++ output_items ++
-       function_call_outputs` and posts again. Reasoning items pass
+       function_call_outputs` and posts again with the same `instructions`:
+       with `store: false` nothing is kept server-side, so a step that left
+       them out would run without the system prompt. Reasoning items pass
        through `output_items` unchanged so the model can resume its
        chain of thought.
 
@@ -75,6 +78,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
     turn_state = %{
       model: model,
+      instructions: instructions,
       input: input,
       tools: tools,
       capabilities: capabilities,
@@ -104,6 +108,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
     base_url = Keyword.get(opts, :base_url, @default_base_url)
 
     %{
+      instructions: instructions,
       input: prior_input,
       output_items: output_items,
       tools: tools,
@@ -134,12 +139,14 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
     body =
       %{model: model, input: next_input, store: false}
+      |> maybe_put(:instructions, instructions)
       |> maybe_put(:tools, tools)
       |> maybe_put(:reasoning, reasoning)
       |> maybe_put(:text, text)
 
     turn_state = %{
       model: model,
+      instructions: instructions,
       input: next_input,
       tools: tools,
       capabilities: caps,
@@ -149,7 +156,7 @@ defmodule FermixCore.Providers.OpenAI.Responses do
       reasoning_effort: reasoning_effort,
       invariant_metrics: invariant_metrics,
       request_metrics:
-        Map.merge(ResponsesShared.input_metrics(next_input, nil), invariant_metrics)
+        Map.merge(ResponsesShared.input_metrics(next_input, instructions), invariant_metrics)
     }
 
     post(base_url, bearer, body, req_options, turn_state)
@@ -195,14 +202,21 @@ defmodule FermixCore.Providers.OpenAI.Responses do
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state)
        when is_map(body) do
-    ResponsesShared.build_turn(
-      body,
-      turn_state.model,
-      turn_state.input,
-      turn_state.tools,
-      turn_state.capabilities,
-      turn_state.invariant_metrics
-    )
+    {:ok, turn} =
+      ResponsesShared.build_turn(
+        body,
+        turn_state.model,
+        turn_state.input,
+        turn_state.tools,
+        turn_state.capabilities,
+        turn_state.invariant_metrics
+      )
+
+    {:ok,
+     %{
+       turn
+       | provider_state: Map.put(turn.provider_state, :instructions, turn_state.instructions)
+     }}
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do
