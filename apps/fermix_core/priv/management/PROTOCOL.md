@@ -306,10 +306,12 @@ Notes that the shapes alone do not carry:
   that opens the window. It carries the one-time secret the phone pairs with, so
   it is never logged, never traced and never retained, and no later read
   repeats it. The pane draws the QR code from it.
-- **Attestation ships in its final shape and is empty for now.** Until the
-  daemon verifies a phone's secure hardware, `platform`, `build_role` and
-  `boot_state` are null on a request and on a device, and `attestation.status`
-  is `unavailable` with the daemon's sentence.
+- **Attestation ships in its final shape and is empty for now.** A request's
+  `platform` is the phone's own word (`android` or `ios`). Until the daemon
+  verifies a phone's secure hardware, `build_role` and `boot_state` are null
+  on a request, `platform`, `signer_role` and `boot_state` are null on a
+  device, and `attestation.status` is `unavailable` with the daemon's
+  sentence, which says the phone's secure hardware is not checked yet.
 - **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
   with the channel off**, so a pane can always read the state and the owner
   can always forget a phone: while the channel is not running the paired

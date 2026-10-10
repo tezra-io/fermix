@@ -53,7 +53,7 @@ defmodule FermixCore.Management.Settings.Mobile do
       ),
       Row.new("mobile_bind", :text, "Listen on",
         footer:
-          "`0.0.0.0` for every network, or one address, such as your Tailscale IP, " <>
+          "Every network by default, or one address, such as your Tailscale IP, " <>
             "to listen only there.",
         value: Source.string(block, :bind, @default_bind),
         restart: restart

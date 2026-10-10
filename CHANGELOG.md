@@ -14,10 +14,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   turn: replies stream in, every turn ends so your next message goes out,
   older history loads as you scroll back, and a phone that reconnects
   learns how the messages it sent while away ended. Jobs and reminders reach
-  the phone as messages of their own. The pairing code names the Fermix
-  profile, so two Fermix homes on one computer pair as two. Fermix takes the
-  phone's secure-hardware proof without checking it yet, and the approval
-  prompt says so.
+  the phone as messages of their own. The pairing code also names the Fermix
+  profile, so the app can tell two Fermix homes on one computer apart. Fermix
+  takes the phone's secure-hardware proof without checking it yet, and the
+  approval prompt says so.
 
 ### Changed
 
@@ -33,6 +33,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **The phone's Listen on setting reads as plain words.** Its note wrapped
+  the every-network address in code marks, which the Mac app showed as
+  stray backticks. It now says plainly that the phone listener takes every
+  network by default, or one address, such as your Tailscale IP.
 - **A compacted chat keeps answering on Anthropic.** Compaction saved its
   checkpoint summary with the time it ran, later than the turns it kept, so
   once the chat reloaded from disk the summary came after them. Anthropic
