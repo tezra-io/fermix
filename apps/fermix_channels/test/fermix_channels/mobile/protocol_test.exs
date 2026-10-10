@@ -8,7 +8,7 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     push_register ack read_state pair_request unpair ping
   )
   @server_events ~w(
-    hello_ack accepted attach_status turn_started text_delta tool_event text_done
+    hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page notice pair_approved pair_denied error pong event_part
   )
@@ -551,6 +551,25 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
     assert {:error, {:missing_field, "ts"}} =
              Protocol.encode_server_frame("row", Map.delete(row, "ts"), 1)
+  end
+
+  # Mobile protocol 2 ends every turn: `turn_done` is this wire's own event,
+  # not the shared chat vocabulary's, so the companion export does not move.
+  test "a turn ends with turn_done, and a rewritten draft is sent whole" do
+    assert {:ok, frame} = Protocol.encode_server_frame("turn_done", %{"turn_id" => "turn-c-1"}, 1)
+    assert {:ok, %{header: %{"t" => "turn_done", "turn_id" => "turn-c-1"}}} = decode_frame(frame)
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_frame("turn_done", %{}, 1)
+
+    assert {:error, {:invalid_field, "turn_id"}} =
+             Protocol.encode_server_frame("turn_done", %{"turn_id" => ""}, 1)
+
+    refute "turn_done" in FermixCore.Companion.Protocol.shared_server_events()
+
+    delta = %{"turn_id" => "turn-c-1", "text" => "Hello there", "replace" => true}
+    assert {:ok, frame} = Protocol.encode_server_frame("text_delta", delta, 2)
+    assert {:ok, %{header: %{"replace" => true}}} = decode_frame(frame)
   end
 
   test "a request's error names the request it ends" do

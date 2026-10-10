@@ -414,7 +414,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as `Companion.Turns` does at its hand-off
-    (`turns.ex:273-278`), gives the prompt to that pid, and monitors it.
+    (`turns.ex:275-280`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be

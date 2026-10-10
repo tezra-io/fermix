@@ -1,4 +1,4 @@
-{"v":2,"t":"hello_ack","seq":1,"session_id":"mobile-session-1","min_version":2,"max_version":2,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"},{"host":"192.168.1.8","interface":"en0","scope":"lan"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"max_media_bytes":20971520}}
+{"v":2,"t":"hello_ack","seq":1,"session_id":"mobile-session-1","min_version":2,"max_version":2,"profiles":[{"id":"main","name":"Fermix"}],"candidates":[{"host":"workstation.tail1234.ts.net","interface":"utun4","scope":"tailnet"},{"host":"100.101.102.103","interface":"utun4","scope":"tailnet"},{"host":"192.168.1.8","interface":"en0","scope":"lan"}],"history_head_seq":12,"read_up_to_seq":11,"caps":{"commands":[{"name":"help","aliases":[],"description":"Show available commands"}],"media":true,"streaming":true,"turn_done":true,"max_media_bytes":20971520}}
 {"v":2,"t":"approval","seq":2,"approval_id":"sandbox-rC4mUqHuVQfhEasTL7YUIBJq3N9kEXbbvfYTp5sZrM8","kind":"sandbox","text":"Allow reading ~/Documents?","token":"opaque-token","ttl_s":37,"approve_command":"/confirm opaque-token","deny_command":"/deny opaque-token"}
 {"v":2,"t":"accepted","seq":3,"client_msg_id":"client-1","duplicate":false}
 {"v":2,"t":"accepted","seq":4,"client_msg_id":"client-0","duplicate":true,"server_seq":11}
@@ -7,9 +7,11 @@
 {"v":2,"t":"attach_status","seq":7,"attach_id":"attach-1","status":"present"}
 {"v":2,"t":"turn_started","seq":8,"profile_id":"main","turn_id":"turn-client-1","in_reply_to":"client-1"}
 {"v":2,"t":"text_delta","seq":9,"turn_id":"turn-client-1","text":"Hel"}
+{"v":2,"t":"text_delta","seq":9,"turn_id":"turn-client-1","text":"Hello there","replace":true}
 {"v":2,"t":"tool_event","seq":10,"turn_id":"turn-client-1","tool":"web_search","phase":"start"}
 {"v":2,"t":"tool_event","seq":11,"turn_id":"turn-client-1","tool":"web_search","phase":"stop","detail":"%{status: :ok}"}
 {"v":2,"t":"text_done","seq":12,"turn_id":"turn-client-1","server_seq":14,"text":"Hello"}
+{"v":2,"t":"turn_done","seq":12,"turn_id":"turn-client-1"}
 {"v":2,"t":"text_done","seq":13,"turn_id":"turn-client-5","server_seq":15,"text":"The first part of a reply too long to send whole","truncated":true}
 {"v":2,"t":"media_begin","seq":14,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","server_seq":16,"kind":"document","mime":"application/pdf","size_bytes":3,"sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","filename":"answer.pdf"}
 {"v":2,"t":"media_end","seq":16,"ref":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}

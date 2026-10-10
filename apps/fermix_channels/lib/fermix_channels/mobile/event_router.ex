@@ -8,7 +8,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   decoded payload and never reconstructed from client-controlled JSON, and it
   supplies what only the phone has: attribution of each claim to its device,
   replies addressed to that device, link previews after a user row is written,
-  and a push once a request settles without a turn.
+  and, once a request settles without a turn, the ending of the turn its
+  `accepted` opened on the phones, and a push.
   """
 
   alias FermixChannels.Channels.Mobile
@@ -108,7 +109,7 @@ defmodule FermixChannels.Mobile.EventRouter do
       attempt_key: :mobile_attempt,
       max_page_bytes: @max_page_bytes,
       after_user_append: &after_user_append/4,
-      after_settle: &schedule_settled_push/3
+      after_settle: &after_settle/3
     }
   end
 
@@ -133,6 +134,24 @@ defmodule FermixChannels.Mobile.EventRouter do
     )
   end
 
+  # A request settled here rather than by a turn (an inline answer, a deferred
+  # command's end) streamed nothing that ends the turn its `accepted` opened
+  # on the phones, so a completed one ends it with `turn_done` (mobile
+  # protocol 2), on every phone, as its reply reached them. A failed one is
+  # left to the phone's `request_status`.
+  defp after_settle(profile, request, opts) do
+    with :ok <- end_phone_turn(profile, request, opts) do
+      schedule_settled_push(profile, request, opts)
+    end
+  end
+
+  defp end_phone_turn(profile, %{status: "completed", client_msg_id: client_id}, opts) do
+    event = Output.turn_done(Mobile.request_turn_id(client_id))
+    Keyword.fetch!(opts, :event_sink).({:phones, profile}, event)
+  end
+
+  defp end_phone_turn(_profile, %{status: "failed"}, _opts), do: :ok
+
   defp schedule_settled_push(profile, request, opts) do
     case Map.get(request, :result_server_seq) do
       server_seq when is_integer(server_seq) and server_seq > 0 ->
@@ -156,6 +175,9 @@ defmodule FermixChannels.Mobile.EventRouter do
     do: DeviceRegistry.send_device_event(device_id, event)
 
   defp emit_registered({:profile, profile}, event), do: Fanout.announce(profile, event)
+
+  defp emit_registered({:phones, profile}, event),
+    do: Fanout.announce(profile, event, audience: :mobile)
 
   defp authenticated_device(%{
          transport: :mobile,

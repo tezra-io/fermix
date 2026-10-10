@@ -94,8 +94,9 @@ defmodule FermixChannels.Companion.Output do
     }
 
   @doc """
-  A turn that completed and wrote no reply (companion protocol 2, M56 §4.4):
-  its ending, for the connections that streamed it.
+  A completed turn's ending, for the connections that streamed it: every
+  phone turn's, after the rows it wrote (mobile protocol 2), and a Mac turn's
+  that wrote no reply (companion protocol 2, M56 §4.4).
   """
   @spec turn_done(String.t()) :: event()
   def turn_done(turn_id) when is_binary(turn_id) and turn_id != "",

@@ -49,7 +49,7 @@ defmodule FermixChannels.Mobile.Protocol do
     push_register ack read_state pair_request unpair ping
   )
   @server_events ~w(
-    hello_ack accepted attach_status turn_started text_delta tool_event text_done
+    hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
     link_preview read_state history_page notice pair_approved pair_denied error pong event_part
   )
@@ -74,6 +74,7 @@ defmodule FermixChannels.Mobile.Protocol do
     "hello_ack" =>
       ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
     "attach_status" => ~w(attach_id status),
+    "turn_done" => ~w(turn_id),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
     "media_chunk" => ~w(ref index),
     "media_end" => ~w(ref sha256),
@@ -588,6 +589,9 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_server_payload("hello_ack", payload), do: validate_hello_ack(payload)
   defp validate_server_payload("attach_status", payload), do: validate_attach_status(payload)
+  # This wire's own: the companion's `turn_done` is a version 2 event of that
+  # wire, so the shared chat vocabulary does not carry it.
+  defp validate_server_payload("turn_done", payload), do: nonempty(payload, "turn_id")
 
   defp validate_server_payload("media_begin", payload), do: validate_media_begin(payload)
   defp validate_server_payload("media_chunk", payload), do: validate_media_chunk(payload)

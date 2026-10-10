@@ -154,7 +154,8 @@ defmodule FermixChannels.Voice.Bridge do
   otherwise its start, and whether the turn may end with no reply (M56 §4.4,
   §6). It may only on the Mac's wire, while every companion client attached
   reads `turn_done`: the phone's turns run in the chat too (M56 D9), and its
-  wire has no ending without a reply, so a turn it runs answers briefly.
+  channel writes a reply as it comes rather than holding it, so there is no
+  reply to drop and a turn it runs answers briefly.
   """
   @impl true
   @spec chat_call(ConversationKey.t(), String.t()) :: {:ok, VoiceBridge.chat_call()} | :none

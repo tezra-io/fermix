@@ -55,7 +55,7 @@
       "properties": {
         "t": {"enum": [
           "hello_ack", "accepted", "attach_status", "turn_started", "text_delta",
-          "tool_event", "text_done", "media_begin", "media_chunk", "media_end",
+          "tool_event", "text_done", "turn_done", "media_begin", "media_chunk", "media_end",
           "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
           "read_state", "history_page", "notice", "pair_approved", "pair_denied",
           "error", "pong", "event_part"
@@ -69,6 +69,7 @@
         {"if": {"properties": {"t": {"const": "text_delta"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/text_delta"}},
         {"if": {"properties": {"t": {"const": "tool_event"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/tool_event"}},
         {"if": {"properties": {"t": {"const": "text_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/text_done"}},
+        {"if": {"properties": {"t": {"const": "turn_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/turn_done"}},
         {"if": {"properties": {"t": {"const": "media_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_begin"}},
         {"if": {"properties": {"t": {"const": "media_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_chunk"}},
         {"if": {"properties": {"t": {"const": "media_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_end"}},
@@ -203,7 +204,7 @@
       "type": "object", "required": ["commands", "max_media_bytes"],
       "properties": {
         "commands": {"type": "array", "items": {"$ref": "#/$defs/commandDescriptor"}},
-        "media": {"type": "boolean"}, "streaming": {"type": "boolean"},
+        "media": {"type": "boolean"}, "streaming": {"type": "boolean"}, "turn_done": {"type": "boolean"},
         "max_media_bytes": {"type": "integer", "minimum": 0}
       }
     },
@@ -265,7 +266,8 @@
     },
     "text_delta": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "text"],
-      "properties": {"t": {"const": "text_delta"}, "turn_id": {"type": "string", "minLength": 1}, "text": {"type": "string"}}
+      "description": "text extends the bubble the turn is streaming, unless replace is present, and true: then text is the whole bubble, in place of what was shown.",
+      "properties": {"t": {"const": "text_delta"}, "turn_id": {"type": "string", "minLength": 1}, "text": {"type": "string"}, "replace": {"const": true}}
     },
     "tool_event": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "tool", "phase"],
@@ -275,6 +277,11 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "server_seq", "text"],
       "description": "truncated is present, and true, only when text was cut to keep the event within x-max-event-bytes; the stored row is whole.",
       "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}, "truncated": {"const": true}}
+    },
+    "turn_done": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id"],
+      "description": "A completed turn's ending, once, after its last text_done: every turn a request opened ends with turn_done or turn_error.",
+      "properties": {"t": {"const": "turn_done"}, "turn_id": {"type": "string", "minLength": 1}}
     },
     "media_begin": {
       "allOf": [{"$ref": "#/$defs/envelope"}],

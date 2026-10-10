@@ -184,6 +184,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     :ok = Mobile.react(message, "👍")
     {:ok, draft} = Mobile.open_draft(message, "Hel")
     :ok = Mobile.edit_draft(message, draft, "Hello")
+    :ok = Mobile.edit_draft(message, draft, "Hi there")
     :ok = Mobile.discard_draft(message, draft)
     activity = Mobile.build_activity_callback(message)
     :ok = activity.({:tool_start, "shell"})
@@ -191,12 +192,16 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     :ok = Mobile.send_message("main", "Your 9am summary")
     :ok = send_document!(dir)
 
-    types = ~w(reaction turn_started text_delta text_delta tool_event tool_event text_done
+    types = ~w(reaction turn_started text_delta text_delta text_delta tool_event tool_event row
                media_begin media_chunk media_chunk media_chunk media_end)
 
     events = received_phone_events()
     assert Enum.map(events, & &1["t"]) == types
     for event <- events, do: assert_on_the_wire!(event, schema)
+
+    # A turn's ending, as `Companion.Turns` sends it once the turn completes.
+    assert [%{"t" => "turn_done"}] =
+             assert_on_the_wire!(Output.turn_done("turn-client-7"), schema)
   end
 
   test "an approval, its re-send with the time it has left, and its expiry", %{schema: schema} do

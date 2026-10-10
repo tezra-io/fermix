@@ -156,6 +156,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         discover: fn -> {:ok, []} end,
         encode_server: fn "hello_ack", payload, 1 ->
           assert payload["caps"]["max_media_bytes"] == 12_345
+          # Every turn a request opens ends on this wire (mobile protocol 2).
+          assert payload["caps"]["turn_done"] == true
           assert payload["profiles"] == [%{"id" => "main", "name" => "Orbit"}]
           {:ok, "encoded"}
         end,

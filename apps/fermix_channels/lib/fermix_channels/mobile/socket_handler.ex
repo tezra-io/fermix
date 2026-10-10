@@ -646,6 +646,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
            "commands" => Mobile.command_catalog(),
            "media" => true,
            "streaming" => true,
+           "turn_done" => true,
            "max_media_bytes" => state.max_media_bytes
          }
        }}
@@ -868,6 +869,9 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
       {:profile, profile_id}, logical ->
         Fanout.announce(profile_id, logical, device_registry: registry)
+
+      {:phones, profile_id}, logical ->
+        Fanout.announce(profile_id, logical, audience: :mobile, device_registry: registry)
     end
 
     [

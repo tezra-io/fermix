@@ -160,7 +160,7 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def edit_draft(%Message{} = message, %{turn_id: turn_id, state: state}, text)
       when is_binary(turn_id) and is_pid(state) and is_binary(text) do
-    delta = Agent.get_and_update(state, fn prior -> {suffix(prior, text), text} end)
+    delta = Agent.get_and_update(state, fn prior -> {draft_delta(prior, text), text} end)
     emit_delta(message.chat_id, turn_id, delta)
   end
 
@@ -281,6 +281,14 @@ defmodule FermixChannels.Channels.Mobile do
     end
   end
 
+  @doc """
+  The id of the turn that answers the phone's request `client_msg_id`: the
+  one its stream and its ending name, whether or not a turn ran for it.
+  """
+  @spec request_turn_id(String.t()) :: String.t()
+  def request_turn_id(client_msg_id) when is_binary(client_msg_id) and client_msg_id != "",
+    do: "turn-" <> client_msg_id
+
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}
   @spec send_message(String.t(), String.t(), Channel.send_opts()) :: :ok | {:error, term()}
@@ -387,7 +395,7 @@ defmodule FermixChannels.Channels.Mobile do
       metadata: %{
         client_msg_id: client_id,
         mobile_request_type: request_type,
-        turn_id: "turn-" <> client_id
+        turn_id: request_turn_id(client_id)
       },
       attachments: attachments
     })
@@ -480,11 +488,20 @@ defmodule FermixChannels.Channels.Mobile do
   defp deliver_persisted_text(:existing, _profile, _text, _row, _opts), do: :ok
 
   defp deliver_persisted_text(:created, profile, text, row, opts) do
-    _ =
-      emit_after_commit(profile, Output.text_done(turn_id_from_opts(opts), row.server_seq, text))
-
+    _ = emit_after_commit(profile, delivered_text(profile, text, row, opts))
     _ = announce_to_companion(:created, profile, row)
     phone_effects(profile, row.server_seq, text, opts)
+  end
+
+  # A request's reply seals a bubble of its turn, which the request's own
+  # ending closes. Anything else (a job, a reminder, a background result) is
+  # a delivery no turn streamed, and reaches the phones as the row it is, so
+  # it opens no turn that nothing would end (mobile protocol 2).
+  defp delivered_text(profile, text, row, opts) do
+    case Keyword.get(opts, :turn_id) do
+      nil -> Output.row(profile, row)
+      turn_id -> Output.text_done(turn_id, row.server_seq, text)
+    end
   end
 
   defp deliver_persisted_media(:existing, _profile, _media, _ref, _row, _opts), do: :ok
@@ -531,8 +548,6 @@ defmodule FermixChannels.Channels.Mobile do
         {:error, :proactive_media_key_requires_part_id}
     end
   end
-
-  defp turn_id_from_opts(opts), do: Keyword.get(opts, :turn_id, new_turn_id())
 
   # Every row this channel writes reaches the Mac's companion connections as it
   # is written; a row the store deduplicated was announced when it was created.
@@ -921,12 +936,17 @@ defmodule FermixChannels.Channels.Mobile do
     started = Output.turn_started(message.chat_id, turn_id, client_message_id(message))
 
     with :ok <- emit(message.chat_id, started) do
-      emit_delta(message.chat_id, turn_id, text)
+      emit_delta(message.chat_id, turn_id, {:append, text})
     end
   end
 
-  defp emit_delta(_profile, _turn_id, ""), do: :ok
-  defp emit_delta(profile, turn_id, text), do: emit(profile, Output.text_delta(turn_id, text))
+  defp emit_delta(_profile, _turn_id, {:append, ""}), do: :ok
+
+  defp emit_delta(profile, turn_id, {:append, text}),
+    do: emit(profile, Output.text_delta(turn_id, text))
+
+  defp emit_delta(profile, turn_id, {:replace, text}),
+    do: emit(profile, turn_id |> Output.text_delta(text) |> Map.put("replace", true))
 
   defp media_begin(seq, media, ref) do
     %{
@@ -985,12 +1005,13 @@ defmodule FermixChannels.Channels.Mobile do
     end
   end
 
-  defp suffix(prior, text) do
-    if String.starts_with?(text, prior) do
-      binary_part(text, byte_size(prior), byte_size(text) - byte_size(prior))
-    else
-      text
-    end
+  # What a draft edit sends: the text it grew by, or, when the draft was
+  # rewritten rather than grown, its whole text, to replace what the phone
+  # shows (mobile protocol 2).
+  defp draft_delta(prior, text) do
+    if String.starts_with?(text, prior),
+      do: {:append, binary_part(text, byte_size(prior), byte_size(text) - byte_size(prior))},
+      else: {:replace, text}
   end
 
   defp materialize_attachment(attach_id) when is_binary(attach_id) do

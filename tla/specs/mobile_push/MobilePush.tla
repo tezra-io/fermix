@@ -52,8 +52,8 @@
 (* environment does. Three steps fold calls together; each says why.       *)
 (***************************************************************************)
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/push.ex @ c5c4223a58ba
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,deliver_persisted_media,phone_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ 5184a4bd0b06
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#schedule_settled_push @ 742aafa65359
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,phone_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ e2011201a5c1
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ 2947cb567cb4
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/socket_handler.ex#dispatch_event,terminate @ 2ef0feef5137
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options,@idle_grace_ms @ baf5f2adb72c
@@ -88,7 +88,7 @@ CONSTANTS
                           \* brought it
     RetriesTransient,     \* D21: a transient dispatcher error is retried.
                           \* FALSE is today's code: one attempt, its failure
-                          \* logged (channels/mobile.ex:552-559)
+                          \* logged (channels/mobile.ex:596-603)
     AttemptCap,           \* D21: at most three attempts per device
     BootCheck,            \* D21: the boot step that reads push_attempted_seq.
                           \* FALSE is today's code: nothing runs at boot
@@ -193,12 +193,16 @@ AckTarget(d) ==
 (* The writer and the push task (Channels.Mobile, Mobile.Push) *)
 
 \* deliver_persisted_text / deliver_persisted_media for a row nobody asked
-\* for (channels/mobile.ex:453-481), and for a request's reply its
-\* settlement: build_turn_result when it became a turn (:195-201, :984-994),
-\* Mobile.EventRouter.schedule_settled_push when it did not (event_router.ex:
-\* 116-129). The row's Repo write, then emit_after_commit ->
-\* DeviceRegistry.broadcast (:515-520, :873-889), then schedule_push ->
-\* Task.Supervisor.start_child (:342-348, :535-550).
+\* for (channels/mobile.ex:488-513), and for a request's reply its
+\* settlement: build_turn_result when it became a turn (:200-206,
+\* :1034-1044), Mobile.EventRouter.after_settle -> schedule_settled_push when
+\* it did not (event_router.ex:142-168), after the turn_done that ends the
+\* request's turn on the phones (end_phone_turn, :148-153; not a row). The
+\* row's Repo write, then emit_after_commit -> DeviceRegistry.broadcast
+\* (:559-564, :918-931), then schedule_push -> Task.Supervisor.start_child
+\* (:380-386, :579-594). A row nobody asked for reaches the sockets as a
+\* `row`, a reply as its turn's `text_done` (delivered_text, :500-505): either
+\* way the phone takes the row.
 \* Three calls folded into one step: a crash between them leaves what a crash
 \* right after them leaves, a durable row with no task, because the registry
 \* and the task die with the daemon.
@@ -351,7 +355,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (socket_handler.ex:751-752) and, in the design, the
+\* dispatch_event "ack" (socket_handler.ex:756-757) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.

@@ -52,12 +52,12 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     def complete_client_request(profile, id, attempt, fields, _opts) do
       send(self(), {:completed, profile, id, attempt, fields})
       seq = if id in ["command-output", "deferred-output"], do: 88, else: nil
-      {:ok, %{status: "completed", attempt: attempt, result_server_seq: seq}}
+      {:ok, %{client_msg_id: id, status: "completed", attempt: attempt, result_server_seq: seq}}
     end
 
     def fail_client_request(profile, id, attempt, fields, _opts) do
       send(self(), {:failed, profile, id, attempt, fields})
-      {:ok, %{status: "failed", attempt: attempt, result_server_seq: 88}}
+      {:ok, %{client_msg_id: id, status: "failed", attempt: attempt, result_server_seq: 88}}
     end
 
     def update_client_message(profile, id, attempt, attrs, _opts) do
@@ -437,6 +437,11 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     refute_received {:completed, "main", "inline-1", 3, %{}}
     assert :ok = settle.()
     assert_received {:completed, "main", "inline-1", 3, %{}}
+
+    # The phone's `accepted` opened a turn no turn ran to end: every phone is
+    # told it ended, and the Mac, which never saw it, is not.
+    assert_received {:event, {:phones, "main"},
+                     %{"t" => "turn_done", "turn_id" => "turn-inline-1"}}
   end
 
   # R2-1: a `msg` the gateway reads as a deferring command (`/bg` typed in the
@@ -459,6 +464,9 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert :ok = finish.(:completed)
     assert_received {:completed, "main", "deferred-output", 3, %{}}
+
+    assert_received {:event, {:phones, "main"},
+                     %{"t" => "turn_done", "turn_id" => "turn-deferred-output"}}
   end
 
   test "a request that became a turn is left to the turn, its fence on the owner", ctx do

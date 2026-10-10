@@ -61,7 +61,7 @@ one check):
 | `AcksAfterAnnounce` | The app acks a row once it has announced it: shown it on screen, or posted its notification. | The design's first draft: the app acks as soon as the row is persisted (PUSH-2). |
 | `LocalNotify` | The app posts the notification itself for a row that arrives while its chat is off screen. | The row is only listed. |
 | `NotifiedSet` | D22: the app announces an id once, whichever path brought it. | Every arrival alerts. |
-| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`channels/mobile.ex:552-559`). |
+| `RetriesTransient` | D21: a transient dispatcher error is retried. | **Today's code:** one attempt, its failure logged (`channels/mobile.ex:596-603`). |
 | `AttemptCap` | D21: at most three attempts per device. | The retry has no bound. |
 | `BootCheck` | D21: a boot step reads `push_attempted_seq` and decides once for the newest unread row above it. | **Today's code:** nothing runs at boot. |
 

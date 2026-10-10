@@ -317,9 +317,10 @@ A client must not upload chunks after `present`.
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
-| `text_delta` | `turn_id`, `text` | streamed delta |
+| `text_delta` | `turn_id`, `text`; `replace?` | streamed delta; `replace: true` makes `text` the whole bubble |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | phase is `start` or `stop`; detail ≤512 bytes |
-| `text_done` | `turn_id`, `server_seq`, `text`; `truncated?` | canonical final text at its row |
+| `text_done` | `turn_id`, `server_seq`, `text`; `truncated?` | seals one bubble of a turn: its canonical text at its row |
+| `turn_done` | `turn_id` | a completed turn's ending, once, after its last `text_done` |
 | `media_begin` | `ref`, `server_seq`, `kind`, `mime`, `size_bytes`, `sha256`; `filename?`, `caption?` | starts outbound media |
 | `media_chunk` | `ref`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `media_end` | `ref`, `sha256` | completes outbound media |
@@ -346,8 +347,9 @@ routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
 `lan` or `tailnet`. `profiles[]` is `{id, name}`, the name at most 128 bytes.
 `caps` carries `commands[]` (`{name, aliases[], description}`, the command
-palette), `media`, `streaming` and `max_media_bytes`, the largest attachment
-the daemon takes. A `hello_ack` with 16 numeric candidates and the whole
+palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
+ends with `turn_done` or `turn_error`) and `max_media_bytes`, the largest
+attachment the daemon takes. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -386,14 +388,15 @@ daemon never renumbers or reorders a row.
 
 Every row is announced live to every connected phone as it is written:
 
-- a reply written on the phone channel, as a `text_done` at its row, to every
-  phone: the reply of a turn a phone started, the answer to a phone's slash
-  command, and what the daemon delivers there on its own (a scheduled job, a
-  reminder, a background command's result). Its `turn_id` may be one no
-  `turn_started` announced. A media reply arrives as `media_begin`…`media_end`;
+- the reply to a phone's request, as a `text_done` at its row, to every
+  phone: the reply of a turn a phone started and the answer to a phone's slash
+  command, under the request's `turn_id`, which `turn_done` then ends (see
+  *Streaming a turn*). A media reply arrives as `media_begin`…`media_end`;
 - every other row as a `row`: a user's message from any phone or the Mac (the
   sender's own included, with its `client_msg_id`, to match its outbox), the
-  reply of a turn the Mac started, and every other row written for the Mac.
+  reply of a turn the Mac started, what the daemon delivers on its own (a
+  scheduled job, a reminder, a background result), and every other row written
+  for the Mac.
 
 A client keeps a cursor, the last `server_seq` it shows, and:
 
@@ -445,14 +448,20 @@ A `msg` or `command` that becomes a turn streams to every phone of the
 profile. `turn_started{profile_id, turn_id, in_reply_to}` opens it
 (`turn_id` is `turn-` followed by the request's `client_msg_id`), and
 `text_delta` carries the reply as it is written: from its first character, at
-most every 100 ms, with no cap on how many. `tool_event` reports each tool's
+most every 100 ms, with no cap on how many. Each one extends the bubble,
+except one marked `replace: true`, whose `text` is the whole bubble: the draft
+was rewritten rather than grown. `tool_event` reports each tool's
 `start` and `stop`. A route that does not stream sends no `turn_started` or
 `text_delta`, only the ending.
 
-A turn ends on the wire exactly once:
+A reply is one or more bubbles, each sealed by a `text_done` at its row; a
+`text_done` seals a bubble and never ends the turn. A turn ends on the wire
+exactly once:
 
-- it completed: its reply is written to the timeline and sent as `text_done`
-  at its row;
+- it completed: `turn_done{turn_id}`, after its last `text_done`. A request
+  the daemon answers without a turn (a slash command answered at once, an
+  empty message) ends the same way, once it settles, so every request a phone
+  sent ends with `turn_done` or `turn_error`;
 - it was cancelled or failed: one `turn_error` whose `code` is `cancelled`,
   `interrupted` (the daemon lost the turn), a failure's own word, or
   `turn_failed`, and whose message is at most 512 bytes;
@@ -468,7 +477,7 @@ another turn, and the daemon never answers it. It is recorded on the request
 first, so a cancel that arrives after `accepted` but before the request reached
 the turn queue is not lost: the request is never queued, ends with
 `turn_error{code:"cancelled"}`, and is not run again after a restart. A turn
-that had already finished ends with its `text_done`, and a cancel for a request
+that had already finished ends with its `turn_done`, and a cancel for a request
 that already ended changes nothing.
 
 ## Approvals

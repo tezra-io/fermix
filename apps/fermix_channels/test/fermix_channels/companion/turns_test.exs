@@ -307,6 +307,12 @@ defmodule FermixChannels.Companion.TurnsTest do
 
       assert {:ok, %{status: "completed", result_server_seq: seq}} = request(id)
       assert_receive {:mobile_event, "main", %{"t" => "text_done", "server_seq" => ^seq}}
+
+      # The bubble is sealed; the turn ends after it, on the phones alone
+      # (mobile protocol 2), or the phone would hold every later message.
+      turn_id = "turn-" <> id
+      assert_receive {:mobile_event, "main", %{"t" => "turn_done", "turn_id" => ^turn_id}}
+      refute_received {:companion_event, %{"t" => "turn_done"}}
       assert_receive {:push, "main", ^seq}
     end
   end
@@ -339,6 +345,11 @@ defmodule FermixChannels.Companion.TurnsTest do
         drain(ctx)
         refute_received {:enqueued, _turn}
         assert {:ok, %{status: "completed"}} = request(id)
+
+        # The `accepted` opened a turn on the phone that no turn ends.
+        turn_id = "turn-" <> id
+        assert_receive {:mobile_event, "main", %{"t" => "turn_done", "turn_id" => ^turn_id}}
+        refute_received {:companion_event, %{"t" => "turn_done"}}
       end
     end
   end
@@ -522,7 +533,10 @@ defmodule FermixChannels.Companion.TurnsTest do
                         "text" => "Background work " <> _
                       }}
 
-      # The request settles once the result is written, and its push follows.
+      # The request settles once the result is written, its turn ends on the
+      # phones, and its push follows.
+      turn_id = "turn-" <> id
+      assert_receive {:mobile_event, "main", %{"t" => "turn_done", "turn_id" => ^turn_id}}
       assert_receive {:push, "main", ^seq}
       assert {:ok, %{status: "completed", result_server_seq: ^seq}} = request(id)
     end
@@ -1223,6 +1237,9 @@ defmodule FermixChannels.Companion.TurnsTest do
     sink = fn
       {:profile, profile}, event ->
         Fanout.announce(profile, event)
+
+      {:phones, profile}, event ->
+        Fanout.announce(profile, event, audience: :mobile)
 
       target, event ->
         send(test_pid, {:reply, target, event})
