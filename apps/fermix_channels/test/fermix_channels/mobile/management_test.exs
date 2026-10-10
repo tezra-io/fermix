@@ -886,11 +886,35 @@ defmodule FermixChannels.Mobile.ManagementTest do
                  candidates: []
                }
 
-        assert status.mdns == :down
+        assert status.mdns == :disabled
         assert status.paired_devices == 0
         assert status.pairing == nil
         assert status.identity.present
       end
+    end
+
+    # The announcement ships off: a block that never turns it on reads it
+    # disabled whether or not the channel runs, and never asks the advertiser.
+    test "the local-network announcement is disabled unless the config turns it on" do
+      not_started =
+        [config: [enabled: true], device_store: :store, load_identity: fn [] -> {:error, :x} end] ++
+          Keyword.merge(unreachable_processes(),
+            refusal: fn :store -> :none end,
+            whereis: fn _manager -> nil end
+          )
+
+      assert {:ok, %{mdns: :disabled}} = Management.status(not_started)
+
+      announcing = Keyword.put(not_started, :config, enabled: true, advertise_mdns: true)
+      assert {:ok, %{mdns: :down}} = Management.status(announcing)
+
+      running =
+        serving_opts(
+          list_devices: fn :store -> {:ok, []} end,
+          mdns_status: fn :mdns -> flunk("an announcement that is off is not asked") end
+        )
+
+      assert {:ok, %{mdns: :disabled}} = Management.status(running)
     end
 
     test "while running, a read that fails is an error, never an empty fact" do
@@ -1024,6 +1048,60 @@ defmodule FermixChannels.Mobile.ManagementTest do
 
       assert_received :enumerated
       refute_received :enumerated
+    end
+
+    # M51 §5.5: a listener bound to one address answers only there, so the
+    # pairing link and status name that address and no other.
+    test "a pairing link and status list only the address the listener binds" do
+      getifaddrs = fn ->
+        {:ok,
+         [
+           {~c"en0", [flags: [:up, :broadcast], addr: {192, 168, 1, 8}]},
+           {~c"en1", [flags: [:up, :broadcast], addr: {10, 0, 0, 5}]},
+           {~c"utun4", [flags: [:up, :pointtopoint], addr: {100, 64, 1, 2}]}
+         ]}
+      end
+
+      discovery =
+        start_supervised!(
+          {Discovery,
+           name: nil,
+           bind: "192.168.1.8",
+           getifaddrs: getifaddrs,
+           reverse_lookup: fn _address, _timeout_ms -> {:error, :nxdomain} end}
+        )
+
+      opts =
+        [
+          config: [enabled: true, bind: "192.168.1.8"],
+          discovery: discovery,
+          list_devices: fn :store -> {:ok, []} end
+        ]
+        |> serving_opts()
+        |> Keyword.delete(:discover)
+
+      pairing = [
+        open_pair: fn :pair ->
+          {:ok,
+           %{
+             session_id: "session-id",
+             secret: <<3::256>>,
+             identity: %{gateway_public_key: <<1::256>>, tls_fingerprint: <<2::256>>},
+             opened_at_ms: 1_000,
+             expires_at_ms: 121_000
+           }}
+        end,
+        listener_info: fn :listener -> {:ok, {{192, 168, 1, 8}, 40_321}} end,
+        host_label: fn -> "workstation" end
+      ]
+
+      assert {:ok, %{uri: uri}} = Management.begin_pairing(opts ++ pairing)
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
+
+      assert {:ok, status} = Management.status(opts)
+      assert status.listener.candidates == ["wss://192.168.1.8:4031/ws"]
+      assert status.tailnet == %{detected: false, candidates: []}
     end
 
     # STB-6: a listener that cannot bind stays up, unavailable, and says why.

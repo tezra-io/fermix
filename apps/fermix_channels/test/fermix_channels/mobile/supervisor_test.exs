@@ -56,6 +56,33 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert unfurl_opts[:max_children] == MobileChannel.max_concurrent_unfurls()
   end
 
+  # M51 §5.5: the candidates a phone is given are the addresses the listener
+  # answers on, so discovery is told the bind the listener is given.
+  test "discovery enumerates for the bind the listener serves" do
+    cases = [
+      {[config: [bind: "192.168.1.8"]], "192.168.1.8"},
+      {[config: [bind: "192.168.1.8"], listener: [bind: {127, 0, 0, 1}]], {127, 0, 0, 1}},
+      {[config: []], "0.0.0.0"}
+    ]
+
+    for {opts, bind} <- cases do
+      children = init_children(opts)
+      assert child_opts(children, FermixChannels.Mobile.Discovery)[:bind] == bind
+      assert child_opts(children, Listener)[:bind] == bind
+    end
+  end
+
+  test "the local-network announcement starts only when the config turns it on" do
+    for {config, enabled?} <- [
+          {[], false},
+          {[advertise_mdns: false], false},
+          {[advertise_mdns: true], true}
+        ] do
+      children = init_children(config: config)
+      assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == enabled?
+    end
+  end
+
   test "a fresh install starts a dormant listener until first pairing creates identity" do
     root =
       Path.join(
@@ -431,6 +458,26 @@ defmodule FermixChannels.Mobile.SupervisorTest do
         environment: "development"
       ]
     ]
+  end
+
+  # The child specs `init/1` returns for `opts`, nothing started.
+  defp init_children(opts) do
+    assert {:ok, {_flags, children}} =
+             MobileSupervisor.init(
+               [
+                 root: "/tmp/fermix-mobile-supervisor-children-test",
+                 boot_epoch: "children-test-epoch",
+                 start_listener?: false,
+                 names: names()
+               ] ++ opts
+             )
+
+    children
+  end
+
+  defp child_opts(children, id) do
+    %{start: {_module, :start_link, [opts]}} = Enum.find(children, &(&1.id == id))
+    opts
   end
 
   defp names do

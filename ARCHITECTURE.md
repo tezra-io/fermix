@@ -672,7 +672,9 @@ Current channels:
   pushed to the phones while their channel runs, as the phone's own deliveries
   are, since the two draw one timeline.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
-  Noise sessions, a pairing window, APNs push). It is off by default, and
+  Noise sessions, a pairing window, APNs push). It is on by default, its
+  listener dormant until the first pairing window creates the identity and
+  its mDNS announcement off unless `advertise_mdns` is set, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
   conversation history. Its turns run in the Mac's chat conversation
   (`Mobile.joined_conversation/1`, the one `Gateway.Channel` callback that

@@ -1159,7 +1159,7 @@ defmodule FermixCore.Management.SettingsTest do
                {"mobile_enabled", "toggle", false},
                {"mobile_port", "number", 4031},
                {"mobile_bind", "text", "0.0.0.0"},
-               {"mobile_advertise_mdns", "toggle", true}
+               {"mobile_advertise_mdns", "toggle", false}
              ]
 
       assert Enum.all?(rows, & &1["restart"])

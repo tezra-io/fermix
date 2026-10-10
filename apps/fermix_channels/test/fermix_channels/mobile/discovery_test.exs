@@ -176,6 +176,76 @@ defmodule FermixChannels.Mobile.DiscoveryTest do
     assert_received :enumerated
   end
 
+  # M51 §5.5: the listener serves only the address it binds, so a phone told
+  # any other address is told a route that cannot answer.
+  describe "the configured bind" do
+    test "a wildcard bind keeps every candidate" do
+      for bind <- ["0.0.0.0", {0, 0, 0, 0}, "::"] do
+        assert {:ok, candidates} = Discovery.discover(bound_host() ++ [bind: bind])
+
+        assert Enum.map(candidates, & &1.address) == [
+                 "fermix-host.tail123.ts.net",
+                 "100.64.0.1",
+                 "100.64.0.2",
+                 "192.168.1.8",
+                 "10.0.0.5"
+               ]
+      end
+    end
+
+    test "a LAN address keeps only its own candidate, and looks up no tailnet name" do
+      test_pid = self()
+
+      lookup = fn address, timeout_ms ->
+        send(test_pid, {:reverse_lookup, address})
+        reverse_lookup(address, timeout_ms)
+      end
+
+      for bind <- ["192.168.1.8", {192, 168, 1, 8}] do
+        assert {:ok, candidates} =
+                 Discovery.discover(bound_host(reverse_lookup: lookup) ++ [bind: bind])
+
+        assert candidates == [%{address: "192.168.1.8", interface: "en0", scope: :lan}]
+      end
+
+      refute_received {:reverse_lookup, _address}
+    end
+
+    test "a tailnet address keeps its own candidate and its MagicDNS name" do
+      assert {:ok, candidates} = Discovery.discover(bound_host() ++ [bind: "100.64.0.1"])
+
+      assert candidates == [
+               %{address: "fermix-host.tail123.ts.net", interface: "utun4", scope: :tailnet},
+               %{address: "100.64.0.1", interface: "utun4", scope: :tailnet}
+             ]
+    end
+
+    test "a bind no interface holds yields no candidates" do
+      for bind <- ["192.168.9.9", "127.0.0.1", "fd7a:115c:a1e0::1"] do
+        assert Discovery.discover(bound_host() ++ [bind: bind]) == {:ok, []}
+      end
+    end
+
+    test "a malformed bind is refused" do
+      for bind <- ["0.0.0", "not-an-address", "", 4_031, {256, 0, 0, 1}] do
+        assert_raise ArgumentError, ~r/:bind/, fn ->
+          Discovery.discover(bound_host() ++ [bind: bind])
+        end
+      end
+    end
+
+    test "the cache enumerates for its bind, and refuses a malformed one at start" do
+      cache = start_supervised!({Discovery, [name: nil, bind: "192.168.1.8"] ++ bound_host()})
+
+      assert Discovery.candidates(cache) ==
+               {:ok, [%{address: "192.168.1.8", interface: "en0", scope: :lan}]}
+
+      assert_raise ArgumentError, ~r/:bind/, fn ->
+        Discovery.init([name: nil, bind: "0.0.0"] ++ bound_host())
+      end
+    end
+  end
+
   test "returns the interface enumeration failure" do
     assert Discovery.discover(getifaddrs: fn -> {:error, :eacces} end) == {:error, :eacces}
   end
@@ -183,6 +253,26 @@ defmodule FermixChannels.Mobile.DiscoveryTest do
   test "rejects invalid dependency injection" do
     assert_raise ArgumentError, fn -> Discovery.discover(getifaddrs: :not_a_function) end
   end
+
+  # A host on a LAN with two tailnet addresses, one of which has a MagicDNS name.
+  defp bound_host(overrides \\ []) do
+    getifaddrs = fn ->
+      {:ok,
+       [
+         {~c"utun4", [flags: [:up, :pointtopoint], addr: {100, 64, 0, 1}]},
+         {~c"utun5", [flags: [:up, :pointtopoint], addr: {100, 64, 0, 2}]},
+         {~c"en0", [flags: [:up, :broadcast], addr: {192, 168, 1, 8}]},
+         {~c"en1", [flags: [:up, :broadcast], addr: {10, 0, 0, 5}]}
+       ]}
+    end
+
+    Keyword.merge([getifaddrs: getifaddrs, reverse_lookup: &reverse_lookup/2], overrides)
+  end
+
+  defp reverse_lookup({100, 64, 0, 1} = address, 750),
+    do: {:ok, {:hostent, ~c"fermix-host.tail123.ts.net.", [], :inet, 4, [address]}}
+
+  defp reverse_lookup(_address, 750), do: {:error, :nxdomain}
 
   defp tailnet(count) do
     fn ->

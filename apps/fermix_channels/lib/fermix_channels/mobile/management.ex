@@ -662,7 +662,7 @@ defmodule FermixChannels.Mobile.Management do
   end
 
   defp idle_mdns(config) do
-    if enabled?(config) and Keyword.get(config, :advertise_mdns, true),
+    if enabled?(config) and Keyword.get(config, :advertise_mdns, false),
       do: :down,
       else: :disabled
   end
@@ -827,7 +827,7 @@ defmodule FermixChannels.Mobile.Management do
   defp configured_bind(config), do: Keyword.get(config, :bind, "0.0.0.0")
 
   defp mdns_status(opts, config) do
-    if Keyword.get(config, :advertise_mdns, true) do
+    if Keyword.get(config, :advertise_mdns, false) do
       server = Keyword.get(opts, :mdns_advertiser, MdnsAdvertiser)
 
       case process_query(opts, :mdns_status, &MdnsAdvertiser.status/1, [server]) do

@@ -25,15 +25,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Changed
 
-- **The phone channel is on by default.** A new install listens for paired
-  phones on port 4031 on every network address and announces itself on the
-  local network, so a phone can pair without any configuration. Only a phone
-  the owner paired gets in. An install that saved its settings before this
-  release already has `enabled = false` in `[fermix_channels.mobile]` and
-  stays off until you turn on Phone companion in the Phone settings, or set
-  `enabled = true`, and restart. Set `enabled = false` to keep the listener
-  off. Doctor shows the channel with no phone paired as passing ("on, no
-  phone paired yet") instead of a warning.
+- **The phone channel is on by default.** A new install pairs a phone
+  without any configuration. Its phone listener waits until you first start
+  pairing a phone, which creates this computer's phone identity; from then
+  on it starts with Fermix and lets in only phones you paired. Fermix does
+  not announce itself on the local network: the phone finds it through the
+  pairing code. Turn the announcement on with Announce on the local network
+  in the Phone settings, or `advertise_mdns = true` in
+  `[fermix_channels.mobile]`, and restart. An install that saved its
+  settings before this release already has `enabled = false` in
+  `[fermix_channels.mobile]` and stays off until you turn on Phone companion
+  in the Phone settings, or set `enabled = true`, and restart. Set
+  `enabled = false` to keep the listener off. Doctor shows the channel with
+  no phone paired as passing ("on, no phone paired yet") instead of a
+  warning.
 - **Claude conversations compact at 200,000 tokens instead of 850,000.**
   Claude models take a million tokens at the standard price, but every call
   costs what it carries, and a chat message that arrives after the prompt
@@ -53,6 +58,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the every-network address in code marks, which the Mac app showed as
   stray backticks. It now says plainly that the phone listener takes every
   network by default, or one address, such as your Tailscale IP.
+- **A phone is given only the addresses Fermix answers on.** With Listen on
+  set to one address, such as your Tailscale IP, the pairing code and every
+  reconnect still listed all of this computer's network addresses, so the
+  phone tried routes the listener never answered. They now list only that
+  address, with its Tailscale name. A reconnect also no longer fails when
+  the computer cannot list its addresses for a moment: the phone keeps the
+  routes it already has.
 - **A compacted chat keeps answering on Anthropic.** Compaction saved its
   checkpoint summary with the time it ran, later than the turns it kept, so
   once the chat reloaded from disk the summary came after them. Anthropic

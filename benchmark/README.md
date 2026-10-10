@@ -25,7 +25,7 @@ common commands.
 
   ```sh
   FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 \
-  FERMIX_OPIK_PROJECT=fermix-dev FERMIX_BROWSER_HEADLESS=1 PORT=4031 \
+  FERMIX_OPIK_PROJECT=fermix-dev FERMIX_BROWSER_HEADLESS=1 PORT=4130 \
   mix fermix.dev
   ```
 

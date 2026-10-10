@@ -60,7 +60,7 @@ defmodule FermixCore.Management.Settings.Mobile do
       ),
       Row.new("mobile_advertise_mdns", :toggle, "Announce on the local network",
         footer: "Off when you want the phone to reach this machine only over Tailscale.",
-        value: Source.boolean(block, :advertise_mdns, true),
+        value: Source.boolean(block, :advertise_mdns, false),
         restart: restart
       )
     ]

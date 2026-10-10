@@ -1833,6 +1833,31 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
     assert next.server_seq == 2
   end
 
+  # Candidates are routes for later reconnects, and the phone already holds
+  # the ones it was given: a failed enumeration must not close the reconnect.
+  test "hello_ack still acks, with no candidates, when discovery fails" do
+    {:ok, state} =
+      SocketHandler.init(
+        hello_state(%{
+          discover: fn -> {:error, :eaddrnotavail} end,
+          encode_server: fn "hello_ack", payload, 1 ->
+            assert payload["candidates"] == []
+            {:ok, "encoded"}
+          end
+        })
+      )
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:push, {:binary, "ciphertext-out"}, next} =
+                 SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+
+        assert next.phase == :ready
+      end)
+
+    assert log =~ "mobile candidate discovery failed: :eaddrnotavail"
+  end
+
   test "hello_ack reads candidates from the supervised discovery cache" do
     discovery =
       start_supervised!(

@@ -8,7 +8,7 @@ An owner-only channel from the owner's phone to their own Fermix daemon. It is n
 
 On by default: an absent `[fermix_channels.mobile]` section, or one without `enabled`, means enabled, and `enabled = false` keeps it off. An install that saved its settings while the channel was off by default carries that `enabled = false` line, so it stays off until the line changes. The daemon publishes two management surfaces:
 
-- the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns`. A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
+- the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns` (the "Announce on the local network" row, off by default). A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
 - the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
 
 No desktop app draws a Phone pane on them yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host whose `config.toml` says `enabled = false`:
@@ -26,7 +26,9 @@ Hand-edit only: `streaming` (draft streaming is the default) and `max_media_byte
 
 ## Reachability and security
 
-- The phone connects to a dedicated listener, `wss://HOST:4031/ws` by default (`/healthz` is its only other route), over the LAN (Bonjour) or any shared network such as a Tailscale tailnet. Binding to `0.0.0.0` exposes only this listener; setup and the web UI stay loopback-only.
+- The phone connects to a dedicated listener, `wss://HOST:4031/ws` by default (`/healthz` is its only other route), over the LAN or any shared network such as a Tailscale tailnet. Binding to `0.0.0.0` exposes only this listener; setup and the web UI stay loopback-only. On a fresh install the listener stays dormant until the first pairing starts, which creates this host's phone identity; from then on it starts at every boot. It serves only paired phones.
+- The phone learns where to connect from the pairing link and from each reconnect's `hello_ack`: this host's private-LAN and tailnet addresses (with a tailnet address's MagicDNS name), up to 16, best first. A `bind` of one address lists only that address and its MagicDNS name, because the listener answers nowhere else. If the host cannot list its addresses, a reconnect still succeeds with none, and the phone keeps the ones it holds.
+- The local-network announcement (`_fermix._tcp` over mDNS, also called Bonjour) is off by default, and the Android app does not use it. Turn it on with `advertise_mdns = true` in `[fermix_channels.mobile]` or the "Announce on the local network" row, then restart.
 - TLS satisfies the phone platform; trust comes from an end-to-end Noise session between device and gateway keys. The pairing QR carries the pinned certificate fingerprint and gateway public key. No bearer token, port forwarding, public funnel or hosted relay is involved.
 - The listener bounds a peer that never finishes: 64 connections at once, 10 seconds for TLS, 15 seconds to the WebSocket upgrade, 10 seconds for the Noise hello, 64 KiB per client frame. An app built for a protocol version the daemon does not speak is refused with an error naming which side must update.
 - A listener that cannot bind (`address_unavailable`, `address_in_use`, `permission_denied`) never stops the daemon: `mobile.status` reads it `unavailable` with that reason, and it retries (one second doubling to a minute) for up to a day, then waits for the next restart.
@@ -65,7 +67,7 @@ When no device socket is connected and no other device has read the new content,
 - Phone and host share no reachable LAN or tailnet address.
 - The bind address or port is unavailable (the listener keeps retrying).
 - The daemon was not restarted after a mobile config change.
-- mDNS is off or blocked, so the phone needs a reachable address from the QR.
+- `bind` names one address the phone cannot reach: the pairing link and reconnects list only that address.
 - APNs `topic` or `environment` does not match the app build, or `FERMIX_APNS_KEY` cannot be read (a locked keychain): mobile starts without push, logs it, and `fermix doctor` reports APNs credentials missing.
 - The phone was revoked or reinstalled: pair again.
 - Memory is off (`[fermix_core.memory] enabled = false`): the phone channel keeps its timeline there, so it is refused for that boot as `memory_disabled` (every other channel keeps running).

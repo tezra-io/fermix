@@ -1209,7 +1209,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_mdns(report, config) do
     cond do
-      Keyword.get(config, :advertise_mdns, true) == false -> {:ok, "mDNS disabled"}
+      Keyword.get(config, :advertise_mdns, false) == false -> {:ok, "mDNS disabled"}
       Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
       true -> {:fail, "mDNS down"}
     end

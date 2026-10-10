@@ -205,7 +205,7 @@ defmodule FermixChannels.Mobile.Supervisor do
                device_store: names.device_store},
               id: names.request_coordinator
             ),
-            {Discovery, name: names.discovery},
+            {Discovery, name: names.discovery, bind: listener_bind(opts)},
             {Listener, listener_opts(opts, root, names)},
             {MdnsAdvertiser, mdns_opts(opts, names)}
           ]
@@ -324,7 +324,7 @@ defmodule FermixChannels.Mobile.Supervisor do
     [
       root: root,
       name: names.listener,
-      bind: Keyword.get(explicit, :bind, Keyword.get(config, :bind, "0.0.0.0")),
+      bind: listener_bind(opts),
       port: Keyword.get(explicit, :port, Keyword.get(config, :port, 4_031)),
       start_listener?: Keyword.get(opts, :start_listener?, true),
       router_opts: [
@@ -340,12 +340,20 @@ defmodule FermixChannels.Mobile.Supervisor do
     ]
   end
 
+  # One answer for the listener and for discovery, so the addresses a phone is
+  # given are the ones the listener answers on (M51 §5.5).
+  defp listener_bind(opts) do
+    config = Keyword.get(opts, :config, [])
+    explicit = Keyword.get(opts, :listener, [])
+    Keyword.get(explicit, :bind, Keyword.get(config, :bind, "0.0.0.0"))
+  end
+
   defp mdns_opts(opts, names) do
     config = Keyword.get(opts, :config, [])
 
     [
       name: names.mdns_advertiser,
-      enabled: Keyword.get(config, :advertise_mdns, true),
+      enabled: Keyword.get(config, :advertise_mdns, false),
       port: Keyword.get(config, :port, 4_031)
     ]
   end

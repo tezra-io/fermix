@@ -7,9 +7,15 @@ defmodule FermixChannels.Mobile.Discovery do
   concurrently under one overall deadline, so resolvable Tailscale MagicDNS
   names travel with the numeric candidates.
 
-  The mobile supervisor runs one instance as a cache: `hello_ack` and
-  `pair_approved` read `candidates/1`, which enumerates again only once the
-  last answer is older than a minute, so a burst of hellos costs one lookup.
+  The mobile supervisor runs one instance as a cache: `hello_ack`,
+  `pair_approved` and the pairing link read `candidates/1`, which enumerates
+  again only once the last answer is older than a minute, so a burst of hellos
+  costs one lookup.
+
+  Candidates follow the listener's bind (M51 §5.5): a wildcard bind (`0.0.0.0`
+  or `::`) keeps every address, and one address keeps only its own candidate,
+  plus its MagicDNS name when it is a tailnet address, because a listener bound
+  there answers nowhere else.
   """
 
   use GenServer
@@ -21,6 +27,7 @@ defmodule FermixChannels.Mobile.Discovery do
   @magicdns_timeout_ms 750
   @cache_ttl_ms 60_000
   @hostname_label ~r/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/
+  @wildcard_binds [{0, 0, 0, 0}, {0, 0, 0, 0, 0, 0, 0, 0}]
 
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts \\ []) when is_list(opts) do
@@ -31,9 +38,12 @@ defmodule FermixChannels.Mobile.Discovery do
   @spec candidates(GenServer.server()) :: {:ok, [candidate()]} | {:error, term()}
   def candidates(server \\ __MODULE__), do: GenServer.call(server, :candidates)
 
+  # `:bind` and the `discover/1` seams shape the cache's enumeration, validated
+  # here so a malformed one fails the start, not the first hello. `:discover`
+  # replaces the enumeration whole.
   @impl true
   def init(opts) do
-    discover = Keyword.get(opts, :discover, fn -> discover() end)
+    discover = Keyword.get_lazy(opts, :discover, fn -> enumerator(opts) end)
     clock = Keyword.get(opts, :clock, fn -> System.monotonic_time(:millisecond) end)
 
     if is_function(discover, 0) and is_function(clock, 0),
@@ -59,32 +69,49 @@ defmodule FermixChannels.Mobile.Discovery do
     end
   end
 
+  defp enumerator(opts) do
+    enumeration = enumeration!(opts)
+    fn -> enumerate(enumeration) end
+  end
+
   @doc """
   Returns private-LAN and Tailscale IPv4 candidates for active interfaces.
 
-  `:getifaddrs` and `:reverse_lookup` replace the OS calls, and
-  `:lookup_timeout_ms` the 750 ms deadline the reverse lookups share.
+  `:bind` is the listener's address, `"0.0.0.0"` (every candidate) by default,
+  as an IP string or tuple. `:getifaddrs` and `:reverse_lookup` replace the OS
+  calls, and `:lookup_timeout_ms` the 750 ms deadline the reverse lookups share.
   """
   @spec discover(keyword()) :: {:ok, [candidate()]} | {:error, term()}
   def discover(opts \\ [])
 
-  def discover(opts) when is_list(opts) do
+  def discover(opts) when is_list(opts), do: opts |> enumeration!() |> enumerate()
+
+  def discover(_opts), do: raise(ArgumentError, "discovery options must be a keyword list")
+
+  # The validated options of one enumeration; a malformed one is a programming
+  # error, because the config layer has already refused a bad bind by name.
+  defp enumeration!(opts) do
     getifaddrs = Keyword.get(opts, :getifaddrs, &:inet.getifaddrs/0)
     reverse_lookup = Keyword.get(opts, :reverse_lookup, &:inet.gethostbyaddr/2)
     lookup_timeout_ms = Keyword.get(opts, :lookup_timeout_ms, @magicdns_timeout_ms)
     validate_getifaddrs!(getifaddrs)
     validate_reverse_lookup!(reverse_lookup)
     validate_lookup_timeout!(lookup_timeout_ms)
-    lookup = {reverse_lookup, lookup_timeout_ms}
 
-    case getifaddrs.() do
-      {:ok, interfaces} -> {:ok, collect_candidates(interfaces, lookup)}
+    %{
+      getifaddrs: getifaddrs,
+      lookup: {reverse_lookup, lookup_timeout_ms},
+      served: served_address!(Keyword.get(opts, :bind, "0.0.0.0"))
+    }
+  end
+
+  defp enumerate(enumeration) do
+    case enumeration.getifaddrs.() do
+      {:ok, interfaces} -> {:ok, collect_candidates(interfaces, enumeration)}
       {:error, reason} -> {:error, reason}
       other -> {:error, {:invalid_getifaddrs_result, other}}
     end
   end
-
-  def discover(_opts), do: raise(ArgumentError, "discovery options must be a keyword list")
 
   @doc "Classifies an IPv4 address if it is eligible for mobile candidate racing."
   @spec classify(:inet.ip4_address()) :: scope() | nil
@@ -110,16 +137,51 @@ defmodule FermixChannels.Mobile.Discovery do
   defp validate_lookup_timeout!(_timeout_ms),
     do: raise(ArgumentError, ":lookup_timeout_ms must be a positive integer")
 
-  defp collect_candidates(interfaces, lookup)
+  # The address a candidate must have to reach the listener, or `:any` for a
+  # wildcard bind. Strict parsing, as the config layer's: a short form such as
+  # "0.0.0" is not an address anyone wrote.
+  defp served_address!(bind) when is_binary(bind) do
+    case :inet.parse_strict_address(String.to_charlist(bind)) do
+      {:ok, address} ->
+        served_address!(address)
+
+      {:error, _reason} ->
+        raise ArgumentError, ":bind must be an IP address, got #{inspect(bind)}"
+    end
+  end
+
+  defp served_address!(bind) when bind in @wildcard_binds, do: :any
+
+  defp served_address!(bind) when is_tuple(bind) do
+    if :inet.is_ip_address(bind),
+      do: address_string(bind),
+      else: raise(ArgumentError, ":bind must be an IP address, got #{inspect(bind)}")
+  end
+
+  defp served_address!(bind),
+    do: raise(ArgumentError, ":bind must be an IP address, got #{inspect(bind)}")
+
+  # The bind is applied before the reverse lookups, so a tailnet name travels
+  # only with the one address it was looked up for, and an address the
+  # listener does not serve costs no lookup.
+  defp collect_candidates(interfaces, enumeration)
        when is_list(interfaces) or is_map(interfaces) do
-    candidates = interfaces |> Enum.flat_map(&interface_candidates/1) |> unique_candidates()
+    candidates =
+      interfaces
+      |> Enum.flat_map(&interface_candidates/1)
+      |> unique_candidates()
+      |> Enum.filter(&served?(&1, enumeration.served))
+
     {tailnet, lan} = Enum.split_with(candidates, &(&1.scope == :tailnet))
-    magicdns = magicdns_candidates(tailnet, lookup)
+    magicdns = magicdns_candidates(tailnet, enumeration.lookup)
 
     unique_candidates(magicdns ++ tailnet ++ lan)
   end
 
-  defp collect_candidates(_interfaces, _lookup), do: []
+  defp collect_candidates(_interfaces, _enumeration), do: []
+
+  defp served?(_candidate, :any), do: true
+  defp served?(candidate, address), do: candidate.address == address
 
   # Every lookup starts at once, so the per-task timeout is also the overall
   # deadline: an unanswerable PTR (MagicDNS off, no upstream resolver) costs

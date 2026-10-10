@@ -154,6 +154,18 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # The announcement ships off and the phone app finds the host through the
+  # pairing link, so the reference names the switch and never blames a missing
+  # announcement for a phone that cannot connect.
+  test "documents the local-network announcement as off by default, with its switch" do
+    reference = File.read!(mobile_reference_path())
+
+    assert reference =~ "off by default"
+    assert reference =~ "advertise_mdns = true"
+    assert reference =~ "Announce on the local network"
+    refute reference =~ "mDNS is off or blocked"
+  end
+
   # The companion socket has no setting, so the runtime self-reference must not
   # invent one, and it must say the app half has not shipped: an owner is never
   # walked to a chat window that is not there.

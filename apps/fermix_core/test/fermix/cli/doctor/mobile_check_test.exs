@@ -337,6 +337,33 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     refute result.detail =~ "no paired devices"
   end
 
+  # The announcement ships off, so a block that never turns it on reads it
+  # disabled and never fails on it.
+  test "an announcement the config never turned on reads disabled", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    client =
+      live_client(%{
+        "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+        "mdns" => "disabled",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => false, "credentials" => "missing"},
+        "paired_devices" => 1
+      })
+
+    result =
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        client: client,
+        health_probe: fn "https://lan:4031/healthz", 750 -> :ok end
+      )
+
+    assert result.status == :ok
+    assert result.detail =~ "mDNS disabled"
+    refute result.detail =~ "mDNS down"
+  end
+
   test "listener, mDNS, APNs, and empty-pairing problems are not hidden", %{
     mobile_dir: mobile_dir
   } do

@@ -348,7 +348,11 @@ a reply row: that reply's seq. A first `accepted` never carries it.
 `hello_ack.candidates[]` and `pair_approved.candidates[]` hold at most 16
 routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
-`lan` or `tailnet`. `profiles[]` is `{id, name}`, the name at most 128 bytes.
+`lan` or `tailnet`. A daemon whose listener is bound to one address lists only
+that address, with its MagicDNS name when it is a tailnet address, here and in
+the pairing link. A daemon that cannot list its addresses sends an empty list,
+and the phone keeps the routes it holds. `profiles[]` is `{id, name}`, the
+name at most 128 bytes.
 `caps` carries `commands[]` (`{name, aliases[], description}`, the command
 palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
 ends with `turn_done` or `turn_error`) and `max_media_bytes`, the largest

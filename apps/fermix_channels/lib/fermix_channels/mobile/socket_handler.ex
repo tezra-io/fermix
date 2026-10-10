@@ -629,8 +629,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
 
   defp build_hello_ack(state) do
     with {:ok, history_head} <- history_head(state.profile_id, state),
-         {:ok, read_up_to} <- read_frontier(state.profile_id, state),
-         {:ok, candidates} <- state.discover.() do
+         {:ok, read_up_to} <- read_frontier(state.profile_id, state) do
       {min_version, max_version} = Protocol.supported_version_range()
 
       {:ok,
@@ -639,7 +638,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
          "min_version" => min_version,
          "max_version" => max_version,
          "profiles" => profiles(state),
-         "candidates" => encode_candidates(candidates),
+         "candidates" => current_candidates(state),
          "history_head_seq" => history_head,
          "read_up_to_seq" => read_up_to,
          "caps" => %{
@@ -1440,8 +1439,9 @@ defmodule FermixChannels.Mobile.SocketHandler do
     do: apply(Timeline, :read_frontier, [profile])
 
   # Candidates are routes for later reconnects; the phone already holds the
-  # QR's. A failed enumeration must not undo an approved pairing, so it ships
-  # none and says so where the operator reads.
+  # QR's and the last hello_ack's. A failed enumeration must not undo an
+  # approved pairing or close a reconnect, so it ships none and says so where
+  # the operator reads.
   defp current_candidates(state) do
     case state.discover.() do
       {:ok, candidates} ->

@@ -9,7 +9,7 @@ Run the full daemon from source — the dev equivalent of `fermix run`:
 
 ```bash
 FERMIX_HOME=~/.fermix-dev FERMIX_OPIK_ENABLED=1 FERMIX_BROWSER_HEADLESS=0 \
-COMPUX_DISCLAIMED=1 PORT=4031 mix fermix.dev
+COMPUX_DISCLAIMED=1 PORT=4130 mix fermix.dev
 ```
 
 Foreground, one BEAM node (`fermix_core` + `fermix_channels` + `fermix_web`), one Ctrl-C
@@ -22,16 +22,24 @@ What each env var does (all optional):
 | Variable | Effect |
 |---|---|
 | `FERMIX_HOME=~/.fermix-dev` | Dev home. Keeps the dev daemon fully separate from the live daemon's `~/.fermix` (config, memory.db, traces, sockets). |
-| `PORT=4031` | Phoenix/webhook port (default 4030 — which the live daemon usually owns). |
+| `PORT=4130` | Phoenix/webhook port (default 4030 — which the live daemon usually owns). Off the 403x range, so it never meets the live daemon's phone listener on 4031. |
 | `FERMIX_OPIK_ENABLED=1` | Turns on the Opik trace exporter (`fermix_opik`). Dev turns land in the local Opik instance, correlated by session id. |
 | `FERMIX_BROWSER_HEADLESS=0` | Forces the browser tool headful. `1` forces headless; unset auto-detects (headless only on Linux without a display). |
 | `COMPUX_DISCLAIMED=1` | Tells the compux computer-use sidecar it is already disclaimed, so it skips its self-disclaim re-exec — a dev-machine convenience for unsigned local sidecars. |
 
 Two-daemon reality on this machine: the **live** daemon (launchd service, `~/.fermix`,
-port 4030, real Telegram) and the **dev** daemon above (`~/.fermix-dev`, port 4031).
+port 4030, real Telegram, phone listener on 4031) and the **dev** daemon above
+(`~/.fermix-dev`, port 4130, phone listener on 4131). The dev home sets its own phone
+port in `~/.fermix-dev/config.toml`, so the two phone listeners never collide:
+
+```toml
+[fermix_channels.mobile]
+port = 4131
+```
+
 Always confirm which home a trace or socket belongs to before reading it.
 
-Setup UI: `http://127.0.0.1:4031/setup` is token-gated by design — the dev task prints
+Setup UI: `http://127.0.0.1:4130/setup` is token-gated by design — the dev task prints
 the tokenized URL at boot.
 
 ## Tests and gates
