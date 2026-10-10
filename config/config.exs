@@ -180,8 +180,11 @@ config :fermix_channels,
     enabled: false,
     mode: :subprocess
   ],
+  # The phone channel. On by default: the listener serves only phones the owner
+  # paired, and an explicit `enabled = false` in config.toml still wins (the TOML
+  # is merged over this default at boot).
   mobile: [
-    enabled: false,
+    enabled: true,
     mode: :listener,
     port: 4_031,
     bind: "0.0.0.0",

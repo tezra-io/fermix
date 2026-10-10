@@ -31,16 +31,15 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result == %{name: "mobile companion", status: :ok, detail: "disabled"}
   end
 
-  test "enabled but never paired is a dormant warning, not a doctor failure", %{
-    mobile_dir: mobile_dir
-  } do
+  # The channel ships on, so an install with no phone is the normal state, not
+  # a problem, and the row names no CLI verb: on an app-managed Mac pairing
+  # belongs to the app.
+  test "enabled but never paired passes and names no CLI verb", %{mobile_dir: mobile_dir} do
     Application.put_env(:fermix_channels, :mobile, enabled: true)
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)
 
-    assert result.status == :warn
-    assert result.detail =~ "never paired"
-    assert result.detail =~ "fermix pair"
+    assert result == %{name: "mobile companion", status: :ok, detail: "on, no phone paired yet"}
   end
 
   test "a half-created identity is refused rather than read as unpaired", %{

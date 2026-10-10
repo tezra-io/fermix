@@ -1007,10 +1007,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       :never_paired ->
-        warn(
-          "mobile companion",
-          "enabled but never paired — run `fermix pair` to create the gateway identity"
-        )
+        ok("mobile companion", "on, no phone paired yet")
 
       {:error, detail} ->
         fail("mobile companion", detail)

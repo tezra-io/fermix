@@ -6,12 +6,12 @@ An owner-only channel from the owner's phone to their own Fermix daemon. It is n
 
 ## Turning it on
 
-Off by default: an absent `[fermix_channels.mobile]` section means disabled, not unconfigured. The daemon publishes two management surfaces:
+On by default: an absent `[fermix_channels.mobile]` section, or one without `enabled`, means enabled, and `enabled = false` keeps it off. An install that saved its settings while the channel was off by default carries that `enabled = false` line, so it stays off until the line changes. The daemon publishes two management surfaces:
 
 - the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns`. A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
 - the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
 
-No desktop app draws a Phone pane on them yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host:
+No desktop app draws a Phone pane on them yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host whose `config.toml` says `enabled = false`:
 
 ```toml
 [fermix_channels.mobile]
@@ -60,7 +60,7 @@ When no device socket is connected and no other device has read the new content,
 
 ## Troubleshooting
 
-`fermix doctor` checks gateway keys and TLS files (`0600`), listener reachability on advertised addresses, mDNS, tailnet detection, APNs credentials and delivery, and the paired-device count. An enabled but never-paired channel is a warning with the `fermix pair` hint; an incomplete identity or wrong permissions fails, because Fermix refuses such files rather than regenerating them. "mobile surface refused this boot; see the daemon log" and "mobile channel not started; restart the daemon" replace the per-probe rows; a listener that cannot bind reads "listener unavailable (reason); it keeps retrying". `mobile.status` publishes the same facts (`enabled` and `started` separately, any `refusal` class, listener, APNs, mDNS, tailnet, device count, the gateway key fingerprint and the pairing in flight).
+`fermix doctor` checks gateway keys and TLS files (`0600`), listener reachability on advertised addresses, mDNS, tailnet detection, APNs credentials and delivery, and the paired-device count. An enabled channel with no phone paired passes as "on, no phone paired yet"; an incomplete identity or wrong permissions fails, because Fermix refuses such files rather than regenerating them. "mobile surface refused this boot; see the daemon log" and "mobile channel not started; restart the daemon" replace the per-probe rows; a listener that cannot bind reads "listener unavailable (reason); it keeps retrying". `mobile.status` publishes the same facts (`enabled` and `started` separately, any `refusal` class, listener, APNs, mDNS, tailnet, device count, the gateway key fingerprint and the pairing in flight).
 
 - Phone and host share no reachable LAN or tailnet address.
 - The bind address or port is unavailable (the listener keeps retrying).

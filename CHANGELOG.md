@@ -4,6 +4,20 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **The phone channel is on by default.** A new install listens for paired
+  phones on port 4031 on every network address and announces itself on the
+  local network, so a phone can pair without any configuration. Only a phone
+  the owner paired gets in. An install that saved its settings before this
+  release already has `enabled = false` in `[fermix_channels.mobile]` and
+  stays off until you turn on Phone companion in the Phone settings, or set
+  `enabled = true`, and restart. Set `enabled = false` to keep the listener
+  off. Doctor shows the channel with no phone paired as passing ("on, no
+  phone paired yet") instead of a warning.
+
 ## [0.14.0] - 2026-10-06
 
 ### Added
