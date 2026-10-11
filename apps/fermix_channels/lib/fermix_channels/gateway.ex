@@ -261,6 +261,10 @@ defmodule FermixChannels.Gateway do
                           "backend is configured. Run `fermix setup` to add one."
   @transcription_failed_reply "I couldn't transcribe your voice note — the " <>
                                 "transcription failed. Please try again."
+  # The provider heard the recording and found no speech: retrying the same
+  # clip can't help, so the reply points at the microphone instead.
+  @no_speech_reply "I couldn't hear any speech in your voice note — check your " <>
+                     "microphone and record it again."
   # An uninstalled on-device backend is an install state, not a transient
   # failure: "please try again" is a remedy that can never work, so each half
   # names the install that fixes it (the doctor wording, D14).
@@ -477,6 +481,7 @@ defmodule FermixChannels.Gateway do
   defp transcription_failure_copy(:sidecar_not_installed), do: @sidecar_not_installed_reply
   defp transcription_failure_copy(:model_not_installed), do: @model_not_installed_reply
   defp transcription_failure_copy(:no_release_pinned), do: @no_on_device_build_reply
+  defp transcription_failure_copy(:empty_transcription), do: @no_speech_reply
 
   defp transcription_failure_copy({:file_too_large, size_mb, cap_mb}) do
     "I couldn't transcribe your voice note — it's #{size_mb} MB, over the " <>

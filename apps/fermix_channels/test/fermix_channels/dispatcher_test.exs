@@ -130,6 +130,12 @@ defmodule FermixChannels.DispatcherTest do
     def transcribe(_path, _opts), do: {:error, "OpenAI transcription error: 500"}
   end
 
+  # A recording the provider heard no speech in (a muted microphone).
+  defmodule SilentBackend do
+    def name, do: :silent_stub
+    def transcribe(_path, _opts), do: {:ok, "  "}
+  end
+
   # The on-device backend selected but never installed — an install state, not a
   # transient failure (`FermixCore.Transcription.Local`).
   defmodule SidecarNotInstalledBackend do
@@ -804,6 +810,26 @@ defmodule FermixChannels.DispatcherTest do
       assert_receive {:ingress_reply, reply}
       assert reply =~ "transcription failed"
       assert reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "a voice note with no speech in it says so instead of reporting a failed transcription" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: SilentBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "couldn't hear any speech"
+      refute reply =~ "transcription failed"
       refute_received {:agent_message, _agent_message}
     end
 
