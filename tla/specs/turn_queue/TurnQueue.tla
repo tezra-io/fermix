@@ -64,7 +64,7 @@ CONSTANTS
     Named,              \* the message a named stop names (one of Msgs)
     TasksCanCrash,      \* the turn task dies at any step: its own code raises or exits, or a
                         \* linked helper (typing loop, typing.ex:24; DraftStream,
-                        \* draft_stream.ex:182) exits, which can land anywhere
+                        \* draft_stream.ex:195) exits, which can land anywhere
     QueueCanCrash,      \* the Queue GenServer dies and its supervisor restarts it empty
     \* Mechanism switches: what the code does about it. TRUE is the real code;
     \* each is switched off by exactly one kind of check to show a property needs it.

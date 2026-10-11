@@ -39,7 +39,7 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex @ 7ba02aa96383
 \* SOURCE: apps/fermix_core/lib/fermix_core/application.ex#start_supervision_tree,temporal_scheduler_opts @ 80543c3e238b
 \* SOURCE: apps/fermix_core/lib/fermix_core/temporal/registry.ex @ ee0831d5019c
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ ccfa7611fa5c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex @ 96f0f91b0e80
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex @ 27101bebdc5c
 EXTENDS Naturals, FiniteSets
 

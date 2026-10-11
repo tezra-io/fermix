@@ -26,7 +26,7 @@ messages covers the interleavings that matter.
   it can arrive after its own turn ended.
 - `TasksCanCrash`: the turn task dies at any step. Its own code raises or
   exits, or a linked helper exits: the typing loop (`typing.ex:24`, linked
-  until `with_indicator` returns) or DraftStream (`draft_stream.ex:182`,
+  until `with_indicator` returns) or DraftStream (`draft_stream.ex:195`,
   linked until the task exits). A helper's exit can land anywhere, including
   where nothing in the task can raise: between delivering the reply and
   marking it delivered ("shown"), in the claim gap ("invoking"), and after the
@@ -481,7 +481,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Code:** after QUEUE-6's fix neither a stop nor the callback itself can
   kill the task in that gap. A linked helper still can: the typing loop
   (`typing.ex:24`, linked until `Typing.with_indicator` returns, which is
-  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:182`,
+  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:195`,
   linked until the task exits; its post-seal sweep runs beside the commit).
 - **Owner question:** close this too, by calling `finish_turn` after
   `Typing.with_indicator` returns (`turn_task/7` would take the outcome from
