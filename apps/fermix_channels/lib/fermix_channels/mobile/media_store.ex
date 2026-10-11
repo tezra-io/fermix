@@ -5,7 +5,8 @@ defmodule FermixChannels.Mobile.MediaStore do
   Uploads are written to private temporary files, hashed incrementally, and
   atomically renamed into the SHA-256 namespace only after size and digest
   verification. Durable blobs are never handed to gateway cleanup code;
-  `materialize_attachment/2` returns a disposable copy instead.
+  `materialize_attachment/2` returns a disposable copy instead, named with its
+  mime type's extension.
 
   Uploads in flight are bounded per uploading process and in all, each
   uploader is monitored so its partial files go when it does, and a
@@ -17,6 +18,8 @@ defmodule FermixChannels.Mobile.MediaStore do
   use GenServer
 
   require Logger
+
+  alias FermixChannels.Gateway.MediaDownload
 
   @default_max_media_bytes 20 * 1_024 * 1_024
   @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
@@ -301,7 +304,7 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   defp open_upload_with_room(upload, owner, state) do
-    case open_unique(state.upload_dir, @open_attempts) do
+    case open_unique(state.upload_dir, ".part", @open_attempts) do
       {:ok, path, io} ->
         active =
           Map.merge(upload, %{
@@ -543,8 +546,8 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
-  defp copy_to_temp(source, dir) do
-    with {:ok, path, io} <- open_unique(dir, @open_attempts),
+  defp copy_to_temp(source, dir, extension) do
+    with {:ok, path, io} <- open_unique(dir, extension, @open_attempts),
          :ok <- close_temp(io, path) do
       copy_file(source, path)
     else
@@ -553,7 +556,7 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   defp write_temp_bytes(dir, bytes) do
-    with {:ok, path, io} <- open_unique(dir, @open_attempts) do
+    with {:ok, path, io} <- open_unique(dir, ".part", @open_attempts) do
       case write_and_close(io, bytes) do
         :ok -> {:ok, path}
         {:error, reason} -> cleanup_temp_error(io, path, reason)
@@ -605,15 +608,15 @@ defmodule FermixChannels.Mobile.MediaStore do
     end
   end
 
-  defp open_unique(_dir, 0), do: {:error, :temp_name_exhausted}
+  defp open_unique(_dir, _extension, 0), do: {:error, :temp_name_exhausted}
 
-  defp open_unique(dir, attempts) do
+  defp open_unique(dir, extension, attempts) do
     name = 16 |> :crypto.strong_rand_bytes() |> Base.url_encode64(padding: false)
-    path = Path.join(dir, name <> ".part")
+    path = Path.join(dir, name <> extension)
 
     case File.open(path, [:write, :binary, :exclusive]) do
       {:ok, io} -> {:ok, path, io}
-      {:error, :eexist} -> open_unique(dir, attempts - 1)
+      {:error, :eexist} -> open_unique(dir, extension, attempts - 1)
       {:error, reason} -> {:error, reason}
     end
   end
@@ -1030,7 +1033,9 @@ defmodule FermixChannels.Mobile.MediaStore do
   end
 
   defp copy_live_attachment(attachment, blob, state) do
-    case copy_to_temp(blob.path, state.materialized_dir) do
+    extension = MediaDownload.extension(attachment)
+
+    case copy_to_temp(blob.path, state.materialized_dir, extension) do
       {:ok, temp_path} ->
         next = touch_blob(state, attachment.ref)
         {:reply, {:ok, attachment |> public_attachment() |> Map.put(:path, temp_path)}, next}

@@ -220,7 +220,13 @@ defmodule FermixChannels.Gateway.MediaDownload do
     Map.get(attachment, key) || Map.get(attachment, Atom.to_string(key))
   end
 
-  defp extension(attachment) do
+  @doc """
+  The temp-file extension for an attachment, from its mime type (`.bin` when it
+  has none). A transcription provider reads the media's format from the file
+  name, so every inbound copy is named with this, the mobile store's included.
+  """
+  @spec extension(map()) :: String.t()
+  def extension(attachment) when is_map(attachment) do
     attachment
     |> value(:mime_type)
     |> normalize_extension()

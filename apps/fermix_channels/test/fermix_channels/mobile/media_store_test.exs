@@ -110,6 +110,21 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert File.read!(durable_path) == bytes
   end
 
+  test "a materialized copy is named for its mime type, which a provider reads the format from",
+       %{store: store} do
+    bytes = "OggS voice"
+    digest = sha256(bytes)
+    voice_note = %{upload("v-1", bytes, digest) | kind: "audio", mime: "audio/ogg"}
+
+    assert {:ok, :upload} = MediaStore.begin_upload(store, voice_note)
+    assert :ok = MediaStore.write_chunk(store, "v-1", 0, bytes)
+    assert {:ok, ^digest} = MediaStore.finish_upload(store, "v-1", digest)
+
+    assert {:ok, %{path: temp_path}} = MediaStore.materialize_attachment(store, "v-1")
+    assert Path.extname(temp_path) == ".ogg"
+    assert :ok = FermixTestSupport.SafeRm.rm(temp_path)
+  end
+
   test "completed attachment metadata and materialization survive a store restart", %{
     root: root,
     store: store
