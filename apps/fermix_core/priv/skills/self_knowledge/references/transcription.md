@@ -36,6 +36,7 @@ The sender gets a reply and no turn is scheduled:
 | File over `max_file_mb` | the size limit | send a shorter clip |
 | On-device helper or model missing | "…Install it from `fermix setup` → Transcription." | choose a hosted backend in **Transcribe with** |
 | No on-device build for this machine | choose another backend | **Transcribe with** |
+| No speech in the recording | "I couldn't hear any speech in your voice note — check your microphone…" | check the microphone and record again |
 | Provider error | "transcription failed. Please try again." | try again; check the key |
 
 The replies name `fermix setup`; translate them for a Mac app user.
