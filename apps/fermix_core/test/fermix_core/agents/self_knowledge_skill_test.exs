@@ -156,6 +156,18 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # M51 D3 is enforced: the agent must not tell an owner that an emulator or
+  # an unlocked phone can pair, nor that the hardware goes unchecked.
+  test "documents that a phone proves its secure hardware to pair" do
+    reference = File.read!(mobile_reference_path())
+
+    refute reference =~ "does not check a phone's secure hardware yet"
+    refute reference =~ "takes it without verifying it"
+    assert reference =~ "emulator"
+    assert reference =~ "Already paired phones keep working"
+    assert reference =~ "*Attestation*"
+  end
+
   # The announcement ships off and the phone app finds the host through the
   # pairing link, so the reference names the switch and never blames a missing
   # announcement for a phone that cannot connect.

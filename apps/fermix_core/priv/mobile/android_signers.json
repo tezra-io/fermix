@@ -1,0 +1,12 @@
+{
+  "description": "The Android app Fermix pairs: its package and the signing certificates it may be signed with, each with its role (M51 D4, section 6.2 check 6). Every signature digest a phone's attestation names must be listed here. No release key exists yet; the owner adds its entry when the release key is made.",
+  "package": "io.tezra.fermix",
+  "signers": [
+    {
+      "role": "development",
+      "subject": "CN=Fermix Android dev, O=Tezra, C=US",
+      "sha256": "d56b2c45e652da4e9c9970879fdc49cb38a59609a4908053fcb51265dfa12da9",
+      "source": "the debug APK of tezra-io/fermix-android built 2026-10-10, read with apksigner --print-certs on 2026-10-11"
+    }
+  ]
+}

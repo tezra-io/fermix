@@ -783,12 +783,12 @@ defmodule FermixCore.Management.ProtocolContractTest do
       %{
         device_name: "Sam's phone",
         model: "Google Pixel 9 Pro",
-        platform: nil,
+        platform: "android",
         app_version: "1.0.0",
         sas: "481062",
-        build_role: nil,
-        boot_state: nil,
-        attestation: :unavailable
+        build_role: :release,
+        boot_state: %{verified: true, locked: true},
+        attestation: :verified
       }
     end
   end

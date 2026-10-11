@@ -16,13 +16,22 @@ defmodule FermixChannels.Mobile.PairManager do
   A closed window leaves a secret-free record behind so a management client
   that polls can still read how the ceremony ended: at most eight records,
   none older than five minutes on the injected clock.
+
+  Only a phone whose key attestation was verified reaches the owner (M51 D3):
+  its request carries what the verification found, and a refused attestation
+  ends the window (`refuse/3`). Google's attestation status list is fetched
+  here when a window opens, beside the manager and bounded in time, and is
+  used for as long as its max-age allows (`attestation_statuses/2`).
   """
 
   use GenServer
 
   import Bitwise, only: [band: 2, bor: 2]
 
+  alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.Identity
+
+  require Logger
 
   @max_ttl_ms 120_000
   # Per source address: one noisy peer is refused alone. A failed handshake
@@ -40,8 +49,26 @@ defmodule FermixChannels.Mobile.PairManager do
   @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   # The phone's own word for what it runs on, as its `pair_request` says it.
   @platforms ~w(ios android)
+  @telemetry_platforms %{"android" => :android, "ios" => :ios}
+  # How a refused attestation ends a window, in the phone's own word.
+  @refusal_reasons [:attestation, :attestation_unavailable, :platform_unsupported]
+  @security_levels [:trusted_environment, :strongbox]
+  @signer_roles [:development, :release]
+  # A pairing request waits at most this long for a status list fetch already
+  # running; the fetch itself is stopped at its deadline.
+  @status_wait_ms 10_000
+  @status_fetch_deadline_ms 20_000
 
   @type session_id :: String.t()
+  @typedoc "What a verified attestation found (`Mobile.Attestation.verify/3`)."
+  @type attestation :: %{
+          platform: String.t(),
+          security_level: :trusted_environment | :strongbox,
+          signer_role: :development | :release,
+          version_code: non_neg_integer(),
+          boot_state: :verified,
+          device_locked: true
+        }
   @type request :: %{
           name: String.t(),
           model: String.t(),
@@ -49,6 +76,7 @@ defmodule FermixChannels.Mobile.PairManager do
           platform: String.t(),
           noise_pk: <<_::256>>,
           sas: String.t(),
+          attestation: attestation(),
           socket_pid: pid()
         }
   @type public_request :: %{
@@ -57,10 +85,16 @@ defmodule FermixChannels.Mobile.PairManager do
           app_version: String.t(),
           platform: String.t(),
           noise_pk: <<_::256>>,
-          sas: String.t()
+          sas: String.t(),
+          attestation: attestation()
         }
-  @type terminal_status :: :approved | :denied | :expired | :cancelled | :device_disconnected
-  @type outcome_reason :: :approved | :denied | :timeout | :cancelled | :device_disconnected
+  @type refusal_reason :: :attestation | :attestation_unavailable | :platform_unsupported
+  @type terminal_status ::
+          :approved | :denied | :expired | :cancelled | :device_disconnected | refusal_reason()
+  @type outcome_reason ::
+          :approved | :denied | :timeout | :cancelled | :device_disconnected | refusal_reason()
+  @type status_list_error ::
+          :status_list_missing | :status_list_stale | :status_list_wait_timeout
   @typedoc "Where a handshake came from; `:unknown` when the caller cannot say."
   @type source :: :inet.ip_address() | :unknown
   @type record :: %{
@@ -68,7 +102,8 @@ defmodule FermixChannels.Mobile.PairManager do
           status: :awaiting_scan | :awaiting_decision | terminal_status(),
           remaining_ms: non_neg_integer() | nil,
           request: public_request() | nil,
-          device_id: String.t() | nil
+          device_id: String.t() | nil,
+          refusal: %{reason: refusal_reason(), check: atom()} | nil
         }
 
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -122,7 +157,8 @@ defmodule FermixChannels.Mobile.PairManager do
   def outcome_reason(:expired), do: :timeout
 
   def outcome_reason(status)
-      when status in [:approved, :denied, :cancelled, :device_disconnected],
+      when status in [:approved, :denied, :cancelled, :device_disconnected] or
+             status in @refusal_reasons,
       do: status
 
   @doc """
@@ -157,6 +193,36 @@ defmodule FermixChannels.Mobile.PairManager do
   def await_decision(server, session_id, timeout_ms)
       when is_binary(session_id) and session_id != "" and timeout_ms in 1..@max_wait_ms do
     GenServer.call(server, {:await, :decision, session_id, timeout_ms}, timeout_ms + 1_000)
+  end
+
+  @doc """
+  End the open window because a phone's attestation was refused (M51 section
+  6.2): the session reads failed, naming the check, and nothing reaches the
+  owner. `platform` is the refused phone's own word for what it runs on. A
+  phone already waiting for the owner proved the pairing secret, so another
+  connection's refusal leaves that ceremony open: `{:error, :request_pending}`.
+  """
+  @spec refuse(GenServer.server(), session_id(), %{
+          reason: refusal_reason(),
+          check: atom(),
+          platform: String.t()
+        }) :: :ok | {:error, :request_pending | :session_not_found}
+  def refuse(server, session_id, %{reason: reason, check: check, platform: platform})
+      when is_binary(session_id) and session_id != "" and reason in @refusal_reasons and
+             is_atom(check) and platform in @platforms do
+    refusal = %{reason: reason, check: check, platform: platform}
+    GenServer.call(server, {:refuse, session_id, refusal})
+  end
+
+  @doc """
+  Google's attestation status list, for the open window's socket: the list
+  held while it is fresh; while a fetch is running, its outcome, waited for at
+  most ten seconds; otherwise why there is none. Nothing is fetched here.
+  """
+  @spec attestation_statuses(GenServer.server(), session_id()) ::
+          {:ok, MapSet.t(String.t())} | {:error, status_list_error() | :session_not_found}
+  def attestation_statuses(server, session_id) when is_binary(session_id) and session_id != "" do
+    GenServer.call(server, {:attestation_statuses, session_id}, @status_wait_ms + 5_000)
   end
 
   @spec record_failure(GenServer.server(), session_id()) ::
@@ -204,6 +270,8 @@ defmodule FermixChannels.Mobile.PairManager do
     ttl_ms = Keyword.get(opts, :ttl_ms, @max_ttl_ms)
 
     if is_integer(ttl_ms) and ttl_ms in 1..@max_ttl_ms do
+      # terminate/2 must run on shutdown to stop a status list fetch in flight.
+      Process.flag(:trap_exit, true)
       {:ok, build_state(opts, ttl_ms)}
     else
       {:stop, {:invalid_pairing_ttl, ttl_ms}}
@@ -295,6 +363,24 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
+  def handle_call({:refuse, session_id, refusal}, _from, state) do
+    with {:ok, state, window} <- fetch_window(state, session_id),
+         :ok <- no_request_waiting(window) do
+      window = %{window | refusal: refusal}
+      {:reply, :ok, close_window(%{state | window: window}, refusal.reason)}
+    else
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+      {:error, reason} -> {:reply, {:error, reason}, state}
+    end
+  end
+
+  def handle_call({:attestation_statuses, session_id}, from, state) do
+    case fetch_window(state, session_id) do
+      {:ok, state, _window} -> statuses_reply(state, from)
+      {:error, reason, state} -> {:reply, {:error, reason}, state}
+    end
+  end
+
   def handle_call({:cancel, session_id}, _from, state) do
     case fetch_window(state, session_id) do
       {:ok, state, _window} -> {:reply, :ok, close_window(state, :cancelled)}
@@ -314,6 +400,40 @@ defmodule FermixChannels.Mobile.PairManager do
     {:noreply, timeout_waiter(state, session_id, key, token)}
   end
 
+  def handle_info({ref, result}, %{status_fetch: %{task: %Task{ref: ref}}} = state) do
+    Process.demonitor(ref, [:flush])
+    {:noreply, finish_status_fetch(state, result)}
+  end
+
+  def handle_info(
+        {:DOWN, ref, :process, _pid, reason},
+        %{status_fetch: %{task: %Task{ref: ref}}} = state
+      ),
+      do: {:noreply, finish_status_fetch(state, {:error, {:status_fetch_exited, reason}})}
+
+  def handle_info(
+        {:status_fetch_deadline, token},
+        %{status_fetch: %{token: token} = fetch} = state
+      ) do
+    Task.shutdown(fetch.task, :brutal_kill)
+    {:noreply, finish_status_fetch(state, {:error, :status_fetch_deadline})}
+  end
+
+  def handle_info({:status_wait_timeout, token}, state) do
+    {expired, waiting} = Enum.split_with(state.status_waiters, &(&1.token == token))
+    Enum.each(expired, &GenServer.reply(&1.from, {:error, :status_list_wait_timeout}))
+    {:noreply, %{state | status_waiters: waiting}}
+  end
+
+  # Exits are trapped only so terminate/2 runs on shutdown, and GenServer
+  # handles the parent's exit itself. No other process links to the manager,
+  # so another linked process's exit, whatever its reason, is a fault: it
+  # stops the manager, loudly.
+  def handle_info({:EXIT, _pid, reason}, state) do
+    Logger.error("mobile pairing manager stopped: a linked process exited: #{inspect(reason)}")
+    {:stop, {:linked_exit, reason}, state}
+  end
+
   def handle_info(_message, state), do: {:noreply, state}
 
   @impl true
@@ -324,6 +444,7 @@ defmodule FermixChannels.Mobile.PairManager do
       cancel_waiter_timer(state.window.decision_waiter, state)
     end
 
+    if state.status_fetch, do: Task.shutdown(state.status_fetch.task, :brutal_kill)
     :ok
   end
 
@@ -352,7 +473,11 @@ defmodule FermixChannels.Mobile.PairManager do
         Keyword.get(opts, :activate_listener, default_activate_listener(listener)),
       persist_device:
         Keyword.get(opts, :persist_device, default_persist_device(device_store, root)),
-      emit_pair: Keyword.get(opts, :emit_pair, &default_emit_pair/2),
+      emit_pair: Keyword.get(opts, :emit_pair, &default_emit_pair/3),
+      fetch_statuses: Keyword.get(opts, :status_fetch, &Attestation.fetch_status_list/0),
+      statuses: nil,
+      status_fetch: nil,
+      status_waiters: [],
       session_id_generator: Keyword.get(opts, :session_id_generator, &uuid/0),
       device_id_generator: Keyword.get(opts, :device_id_generator, &uuid/0),
       secret_generator: Keyword.get(opts, :secret_generator, &:crypto.strong_rand_bytes/1),
@@ -380,11 +505,12 @@ defmodule FermixChannels.Mobile.PairManager do
         timer_token: timer_token,
         failures_by_source: %{},
         request: nil,
+        refusal: nil,
         request_waiter: nil,
         decision_waiter: nil
       }
 
-      {:ok, public_window(window), %{state | window: window}}
+      {:ok, public_window(window), refresh_statuses(%{state | window: window})}
     else
       {:error, reason} -> {:error, reason, state}
       other -> {:error, {:invalid_pair_dependency, other}, state}
@@ -526,7 +652,7 @@ defmodule FermixChannels.Mobile.PairManager do
     _window = reply_waiter(window, :decision_waiter, terminal_reply, state)
     notify_socket(window, socket_result || terminal_reply)
     duration_us = max(now - window.opened_at_ms, 0) * 1_000
-    :ok = state.emit_pair.(status, duration_us)
+    :ok = state.emit_pair.(status, duration_us, pair_facts(window))
     closed = closed_record(window, status, socket_result, now)
     prune_closed(%{state | window: nil, closed: [closed | state.closed]})
   end
@@ -539,9 +665,35 @@ defmodule FermixChannels.Mobile.PairManager do
       status: status,
       request: optional_public_request(window.request),
       device_id: approved_device_id(socket_result),
+      refusal: public_refusal(window.refusal),
       closed_at_ms: now
     }
   end
+
+  defp public_refusal(nil), do: nil
+  defp public_refusal(refusal), do: Map.take(refusal, [:reason, :check])
+
+  # What the pair event says about the phone: what its attestation was found
+  # to be, and nothing when no phone got that far.
+  defp pair_facts(%{refusal: %{reason: reason, platform: platform}}) do
+    attestation = if reason == :attestation_unavailable, do: :unavailable, else: :refused
+
+    %{
+      platform: Map.fetch!(@telemetry_platforms, platform),
+      attestation: attestation,
+      signer_role: nil
+    }
+  end
+
+  defp pair_facts(%{request: %{platform: platform, attestation: attestation}}) do
+    %{
+      platform: Map.fetch!(@telemetry_platforms, platform),
+      attestation: :verified,
+      signer_role: attestation.signer_role
+    }
+  end
+
+  defp pair_facts(_window), do: %{platform: nil, attestation: nil, signer_role: nil}
 
   defp approved_device_id({:ok, device}), do: Map.fetch!(device, :device_id)
   defp approved_device_id(_socket_result), do: nil
@@ -582,7 +734,8 @@ defmodule FermixChannels.Mobile.PairManager do
       status: if(window.request, do: :awaiting_decision, else: :awaiting_scan),
       remaining_ms: max(window.expires_at_ms - state.clock.(), 0),
       request: optional_public_request(window.request),
-      device_id: nil
+      device_id: nil,
+      refusal: nil
     }
   end
 
@@ -606,6 +759,7 @@ defmodule FermixChannels.Mobile.PairManager do
       platform: field(attrs, :platform, "platform"),
       noise_pk: field(attrs, :noise_pk, "noise_pk"),
       sas: field(attrs, :sas, "sas"),
+      attestation: field(attrs, :attestation, "attestation"),
       socket_pid: field(attrs, :socket_pid, "socket_pid")
     }
 
@@ -619,10 +773,31 @@ defmodule FermixChannels.Mobile.PairManager do
          :ok <- validate_platform(request.platform),
          :ok <- validate_noise_pk(request.noise_pk),
          :ok <- validate_sas(request.sas),
+         :ok <- validate_attestation(request.attestation, request.platform),
          :ok <- validate_socket(request.socket_pid) do
       {:ok, request}
     end
   end
+
+  # The socket verified the phone's attestation before submitting; a request
+  # without its verified facts never reaches the owner.
+  defp validate_attestation(
+         %{
+           platform: platform,
+           security_level: level,
+           signer_role: role,
+           version_code: version_code,
+           boot_state: :verified,
+           device_locked: true
+         } = attestation,
+         platform
+       )
+       when map_size(attestation) == 6 and level in @security_levels and role in @signer_roles and
+              is_integer(version_code) and version_code >= 0,
+       do: :ok
+
+  defp validate_attestation(_attestation, _platform),
+    do: {:error, {:invalid_pair_request, :attestation}}
 
   # Device-supplied text is rendered in the operator's SAS approval prompt, so
   # intake is where it must be proven printable: an ESC or C1 sequence could
@@ -673,7 +848,12 @@ defmodule FermixChannels.Mobile.PairManager do
          push_token: nil,
          created_at: now,
          last_seen: nil,
-         apns_key_salt: salt
+         apns_key_salt: salt,
+         platform: request.platform,
+         signer_role: request.attestation.signer_role,
+         version_code: request.attestation.version_code,
+         boot_state: request.attestation.boot_state,
+         device_locked: request.attestation.device_locked
        }}
     else
       other -> {:error, {:invalid_pair_dependency, other}}
@@ -696,6 +876,79 @@ defmodule FermixChannels.Mobile.PairManager do
 
   defp request_available(%{request: %{noise_pk: key}}, %{noise_pk: key}), do: :ok
   defp request_available(_window, _request), do: {:error, :request_pending}
+
+  defp no_request_waiting(%{request: nil}), do: :ok
+  defp no_request_waiting(_window), do: {:error, :request_pending}
+
+  # Google's list is fetched when a window opens, unless the one held stays
+  # fresh until the window closes or a fetch is already running. It runs beside
+  # the manager, stopped at its deadline.
+  defp refresh_statuses(%{status_fetch: %{}} = state), do: state
+
+  defp refresh_statuses(%{statuses: %{expires_at_ms: expires_at_ms}, window: window} = state)
+       when expires_at_ms >= window.expires_at_ms,
+       do: state
+
+  defp refresh_statuses(state) do
+    task = Task.Supervisor.async_nolink(FermixCore.TaskSupervisor, state.fetch_statuses)
+    token = make_ref()
+    timer_ref = state.schedule_timer.({:status_fetch_deadline, token}, @status_fetch_deadline_ms)
+    fetch = %{task: task, token: token, timer_ref: timer_ref, started_at_ms: state.clock.()}
+    %{state | status_fetch: fetch}
+  end
+
+  # A failed fetch keeps the list held before it, which still ages out at its
+  # own max-age.
+  defp finish_status_fetch(state, result) do
+    fetch = state.status_fetch
+    cancel_timer(fetch.timer_ref, state)
+    statuses = fetched_statuses(result, fetch.started_at_ms, state.statuses)
+    state = %{state | status_fetch: nil, statuses: statuses}
+    reply = held_statuses(state)
+    Enum.each(state.status_waiters, &reply_status_waiter(&1, reply, state))
+    %{state | status_waiters: []}
+  end
+
+  defp fetched_statuses(
+         {:ok, %{serials: %MapSet{} = serials, max_age_ms: max_age_ms}},
+         started_at_ms,
+         _held
+       )
+       when is_integer(max_age_ms) and max_age_ms > 0,
+       do: %{serials: serials, expires_at_ms: started_at_ms + max_age_ms}
+
+  defp fetched_statuses({:error, reason}, _started_at_ms, held) do
+    Logger.warning("mobile pairing: attestation status list not fetched: #{inspect(reason)}")
+    held
+  end
+
+  defp reply_status_waiter(waiter, reply, state) do
+    cancel_timer(waiter.timer_ref, state)
+    GenServer.reply(waiter.from, reply)
+  end
+
+  defp statuses_reply(state, from) do
+    case {held_statuses(state), state.status_fetch} do
+      {{:ok, serials}, _fetch} -> {:reply, {:ok, serials}, state}
+      {error, nil} -> {:reply, error, state}
+      {_error, _fetch} -> {:noreply, add_status_waiter(state, from)}
+    end
+  end
+
+  defp held_statuses(%{statuses: nil}), do: {:error, :status_list_missing}
+
+  defp held_statuses(%{statuses: statuses} = state) do
+    if state.clock.() < statuses.expires_at_ms,
+      do: {:ok, statuses.serials},
+      else: {:error, :status_list_stale}
+  end
+
+  defp add_status_waiter(state, from) do
+    token = make_ref()
+    timer_ref = state.schedule_timer.({:status_wait_timeout, token}, @status_wait_ms)
+    waiter = %{from: from, token: token, timer_ref: timer_ref}
+    %{state | status_waiters: [waiter | state.status_waiters]}
+  end
 
   defp release_replaced_socket(%{socket_pid: old}, %{socket_pid: new}) when old != new do
     send(old, {:mobile_replaced, new})
@@ -832,8 +1085,8 @@ defmodule FermixChannels.Mobile.PairManager do
     end
   end
 
-  defp default_emit_pair(status, duration_us) do
-    apply(FermixChannels.Telemetry, :emit_pair, [:mobile, status, duration_us])
+  defp default_emit_pair(status, duration_us, facts) do
+    apply(FermixChannels.Telemetry, :emit_pair, [:mobile, status, duration_us, facts])
   end
 
   defp matching_timer?(%{session_id: session_id, timer_token: token}, session_id, token), do: true

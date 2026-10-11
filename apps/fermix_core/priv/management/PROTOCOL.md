@@ -306,12 +306,18 @@ Notes that the shapes alone do not carry:
   that opens the window. It carries the one-time secret the phone pairs with, so
   it is never logged, never traced and never retained, and no later read
   repeats it. The pane draws the QR code from it.
-- **Attestation ships in its final shape and is empty for now.** A request's
-  `platform` is the phone's own word (`android` or `ios`). Until the daemon
-  verifies a phone's secure hardware, `build_role` and `boot_state` are null
-  on a request, `platform`, `signer_role` and `boot_state` are null on a
-  device, and `attestation.status` is `unavailable` with the daemon's
-  sentence, which says the phone's secure hardware is not checked yet.
+- **Only a phone whose secure hardware the daemon verified reaches the
+  owner.** The phone's key attestation is verified before a request appears
+  (see *Attestation* in the mobile protocol), so a request's
+  `attestation.status` is `verified`, with the daemon's sentence, `build_role`
+  is the role of the key the app is signed with, and `boot_state` is
+  `{verified: true, locked: true}`. A request's `platform` is the phone's own
+  word. A refused proof never reaches the owner: the session ends `failed`
+  with `request` null, a `refused` failure whose sentence names the check that
+  failed, or an `unavailable` failure when Google's attestation service could
+  not be reached. A device paired with a verified attestation carries
+  `platform`, `signer_role` and `boot_state`; one paired before the daemon
+  verified attestation carries them null and keeps working.
 - **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
   with the channel off**, so a pane can always read the state and the owner
   can always forget a phone: while the channel is not running the paired

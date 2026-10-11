@@ -100,7 +100,7 @@ defmodule FermixCore.Management.MobileTest do
              }
     end
 
-    test "a waiting phone carries its request, its secure hardware not checked yet" do
+    test "a waiting phone carries its request and what its attestation proved" do
       session = session(:awaiting_decision, request: request())
 
       assert {:ok, view} = Mobile.pair_get(@session_id, fake({:ok, session}))
@@ -113,19 +113,18 @@ defmodule FermixCore.Management.MobileTest do
                "platform" => "android",
                "app_version" => "1.0.0",
                "sas" => "481062",
-               "build_role" => nil,
-               "boot_state" => nil,
+               "build_role" => "development",
+               "boot_state" => %{"verified" => true, "locked" => true},
                "attestation" => %{
-                 "status" => "unavailable",
-                 "sentence" => "Fermix does not check a phone's secure hardware yet."
+                 "status" => "verified",
+                 "sentence" => "Secure hardware, locked bootloader, official Fermix build."
                }
              }
 
       assert view["outcome"] == nil and view["failure"] == nil
     end
 
-    # The final shape ships before the proof does, so the fields a verified
-    # phone will carry are published as given rather than dropped.
+    # The fields a verified phone carries are published as given.
     test "a request's platform, build role and boot state are published as given" do
       verified =
         request()
@@ -166,17 +165,52 @@ defmodule FermixCore.Management.MobileTest do
     end
 
     test "a failed session carries the daemon's own sentence for each reason" do
-      sentences = %{
-        device_disconnected: "The phone disconnected before you decided. Start pairing again."
-      }
+      refused = "The phone's secure-hardware proof was refused: "
 
-      for {reason, sentence} <- sentences do
-        session = session(:failed, ttl_ms: nil, failure: %{reason: reason})
+      failures = [
+        {%{reason: :device_disconnected}, "refused",
+         "The phone disconnected before you decided. Start pairing again."},
+        {%{reason: :attestation, check: :key}, "refused",
+         refused <> "the key it proved is not the key it connected with."},
+        {%{reason: :attestation, check: :chain}, "refused",
+         refused <> "it is not signed by Google's attestation root."},
+        {%{reason: :attestation, check: :key_properties}, "refused",
+         refused <> "its key was not made in the phone's secure hardware for this use."},
+        {%{reason: :attestation, check: :challenge}, "refused",
+         refused <> "it was not made for this pairing."},
+        {%{reason: :attestation, check: :root_of_trust}, "refused",
+         refused <> "the phone's bootloader is unlocked or its system is not verified."},
+        {%{reason: :attestation, check: :application}, "refused",
+         refused <> "the app is not an official Fermix build."},
+        {%{reason: :attestation, check: :revocation}, "refused",
+         refused <> "Google revoked one of its certificates, or one has expired."},
+        {%{reason: :platform_unsupported, check: :platform}, "refused",
+         refused <> "only an Android phone can pair."},
+        {%{reason: :attestation_unavailable, check: :revocation}, "unavailable",
+         "Google's attestation service could not be reached."}
+      ]
+
+      for {failure, code, sentence} <- failures do
+        session = session(:failed, ttl_ms: nil, failure: failure)
 
         assert {:ok, view} = Mobile.pair_get(@session_id, fake({:ok, session}))
 
-        assert view["failure"] == %{"code" => "refused", "sentence" => sentence}
+        assert view["failure"] == %{"code" => code, "sentence" => sentence}
         assert view["outcome"] == nil
+        assert view["request"] == nil
+        assert sentence in Mobile.sentences()
+      end
+    end
+
+    # Only a verified phone reaches the owner, so a request whose attestation
+    # is anything else is a defect between the two apps, refused loudly.
+    test "a request whose attestation was not verified is refused loudly" do
+      for attestation <- [:unavailable, :refused] do
+        session = session(:awaiting_decision, request: %{request() | attestation: attestation})
+
+        assert_raise FunctionClauseError, fn ->
+          Mobile.pair_get(@session_id, fake({:ok, session}))
+        end
       end
     end
 
@@ -488,7 +522,16 @@ defmodule FermixCore.Management.MobileTest do
              "The paired-device list could not be read. See the daemon log.",
              "The pairing window could not be opened. See the daemon log.",
              "The phone disconnected before you decided. Start pairing again.",
-             "Fermix does not check a phone's secure hardware yet.",
+             "Secure hardware, locked bootloader, official Fermix build.",
+             "The phone's secure-hardware proof was refused: the key it proved is not the key it connected with.",
+             "The phone's secure-hardware proof was refused: it is not signed by Google's attestation root.",
+             "The phone's secure-hardware proof was refused: its key was not made in the phone's secure hardware for this use.",
+             "The phone's secure-hardware proof was refused: it was not made for this pairing.",
+             "The phone's secure-hardware proof was refused: the phone's bootloader is unlocked or its system is not verified.",
+             "The phone's secure-hardware proof was refused: the app is not an official Fermix build.",
+             "The phone's secure-hardware proof was refused: Google revoked one of its certificates, or one has expired.",
+             "The phone's secure-hardware proof was refused: only an Android phone can pair.",
+             "Google's attestation service could not be reached.",
              "No phone is waiting for a decision.",
              "No paired phone has that id.",
              "Only the owner can pair or forget a phone; run this from your own terminal.",
@@ -533,9 +576,9 @@ defmodule FermixCore.Management.MobileTest do
       platform: "android",
       app_version: "1.0.0",
       sas: "481062",
-      build_role: nil,
-      boot_state: nil,
-      attestation: :unavailable
+      build_role: :development,
+      boot_state: %{verified: true, locked: true},
+      attestation: :verified
     }
   end
 

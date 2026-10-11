@@ -331,7 +331,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
            end,
            activate_listener: fn _identity -> :ok end,
            persist_device: fn device -> {:ok, device} end,
-           emit_pair: fn _status, _duration_us -> :ok end,
+           emit_pair: fn _status, _duration_us, _facts -> :ok end,
+           status_fetch: fn -> {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}} end,
            session_id_generator: fn -> "pair-session" end,
            device_id_generator: fn -> "device-id" end,
            secret_generator: fn -> <<3::256>> end,
@@ -395,10 +396,32 @@ defmodule FermixChannels.Mobile.ManagementTest do
                platform: "android",
                app_version: "1.0.0",
                sas: "481062",
-               build_role: nil,
-               boot_state: nil,
-               attestation: :unavailable
+               build_role: :development,
+               boot_state: %{verified: true, locked: true},
+               attestation: :verified
              }
+    end
+
+    # MILESTONE_51_MANAGEMENT_MOBILE_PAIRING §4: a refused proof never reaches
+    # the owner; the session ends failed with the check that refused it, and
+    # nothing was asked, so there is no request to show.
+    test "a refused attestation ends the session failed, naming its check", ctx do
+      for {reason, check} <- [
+            attestation: :root_of_trust,
+            attestation_unavailable: :revocation,
+            platform_unsupported: :platform
+          ] do
+        assert {:ok, _started} = Management.pair_start(ctx.opts)
+        refusal = %{reason: reason, check: check, platform: "android"}
+        assert :ok = PairManager.refuse(ctx.manager, "pair-session", refusal)
+
+        assert {:ok, view} = Management.pair_get("pair-session", ctx.opts)
+        assert view.state == :failed
+        assert view.failure == %{reason: reason, check: check}
+        assert view.request == nil
+        assert view.outcome == nil
+        assert view.ttl_ms == nil
+      end
     end
 
     test "approve ends approved with the new device id and keeps who was approved", ctx do
@@ -728,6 +751,28 @@ defmodule FermixChannels.Mobile.ManagementTest do
       end
     end
 
+    test "a phone paired with a verified attestation shows what it proved" do
+      attested =
+        "33333333-3333-4333-8333-333333333333"
+        |> device(~U[2026-10-11 08:00:00Z], nil)
+        |> Map.merge(%{
+          platform: "android",
+          signer_role: :release,
+          version_code: 7,
+          boot_state: :verified,
+          device_locked: true
+        })
+
+      assert {:ok, [row]} =
+               Management.devices_list(
+                 serving_opts(list_devices: fn :store -> {:ok, [attested]} end)
+               )
+
+      assert row.platform == "android"
+      assert row.signer_role == :release
+      assert row.boot_state == %{verified: true, locked: true}
+    end
+
     test "at most 64 rows are listed" do
       devices =
         for index <- 1..65 do
@@ -957,7 +1002,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
         status: :device_disconnected,
         remaining_ms: nil,
         request: nil,
-        device_id: nil
+        device_id: nil,
+        refusal: nil
       }
 
       opts =
@@ -1207,6 +1253,14 @@ defmodule FermixChannels.Mobile.ManagementTest do
                platform: "android",
                noise_pk: <<5::256>>,
                sas: "481062",
+               attestation: %{
+                 platform: "android",
+                 security_level: :trusted_environment,
+                 signer_role: :development,
+                 version_code: 42,
+                 boot_state: :verified,
+                 device_locked: true
+               },
                socket_pid: socket
              })
   end
@@ -1301,7 +1355,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
       status: status,
       remaining_ms: 120_000,
       request: nil,
-      device_id: nil
+      device_id: nil,
+      refusal: nil
     }
   end
 

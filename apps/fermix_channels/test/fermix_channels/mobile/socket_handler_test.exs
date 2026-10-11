@@ -1,9 +1,11 @@
 defmodule FermixChannels.Mobile.SocketHandlerTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.MediaStore
+  alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.SocketHandler
   alias FermixChannels.Mobile.TlsTransport
 
@@ -1595,10 +1597,10 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
       seq: 1,
       payload: %{
         "device_name" => "Phone",
-        "model" => "iPhone17,1",
+        "model" => "Pixel 9",
         "app_version" => "1.0",
-        "platform" => "ios",
-        "attestation" => %{"kind" => "apple_app_attest", "cert_lengths" => [5]}
+        "platform" => "android",
+        "attestation" => %{"kind" => "android_keymint", "cert_lengths" => [5]}
       },
       bytes: "chain"
     }
@@ -1618,7 +1620,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         end,
         decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
         decode_client: fn "request", _opts -> {:ok, request} end,
-        submit_pair: fn :pair, "pair-session", %{platform: "ios"} -> {:ok, %{}} end,
+        verify_pair: fn :pair, "pair-session", %{chain: "chain"} -> {:ok, facts()} end,
+        submit_pair: fn :pair, "pair-session", %{platform: "android"} -> {:ok, %{}} end,
         discover: fn -> {:ok, []} end,
         encode_server: fn "pair_approved", _payload, 1 -> {:ok, "approved"} end,
         encrypt: fn :noise, "approved" -> {:ok, "encrypted-approved", :noise} end
@@ -1631,7 +1634,8 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
         phase: :await_pair_request,
         pairing_session_id: "pair-session",
         pairing_remote_static: <<4::256>>,
-        pairing_sas: "047291"
+        pairing_sas: "047291",
+        pairing_challenge: Attestation.challenge(<<1::256>>)
       })
 
     assert {:ok, deciding} = SocketHandler.handle_in({"request", opcode: :binary}, parked)
@@ -1652,6 +1656,249 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
 
     assert {:stop, :handshake_timeout, {1008, "mobile handshake deadline"}, _state} =
              SocketHandler.handle_info(hello_deadline, approved)
+  end
+
+  describe "a pair_request's attestation is verified before the owner sees it" do
+    # F-01: the chain was checked for shape only, so a literal string paired.
+    # No verifier is injected here: the production default runs, against a
+    # real pairing manager, and refuses before the manager hears of a phone.
+    test "a chain that is a literal string is refused and the session ends failed" do
+      {manager, window} = open_real_window()
+      state = pair_request_state(manager, window, request_event("literal certificate"))
+
+      assert {:stop, :attestation, {4003, "pairing attestation"}, [binary: _frame], stopped} =
+               SocketHandler.handle_in({"request", opcode: :binary}, state)
+
+      assert_received {:sent, %{"t" => "pair_denied", "reason" => "attestation"}}
+      assert stopped.pair_failure_recorded?
+
+      assert {:ok, %{status: :attestation, request: nil, refusal: %{check: :chain}}} =
+               PairManager.session(manager, window.session_id)
+
+      assert :ok = SocketHandler.terminate(:attestation, stopped)
+    end
+
+    test "an iPhone is refused as an unsupported platform" do
+      {manager, window} = open_real_window()
+
+      event =
+        request_event("chain", %{
+          "platform" => "ios",
+          "attestation" => %{"kind" => "apple_app_attest", "cert_lengths" => [5]}
+        })
+
+      state = pair_request_state(manager, window, event)
+
+      assert {:stop, :platform_unsupported, {4003, "pairing platform_unsupported"}, _frames,
+              _stopped} = SocketHandler.handle_in({"request", opcode: :binary}, state)
+
+      assert_received {:sent, %{"t" => "pair_denied", "reason" => "platform_unsupported"}}
+
+      assert {:ok, %{status: :platform_unsupported, refusal: %{check: :platform}}} =
+               PairManager.session(manager, window.session_id)
+    end
+
+    test "an unusable status list is attestation_unavailable on both sides" do
+      {manager, window} = open_real_window()
+
+      unavailable = %{
+        reason: :attestation_unavailable,
+        check: :revocation,
+        detail: :status_list_missing
+      }
+
+      state =
+        manager
+        |> pair_request_state(window, request_event("chain"))
+        |> Map.put(:verify_pair, fn ^manager, _session_id, _evidence -> {:error, unavailable} end)
+
+      assert {:stop, :attestation_unavailable, {4003, "pairing attestation_unavailable"}, _frames,
+              _stopped} = SocketHandler.handle_in({"request", opcode: :binary}, state)
+
+      assert_received {:sent, %{"t" => "pair_denied", "reason" => "attestation_unavailable"}}
+
+      assert {:ok, %{status: :attestation_unavailable}} =
+               PairManager.session(manager, window.session_id)
+    end
+
+    test "the verifier is handed the chain, the handshake key and the window's challenge" do
+      test_pid = self()
+
+      state =
+        pair_request_state(
+          :pair,
+          %{session_id: "pair-session", secret: <<1::256>>},
+          request_event("chain")
+        )
+        |> Map.merge(%{
+          verify_pair: fn :pair, "pair-session", evidence ->
+            send(test_pid, {:evidence, evidence})
+            {:ok, facts()}
+          end,
+          submit_pair: fn :pair, "pair-session", attrs ->
+            send(test_pid, {:submitted, attrs})
+            {:ok, %{}}
+          end
+        })
+
+      assert {:ok, deciding} = SocketHandler.handle_in({"request", opcode: :binary}, state)
+      assert deciding.phase == :await_pair_decision
+
+      assert_received {:evidence, evidence}
+
+      assert evidence == %{
+               platform: "android",
+               kind: "android_keymint",
+               cert_lengths: [5],
+               chain: "chain",
+               noise_pk: <<4::256>>,
+               challenge: Attestation.challenge(<<1::256>>)
+             }
+
+      assert_received {:submitted, %{attestation: attestation, platform: "android"}}
+      assert attestation == facts()
+    end
+
+    # A phone waiting for the owner already proved the pairing secret; a
+    # second phone's refused proof cannot end its ceremony, and is closed the
+    # way a second phone always is.
+    test "a refusal the manager declines closes the socket as a failed attempt" do
+      test_pid = self()
+
+      state =
+        pair_request_state(
+          :pair,
+          %{session_id: "pair-session", secret: <<1::256>>},
+          request_event("chain")
+        )
+        |> Map.merge(%{
+          verify_pair: fn :pair, "pair-session", _evidence ->
+            {:error, %{reason: :attestation, check: :chain, detail: :malformed_certificate}}
+          end,
+          refuse_pair: fn :pair, "pair-session", refusal ->
+            send(test_pid, {:refused, refusal})
+            {:error, :request_pending}
+          end,
+          record_pair_failure: fn :pair, "pair-session" ->
+            send(test_pid, :failure_recorded)
+            {:ok, 0}
+          end
+        })
+
+      assert {:stop, {:pairing_failed, :request_pending}, {1002, "mobile protocol error"}, _state} =
+               SocketHandler.handle_in({"request", opcode: :binary}, state)
+
+      assert_received {:refused, %{reason: :attestation, check: :chain, platform: "android"}}
+      assert_received :failure_recorded
+      refute_received {:sent, _frame}
+    end
+
+    test "a refusal is logged with its reason and never carries the chain or the secret" do
+      {manager, window} = open_real_window()
+      state = pair_request_state(manager, window, request_event("SECRET-CHAIN-BYTES"))
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:stop, :attestation, _close, _frames, _state} =
+                   SocketHandler.handle_in({"request", opcode: :binary}, state)
+        end)
+
+      assert log =~ "mobile pairing refused: attestation (chain: {:malformed_certificate, "
+      refute log =~ "SECRET-CHAIN-BYTES"
+      refute log =~ Base.encode64(window.secret)
+      refute log =~ inspect(window.secret)
+    end
+
+    # A phone waiting for the owner has proven the pairing secret. Another
+    # phone is then closed as a failed attempt, whether its attestation
+    # verified or not, and the waiting ceremony goes on untouched.
+    test "a second phone, verified or refused, is closed 1002 while the first waits" do
+      {manager, window} = open_real_window()
+
+      first =
+        manager
+        |> pair_request_state(window, request_event("chain"))
+        |> Map.put(:verify_pair, fn ^manager, _session_id, _evidence -> {:ok, facts()} end)
+
+      assert {:ok, %{phase: :await_pair_decision}} =
+               SocketHandler.handle_in({"request", opcode: :binary}, first)
+
+      verified = %{first | pairing_remote_static: <<5::256>>}
+
+      refused =
+        manager
+        |> pair_request_state(window, request_event("literal certificate"))
+        |> Map.put(:pairing_remote_static, <<6::256>>)
+
+      for second <- [verified, refused] do
+        assert {:stop, {:pairing_failed, :request_pending}, {1002, "mobile protocol error"},
+                _state} = SocketHandler.handle_in({"request", opcode: :binary}, second)
+      end
+
+      refute_received {:sent, _frame}
+
+      assert {:ok, %{status: :awaiting_decision, request: %{noise_pk: <<4::256>>}}} =
+               PairManager.session(manager, window.session_id)
+    end
+
+    # Attestation is pairing-time evidence (M51 §6.4): a phone paired before it
+    # was verified, its row carrying no facts, reconnects as it always did.
+    test "a reconnect never re-verifies attestation, a phone paired before it included" do
+      legacy = %FermixChannels.Mobile.DeviceStore.Device{
+        device_id: "91d72be6-c253-4b73-8598-91c03f66b9d0",
+        name: "Old phone",
+        model: "Google Pixel 9",
+        noise_pk: <<7::256>>,
+        created_at: ~U[2026-10-01 09:00:00Z],
+        apns_key_salt: <<3::256>>
+      }
+
+      state = %{
+        phase: :prelude,
+        device_store: :store,
+        pair_manager: :pair,
+        gateway_keypair: :gateway,
+        noise_initialize: fn :responder, :ik, static_keypair: :gateway -> {:ok, :noise0} end,
+        noise_read: fn :noise0, <<"FXM1", 1, "handshake">> -> {:ok, <<>>, :noise1} end,
+        noise_write: fn :noise1, <<>> -> {:ok, "response", :noise2} end,
+        noise_remote_static: fn :noise2 -> {:ok, <<7::256>>} end,
+        find_device: fn :store, <<7::256>> -> {:ok, legacy} end,
+        verify_pair: fn _manager, _session_id, _evidence -> flunk("a reconnect was verified") end
+      }
+
+      assert {:push, {:binary, "response"}, next} =
+               SocketHandler.handle_in({<<"FXM1", 1, "handshake">>, opcode: :binary}, state)
+
+      assert next.phase == :await_hello
+      assert next.authenticated_device == legacy
+      assert legacy.signer_role == nil
+    end
+
+    test "the pairing handshake keeps the window's challenge, never its secret" do
+      secret = :crypto.strong_rand_bytes(32)
+
+      {:ok, state} =
+        SocketHandler.init(%{
+          gateway_keypair: %{private: <<1::256>>, public: <<2::256>>},
+          pair_manager: :pair,
+          current_pair: fn :pair -> {:ok, %{session_id: "pair-session", secret: secret}} end,
+          noise_initialize: fn :responder, :ikpsk2, opts ->
+            assert opts[:psk] == secret
+            {:ok, :noise}
+          end,
+          noise_read: fn :noise, _wire -> {:ok, <<>>, :noise} end,
+          noise_write: fn :noise, <<>> -> {:ok, "response", :noise} end,
+          noise_remote_static: fn :noise -> {:ok, <<4::256>>} end,
+          noise_sas: fn :noise -> "047291" end
+        })
+
+      assert {:push, {:binary, "response"}, paired} =
+               SocketHandler.handle_in({<<"FXM1", 2, "hello">>, opcode: :binary}, state)
+
+      assert paired.phase == :await_pair_request
+      assert paired.pairing_challenge == Attestation.challenge(secret)
+      refute secret in Map.values(paired)
+    end
   end
 
   test "a socket that says hello in time drops its deadline" do
@@ -2103,4 +2350,77 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
   end
 
   defp sha256(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
+  defp facts do
+    %{
+      platform: "android",
+      security_level: :trusted_environment,
+      signer_role: :development,
+      version_code: 42,
+      boot_state: :verified,
+      device_locked: true
+    }
+  end
+
+  # A pairing manager that opened its window, its status list fetched once
+  # and fresh: nothing here reaches the network.
+  defp open_real_window do
+    manager =
+      start_supervised!(
+        {PairManager,
+         name: nil,
+         ensure_identity: fn -> {:ok, %{gateway_public_key: <<1::256>>}} end,
+         activate_listener: fn _identity -> :ok end,
+         persist_device: fn attrs -> {:ok, attrs} end,
+         emit_pair: fn _status, _duration_us, _facts -> :ok end,
+         status_fetch: fn -> {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}} end},
+        id: make_ref()
+      )
+
+    {:ok, window} = PairManager.open(manager)
+    {manager, window}
+  end
+
+  defp request_event(chain, overrides \\ %{}) do
+    payload =
+      Map.merge(
+        %{
+          "device_name" => "Pixel",
+          "model" => "Google Pixel 9",
+          "app_version" => "1.0",
+          "platform" => "android",
+          "attestation" => %{"kind" => "android_keymint", "cert_lengths" => [byte_size(chain)]}
+        },
+        overrides
+      )
+
+    %{type: "pair_request", version: 2, seq: 1, payload: payload, bytes: chain}
+  end
+
+  # A socket that finished its IKpsk2 handshake for `window` and is about to
+  # read `event`; what it sends is decoded and handed to the test.
+  defp pair_request_state(manager, window, event) do
+    test_pid = self()
+
+    {:ok, state} =
+      SocketHandler.init(%{
+        pair_manager: manager,
+        noise: :noise,
+        decrypt: fn :noise, "request" -> {:ok, "request", :noise} end,
+        decode_client: fn "request", _opts -> {:ok, event} end,
+        encrypt: fn :noise, plaintext ->
+          {header, <<>>} = decode_server_frame(plaintext)
+          send(test_pid, {:sent, header})
+          {:ok, "encrypted", :noise}
+        end
+      })
+
+    Map.merge(state, %{
+      phase: :await_pair_request,
+      pairing_session_id: window.session_id,
+      pairing_remote_static: <<4::256>>,
+      pairing_sas: "047291",
+      pairing_challenge: Attestation.challenge(window.secret)
+    })
+  end
 end

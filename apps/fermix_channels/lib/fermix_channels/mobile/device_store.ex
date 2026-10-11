@@ -18,10 +18,25 @@ defmodule FermixChannels.Mobile.DeviceStore do
   require Logger
 
   defmodule Device do
-    @moduledoc "A paired device authenticated by its Noise static public key."
+    @moduledoc """
+    A paired device authenticated by its Noise static public key.
+
+    `platform`, `signer_role`, `version_code`, `boot_state` and
+    `device_locked` are what the phone's key attestation proved when it was
+    approved; a phone paired before attestation was verified has them `nil`.
+    """
 
     @enforce_keys [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
-    defstruct @enforce_keys ++ [push_token: nil, last_seen: nil]
+    defstruct @enforce_keys ++
+                [
+                  push_token: nil,
+                  last_seen: nil,
+                  platform: nil,
+                  signer_role: nil,
+                  version_code: nil,
+                  boot_state: nil,
+                  device_locked: nil
+                ]
 
     @type t :: %__MODULE__{
             device_id: String.t(),
@@ -31,7 +46,12 @@ defmodule FermixChannels.Mobile.DeviceStore do
             push_token: String.t() | nil,
             created_at: DateTime.t(),
             last_seen: DateTime.t() | nil,
-            apns_key_salt: <<_::256>>
+            apns_key_salt: <<_::256>>,
+            platform: String.t() | nil,
+            signer_role: :development | :release | nil,
+            version_code: non_neg_integer() | nil,
+            boot_state: :verified | nil,
+            device_locked: true | nil
           }
   end
 
@@ -41,7 +61,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
   @file_mode 0o600
   @dir_mode 0o700
   @required_fields [:device_id, :name, :model, :noise_pk, :created_at, :apns_key_salt]
-  @optional_fields [:push_token, :last_seen]
+  @optional_fields [
+    :push_token,
+    :last_seen,
+    :platform,
+    :signer_role,
+    :version_code,
+    :boot_state,
+    :device_locked
+  ]
+  @platforms ~w(android ios)
+  @signer_roles %{"development" => :development, "release" => :release}
   @update_fields [:name, :model, :push_token, :last_seen]
   # last_seen is informational, and every hello records it: a newer value
   # inside this window is not worth a durable, fsync'd rewrite of the store.
@@ -408,7 +438,12 @@ defmodule FermixChannels.Mobile.DeviceStore do
       push_token: row["push_token"],
       created_at: decode_datetime(row["created_at"]),
       last_seen: decode_optional_datetime(row["last_seen"]),
-      apns_key_salt: decode_base64(row["apns_key_salt"])
+      apns_key_salt: decode_base64(row["apns_key_salt"]),
+      platform: row["platform"],
+      signer_role: decode_signer_role(row["signer_role"]),
+      version_code: row["version_code"],
+      boot_state: decode_boot_state(row["boot_state"]),
+      device_locked: row["device_locked"]
     }
 
     validate_decoded(attrs)
@@ -445,6 +480,17 @@ defmodule FermixChannels.Mobile.DeviceStore do
   defp decode_optional_datetime(nil), do: nil
   defp decode_optional_datetime(value), do: decode_datetime(value)
 
+  defp decode_signer_role(nil), do: nil
+
+  defp decode_signer_role(value) when is_map_key(@signer_roles, value),
+    do: Map.fetch!(@signer_roles, value)
+
+  defp decode_signer_role(value), do: {:decode_error, {:invalid_signer_role, value}}
+
+  defp decode_boot_state(nil), do: nil
+  defp decode_boot_state("verified"), do: :verified
+  defp decode_boot_state(value), do: {:decode_error, {:invalid_boot_state, value}}
+
   defp validate_new(attrs) do
     with :ok <- validate_keys(attrs, @required_fields, @optional_fields),
          :ok <- validate_device_id(attrs[:device_id]),
@@ -454,10 +500,29 @@ defmodule FermixChannels.Mobile.DeviceStore do
          :ok <- validate_optional_text(:push_token, attrs[:push_token]),
          :ok <- validate_datetime(:created_at, attrs[:created_at]),
          :ok <- validate_optional_datetime(:last_seen, attrs[:last_seen]),
-         :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]) do
+         :ok <- validate_binary32(:apns_key_salt, attrs[:apns_key_salt]),
+         :ok <- validate_attestation_facts(attrs) do
       {:ok, struct!(Device, Map.take(attrs, @required_fields ++ @optional_fields))}
     end
   end
+
+  # What a verified attestation can have proved; absent on a row from before
+  # attestation was verified.
+  defp validate_attestation_facts(attrs) do
+    cond do
+      attrs[:platform] not in [nil | @platforms] -> invalid_fact(:platform)
+      attrs[:signer_role] not in [nil | Map.values(@signer_roles)] -> invalid_fact(:signer_role)
+      not valid_version_code?(attrs[:version_code]) -> invalid_fact(:version_code)
+      attrs[:boot_state] not in [nil, :verified] -> invalid_fact(:boot_state)
+      attrs[:device_locked] not in [nil, true] -> invalid_fact(:device_locked)
+      true -> :ok
+    end
+  end
+
+  defp valid_version_code?(nil), do: true
+  defp valid_version_code?(value), do: is_integer(value) and value >= 0
+
+  defp invalid_fact(field), do: {:error, {:invalid_device, field, :invalid_attestation_fact}}
 
   defp validate_updates(attrs) do
     unknown = Map.keys(attrs) -- @update_fields
@@ -630,7 +695,15 @@ defmodule FermixChannels.Mobile.DeviceStore do
     }
     |> maybe_put("push_token", device.push_token)
     |> maybe_put("last_seen", encode_datetime(device.last_seen))
+    |> maybe_put("platform", device.platform)
+    |> maybe_put("signer_role", encode_atom(device.signer_role))
+    |> maybe_put("version_code", device.version_code)
+    |> maybe_put("boot_state", encode_atom(device.boot_state))
+    |> maybe_put("device_locked", device.device_locked)
   end
+
+  defp encode_atom(nil), do: nil
+  defp encode_atom(value) when is_atom(value), do: Atom.to_string(value)
 
   defp encode_datetime(nil), do: nil
   defp encode_datetime(%DateTime{} = value), do: DateTime.to_iso8601(value)

@@ -89,7 +89,9 @@ defmodule FermixCore.Management.Copy do
     "Google Chrome Canary",
     "Google Chrome",
     "Chromium",
-    "Chrome"
+    "Chrome",
+    "Google",
+    "Android"
   ]
 
   @doc """

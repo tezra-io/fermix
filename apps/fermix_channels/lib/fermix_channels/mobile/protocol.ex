@@ -571,7 +571,8 @@ defmodule FermixChannels.Mobile.Protocol do
 
   # A pairing presents its secure-hardware attestation: the kind, and the
   # length of each DER certificate of the chain its raw tail carries, leaf
-  # first. The chain is checked for shape here and not verified (M51 D3).
+  # first. The frame checks its shape; `Mobile.Attestation` verifies it when
+  # the socket reads the `pair_request` (M51 D3).
   defp validate_attestation(%{"kind" => kind, "cert_lengths" => lengths}) do
     cond do
       kind not in @attestation_kinds -> {:error, {:invalid_field, "attestation.kind"}}

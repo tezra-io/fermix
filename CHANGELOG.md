@@ -15,9 +15,8 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   older history loads as you scroll back, and a phone that reconnects
   learns how the messages it sent while away ended. Jobs and reminders reach
   the phone as messages of their own. The pairing code also names the Fermix
-  profile, so the app can tell two Fermix homes on one computer apart. Fermix
-  takes the phone's secure-hardware proof without checking it yet, and the
-  approval prompt says so.
+  profile, so the app can tell two Fermix homes on one computer apart. The
+  phone must prove its secure hardware before you are asked (see Security).
 - **Claude Haiku 5.5 is in the Anthropic model list** (`claude-haiku-5-5`),
   the fastest and cheapest Claude. Above 100,000 prompt tokens Anthropic
   bills it at five times the price, so a conversation on it compacts at
@@ -102,6 +101,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Security
 
+- **A phone must prove its secure hardware to pair.** Fermix used to take
+  the Android app's secure-hardware proof without checking it, so anyone who
+  scanned a live pairing code could pair a key that was never in a phone's
+  secure hardware. Fermix now checks the proof before it asks you: it must
+  come from Google's attestation roots, prove the very key the phone paired
+  with, for this pairing, made in the phone's secure hardware, on a phone
+  with a locked bootloader and a verified system, by the official Fermix app,
+  with no certificate Google has revoked. A refused phone is told why and
+  the pairing ends in a sentence saying which check failed; you are never
+  asked. The approval prompt now names the app's build and the phone's boot
+  state. An emulator, an unlocked or rooted phone, and an app built and
+  signed by anyone else cannot pair, so development pairs a real, locked
+  phone. Phones you already paired stay paired and keep working.
 - **The status page and `/health` no longer show your setup to strangers.**
   A Slack or WhatsApp webhook tunnel forwards every path to Fermix's
   listener, and a tunnel on the same computer makes each request look local,

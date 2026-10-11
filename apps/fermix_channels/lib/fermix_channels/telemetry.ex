@@ -1,11 +1,37 @@
 defmodule FermixChannels.Telemetry do
   @moduledoc false
 
-  @pair_statuses [:approved, :denied, :expired, :cancelled, :device_disconnected]
+  @pair_statuses [
+    :approved,
+    :denied,
+    :expired,
+    :cancelled,
+    :device_disconnected,
+    :attestation,
+    :attestation_unavailable,
+    :platform_unsupported
+  ]
+  @pair_platforms [:android, :ios, nil]
+  @pair_attestations [:verified, :refused, :unavailable, nil]
+  @pair_signer_roles [:development, :release, nil]
   @push_statuses [:sent, :failed]
   @transport_statuses [:degraded, :recovered]
 
-  @type pair_status :: :approved | :denied | :expired | :cancelled | :device_disconnected
+  @type pair_status ::
+          :approved
+          | :denied
+          | :expired
+          | :cancelled
+          | :device_disconnected
+          | :attestation
+          | :attestation_unavailable
+          | :platform_unsupported
+  @typedoc "What the pair event says about the phone; `nil` when no phone got that far."
+  @type pair_facts :: %{
+          platform: :android | :ios | nil,
+          attestation: :verified | :refused | :unavailable | nil,
+          signer_role: :development | :release | nil
+        }
   @type push_status :: :sent | :failed
   @type transport_status :: :degraded | :recovered
 
@@ -50,14 +76,20 @@ defmodule FermixChannels.Telemetry do
     )
   end
 
-  @spec emit_pair(atom(), pair_status(), non_neg_integer()) :: :ok
-  def emit_pair(channel, status, duration_us)
+  @spec emit_pair(atom(), pair_status(), non_neg_integer(), pair_facts()) :: :ok
+  def emit_pair(
+        channel,
+        status,
+        duration_us,
+        %{platform: platform, attestation: attestation, signer_role: role} = facts
+      )
       when is_atom(channel) and status in @pair_statuses and is_integer(duration_us) and
-             duration_us >= 0 do
+             duration_us >= 0 and map_size(facts) == 3 and platform in @pair_platforms and
+             attestation in @pair_attestations and role in @pair_signer_roles do
     :telemetry.execute(
       [:fermix, :channel, :pair],
       %{count: 1, duration_us: duration_us},
-      %{channel: channel, status: status}
+      Map.merge(%{channel: channel, status: status}, facts)
     )
   end
 

@@ -36,6 +36,7 @@ defmodule Fermix.CLI.PairCommand do
   @max_text_bytes 128
   @session_id_pattern ~r/^[A-Za-z0-9_-]{1,128}$/
   @sas_pattern ~r/^\d{6}$/
+  @build_roles ~w(release development)
   @uuid_pattern ~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
   @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @uri_prefix "fermix://pair?"
@@ -213,12 +214,17 @@ defmodule Fermix.CLI.PairCommand do
 
   defp decide_if_asked(view, _session_id, _io, _deps), do: {:ok, view}
 
+  # Only a phone whose attestation was verified reaches the owner (M51 D3), so
+  # a request without its build role and a verified, locked boot is not one the
+  # daemon can have asked about.
   defp pairing_request(%{"sas" => sas, "attestation" => %{"sentence" => sentence}} = request)
        when is_binary(sas) and is_binary(sentence) do
     valid? =
       valid_text?(Map.get(request, "device_name")) and
         valid_text?(Map.get(request, "model")) and
-        Regex.match?(@sas_pattern, sas)
+        Regex.match?(@sas_pattern, sas) and
+        Map.get(request, "build_role") in @build_roles and
+        Map.get(request, "boot_state") == %{"verified" => true, "locked" => true}
 
     if valid?, do: {:ok, request}, else: {:error, :invalid_pairing_request}
   end
@@ -226,13 +232,15 @@ defmodule Fermix.CLI.PairCommand do
   defp pairing_request(_request), do: {:error, :invalid_pairing_request}
 
   # The human is the comparator: approve only when the phone shows the same
-  # six digits. A blank answer or a closed input denies.
+  # six digits. A blank answer or a closed input denies. The build role and the
+  # boot state are what the phone's attestation proved (M51 section 6.2).
   defp prompt_approval(request, io) do
     IO.puts(io.stdout, scrub(request["attestation"]["sentence"]))
 
     prompt =
       "#{safe_field(request["model"])} '#{safe_field(request["device_name"])}' requests " <>
-        "pairing. Phone shows #{request["sas"]}. Approve? [y/N] "
+        "pairing (#{request["build_role"]} build). Phone shows #{request["sas"]}. " <>
+        "Secure hardware ✓, bootloader locked ✓. Approve? [y/N] "
 
     confirm?(io, prompt)
   end

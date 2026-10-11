@@ -44,6 +44,7 @@ defmodule FermixChannels.Mobile.Management do
   @max_listed_devices 64
   @v0_device_fields [:device_id, :name, :created_at, :last_seen]
   @open_states [:awaiting_scan, :awaiting_decision]
+  @refused_states [:attestation, :attestation_unavailable, :platform_unsupported]
 
   @type session_state ::
           :awaiting_scan
@@ -59,9 +60,9 @@ defmodule FermixChannels.Mobile.Management do
           platform: String.t(),
           app_version: String.t(),
           sas: String.t(),
-          build_role: nil,
-          boot_state: nil,
-          attestation: :unavailable
+          build_role: :development | :release,
+          boot_state: %{verified: true, locked: true},
+          attestation: :verified
         }
   @type session :: %{
           session_id: String.t(),
@@ -69,15 +70,18 @@ defmodule FermixChannels.Mobile.Management do
           ttl_ms: non_neg_integer() | nil,
           request: request_view() | nil,
           outcome: nil | %{device_id: String.t()} | %{reason: :denied | :timeout | :cancelled},
-          failure: nil | %{reason: :device_disconnected}
+          failure:
+            nil
+            | %{reason: :device_disconnected}
+            | %{reason: PairManager.refusal_reason(), check: atom()}
         }
   @type device_row :: %{
           device_id: String.t(),
           name: String.t(),
           model: String.t(),
-          platform: nil,
-          signer_role: nil,
-          boot_state: nil,
+          platform: String.t() | nil,
+          signer_role: :development | :release | nil,
+          boot_state: %{verified: true, locked: true} | nil,
           push_registered: boolean(),
           created_at: String.t(),
           last_seen: String.t() | nil
@@ -553,11 +557,12 @@ defmodule FermixChannels.Mobile.Management do
       ttl_ms: record.remaining_ms,
       request: request_view(record.request),
       outcome: session_outcome(record),
-      failure: session_failure(record.status)
+      failure: session_failure(record)
     }
   end
 
   defp session_state(:device_disconnected), do: :failed
+  defp session_state(status) when status in @refused_states, do: :failed
   defp session_state(status), do: status
 
   # The words are the pair manager's, so the phone's `pair_denied` and this
@@ -569,14 +574,18 @@ defmodule FermixChannels.Mobile.Management do
 
   defp session_outcome(_record), do: nil
 
-  defp session_failure(:device_disconnected),
+  defp session_failure(%{status: :device_disconnected}),
     do: %{reason: PairManager.outcome_reason(:device_disconnected)}
 
-  defp session_failure(_status), do: nil
+  # A refused attestation names the check that refused it (M51 section 6.2).
+  defp session_failure(%{status: status, refusal: %{check: check}})
+       when status in @refused_states,
+       do: %{reason: PairManager.outcome_reason(status), check: check}
 
-  # The platform is the phone's own word. What only a verified attestation
-  # can tell is present and empty until the daemon checks one (M51 D3), so
-  # the view already has its final shape.
+  defp session_failure(_record), do: nil
+
+  # The platform is the phone's own word; the rest is what its verified
+  # attestation proved (M51 D3): no request reaches the owner unverified.
   defp request_view(nil), do: nil
 
   defp request_view(request) do
@@ -586,11 +595,18 @@ defmodule FermixChannels.Mobile.Management do
       platform: request.platform,
       app_version: request.app_version,
       sas: request.sas,
-      build_role: nil,
-      boot_state: nil,
-      attestation: :unavailable
+      build_role: request.attestation.signer_role,
+      boot_state: boot_state(request.attestation),
+      attestation: :verified
     }
   end
+
+  # Only a verified boot on a locked phone pairs, so a state that is known is
+  # that one; a phone paired before attestation was verified has none.
+  defp boot_state(%{boot_state: :verified, device_locked: true}),
+    do: %{verified: true, locked: true}
+
+  defp boot_state(_facts), do: nil
 
   # The running store serializes every write, so it answers while it runs;
   # otherwise nothing else writes the file, and it is read where it lies.
@@ -779,16 +795,21 @@ defmodule FermixChannels.Mobile.Management do
 
   defp public_device(device), do: device |> device_row() |> Map.take(@v0_device_fields)
 
-  # Platform, signer role and boot state come from Android attestation, which
-  # the ceremony does not produce yet; the row carries them empty.
+  # Platform, signer role and boot state are what the phone's attestation
+  # proved when it was approved; a phone paired before it was verified
+  # carries them empty.
   defp device_row(device) do
     %{
       device_id: value(device, :device_id),
       name: value(device, :name),
       model: value(device, :model),
-      platform: nil,
-      signer_role: nil,
-      boot_state: nil,
+      platform: value(device, :platform),
+      signer_role: value(device, :signer_role),
+      boot_state:
+        boot_state(%{
+          boot_state: value(device, :boot_state),
+          device_locked: value(device, :device_locked)
+        }),
       push_registered: push_registered?(value(device, :push_token)),
       created_at: iso8601(value(device, :created_at)),
       last_seen: iso8601(value(device, :last_seen))

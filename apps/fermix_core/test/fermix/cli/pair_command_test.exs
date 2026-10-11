@@ -6,7 +6,7 @@ defmodule Fermix.CLI.PairCommandTest do
   @session_id "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
   @uri "fermix://pair?v=1&port=4031&secret=one-time"
-  @unchecked "Fermix does not check a phone's secure hardware yet."
+  @verified "Secure hardware, locked bootloader, official Fermix build."
 
   test "renders the QR, waits for a phone, and approves only after the code is confirmed" do
     script = %{
@@ -25,10 +25,13 @@ defmodule Fermix.CLI.PairCommandTest do
     assert stdout =~ "██"
     assert stdout =~ "expires in 120s"
     assert stdout =~ "Manual pairing URI: #{@uri}"
-    assert stdout =~ @unchecked
+    assert stdout =~ @verified
 
+    # M51 §6.2: the prompt names the build role and the boot state the
+    # phone's verified attestation proved.
     assert stdout =~
-             "Google Pixel 9 Pro 'Sam's phone' requests pairing. Phone shows 481062. Approve? [y/N]"
+             "Google Pixel 9 Pro 'Sam's phone' requests pairing (release build). " <>
+               "Phone shows 481062. Secure hardware ✓, bootloader locked ✓. Approve? [y/N]"
 
     assert stdout =~ "paired Sam's phone (#{@device_id})"
     assert stderr == ""
@@ -290,6 +293,51 @@ defmodule Fermix.CLI.PairCommandTest do
     refute_received {:call, "mobile.pair.cancel", _params, _opts}
   end
 
+  # A refused proof ends the session before anyone is asked: the run ends in
+  # the daemon's sentence and there is no window left to cancel.
+  test "a phone whose secure-hardware proof was refused ends the run, nothing asked" do
+    sentence =
+      "The phone's secure-hardware proof was refused: the phone's bootloader is unlocked " <>
+        "or its system is not verified."
+
+    script = %{
+      "mobile.pair.start" => [started(120_000)],
+      "mobile.pair.get" => [{:ok, view("failed", failure: failure("refused", sentence))}]
+    }
+
+    {status, stdout, stderr} = run_pair(script, "y\n")
+
+    assert status == 1
+    assert stderr == "fermix pair: #{sentence}\n"
+    refute stdout =~ "Approve?"
+    refute_received {:call, "mobile.pair.decide", _params, _opts}
+    refute_received {:call, "mobile.pair.cancel", _params, _opts}
+  end
+
+  test "a development build is named in the prompt" do
+    development = request(%{"build_role" => "development"})
+    {status, stdout, _stderr} = run_pair(asking_script(approved(), development), "y\n")
+    assert status == 0
+    assert stdout =~ "requests pairing (development build)."
+  end
+
+  # Only a verified phone reaches the owner, so a request without what its
+  # attestation proved is not one the daemon can have asked about.
+  test "a waiting request without its proof's facts is refused and its window cancelled" do
+    unproven = request(%{"build_role" => nil, "boot_state" => nil})
+
+    script =
+      asking_script(approved(), unproven)
+      |> Map.put("mobile.pair.cancel", [{:ok, view("cancelled", outcome: reason("cancelled"))}])
+
+    {status, stdout, stderr} = run_pair(script, "y\n")
+    assert status == 1
+    refute stdout =~ "Approve?"
+    assert stderr =~ "invalid pairing request"
+    assert_received {:call, "mobile.pair.cancel", _params, _opts}
+    refute_received {:call, "mobile.pair.decide", _params, _opts}
+  end
+
   test "a management refusal is rendered in the daemon's own sentence, not its code" do
     refusal =
       {:error,
@@ -366,10 +414,10 @@ defmodule Fermix.CLI.PairCommandTest do
   end
 
   # A phone asks on the first poll, and the decision answers `decided`.
-  defp asking_script(decided) do
+  defp asking_script(decided, asked \\ request()) do
     %{
       "mobile.pair.start" => [started(120_000)],
-      "mobile.pair.get" => [{:ok, view("awaiting_decision", ttl_ms: 90_000, request: request())}],
+      "mobile.pair.get" => [{:ok, view("awaiting_decision", ttl_ms: 90_000, request: asked)}],
       "mobile.pair.decide" => [decided]
     }
   end
@@ -467,12 +515,12 @@ defmodule Fermix.CLI.PairCommandTest do
       %{
         "device_name" => "Sam's phone",
         "model" => "Google Pixel 9 Pro",
-        "platform" => nil,
+        "platform" => "android",
         "app_version" => "1.0.0",
         "sas" => "481062",
-        "build_role" => nil,
-        "boot_state" => nil,
-        "attestation" => %{"status" => "unavailable", "sentence" => @unchecked}
+        "build_role" => "release",
+        "boot_state" => %{"verified" => true, "locked" => true},
+        "attestation" => %{"status" => "verified", "sentence" => @verified}
       },
       fields
     )

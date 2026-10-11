@@ -248,6 +248,78 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     end
   end
 
+  # M51 §6.3 / §11.2: an approval stores what the phone's attestation proved.
+  test "an approved phone's attestation facts persist and read back", %{root: root} do
+    attrs = Map.merge(device_attrs(), attested())
+
+    assert {:ok, added} = DeviceStore.add(attrs, root: root)
+    assert {:ok, [^added]} = DeviceStore.list(root: root)
+    assert added.platform == "android"
+    assert added.signer_role == :development
+    assert added.version_code == 42
+    assert added.boot_state == :verified
+    assert added.device_locked == true
+
+    toml = File.read!(Path.join(root, "mobile/devices.toml"))
+    assert toml =~ ~s(signer_role = "development")
+    assert toml =~ ~s(boot_state = "verified")
+    assert toml =~ "device_locked = true"
+    assert toml =~ "version_code = 42"
+  end
+
+  # A phone paired before attestation was verified keeps working exactly as it
+  # did: its row loads with the facts empty and is never relabelled as
+  # verified, not even when it is written again.
+  test "a row from before attestation loads, updates and stays unlabelled", %{root: root} do
+    device_id = uuid()
+    noise_pk = :crypto.strong_rand_bytes(32)
+    mobile_dir = Path.join(root, "mobile")
+    path = Path.join(mobile_dir, "devices.toml")
+    File.mkdir_p!(mobile_dir)
+    File.chmod!(mobile_dir, 0o700)
+
+    File.write!(path, """
+    [[devices]]
+    apns_key_salt = "#{Base.encode64(:crypto.strong_rand_bytes(32))}"
+    created_at = "2026-10-01T09:00:00Z"
+    device_id = "#{device_id}"
+    model = "Google Pixel 9"
+    name = "Old phone"
+    noise_pk = "#{Base.encode64(noise_pk)}"
+    """)
+
+    File.chmod!(path, 0o600)
+
+    assert {:ok, [legacy]} = DeviceStore.list(root: root)
+    assert legacy.device_id == device_id
+    assert {legacy.platform, legacy.signer_role, legacy.version_code} == {nil, nil, nil}
+    assert {legacy.boot_state, legacy.device_locked} == {nil, nil}
+    assert {:ok, ^legacy} = DeviceStore.find_by_noise_pk(noise_pk, root: root)
+
+    assert {:ok, _seen} =
+             DeviceStore.update(device_id, %{last_seen: ~U[2026-10-11 08:00:00Z]}, root: root)
+
+    toml = File.read!(path)
+    refute toml =~ "platform"
+    refute toml =~ "signer_role"
+    refute toml =~ "boot_state"
+  end
+
+  test "attestation facts outside what a verified phone can carry are refused", %{root: root} do
+    for {field, value} <- [
+          platform: "windows",
+          signer_role: :stranger,
+          version_code: -1,
+          boot_state: :unverified,
+          device_locked: false
+        ] do
+      attrs = device_attrs() |> Map.merge(attested()) |> Map.put(field, value)
+      assert {:error, {:invalid_device, ^field, _reason}} = DeviceStore.add(attrs, root: root)
+    end
+
+    refute File.exists?(Path.join(root, "mobile"))
+  end
+
   test "delete removes only the requested record", %{root: root} do
     first = device_attrs()
     second = device_attrs()
@@ -321,6 +393,16 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
       created_at: ~U[2026-08-12 18:00:00Z],
       last_seen: nil,
       apns_key_salt: :crypto.strong_rand_bytes(32)
+    }
+  end
+
+  defp attested do
+    %{
+      platform: "android",
+      signer_role: :development,
+      version_code: 42,
+      boot_state: :verified,
+      device_locked: true
     }
   end
 

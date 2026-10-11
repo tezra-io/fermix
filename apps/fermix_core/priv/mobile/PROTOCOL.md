@@ -13,6 +13,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
+| `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
 
 **Optional fields are absent, never null.** Every field marked `?` below is
 optional by omission: a value the daemon does not have is an absent key, never
@@ -146,10 +147,12 @@ A pairing session runs in this order:
    after the upgrade, with its secure-hardware attestation (see *Attestation*
    below). A peer that finishes the handshake and sends nothing is closed with
    `1008`, and that counts as a failed pairing attempt from its address.
-2. The owner compares the SAS and decides. A pairing window lasts at most 120
-   seconds. While the owner decides, the daemon answers `ping` with `pong` and
-   refuses every other event, so a keepalive never has to stop; an idle
-   disconnect while a decision is pending is not a failed pairing handshake.
+2. The daemon verifies the attestation (see *Attestation*); only a phone it
+   verified reaches the owner. The owner compares the SAS and decides. A
+   pairing window lasts at most 120 seconds. While the owner decides, the
+   daemon answers `ping` with `pong` and refuses every other event, so a
+   keepalive never has to stop; an idle disconnect while a decision is pending
+   is not a failed pairing handshake.
 3. Approved: `pair_approved{device_id, candidates[], profiles[], push_salt}`,
    where `push_salt` is the device's 32-byte push salt in standard base64 (see
    *Push notifications*). The phone then sends `hello` on the same session (its
@@ -157,8 +160,10 @@ A pairing session runs in this order:
 4. Not approved: `pair_denied{reason}`, then close `4003` with the text
    `pairing <reason>`. `reason` is one word, the one the management protocol
    uses for the same ending: `denied` (the owner said no), `timeout` (the
-   window ran out), `cancelled` (the owner closed the window) or
-   `device_disconnected` (the phone was gone when the owner approved).
+   window ran out), `cancelled` (the owner closed the window),
+   `device_disconnected` (the phone was gone when the owner approved), or one
+   of the three refusals of *Attestation* below, sent before the owner is asked:
+   `attestation`, `attestation_unavailable` or `platform_unsupported`.
 
 Failed pairing attempts are counted per source address. An address's fifth
 failure refuses that address for the rest of the window: its next handshake is
@@ -167,7 +172,10 @@ window, so nobody but the owner can end one, and nothing is counted while a
 request waits for the owner. A window remembers at most 1,024 addresses; a
 failure from another address is not counted. A `pair_request` from the same
 phone key as the one waiting replaces it, and the older socket is closed with
-`4001`. A phone that was approved but never said `hello` can pair again.
+`4001`. A `pair_request` from another phone key while one waits is closed with
+`1002`, whether its attestation verified or not: it gets no `pair_denied`, and
+the waiting request goes on. A phone that was approved but never said `hello`
+can pair again.
 
 ### Attestation
 
@@ -177,8 +185,50 @@ its `attestation{kind, cert_lengths[]}`: `kind` is `android_keymint` or
 certificate chain, leaf first. `cert_lengths` holds each certificate's length,
 1 to 6 of them, and they sum to the tail, which is at most 16 KiB. A request
 whose chain breaks these bounds is a failed pairing attempt, closed with
-`1002`. This daemon checks the chain's shape and does not verify it yet: the
-owner's pairing prompt says so, and `pair_denied` never names an attestation.
+`1002`.
+
+The daemon verifies the chain before the owner is asked. It pairs only an
+Android phone (`platform` `android`, `kind` `android_keymint`) whose chain:
+
+1. attests the X25519 key the phone made the pairing handshake with;
+2. leads to one of Google's attestation roots in `attestation_roots.json`. A
+   root is trusted by its key, so a phone presenting an older, expired
+   certificate of it still chains; every other certificate must be valid now;
+3. describes a KeyMint key (attestation version 100 or later) generated in the
+   phone's TEE or StrongBox, the attestation and KeyMint levels agreeing, for
+   key agreement only: purpose `AGREE_KEY`, algorithm EC, curve 25519;
+4. carries the challenge `SHA-256("fermix-mobile-attest-v1" || secret)`, where
+   `secret` is the pairing link's 32-byte one-time secret;
+5. reports a locked bootloader and a `Verified` boot;
+6. names the app `io.tezra.fermix`, signed only by certificates listed in
+   `android_signers.json`, all of one role (`development` or `release`);
+7. has no certificate on Google's attestation status list
+   (`https://android.googleapis.com/attestation/status`), `REVOKED` or
+   `SUSPENDED`.
+
+The status list is fetched when a pairing window opens, not when a phone asks,
+and is used for as long as its `cache-control` max-age allows, at most a day.
+A fetch is bounded at 10 s of network silence, 20 s in all and 2 MiB. A
+`pair_request` that arrives while the list is still being fetched waits for it
+at most 10 s.
+
+A phone that fails is sent `pair_denied{reason}` and closed `4003`, and the
+pairing session ends `failed` with the check that refused it; the owner is
+never asked:
+
+| `reason` | When |
+|---|---|
+| `platform_unsupported` | `platform` is not `android` or `kind` is not `android_keymint`; no iPhone app exists |
+| `attestation` | any of the seven checks above fails |
+| `attestation_unavailable` | the status list is missing, past its max-age, or could not be fetched in time |
+
+An emulator cannot pair: its key is attested at the software level under the
+Android software attestation root, not Google's. Neither can a phone with an
+unlocked bootloader or an unverified system, an app signed by any key but the
+pinned ones (a debug keystore included), or a rebuilt app. Development pairs a
+real, locked phone running a build signed with the `development` key.
+Attestation is pairing-time evidence: a reconnect is never verified again, and
+a phone paired before the daemon verified attestation keeps working.
 
 The shared deterministic `noise_vectors.json` pins X25519 keys, both handshake
 messages, handshake hashes, SAS values, and the first transport ciphertext for

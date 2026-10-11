@@ -380,7 +380,7 @@
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
-      "properties": {"t": {"const": "pair_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected"]}}
+      "properties": {"t": {"const": "pair_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected", "attestation", "attestation_unavailable", "platform_unsupported"]}}
     },
     "error": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "code", "message"],

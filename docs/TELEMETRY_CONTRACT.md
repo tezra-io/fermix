@@ -587,14 +587,22 @@ of their own: the row is a companion write, logged on failure.
 Pairing decisions and push deliveries are **point events with no agent
 session** (like plugin dist): a pairing resolves in `PairManager` and a push
 fires after the turn already closed. Both go through `FermixChannels.Telemetry`
-— `emit_pair(channel, status, duration_us)` with
-`status ∈ approved | denied | expired | cancelled | device_disconnected`
+— `emit_pair(channel, status, duration_us, facts)` with
+`status ∈ approved | denied | expired | cancelled | device_disconnected |
+attestation | attestation_unavailable | platform_unsupported`
 (`cancelled`: the window closed before a decision, by an owner's cancel, a
 dropped `fermix pair` connection or a failed setup; `device_disconnected`: the
-phone was gone when the owner approved), and
+phone was gone when the owner approved; the last three: the phone's key
+attestation was refused, Google's status list could not be used, or the phone
+is not Android, each ending the window before the owner was asked), and
 `emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
-(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only).
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). The
+pair event's `facts` add `platform` (`android | ios`), `attestation`
+(`verified | refused | unavailable`) and `signer_role` (`development |
+release`, set only when verified), each `nil` when no phone got that far;
+never a chain, a key or a name. A refusal's internal check and detail go to
+the daemon log (`mobile pairing refused: …`), not the event.
 `expired` is the window's own end, which the phone and the management wire
 both call `timeout`. Failed handshakes refuse only the address they came from
 and never end a window, so they have no pair status. Never hand-roll the

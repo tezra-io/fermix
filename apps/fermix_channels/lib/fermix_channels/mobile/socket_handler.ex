@@ -16,6 +16,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
+  alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -255,6 +256,8 @@ defmodule FermixChannels.Mobile.SocketHandler do
     |> Map.put_new(:find_device, &DeviceStore.find_by_noise_pk/2)
     |> Map.put_new(:update_device, &DeviceStore.update/3)
     |> Map.put_new(:current_pair, &PairManager.current/1)
+    |> Map.put_new(:verify_pair, &verify_pair/3)
+    |> Map.put_new(:refuse_pair, &PairManager.refuse/3)
     |> Map.put_new(:submit_pair, &PairManager.submit_request/3)
     |> Map.put_new(:record_pair_failure, &PairManager.record_failure/2)
     |> Map.put_new(:attach_socket, &DeviceRegistry.attach/4)
@@ -354,7 +357,8 @@ defmodule FermixChannels.Mobile.SocketHandler do
        noise: noise,
        pairing_session_id: pairing.session_id,
        pairing_remote_static: remote_static,
-       pairing_sas: sas
+       pairing_sas: sas,
+       pairing_challenge: Attestation.challenge(pairing.secret)
      })
      |> scrub_identity_source()
      |> mark_session_start()}
@@ -385,10 +389,7 @@ defmodule FermixChannels.Mobile.SocketHandler do
   defp handle_pair_request(ciphertext, state) do
     with {:ok, event, state} <- decrypt_event(ciphertext, state),
          {:ok, state} <- consume_event(event, state) do
-      case submit_pair_request(event, state) do
-        :ok -> {:ok, stop_handshake_deadline(%{state | phase: :await_pair_decision})}
-        {:error, reason} -> pairing_error(reason, state)
-      end
+      pair_request_reply(event, state)
     else
       {:error, {:unsupported_protocol_version, direction, version}, state} ->
         refuse_version(direction, version, state)
@@ -652,7 +653,66 @@ defmodule FermixChannels.Mobile.SocketHandler do
     end
   end
 
-  defp submit_pair_request(%{type: "pair_request", payload: payload}, state) do
+  # M51 D3: the phone's key attestation is verified before the owner hears of
+  # the phone. A refusal ends the session: the pairing manager closes the
+  # window as failed and the phone is told why.
+  defp pair_request_reply(%{type: "pair_request", payload: payload} = event, state) do
+    evidence = attestation_evidence(event, state)
+
+    case state.verify_pair.(state.pair_manager, state.pairing_session_id, evidence) do
+      {:ok, facts} -> submit_pair_request(payload, facts, state)
+      {:error, %{reason: _reason} = refusal} -> refuse_pair_request(refusal, payload, state)
+      {:error, reason} -> pairing_error(reason, state)
+    end
+  end
+
+  defp pair_request_reply(_event, state), do: pairing_error(:pair_request_required, state)
+
+  defp attestation_evidence(%{payload: payload, bytes: chain}, state) do
+    %{
+      platform: payload["platform"],
+      kind: payload["attestation"]["kind"],
+      cert_lengths: payload["attestation"]["cert_lengths"],
+      chain: chain,
+      noise_pk: state.pairing_remote_static,
+      challenge: state.pairing_challenge
+    }
+  end
+
+  # The pinned roots and signers were embedded when the verifier compiled;
+  # Google's status list comes from the pairing manager for each pairing.
+  defp verify_pair(manager, session_id, evidence) do
+    with {:ok, statuses} <- pairing_statuses(manager, session_id) do
+      trust = Map.merge(Attestation.signers(), %{roots: Attestation.roots(), statuses: statuses})
+      Attestation.verify(evidence, trust, DateTime.utc_now())
+    end
+  end
+
+  # A status list that cannot be used is the verifier's to refuse; a window
+  # that closed meanwhile ends this request.
+  defp pairing_statuses(manager, session_id) do
+    case PairManager.attestation_statuses(manager, session_id) do
+      {:error, :session_not_found} -> {:error, :session_not_found}
+      statuses -> {:ok, statuses}
+    end
+  end
+
+  defp refuse_pair_request(%{reason: reason, check: check, detail: detail}, payload, state) do
+    Logger.warning("mobile pairing refused: #{reason} (#{check}: #{inspect(detail)})")
+    refused = %{reason: reason, check: check, platform: payload["platform"]}
+
+    case state.refuse_pair.(state.pair_manager, state.pairing_session_id, refused) do
+      :ok ->
+        payload = %{"reason" => Atom.to_string(reason)}
+        state = %{state | pair_failure_recorded?: true}
+        send_event_then_stop("pair_denied", payload, reason, state)
+
+      {:error, failure} ->
+        pairing_error(failure, state)
+    end
+  end
+
+  defp submit_pair_request(payload, facts, state) do
     attrs = %{
       name: payload["device_name"],
       model: payload["model"],
@@ -660,16 +720,15 @@ defmodule FermixChannels.Mobile.SocketHandler do
       platform: payload["platform"],
       noise_pk: state.pairing_remote_static,
       sas: state.pairing_sas,
+      attestation: facts,
       socket_pid: self()
     }
 
     case state.submit_pair.(state.pair_manager, state.pairing_session_id, attrs) do
-      {:ok, _request} -> :ok
-      {:error, reason} -> {:error, reason}
+      {:ok, _request} -> {:ok, stop_handshake_deadline(%{state | phase: :await_pair_decision})}
+      {:error, reason} -> pairing_error(reason, state)
     end
   end
-
-  defp submit_pair_request(_event, _state), do: {:error, :pair_request_required}
 
   # The push salt is the device's own, for the key its notifications are
   # encrypted under (see *Push notifications* in the protocol).
