@@ -8,17 +8,17 @@ An owner-only channel from the owner's phone to their own Fermix daemon. It is n
 
 On by default: an absent `[fermix_channels.mobile]` section, or one without `enabled`, means enabled, and `enabled = false` keeps it off. An install that saved its settings while the channel was off by default carries that `enabled = false` line, so it stays off until the line changes. The daemon publishes two management surfaces:
 
-- the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns` (the "Announce on the local network" row, off by default). A write lands in `config.toml` at once, but the listener starts or stops only at a restart; until then the channel keeps doing what it did at boot (turned on, it reports not started; turned off, it keeps serving, pairing and revoking included).
+- the `channels.mobile` settings section: `enabled`, `port`, `bind` (`0.0.0.0` for every network, or one literal IP such as the Tailscale address; anything else is refused by name) and `advertise_mdns` (the "Announce on the local network" row, off by default). A write lands in `config.toml` at once. `enabled` is live: turning it on starts the channel and turning it off stops it, with no restart (turning it off drops connected phones and closes an open pairing code; paired phones stay paired). `port`, `bind` and `advertise_mdns` are read when the channel starts, so a change to them takes a restart.
 - the `mobile.*` methods: `mobile.status`, the pairing session (`mobile.pair.start`, `mobile.pair.get`, `mobile.pair.decide`, `mobile.pair.cancel`) and paired devices (`mobile.devices.list`, `mobile.devices.revoke`).
 
-The Mac app's Phone row in its Channels settings is built on them: it turns the channel on (restarting Fermix after saying so) and pairs a phone in one place. The Linux app has no Phone pane yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host whose `config.toml` says `enabled = false`:
+The Mac app's Phone row in its Channels settings is built on them: it turns the channel on and pairs a phone in one place. The Linux app has no Phone pane yet. On an app-managed Mac, enabling and pairing belong to the app, never the CLI. On a dev or Linux host, `fermix pair` finds a channel that is off, asks, turns it on and pairs, in one command. To turn it on without pairing, run `fermix settings set channels.mobile mobile_enabled=true`, or set
 
 ```toml
 [fermix_channels.mobile]
 enabled = true
 ```
 
-then `fermix restart`, and pair with `fermix pair`. The terminal wizard and browser setup have no mobile step or flag.
+in `config.toml` and run `fermix settings reload`; neither needs a restart. The terminal wizard and browser setup have no mobile step or flag.
 
 **Only the owner pairs or forgets a phone.** Starting, deciding or cancelling a pairing and revoking a phone are taken only from a process the daemon places as the owner's own (the app, or a command typed in a terminal). One Fermix started itself (an agent's shell command, a coding run, a scheduled job), a detached one, or one it cannot place is refused with "Only the owner can pair or forget a phone; run this from your own terminal." So never run `fermix pair` or `fermix devices revoke` through `shell`; tell the owner to. Reading the status, the session and the phone list stays open.
 

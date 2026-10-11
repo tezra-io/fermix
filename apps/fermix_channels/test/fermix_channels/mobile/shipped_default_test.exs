@@ -83,6 +83,7 @@ defmodule FermixChannels.Mobile.ShippedDefaultTest do
 
     assert mobile_enabled?()
     assert {MobileSupervisor, []} in ChannelRegistry.transport_children(@ready)
+    assert boot_switch().()
   end
 
   test "an explicit enabled = false keeps the listener off", %{home: home} do
@@ -91,7 +92,10 @@ defmodule FermixChannels.Mobile.ShippedDefaultTest do
     assert :ok = ConfigStore.bootstrap_runtime_config(supervised: false)
 
     refute mobile_enabled?()
-    refute Enum.any?(ChannelRegistry.transport_children(@ready), &mobile_child?/1)
+    # The subtree stays registered so the switch can turn it on live; its own
+    # start reads the switch and starts nothing while it is off.
+    assert {MobileSupervisor, []} in ChannelRegistry.transport_children(@ready)
+    refute boot_switch().()
   end
 
   test "a home with no mobile section hydrates with the announcement off", %{home: home} do
@@ -117,7 +121,10 @@ defmodule FermixChannels.Mobile.ShippedDefaultTest do
 
   defp mobile_config, do: Application.get_env(:fermix_channels, :mobile, [])
 
-  defp mobile_child?({child, _opts}), do: child == MobileSupervisor
+  defp boot_switch do
+    {MobileSupervisor, opts} = MobileSupervisor.boot_child("shipped-default-epoch")
+    Keyword.fetch!(opts, :switch)
+  end
 
   # The phone block a fresh BEAM of `env` boots with, straight from the shipped config.
   defp shipped_mobile_default(env) do

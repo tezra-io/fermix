@@ -51,6 +51,14 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the model could read. Doctor shows the line as "compact at 200000
   tokens". Claude Haiku 4.5, whose window is 200,000, still compacts at the
   threshold.
+- **Turning the phone channel on or off takes effect at once.** The
+  Phone companion switch used to need a restart. Turning it on now starts
+  the channel and turning it off stops it, while everything else keeps
+  running: turning it off drops connected phones and closes an open pairing
+  code, and paired phones stay paired. Changing the port, the listen address
+  or the local-network announcement still needs a restart. `fermix pair` on
+  a host where the channel is off now asks to turn it on, then shows the
+  pairing code, in one command.
 
 ### Fixed
 

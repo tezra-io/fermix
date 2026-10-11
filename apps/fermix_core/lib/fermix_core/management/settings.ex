@@ -19,6 +19,7 @@ defmodule FermixCore.Management.Settings do
 
   alias FermixCore.Auth.Redaction
   alias FermixCore.Browser.Config, as: BrowserConfig
+  alias FermixCore.Management.Mobile, as: PhoneChannel
   alias FermixCore.Management.Settings.AnswerMap
   alias FermixCore.Management.Settings.Assistant
   alias FermixCore.Management.Settings.Browser
@@ -27,6 +28,7 @@ defmodule FermixCore.Management.Settings do
   alias FermixCore.Management.Settings.Providers
   alias FermixCore.Management.Settings.Row
   alias FermixCore.Management.Settings.Secrets
+  alias FermixCore.Management.Settings.Source
   alias FermixCore.Management.Settings.Tools
   alias FermixCore.Management.Settings.Voice
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -80,7 +82,10 @@ defmodule FermixCore.Management.Settings do
   Applies changed keys to one section.
 
   Every value is checked against the row it names before anything is written, so
-  a refused key never leaves half a change behind.
+  a refused key never leaves half a change behind. The phone channel's switch is
+  the one setting applied the moment it is written: a write that moves it starts
+  or stops the channel (M51 §5.5), and `:mobile_switch` replaces that call in a
+  test.
   """
   @spec apply(String.t(), map(), keyword()) :: {:ok, map()} | {:error, write_error()}
   def apply(section, values, opts \\ [])
@@ -88,7 +93,7 @@ defmodule FermixCore.Management.Settings do
     with {:ok, module} <- fetch_family(section, opts),
          rows = module.rows(section, snapshot(opts)),
          {:ok, answers} <- answers(section, rows, values) do
-      write(section, answers, Map.keys(values))
+      write(section, answers, Map.keys(values), opts)
     end
   end
 
@@ -103,7 +108,8 @@ defmodule FermixCore.Management.Settings do
   write family allowed while an external change stands. The third step is what
   clears the state: applying a snapshot writes no file and records nothing, so
   without re-recording the baseline the one offered remedy would leave every
-  write refusing.
+  write refusing. A reload that moves the phone channel's switch applies it, as a
+  write does, and logs a channel that did not follow it.
   """
   @spec reload(keyword()) :: {:ok, map()} | {:error, write_error()}
   def reload(opts \\ []) when is_list(opts) do
@@ -136,8 +142,12 @@ defmodule FermixCore.Management.Settings do
   end
 
   defp apply_reload(persisted, opts) do
+    before = ConfigStore.current_snapshot()
     :ok = ConfigStore.apply_snapshot(persisted, Keyword.take(opts, [:supervised]))
     :ok = RestartState.record_persisted_baseline()
+
+    for sentence <- phone_switch(before, ConfigStore.current_snapshot(), opts),
+        do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
      %{
@@ -184,11 +194,11 @@ defmodule FermixCore.Management.Settings do
   # nowhere wider: an exception out of this call is a statement about the value
   # that was sent, and letting it through would answer `internal_error` for what
   # is an ordinary refusal.
-  defp write(section, answers, keys) do
+  defp write(section, answers, keys, opts) do
     before = ConfigStore.current_snapshot()
 
     case guarded_commit(AnswerMap.writer(section), answers, field(section, keys)) do
-      {:ok, _report} -> {:ok, applied(keys, before)}
+      {:ok, _report} -> {:ok, applied(keys, before, opts)}
       {:error, reason} -> {:error, write_error(section, reason)}
     end
   end
@@ -250,17 +260,37 @@ defmodule FermixCore.Management.Settings do
     {:invalid_params, section, "The change could not be saved. See the daemon log."}
   end
 
-  defp applied(keys, before) do
+  defp applied(keys, before, opts) do
     current = ConfigStore.current_snapshot()
     switch = engine_switch(before, current)
+    phone = phone_switch(before, current, opts)
 
     %{
       "applied" => keys ++ derived_keys(keys, switch),
       "restart" => restart(),
       "readiness" => readiness(),
-      "side_effects" => side_effects(before, current, switch)
+      "side_effects" => side_effects(before, current, switch) ++ phone
     }
   end
+
+  # The phone channel's switch is live (M51 §5.5): a write or a reload that moves
+  # it starts or stops the channel at once, and a channel that did not follow it
+  # is said in the daemon's words. Nothing is called when it did not move.
+  defp phone_switch(before, current, opts) do
+    now = phone_on?(current)
+
+    if phone_on?(before) == now do
+      []
+    else
+      case Keyword.get(opts, :mobile_switch, &PhoneChannel.apply_enabled/1).(now) do
+        :ok -> []
+        {:error, sentence} when is_binary(sentence) -> [sentence]
+      end
+    end
+  end
+
+  defp phone_on?(snapshot),
+    do: snapshot |> Source.channel(:mobile) |> Keyword.get(:enabled, false) == true
 
   # The voice engine before and after the write, or `nil` when it did not move.
   # It is the one write in this daemon that rewrites keys of its own section, so

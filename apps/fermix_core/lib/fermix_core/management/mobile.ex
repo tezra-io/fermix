@@ -56,6 +56,10 @@ defmodule FermixCore.Management.Mobile do
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
+  # What a settings write says when the channel did not follow its switch.
+  @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
+  @switch_not_ready_sentence "The phone channel starts the next time Fermix starts."
+  @switch_failed_sentence "The phone channel's switch could not be applied. See the daemon log."
 
   @type refusal ::
           {:busy, String.t()}
@@ -79,7 +83,10 @@ defmodule FermixCore.Management.Mobile do
       @unchecked_attestation_sentence,
       @no_request_sentence,
       @unknown_device_sentence,
-      @owner_only_sentence
+      @owner_only_sentence,
+      @switch_not_started_sentence,
+      @switch_not_ready_sentence,
+      @switch_failed_sentence
     ]
   end
 
@@ -96,6 +103,31 @@ defmodule FermixCore.Management.Mobile do
   """
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_only_sentence
+
+  @doc """
+  Starts or stops the phone channel while the daemon runs, once settings have
+  written its switch (M51 §5.5). `:ok` when the channel followed the switch;
+  otherwise the sentence the settings write publishes as a side effect. A
+  provider failure is logged here and answered with a fixed sentence, because
+  its reason names the channels app's internals.
+  """
+  @spec apply_enabled(boolean(), keyword()) :: :ok | {:error, String.t()}
+  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts) do
+    case call(opts, :apply_enabled, [enabled?]) do
+      {:ok, {:ok, state}} when state in [:started, :stopped] -> :ok
+      {:ok, {:ok, :not_started}} -> {:error, @switch_not_started_sentence}
+      {:ok, {:error, :not_ready}} -> {:error, @switch_not_ready_sentence}
+      other -> switch_failed(enabled?, other)
+    end
+  end
+
+  defp switch_failed(enabled?, reply) do
+    Logger.error(
+      "management mobile: apply_enabled(#{enabled?}) answered #{Redaction.format(reply)}"
+    )
+
+    {:error, @switch_failed_sentence}
+  end
 
   @doc "The phone channel as it stands. Answers with the channel off, too."
   @spec status(keyword()) :: result()

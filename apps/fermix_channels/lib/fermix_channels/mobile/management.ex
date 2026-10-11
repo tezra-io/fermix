@@ -15,8 +15,9 @@ defmodule FermixChannels.Mobile.Management do
   `status/1`) answer atom-keyed facts; `FermixCore.Management.Mobile` turns
   them into wire JSON and owns every sentence.
 
-  Settings are boot-bound: the enable switch reaches the application env at
-  once, but the subtree starts and stops only at boot. So every verb gates on
+  The enable switch is live: once core has written it, `apply_enabled/2` starts
+  or stops the subtree at once (M51 §5.5). The port, the address and the
+  announcement are still read when the subtree starts. Every verb gates on
   whether the subtree is running, never on the switch alone, and the paired
   devices, which are a file, are listed and revoked from that file while it is
   not running.
@@ -377,6 +378,16 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  @doc """
+  Turns the phone channel on or off while the daemon runs, after core has
+  written the switch (`FermixCore.Management.Settings`). Answers what the
+  subtree did: see `FermixChannels.Mobile.Supervisor.switch/2`.
+  """
+  @spec apply_enabled(boolean(), keyword()) ::
+          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
+  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts),
+    do: MobileSupervisor.switch(enabled?, Keyword.take(opts, [:parent, :device_store]))
+
   @doc "Fail-closed health for the runtime mobile channel adapter."
   @spec health() :: {:ok, map()} | {:error, term()}
   def health, do: health([])
@@ -405,10 +416,10 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
-  # The pairing verbs' gate: a running subtree serves whatever the switch says
-  # now, because settings are boot-bound. With nothing running the refusal is
-  # named before any process call: the switch off, a surface refused this
-  # boot, or one turned on that has not started yet. Without the gate these
+  # The pairing verbs' gate: a running subtree serves, and the switch decides
+  # whether it runs. With nothing running the refusal is named before any
+  # process call: the switch off, a surface refused, or one turned on that
+  # could not start (setup was not ready at boot). Without the gate these
   # surfaced as raw `{:dependency_exit, _, {:noproc, _}}` tuples.
   defp require_serving(opts) do
     cond do

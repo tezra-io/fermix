@@ -65,10 +65,11 @@ defmodule Fermix.CLI.PairCommandTest do
     assert stdout =~ "pairing denied"
   end
 
-  # Nothing was opened, so nothing is polled or cancelled. The switch still
-  # lives in `config.toml` on a host managed without the desktop app, so the
-  # daemon's sentence is followed by where to flip it.
-  test "a channel that is off prints the daemon's sentence and the config switch" do
+  # Pairing is one step (M51 §2.1): the switch is live, so on a host managed
+  # without the desktop app the command offers to turn the channel on. Declined,
+  # or with no answer, nothing is written, nothing is polled or cancelled, and
+  # the command names the one command that turns it on.
+  test "a channel that is off and not turned on names the command that turns it on" do
     script = %{
       "mobile.pair.start" => [failed_start("unavailable", "The mobile channel is turned off.")]
     }
@@ -76,15 +77,80 @@ defmodule Fermix.CLI.PairCommandTest do
     {status, stdout, stderr} = run_pair(script, "")
 
     assert status == 1
-    assert stdout == ""
+    assert stdout =~ "Turn the phone channel on now? [y/N]"
     assert stderr =~ "fermix pair: The mobile channel is turned off."
-    assert stderr =~ "[fermix_channels.mobile]"
-    assert stderr =~ "enabled = true"
-    assert stderr =~ "config.toml"
-    assert stderr =~ "fermix restart"
-    refute stderr =~ "fermix setup"
+    assert stderr =~ "fermix settings set channels.mobile mobile_enabled=true"
+    refute stderr =~ "fermix restart"
+    refute_received {:call, "settings.apply", _params, _opts}
     refute_received {:call, "mobile.pair.get", _params, _opts}
     refute_received {:call, "mobile.pair.cancel", _params, _opts}
+  end
+
+  test "a channel that is off is turned on when the owner says yes, and pairing goes on" do
+    script = %{
+      "mobile.pair.start" => [
+        failed_start("unavailable", "The mobile channel is turned off."),
+        started(120_000)
+      ],
+      "settings.apply" => [applied([])],
+      "mobile.pair.get" => [{:ok, view("awaiting_decision", ttl_ms: 90_000, request: request())}],
+      "mobile.pair.decide" => [approved()]
+    }
+
+    {status, stdout, _stderr} = run_pair(script, "y\ny\n")
+
+    assert status == 0
+
+    assert_received {:call, "settings.apply",
+                     %{"section" => "channels.mobile", "values" => %{"mobile_enabled" => true}},
+                     _opts}
+
+    assert stdout =~ "Turned the phone channel on."
+    assert stdout =~ "██"
+    assert_received {:call, "mobile.pair.decide", %{"approved" => true}, _opts}
+  end
+
+  # Asked once: a channel that did not start after the switch is reported in the
+  # daemon's words, and the command neither asks again nor writes again.
+  test "a switch the channel did not follow is said, and nothing is asked twice" do
+    not_started = "The phone channel is on but could not start. See the daemon log."
+    surface = "The mobile channel could not start this boot. See the daemon log."
+
+    script = %{
+      "mobile.pair.start" => [
+        failed_start("unavailable", "The mobile channel is turned off."),
+        failed_start("unavailable", surface)
+      ],
+      "settings.apply" => [applied([not_started])]
+    }
+
+    {status, stdout, stderr} = run_pair(script, "y\ny\n")
+
+    assert status == 1
+    assert stderr =~ "fermix pair: #{not_started}"
+    assert stderr =~ "fermix pair: #{surface}"
+    refute stdout =~ "Turned the phone channel on."
+    assert length(Regex.scan(~r/Turn the phone channel on now\?/, stdout)) == 1
+    assert_received {:call, "settings.apply", _params, _opts}
+    refute_received {:call, "settings.apply", _params, _opts}
+  end
+
+  test "a refused settings write stops before a second window" do
+    refusal =
+      {:management_error, "invalid_params", "refused",
+       %{"sentence" => "The change could not be saved. See the daemon log."}}
+
+    script = %{
+      "mobile.pair.start" => [failed_start("unavailable", "The mobile channel is turned off.")],
+      "settings.apply" => [{:error, refusal}]
+    }
+
+    {status, _stdout, stderr} = run_pair(script, "y\n")
+
+    assert status == 1
+    assert stderr =~ "fermix pair: The change could not be saved. See the daemon log."
+    assert_received {:call, "mobile.pair.start", _params, _opts}
+    refute_received {:call, "mobile.pair.start", _params, _opts}
   end
 
   # An app-managed home's switch is the app's, never config.toml or the CLI:
@@ -103,6 +169,7 @@ defmodule Fermix.CLI.PairCommandTest do
     assert stderr =~ "Phone"
     refute stderr =~ "config.toml"
     refute stderr =~ "fermix restart"
+    refute_received {:call, "settings.apply", _params, _opts}
     refute_received {:call, "mobile.pair.get", _params, _opts}
   end
 
@@ -350,6 +417,16 @@ defmodule Fermix.CLI.PairCommandTest do
   end
 
   defp started(ttl_ms), do: {:ok, Map.put(view("awaiting_scan", ttl_ms: ttl_ms), "uri", @uri)}
+
+  defp applied(side_effects) do
+    {:ok,
+     %{
+       "applied" => ["mobile_enabled"],
+       "restart" => %{"required" => false, "reasons" => []},
+       "readiness" => %{"status" => "ready", "failure_count" => 0},
+       "side_effects" => side_effects
+     }}
+  end
 
   defp approved do
     {:ok,

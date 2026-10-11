@@ -315,12 +315,13 @@ Notes that the shapes alone do not carry:
 - **`mobile.status`, `mobile.devices.list` and `mobile.devices.revoke` answer
   with the channel off**, so a pane can always read the state and the owner
   can always forget a phone: while the channel is not running the paired
-  phones are read from, and forgotten in, the paired-device file. Every row
-  of the channel's settings is boot-bound: the switch reaches the daemon at
-  once but the channel starts and stops only at boot, so `enabled` is the
-  switch and `started` whether the channel runs, and the two differ until a
-  restart. Every verb goes by `started`, never by the switch: a channel
-  switched off keeps serving, pairing and revoking until the restart.
+  phones are read from, and forgotten in, the paired-device file. The switch
+  is live: a `settings.apply` or a reload that moves it starts or stops the
+  channel at once, and a write says in `side_effects` when the channel did not
+  follow it. `enabled` is the switch and `started` whether the channel runs;
+  they differ when the channel could not start (`refused`), or when setup was
+  not complete at boot, until the next start. Every verb goes by `started`,
+  never by the switch.
   `refused` is true when the channel could not start this boot, and
   `refusal` names the class: `memory_disabled` (the conversation lives in the
   memory store, which is off), `identity`, `attachment_manifest` or
@@ -357,8 +358,9 @@ Notes that the shapes alone do not carry:
   sentence is what tells this refusal from a channel that is not running.
   Reading a session and the status stay open to every caller.
 - **`channels.mobile` is the phone channel's settings section**: the enable
-  switch, the port, the address it listens on and the local-network
-  announcement, every row boot-bound. It is a section of its own rather than a
+  switch, applied the moment it is written (its row's `restart` is false), and
+  the port, the address it listens on and the local-network announcement,
+  which are read when the channel starts and are boot-bound. It is a section of its own rather than a
   channels-inventory entry, because the phone channel has no credential.
   `setup.state.get` carries a `mobile` channel row after the inventory
   channels, always `configured`, with mode `listener` while it is enabled.

@@ -24,6 +24,7 @@ defmodule FermixCore.Management.MobileTest do
     def pair_cancel(_session_id, opts), do: answer(opts)
     def devices_list(opts), do: answer(opts)
     def devices_revoke(_device_id, opts), do: answer(opts)
+    def apply_enabled(_enabled?, opts), do: answer(opts)
 
     defp answer(opts) do
       case Keyword.fetch!(opts, :reply) do
@@ -40,6 +41,40 @@ defmodule FermixCore.Management.MobileTest do
   @device_keys ~w(boot_state created_at device_id last_seen model name platform push_registered
                   signer_role)
   @unavailable {:error, {:unavailable, "mobile"}}
+
+  # The switch is live (M51 §5.5): settings call this once the switch is
+  # written, and publish its sentence when the channel did not follow it.
+  describe "apply_enabled/2" do
+    test "a channel that started or stopped answers ok" do
+      assert Mobile.apply_enabled(true, fake({:ok, :started})) == :ok
+      assert Mobile.apply_enabled(false, fake({:ok, :stopped})) == :ok
+    end
+
+    test "a channel that did not follow its switch answers the daemon's sentence" do
+      assert {:error, not_started} = Mobile.apply_enabled(true, fake({:ok, :not_started}))
+      assert not_started == "The phone channel is on but could not start. See the daemon log."
+
+      assert {:error, not_ready} = Mobile.apply_enabled(true, fake({:error, :not_ready}))
+      assert not_ready == "The phone channel starts the next time Fermix starts."
+
+      for sentence <- [not_started, not_ready], do: assert(sentence in Mobile.sentences())
+    end
+
+    test "a failure is logged and answered with a fixed sentence" do
+      log =
+        capture_log(fn ->
+          assert {:error, sentence} = Mobile.apply_enabled(true, fake({:error, {:boom, "/x"}}))
+
+          assert sentence ==
+                   "The phone channel's switch could not be applied. See the daemon log."
+
+          assert sentence in Mobile.sentences()
+        end)
+
+      assert log =~ "apply_enabled"
+      assert {:error, _sentence} = Mobile.apply_enabled(true, provider: nil)
+    end
+  end
 
   describe "the session view" do
     test "every state renders every field, null where it does not apply" do
@@ -456,7 +491,10 @@ defmodule FermixCore.Management.MobileTest do
              "Fermix does not check a phone's secure hardware yet.",
              "No phone is waiting for a decision.",
              "No paired phone has that id.",
-             "Only the owner can pair or forget a phone; run this from your own terminal."
+             "Only the owner can pair or forget a phone; run this from your own terminal.",
+             "The phone channel is on but could not start. See the daemon log.",
+             "The phone channel starts the next time Fermix starts.",
+             "The phone channel's switch could not be applied. See the daemon log."
            ]
   end
 

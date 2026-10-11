@@ -5,6 +5,14 @@ defmodule FermixChannels.Mobile.Supervisor do
   Durable and presence state starts before pairing, media, and the listener.
   The listener itself may be dormant until the first pairing ceremony creates
   the gateway identity and asks it to activate.
+
+  The phone channel's switch is live (M51 §5.5, owner 2026-10-10). The
+  channels application registers this subtree for the whole boot, on or off,
+  with the boot's request epoch (`boot_child/1`); `start_link/1` reads the
+  switch and starts nothing while it is off, and `switch/2` starts or stops the
+  registered child when the switch changes. Restarting the registered child
+  keeps the epoch, so a phone request running under this boot is never taken
+  for one an earlier boot left behind.
   """
 
   use Supervisor
@@ -54,6 +62,10 @@ defmodule FermixChannels.Mobile.Supervisor do
   """
   @spec start_link(keyword()) :: Supervisor.on_start()
   def start_link(opts \\ []) when is_list(opts) do
+    if switched_on?(opts), do: admit(opts), else: :ignore
+  end
+
+  defp admit(opts) do
     root = root(opts)
     store = names(opts).device_store
 
@@ -62,6 +74,69 @@ defmodule FermixChannels.Mobile.Supervisor do
       {:error, reason} -> refuse(root, store, reason)
     end
   end
+
+  # `:switch` reads the channel's switch at each start. The channels
+  # application passes the running config's (`boot_child/1`); a subtree started
+  # without one, as a test starts it, always starts.
+  defp switched_on?(opts) do
+    case Keyword.get(opts, :switch) do
+      nil -> true
+      switch when is_function(switch, 0) -> switch.() == true
+      other -> raise ArgumentError, ":switch must be a zero-arity function, got #{inspect(other)}"
+    end
+  end
+
+  @doc """
+  The child the channels application registers for the whole boot: this
+  subtree with the boot's request epoch, and the running config's switch.
+  """
+  @spec boot_child(String.t()) :: {module(), keyword()}
+  def boot_child(boot_epoch) when is_binary(boot_epoch) and boot_epoch != "" do
+    {__MODULE__, boot_epoch: boot_epoch, switch: &switch_on?/0}
+  end
+
+  @doc "Whether `[fermix_channels.mobile] enabled` is on in the running config."
+  @spec switch_on?() :: boolean()
+  def switch_on? do
+    :fermix_channels |> Application.get_env(:mobile, []) |> Keyword.get(:enabled, false) == true
+  end
+
+  @doc """
+  Starts or stops the registered subtree while the daemon runs.
+
+  On: the registered child starts again with its boot arguments, so it reads
+  the switch and keeps the boot's epoch. `:not_started` is a start that came
+  back empty: the switch still reads off, or the admission check refused the
+  subtree and recorded why (`refusal/1`). `{:error, :not_ready}` is a boot that
+  registered no subtree, because setup was not ready. Off: the child stops and
+  stays registered, and a refusal recorded for it is forgotten, because a
+  channel turned off has nothing to refuse. `:parent` and `:device_store`
+  replace the channels supervisor and the trust store in a test.
+  """
+  @spec switch(boolean(), keyword()) ::
+          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
+  def switch(on?, opts \\ [])
+
+  def switch(true, opts) when is_list(opts) do
+    case Supervisor.restart_child(parent(opts), __MODULE__) do
+      {:ok, pid} when is_pid(pid) -> {:ok, :started}
+      {:ok, :undefined} -> {:ok, :not_started}
+      {:error, :running} -> {:ok, :started}
+      {:error, :not_found} -> {:error, :not_ready}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def switch(false, opts) when is_list(opts) do
+    case Supervisor.terminate_child(parent(opts), __MODULE__) do
+      :ok -> forget_refusal(Keyword.get(opts, :device_store, DeviceStore))
+      {:error, :not_found} -> :ok
+    end
+
+    {:ok, :stopped}
+  end
+
+  defp parent(opts), do: Keyword.get(opts, :parent, FermixChannels.Supervisor)
 
   defp admission_check(opts, root) do
     with {:ok, _devices} <- DeviceStore.list(root: root),

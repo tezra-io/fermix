@@ -821,6 +821,21 @@ defmodule FermixChannels.Mobile.ManagementTest do
     end
   end
 
+  # The switch is live (M51 §5.5): core calls this after it writes the switch.
+  describe "apply_enabled/2" do
+    test "answers what the subtree's switch did" do
+      parent =
+        start_supervised!(%{
+          id: :apply_enabled_parent,
+          start: {Supervisor, :start_link, [[], [strategy: :one_for_one]]},
+          type: :supervisor
+        })
+
+      assert {:error, :not_ready} = Management.apply_enabled(true, parent: parent)
+      assert {:ok, :stopped} = Management.apply_enabled(false, parent: parent)
+    end
+  end
+
   describe "status/1" do
     test "with the channel off it answers from config alone, without a process call" do
       opts =
