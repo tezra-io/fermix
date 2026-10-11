@@ -23,7 +23,6 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Router
   alias FermixCore.Management.Settings
   alias FermixCore.Management.Settings.Row
-  alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Readiness
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SafeRm
@@ -387,6 +386,11 @@ defmodule FermixCore.Management.ProtocolContractTest do
   # The export is the Mac's inventory: `channels.imessage` exists only there
   # (M54 §12), and the app that vendors this contract is a Mac app. The host is
   # named rather than inherited so every CI leg compares the same list.
+  #
+  # Provider sections are the exception: there is one per descriptor, and which
+  # providers exist is data every app reads from the daemon, not wire shape. The
+  # golden illustrates some of them, so a provider added to the engine moves no
+  # export an app vendors.
   test "the golden section inventory is the one the daemon publishes" do
     published = Enum.map(Settings.sections(macos?: true), & &1.id)
 
@@ -396,32 +400,31 @@ defmodule FermixCore.Management.ProtocolContractTest do
       |> Map.fetch!("sections")
       |> Enum.map(& &1["id"])
 
-    assert fixture == published
+    {fixture_providers, fixture_rest} = Enum.split_with(fixture, &provider_section?/1)
+    {published_providers, published_rest} = Enum.split_with(published, &provider_section?/1)
+
+    assert fixture_rest == published_rest
+    assert fixture_providers -- published_providers == []
   end
 
-  # A provider section's Model row offers the catalog, and `default_model` is
-  # the model in force, which for an unconfigured provider is the catalog's
-  # default. The two are one list, so a golden whose options lag the catalog
-  # holds a value none of its options can show: the app's choice control drew
-  # a blank popup for `gpt-6-astra` while the options still began at
-  # `gpt-5.6-sol`.
-  test "every golden provider section offers the catalog's models and holds one of them" do
+  # The goldens illustrate the wire, not the catalog. A provider section's Model
+  # row shows example options, and the models a daemon offers are data every app
+  # reads at runtime (`settings_test.exs` pins the live row to `ModelCatalog`),
+  # so a model added to the catalog moves no export an app vendors. What a golden
+  # must still do is hold a value one of its own options can show: the app's
+  # choice control drew a blank popup for `gpt-6-astra` while the golden's
+  # options began at `gpt-5.6-sol`.
+  test "every golden provider section holds one of its own models" do
     for fixture <- fixtures(@successes),
         String.starts_with?(fixture["name"], "settings_get_providers_") do
       result = fixture["response"]["result"]
-      "providers." <> provider = result["id"]
       row = Enum.find(result["rows"], &(&1["key"] == "default_model"))
 
-      expected =
-        provider
-        |> String.to_existing_atom()
-        |> ModelCatalog.models_for()
-        |> Enum.map(&Row.option(&1.id, &1.label))
-
-      assert row["options"] == expected, "#{result["id"]} offers models the catalog does not"
       assert_holds_offered_model(row, result["id"])
     end
   end
+
+  defp provider_section?(id), do: String.starts_with?(id, "providers.")
 
   # The voice section's rows depend on the engine, and the section's first
   # golden runs the default one, so the rows only Live publishes (its backend

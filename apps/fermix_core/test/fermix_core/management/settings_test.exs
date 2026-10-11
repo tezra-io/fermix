@@ -311,6 +311,22 @@ defmodule FermixCore.Management.SettingsTest do
       end
     end
 
+    # Every app draws its model picker from this row, and the goldens only
+    # illustrate it, so this is where the catalog and the wire are held to one
+    # list: a model added to `ModelCatalog` reaches every app with no change
+    # there.
+    test "a model row offers exactly the catalog" do
+      for descriptor <- Descriptor.all() do
+        expected =
+          descriptor.id
+          |> ModelCatalog.models_for()
+          |> Enum.map(&Row.option(&1.id, &1.label))
+
+        assert row("providers.#{descriptor.id}", "default_model")["options"] == expected,
+               "providers.#{descriptor.id} offers models the catalog does not"
+      end
+    end
+
     # The macOS app draws its model picker from these options, so a catalog
     # model reaches the app only if it is published here.
     test "a model row offers the newest catalog models to the app" do
