@@ -239,8 +239,9 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/health/live` | Process liveness only |
-| `GET` | `/health/ready` | Structured readiness and runtime health |
+| `GET` | `/health/ready` | Readiness status alone (`status`, `app`, `version`, `timestamp`): 200 when ready, 503 otherwise; the full report is `fermix health --json` |
 | `GET` | `/health` | Backward-compatible alias of `/health/ready` |
+| `GET` | `/` | Runtime dashboard LiveView; needs the setup session, as `/setup` does |
 | `GET` | `/setup` | Shared setup/readiness LiveView |
 | `GET` | `/webhook/whatsapp` | WhatsApp verification challenge |
 | `POST` | `/webhook/whatsapp` | WhatsApp webhook ingress |
@@ -401,7 +402,7 @@ Observability:
 - Structured JSONL traces under `FERMIX_HOME/traces/YYYY-MM-DD/<type>.jsonl`
 - Rotating log file at `FERMIX_HOME/logs/fermix.log`
 - Telemetry events for provider calls, tool execution, channel ingress, and agent lifecycle
-- `/health/ready` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status
+- `fermix health --json` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status; `/health/ready` answers only the readiness status
 
 ## Develop
 

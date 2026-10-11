@@ -100,6 +100,22 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   request's opening. Every call now carries them. OpenAI Codex was not
   affected.
 
+### Security
+
+- **The status page and `/health` no longer show your setup to strangers.**
+  A Slack or WhatsApp webhook tunnel forwards every path to Fermix's
+  listener, and a tunnel on the same computer makes each request look local,
+  so anyone who knew the tunnel's address could read the status page at `/`
+  (scheduled job names and schedules, the models and subagents at work, the
+  voice socket's path) and `/health/ready` (the home, config and workspace
+  paths, and every setup failure, provider and channel). The status page now
+  opens only in a browser that setup signed in, the same check the setup
+  page makes, and `/health` and `/health/ready` answer everyone with the
+  readiness status alone (`status`, `app`, `version` and `timestamp`), still
+  200 when ready and 503 otherwise. The full report is unchanged for you:
+  `fermix health --json` prints it. Forward only `/webhook/slack` or
+  `/webhook/whatsapp` if your tunnel allows it.
+
 ## [0.14.0] - 2026-10-06
 
 ### Added

@@ -19,14 +19,9 @@ defmodule FermixWebWeb.Router do
   end
 
   scope "/", FermixWebWeb do
-    pipe_through :browser
-
-    live "/", HomeLive
-  end
-
-  scope "/", FermixWebWeb do
     pipe_through [:browser, :setup_auth]
 
+    live "/", HomeLive
     live "/setup", SetupLive
   end
 

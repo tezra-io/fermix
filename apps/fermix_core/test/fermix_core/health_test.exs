@@ -4,6 +4,7 @@ defmodule FermixCore.HealthTest do
   alias FermixCore.BuildInfo
   alias FermixCore.Health
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.Wizard
 
   setup do
     providers = Application.get_env(:fermix_core, :providers)
@@ -124,6 +125,39 @@ defmodule FermixCore.HealthTest do
              active_clients: 0,
              companion_connected?: false
            }
+  end
+
+  # The detail `/health/ready` no longer publishes (M65 security review F-02) is
+  # this report's, printed by `fermix health --json`: a boot that needs setup
+  # names each failure with its action, and the provider and channel rows carry
+  # the same verdict. `Wizard.report/0` is what `BootReport` caches.
+  test "a setup-required boot reports each failure's action and the rows it blocks" do
+    Application.put_env(:fermix_core, :providers, [])
+    Application.put_env(:fermix_core, :realtime, enabled: false)
+    Application.delete_env(:fermix_channels, :telegram)
+    Application.put_env(:fermix_channels, :whatsapp, enabled: false)
+    Application.put_env(:fermix_channels, :discord, enabled: false)
+    Application.put_env(:fermix_channels, :slack, enabled: false)
+    Application.put_env(:fermix_channels, :signal, enabled: false)
+
+    report = Health.report(boot_report: Wizard.report())
+
+    assert report.status == :setup_required
+    assert is_map(report.config)
+
+    assert Enum.any?(report.failures, fn failure ->
+             failure.component == "provider:openai" and
+               failure.action == "Add the OpenAI API key in Providers settings."
+           end)
+
+    assert Enum.any?(report.failures, fn failure ->
+             failure.component == "channel:telegram" and
+               failure.action == "Add the Telegram bot token in Channels settings."
+           end)
+
+    assert %{status: :setup_required} = Enum.find(report.providers, &(&1.name == "openai"))
+    assert %{status: :setup_required} = channel(report, "telegram")
+    assert report.memory == %{conversation_store: :ready, store: :ready}
   end
 
   test "reports realtime degraded when enabled and expected socket process is absent" do

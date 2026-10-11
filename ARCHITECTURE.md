@@ -803,16 +803,18 @@ The router exposes:
 
 - `/` (`HomeLive`), a dashboard fed by `FermixCore.Introspection` that redirects
   to `/setup` until boot is ready
-- `/setup` (`SetupLive`) behind `SetupAuth`: a one-time launch token, then a
-  session cookie; `embed=1` serves the macOS app
-- `/health` and `/health/ready` for readiness, and `/health/live` for a static
-  liveness payload
+- `/setup` (`SetupLive`); it and `/` sit behind `SetupAuth`: a one-time launch
+  token, then a session cookie, which each LiveView's mount checks again for
+  its socket; `embed=1` serves the macOS app
+- `/health` and `/health/ready` for the readiness status alone, and
+  `/health/live` for a static liveness payload; the full report stays with
+  `fermix health --json`
 - `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`
 
 `WebhookController` verifies the request and parses it with the channel adapter,
 drops duplicates, and hands the message to `Gateway.ingest/2` asynchronously
 under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
-the duplicate record. `HealthController` reports from `FermixCore.Health`.
+the duplicate record. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and

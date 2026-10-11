@@ -41,4 +41,14 @@ defmodule FermixWebWeb.ConnCase do
     {:ok, fingerprint} = AccessToken.setup_fingerprint()
     Plug.Test.init_test_session(conn, setup_authorized: fingerprint)
   end
+
+  # What a same-machine webhook tunnel (Cloudflare Tunnel, ngrok, Tailscale
+  # Funnel) hands the loopback listener: a public host and forwarded headers,
+  # from a peer that is itself local. Plug carries the Host header as `host`.
+  def tunneled(conn) do
+    %{conn | host: "fermix-hooks.example.com", remote_ip: {127, 0, 0, 1}}
+    |> Plug.Conn.put_req_header("x-forwarded-proto", "https")
+    |> Plug.Conn.put_req_header("x-forwarded-host", "fermix-hooks.example.com")
+    |> Plug.Conn.put_req_header("x-forwarded-for", "203.0.113.7")
+  end
 end
