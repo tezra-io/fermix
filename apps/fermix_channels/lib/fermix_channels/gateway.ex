@@ -113,7 +113,7 @@ defmodule FermixChannels.Gateway do
             DraftStream.build_spec(
               channel,
               message,
-              rotation_opts(channel) ++ pacing_opts(channel)
+              rotation_opts(channel) ++ pacing_opts(channel) ++ seal_opts(channel)
             )
 
       "block" ->
@@ -163,6 +163,15 @@ defmodule FermixChannels.Gateway do
   defp pacing_opts(channel) do
     if function_exported?(channel, :draft_pacing, 0),
       do: [pacing: channel.draft_pacing()],
+      else: []
+  end
+
+  # Whether the channel's seal is the reply's write of record, resolved here
+  # like pacing; without the callback the engine seals as an edit and skips a
+  # seal the last edit already wrote (design §5.7).
+  defp seal_opts(channel) do
+    if function_exported?(channel, :seal_persists?, 0),
+      do: [seal_persists?: channel.seal_persists?()],
       else: []
   end
 

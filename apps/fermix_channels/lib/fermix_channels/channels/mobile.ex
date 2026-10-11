@@ -126,6 +126,11 @@ defmodule FermixChannels.Channels.Mobile do
   @impl true
   def draft_pacing, do: %{edit_interval_ms: 100, min_draft_chars: 1, max_edits: :infinity}
 
+  # A draft edit only shows the phones the reply; the seal is the one write
+  # that stores it and completes its request, so it is never skipped.
+  @impl true
+  def seal_persists?, do: true
+
   @impl true
   def terminal_error_capability, do: :turn_result
 

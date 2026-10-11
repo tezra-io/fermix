@@ -1383,6 +1383,9 @@ defmodule FermixChannels.DispatcherTest do
       assert agent_message.stream_spec.measure == nil
       # D8: and it keeps the engine's own pacing, byte for byte.
       assert agent_message.stream_spec.pacing == nil
+      # Without seal_persists?/0 its seal is an edit, skipped when the last
+      # edit already wrote it (design §5.7).
+      assert agent_message.stream_spec.seal_persists? == false
     end
 
     test "a channel that declares its draft pacing hands it to the engine" do

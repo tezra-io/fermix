@@ -1596,6 +1596,14 @@ defmodule FermixChannels.Channels.TelegramTest do
   end
 
   describe "seal_draft/3" do
+    # The seal is one more edit of the streamed message, so the engine skips
+    # it when the last edit already shows the text (design §5.7). Telegram
+    # keeps that only by not exporting seal_persists?/0.
+    test "is an edit, not the reply's write of record" do
+      Code.ensure_loaded!(Telegram)
+      refute function_exported?(Telegram, :seal_persists?, 0)
+    end
+
     test "one in-place edit; no remainder for fitting text" do
       stub_telegram(self(), 200, %{"ok" => true})
 

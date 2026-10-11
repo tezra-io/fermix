@@ -18,6 +18,7 @@ defmodule FermixChannels.Companion.TurnsTest do
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Companion.Supervisor, as: CompanionSupervisor
   alias FermixChannels.Companion.Turns
+  alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.WorkRegistry
   alias FermixChannels.Mobile.DeviceRegistry
@@ -1226,6 +1227,82 @@ defmodule FermixChannels.Companion.TurnsTest do
       assert :ok = Fanout.announce("main", ending, audience: :companion)
       assert_receive {:companion_event, %{"t" => "turn_error"}}
       refute_received {:mobile_event, "main", %{"t" => "turn_error"}}
+    end
+  end
+
+  # The phone's whole wire for a reply whose last streamed edit already holds
+  # the final text, the ordinary case: through the draft spec the gateway put
+  # on the queued turn, on the real timeline store.
+  describe "a phone reply streamed in full" do
+    test "its seal stores the row and completes the request; the turn then ends once", ctx do
+      id = unique()
+      answer = "The whole answer, streamed."
+      turn_id = "turn-" <> id
+      msg = decoded("msg", msg_payload(id, "hello"))
+
+      assert :ok = EventRouter.route(msg, mobile_context(ctx), request_opts(ctx))
+      assert_receive {:enqueued, %{stream_spec: %DraftStream.Spec{} = spec} = turn}
+      assert spec.seal_persists? == true
+      assert {:ok, %{status: "running", attempt: attempt}} = request(id)
+
+      log =
+        capture_log(fn ->
+          pid = DraftStream.start_link(spec)
+          DraftStream.push(pid, {:text_delta, answer})
+
+          assert_receive {:mobile_event, "main",
+                          %{"t" => "text_delta", "turn_id" => ^turn_id, "text" => ^answer}}
+
+          assert {:ok, nil} = DraftStream.seal(pid, answer)
+
+          # The seal itself wrote the row and completed the request, before any outcome.
+          assert {:ok, %{status: "completed", attempt: ^attempt, result_server_seq: seq}} =
+                   request(id)
+
+          assert is_integer(seq) and seq > 0
+
+          assert_receive {:mobile_event, "main",
+                          %{
+                            "t" => "text_done",
+                            "turn_id" => ^turn_id,
+                            "server_seq" => ^seq,
+                            "text" => ^answer
+                          }}
+
+          assert {:ok, %{messages: [row]}} =
+                   RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+
+          assert %{server_seq: ^seq, role: "assistant", content: ^answer, in_reply_to: ^id} = row
+
+          # The Mac's chat takes the reply as a live row.
+          assert_receive {:companion_event,
+                          %{
+                            "t" => "row",
+                            "server_seq" => ^seq,
+                            "role" => "assistant",
+                            "text" => ^answer
+                          }}
+
+          refute_received {:mobile_event, "main", %{"t" => "turn_done"}}
+
+          # The outcome finds the request already completed: one turn_done, the
+          # push at the row, and nothing settled twice or logged.
+          turn.turn_result_fn.({:completed})
+          drain(ctx)
+
+          assert_receive {:mobile_event, "main", %{"t" => "turn_done", "turn_id" => ^turn_id}}
+          refute_received {:mobile_event, "main", %{"t" => "turn_done"}}
+          # The turn ends on the phones alone (mobile protocol 2).
+          refute_received {:companion_event, %{"t" => "turn_done"}}
+          refute_received {:mobile_event, "main", %{"t" => "turn_error"}}
+          refute_received {:mobile_event, "main", %{"t" => "text_done"}}
+          assert_receive {:push, "main", ^seq}
+          refute_received {:push, _, _}
+
+          assert {:ok, %{status: "completed", result_server_seq: ^seq}} = request(id)
+        end)
+
+      assert log == ""
     end
   end
 

@@ -71,6 +71,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the app's Channels settings, which turns the channel on and pairs in one
   place. Doctor's repair for a half-created phone identity names the same
   row on a Mac app engine instead of `fermix pair`.
+- **A phone keeps the replies it streams.** A reply that finished streaming
+  in full, as most do, was never saved: the phone showed it as it came in,
+  dropped it when the turn ended, and the chat's history kept only your
+  message. Each streamed reply is now saved, so it stays on the phone and in
+  the Mac app's chat.
 - **A compacted chat keeps answering on Anthropic.** Compaction saved its
   checkpoint summary with the time it ran, later than the turns it kept, so
   once the chat reloaded from disk the summary came after them. Anthropic
