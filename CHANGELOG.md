@@ -4,7 +4,7 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.15.0] - 2026-10-11
 
 ### Added
 
@@ -98,6 +98,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without them, and the provider could not reuse its cached copy of the
   request's opening. Every call now carries them. OpenAI Codex was not
   affected.
+- **A GPT-Live call listens as soon as it starts.** The pet sat at rest for
+  a second or more while the call connected to OpenAI, with its microphone
+  already on, and anything said in that time was dropped. The call now
+  listens the moment Fermix accepts it, and what you say while it connects
+  is held, up to ten seconds of it, and reaches the voice in order once the
+  call is up.
 
 ### Security
 
