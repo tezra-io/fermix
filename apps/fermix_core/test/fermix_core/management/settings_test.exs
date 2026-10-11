@@ -1302,8 +1302,14 @@ defmodule FermixCore.Management.SettingsTest do
                  mobile_switch: &switched/1
                )
 
+      # Only the phone table's switch: the file also carries other channels'
+      # `enabled = false`, and turning on a Mac-only one fails the reload off a Mac.
       path = Path.join(home, "config.toml")
-      File.write!(path, String.replace(File.read!(path), "enabled = false", "enabled = true"))
+      phone_off = ~r/(\[fermix_channels\.mobile\][^\[]*?)enabled = false/
+
+      File.write!(path, Regex.replace(phone_off, File.read!(path), "\\1enabled = true"))
+      assert File.read!(path) =~ ~r/\[fermix_channels\.mobile\][^\[]*?enabled = true/
+      refute File.read!(path) =~ ~r/\[fermix_channels\.imessage\][^\[]*?enabled = true/
 
       assert {:ok, reload} = Settings.reload(mobile_switch: &switched/1)
       assert reload["reloaded"]
