@@ -31,6 +31,7 @@ Each provider is `[fermix_core.providers.<name>]` with `primary`, `default_model
 
 An unknown key in any provider block, or an unknown legacy provider, fails loud at config load.
 
+- **OpenAI Codex**: a conversation on a GPT-6 model compacts at 500,000 tokens whatever the threshold; the GPT-5 models compact as they do on the `openai` API route. That route keeps the GPT-6 models at 272,000, because OpenAI bills an API request over 272,000 input tokens at twice the price.
 - **Anthropic**: subscription requests identify as Claude Code and auto-refresh with one 401 retry. Every request sends prompt-cache breakpoints and asks for adaptive thinking where the model supports it (none for Haiku 4.5). Output caps at 16,384 tokens.
 - **Grok**: a 403 means the plan lacks API access, not a stale token. Some Grok models reject an effort field and get none.
 - **OpenRouter**: vendor-prefixed ids (`anthropic/claude-sonnet-4.6`); attribution headers `HTTP-Referer: https://fermix.sh`, `X-Title: Fermix`; no effort field.

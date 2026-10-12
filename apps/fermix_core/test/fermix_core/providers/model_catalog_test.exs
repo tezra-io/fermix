@@ -64,17 +64,36 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
 
     # The plan route serves the public API's models, so a listed slug takes the
-    # openai catalog's window; a slug neither knows takes the unknown-model one.
-    test "an openai_codex slug takes the openai catalog's window" do
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6.1-sol") ==
-               ModelCatalog.context_window_for(:openai, "gpt-6.1-sol")
+    # openai catalog's facts; a slug neither knows takes the unknown-model window.
+    test "an openai_codex slug takes the openai catalog's facts" do
+      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6-luna) do
+        assert ModelCatalog.context_window_for(:openai_codex, model) == 1_050_000
+      end
 
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") ==
-               ModelCatalog.context_window_for(:openai, "gpt-5.5")
+      for model <- ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4 gpt-5.4-mini) do
+        assert ModelCatalog.context_window_for(:openai_codex, model) ==
+                 ModelCatalog.context_window_for(:openai, model)
+
+        assert ModelCatalog.compaction_ceiling_for(:openai_codex, model) == nil
+      end
 
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-plan-unlisted",
                unknown_model_telemetry: false
              ) == 100_000
+
+      assert ModelCatalog.compaction_ceiling_for(:openai_codex, "gpt-plan-unlisted") == nil
+    end
+
+    # A ChatGPT plan has usage limits, not the API's 272k repricing, so a GPT-6
+    # conversation on Codex compacts at 500k; the direct API keeps its calibration.
+    test "a GPT-6 conversation on openai_codex compacts at 500k" do
+      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6-luna), threshold <- [0.85, 0.95, 1.0] do
+        assert ModelCatalog.compact_at_tokens_for(:openai_codex, model, threshold) == 500_000
+        assert ModelCatalog.context_budget_for(:openai_codex, model) == 500_000
+        assert ModelCatalog.compact_at_tokens_for(:openai, model, 0.85) == 272_000
+      end
+
+      assert ModelCatalog.compact_at_tokens_for(:openai_codex, "gpt-5.6-sol", 0.85) == 231_200
     end
 
     test "the openai catalog's facts never make an openai_codex slug a known model" do

@@ -32,6 +32,9 @@ defmodule FermixCore.Providers.ModelCatalog do
 
   @unknown_model_default_ctx 100_000
   @default_max_output_tokens 8_192
+  # Where an OpenAI Codex conversation on a GPT-6-or-later model compacts
+  # (`find_entry/2`).
+  @openai_codex_compaction_ceiling 500_000
 
   # OpenAI Codex ships no catalog (M57 §6.2): it signs in with ChatGPT, the
   # models a signed-in account may call come live from `GET /v1/models`
@@ -85,14 +88,29 @@ defmodule FermixCore.Providers.ModelCatalog do
   # Codex-only `ultra` level (maximum reasoning plus automatic task delegation)
   # is a Codex-harness mode rather than a `reasoning.effort` wire value, so it
   # is deliberately absent from `ReasoningEffort`.
+  #
+  # `openai_codex_window` is the GPT-6 generation's published window, which
+  # OpenAI Codex runs it within (`find_entry/2`); a GPT-6-or-later entry
+  # carries it, an older one runs on Codex as it does on the API.
   @openai [
     %Entry{
       id: "gpt-6-astra",
       label: "GPT-6 Astra (default, recommended)",
-      context_window: 320_000
+      context_window: 320_000,
+      openai_codex_window: 1_050_000
     },
-    %Entry{id: "gpt-6.1-sol", label: "GPT-6.1 Sol", context_window: 320_000},
-    %Entry{id: "gpt-6-luna", label: "GPT-6 Luna (fast, cheaper)", context_window: 320_000},
+    %Entry{
+      id: "gpt-6.1-sol",
+      label: "GPT-6.1 Sol",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000
+    },
+    %Entry{
+      id: "gpt-6-luna",
+      label: "GPT-6 Luna (fast, cheaper)",
+      context_window: 320_000,
+      openai_codex_window: 1_050_000
+    },
     %Entry{id: "gpt-5.6-sol", label: "GPT-5.6 Sol", context_window: 272_000},
     %Entry{id: "gpt-5.6-terra", label: "GPT-5.6 Terra (balanced)", context_window: 272_000},
     %Entry{id: "gpt-5.6-luna", label: "GPT-5.6 Luna (fast, cheaper)", context_window: 272_000},
@@ -662,8 +680,23 @@ defmodule FermixCore.Providers.ModelCatalog do
   # OpenAI Codex lists the signed-in account's models live, and its plan route
   # serves the public API's models, so a slug's window and effort ceiling are
   # the `openai` catalog's. Only per-model facts read through here: the model
-  # list and `known_model?/2` stay the live listing's.
-  defp find_entry(:openai_codex, model_id), do: find_entry(:openai, model_id)
+  # list and `known_model?/2` stay the live listing's. A ChatGPT plan has usage
+  # limits rather than the API's 272k repricing, so a GPT-6-or-later slug runs
+  # within its `openai_codex_window` and compacts at
+  # @openai_codex_compaction_ceiling; an older one keeps the API's facts.
+  defp find_entry(:openai_codex, model_id) do
+    case find_entry(:openai, model_id) do
+      %Entry{openai_codex_window: window} = entry when is_integer(window) ->
+        %Entry{
+          entry
+          | context_window: window,
+            compaction_ceiling: @openai_codex_compaction_ceiling
+        }
+
+      entry ->
+        entry
+    end
+  end
 
   defp find_entry(provider, model_id) do
     if provider in Descriptor.ids() do

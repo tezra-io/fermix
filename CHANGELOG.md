@@ -50,6 +50,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the model could read. Doctor shows the line as "compact at 200000
   tokens". Claude Haiku 4.5, whose window is 200,000, still compacts at the
   threshold.
+- **GPT-6 conversations on OpenAI Codex compact at 500,000 tokens instead
+  of 272,000.** A ChatGPT plan has usage limits, not the OpenAI API's double
+  price above 272,000 input tokens, so GPT-6 Astra, GPT-6.1 Sol and GPT-6
+  Luna on OpenAI Codex now run within their 1,050,000-token window and
+  compact when a conversation reaches 500,000 tokens, whatever the
+  compaction threshold says (a threshold low enough to come first still
+  does), and a long task digests older tool results at the same line.
+  Doctor shows the line as "compact at 500000 tokens". The GPT-5 models on
+  OpenAI Codex, and every model on the OpenAI API provider, are unchanged.
 - **Turning the phone channel on or off takes effect at once.** The
   Phone companion switch used to need a restart. Turning it on now starts
   the channel and turning it off stops it, while everything else keeps
