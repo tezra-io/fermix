@@ -31,7 +31,7 @@ defmodule FermixChannels.Gateway.AlbumBuffer do
 
   Buffered parts flush as ONE message: every non-empty caption joined with `"\\n"`
   in arrival order, all attachments concatenated. Other fields come from the
-  first part. The existing `MediaIngest → TurnRunner → encoder` path turns that
+  first part. The existing `Gateway.Attachments → TurnRunner → encoder` path turns that
   into one multi-image turn — no downstream change.
 
   ## Ordering, idempotency, durability

@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Attachments
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -1822,12 +1823,29 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     test "maps unsupported image input to the explicit routing message" do
-      reply = TurnRunner.error_reply({:image_unsupported, :ollama, "qwen3:32b"})
+      reply = TurnRunner.error_reply({:attachment_unsupported, :image, :ollama, "qwen3:32b"})
 
       assert reply =~ "ollama/qwen3:32b"
       assert reply =~ "vision-capable"
       refute reply =~ "HTTP"
       refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "names a picture format the route refuses, and a PDF a provider can't take inline" do
+      format =
+        TurnRunner.error_reply(
+          {:attachment_unsupported, {:image_format, "image/webp"}, :xai, "grok-5"}
+        )
+
+      pdf = TurnRunner.error_reply({:attachment_unsupported, :document, :xai, "grok-5"})
+
+      assert format =~ "image/webp picture"
+      assert format =~ "xai/grok-5"
+      assert format =~ "JPEG or PNG"
+      assert pdf =~ "the current model (xai/grok-5) can't take a PDF inline"
+      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice"
+      refute pdf =~ "SpaceXAI"
+      assert pdf =~ "send the pages as pictures"
     end
 
     test "maps max iteration exhaustion to an actionable step-limit message" do
@@ -2168,6 +2186,95 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       assert first == second
       assert first =~ "Discord caps a single message"
+    end
+  end
+
+  # M67: the gateway's attachments become the manifest in the persisted user
+  # text and the turn-local parts the encoders read.
+  describe "inbound attachments" do
+    test "a text-only turn keeps the bare user message, with no parts" do
+      user = capture_prompt(%{channel: "telegram", chat_id: "attach_none"}) |> List.last()
+
+      assert user == %{role: "user", content: "how does this render?"}
+    end
+
+    test "the manifest is composed into the user text and the parts ride beside it" do
+      attachments = [
+        %Attachments{
+          kind: :still,
+          mime_type: "image/png",
+          name: "chart.png",
+          size_bytes: 3,
+          bytes: "png"
+        },
+        %Attachments{
+          kind: :document,
+          mime_type: "application/pdf",
+          name: "lease.pdf",
+          size_bytes: 4,
+          bytes: "%PDF"
+        },
+        %Attachments{
+          kind: :unknown,
+          mime_type: "application/zip",
+          name: "bundle.zip",
+          status: {:unusable, {:unknown_type, "application/zip"}}
+        }
+      ]
+
+      user =
+        %{channel: "telegram", chat_id: "attach_parts", inbound_attachments: attachments}
+        |> capture_prompt()
+        |> List.last()
+
+      assert user.content =~ ~r/\Ahow does this render\?\n\n\[attachments\]\n/
+      assert user.content =~ "1. chart.png · image · 3 bytes · attached as image 1"
+      assert user.content =~ "2. lease.pdf · PDF · 4 bytes · attached as document 1"
+      assert user.content =~ "3. bundle.zip · file · not readable: Fermix can't read"
+
+      assert user.parts == [
+               %{type: :image, mime_type: "image/png", data: "png"},
+               %{type: :document, mime_type: "application/pdf", data: "%PDF", name: "lease.pdf"}
+             ]
+    end
+
+    test "the history keeps the manifest, never the bytes" do
+      store = start_voice_store()
+      registry = :"tr_attach_reg_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+
+      still = %Attachments{
+        kind: :still,
+        mime_type: "image/png",
+        name: "chart.png",
+        size_bytes: 9,
+        bytes: "PNG-BYTES"
+      }
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "attach_history",
+        sender: "user",
+        content: "",
+        source_trust: :operator,
+        inbound_attachments: [still]
+      }
+
+      turn_state =
+        turn_state(
+          adapter: CapturePromptAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry,
+          conversation_store: store
+        )
+
+      assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      [user | _rest] =
+        ConversationStore.get_history({"telegram", "attach_history", :root}, server: store)
+
+      assert user.content == "[attachments]\n1. chart.png · image · 9 bytes · attached as image 1"
+      refute inspect(user) =~ "PNG-BYTES"
     end
   end
 

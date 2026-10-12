@@ -174,7 +174,10 @@ defmodule FermixCore.Providers.Failover do
 
   defp reason_kind({:provider_error, %{kind: kind}}), do: kind
   defp reason_kind({:provider_transport_error, %{kind: kind}}), do: kind
-  defp reason_kind({:image_unsupported, _provider, _model}), do: :image_unsupported
+
+  defp reason_kind({:attachment_unsupported, _part, _provider, _model}),
+    do: :attachment_unsupported
+
   defp reason_kind(_reason), do: :unknown
 
   # Eligibility keys on the error `kind` only. The user-visible streaming
@@ -194,10 +197,12 @@ defmodule FermixCore.Providers.Failover do
   def eligible?({:provider_transport_error, %{kind: kind}}),
     do: kind in @fallback_transport_kinds
 
-  # An image turn routed to a non-vision model can't be served by THIS route, but
-  # a later route in the chain may be vision-capable — so fail over to look for
-  # one. If none exists the chain exhausts and surfaces the precise message.
-  def eligible?({:image_unsupported, _provider, _model}), do: true
+  # A turn carrying a part THIS route can't take (a picture on a non-vision
+  # model or in a format the provider refuses, a PDF on a provider that reads
+  # none inline) can't be served here, but a later route in the chain may take
+  # it — so fail over to look for one. If none exists the chain exhausts and
+  # surfaces the precise message (M67).
+  def eligible?({:attachment_unsupported, _part, _provider, _model}), do: true
 
   # Unknown shapes (bare strings, atoms, anything outside the Error
   # contract) are conservative: no fallback, fail loud at the boundary.

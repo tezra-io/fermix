@@ -7,23 +7,24 @@ defmodule FermixCore.Providers.AdapterTest do
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.OpenAI.Responses
 
-  describe "has_image_content?/1" do
-    test "true when a user message carries an image part" do
+  describe "content_parts/1" do
+    test "every part the messages carry, in order" do
+      image = %{type: :image, mime_type: "image/png", data: "x"}
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF", name: "a.pdf"}
+
       messages = [
-        %{
-          role: "user",
-          content: "hi",
-          image_parts: [%{type: :image, mime_type: "image/png", data: "x"}]
-        }
+        %{role: "user", content: "earlier", parts: [image]},
+        %{role: "assistant", content: "ok"},
+        %{role: "user", content: "hi", parts: [pdf, image]}
       ]
 
-      assert Adapter.has_image_content?(messages)
+      assert Adapter.content_parts(messages) == [image, pdf, image]
     end
 
-    test "false for plain text turns and messages without image parts" do
-      refute Adapter.has_image_content?([%{role: "user", content: "hello"}])
-      refute Adapter.has_image_content?([%{role: "user", content: "hi", image_parts: []}])
-      refute Adapter.has_image_content?([])
+    test "none for plain text turns and messages without parts" do
+      assert Adapter.content_parts([%{role: "user", content: "hello"}]) == []
+      assert Adapter.content_parts([%{role: "user", content: "hi", parts: []}]) == []
+      assert Adapter.content_parts([]) == []
     end
   end
 

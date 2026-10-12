@@ -24,6 +24,7 @@ defmodule FermixCore.AgentLoop do
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Memory.Config
   alias FermixCore.Providers.Adapter
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.Transient
@@ -466,29 +467,48 @@ defmodule FermixCore.AgentLoop do
     end
   end
 
-  # Rule #12 fail-loud: a turn carrying image content must not be sent to a model
-  # that can't accept it — no silent drop, no degrade-to-text. Returns an error
-  # tuple (not a raise) so it rides the normal failover/error flow: the chain can
-  # try the next route for a vision-capable one, and the precise message reaches
-  # the user instead of a generic crash. Checked per route, so a transient
-  # failover onto a non-vision model is caught too.
-  defp ensure_image_capable(bound) do
-    if Adapter.has_image_content?(bound.messages) do
-      %{provider: provider, model: model} = bound.route_key
+  # Rule #12 fail-loud: a turn carrying a picture or a PDF must not be sent to a
+  # route that can't accept it — no silent drop, no degrade-to-text, and Fermix
+  # converts nothing. Returns an error tuple (not a raise) so it rides the
+  # normal failover/error flow: the chain can try the next route for one that
+  # takes it, and the precise message reaches the user instead of a generic
+  # crash. Checked per route, so a transient failover onto a route that cannot
+  # take the part is caught too (M67).
+  defp ensure_parts_capable(bound) do
+    %{provider: provider, model: model} = bound.route_key
 
-      if ModelCatalog.vision?(provider, model),
-        do: :ok,
-        else: {:error, {:image_unsupported, provider, model}}
-    else
-      :ok
+    bound.messages
+    |> Adapter.content_parts()
+    |> Enum.find_value(:ok, &part_refusal(&1, provider, model))
+  end
+
+  # A picture needs a vision model, in a format the provider takes; a PDF needs a
+  # vision model on a provider that reads one inline (OpenAI reads PDFs on its
+  # vision models only). `nil` admits the part.
+  defp part_refusal(%{type: :image, mime_type: mime}, provider, model) do
+    cond do
+      not ModelCatalog.vision?(provider, model) ->
+        {:error, {:attachment_unsupported, :image, provider, model}}
+
+      not Descriptor.image_format?(provider, mime) ->
+        {:error, {:attachment_unsupported, {:image_format, mime}, provider, model}}
+
+      true ->
+        nil
     end
+  end
+
+  defp part_refusal(%{type: :document}, provider, model) do
+    if Descriptor.documents?(provider) and ModelCatalog.vision?(provider, model),
+      do: nil,
+      else: {:error, {:attachment_unsupported, :document, provider, model}}
   end
 
   defp initial_attempt(state) do
     fn route ->
       bound = bind_route(state, route)
 
-      with :ok <- ensure_image_capable(bound),
+      with :ok <- ensure_parts_capable(bound),
            {:ok, turn} <-
              bound.adapter.chat(bound.messages, bound.capabilities, bound.adapter_opts) do
         {:ok, {turn, bound}}
@@ -632,18 +652,19 @@ defmodule FermixCore.AgentLoop do
   defp blank?(content) when is_binary(content), do: String.trim(content) == ""
   defp blank?(_content), do: false
 
-  # Continuation parallel to `ensure_image_capable/1`: a tool RESULT carrying image
+  # Continuation parallel to `ensure_parts_capable/1`: a tool RESULT carrying image
   # content (e.g. a screenshot) must not be sent back to a non-vision route — no
-  # silent drop, no degrade-to-text (Rule #12). Same `{:image_unsupported, ...}`
-  # shape so it rides the existing error flow and reaches the user verbatim. The
-  # route is fixed for the tool loop, so this checks the bound provider/model.
+  # silent drop, no degrade-to-text (Rule #12). Same `{:attachment_unsupported,
+  # :image, ...}` shape so it rides the existing error flow and reaches the user
+  # verbatim. The route is fixed for the tool loop, so this checks the bound
+  # provider/model.
   defp ensure_tool_results_image_capable(tool_results, state) do
     if Enum.any?(tool_results, &tool_result_has_images?/1) do
       %{provider: provider, model: model} = state.route_key
 
       if ModelCatalog.vision?(provider, model),
         do: :ok,
-        else: {:error, {:image_unsupported, provider, model}}
+        else: {:error, {:attachment_unsupported, :image, provider, model}}
     else
       :ok
     end

@@ -117,6 +117,7 @@
         "t": {"const": "attach_begin"}, "attach_id": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1}, "mime": {"type": "string", "minLength": 1},
         "size_bytes": {"type": "integer", "minimum": 0}, "name": {"type": "string", "minLength": 1},
+        "poster_of": {"type": "string", "minLength": 1},
         "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
       }
     },

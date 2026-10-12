@@ -33,6 +33,8 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Attachments
+  alias FermixCore.Attachments.Manifest
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -42,6 +44,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Net.Egress
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
@@ -305,9 +308,26 @@ defmodule FermixCore.Agents.TurnRunner do
       reply_for(last_reason, surface)
   end
 
-  defp reply_for({:image_unsupported, provider, model}, _surface) do
+  # A route that cannot take a part of the turn (M67): failover tried the rest
+  # of the chain first, so this sentence shows only when none could.
+  defp reply_for({:attachment_unsupported, :image, provider, model}, _surface) do
     "That message includes an image, but the current model (#{provider}/#{model}) can't accept " <>
       "images. Switch to a vision-capable model, or send text only."
+  end
+
+  defp reply_for({:attachment_unsupported, {:image_format, mime}, provider, model}, _surface) do
+    "That message includes a #{mime} picture, which the current model (#{provider}/#{model}) " <>
+      "can't accept. Send it as a JPEG or PNG, or switch models."
+  end
+
+  defp reply_for({:attachment_unsupported, :document, provider, model}, _surface) do
+    readers =
+      Descriptor.all()
+      |> Enum.filter(& &1.documents?)
+      |> Enum.map_join(", ", & &1.label)
+
+    "That message includes a PDF, but the current model (#{provider}/#{model}) can't take a " <>
+      "PDF inline. Switch to a vision model on one of #{readers}, or send the pages as pictures."
   end
 
   # The summarizer's own refusals are atoms (`:empty_summary`, `:too_deep`)
@@ -392,22 +412,27 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp max_iterations_error?(_reason), do: false
 
-  # Build the user turn. Text-only stays a bare `%{role, content}` map —
-  # byte-identical to the pre-multimodal shape (no `:image_parts` key), so
-  # accounting, compaction, persistence, and the provider prompt cache are
-  # untouched. Inbound images the gateway materialized (M14) ride a transient
-  # `:image_parts` list the provider encoder reads; they are never persisted.
-  defp build_user_message(msg) do
-    base = %{role: "user", content: msg.content}
-
-    case Map.get(msg, :media_parts) || [] do
-      [] -> base
-      parts -> Map.put(base, :image_parts, parts)
-    end
+  # The gateway's inbound attachments (M67) become two things: the manifest
+  # composed into the user text, which is what is persisted (so history and
+  # compaction know what was attached and what could not be read), and the
+  # turn-local content parts the provider encoders read. A turn without
+  # attachments keeps its text byte-identical and has no parts.
+  defp with_attachments(msg) do
+    attachments = Map.get(msg, :inbound_attachments) || []
+    {%{msg | content: Manifest.compose(msg.content, attachments)}, Attachments.parts(attachments)}
   end
+
+  # Build the user turn. Text-only stays a bare `%{role, content}` map —
+  # byte-identical to the pre-multimodal shape (no `:parts` key), so
+  # accounting, compaction, persistence, and the provider prompt cache are
+  # untouched. Inbound pictures and PDFs ride a transient `:parts` list the
+  # provider encoder reads; they are never persisted.
+  defp build_user_message(msg, []), do: %{role: "user", content: msg.content}
+  defp build_user_message(msg, parts), do: %{role: "user", content: msg.content, parts: parts}
 
   defp run_message_loop(msg, state, deliver, stream_callback, activity_callback) do
     start = System.monotonic_time(:millisecond)
+    {msg, parts} = with_attachments(msg)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
@@ -439,7 +464,7 @@ defmodule FermixCore.Agents.TurnRunner do
         ConversationStore.get_history(conversation_key, server: state.conversation_store)
       end)
 
-    user_message = build_user_message(msg)
+    user_message = build_user_message(msg, parts)
 
     {history, preflight_compaction} =
       maybe_preflight_auto_compact(conversation_key, state, history)
@@ -561,9 +586,9 @@ defmodule FermixCore.Agents.TurnRunner do
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
       reaction_spec: Map.get(msg, :reaction_spec),
-      # This-turn inbound channel images (M14), so `generate_image` edit can
-      # reference `inbound:last`. Transient like `:image_parts`, never persisted.
-      inbound_images: Map.get(msg, :media_parts) || []
+      # This-turn inbound channel pictures (M14), so `generate_image` edit can
+      # reference `inbound:last`. Transient like `:parts`, never persisted.
+      inbound_images: Enum.filter(parts, &match?(%{type: :image}, &1))
     }
 
     # The composed prompt + runtime section are cached per profile, so neither

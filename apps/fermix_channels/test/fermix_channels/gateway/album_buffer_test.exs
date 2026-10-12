@@ -8,7 +8,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
   alias FermixChannels.Gateway.Message
 
   # Inject a dispatch seam that forwards to the test process, so the buffer's
-  # logic is exercised without touching Gateway/MediaIngest/network. Defaults to
+  # logic is exercised without touching Gateway/Attachments/network. Defaults to
   # the WhatsApp channel (per-image webhooks); Telegram tests override `channel:`.
   defp start_buffer(opts) do
     test_pid = self()
@@ -44,7 +44,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
         sender_id: wa_id,
         user_id: wa_id
       },
-      attachments: [%{kind: :image, file_id: "f-#{id}", mime_type: "image/jpeg", url: nil}]
+      attachments: [%{hint: :photo, file_id: "f-#{id}", mime_type: "image/jpeg", url: nil}]
     })
   end
 
@@ -70,7 +70,7 @@ defmodule FermixChannels.Gateway.AlbumBufferTest do
       chat_id: "42",
       reply_target: "42",
       metadata: %{user_id: "111", media_group_id: group_id},
-      attachments: [%{kind: :image, file_id: "tg-#{id}", mime_type: "image/jpeg", url: nil}]
+      attachments: [%{hint: :photo, file_id: "tg-#{id}", mime_type: "image/jpeg", url: nil}]
     })
   end
 

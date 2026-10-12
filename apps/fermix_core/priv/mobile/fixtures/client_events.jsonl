@@ -16,3 +16,4 @@
 {"v":2,"t":"request_status","seq":15,"client_msg_ids":["client-1","client-2","client-9"]}
 {"v":2,"t":"ping","seq":16}
 {"v":2,"t":"unpair","seq":17}
+{"v":2,"t":"attach_begin","seq":18,"attach_id":"attach-3","kind":"image","mime":"image/jpeg","size_bytes":4,"name":"clip-poster.jpg","poster_of":"attach-2","sha256":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}

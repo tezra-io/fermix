@@ -1,9 +1,11 @@
 suite: multimodal
 risk: host_readonly
-title: "Inbound multimodal — images reach and are understood by the model"
+title: "Inbound multimodal — attachments reach and are understood by the model"
 description: >
-  Verifies an inbound image attachment is materialized at the gateway, encoded as
-  a provider image content part, and actually understood by the model (M14). Most
+  Verifies an inbound attachment is rendered at the gateway, encoded as a
+  provider content part (or inlined), and actually understood by the model (M14,
+  M67): pictures, a GIF file read from its first frame, a PDF, a text file, and a
+  file Fermix cannot read, which must be named, never called empty. Most
   cases inject bundled fixtures through `fermix ask --attach`; only the channel-
   specific scenarios use drive: telegram_operator with --operator. For those, the
   runner prints an exact fixture path to attach to the dedicated eval Telegram bot
@@ -107,6 +109,108 @@ scenarios:
           # Both numbers (42 and 73) present → both images were read, not just one.
           reply_matches: "(?i)(?=[\\s\\S]*\\b42\\b)(?=[\\s\\S]*\\b73\\b)"
         rubric: "Reports both numbers 42 and 73 — proof both images reached the model."
+
+  # M67: attachments beyond pictures, through the same `fermix ask --attach`
+  # path into the one gateway pipeline a channel attachment takes. Each answer
+  # is a token only the attachment holds (the outcome floor); the negatives
+  # catch the old failure, an attachment called empty or missing. A message
+  # with no text whose attachments are all unreadable is answered at the
+  # gateway with no turn, so it has no trace to grade here: ExUnit proves that
+  # reply (`FermixChannels.CLITest`), and these cases carry a question.
+  - id: gif_file_auto
+    title: "A GIF file reaches the model as its first frame"
+    severity: critical
+    tags: [multimodal, attachments, animation, automated]
+    cases:
+      - id: spinner_gif_words
+        image: fixtures/attachments/spinner_gamma.gif
+        query: "What does this little animation say?"
+        expect:
+          main_model_matches: "."
+          reply_matches: "(?i)gamma"
+          reply_not_matches: "(?i)(looks|is) empty|no (gif|image|file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: >
+          Reads the words GAMMA 19 from the attached GIF. It may say it saw one
+          frame; it must not claim the attachment is empty or missing.
+      - id: spinner_gif_number
+        image: fixtures/attachments/spinner_gamma.gif
+        query: "There's a number in this gif somewhere, what is it?"
+        expect:
+          reply_matches: "\\b19\\b"
+          reply_not_matches: "(?i)(looks|is) empty|no (gif|image|file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: "Gives the number 19 shown in the GIF."
+
+  - id: pdf_read_auto
+    title: "A PDF reaches the model as a document"
+    severity: critical
+    tags: [multimodal, attachments, document, automated]
+    cases:
+      - id: lease_number
+        image: fixtures/attachments/lease_7731.pdf
+        query: "What's the lease number on this?"
+        expect:
+          main_model_matches: "."
+          reply_matches: "7731"
+          reply_not_matches: "(?i)(looks|is) empty|no (pdf|document|file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: "Gives lease number 7731, read from the attached PDF."
+      - id: lease_tenant
+        image: fixtures/attachments/lease_7731.pdf
+        query: "Who's the tenant here, and which property is it for?"
+        expect:
+          reply_matches: "(?i)orla"
+        rubric: >
+          Names Orla Venn as the tenant and 14 Harrow Lane, Kestrel Bay as the
+          property, both read from the attached PDF.
+
+  - id: text_file_inlined_auto
+    title: "A text file is read inline"
+    severity: normal
+    tags: [multimodal, attachments, text, automated]
+    cases:
+      - id: barrier_code
+        image: fixtures/attachments/notes_delta.txt
+        query: "What's the car park barrier code in my picnic notes?"
+        expect:
+          main_model_matches: "."
+          reply_matches: "\\b55\\b"
+          reply_not_matches: "(?i)(looks|is) empty|no (file|note|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: "Gives the barrier code DELTA 55 from the attached notes."
+      - id: bakery_name
+        image: fixtures/attachments/notes_delta.txt
+        query: "Which bakery is the cake from, according to this list?"
+        expect:
+          reply_matches: "(?i)hollis"
+          reply_not_matches: "(?i)(looks|is) empty|no (file|note|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: "Names Hollis Bakery, from the attached list."
+
+  - id: unreadable_named_auto
+    title: "A file Fermix cannot read is named, never called empty"
+    severity: critical
+    tags: [multimodal, attachments, unreadable, automated]
+    cases:
+      - id: binary_file
+        image: fixtures/attachments/payload.bin
+        query: "Can you go through this file for me?"
+        # No wording gate: the floor is that the turn ran on the main model,
+        # the negative catches the old "looks empty" failure, and the rubric
+        # owns the rest.
+        expect:
+          main_model_matches: "."
+          reply_not_matches: "(?i)(looks|is) empty|no (file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: >
+          Passes only if the reply does both: (1) it tells the user that the
+          attached file payload.bin could not be read or opened, and (2) it
+          states no contents of that file. It fails if it describes what the file
+          contains, or says the message or the attachment is empty or missing.
+      - id: binary_file_reworded
+        image: fixtures/attachments/payload.bin
+        query: "What's in this attachment?"
+        expect:
+          reply_not_matches: "(?i)(looks|is) empty|no (file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: >
+          Passes only if the reply tells the user the attached file payload.bin
+          could not be opened and describes none of its contents. It fails if it
+          states what the file contains, or calls the attachment empty or missing.
 
   - id: image_described
     risk: external_write

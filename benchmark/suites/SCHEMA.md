@@ -223,8 +223,9 @@ the `query` shorthand; multi-turn uses `turns`.
   multimodal operator cases do not. `companion`: the runner is the Mac app's
   chat client on the eval home's `companion.sock` and runs unattended; see
   *`drive: companion`* below. Single-turn `query` only, no `image`.
-- `image` (string, optional) — single-turn path to a known local image relative
-  to the suite file and physically contained under `suites/fixtures/`. Absolute
+- `image` (string, optional) — single-turn path to a known local attachment (a
+  picture, or any file: a GIF, a PDF, a text file, a file Fermix cannot read)
+  relative to the suite file and physically contained under `suites/fixtures/`. Absolute
   paths, traversal, missing files, and symlinks escaping that fixture root are
   rejected. With `drive: ask`, it is attached via
   `fermix ask --attach`; with `drive: telegram_operator`, the runner prints the

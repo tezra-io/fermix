@@ -769,7 +769,8 @@ defmodule FermixChannels.Mobile.SocketHandler do
       mime: payload["mime"],
       size_bytes: payload["size_bytes"],
       sha256: payload["sha256"],
-      name: payload["name"]
+      name: payload["name"],
+      poster_of: payload["poster_of"]
     }
 
     case MediaStore.begin_upload(state.media_store, spec) do

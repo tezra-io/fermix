@@ -938,15 +938,15 @@ defmodule Fermix.CLI.Daemon do
         cli_channel_bridge().default_timeout_ms()
       )
 
-    case decode_images(Map.get(params, "images", [])) do
-      {:ok, media_parts} ->
-        if content == "" and media_parts == [] do
+    case request_attachments(params) do
+      {:ok, attachments} ->
+        if content == "" and attachments == [] do
           %{status: "error", error: "empty_input", session_id: session_id}
         else
           cli_bridge_reply(content,
             session_id: session_id,
             timeout_ms: timeout_ms,
-            media_parts: media_parts,
+            attachments: attachments,
             cwd: Map.get(params, "cwd"),
             caller: caller
           )
@@ -969,26 +969,46 @@ defmodule Fermix.CLI.Daemon do
     }
   end
 
-  # Decode `fermix ask --attach` image payloads (mime + base64) into the neutral
-  # content parts the turn runner expects. Fail loud on a malformed payload.
-  defp decode_images(images) when is_list(images) do
-    images
-    |> Enum.reduce_while({:ok, []}, fn image, {:ok, acc} ->
-      with mime when is_binary(mime) <- Map.get(image, "mime_type"),
-           b64 when is_binary(b64) <- Map.get(image, "data_base64"),
-           {:ok, data} <- Base.decode64(b64) do
-        {:cont, {:ok, [%{type: :image, mime_type: mime, data: data} | acc]}}
-      else
-        _ -> {:halt, {:error, :invalid_image_payload}}
+  # The image-only `images` parameter is retired (M67): a client still sending it
+  # is refused by name rather than having its pictures dropped.
+  defp request_attachments(%{"images" => _retired}),
+    do:
+      {:error,
+       ~s(the "images" parameter is retired; send each file as "attachments" ) <>
+         "(file_name + data_base64), as fermix ask --attach does"}
+
+  defp request_attachments(params),
+    do: decode_attachments(Map.get(params, "attachments", []))
+
+  # Decode `fermix ask --attach` payloads (file name + base64) into the
+  # attachments the CLI channel declares; the gateway's attachment pipeline then
+  # names, caps and renders them as it does for any channel (M67). Fail loud on
+  # a malformed payload.
+  defp decode_attachments(attachments) when is_list(attachments) do
+    attachments
+    |> Enum.reduce_while({:ok, []}, fn attachment, {:ok, acc} ->
+      case decode_attachment(attachment) do
+        {:ok, declared} -> {:cont, {:ok, [declared | acc]}}
+        :error -> {:halt, {:error, :invalid_attachment_payload}}
       end
     end)
     |> case do
-      {:ok, parts} -> {:ok, Enum.reverse(parts)}
+      {:ok, declared} -> {:ok, Enum.reverse(declared)}
       other -> other
     end
   end
 
-  defp decode_images(_images), do: {:ok, []}
+  defp decode_attachments(_attachments), do: {:error, :invalid_attachment_payload}
+
+  defp decode_attachment(%{"file_name" => name, "data_base64" => b64})
+       when is_binary(name) and name != "" and is_binary(b64) do
+    case Base.decode64(b64) do
+      {:ok, data} -> {:ok, %{file_name: name, data: data, size_bytes: byte_size(data)}}
+      :error -> :error
+    end
+  end
+
+  defp decode_attachment(_attachment), do: :error
 
   defp cli_bridge_reply(content, opts) do
     session_id = Keyword.fetch!(opts, :session_id)

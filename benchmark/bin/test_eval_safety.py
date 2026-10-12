@@ -260,6 +260,28 @@ def test_eval_shim_classifies_socket_timeout_as_timeout(command, args, capsys):
     assert '"error": "timeout"' in capsys.readouterr().out
 
 
+def test_eval_shim_attaches_any_file_by_name_and_bytes(tmp_path, capsys):
+    """M67: the CLI declares any file; the daemon's pipeline names its kind."""
+    shim_path = os.path.join(HERE, "fermix-shim")
+    namespace = runpy.run_path(shim_path)
+    pdf = tmp_path / "lease_7731.pdf"
+    pdf.write_bytes(b"%PDF-1.4 lease")
+    sent = {}
+
+    def call_daemon(method, params=None, **_kwargs):
+        sent["method"], sent["params"] = method, params
+        return {"status": "ok", "response": "7731"}
+
+    namespace["cmd_ask"].__globals__["call_daemon"] = call_daemon
+    with pytest.raises(SystemExit) as exc:
+        namespace["cmd_ask"](["--json", "--attach", str(pdf), "what is the lease number?"])
+    assert exc.value.code == 0
+    assert sent["method"] == "agent_message"
+    assert sent["params"]["attachments"] == [
+        {"file_name": "lease_7731.pdf", "data_base64": "JVBERi0xLjQgbGVhc2U="}]
+    assert "images" not in sent["params"]
+
+
 def _write_raw_suite(tmp_path, body: str):
     path = tmp_path / "raw_suite.yaml"
     path.write_text(body)

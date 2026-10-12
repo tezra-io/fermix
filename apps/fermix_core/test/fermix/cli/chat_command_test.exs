@@ -155,6 +155,41 @@ defmodule Fermix.CLI.ChatCommandTest do
     assert Keyword.get(opts, :session_id) == "cli"
   end
 
+  # M67: the CLI declares any file; the daemon's pipeline names its kind.
+  test "attaches any file, declared by name and bytes, with or without text" do
+    dir = mkdir!()
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+
+    pdf = Path.join(dir, "lease_7731.pdf")
+    bin = Path.join(dir, "payload.bin")
+    File.write!(pdf, "%PDF-1.4 lease")
+    File.write!(bin, <<0, 1, 2>>)
+
+    capture_io(fn ->
+      assert ChatCommand.run(["--attach", pdf, "what is the lease number?"]) == 0
+    end)
+
+    assert_receive {:chat_command_bridge_call, "what is the lease number?", opts}
+
+    assert Keyword.fetch!(opts, :attachments) == [
+             %{file_name: "lease_7731.pdf", data: "%PDF-1.4 lease", size_bytes: 14}
+           ]
+
+    capture_io(fn -> assert ChatCommand.run(["--attach", bin]) == 0 end)
+    assert_receive {:chat_command_bridge_call, "", opts}
+    assert [%{file_name: "payload.bin", data: <<0, 1, 2>>}] = Keyword.fetch!(opts, :attachments)
+  end
+
+  test "an attachment path that cannot be read fails before the daemon is asked" do
+    output =
+      capture_io(:stderr, fn ->
+        assert ChatCommand.run(["--attach", "/nonexistent/fermix/file.pdf", "hi"]) == 1
+      end)
+
+    assert output =~ "cannot read attachment /nonexistent/fermix/file.pdf"
+    refute_received {:chat_command_bridge_call, _content, _opts}
+  end
+
   test "rejects cumulative encoded attachments over the daemon frame cap" do
     dir = mkdir!()
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)

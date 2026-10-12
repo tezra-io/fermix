@@ -2,6 +2,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   use ExUnit.Case, async: false
 
   alias FermixCore.Agents.LifecycleTelemetry
+  alias FermixCore.Attachments.Telemetry, as: AttachmentTelemetry
   alias FermixCore.Capabilities.MCP.Telemetry, as: MCPClientTelemetry
   alias FermixCore.ComputerUse.Telemetry, as: ComputerUseTelemetry
   alias FermixCore.Plugins.Auth.Telemetry, as: PluginAuthTelemetry
@@ -463,6 +464,42 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert entry["error_class"] == "timeout"
     assert entry["consecutive_failures"] == 312
     refute Map.has_key?(entry, "content")
+  end
+
+  test "an attachment ingest becomes an attachment_ingest agent_event row, never its bytes", %{
+    dir: dir,
+    server: server
+  } do
+    still = %FermixCore.Attachments{
+      kind: :still,
+      mime_type: "image/png",
+      name: "chart.png",
+      size_bytes: 9,
+      bytes: "PNG-BYTES"
+    }
+
+    capture_content(false)
+    :ok = AttachmentTelemetry.emit_ingest("telegram", still, 1_200)
+    capture_content(true)
+    :ok = AttachmentTelemetry.emit_ingest("telegram", still, 1_300)
+    sync(server)
+
+    [quiet, named] =
+      dir |> read_entries(:agent_event) |> Enum.filter(&(&1["event"] == "attachment_ingest"))
+
+    assert quiet["agent"] == "still"
+    assert quiet["channel"] == "telegram"
+    assert quiet["outcome"] == "image"
+    assert quiet["mime"] == "image/png"
+    assert quiet["bytes"] == 9
+    assert quiet["rendered_bytes"] == 9
+    assert quiet["parts"] == 1
+    assert quiet["duration_us"] == 1_200
+    refute Map.has_key?(quiet, "name")
+    assert named["name"] == "chart.png"
+
+    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+             "PNG-BYTES"
   end
 
   test "memory:review event creates a memory_review agent_event trace", %{

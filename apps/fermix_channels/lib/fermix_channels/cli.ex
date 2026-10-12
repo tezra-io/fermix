@@ -9,6 +9,7 @@ defmodule FermixChannels.CLI do
   @behaviour FermixChannels.Gateway.Channel
 
   alias FermixChannels.Gateway
+  alias FermixChannels.Gateway.MediaDownload
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Telemetry, as: ChannelTelemetry
@@ -34,9 +35,9 @@ defmodule FermixChannels.CLI do
 
   defp do_parse_input(input, opts) do
     content = String.trim(input)
-    media_parts = Keyword.get(opts, :media_parts, [])
+    attachments = Keyword.get(opts, :attachments, [])
 
-    if content == "" and media_parts == [] do
+    if content == "" and attachments == [] do
       {:error, :empty_input}
     else
       sender = opts |> Keyword.get(:sender, default_sender()) |> to_string()
@@ -52,7 +53,7 @@ defmodule FermixChannels.CLI do
           reply_target: session_id,
           request_cwd: request_cwd(opts),
           metadata: put_caller(%{source: :cli, user_id: "cli", chat_type: "private"}, opts),
-          media_parts: media_parts
+          attachments: attachments
         })
 
       {:ok, [message]}
@@ -148,6 +149,27 @@ defmodule FermixChannels.CLI do
 
   @impl true
   def verify_webhook(_conn), do: {:error, :unsupported_transport}
+
+  @doc """
+  The bytes of a `fermix ask --attach` file, which the daemon already holds,
+  written to a private temp file like any channel's download, so the CLI joins
+  the one attachment pipeline (M67).
+  """
+  @impl true
+  @spec download_attachment(Message.t(), map()) :: {:ok, String.t()} | {:error, term()}
+  def download_attachment(_message, %{data: data} = attachment) when is_binary(data),
+    do: MediaDownload.write_temp_bytes(data, @channel, temp_extension(attachment))
+
+  def download_attachment(_message, _attachment), do: {:error, :missing_attachment_reference}
+
+  # The file's own extension, so a transcription backend reads the format from
+  # the temp name; only letters and digits survive.
+  defp temp_extension(attachment) do
+    case attachment |> Map.get(:file_name, "") |> to_string() |> Path.extname() do
+      "." <> ext -> "." <> String.replace(ext, ~r/[^A-Za-z0-9]/, "")
+      _none -> ".bin"
+    end
+  end
 
   defp await_reply(ref, session_id, timeout_ms) do
     receive do

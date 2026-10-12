@@ -230,7 +230,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       assert msg.metadata.user_id == "111"
     end
 
-    test "parses a photo message into an image attachment ref (largest variant, file_id only)" do
+    test "declares a photo as its largest variant (file_id only, hinted :photo)" do
       update = %{
         "message" => %{
           "message_id" => 7,
@@ -249,7 +249,7 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert [
                %{
-                 kind: :image,
+                 hint: :photo,
                  file_id: "big",
                  mime_type: "image/jpeg",
                  size_bytes: 50_000,
@@ -288,7 +288,7 @@ defmodule FermixChannels.Channels.TelegramTest do
       refute Map.has_key?(msg.metadata, :media_group_id)
     end
 
-    test "parses a voice note into an audio attachment (audio/ogg, file_id only)" do
+    test "declares a voice note as audio/ogg, hinted :voice" do
       update = %{
         "message" => %{
           "message_id" => 10,
@@ -308,7 +308,8 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert [
                %{
-                 kind: :audio,
+                 hint: :voice,
+                 duration_s: 4,
                  file_id: "voice-1",
                  mime_type: "audio/ogg",
                  size_bytes: 12_345,
@@ -330,10 +331,10 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert {:ok, [msg]} = Telegram.parse_update(update)
       assert msg.content == "summarize this"
-      assert [%{kind: :audio, file_id: "voice-2", mime_type: "audio/ogg"}] = msg.attachments
+      assert [%{hint: :voice, file_id: "voice-2", mime_type: "audio/ogg"}] = msg.attachments
     end
 
-    test "parses an audio file using its declared mime type" do
+    test "declares an audio file with its own mime type" do
       update = %{
         "message" => %{
           "message_id" => 12,
@@ -347,7 +348,7 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert [
                %{
-                 kind: :audio,
+                 hint: :audio,
                  file_id: "audio-1",
                  mime_type: "audio/mpeg",
                  size_bytes: 999,
@@ -356,7 +357,7 @@ defmodule FermixChannels.Channels.TelegramTest do
              ] = msg.attachments
     end
 
-    test "parses a video note into an audio attachment tagged video/mp4" do
+    test "declares a video note as video/mp4, hinted :video_note (transcribed, D17)" do
       update = %{
         "message" => %{
           "message_id" => 13,
@@ -375,7 +376,8 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert [
                %{
-                 kind: :audio,
+                 hint: :video_note,
+                 duration_s: 8,
                  file_id: "vnote-1",
                  mime_type: "video/mp4",
                  size_bytes: 7_777,
@@ -384,7 +386,7 @@ defmodule FermixChannels.Channels.TelegramTest do
              ] = msg.attachments
     end
 
-    test "parses an audio-MIME document into an audio attachment" do
+    test "declares an audio-MIME document with its file name" do
       update = %{
         "message" => %{
           "message_id" => 14,
@@ -403,7 +405,8 @@ defmodule FermixChannels.Channels.TelegramTest do
 
       assert [
                %{
-                 kind: :audio,
+                 hint: :document,
+                 file_name: "memo.wav",
                  file_id: "doc-1",
                  mime_type: "audio/x-wav",
                  size_bytes: 4_242,
@@ -412,13 +415,14 @@ defmodule FermixChannels.Channels.TelegramTest do
              ] = msg.attachments
     end
 
-    test "leaves a non-audio document unparsed (unchanged behavior)" do
+    test "declares any document, whatever its mime (M67)" do
       update = %{
         "message" => %{
           "message_id" => 15,
           "document" => %{
             "file_id" => "doc-2",
             "mime_type" => "application/pdf",
+            "file_name" => "lease.pdf",
             "file_size" => 4_242
           },
           "chat" => %{"id" => 123},
@@ -427,7 +431,101 @@ defmodule FermixChannels.Channels.TelegramTest do
       }
 
       assert {:ok, [msg]} = Telegram.parse_update(update)
-      assert msg.attachments == []
+
+      assert [
+               %{
+                 hint: :document,
+                 file_id: "doc-2",
+                 mime_type: "application/pdf",
+                 file_name: "lease.pdf",
+                 poster: nil
+               }
+             ] = msg.attachments
+    end
+
+    # A GIF: Telegram sends a silent MP4 as `animation` and sets `document` too.
+    test "declares a GIF as its animation, with the thumbnail as its poster (M67)" do
+      update = %{
+        "message" => %{
+          "message_id" => 16,
+          "caption" => "what is this one?",
+          "animation" => %{
+            "file_id" => "anim-1",
+            "file_name" => "holiday.gif.mp4",
+            "mime_type" => "video/mp4",
+            "duration" => 3,
+            "file_size" => 1_153_434,
+            "thumbnail" => %{
+              "file_id" => "thumb-1",
+              "width" => 320,
+              "height" => 180,
+              "file_size" => 9_000
+            }
+          },
+          "document" => %{"file_id" => "anim-1", "mime_type" => "video/mp4"},
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+
+      assert [
+               %{
+                 hint: :animation,
+                 file_id: "anim-1",
+                 mime_type: "video/mp4",
+                 duration_s: 3,
+                 size_bytes: 1_153_434,
+                 poster: %{file_id: "thumb-1", mime_type: "image/jpeg", size_bytes: 9_000}
+               }
+             ] = msg.attachments
+    end
+
+    test "declares a video with its thumbnail, and a mime-less one as MP4" do
+      update = %{
+        "message" => %{
+          "message_id" => 17,
+          "video" => %{
+            "file_id" => "video-1",
+            "duration" => 12,
+            "thumbnail" => %{"file_id" => "thumb-2"}
+          },
+          "chat" => %{"id" => 123},
+          "from" => %{"id" => 111, "username" => "alice"}
+        }
+      }
+
+      assert {:ok, [msg]} = Telegram.parse_update(update)
+
+      assert [%{hint: :video, mime_type: "video/mp4", poster: %{file_id: "thumb-2"}}] =
+               msg.attachments
+    end
+
+    test "declares a sticker by its kind: still WebP, video WebM or animated TGS" do
+      for {sticker, mime} <- [
+            {%{}, "image/webp"},
+            {%{"is_video" => true}, "video/webm"},
+            {%{"is_animated" => true}, "application/x-tgsticker"}
+          ] do
+        update = %{
+          "message" => %{
+            "message_id" => 18,
+            "sticker" =>
+              Map.merge(
+                %{"file_id" => "sticker-1", "thumbnail" => %{"file_id" => "thumb-3"}},
+                sticker
+              ),
+            "chat" => %{"id" => 123},
+            "from" => %{"id" => 111, "username" => "alice"}
+          }
+        }
+
+        assert {:ok, [msg]} = Telegram.parse_update(update)
+
+        assert [%{hint: :sticker, mime_type: ^mime, poster: %{file_id: "thumb-3"}}] =
+                 msg.attachments
+      end
     end
   end
 

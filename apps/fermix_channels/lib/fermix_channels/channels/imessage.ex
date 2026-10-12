@@ -243,18 +243,27 @@ defmodule FermixChannels.Channels.IMessage do
     row
     |> Map.get("attachments")
     |> List.wrap()
+    |> Enum.reject(&link_preview?/1)
     |> Enum.flat_map(&attachment(&1, guid))
   end
+
+  # Messages stores the preview card of a link it rendered as a mime-less
+  # `.pluginPayloadAttachment`; the link itself is in the text, so the card is
+  # not an attachment the sender sent (M67).
+  defp link_preview?(%{"name" => name}) when is_binary(name),
+    do: String.ends_with?(name, ".pluginPayloadAttachment")
+
+  defp link_preview?(_item), do: false
 
   defp attachment(%{"index" => index} = item, guid) when is_integer(index) and index >= 0 do
     mime = item["mime"]
 
     [
       %{
-        kind: attachment_kind(mime),
         file_id: {guid, index},
         mime_type: mime,
-        size_bytes: item["bytes"]
+        size_bytes: item["bytes"],
+        file_name: item["name"]
       }
     ]
   end
@@ -263,10 +272,6 @@ defmodule FermixChannels.Channels.IMessage do
     Logger.error("iMessage message #{guid} carried a malformed attachment: #{bounded(item)}")
     []
   end
-
-  defp attachment_kind("audio/" <> _rest), do: :audio
-  defp attachment_kind("image/" <> _rest), do: :image
-  defp attachment_kind(_mime), do: :file
 
   defp parse_status({:ok, %Message{metadata: %{decode_error: class}}}) when is_binary(class),
     do: {:error, :decode_error}

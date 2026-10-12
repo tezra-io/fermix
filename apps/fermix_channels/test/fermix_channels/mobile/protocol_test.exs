@@ -302,6 +302,26 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              )
   end
 
+  test "attach_begin takes an optional poster_of naming the video a still belongs to (M67)" do
+    begin = %{
+      "attach_id" => "a-2",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 100,
+      "sha256" => String.duplicate("b", 64)
+    }
+
+    assert {:ok, %{payload: %{"poster_of" => "a-1"}}} =
+             Protocol.decode_client_frame(
+               client_frame("attach_begin", 4, Map.put(begin, "poster_of", "a-1"))
+             )
+
+    assert {:error, {:invalid_field, "poster_of"}} =
+             Protocol.decode_client_frame(
+               client_frame("attach_begin", 4, Map.put(begin, "poster_of", ""))
+             )
+  end
+
   test "only chunk events accept raw bytes and enforce the 60 KiB cap" do
     bytes = :binary.copy(<<7>>, Protocol.max_raw_chunk_bytes())
 

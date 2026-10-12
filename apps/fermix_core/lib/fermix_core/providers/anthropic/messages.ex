@@ -385,12 +385,12 @@ defmodule FermixCore.Providers.Anthropic.Messages do
   defp anthropic_text_blocks("", [_ | _]), do: []
   defp anthropic_text_blocks(content, _image_blocks), do: [%{type: "text", text: content}]
 
-  # Inbound images (M14) ride the user message's `image_parts`; append them after
-  # the text block. Text-only turns produce `[%{type: "text", ...}]` unchanged,
-  # keeping the cached prefix byte-stable.
+  # Inbound pictures and PDFs (M14, M67) ride the user message's `parts`; append
+  # them after the text block. Text-only turns produce `[%{type: "text", ...}]`
+  # unchanged, keeping the cached prefix byte-stable.
   defp anthropic_image_blocks(message) do
     message
-    |> Map.get(:image_parts, [])
+    |> Map.get(:parts, [])
     |> Enum.map(&anthropic_image_block/1)
   end
 
@@ -399,6 +399,13 @@ defmodule FermixCore.Providers.Anthropic.Messages do
        do: %{
          type: "image",
          source: %{type: "base64", media_type: mime, data: Base.encode64(data)}
+       }
+
+  defp anthropic_image_block(%{type: :document, mime_type: "application/pdf", data: data})
+       when is_binary(data),
+       do: %{
+         type: "document",
+         source: %{type: "base64", media_type: "application/pdf", data: Base.encode64(data)}
        }
 
   defp anthropic_image_block(part),

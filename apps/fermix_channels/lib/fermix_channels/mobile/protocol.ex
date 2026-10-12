@@ -506,7 +506,8 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "kind"),
          :ok <- nonempty(payload, "mime"),
          :ok <- bounded_size(payload, "size_bytes", max),
-         :ok <- sha256(payload, "sha256") do
+         :ok <- sha256(payload, "sha256"),
+         :ok <- optional_nonempty(payload, "poster_of") do
       optional_nonempty(payload, "name")
     end
   end

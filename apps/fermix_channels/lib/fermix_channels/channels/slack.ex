@@ -364,21 +364,28 @@ defmodule FermixChannels.Channels.Slack do
     end
   end
 
+  # Each file is declared as Slack gave it, with no kind: the gateway attachment
+  # pipeline names the kind from the bytes (M67). A video's `thumb_video` is its
+  # poster, fetched like `url_private`, with the bot token.
   defp parse_attachments(files) when is_list(files) do
     Enum.map(files, fn file ->
-      mime_type = Map.get(file, "mimetype")
-
       %{
-        kind: attachment_kind(mime_type),
         url: Map.get(file, "url_private"),
-        mime_type: mime_type,
+        mime_type: Map.get(file, "mimetype"),
         file_id: Map.get(file, "id"),
-        size_bytes: Map.get(file, "size")
+        size_bytes: Map.get(file, "size"),
+        file_name: Map.get(file, "name"),
+        poster: poster(Map.get(file, "thumb_video"))
       }
     end)
   end
 
   defp parse_attachments(_files), do: []
+
+  defp poster(url) when is_binary(url) and url != "",
+    do: %{url: url, mime_type: "image/jpeg", file_id: nil, size_bytes: nil}
+
+  defp poster(_none), do: nil
 
   @impl true
   @spec download_attachment(FermixChannels.Gateway.Channel.message(), map()) ::
@@ -417,10 +424,6 @@ defmodule FermixChannels.Channels.Slack do
   end
 
   defp handle_media_response({:error, reason}), do: {:error, reason}
-
-  defp attachment_kind("audio/" <> _rest), do: :audio
-  defp attachment_kind("image/" <> _rest), do: :image
-  defp attachment_kind(_mime_type), do: :file
 
   defp maybe_put_thread_ts(body, opts) do
     case Keyword.get(opts, :thread_ts) do

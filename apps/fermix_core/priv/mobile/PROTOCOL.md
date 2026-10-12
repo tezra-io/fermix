@@ -324,7 +324,7 @@ accepts it.
 |---|---|---|
 | `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v` | first paired-session event |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
-| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?` | SHA-256 is announced before transfer so the host can deduplicate |
+| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `attach_end` | `attach_id`, `sha256` | host verifies announced size and digest |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | uses the normal command registry; `name` is lowercase letters, digits and `_` |
@@ -603,6 +603,14 @@ A `msg`'s `attach_ids` name blobs by the `attach_id` of their `attach_begin`.
 An id lasts 48 hours; a blob keeps its 8 newest ids, and the daemon its 4,096
 newest. A `msg` naming an id past that fails as a request
 (`error{code:"attachment_unavailable", client_msg_id}`).
+
+A GIF or video can carry the still the phone made of it: upload that picture
+with `attach_begin.poster_of` set to the video's `attach_id`, and name both in
+the `msg`'s `attach_ids`. The daemon pairs them: the still is the video's
+poster frame, which reaches the model in its place when the host has no
+ffmpeg, and it is neither an attachment of its own nor a `media_refs[]` entry
+of the stored row. A `poster_of` naming no video in the same `msg` leaves the
+still unused.
 
 ## Media downloads
 

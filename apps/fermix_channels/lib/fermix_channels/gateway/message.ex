@@ -39,10 +39,12 @@ defmodule FermixChannels.Gateway.Message do
     :conversation_key,
     thread_scope: :root,
     metadata: %{},
+    # What the channel declared (`FermixCore.Attachments.declared/0`).
     attachments: [],
-    # Transient materialized inbound content parts (e.g. image bytes resolved at
-    # the gateway media-ingest step). NOT persisted — turn-local (M14).
-    media_parts: []
+    # What the gateway pipeline made of them (M67): rendered
+    # `FermixCore.Attachments`, bytes included. NOT persisted — turn-local; the
+    # turn persists only the manifest it composes from them.
+    inbound_attachments: []
   ]
 
   @type thread_scope :: :root | :thread
@@ -61,8 +63,8 @@ defmodule FermixChannels.Gateway.Message do
           conversation_key: FermixCore.Agents.ConversationKey.t() | nil,
           thread_scope: thread_scope(),
           metadata: map(),
-          attachments: [map()],
-          media_parts: [map()]
+          attachments: [FermixCore.Attachments.declared()],
+          inbound_attachments: [FermixCore.Attachments.t()]
         }
 
   @spec new!(map()) :: t()
@@ -74,16 +76,28 @@ defmodule FermixChannels.Gateway.Message do
 
   @doc """
   Whether the message carries something the agent can act on: non-blank text, or
-  any materialized media. A captionless image is actionable (the media carries
-  the turn); a sticker / poll / blank text with no media is not. This is the one
-  shared definition of "empty inbound" the gateway guards on — replying and not
-  scheduling a turn when a message is not actionable.
+  an attachment that reached the model (M67). A captionless picture is
+  actionable (the attachment carries the turn); a poll or blank text with no
+  attachment is not. This is the one shared definition of "empty inbound" the
+  gateway guards on — replying and not scheduling a turn when a message is not
+  actionable.
   """
   @spec actionable?(t()) :: boolean()
-  def actionable?(%__MODULE__{content: content, media_parts: parts})
-      when is_binary(content) and is_list(parts) do
-    String.trim(content) != "" or parts != []
+  def actionable?(%__MODULE__{content: content, inbound_attachments: attachments})
+      when is_binary(content) and is_list(attachments) do
+    String.trim(content) != "" or Enum.any?(attachments, &usable?/1)
   end
+
+  @doc """
+  Whether the message carried attachments and none of them is usable, with no
+  text to run a turn on (D4): the gateway answers it, naming each attachment and
+  its reason, and never calls it empty.
+  """
+  @spec unusable_only?(t()) :: boolean()
+  def unusable_only?(%__MODULE__{inbound_attachments: attachments} = message),
+    do: attachments != [] and not actionable?(message)
+
+  defp usable?(%FermixCore.Attachments{status: status}), do: status in [:ready, :transcribed]
 
   defp thread_scope(%{thread_ts: nil}), do: :root
   defp thread_scope(%{thread_ts: _thread_ts}), do: :thread

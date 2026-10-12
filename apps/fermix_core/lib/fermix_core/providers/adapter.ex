@@ -32,24 +32,27 @@ defmodule FermixCore.Providers.Adapter do
   alias FermixCore.Providers.Descriptor
 
   @typedoc """
-  A neutral, provider-agnostic image content part. Inbound images are
-  materialized at the channel gateway and ride a user message's `image_parts`
-  list. Each adapter translates a part into its provider's wire shape at its own
-  edge (base64 image block / `input_image` data URI / `image_url`), so the spine
-  and conversation store never depend on any provider's format. The message text
-  stays a plain `String.t()` on `content`, so text accounting, compaction, and
-  persistence are unaffected.
+  A neutral, provider-agnostic content part: a picture (`:image`) or a PDF
+  (`:document`, with the file `name` the wire carries). Inbound attachments are
+  rendered at the channel gateway and ride a user message's `parts` list, in
+  attachment order (M67). Each adapter translates a part into its provider's
+  wire shape at its own edge (base64 image or document block / `input_image` or
+  `input_file` / `image_url` or `file`), so the spine and conversation store
+  never depend on any provider's format. The message text stays a plain
+  `String.t()` on `content`, so text accounting, compaction, and persistence are
+  unaffected.
   """
   @type content_part :: %{
-          required(:type) => :image,
+          required(:type) => :image | :document,
           required(:mime_type) => String.t(),
-          required(:data) => binary()
+          required(:data) => binary(),
+          optional(:name) => String.t()
         }
 
   @type message :: %{
           required(:role) => String.t(),
           required(:content) => String.t(),
-          optional(:image_parts) => [content_part()],
+          optional(:parts) => [content_part()],
           optional(:tool_call_id) => String.t(),
           optional(:tool_calls) => [map()]
         }
@@ -126,18 +129,15 @@ defmodule FermixCore.Providers.Adapter do
   end
 
   @doc """
-  True if any message carries a multimodal content list with at least one image
-  part. The agent loop uses this to fail loud before sending an image to a
-  non-vision model (no silent drop).
+  Every content part the messages carry, in order. The agent loop checks each
+  against the route before sending it, so a picture or PDF the route cannot take
+  fails loud instead of being dropped.
   """
-  @spec has_image_content?([message()]) :: boolean()
-  def has_image_content?(messages) when is_list(messages) do
-    Enum.any?(messages, fn
-      %{image_parts: parts} when is_list(parts) ->
-        Enum.any?(parts, &match?(%{type: :image}, &1))
-
-      _ ->
-        false
+  @spec content_parts([message()]) :: [content_part()]
+  def content_parts(messages) when is_list(messages) do
+    Enum.flat_map(messages, fn
+      %{parts: parts} when is_list(parts) -> parts
+      _message -> []
     end)
   end
 

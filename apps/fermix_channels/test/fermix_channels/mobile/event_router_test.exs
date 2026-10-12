@@ -182,6 +182,30 @@ defmodule FermixChannels.Mobile.EventRouterTest do
        }}
     end
 
+    def attachment(:media, "clip-1") do
+      {:ok,
+       %{
+         attach_id: "clip-1",
+         ref: String.duplicate("c", 64),
+         kind: "video",
+         mime_type: "video/mp4",
+         size_bytes: 900,
+         file_name: "clip.mp4"
+       }}
+    end
+
+    def attachment(:media, "clip-1-poster") do
+      {:ok,
+       %{
+         attach_id: "clip-1-poster",
+         ref: String.duplicate("d", 64),
+         kind: "image",
+         mime_type: "image/jpeg",
+         size_bytes: 40,
+         poster_of: "clip-1"
+       }}
+    end
+
     def attachment(:media, _id), do: {:error, :unknown_attachment}
   end
 
@@ -328,7 +352,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_received {:gateway_ingest, [message], gateway_opts}
     assert message.channel == "mobile"
     assert message.chat_id == "main"
-    assert [%{file_id: "photo-1", kind: :image}] = message.attachments
+    assert [%{file_id: "photo-1", hint: :photo}] = message.attachments
     assert gateway_opts[:ingress_context] == ctx.context
     assert message.metadata.mobile_attempt == 3
 
@@ -405,6 +429,48 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert ref["ref"] == String.duplicate("a", 64)
     refute Enum.any?(row, fn {_field, value} -> is_nil(value) end)
+  end
+
+  # M67: a still sent with `poster_of` is its video's poster frame, not an
+  # attachment of its own, and no row shows it.
+  test "a still sent as a video's poster rides with that video, not on its own", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "poster-1",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1-poster", "clip-1"]
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+    assert_received {:gateway_ingest, [message], _gateway_opts}
+
+    assert [
+             %{
+               file_id: "clip-1",
+               hint: :video,
+               file_name: "clip.mp4",
+               poster: %{file_id: "clip-1-poster", mime_type: "image/jpeg", size_bytes: 40}
+             }
+           ] = message.attachments
+
+    assert_received {:appended, "main", %{media_refs: [ref]}}
+    assert ref["ref"] == String.duplicate("c", 64)
+  end
+
+  test "a poster whose video is not in the message is refused, never dropped", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "poster-alone",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1-poster"]
+      })
+
+    assert {:error, {:invalid_field, "poster_of"}} =
+             EventRouter.route(event, ctx.context, ctx.opts)
+
+    refute_received {:gateway_ingest, _messages, _opts}
   end
 
   # Without a sink of its own (boot recovery), a profile event reaches the

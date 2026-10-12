@@ -1,76 +1,57 @@
 defmodule FermixChannels.Gateway.Transcription do
   @moduledoc """
-  Ingress speech-to-text routing for inbound audio attachments.
+  Ingress speech-to-text for one inbound audio attachment.
 
-  Channels opt in by exposing `download_attachment/2`. When an inbound message
-  has no text content but does carry an audio attachment, this downloads the
-  attachment, transcribes it through `FermixCore.Transcription`, and forwards
-  the normalized text message to the agent while preserving the original
-  attachment metadata. The speech-to-text engine itself lives in
+  The gateway pipeline (`FermixChannels.Gateway.Attachments`) downloads every
+  attachment and names its kind; an `:audio` one (and a Telegram video note,
+  M21 D17) comes here with its downloaded path. This module caps it,
+  transcribes it through `FermixCore.Transcription`, and composes the
+  transcript into the message content (`put_transcript/2`) while keeping the
+  original attachment metadata. The speech-to-text engine itself lives in
   `FermixCore.Transcription`; this module owns the *when/how* of ingress.
   """
-
-  require Logger
 
   alias FermixCore.Telemetry
   alias FermixCore.Transcription
 
   @type attachment :: map()
   @type message :: map()
+  @type transcript :: %{text: String.t(), backend: atom(), attachment: attachment()}
 
   @bytes_per_mb 1_024 * 1_024
 
-  # D15: an `:audio` attachment is transcribed whenever the channel can fetch it,
-  # regardless of whether the message also carries a caption — the caption is
-  # composed with the transcript afterwards (see `compose_content/2`). The old
-  # blank-content-only guard is gone.
-  @spec maybe_transcribe_message(module(), message(), keyword()) ::
-          {:ok, message()} | {:error, term()}
-  def maybe_transcribe_message(channel, message, opts \\ [])
-      when is_atom(channel) and is_map(message) do
-    case {audio_attachment(message), downloader?(channel)} do
-      {nil, _downloader?} ->
-        {:ok, message}
+  @doc """
+  Transcribe the audio at `path`, the downloaded copy of `attachment` (the
+  caller owns the file and removes it). A failure is
+  `{:error, {:transcription_failed, reason}}`, which the gateway answers with a
+  reason-specific reply (D14).
+  """
+  @spec transcribe(message(), attachment(), String.t(), keyword()) ::
+          {:ok, transcript()} | {:error, {:transcription_failed, term()}}
+  def transcribe(message, attachment, path, opts \\ [])
+      when is_map(message) and is_map(attachment) and is_binary(path) and is_list(opts) do
+    attachment = normalize_attachment(attachment)
 
-      {_attachment, false} ->
-        {:ok, message}
-
-      {attachment, true} ->
-        transcribe_message(channel, message, normalize_attachment(attachment), opts)
-    end
-  end
-
-  defp transcribe_message(channel, message, attachment, opts) do
     {result, duration_us} =
-      Telemetry.timed_us(fn -> do_transcribe_message(channel, message, attachment, opts) end)
+      Telemetry.timed_us(fn -> transcribe_capped(message, attachment, path, opts) end)
 
     emit_transcription_telemetry(message, result, duration_us)
     result
   end
 
-  defp do_transcribe_message(channel, message, attachment, opts) do
-    case preflight_cap(attachment, opts) do
-      :ok -> download_and_transcribe(channel, message, attachment, opts)
-      {:error, reason} -> {:error, {:transcription_failed, reason}}
-    end
-  end
-
-  defp download_and_transcribe(channel, message, attachment, opts) do
-    case channel.download_attachment(message, attachment) do
-      {:ok, path} ->
-        try do
-          transcribe_capped(message, attachment, path, opts)
-        after
-          cleanup_download(path)
-        end
-
-      {:error, reason} ->
-        {:error, {:attachment_download_failed, reason}}
-    end
+  @doc """
+  Compose a transcript into the message (D15): it stands alone when the audio
+  came without a caption, and follows the caption under a labelled delimiter
+  when one came with it. The metadata records the attachment and the backend.
+  """
+  @spec put_transcript(message(), transcript()) :: message()
+  def put_transcript(message, %{text: text, backend: backend, attachment: attachment})
+      when is_map(message) and is_binary(text) do
+    put_transcription(message, text, attachment, backend)
   end
 
   defp transcribe_capped(message, attachment, path, opts) do
-    case postflight_cap(path, attachment, opts) do
+    case stat_cap(path, opts) do
       :ok -> run_transcription(message, attachment, path, opts)
       {:error, reason} -> {:error, {:transcription_failed, reason}}
     end
@@ -80,28 +61,14 @@ defmodule FermixChannels.Gateway.Transcription do
     metadata = transcription_metadata(message, attachment)
 
     case Transcription.transcribe(path, Keyword.put(opts, :metadata, metadata)) do
-      {:ok, text} -> handle_transcription_text(message, text, attachment, backend_name(opts))
+      {:ok, text} -> transcript(text, attachment, backend_name(opts))
       {:error, reason} -> {:error, {:transcription_failed, reason}}
     end
   end
 
   # File-size cap (M21 §5.2/D-caps; Code Rule #2 — cap behavior is an explicit
-  # reply upstream): enforced against the declared size before download when the
-  # attachment carries one, otherwise against the written file after download.
-  defp preflight_cap(attachment, opts) do
-    case attachment_value(attachment, :size_bytes) do
-      size when is_integer(size) -> enforce_cap(size, opts)
-      _ -> :ok
-    end
-  end
-
-  defp postflight_cap(path, attachment, opts) do
-    case attachment_value(attachment, :size_bytes) do
-      size when is_integer(size) -> :ok
-      _ -> stat_cap(path, opts)
-    end
-  end
-
+  # reply upstream), measured on the downloaded file: the pipeline's download
+  # cap already refused anything over it before a byte was fetched.
   defp stat_cap(path, opts) do
     case File.stat(path) do
       {:ok, %File.Stat{size: size}} -> enforce_cap(size, opts)
@@ -171,13 +138,10 @@ defmodule FermixChannels.Gateway.Transcription do
     end
   end
 
-  defp handle_transcription_text(message, text, attachment, backend) do
-    trimmed = String.trim(text)
-
-    if trimmed == "" do
-      {:error, {:transcription_failed, :empty_transcription}}
-    else
-      {:ok, put_transcription(message, trimmed, attachment, backend)}
+  defp transcript(text, attachment, backend) do
+    case String.trim(text) do
+      "" -> {:error, {:transcription_failed, :empty_transcription}}
+      trimmed -> {:ok, %{text: trimmed, backend: backend, attachment: attachment}}
     end
   end
 
@@ -191,49 +155,15 @@ defmodule FermixChannels.Gateway.Transcription do
     }
   end
 
-  defp audio_attachment(message) do
-    message
-    |> message_value(:attachments)
-    |> normalize_attachments()
-    |> Enum.find(&audio_attachment?/1)
-  end
-
-  defp audio_attachment?(attachment) do
-    kind = attachment_value(attachment, :kind)
-    kind == :audio or kind == "audio"
-  end
-
   defp present?(value) when is_binary(value), do: String.trim(value) != ""
   defp present?(_value), do: false
-
-  defp downloader?(channel), do: function_exported?(channel, :download_attachment, 2)
-
-  defp cleanup_download(path) when is_binary(path) do
-    case File.rm(path) do
-      :ok ->
-        :ok
-
-      {:error, :enoent} ->
-        :ok
-
-      {:error, reason} ->
-        Logger.error(
-          "Transcription temp file cleanup failed: #{inspect(path)} - #{inspect(reason)}"
-        )
-
-        :ok
-    end
-  end
 
   defp normalize_metadata(value) when is_map(value), do: value
   defp normalize_metadata(_value), do: %{}
 
-  defp normalize_attachments(value) when is_list(value), do: value
-  defp normalize_attachments(_value), do: []
-
   defp normalize_attachment(attachment) when is_map(attachment) do
     %{
-      kind: attachment_value(attachment, :kind),
+      hint: attachment_value(attachment, :hint),
       url: attachment_value(attachment, :url),
       mime_type: attachment_value(attachment, :mime_type),
       file_id: attachment_value(attachment, :file_id),
@@ -265,11 +195,11 @@ defmodule FermixChannels.Gateway.Transcription do
       %{
         channel: message_value(message, :channel),
         status: transcription_status(result),
-        transcribed?: match?({:ok, _message}, result)
+        transcribed?: match?({:ok, _transcript}, result)
       }
     )
   end
 
-  defp transcription_status({:ok, _message}), do: :ok
+  defp transcription_status({:ok, _transcript}), do: :ok
   defp transcription_status({:error, _reason}), do: :error
 end

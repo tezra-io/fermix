@@ -21,9 +21,9 @@ A chat turn:
 1. A channel adapter receives platform input (webhook, long poll, local socket,
    or CLI) and normalizes it into a `FermixChannels.Gateway.Message`.
 2. `FermixChannels.Gateway.ingest/2` authorizes the sender, builds the reply
-   function, transcribes audio and ingests images, runs slash commands, and hands
-   the turn to `Gateway.Queue`, which runs one FIFO turn at a time per
-   conversation.
+   function, runs the attachment pipeline (`Gateway.Attachments`: fetch,
+   classify, render, transcribe audio), runs slash commands, and hands the turn
+   to `Gateway.Queue`, which runs one FIFO turn at a time per conversation.
 3. The queue checks a turn-state snapshot out of `FermixCore.Agents.MainAgent`
    (the cached runtime context: bootstrap prompt, prompt memory, capability
    profiles, provider routes) and runs `FermixCore.Agents.TurnRunner` in a task.
@@ -638,8 +638,15 @@ commands are allowed.
 normalizes input into `Gateway.Message`, authorizes the sender through
 `Gateway.Authorizer` (the owner is an operator, allowlisted senders are guests,
 anyone else is dropped), builds the reply function (`Gateway.Delivery`),
-transcribes audio and ingests images, runs slash commands unless the channel
-disables them, and hands the turn to `Gateway.Queue`.
+runs the one attachment pipeline, runs slash commands unless the channel
+disables them, and hands the turn to `Gateway.Queue`. Channels only declare
+what their platform gave them; `Gateway.Attachments` fetches each attachment,
+names its kind from the bytes (`FermixCore.Attachments.Kind`), renders it (a
+picture as it came, a GIF or video as one still, a PDF or text file as its
+bytes, audio through `Gateway.Transcription`) and answers a message whose
+attachments are all unreadable itself. The turn composes the `[attachments]`
+manifest into the persisted user text (`FermixCore.Attachments.Manifest`) and
+the content parts the encoders read.
 `FermixChannels.Dispatcher` remains only as a thin alias for `Gateway.ingest/2`,
 used by tests.
 

@@ -59,6 +59,8 @@ defmodule FermixCore.Providers.Descriptor do
           retired_config_keys: [atom()],
           setup_fields: [setup_field()],
           effort?: boolean(),
+          documents?: boolean(),
+          image_formats: [String.t()] | :any,
           model_info: String.t() | nil,
           default_req_options: keyword()
         }
@@ -72,7 +74,9 @@ defmodule FermixCore.Providers.Descriptor do
     :secrets,
     :config_keys,
     :setup_fields,
-    :effort?
+    :effort?,
+    :documents?,
+    :image_formats
   ]
   defstruct [
     :id,
@@ -85,6 +89,8 @@ defmodule FermixCore.Providers.Descriptor do
     :config_keys,
     :setup_fields,
     :effort?,
+    :documents?,
+    :image_formats,
     :model_info,
     retired_config_keys: [],
     default_req_options: []
@@ -99,6 +105,14 @@ defmodule FermixCore.Providers.Descriptor do
   # providers; `length > 1` is what gates the web auth-mode picker. `:routed`
   # keeps `Adapter.for_route/1`'s Responses-vs-ChatCompletions split for
   # direct OpenAI.
+  #
+  # What a route takes inline (M67), read from each vendor's own page and, for
+  # the Codex and Anthropic sign-in routes, measured through these adapters:
+  # `documents?` is whether the wire takes an inline PDF (an Anthropic
+  # `document` block, a Responses `input_file` with `file_data`, a Chat
+  # Completions `file` part); `image_formats` lists the picture mimes the
+  # provider takes, or `:any` where it depends on the model, in which case the
+  # provider's own refusal is the named reply. Fermix converts no picture.
   #
   # Raw maps here (structs of a module cannot be built in its own module
   # attributes); materialized via `struct!/2` below so `@enforce_keys`
@@ -121,7 +135,9 @@ defmodule FermixCore.Providers.Descriptor do
       config_keys: [:default_model, :reasoning_effort, :primary],
       retired_config_keys: [:fast],
       setup_fields: [],
-      effort?: true
+      effort?: true,
+      documents?: true,
+      image_formats: ["image/png", "image/jpeg", "image/webp", "image/gif"]
     },
     %{
       id: :openai,
@@ -144,7 +160,9 @@ defmodule FermixCore.Providers.Descriptor do
           default: nil
         }
       ],
-      effort?: true
+      effort?: true,
+      documents?: true,
+      image_formats: ["image/png", "image/jpeg", "image/webp", "image/gif"]
     },
     %{
       id: :anthropic,
@@ -164,7 +182,9 @@ defmodule FermixCore.Providers.Descriptor do
           default: nil
         }
       ],
-      effort?: true
+      effort?: true,
+      documents?: true,
+      image_formats: ["image/png", "image/jpeg", "image/webp", "image/gif"]
     },
     %{
       id: :xai,
@@ -184,7 +204,9 @@ defmodule FermixCore.Providers.Descriptor do
           default: nil
         }
       ],
-      effort?: true
+      effort?: true,
+      documents?: false,
+      image_formats: ["image/jpeg", "image/png"]
     },
     %{
       id: :openrouter,
@@ -204,7 +226,9 @@ defmodule FermixCore.Providers.Descriptor do
           default: nil
         }
       ],
-      effort?: false
+      effort?: false,
+      documents?: true,
+      image_formats: :any
     },
     %{
       id: :mistral,
@@ -227,7 +251,9 @@ defmodule FermixCore.Providers.Descriptor do
       # Mistral's effort vocabulary is high|none, not the canonical
       # none|low|medium|high subset; rather than map a partial range we omit
       # the field entirely (like OpenRouter) and take the server default.
-      effort?: false
+      effort?: false,
+      documents?: false,
+      image_formats: :any
     },
     %{
       id: :venice,
@@ -251,6 +277,8 @@ defmodule FermixCore.Providers.Descriptor do
       # open-weight families), so the field is omitted entirely and the server
       # default stands — the same call OpenRouter makes (M49 §3.2).
       effort?: false,
+      documents?: true,
+      image_formats: :any,
       # The privacy tier rides in every model label, and the two words mean
       # materially different things, so the sentence that explains them is
       # declared here and published once: the management wire carries it as the
@@ -282,6 +310,8 @@ defmodule FermixCore.Providers.Descriptor do
         }
       ],
       effort?: false,
+      documents?: false,
+      image_formats: :any,
       # Local inference is slow; explicit per-route req_options still win.
       default_req_options: [receive_timeout: 300_000]
     }
@@ -322,6 +352,32 @@ defmodule FermixCore.Providers.Descriptor do
   @doc "Whether the provider exposes an auth-mode choice (gates the web picker)."
   @spec multi_auth_mode?(t()) :: boolean()
   def multi_auth_mode?(%__MODULE__{auth_modes: modes}), do: length(modes) > 1
+
+  @doc """
+  Whether the provider's wire takes an inline PDF (M67). A provider outside the
+  registry (the `:mock` test adapter) is permissive, as `ModelCatalog.vision?/2`
+  is for a model outside the catalog: its own refusal is the named reply.
+  """
+  @spec documents?(atom()) :: boolean()
+  def documents?(id) when is_atom(id) do
+    case fetch(id) do
+      {:ok, %__MODULE__{documents?: documents?}} -> documents?
+      :error -> true
+    end
+  end
+
+  @doc """
+  Whether the provider takes a picture of `mime` (M67). `:any` (the format
+  depends on the model) and a provider outside the registry are permissive.
+  """
+  @spec image_format?(atom(), String.t()) :: boolean()
+  def image_format?(id, mime) when is_atom(id) and is_binary(mime) do
+    case fetch(id) do
+      {:ok, %__MODULE__{image_formats: :any}} -> true
+      {:ok, %__MODULE__{image_formats: formats}} -> mime in formats
+      :error -> true
+    end
+  end
 
   @doc """
   Declared locality of a provider id (MILESTONE_32 §9.3). An unknown id is

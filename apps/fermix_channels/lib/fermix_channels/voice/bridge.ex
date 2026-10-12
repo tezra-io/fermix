@@ -80,6 +80,7 @@ defmodule FermixChannels.Voice.Bridge do
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Attachments, as: Attachment
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRecord
@@ -512,7 +513,7 @@ defmodule FermixChannels.Voice.Bridge do
           persist?: persist?
         }
       },
-      media_parts: media_parts(request)
+      inbound_attachments: screen_frame(request)
     })
   end
 
@@ -521,12 +522,23 @@ defmodule FermixChannels.Voice.Bridge do
   end
 
   # The newest screen frame the session buffered, if the call is sharing a
-  # screen. Transient like every other inbound image: it rides the turn and is
-  # never persisted.
-  defp media_parts(request) do
+  # screen: an attachment the session already rendered, so it rides the turn
+  # like any inbound picture and its bytes are never persisted (M67).
+  defp screen_frame(request) do
     case Map.get(request, :screen_frame) do
-      %{} = frame -> [frame]
-      nil -> []
+      %{mime_type: mime, data: data} ->
+        [
+          %Attachment{
+            kind: :still,
+            mime_type: mime,
+            name: "screen frame",
+            size_bytes: byte_size(data),
+            bytes: data
+          }
+        ]
+
+      nil ->
+        []
     end
   end
 end

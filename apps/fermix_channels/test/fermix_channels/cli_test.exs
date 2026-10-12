@@ -73,22 +73,22 @@ defmodule FermixChannels.CLITest do
       end
     end
 
-    test "carries media_parts onto the message (fermix ask --attach)" do
-      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+    test "declares the attached files on the message (fermix ask --attach)" do
+      declared = %{file_name: "chart.png", data: "PNGBYTES", size_bytes: 8}
 
       assert {:ok, [%Message{} = message]} =
-               CLI.parse_input("what is this?", media_parts: [part])
+               CLI.parse_input("what is this?", attachments: [declared])
 
       assert message.content == "what is this?"
-      assert message.media_parts == [part]
+      assert message.attachments == [declared]
     end
 
-    test "allows an image-only turn (blank text + media_parts)" do
-      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+    test "allows an attachment-only turn (blank text + attachments)" do
+      declared = %{file_name: "chart.png", data: "PNGBYTES", size_bytes: 8}
 
-      assert {:ok, [%Message{} = message]} = CLI.parse_input("  ", media_parts: [part])
+      assert {:ok, [%Message{} = message]} = CLI.parse_input("  ", attachments: [declared])
       assert message.content == ""
-      assert message.media_parts == [part]
+      assert message.attachments == [declared]
     end
 
     test "emits inbound channel telemetry" do
@@ -147,19 +147,61 @@ defmodule FermixChannels.CLITest do
       refute_received {:handled_message, _message}
     end
 
-    test "a captionless image (blank text + media) is actionable and reaches the agent" do
+    test "a captionless picture joins the attachment pipeline and reaches the agent" do
       test_pid = self()
-      part = %{type: :image, mime_type: "image/png", data: "PNGBYTES"}
+      png = FermixTestSupport.AttachmentFixtures.png()
+      declared = %{file_name: "chart.png", data: png, size_bytes: byte_size(png)}
 
       assert :ok =
-               Gateway.ingest([blank_message(media_parts: [part])],
+               Gateway.ingest([blank_message(attachments: [declared])],
                  channel: CLI,
                  agent: TestAgent,
                  agent_server: test_pid
                )
 
       assert_receive {:handled_message, delivered}
-      assert delivered.media_parts == [part]
+
+      assert [%FermixCore.Attachments{kind: :still, name: "chart.png", status: :ready} = still] =
+               delivered.inbound_attachments
+
+      assert still.bytes == png
+    end
+
+    test "a file nothing can read, sent with no text, is named in the reply and runs no turn" do
+      test_pid = self()
+      declared = %{file_name: "payload.bin", data: <<0, 159, 146, 150>>, size_bytes: 4}
+
+      assert :ok =
+               Gateway.ingest([blank_message(attachments: [declared])],
+                 channel: CLI,
+                 agent: TestAgent,
+                 agent_server: test_pid,
+                 reply_fn: fn {:text, text} -> send(test_pid, {:reply, text}) end
+               )
+
+      assert_receive {:reply, reply}
+      assert reply =~ "I couldn't read payload.bin"
+      refute reply =~ "empty"
+      refute_received {:handled_message, _message}
+    end
+  end
+
+  describe "download_attachment/2" do
+    test "writes the file the daemon holds to a private temp file named by its extension" do
+      assert {:ok, path} =
+               CLI.download_attachment(blank_message(), %{file_name: "notes.t!xt", data: "hi"})
+
+      on_exit(fn -> FermixTestSupport.SafeRm.rm!(path) end)
+
+      assert File.read!(path) == "hi"
+      assert Path.extname(path) == ".txt"
+      assert %File.Stat{mode: mode} = File.stat!(path)
+      assert Bitwise.band(mode, 0o777) == 0o600
+    end
+
+    test "an attachment with no bytes is refused" do
+      assert CLI.download_attachment(blank_message(), %{file_name: "x"}) ==
+               {:error, :missing_attachment_reference}
     end
   end
 

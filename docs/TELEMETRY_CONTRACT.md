@@ -648,6 +648,28 @@ boot, a suspected reply loop) and never per failure, and a message body the
 helper could not decode is the `emit_parse(:imessage, :decode_error, …)` parse
 status, not a new event name.
 
+## Inbound attachments (a pre-turn point per attachment)
+
+The gateway's attachment pipeline (`FermixChannels.Gateway.Attachments`, M67)
+emits **one point event per inbound attachment**, once what reached the model is
+settled, through its one emitter `FermixCore.Attachments.Telemetry.emit_ingest/3`:
+`[:fermix, :attachment, :ingest]` with measurements `duration_us` (download,
+classification and rendering), `bytes` (its size), `rendered_bytes` (what rides
+the turn inline: the picture, the still, the PDF or the text) and `parts`
+(content parts it adds), and metadata `channel`, `kind`
+(`still | animation | video | audio | document | text | unknown`), `mime`,
+`outcome` (`image | poster | document | text | transcript | unusable`) and
+`reason` (the unusable reason's leading atom, such as `too_large`,
+`needs_ffmpeg` or `download_failed`, else nil) and `detail` (the whole reason,
+inspected and bounded to 200 characters, so an HTTP status or an exit reason
+reaches the trace and not only the log; else nil). The file name rides as `name`
+only under `capture_content?`; bytes never ride. It runs before any turn, like
+ingress transcription, so it has no session: `Trace.TelemetryHandler` records
+it as an `attachment_ingest` `agent_event` row keyed on `kind`, and Opik does
+**not** subscribe. A message whose attachments are all unreadable is answered
+at the gateway and counted as `[:fermix, :dispatcher, :ingress_failed]` with
+`reason: :attachments_unusable`. Never hand-roll the event.
+
 ## Computer-history summarizer (a headless run with no bookends)
 
 The summarizer is **one bounded provider call per cycle**, not an agent loop:

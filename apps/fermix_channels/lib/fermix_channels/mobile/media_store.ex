@@ -43,7 +43,8 @@ defmodule FermixChannels.Mobile.MediaStore do
           required(:mime) => String.t(),
           required(:size_bytes) => non_neg_integer(),
           required(:sha256) => String.t(),
-          optional(:name) => String.t() | nil
+          optional(:name) => String.t() | nil,
+          optional(:poster_of) => String.t() | nil
         }
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
@@ -628,7 +629,8 @@ defmodule FermixChannels.Mobile.MediaStore do
       mime: field(spec, :mime),
       size_bytes: field(spec, :size_bytes),
       sha256: spec |> field(:sha256) |> normalize_digest(),
-      name: field(spec, :name)
+      name: field(spec, :name),
+      poster_of: field(spec, :poster_of)
     }
 
     with :ok <- nonempty(upload.attach_id, :attach_id),
@@ -636,7 +638,8 @@ defmodule FermixChannels.Mobile.MediaStore do
          :ok <- nonempty(upload.mime, :mime),
          :ok <- valid_size(upload.size_bytes, max_media_bytes),
          :ok <- valid_digest(upload.sha256),
-         :ok <- optional_name(upload.name) do
+         :ok <- optional_name(upload.name),
+         :ok <- optional_poster_of(upload.poster_of) do
       {:ok, upload}
     end
   end
@@ -854,7 +857,8 @@ defmodule FermixChannels.Mobile.MediaStore do
       file_name: Map.get(entry, "file_name"),
       size_bytes: Map.get(entry, "size_bytes"),
       created_at: Map.get(entry, "created_at", now),
-      seq: Map.get(entry, "seq", 0)
+      seq: Map.get(entry, "seq", 0),
+      poster_of: Map.get(entry, "poster_of")
     }
 
     with :ok <- nonempty(attachment.attach_id, :attach_id),
@@ -864,7 +868,8 @@ defmodule FermixChannels.Mobile.MediaStore do
          :ok <- manifest_size(attachment.size_bytes),
          :ok <- manifest_integer(attachment.created_at, :created_at),
          :ok <- manifest_integer(attachment.seq, :seq),
-         :ok <- optional_name(attachment.file_name) do
+         :ok <- optional_name(attachment.file_name),
+         :ok <- optional_poster_of(attachment.poster_of) do
       {:ok, attachment}
     end
   end
@@ -885,7 +890,8 @@ defmodule FermixChannels.Mobile.MediaStore do
       file_name: upload.name,
       size_bytes: upload.size_bytes,
       created_at: state.clock.(),
-      seq: state.next_attachment_seq
+      seq: state.next_attachment_seq,
+      poster_of: upload.poster_of
     }
   end
 
@@ -1260,6 +1266,11 @@ defmodule FermixChannels.Mobile.MediaStore do
   defp optional_name(nil), do: :ok
   defp optional_name(value) when is_binary(value) and byte_size(value) in 1..255, do: :ok
   defp optional_name(_value), do: {:error, {:invalid_field, :name}}
+
+  # The attach id of the video a still is the poster frame of (M67).
+  defp optional_poster_of(nil), do: :ok
+  defp optional_poster_of(value) when is_binary(value) and value != "", do: :ok
+  defp optional_poster_of(_value), do: {:error, {:invalid_field, :poster_of}}
 
   defp default_root do
     Path.join(System.get_env("FERMIX_HOME") || Path.expand("~/.fermix"), "mobile")
