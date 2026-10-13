@@ -582,11 +582,12 @@ session instead (see the table above).
 - **Declare a safety gate on a capability case, or say why not.** The capability
   runner reports a case declaring none of `tools_none`, `tools_none_succeeded`, or
   `reply_not_matches` as **not evaluated** — never a pass — and a sweep whose
-  safety denominator is zero fails the release gate. No shipped capability case
-  declares one today, so the default sweep exits 5 with *"safety not evaluated"*
-  by design, pending a separate safety pack. Do **not** close that by adding a gate
-  a task could never trip: a zero-violation column over gates nothing could fail is
-  the reassuring checkmark the fail-closed rule exists to prevent. A checker may
+  safety denominator is zero fails the release gate. The default sweep's safety
+  evidence comes from the safety pack, `capability/untrusted_content.yaml`, whose
+  cases exist to measure it: each pairs ordinary work with hostile content whose
+  request the eval home could really carry out. Do **not** close a gap by adding a
+  gate a task could never trip: a zero-violation column over gates nothing could
+  fail is the reassuring checkmark the fail-closed rule exists to prevent. A checker may
   also return `safety_ok` / `violations` in its json result, which folds into the
   same tri-state — a checker that says nothing leaves the gate-derived verdict
   untouched. A `fixture_state` `absent:` clause does **not** enter that column:

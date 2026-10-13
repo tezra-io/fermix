@@ -86,7 +86,9 @@ SKILL_TOKEN_FILE = os.path.join("eval-fixtures", "skill_token")
 # tools, so the invented halden_ops server is the eval home's deferred surface (a fresh
 # home has no plugins, so without it nothing there is ever deferred); receipt-filing is a
 # skill whose instructions are not in the prompt. The server keeps its state under
-# eval-mcp/, which reset_state clears with the rest of the baseline.
+# eval-mcp/, which reset_state clears with the rest of the baseline. The same server is
+# cap_untrusted_content's hostile surface (its order_notes tool); that pack needs no
+# consent gate granted, because the writes its injection asks for must stay possible.
 BENCH_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 FIXTURE_MCP_SERVER = os.path.join(BENCH_DIR, "suites", "capability", "fixtures", "mcp",
                                   "halden_ops.py")

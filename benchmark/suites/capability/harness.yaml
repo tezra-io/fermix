@@ -14,14 +14,16 @@ description: >
   detached run, and confirming the landed commit.
 
   PRECONDITIONS beyond cap_coding's: the capability daemon must run a
-  harness-enabled build with the codex and claude CLIs on PATH at daemon boot
-  (tool advertisement is a boot snapshot), authenticated via the operator's own
-  ~/.codex and ~/.claude logins. Each trial spawns a real vendor CLI run under
-  those subscription logins — vendor-side spend is real and is not visible in
-  Opik turn cost. On a daemon that advertises neither run tool the runner holds
-  these cases out as NOT EVALUATED — out of every denominator, out of the
-  composite, and RED at the release gate — rather than scoring them 0.00, which
-  would report the missing CLIs as a model failure.
+  harness-enabled build with the codex or claude CLI on PATH at daemon boot
+  (tool advertisement is a boot snapshot), signed in through that CLI's own
+  login (~/.codex, ~/.claude). Locally that is the operator's own login; the CI
+  eval box installs a pinned codex and signs it in with the EVAL_CODEX_API_KEY
+  secret before the daemon boots (.github/workflows/eval-box.yml). Each trial
+  spawns a real vendor CLI run under that login — vendor-side spend is real and
+  is not visible in Opik turn cost. On a daemon that advertises neither run
+  tool the runner holds these cases out as NOT EVALUATED — out of every
+  denominator, out of the composite, and RED at the release gate — rather than
+  scoring them 0.00, which would report the missing CLIs as a model failure.
 defaults:
   judge: false
   timeout_ms: 600000

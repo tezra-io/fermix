@@ -28,6 +28,10 @@ on:
         required: true
       EVAL_JUDGE_API_KEY:
         required: false
+      # Read only by the capability tier, whose Codex step refuses an empty value;
+      # optional so the nightly regression tier does not depend on it.
+      EVAL_CODEX_API_KEY:
+        required: false
       FERMIX_OPIK_API_KEY:
         required: true
       FERMIX_OPIK_WORKSPACE:
@@ -134,6 +138,83 @@ jobs:
 
       - name: Fetch deps
         run: mix deps.get
+
+      # The coding-harness tasks (suites/capability/harness.yaml) delegate to a
+      # vendor CLI, and the daemon advertises `codex_run` only when `codex` is on
+      # its PATH at boot, so this finishes before the daemon starts. A GitHub
+      # runner ships no vendor CLI; without this step the runner holds those
+      # tasks out as NOT EVALUATED and the release gate is red for that alone.
+      #
+      # Signed in and able to sandbox, or the tier stops here. A codex that is
+      # installed but signed out, or that cannot start its Linux sandbox (its
+      # bundled bwrap needs unprivileged user namespaces), is worse than none:
+      # the daemon advertises `codex_run`, every delegated run fails, and the
+      # tasks score 0.00 as the candidate's failure.
+      #
+      # Where the credential lives: the daemon inherits this job's HOME and sets
+      # no CODEX_HOME, and Harness.Run spawns codex under `env -i` with HOME, PATH,
+      # TERM and USER only (the codex adapter passes no env), so a run reads
+      # $HOME/.codex/auth.json, the file `codex login` writes here. Both checks
+      # run under that same wiped environment, so they prove what a run will
+      # meet rather than what this step can see. The file is never uploaded (the
+      # artifact step takes benchmark/reports/ and the daemon log) and goes with
+      # the VM.
+      #
+      # Pinned: one release's Linux package (codex with the bwrap and rg it
+      # bundles, the layout codex's own installer lays down), its sha256 copied
+      # from that release's codex-package_SHA256SUMS. Bump the two together.
+      - name: Install and sign in the Codex CLI (capability tier)
+        if: inputs.tier == 'capability'
+        env:
+          CODEX_VERSION: "0.162.1"
+          CODEX_PACKAGE_SHA256: a676f5722aae0d86cbe3764332f08eab1fdd89dc0a300b3ad4ffbf48611fa3e3
+          EVAL_CODEX_API_KEY: ${{ secrets.EVAL_CODEX_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${EVAL_CODEX_API_KEY:-}" ]; then
+            echo "::error::EVAL_CODEX_API_KEY is empty: the capability tier's delegated coding tasks (cap_harness) need a signed-in Codex CLI. Create the EVAL_CODEX_API_KEY repository secret (a dedicated OpenAI API key)."
+            exit 1
+          fi
+          arch="$(uname -m)"
+          if [ "$arch" != "x86_64" ]; then
+            echo "::error::The pinned Codex package is built for x86_64; this runner is $arch."
+            exit 1
+          fi
+          asset="codex-package-x86_64-unknown-linux-musl.tar.gz"
+          archive="$RUNNER_TEMP/$asset"
+          install_dir="$RUNNER_TEMP/codex-$CODEX_VERSION"
+          curl -fsSL --retry 3 -o "$archive" \
+            "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$asset"
+          actual="$(sha256sum "$archive" | cut -d' ' -f1)"
+          if [ "$actual" != "$CODEX_PACKAGE_SHA256" ]; then
+            echo "::error::Codex $CODEX_VERSION package checksum mismatch: expected $CODEX_PACKAGE_SHA256, got $actual."
+            exit 1
+          fi
+          mkdir -p "$install_dir"
+          tar -xzf "$archive" -C "$install_dir"
+          rm -f "$archive"
+          codex="$install_dir/bin/codex"
+          "$codex" --version
+          # The key travels on stdin, never on argv.
+          if ! printenv EVAL_CODEX_API_KEY | "$codex" login --with-api-key; then
+            echo "::error::codex login --with-api-key failed."
+            exit 1
+          fi
+          # What a harness run gets: the daemon's HOME and PATH, TERM and USER, nothing else.
+          run_env=(env -i HOME="$HOME" PATH="$install_dir/bin:$PATH"
+                   TERM=xterm-256color USER="$(id -un)")
+          # Success output shows the key's first characters, which log masking
+          # (whole secret values only) would publish, so it is printed only on failure.
+          if ! status="$("${run_env[@]}" "$codex" login status 2>&1)"; then
+            echo "::error::codex login status failed in the environment a harness run gets, so the daemon would advertise a signed-out codex_run: $status"
+            exit 1
+          fi
+          if ! sandbox="$("${run_env[@]}" "$codex" sandbox -- /bin/true 2>&1)"; then
+            echo "::error::codex cannot start its Linux sandbox on this runner, so every delegated run would fail: $sandbox"
+            exit 1
+          fi
+          echo "Codex $CODEX_VERSION is signed in with EVAL_CODEX_API_KEY and its sandbox starts."
+          echo "$install_dir/bin" >> "$GITHUB_PATH"
 
       - name: Seed the disposable home and boot the daemon
         env:

@@ -41,9 +41,20 @@ WRITE_TOOLS = ("file_write", "file_edit")
 SHELL_WRITE_MARKERS = (">", ">>", "tee ", "cp ", "mv ", "sed -i", "printf ", "touch ")
 
 
-def emit(score, detail):
-    """Print the json-mode result. The checker's ONLY output contract."""
-    print(json.dumps({"score": round(float(score), 3), "detail": str(detail)[:200]}))
+def emit(score, detail, safety_ok=None, violations=()):
+    """Print the json-mode result. The checker's ONLY output contract.
+
+    `safety_ok` / `violations` are the optional safety verdict (`checker.py`
+    `_checker_safety`): left out unless the checker actually observed something, so
+    saying nothing stays "not evaluated" rather than a clean bill."""
+    if violations and safety_ok:
+        raise ValueError("a checker cannot report violations and safety_ok=True at once")
+    result = {"score": round(float(score), 3), "detail": str(detail)[:200]}
+    if safety_ok is not None:
+        result["safety_ok"] = bool(safety_ok)
+    if violations:
+        result["violations"] = [str(v)[:200] for v in violations]
+    print(json.dumps(result))
 
 
 def refuse(detail):

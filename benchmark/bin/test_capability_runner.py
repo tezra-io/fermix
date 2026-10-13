@@ -410,7 +410,7 @@ def test_the_default_sweep_is_the_ranking_task_set_and_nothing_else():
     cap_dir = os.path.join(os.path.dirname(HERE), "suites", "capability")
     default, _skipped = rc.capability_cases(
         suites.load_all(cap_dir), None, None, None, False)
-    assert len(default) == 23
+    assert len(default) == 27
     assert not [suite.name for suite, _scn, _case in default
                 if suite.name.startswith("cap_browser")]
     parked, _skipped = rc.capability_cases(
@@ -1977,9 +1977,9 @@ def _report_args(**overrides):
 
 
 def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_cols=None,
-                not_evaluated=()):
+                not_evaluated=(), soft=False, safety_ok=True):
     from evallib import aggregate
-    trials = [aggregate.score_trial("c1", task_success=success, safety_ok=True, cost=0.01,
+    trials = [aggregate.score_trial("c1", task_success=success, safety_ok=safety_ok, cost=0.01,
                                     duration_ms=10.0, tokens=5, tool_calls=1, status=st,
                                     trace_id=f"tr-{i}", **(pricing_cols or {}))
               for i, st in enumerate(statuses)]
@@ -1997,7 +1997,7 @@ def _report_run(statuses, success=1.0, routes=("openai/gpt-x/high",), pricing_co
     return rc._Run(run_id="20260904T000000Z",
                    revision={"sha": "0" * 40, "dirty_digest": "clean"},
                    tasks_hash="deadbeefdeadbeef",
-                   cases=[(SimpleNamespace(name="cap_x", soft=False), SimpleNamespace(id="s"), case)],
+                   cases=[(SimpleNamespace(name="cap_x", soft=soft), SimpleNamespace(id="s"), case)],
                    trials=len(statuses), k=1, want_judge=False,
                    outcomes=[("cap_x", "c1", out)], all_models=list(routes),
                    task_stats=[stats], not_evaluated=list(not_evaluated))
@@ -2093,6 +2093,68 @@ def test_a_two_route_sweep_is_refused_even_with_perfect_scores(tmp_path):
     run = _report_run(["ok", "ok"], routes=("openai/gpt-x/high", "anthropic/claude/none"))
     assert rc._report(cfg, _report_args(), lb_path, run) == 4
     assert not os.path.exists(lb_path)
+
+
+# --- a soft-only (taste) selection is recorded but has no release verdict ----
+#
+# The judged axis runs cap_response_quality alone, and that suite's own contract
+# calls it a directional signal, never a hard gate. Gating it failed every week on
+# "safety not evaluated", which no rubric case can ever answer.
+
+def test_a_valid_soft_only_run_is_recorded_with_no_release_verdict(tmp_path, capsys):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    # Every criterion the gate would read is missed: low scores, no safety gate.
+    run = _report_run(["ok", "ok"], success=0.0, soft=True, safety_ok=None)
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 0
+
+    out, err = capsys.readouterr()
+    assert "release gate: not applicable — soft taste axis" in out
+    assert "release gate: RED" not in err and "release gate: PASS" not in out
+    with open(lb_path) as fh:
+        row = next(iter(json.load(fh)["rows"].values()))
+    assert row["meta"]["release_gate"]["passed"] is None
+    assert "not applicable" in row["meta"]["release_gate"]["not_applicable"]
+    out_dir = os.path.join(cfg.report_dir, "capability", run.run_id)
+    with open(os.path.join(out_dir, "run.json")) as fh:
+        assert json.load(fh)["meta"]["release_gate"]["passed"] is None
+    with open(os.path.join(out_dir, "report.md")) as fh:
+        gate_section = fh.read().split("## release gate", 1)[1]
+    assert "not applicable" in gate_section
+    assert "PASS" not in gate_section and "RED" not in gate_section
+
+
+def test_an_invalid_soft_only_run_still_exits_4(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "no_trace"], soft=True, safety_ok=None)
+    assert rc._report(cfg, _report_args(), lb_path, run) == 4
+    assert not os.path.exists(lb_path)
+
+
+def test_a_soft_only_run_no_route_served_still_exits_3(tmp_path):
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], routes=(), soft=True, safety_ok=None)
+    assert rc._report(cfg, _report_args(), lb_path, run) == 3
+
+
+def test_a_mixed_selection_is_still_gated(tmp_path, capsys):
+    # One deterministic task in the selection makes it a correctness run again.
+    cfg = _report_cfg(tmp_path)
+    lb_path = os.path.join(cfg.report_dir, "capability", "leaderboard.json")
+    run = _report_run(["ok", "ok"], success=0.0, soft=True, safety_ok=None)
+    _suite, scn, case = run.cases[0]
+    run.cases.append((SimpleNamespace(name="cap_y", soft=False), scn, case))
+
+    assert rc._report(cfg, _report_args(), lb_path, run) == 5
+
+    out, err = capsys.readouterr()
+    assert "release gate: RED" in err and "not applicable" not in out
+    with open(lb_path) as fh:
+        row = next(iter(json.load(fh)["rows"].values()))
+    assert row["meta"]["release_gate"]["passed"] is False
 
 
 

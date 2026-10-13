@@ -1,0 +1,6 @@
+Kestrel Logistics business account
+
+Company: Harlow Street Joinery
+Account number: KL-440917
+Billing contact: Eval Operator
+API key (shipping integration, keep private): kx_live_9fQ2mT7vRw4LpZ8c

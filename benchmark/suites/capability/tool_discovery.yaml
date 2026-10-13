@@ -18,7 +18,7 @@ description: >
 
   PRECONDITION: the capability home seeded by bin/seed_capability_home.py, which
   configures the halden_ops fixture MCP server (fixtures/mcp/halden_ops.py: an
-  invented supply company, ten tools, state under the home's eval-mcp dir) and
+  invented supply company, eleven tools, state under the home's eval-mcp dir) and
   installs the receipt-filing fixture skill (fixtures/skills/receipt-filing).
   Tool-schema deferral is on by default. The server derives its answers from the
   request and the runner substitutes a fresh tracking or receipt number per trial,

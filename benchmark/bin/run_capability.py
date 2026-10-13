@@ -23,7 +23,8 @@ OUTCOME, and does that outcome clear the RELEASE bar (evallib/release_gate.py). 
 completed run is not a passing gate, and a missing trace is not a scored zero.
 
 Exit codes:
-  0  measurement valid, leaderboard written, release gate green
+  0  measurement valid, leaderboard written, release gate green — or not applicable:
+     a soft-only (taste) selection is a directional signal with no release verdict
   2  usage / selection / argument refusal (nothing was driven)
   3  preconditions (Opik or daemon down, or no route served the sweep)
   4  measurement INVALID — missing trace evidence, a checker/evaluator failure,
@@ -1310,8 +1311,15 @@ def render_report(run_id, config_id, meta, score, gate, problems) -> str:
         "## cost (reported beside the score, never inside it)", "",
         *_cost_lines(score), "",
         "## release gate", "",
-        ("PASS — every predeclared target met." if gate.passed
-         else "RED — " + "; ".join(gate.reasons)), ""])
+        _gate_line(gate), ""])
+
+
+def _gate_line(gate) -> str:
+    if gate is None:
+        return SOFT_AXIS_GATE
+    if gate.passed:
+        return "PASS — every predeclared target met."
+    return "RED — " + "; ".join(gate.reasons)
 
 
 def _not_evaluated_lines(meta) -> list[str]:
@@ -1488,6 +1496,14 @@ def _detect_config_id(arg_id, all_models) -> str:
     if not all_models:
         return "unknown-model"
     return Counter(all_models).most_common(1)[0][0]
+
+
+# A soft-only selection is judge-scored taste with no ground truth. Its suite contract
+# calls it a directional signal, never a hard gate, so it is recorded on its own row
+# and has NO release verdict: gating it would demand pass@1 and safety evidence that a
+# rubric axis cannot produce, and fail it every time for that alone.
+SOFT_AXIS_GATE = ("not applicable — soft taste axis (judge-scored, no ground truth): a "
+                  "directional signal on its own leaderboard row, never a release verdict")
 
 
 def _soft_axis_suffix(cases) -> str | None:
@@ -2067,8 +2083,10 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
     if args.results_out:
         write_results_json(args.results_out, "fermix", config_id,
                            run.k, args.threshold, run.outcomes, valid=True)
-    gate = release_gate.evaluate(score)
-    meta["release_gate"] = {"passed": gate.passed, "reasons": gate.reasons}
+    # A soft-only selection has no release verdict at all (SOFT_AXIS_GATE), so the
+    # gate is not evaluated for it rather than evaluated and set aside.
+    gate = None if _soft_axis_suffix(run.cases) else release_gate.evaluate(score)
+    meta["release_gate"] = _gate_record(gate)
     md = _publish(cfg, args, lb_path, config_id, score, meta, run)
     with open(os.path.join(out_dir, "leaderboard.md"), "w", encoding="utf-8") as fh:
         fh.write(md)
@@ -2077,6 +2095,22 @@ def _report(cfg, args, lb_path, run: _Run) -> int:
     print(md)
     print(f"leaderboard: {lb_path}")
     _render_html(cfg, lb_path)
+    return _gate_exit(gate)
+
+
+def _gate_record(gate) -> dict:
+    """The release decision as the row and run.json carry it. `passed` is None when
+    there is no verdict, so nothing reading the row can mistake it for a pass."""
+    if gate is None:
+        return {"passed": None, "not_applicable": SOFT_AXIS_GATE}
+    return {"passed": gate.passed, "reasons": gate.reasons}
+
+
+def _gate_exit(gate) -> int:
+    """Exit 0 for a green gate or no verdict, 5 for a red one, each named on its own line."""
+    if gate is None:
+        print(f"release gate: {SOFT_AXIS_GATE}")
+        return 0
     if gate.passed:
         print("release gate: PASS")
         return 0
