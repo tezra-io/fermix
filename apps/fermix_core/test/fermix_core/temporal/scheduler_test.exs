@@ -250,11 +250,28 @@ defmodule FermixCore.Temporal.SchedulerTest do
     index
   end
 
-  defp await_worker_exit(id) do
+  # The test's own monitor sees the worker die, but nothing orders the scheduler's
+  # `:DOWN` (sent by the dying worker) before the test's next call: a bare
+  # `:sys.get_state` can be answered before the scheduler settles the row. The
+  # scheduler drops a worker's monitor in the callback that settles its row, so
+  # wait until that monitor is gone, at most 200 polls 10 ms apart.
+  defp await_worker_exit(scheduler, id) do
     assert_receive {:worker_started, ^id, pid}
     ref = Process.monitor(pid)
     assert_receive {:DOWN, ^ref, :process, ^pid, _reason}
-    :ok
+    await_unmonitored(scheduler, id, 200)
+  end
+
+  defp await_unmonitored(_scheduler, id, 0),
+    do: flunk("the scheduler still monitors reminder #{id}'s worker after 2 s")
+
+  defp await_unmonitored(scheduler, id, polls) do
+    if id in Map.values(sync(scheduler).monitors) do
+      Process.sleep(10)
+      await_unmonitored(scheduler, id, polls - 1)
+    else
+      :ok
+    end
   end
 
   describe "due ticks" do
@@ -353,7 +370,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
       set_now(ctx, due)
       :ok = Scheduler.tick(scheduler, now: due)
-      :ok = await_worker_exit(row.id)
+      :ok = await_worker_exit(scheduler, row.id)
       sync(scheduler)
 
       settled = reminder(ctx, row.id)
@@ -372,7 +389,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
         Enum.reduce(0..4, due, fn _index, now ->
           set_now(ctx, now)
           :ok = Scheduler.tick(scheduler, now: now)
-          :ok = await_worker_exit(row.id)
+          :ok = await_worker_exit(scheduler, row.id)
           sync(scheduler)
           DateTime.add(now, 5, :second)
         end)
@@ -846,7 +863,7 @@ defmodule FermixCore.Temporal.SchedulerTest do
 
           set_now(ctx, due)
           :ok = Scheduler.tick(name, now: due)
-          :ok = await_worker_exit(row.id)
+          :ok = await_worker_exit(name, row.id)
           sync(name)
           {name, Process.whereis(name)}
         end)
