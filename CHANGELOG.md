@@ -21,6 +21,35 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the fastest and cheapest Claude. Above 100,000 prompt tokens Anthropic
   bills it at five times the price, so a conversation on it compacts at
   100,000 tokens. Claude Haiku 4.5 stays in the list.
+- **Every attachment you send reaches the model.** Pictures and voice notes
+  used to be the only attachments the model saw: a GIF, a video, a PDF or a
+  text file sent in a chat was left out. Now, on every channel and with
+  `fermix ask --attach`:
+  - A GIF or a video reaches the model as up to four frames spread over it
+    when `ffmpeg` is installed on the computer running Fermix. Fermix looks
+    for it on every message, so installing it works on the next one, and
+    installs nothing itself. Without `ffmpeg` the model gets one still: a
+    GIF's own first frame, or the preview the sender's app made (Telegram's
+    thumbnail, Slack's video thumbnail, the phone's poster). With neither,
+    the reply says `ffmpeg` is not installed and how to install it.
+  - A video's sound is transcribed beside its pictures. A clip with no sound
+    costs no transcription.
+  - A PDF goes to the model as a document on Anthropic, OpenAI, OpenAI
+    Codex, OpenRouter and Venice, and a text file is read into the message,
+    up to 32 KB for all of one message's files.
+  - A model that cannot take a picture or a PDF passes the turn to the next
+    one in your fallback chain that can. When none can, the reply says so.
+  - Anything Fermix cannot read (another file type, a HEIC or TIFF picture,
+    a file over 20 MB, a failed download) is named with its reason, never
+    dropped. A message with no text and nothing readable gets a reply naming
+    what could not be read, and no turn runs.
+- **Your attachments are kept for later messages.** On your own turns,
+  every attachment you send, with the frames or still the model saw, is
+  saved in the workspace under `media/inbound/<date>/` and named in the
+  conversation, so a later message can come back to it. Fermix keeps them
+  for 14 days and 1 GB at most, removing the oldest first. A guest's
+  attachments are not saved, and the conversation's history keeps the list
+  of attachments, never their contents.
 
 ### Changed
 
@@ -107,6 +136,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   without them, and the provider could not reuse its cached copy of the
   request's opening. Every call now carries them. OpenAI Codex was not
   affected.
+- **A GPT-Live call listens as soon as it starts.** The pet sat at rest for
+  one to two seconds after a call started, while Fermix connected to
+  OpenAI, and what you said in that time was lost. The call now shows it is
+  listening at once, and what you say while it connects is held, up to ten
+  seconds, and passed to the voice when it is ready.
+- **The phone's voice notes are transcribed.** Every voice note from the
+  phone failed on OpenAI with "Unsupported file format", because Fermix
+  passed the recording on under a name with no audio extension. It now
+  carries its format's extension, on OpenAI and SpaceXAI alike.
+- **A voice note with no speech in it says so.** A recording with nothing
+  to transcribe got "the transcription failed. Please try again.", the same
+  reply as a provider error, so a muted microphone looked like a broken
+  Fermix and recording again could not help. The reply now says no speech
+  was heard and to check the microphone.
 
 ### Security
 
