@@ -64,8 +64,9 @@ on:
 # the job that runs the capability tier (eval-weekly's) grants id-token: write for
 # the Claude Code sign-in, and the regression and dangerous tiers never hold the
 # right to mint GitHub OIDC tokens. A direct dispatch gets the repository's
-# read-only default, which the sign-in step refuses with a sentence: run the
-# capability tier on demand through eval-weekly instead.
+# default token, which must stay read-only (Settings > Actions > General >
+# Workflow permissions; read-only as of 2026-10-13), and the sign-in step refuses
+# it with a sentence: run the capability tier on demand through eval-weekly.
 
 concurrency:
   group: eval-box
@@ -254,14 +255,21 @@ jobs:
             > "$anthropic_dir/configs/$WIF_PROFILE.json"
           printf '%s\n' "$WIF_PROFILE" > "$anthropic_dir/active_config"
 
+          # The job's OIDC request credential never reaches a command line or an
+          # environment another process can read (/proc/<pid>/cmdline and
+          # /proc/<pid>/environ): curl takes the header on stdin, and the refresher
+          # below gets the credential on a file descriptor into a shell variable.
+          oidc_request_token="$ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+          oidc_request_url="$ACTIONS_ID_TOKEN_REQUEST_URL"
+
           # A fresh GitHub OIDC token, written beside the target and renamed over it
           # so claude never reads half a token. Prints nothing it fetched.
           fetch_jwt() {
             local tmp
             tmp="$(mktemp "$wif_dir/github-oidc.XXXXXX")"
-            if curl -fsS --retry 3 --max-time 30 \
-                 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-                 "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+            if printf 'Authorization: Bearer %s\n' "$oidc_request_token" \
+                 | curl -fsS --retry 3 --max-time 30 -H @- \
+                     "$oidc_request_url&audience=https://api.anthropic.com" \
                  | jq -er '.value' > "$tmp" \
                && grep -Eqx '[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' "$tmp"; then
               mv -f "$tmp" "$jwt"
@@ -327,7 +335,16 @@ jobs:
             done
             echo "$(date -u +%FT%TZ) stopped at the cap of $WIF_REFRESH_MAX refreshes"
           }
-          refresh_loop < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
+          # The loop outlives this step beside every process the candidate drives,
+          # so it starts from a wiped environment holding only what it needs; the
+          # request credential arrives on fd 3 and lives only in a shell variable.
+          env -i PATH="$PATH" HOME="$HOME" wif_dir="$wif_dir" jwt="$jwt" \
+            oidc_request_url="$oidc_request_url" \
+            WIF_REFRESH_SECONDS="$WIF_REFRESH_SECONDS" WIF_REFRESH_MAX="$WIF_REFRESH_MAX" \
+            bash -c "set -uo pipefail; $(declare -f fetch_jwt refresh_loop)
+              IFS= read -r oidc_request_token <&3; exec 3<&-
+              refresh_loop" \
+            3<<< "$oidc_request_token" < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
           echo "$!" > "$wif_dir/refresher.pid"
           disown
           echo "Claude Code $CLAUDE_CODE_VERSION signs in through the $WIF_PROFILE federation profile and answers on $CLAUDE_MODEL."

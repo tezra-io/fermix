@@ -139,9 +139,10 @@ it was dispatched from. Delegated runs bill the service account's workspace, and
 none of that spend shows in Opik turn cost. Only eval-weekly's capability job grants
 `id-token: write`: eval-box declares no permissions and inherits its caller's
 token, so the regression and dangerous tiers never hold the right to mint a
-GitHub OIDC token. A direct eval-box dispatch gets the repository's read-only
-default and the sign-in step refuses it, so run the capability tier on demand
-through eval-weekly. Only the sign-in step mints a token, and the daemon's
+GitHub OIDC token. A direct eval-box dispatch gets the repository's default
+token, so that default must stay read-only (Settings → Actions → General →
+Workflow permissions), and the sign-in step refuses it: run the capability tier
+on demand through eval-weekly. Only the sign-in step mints a token, and the daemon's
 environment drops the request credential.
 
 **Model rule:** the candidate model (eval-box input `model`, default

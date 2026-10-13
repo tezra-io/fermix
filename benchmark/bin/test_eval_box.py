@@ -252,11 +252,17 @@ echo '{"type":"system","subtype":"init","model":"claude-haiku-5-5","apiKeySource
 CURL_STUB = """#!/bin/sh
 # Serves the stub Claude Code binary for a release URL and a numbered invented JWT
 # for the OIDC endpoint (optionally in two halves, slowly), and records each URL.
+# Its settings come from stub.env beside it, read as plain shell variables, so it
+# works from the refresher's wiped environment and `env` below shows only what the
+# caller really passed down. Every argv and every inherited environment is
+# recorded, so a test can prove the OIDC request credential reached neither.
+. "$(dirname "$0")/stub.env"
+printf '%s\\n' "$*" >> "$STUB_ARGV_LOG"
 out=""; header=""; url=""
 while [ $# -gt 0 ]; do
   case "$1" in
     -o) out="$2"; shift 2 ;;
-    -H) header="$2"; shift 2 ;;
+    -H) header="$2"; [ "$header" != "@-" ] || IFS= read -r header; shift 2 ;;
     --retry|--max-time) shift 2 ;;
     https://*) url="$1"; shift ;;
     *) shift ;;
@@ -265,6 +271,8 @@ done
 echo "$url" >> "$STUB_CURL_LOG"
 case "$url" in
   "$STUB_OIDC_URL"*)
+    if env | grep -qF "$STUB_OIDC_REQUEST_TOKEN"; then echo "inherited" >> "$STUB_ENV_LOG"
+    else echo "clean" >> "$STUB_ENV_LOG"; fi
     if [ "$header" != "Authorization: Bearer $STUB_OIDC_REQUEST_TOKEN" ] || [ -e "$STUB_OIDC_FAIL" ]; then
       echo "curl: (22) The requested URL returned error: 403" >&2; exit 22
     fi
@@ -314,13 +322,18 @@ def _run_step(step, root: Path, *, binary=None, sha=None, arch="x86_64", vars_=N
     oidc_fail = root / "oidc-fail"
     if oidc_fails:
         oidc_fail.write_text("")
+    argv_log, env_log = root / "curl-argv.log", root / "curl-env.log"
+    stub_env = {"STUB_BINARY": str(binary_path), "STUB_CURL_LOG": str(curl_log),
+                "STUB_OIDC_URL": OIDC_URL, "STUB_OIDC_REQUEST_TOKEN": REQUEST_TOKEN,
+                "STUB_OIDC_COUNT": str(root / "oidc-count"),
+                "STUB_OIDC_FAIL": str(oidc_fail), "STUB_OIDC_SLOW": oidc_slow,
+                "STUB_JWT_STEM": JWT_STEM, "STUB_ARGV_LOG": str(argv_log),
+                "STUB_ENV_LOG": str(env_log)}
+    (stub_bin / "stub.env").write_text(
+        "".join(f"{k}='{v}'\n" for k, v in stub_env.items()))
     env = {"PATH": f"{stub_bin}{os.pathsep}{os.environ.get('PATH', '')}",
            "HOME": str(home), "RUNNER_TEMP": str(runner_temp),
-           "GITHUB_PATH": str(github_path), "STUB_BINARY": str(binary_path),
-           "STUB_CURL_LOG": str(curl_log), "STUB_ARCH": arch,
-           "STUB_OIDC_URL": OIDC_URL, "STUB_OIDC_REQUEST_TOKEN": REQUEST_TOKEN,
-           "STUB_OIDC_COUNT": str(root / "oidc-count"), "STUB_OIDC_FAIL": str(oidc_fail),
-           "STUB_OIDC_SLOW": oidc_slow, "STUB_JWT_STEM": JWT_STEM,
+           "GITHUB_PATH": str(github_path), "STUB_ARCH": arch,
            # The step's own env, with the values a test cannot take from it.
            **{k: str(v) for k, v in step["env"].items()},
            **(VAR_VALUES if vars_ is None else vars_),
@@ -335,7 +348,8 @@ def _run_step(step, root: Path, *, binary=None, sha=None, arch="x86_64", vars_=N
         status=p.returncode, output=p.stdout + p.stderr,
         published=github_path.read_text(), home=home, runner_temp=runner_temp,
         urls=curl_log.read_text().split() if curl_log.exists() else [],
-        wif_dir=runner_temp / "anthropic-wif", oidc_fail=oidc_fail)
+        wif_dir=runner_temp / "anthropic-wif", oidc_fail=oidc_fail,
+        argv_log=argv_log, env_log=env_log)
 
 
 def _stop_refresher(wif_dir: Path) -> None:
@@ -496,6 +510,38 @@ def test_the_refresher_keeps_replacing_the_token(run_step):
     jwt = r.wif_dir / "github-oidc.jwt"
     assert int(JWT_RE.fullmatch(jwt.read_text()).group(1)) > 3
     assert _mode(jwt) == 0o600
+
+
+def _await_oidc_fetches(r, n: int, timeout: float = 5.0) -> None:
+    """Waits, at most `timeout` seconds, until the OIDC endpoint has served `n` tokens."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if r.env_log.exists() and len(r.env_log.read_text().split()) >= n:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"fewer than {n} OIDC fetches within {timeout}s")
+
+
+def test_the_request_credential_never_reaches_a_command_line(run_step):
+    # Any process on the box can read another's argv from /proc/<pid>/cmdline, so
+    # curl takes the Authorization header on stdin, on every fetch.
+    r = run_step(refresh_seconds="0.2")
+    assert r.status == 0, r.output
+    _await_oidc_fetches(r, 4)
+    assert REQUEST_TOKEN not in r.argv_log.read_text()
+    assert "-H @-" in r.argv_log.read_text()
+
+
+def test_the_refresher_starts_from_a_wiped_environment(run_step):
+    # The refresher outlives the step beside the processes the candidate drives,
+    # and /proc/<pid>/environ is readable by the same user, so it holds the
+    # request credential only in a shell variable read from a file descriptor.
+    r = run_step(refresh_seconds="0.2")
+    assert r.status == 0, r.output
+    _await_oidc_fetches(r, 4)
+    envs = r.env_log.read_text().split()
+    # The first two fetches run in the step itself; every later one is the refresher's.
+    assert len(envs) >= 4 and envs[2:] == ["clean"] * len(envs[2:]), envs
 
 
 def test_the_refresher_never_exposes_a_partial_token(run_step):
