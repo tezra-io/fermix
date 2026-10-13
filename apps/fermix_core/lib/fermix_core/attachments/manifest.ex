@@ -5,10 +5,12 @@ defmodule FermixCore.Attachments.Manifest do
   nothing in a message is usable (D4).
 
   The manifest is persisted as part of the user message, so history and
-  compaction know what was attached and what could not be read. It lists each
-  attachment's name, kind and size and what reached the model, or why nothing
-  did. Text files are inlined under it, all of them together cut at
-  `FermixCore.Attachments.max_text_inline_bytes/0`, on a character boundary. A
+  compaction know what was attached, what could not be read and where an
+  operator turn kept each file. It lists each attachment's name, kind and size,
+  what reached the model or why nothing did, what became of a video's sound,
+  and where it was saved or why it was not. Text files are inlined under it, all
+  of them together cut at `FermixCore.Attachments.max_text_inline_bytes/0`, on a
+  character boundary, and a video's transcript follows under its own label. A
   voice note is not listed: its transcript already stands in the text (M21), so
   a voice-note turn reads as it always has. A turn with no attachments is left
   byte-identical.
@@ -37,7 +39,11 @@ defmodule FermixCore.Attachments.Manifest do
 
       listed ->
         texts = inline_texts(listed)
-        join([content, manifest(listed, texts, opts) | text_blocks(listed, texts)])
+
+        join(
+          [content, manifest(listed, texts, opts)] ++
+            text_blocks(listed, texts) ++ sound_blocks(listed)
+        )
     end
   end
 
@@ -66,9 +72,21 @@ defmodule FermixCore.Attachments.Manifest do
     Enum.join(["[attachments]" | lines], "\n")
   end
 
+  # One line per attachment, and the seam for every fact about it: what reached
+  # the model, its sound, and where it was saved.
   defp line({{%Attachments{} = att, text}, index}, counters, opts) do
     {outcome, counters} = outcome(att, text, counters, opts)
-    facts = [name(att), kind_label(att), duration(att), size(att.size_bytes), outcome]
+
+    facts = [
+      name(att),
+      kind_label(att),
+      duration(att),
+      size(att.size_bytes),
+      outcome,
+      sound(att.sound),
+      saved(att.saved)
+    ]
+
     {"#{index}. " <> (facts |> Enum.reject(&is_nil/1) |> Enum.join(" · ")), counters}
   end
 
@@ -77,6 +95,13 @@ defmodule FermixCore.Attachments.Manifest do
 
   defp outcome(%Attachments{kind: :still}, _text, counters, _opts),
     do: numbered(counters, :image, &"attached as image #{&1}")
+
+  defp outcome(%Attachments{kind: kind, frames: [_ | _] = frames}, _text, counters, _opts)
+       when kind in [:animation, :video] do
+    first = counters.image + 1
+    last = counters.image + length(frames)
+    {frames_outcome(length(frames), first, last), %{counters | image: last}}
+  end
 
   defp outcome(%Attachments{kind: kind}, _text, counters, _opts)
        when kind in [:animation, :video],
@@ -92,6 +117,51 @@ defmodule FermixCore.Attachments.Manifest do
     number = Map.fetch!(counters, part) + 1
     {sentence.(number), Map.put(counters, part, number)}
   end
+
+  defp frames_outcome(1, number, number), do: "one frame of it attached as image #{number}"
+
+  defp frames_outcome(count, first, last),
+    do: "#{count} frames spread over it attached as images #{first} to #{last}"
+
+  defp sound({:transcript, _text}), do: "its sound transcribed below"
+  defp sound(:no_speech), do: "no speech in its sound"
+  defp sound(:no_sound), do: "it has no sound track"
+
+  defp sound({:failed, reason}),
+    do: "its sound could not be transcribed: " <> sound_failure(reason)
+
+  defp sound(nil), do: nil
+
+  # A video's sound is not its message: the frames still carry the video, so a
+  # transcription failure is a note here, never the voice note's reply (D14).
+  defp sound_failure(:not_configured), do: "no transcription backend is configured"
+
+  defp sound_failure({:unsupported_auth_mode, _mode}),
+    do: "no transcription backend is configured"
+
+  defp sound_failure({:file_too_large, size_mb, cap_mb}),
+    do: "it is #{size_mb} MB, over the #{cap_mb} MB transcription limit"
+
+  defp sound_failure(reason) when reason in [:sidecar_not_installed, :model_not_installed],
+    do: "on-device transcription is selected but not installed"
+
+  defp sound_failure(:no_release_pinned),
+    do: "on-device transcription is selected but not available on this machine"
+
+  defp sound_failure(_reason), do: "the transcription failed"
+
+  defp saved({:saved, path, []}), do: "saved at #{path}"
+
+  defp saved({:saved, path, [still]}),
+    do: "saved at #{path}, with the still it showed beside it as #{Path.basename(still)}"
+
+  defp saved({:saved, path, frames}),
+    do:
+      "saved at #{path}, with its frames beside it as " <>
+        Enum.map_join(frames, ", ", &Path.basename/1)
+
+  defp saved({:not_saved, sentence}), do: "not saved: " <> sentence
+  defp saved(nil), do: nil
 
   defp text_outcome(bytes, bytes), do: "inlined below"
 
@@ -122,6 +192,12 @@ defmodule FermixCore.Attachments.Manifest do
   defp text_blocks(attachments, texts) do
     for {%Attachments{} = att, text} <- Enum.zip(attachments, texts), text not in [nil, ""] do
       "[#{name(att) || "text file"}]\n" <> text
+    end
+  end
+
+  defp sound_blocks(attachments) do
+    for %Attachments{sound: {:transcript, transcript}} = att <- attachments do
+      "[video sound: #{name(att) || "the video"}]\n" <> transcript
     end
   end
 
@@ -201,8 +277,11 @@ defmodule FermixCore.Attachments.Manifest do
 
   defp reason({:needs_ffmpeg, kind}, opts),
     do:
-      "it is #{article(kind)} #{kind} with no still to read; reading its frames takes " <>
-        "ffmpeg (#{install_hint(os(opts))}), or send a screenshot of it"
+      "it is #{article(kind)} #{kind}, and ffmpeg is not installed here to read its " <>
+        "frames; #{install_hint(os(opts))}, or send a screenshot of it"
+
+  defp reason({:render_failed, _detail}, _opts),
+    do: "ffmpeg could not read its frames; send a screenshot of it"
 
   defp reason({:still_unsupported, mime}, _opts),
     do: "it is a #{mime} picture, which the models do not take; send it as a JPEG or PNG"

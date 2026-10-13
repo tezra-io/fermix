@@ -47,8 +47,8 @@ defmodule FermixCore.Tools.Media.Support do
   # the stat size, so a file that grows between the two cannot cross it.
   @max_local_image_bytes 10 * 1024 * 1024
 
-  # The raster types the generation backends accept as a reference. `view_image`
-  # narrows this further at its own call site (no GIF).
+  # The raster types the generation backends accept as a reference; `view_image`
+  # reads the same four.
   @generation_image_mimes ["image/png", "image/jpeg", "image/webp", "image/gif"]
 
   @typedoc "A source image resolved for an edit: bytes in hand plus its MIME and a filename."
@@ -362,22 +362,25 @@ defmodule FermixCore.Tools.Media.Support do
   end
 
   @doc """
-  Writes media bytes to `rel` under the workspace sandbox floor (action
-  `:generate_media`), creating the parent directory. Returns the absolute path.
-  Used by both `Media.Output` (generated artifacts) and the inbound ingest above.
+  Writes media bytes to `rel` under the workspace sandbox floor, creating the
+  parent directory. Returns the absolute path. Used by `Media.Output` (generated
+  artifacts), the inbound ingest above and the inbound attachments an operator
+  turn keeps (`Attachments.Workspace`). `opts[:action]` names the sandbox action
+  (default `:generate_media`).
   """
-  @spec write_bytes(String.t(), binary(), map()) :: {:ok, String.t()} | {:error, String.t()}
-  def write_bytes(rel, bytes, context)
-      when is_binary(rel) and is_binary(bytes) and is_map(context) do
-    with {:ok, abs} <- resolve_write_path(rel, context),
+  @spec write_bytes(String.t(), binary(), map(), keyword()) ::
+          {:ok, String.t()} | {:error, String.t()}
+  def write_bytes(rel, bytes, context, opts \\ [])
+      when is_binary(rel) and is_binary(bytes) and is_map(context) and is_list(opts) do
+    with {:ok, abs} <- resolve_write_path(rel, context, Keyword.get(opts, :action, @action)),
          :ok <- ensure_parent_dir(abs),
          :ok <- write_file(abs, bytes) do
       {:ok, abs}
     end
   end
 
-  defp resolve_write_path(rel, context) do
-    case Sandbox.write_path(rel, @action, context) do
+  defp resolve_write_path(rel, context, action) do
+    case Sandbox.write_path(rel, action, context) do
       {:ok, abs} -> {:ok, abs}
       {:error, reason} -> {:error, sandbox_error(reason)}
     end

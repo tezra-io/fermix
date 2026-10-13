@@ -9,6 +9,7 @@ defmodule FermixCore.Tools.ViewImageTest do
   @jpeg <<0xFF, 0xD8, 0xFF, 0xE0>> <> :binary.copy("j", 64)
   @webp "RIFF" <> <<0, 0, 0, 0>> <> "WEBP" <> :binary.copy("w", 64)
   @gif "GIF89a" <> :binary.copy("g", 64)
+  @tiff <<"II", 42, 0>> <> :binary.copy("t", 64)
 
   setup do
     dir = FermixTestSupport.SafeRm.make_tmp_dir!("fermix-view-image")
@@ -78,6 +79,20 @@ defmodule FermixCore.Tools.ViewImageTest do
       assert {:ok, %{images: [%{mime_type: "image/png"}]}} =
                ViewImage.execute(%{"paths" => [Path.join(dir, "one.png")]}, context)
     end
+
+    # M67: the first frame an inbound GIF was read from is kept as a still GIF.
+    test "reads a GIF, such as the still a saved inbound GIF was read from", %{
+      dir: dir,
+      context: context
+    } do
+      write(dir, "holiday-7f3a9c01-still.gif", @gif)
+
+      assert {:ok, %{images: [%{mime_type: "image/gif"}]}} =
+               ViewImage.execute(
+                 %{"paths" => [Path.join(dir, "holiday-7f3a9c01-still.gif")]},
+                 context
+               )
+    end
   end
 
   describe "execute/2 — refusals" do
@@ -129,13 +144,13 @@ defmodule FermixCore.Tools.ViewImageTest do
       context: context
     } do
       write(dir, "good.png", @png)
-      write(dir, "animated.gif", @gif)
+      write(dir, "scan.tiff", @tiff)
 
-      paths = [Path.join(dir, "good.png"), Path.join(dir, "animated.gif")]
+      paths = [Path.join(dir, "good.png"), Path.join(dir, "scan.tiff")]
 
       assert {:ok, result} = ViewImage.execute(%{"paths" => paths}, context)
       refute result.success
-      assert result.error =~ "Reference 2 (animated.gif)"
+      assert result.error =~ "Reference 2 (scan.tiff)"
       assert result.error =~ "image_type_unsupported"
       # All-or-error: the good first reference is NOT returned on its own.
       refute Map.has_key?(result, :images)

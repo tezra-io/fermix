@@ -10,19 +10,24 @@ defmodule FermixChannels.Gateway.Attachments do
        the `@max_download_bytes` cap, declared or measured — into a temp file it
        removes on every path;
     2. names its kind from the bytes (`FermixCore.Attachments.Kind`);
-    3. renders it by kind: a picture as it came; a GIF, animation or video as one
-       still (a GIF file's first frame, else the still the sender made); a PDF
-       and a text file as their bytes; anything else is named unusable;
-    4. caps what rides the turn inline at `@max_inline_bytes`;
-    5. transcribes audio and a Telegram video note (M21 D17) through
-       `Gateway.Transcription`, one after another, in this process.
+    3. renders it by kind: a picture as it came; a GIF or video as frames when
+       ffmpeg is installed (`FermixCore.Attachments.Frames`, looked up once per
+       message), otherwise as one still (a GIF file's first frame, else the
+       still the sender made); a PDF and a text file as their bytes; anything
+       else is named unusable;
+    4. caps what rides the turn inline at `@max_inline_bytes`, frames included;
+    5. transcribes audio and a Telegram video note (M21 D17), and the sound of
+       every other video (D5), through `Gateway.Transcription`, one after
+       another, in this process.
 
   The result is `Message.inbound_attachments`: turn-local, never persisted. The
   turn composes the manifest and the content parts from it. An attachment that
   cannot be read is never dropped: it stays in the list under
   `{:unusable, reason}`, and either the turn's manifest or the gateway's reply
-  names it (D4). A transcription failure keeps its fail-loud reply (D14): the
-  pipeline returns `{:error, {:transcription_failed, reason}}` and no turn runs.
+  names it (D4). A transcription failure of a voice note keeps its fail-loud
+  reply (D14): the pipeline returns `{:error, {:transcription_failed, reason}}`
+  and no turn runs. A video's sound is not its message, so a failure there is
+  the attachment's `sound`, which the manifest names, and the turn runs.
 
   `fermix_channels`-side on purpose: fetching calls a channel adapter, and
   `fermix_core` must not depend on `fermix_channels`. Core only ever receives
@@ -35,6 +40,7 @@ defmodule FermixChannels.Gateway.Attachments do
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Transcription
   alias FermixCore.Attachments, as: Attachment
+  alias FermixCore.Attachments.Frames
   alias FermixCore.Attachments.GifFrame
   alias FermixCore.Attachments.Kind
   alias FermixCore.Attachments.Telemetry, as: AttachmentTelemetry
@@ -54,11 +60,15 @@ defmodule FermixChannels.Gateway.Attachments do
   @download_concurrency 4
   # The picture formats every picture-reading model takes; Fermix converts none.
   @provider_stills ~w(image/jpeg image/png image/webp image/gif)
+  @iso_media_videos ~w(video/mp4 video/quicktime video/3gpp)
 
   @doc """
   Fetch, classify and render the message's declared attachments into
-  `inbound_attachments`, composing any transcript into its content. A message
-  that declares none is returned as it came.
+  `inbound_attachments`, composing any voice note's transcript into its
+  content. A message that declares none is returned as it came.
+
+  `ffmpeg:` (`t:FermixCore.Attachments.Frames.source/0`) says where ffmpeg comes
+  from; every other option goes to `Gateway.Transcription`.
   """
   @spec ingest(module(), Message.t(), keyword()) ::
           {:ok, Message.t()} | {:error, {:transcription_failed, term()}}
@@ -68,9 +78,11 @@ defmodule FermixChannels.Gateway.Attachments do
 
   def ingest(channel, %Message{attachments: declared} = message, opts)
       when is_atom(channel) and is_list(declared) and is_list(opts) do
+    {frame_opts, opts} = Keyword.split(opts, [:ffmpeg])
+    ffmpeg = Frames.ffmpeg(frame_opts)
     {taken, over} = Enum.split(declared, @max_attachments)
     over = Enum.map(over, &{undownloaded(&1, {:too_many, @max_attachments}), &1, 0})
-    settled = fit_turn(fetch_all(channel, message, taken) ++ over)
+    settled = fit_turn(fetch_all(channel, message, taken, ffmpeg) ++ over)
 
     with {:ok, message, settled} <- transcribe_all(message, settled, opts) do
       Enum.each(settled, &emit_ingest(message.channel, &1))
@@ -84,11 +96,13 @@ defmodule FermixChannels.Gateway.Attachments do
   # `timeout: :infinity` because each HTTP fetch is bounded by its client, and a
   # stream timeout would kill a slow download before its temp file is removed;
   # the stream is drained whole, so every task runs its own cleanup.
-  defp fetch_all(channel, message, declared) do
+  defp fetch_all(channel, message, declared, ffmpeg) do
+    ctx = %{channel: channel, message: message, ffmpeg: ffmpeg}
+
     FermixCore.TaskSupervisor
     |> Task.Supervisor.async_stream_nolink(
       declared,
-      fn one -> Telemetry.timed_us(fn -> fetch_and_render(channel, message, one) end) end,
+      fn one -> Telemetry.timed_us(fn -> fetch_and_render(ctx, one) end) end,
       max_concurrency: @download_concurrency,
       timeout: :infinity,
       ordered: true
@@ -109,8 +123,8 @@ defmodule FermixChannels.Gateway.Attachments do
     {undownloaded(declared, {:download_failed, :crashed}), declared, 0}
   end
 
-  defp fetch_and_render(channel, message, declared) do
-    ctx = %{channel: channel, message: message, declared: declared}
+  defp fetch_and_render(ctx, declared) do
+    ctx = Map.put(ctx, :declared, declared)
 
     with :ok <- preflight(declared),
          {:ok, path} <- download(ctx, declared) do
@@ -154,10 +168,14 @@ defmodule FermixChannels.Gateway.Attachments do
     {:unusable, {:download_failed, reason}}
   end
 
+  # The download stays on disk until rendering ends: it is ffmpeg's one input.
   defp render_download(ctx, path) do
     case read_capped(path) do
-      {:ok, bytes} -> ctx.declared |> downloaded_attachment(bytes) |> render(ctx)
-      {:unusable, reason} -> undownloaded(ctx.declared, reason)
+      {:ok, bytes} ->
+        ctx.declared |> downloaded_attachment(bytes) |> render(Map.put(ctx, :path, path))
+
+      {:unusable, reason} ->
+        undownloaded(ctx.declared, reason)
     end
   end
 
@@ -179,12 +197,12 @@ defmodule FermixChannels.Gateway.Attachments do
 
   defp within_download_cap(_size), do: :ok
 
-  # Audio and a Telegram video note are transcribed after every download, in
-  # this process (see `transcribe_all/3`).
+  # Audio, a Telegram video note and a video's sound are transcribed after every
+  # download, in this process (see `transcribe_all/3`).
   defp render(%Attachment{} = att, ctx) do
     cond do
       transcribe?(att) -> att
-      att.kind in [:animation, :video] -> still_without_ffmpeg(att, ctx)
+      att.kind in [:animation, :video] -> moving(att, ctx)
       att.kind == :still -> still(att)
       att.kind in [:document, :text] -> att
       Kind.signed?(att.mime_type) -> unusable(att, {:not_as_declared, att.mime_type})
@@ -193,32 +211,68 @@ defmodule FermixChannels.Gateway.Attachments do
   end
 
   # M21 D17: a Telegram video note is speech, transcribed whatever its container.
-  # Stage 2 gives every video its sound too, beside its frames.
   defp transcribe?(%Attachment{status: :ready, hint: :video_note}), do: true
   defp transcribe?(%Attachment{status: :ready, kind: :audio}), do: true
   defp transcribe?(%Attachment{}), do: false
 
-  # D2/D3: a moving picture reaches the model as one still. A GIF file gives its
-  # own first frame, cut from its blocks; any other gives the still its sender
-  # made (a channel thumbnail, the phone's `poster_of`); with neither, the
-  # manifest or the reply names why. Stage 2 puts ffmpeg's frames ahead of this
-  # when ffmpeg is installed.
-  defp still_without_ffmpeg(%Attachment{mime_type: "image/gif"} = att, _ctx) do
+  # D5: every other video's sound goes to the transcriber too, beside its
+  # pictures. An animation is silent by definition, and so is a sticker; a
+  # video ffmpeg found no sound track in already says so (`sound: :no_sound`).
+  defp sound?(%Attachment{kind: :video, hint: hint, bytes: bytes, sound: nil})
+       when is_binary(bytes),
+       do: hint not in [:video_note, :sticker]
+
+  defp sound?(%Attachment{}), do: false
+
+  # D3: one rule per configuration. With ffmpeg on this machine a GIF or a
+  # video reaches the model as frames, and an ffmpeg failure is named, never
+  # swapped for the still (Rule 12). Without it, `one_still/2`. ffmpeg does not
+  # read an animated WebP or a TGS sticker, so those take the still in both.
+  defp moving(%Attachment{} = att, %{ffmpeg: {:ok, ffmpeg}} = ctx) do
+    if Frames.reads?(att.mime_type), do: frames(att, ffmpeg, ctx), else: one_still(att, ctx)
+  end
+
+  defp moving(%Attachment{} = att, %{ffmpeg: :missing} = ctx), do: one_still(att, ctx)
+
+  defp frames(att, ffmpeg, ctx) do
+    case Frames.extract(ctx.path, ffmpeg) do
+      {:ok, %{frames: frames, audio?: audio?}} ->
+        %{att | frames: frames, sound: no_sound(att, audio?)}
+
+      {:error, reason} ->
+        Logger.warning(
+          "ffmpeg could not read an inbound #{att.kind} (#{att.mime_type}): " <>
+            inspect(reason, limit: 20, printable_limit: 200)
+        )
+
+        unusable(att, {:render_failed, reason})
+    end
+  end
+
+  # A video ffmpeg shows to have no sound track needs no transcription call.
+  defp no_sound(%Attachment{kind: :video}, false), do: :no_sound
+  defp no_sound(%Attachment{}, _audio?), do: nil
+
+  # D2: without ffmpeg a moving picture reaches the model as one still. A GIF
+  # file gives its own first frame, cut from its blocks; any other gives the
+  # still its sender made (a channel thumbnail, the phone's `poster_of`); with
+  # neither, the manifest or the reply names why.
+  defp one_still(%Attachment{mime_type: "image/gif"} = att, _ctx) do
     case GifFrame.first(att.bytes) do
       {:ok, frame} -> %{att | poster: %{mime_type: "image/gif", bytes: frame}}
       :error -> unusable(att, {:no_still, att.mime_type})
     end
   end
 
-  defp still_without_ffmpeg(att, ctx) do
+  defp one_still(att, ctx) do
     case MediaDownload.value(ctx.declared, :poster) do
       %{} = poster -> fetch_poster(att, poster, ctx)
       _none -> unusable(att, no_still(att))
     end
   end
 
-  # ffmpeg reads a video's frames; an animated picture (WebP, a TGS sticker)
-  # it does not help with.
+  # A video with no still is one ffmpeg would read, were it installed; an
+  # animated picture (WebP, a TGS sticker) it does not help with.
   defp no_still(%Attachment{mime_type: "video/" <> _container} = att),
     do: {:needs_ffmpeg, att.kind}
 
@@ -276,6 +330,10 @@ defmodule FermixChannels.Gateway.Attachments do
       else: {{att, declared, duration_us}, used + bytes}
   end
 
+  defp inline_bytes(%Attachment{status: :ready, kind: kind, frames: [_ | _] = frames})
+       when kind in [:animation, :video],
+       do: frames |> Enum.map(&byte_size(&1.bytes)) |> Enum.sum()
+
   defp inline_bytes(%Attachment{status: :ready, kind: kind, poster: %{bytes: bytes}})
        when kind in [:animation, :video],
        do: byte_size(bytes)
@@ -303,23 +361,52 @@ defmodule FermixChannels.Gateway.Attachments do
   end
 
   defp transcribe_entry(message, {att, declared, duration_us} = entry, opts) do
-    if transcribe?(att) do
-      with {:ok, transcript} <- transcribe(message, att, declared, opts) do
-        transcribed = {%{att | status: :transcribed}, declared, duration_us}
-        {:ok, Transcription.put_transcript(message, transcript), transcribed}
-      end
-    else
-      {:ok, message, entry}
+    cond do
+      transcribe?(att) ->
+        with {:ok, transcript} <- transcribe(message, att, declared, opts) do
+          transcribed = {%{att | status: :transcribed}, declared, duration_us}
+          {:ok, Transcription.put_transcript(message, transcript), transcribed}
+        end
+
+      sound?(att) ->
+        {:ok, message,
+         {%{att | sound: sound(message, att, declared, opts)}, declared, duration_us}}
+
+      true ->
+        {:ok, message, entry}
     end
   end
 
-  # The audio goes to the backend in a temp file named for the mime its bytes
-  # were classified as, which is the format a hosted backend reads.
+  # A video's sound, within the transcription cap: a transcript, no speech, or
+  # a failure the manifest names. The frames still carry the video, so nothing
+  # here fails the message.
+  defp sound(message, att, declared, opts) do
+    case transcribe(message, att, declared, opts) do
+      {:ok, %{text: text}} ->
+        {:transcript, text}
+
+      {:error, {:transcription_failed, :empty_transcription}} ->
+        :no_speech
+
+      {:error, {:transcription_failed, reason}} ->
+        Logger.warning(
+          "The sound of an inbound video could not be transcribed: " <>
+            inspect(reason, limit: 20, printable_limit: 200)
+        )
+
+        {:failed, reason}
+    end
+  end
+
+  # The audio goes to the backend in a temp file named, and declared, for the
+  # format its bytes were classified as, which is what a hosted backend reads.
   defp transcribe(message, att, declared, opts) do
-    case MediaDownload.write_temp(att.bytes, "transcription", %{mime_type: att.mime_type}) do
+    mime = transcription_mime(att.mime_type)
+
+    case MediaDownload.write_temp(att.bytes, "transcription", %{mime_type: mime}) do
       {:ok, path} ->
         try do
-          Transcription.transcribe(message, declared, path, opts)
+          Transcription.transcribe(message, Map.put(declared, :mime_type, mime), path, opts)
         after
           cleanup(path)
         end
@@ -328,6 +415,11 @@ defmodule FermixChannels.Gateway.Attachments do
         {:error, {:transcription_failed, reason}}
     end
   end
+
+  # A MOV or 3GP is the same ISO media container as an MP4, and the hosted
+  # backends read MP4 but not the other two names.
+  defp transcription_mime(mime) when mime in @iso_media_videos, do: "video/mp4"
+  defp transcription_mime(mime), do: mime
 
   defp emit_ingest(channel, {att, _declared, duration_us}),
     do: AttachmentTelemetry.emit_ingest(channel, att, duration_us)

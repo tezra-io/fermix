@@ -4,7 +4,8 @@ defmodule FermixChannels.Gateway.Transcription do
 
   The gateway pipeline (`FermixChannels.Gateway.Attachments`) downloads every
   attachment and names its kind; an `:audio` one (and a Telegram video note,
-  M21 D17) comes here with its downloaded path. This module caps it,
+  M21 D17, and the sound of any other video, M67 D5) comes here with its
+  downloaded path. This module caps it,
   transcribes it through `FermixCore.Transcription`, and composes the
   transcript into the message content (`put_transcript/2`) while keeping the
   original attachment metadata. The speech-to-text engine itself lives in

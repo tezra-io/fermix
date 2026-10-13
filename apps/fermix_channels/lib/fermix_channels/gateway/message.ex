@@ -76,7 +76,7 @@ defmodule FermixChannels.Gateway.Message do
 
   @doc """
   Whether the message carries something the agent can act on: non-blank text, or
-  an attachment that reached the model (M67). A captionless picture is
+  an attachment that reached the model (M67), its sound included. A captionless picture is
   actionable (the attachment carries the turn); a poll or blank text with no
   attachment is not. This is the one shared definition of "empty inbound" the
   gateway guards on — replying and not scheduling a turn when a message is not
@@ -97,6 +97,9 @@ defmodule FermixChannels.Gateway.Message do
   def unusable_only?(%__MODULE__{inbound_attachments: attachments} = message),
     do: attachments != [] and not actionable?(message)
 
+  # A video whose pictures could not be read still reached the model when its
+  # sound did (M67 D5).
+  defp usable?(%FermixCore.Attachments{sound: {:transcript, _text}}), do: true
   defp usable?(%FermixCore.Attachments{status: status}), do: status in [:ready, :transcribed]
 
   defp thread_scope(%{thread_ts: nil}), do: :root

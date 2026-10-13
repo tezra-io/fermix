@@ -35,6 +35,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Attachments
   alias FermixCore.Attachments.Manifest
+  alias FermixCore.Attachments.Workspace
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -414,13 +415,45 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # The gateway's inbound attachments (M67) become two things: the manifest
   # composed into the user text, which is what is persisted (so history and
-  # compaction know what was attached and what could not be read), and the
-  # turn-local content parts the provider encoders read. A turn without
-  # attachments keeps its text byte-identical and has no parts.
-  defp with_attachments(msg) do
-    attachments = Map.get(msg, :inbound_attachments) || []
+  # compaction know what was attached, what could not be read and where each
+  # file was kept), and the turn-local content parts the provider encoders read.
+  # A turn without attachments keeps its text byte-identical and has no parts.
+  defp with_attachments(msg, state, session_id, voice_call) do
+    attachments =
+      msg
+      |> Map.get(:inbound_attachments)
+      |> List.wrap()
+      |> keep_in_workspace(msg, state, session_id, voice_call)
+
     {%{msg | content: Manifest.compose(msg.content, attachments)}, Attachments.parts(attachments)}
   end
+
+  # D1: an owner's chat turn keeps its attachments in the workspace, so a later
+  # turn can open them. A guest's turn keeps nothing (the owner's workspace is
+  # not a guest's locker), nor does a Live hand-off, whose screen frame is never
+  # persisted. `turn_state.sandbox_config` names the sandbox, else the live one.
+  defp keep_in_workspace([], _msg, _state, _session_id, _voice_call), do: []
+
+  defp keep_in_workspace(attachments, msg, state, session_id, :none) do
+    case profile_trust(Map.get(msg, :source_trust)) do
+      :operator ->
+        Workspace.save(attachments, sandbox_context(state),
+          channel: msg.channel,
+          session_id: session_id
+        )
+
+      :guest ->
+        attachments
+    end
+  end
+
+  defp keep_in_workspace(attachments, _msg, _state, _session_id, {:ok, _voice_call}),
+    do: attachments
+
+  defp sandbox_context(%{sandbox_config: config}) when not is_nil(config),
+    do: %{sandbox_config: config}
+
+  defp sandbox_context(_state), do: %{}
 
   # Build the user turn. Text-only stays a bare `%{role, content}` map —
   # byte-identical to the pre-multimodal shape (no `:parts` key), so
@@ -432,14 +465,15 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp run_message_loop(msg, state, deliver, stream_callback, activity_callback) do
     start = System.monotonic_time(:millisecond)
-    {msg, parts} = with_attachments(msg)
+    # `:none` on every non-voice turn, which is what keeps each voice seam below
+    # a one-sided read rather than a branch in the shared turn path (M41 §7).
+    voice_call = VoiceCall.from_message(msg)
+    session_id = session_id(voice_call)
+    {msg, parts} = with_attachments(msg, state, session_id, voice_call)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
-    # `:none` on every non-voice turn, which is what keeps each voice seam below
-    # a one-sided read rather than a branch in the shared turn path (M41 §7).
-    voice_call = VoiceCall.from_message(msg)
     # Computed BEFORE the profile is selected (MILESTONE_29 §17.6(b)): the
     # harness surface is decided by one input per turn, and both consumers of
     # that decision — this selection and each tool's `advertise?/1`, which reads
@@ -499,7 +533,7 @@ defmodule FermixCore.Agents.TurnRunner do
       # call id, which is what nests the turn's provider spans under the
       # `voice_live` root (M41 §9). `nil` on every other turn, so the loop's
       # adapter opts are byte-identical to before.
-      session_id: session_id(voice_call),
+      session_id: session_id,
       parent_session: parent_session(voice_call),
       capability_registry: state.capability_registry,
       provider: state.provider,

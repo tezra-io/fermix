@@ -7,6 +7,7 @@ defmodule FermixChannels.Gateway.AttachmentsTest do
   alias FermixChannels.Gateway.Message
   alias FermixCore.Attachments, as: Attachment
   alias FermixTestSupport.AttachmentFixtures, as: Fixtures
+  alias FermixTestSupport.FakeFfmpeg
   alias FermixTestSupport.SafeRm
 
   @mib 1024 * 1024
@@ -59,6 +60,23 @@ defmodule FermixChannels.Gateway.AttachmentsTest do
     def transcribe(_path, _opts), do: {:error, :not_configured}
   end
 
+  # Reports the file name and the mime the backend would send the clip under.
+  defmodule FormatBackend do
+    def name, do: :format
+
+    def transcribe(path, opts) do
+      mime = opts |> Keyword.fetch!(:metadata) |> Map.fetch!(:attachment) |> Map.get(:mime_type)
+      send(Keyword.fetch!(opts, :test_pid), {:sent_as, Path.extname(path), mime})
+      {:ok, "cheers to the crew"}
+    end
+  end
+
+  # A clip with nothing said in it: what a silent video gets from a backend.
+  defmodule NoSpeechBackend do
+    def name, do: :no_speech
+    def transcribe(_path, _opts), do: {:ok, "  "}
+  end
+
   setup do
     dir = SafeRm.make_tmp_dir!("gateway-attachments")
     on_exit(fn -> SafeRm.rm_rf!(dir) end)
@@ -83,8 +101,20 @@ defmodule FermixChannels.Gateway.AttachmentsTest do
   # What a pipeline left in the test directory, its SafeRm marker aside.
   defp leftovers(dir), do: File.ls!(dir) -- [".fermix-test-root"]
 
-  defp ingest(declared, opts \\ []),
-    do: Attachments.ingest(FileChannel, message(declared), opts)
+  # No ffmpeg and a backend that hears nothing unless a test says otherwise, so
+  # no test reaches this machine's ffmpeg or a real transcription backend.
+  defp ingest(declared, opts \\ []) do
+    opts = Keyword.merge([ffmpeg: :missing, backend: NoSpeechBackend], opts)
+    Attachments.ingest(FileChannel, message(declared), opts)
+  end
+
+  # An ffmpeg stub in a directory of its own, so the download directory's
+  # cleanup stays observable.
+  defp stub_ffmpeg(stub_opts \\ []) do
+    stub_dir = SafeRm.make_tmp_dir!("gateway-ffmpeg")
+    on_exit(fn -> SafeRm.rm_rf!(stub_dir) end)
+    {FakeFfmpeg.write!(stub_dir, stub_opts), stub_dir}
+  end
 
   test "a message with no attachments comes back as it came" do
     msg = message([])
@@ -149,6 +179,201 @@ defmodule FermixChannels.Gateway.AttachmentsTest do
 
     assert video.status == {:unusable, {:needs_ffmpeg, :video}}
     assert video.name == "clip.mov"
+  end
+
+  describe "with ffmpeg installed (D3)" do
+    test "a GIF and a video reach the model as frames, read from their own download", %{
+      dir: dir
+    } do
+      {ffmpeg, stub_dir} = stub_ffmpeg()
+      poster = file(dir, "thumb", Fixtures.jpeg(), %{mime_type: "image/jpeg"})
+
+      declared = [
+        file(dir, "g", Fixtures.animated_gif(), %{file_name: "spinner.gif"}),
+        file(dir, "v", Fixtures.mp4(), %{mime_type: "video/mp4", hint: :animation, poster: poster})
+      ]
+
+      assert {:ok, %{inbound_attachments: [gif, video]}} = ingest(declared, ffmpeg: ffmpeg)
+
+      assert %Attachment{kind: :animation, status: :ready, poster: nil} = gif
+      assert length(gif.frames) == 4
+      assert Enum.all?(gif.frames, &(&1.mime_type == "image/jpeg"))
+      # One rule per configuration: with ffmpeg, the sender's still is never fetched.
+      assert %Attachment{kind: :animation, status: :ready, poster: nil} = video
+      assert length(video.frames) == 4
+
+      # A probe and a cut each, every one reading only the download it was handed.
+      runs = FakeFfmpeg.runs(stub_dir)
+      assert Enum.count(runs, &(&1 =~ " -i #{Path.join(dir, "g")} ")) == 2
+      assert Enum.count(runs, &(&1 =~ " -i #{Path.join(dir, "v")} ")) == 2
+      assert length(runs) == 4
+      assert leftovers(dir) == []
+    end
+
+    test "an ffmpeg failure is named, never swapped for the still", %{dir: dir} do
+      {ffmpeg, _stub_dir} = stub_ffmpeg(exit_code: 1)
+      poster = file(dir, "thumb", Fixtures.jpeg(), %{mime_type: "image/jpeg"})
+
+      capture_log(fn ->
+        assert {:ok, %{inbound_attachments: [video]}} =
+                 ingest(
+                   [file(dir, "v", Fixtures.mp4(), %{hint: :animation, poster: poster})],
+                   ffmpeg: ffmpeg
+                 )
+
+        assert {:unusable, {:render_failed, {:ffmpeg_exit, 1, words}}} = video.status
+        assert words =~ "Invalid data"
+        assert video.poster == nil
+      end)
+    end
+
+    test "an animated WebP keeps the still path: ffmpeg never runs for it", %{dir: dir} do
+      {ffmpeg, stub_dir} = stub_ffmpeg()
+      webp = <<"RIFF", 0::32, "WEBP", "VP8X", 10::little-32, 0x02, 0::24>>
+
+      assert {:ok, %{inbound_attachments: [sticker]}} =
+               ingest([file(dir, "s", webp, %{hint: :sticker})], ffmpeg: ffmpeg)
+
+      assert sticker.status == {:unusable, {:no_still, "image/webp"}}
+      assert FakeFfmpeg.runs(stub_dir) == []
+    end
+
+    test "frames count toward what one message carries inline", %{dir: dir} do
+      {ffmpeg, _stub_dir} = stub_ffmpeg()
+      pdf = Fixtures.pdf() <> :binary.copy(<<0>>, 20 * @mib - byte_size(Fixtures.pdf()) - 10)
+
+      assert {:ok, %{inbound_attachments: [document, clip]}} =
+               ingest(
+                 [file(dir, "d", pdf), file(dir, "v", Fixtures.mp4(), %{hint: :animation})],
+                 ffmpeg: ffmpeg
+               )
+
+      assert document.status == :ready
+      assert clip.status == {:unusable, {:turn_full, 20 * @mib}}
+    end
+  end
+
+  describe "a video's sound (D5)" do
+    test "goes to the transcriber as MP4 when its container is MOV or 3GP", %{dir: dir} do
+      mov = <<0, 0, 0, 20, "ftypqt  ", 0::32, "qt  ">>
+      three_gp = <<0, 0, 0, 20, "ftyp3gp4", 0::32, "3gp4">>
+
+      assert {:ok, %{inbound_attachments: [clip, phone]}} =
+               Attachments.ingest(
+                 FileChannel,
+                 message([
+                   file(dir, "m", mov, %{mime_type: "video/quicktime", file_name: "IMG_0042.MOV"}),
+                   file(dir, "p", three_gp)
+                 ]),
+                 ffmpeg: :missing,
+                 backend: FormatBackend,
+                 test_pid: self()
+               )
+
+      assert clip.mime_type == "video/quicktime"
+      assert phone.mime_type == "video/3gpp"
+      assert_received {:sent_as, ".mp4", "video/mp4"}
+      assert_received {:sent_as, ".mp4", "video/mp4"}
+      assert clip.sound == {:transcript, "cheers to the crew"}
+    end
+
+    test "with ffmpeg, a clip with no sound track is noted and costs no transcription", %{
+      dir: dir
+    } do
+      {ffmpeg, _stub_dir} = stub_ffmpeg(audio: false)
+
+      assert {:ok, %{inbound_attachments: [clip]}} =
+               Attachments.ingest(FileChannel, message([file(dir, "v", Fixtures.mp4())]),
+                 ffmpeg: ffmpeg,
+                 backend: FakeBackend,
+                 test_pid: self()
+               )
+
+      refute_received {:transcribed, _bytes, _extension}
+      assert length(clip.frames) == 4
+      assert clip.sound == :no_sound
+    end
+
+    test "with ffmpeg, a clip with a sound track is transcribed beside its frames", %{
+      dir: dir
+    } do
+      {ffmpeg, _stub_dir} = stub_ffmpeg(audio: true)
+
+      assert {:ok, %{inbound_attachments: [clip]}} =
+               Attachments.ingest(FileChannel, message([file(dir, "v", Fixtures.mp4())]),
+                 ffmpeg: ffmpeg,
+                 backend: FakeBackend,
+                 test_pid: self()
+               )
+
+      assert_received {:transcribed, _bytes, ".mp4"}
+      assert length(clip.frames) == 4
+      assert clip.sound == {:transcript, "book the ferry for the eleventh"}
+    end
+
+    test "is transcribed beside its pictures; the caption stays the caption", %{dir: dir} do
+      clip = file(dir, "v", Fixtures.mp4(), %{mime_type: "video/mp4", file_name: "toast.mp4"})
+
+      assert {:ok, msg} =
+               Attachments.ingest(FileChannel, message([clip], "which take?"),
+                 ffmpeg: :missing,
+                 backend: FakeBackend,
+                 test_pid: self()
+               )
+
+      assert_received {:transcribed, _bytes, ".mp4"}
+      assert msg.content == "which take?"
+
+      assert [%Attachment{kind: :video, sound: {:transcript, "book the ferry for the eleventh"}}] =
+               msg.inbound_attachments
+    end
+
+    test "with no speech in it, is a note, not the voice note's reply", %{dir: dir} do
+      assert {:ok, %{inbound_attachments: [clip]}} = ingest([file(dir, "v", Fixtures.mp4())])
+      assert clip.sound == :no_speech
+    end
+
+    test "that cannot be transcribed is named, and the message still runs", %{dir: dir} do
+      log =
+        capture_log(fn ->
+          assert {:ok, %{inbound_attachments: [clip]}} =
+                   ingest([file(dir, "v", Fixtures.mp4())], backend: FailingBackend)
+
+          assert clip.sound == {:failed, :not_configured}
+        end)
+
+      assert log =~ "The sound of an inbound video could not be transcribed"
+    end
+
+    test "carries a message whose pictures could not be read", %{dir: dir} do
+      assert {:ok, msg} =
+               Attachments.ingest(FileChannel, message([file(dir, "v", Fixtures.mp4())], ""),
+                 ffmpeg: :missing,
+                 backend: FakeBackend,
+                 test_pid: self()
+               )
+
+      assert [%Attachment{status: {:unusable, {:needs_ffmpeg, :video}}}] = msg.inbound_attachments
+      assert Message.actionable?(msg)
+    end
+
+    test "an animation and a sticker are silent: no transcription runs", %{dir: dir} do
+      declared = [
+        file(dir, "a", Fixtures.mp4(), %{hint: :animation}),
+        file(dir, "s", <<0x1A, 0x45, 0xDF, 0xA3, "webm">>, %{hint: :sticker})
+      ]
+
+      assert {:ok, %{inbound_attachments: [animation, sticker]}} =
+               Attachments.ingest(FileChannel, message(declared),
+                 ffmpeg: :missing,
+                 backend: FakeBackend,
+                 test_pid: self()
+               )
+
+      refute_received {:transcribed, _bytes, _extension}
+      assert animation.sound == nil
+      assert sticker.sound == nil
+    end
   end
 
   test "a PDF and a text file ride as their bytes", %{dir: dir} do

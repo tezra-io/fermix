@@ -4,8 +4,14 @@ title: "Inbound multimodal — attachments reach and are understood by the model
 description: >
   Verifies an inbound attachment is rendered at the gateway, encoded as a
   provider content part (or inlined), and actually understood by the model (M14,
-  M67): pictures, a GIF file read from its first frame, a PDF, a text file, and a
-  file Fermix cannot read, which must be named, never called empty. Most
+  M67): pictures, a GIF file and a video read from their frames where the eval
+  machine has ffmpeg (a GIF from its first frame, a video named for ffmpeg,
+  where it does not), a PDF, a text file, and a file Fermix cannot read, which
+  must be named, never called empty. The risk stays host_readonly: each turn
+  also keeps its attachment under the development home's own workspace
+  (media/inbound, pruned at 14 days and 1 GB), engine state written the way a
+  history row is, not a scenario's intent; the follow-up scenario reopens one
+  such file in a later turn. Most
   cases inject bundled fixtures through `fermix ask --attach`; only the channel-
   specific scenarios use drive: telegram_operator with --operator. For those, the
   runner prints an exact fixture path to attach to the dedicated eval Telegram bot
@@ -118,7 +124,7 @@ scenarios:
   # gateway with no turn, so it has no trace to grade here: ExUnit proves that
   # reply (`FermixChannels.CLITest`), and these cases carry a question.
   - id: gif_file_auto
-    title: "A GIF file reaches the model as its first frame"
+    title: "A GIF file reaches the model, as frames or as its first frame"
     severity: critical
     tags: [multimodal, attachments, animation, automated]
     cases:
@@ -131,7 +137,7 @@ scenarios:
           reply_not_matches: "(?i)(looks|is) empty|no (gif|image|file|attachment)s? (was |were )?(attached|included|received|sent)"
         rubric: >
           Reads the words GAMMA 19 from the attached GIF. It may say it saw one
-          frame; it must not claim the attachment is empty or missing.
+          frame or several; it must not claim the attachment is empty or missing.
       - id: spinner_gif_number
         image: fixtures/attachments/spinner_gamma.gif
         query: "There's a number in this gif somewhere, what is it?"
@@ -139,6 +145,89 @@ scenarios:
           reply_matches: "\\b19\\b"
           reply_not_matches: "(?i)(looks|is) empty|no (gif|image|file|attachment)s? (was |were )?(attached|included|received|sent)"
         rubric: "Gives the number 19 shown in the GIF."
+
+  # M67 D3: a video reaches the model as frames where the eval machine has
+  # ffmpeg, and is named with the install command where it does not. The
+  # fixture is silent, so its sound adds at most a note (D5). The floor holds on
+  # both machines and keys on no wording: the turn ran on the main model, and
+  # the reply never calls the clip empty or missing. The rubric owns which of
+  # the two outcomes the machine allows.
+  - id: video_clip_auto
+    title: "A video is read from its frames, or ffmpeg is named"
+    severity: critical
+    tags: [multimodal, attachments, video, automated]
+    cases:
+      - id: clip_captions
+        image: fixtures/attachments/clip_kappa.mp4
+        query: "What words come up in this clip?"
+        expect:
+          main_model_matches: "."
+          reply_not_matches: "(?i)(looks|is) empty|no (video|clip|file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: >
+          Passes if the reply does one of two things: (1) it reports the words
+          the clip shows, KAPPA 64 and SIGMA 27 (at least one of KAPPA or
+          SIGMA); or (2) it tells the user the video could not be watched because
+          ffmpeg is not installed, and says how to install it. It fails if it
+          states words the clip does not show, or says the clip is empty or
+          missing. A remark that the clip has no speech, or that its sound could
+          not be transcribed, is neither required nor penalised.
+      - id: clip_caption_order
+        image: fixtures/attachments/clip_kappa.mp4
+        query: "Two captions flash up in this video. Which one comes first?"
+        expect:
+          main_model_matches: "."
+          reply_not_matches: "(?i)(looks|is) empty|no (video|clip|file|attachment)s? (was |were )?(attached|included|received|sent)"
+        rubric: >
+          Passes if the reply either says KAPPA 64 comes first and SIGMA 27
+          after it, or tells the user the video could not be watched because
+          ffmpeg is not installed and says how to install it. It fails if it
+          puts SIGMA 27 first, states captions the clip does not show, or says
+          the clip is empty or missing.
+
+  # M67 D1: an owner's attachment is kept in the workspace and the attachment
+  # list names where, so a later turn can open it again once the picture itself
+  # has left the conversation (pictures ride only the turn they arrive in).
+  # Turn one hands the picture over and asks for nothing about it; turn two asks
+  # what it shows, which only reopening the saved file answers. `tools_any:
+  # [view_image]` is this suite's one labelled sanity route assertion: it is the
+  # only way to see a local picture, so its span is the proof the model reopened
+  # the file instead of recalling it. The token floor is the picture's own text.
+  - id: saved_attachment_reopened_auto
+    title: "A picture sent earlier is reopened from the workspace in a later turn"
+    severity: critical
+    risk: host_readonly
+    tags: [multimodal, attachments, workspace, automated]
+    cases:
+      - id: sign_read_later
+        image: fixtures/text_alpha.png
+        turns:
+          - query: "Here's a photo of a sign I'll need in a minute. Don't read it out yet, just say OK."
+          - query: "Right, now tell me exactly what the sign in that photo says."
+            expect:
+              main_model_matches: "."
+              tools_any: [view_image]
+              reply_matches: "(?i)alpha"
+              reply_not_matches: "(?i)re-?send|send (it|the (photo|picture|image|sign)) again|(no longer|don't|do not) have (it|the (photo|picture|image))"
+        rubric: >
+          Passes only if the final reply reads the sign in the photo from the
+          first message as ALPHA 42 (at least ALPHA). It fails if it asks for the
+          photo to be sent again, says it can no longer see or open it, or states
+          text the sign does not show.
+      - id: number_read_later
+        image: fixtures/text_bravo.png
+        turns:
+          - query: "Keep hold of this image for me, I'll come back to it shortly. Nothing to do with it yet."
+          - query: "OK, what number is on the image I sent you a moment ago?"
+            expect:
+              main_model_matches: "."
+              tools_any: [view_image]
+              reply_matches: "\\b73\\b"
+              reply_not_matches: "(?i)re-?send|send (it|the (photo|picture|image)) again|(no longer|don't|do not) have (it|the (photo|picture|image))"
+        rubric: >
+          Passes only if the final reply gives 73, the number on the image sent
+          in the first message. It fails if it asks for the image to be sent
+          again, says it can no longer see or open it, or gives a different
+          number.
 
   - id: pdf_read_auto
     title: "A PDF reaches the model as a document"

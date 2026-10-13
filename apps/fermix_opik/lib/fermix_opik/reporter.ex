@@ -77,7 +77,8 @@ defmodule FermixOpik.Reporter do
     [:fermix, :computer_use, :session_error],
     [:fermix, :computer_use, :session_pause],
     [:fermix, :computer_use, :session_resume],
-    [:fermix, :timeout, :expired]
+    [:fermix, :timeout, :expired],
+    [:fermix, :attachment, :save]
   ]
 
   @handler_id "fermix-opik-reporter"

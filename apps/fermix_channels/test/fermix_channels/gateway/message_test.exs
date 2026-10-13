@@ -83,6 +83,19 @@ defmodule FermixChannels.Gateway.MessageTest do
       assert Message.unusable_only?(msg)
     end
 
+    test "a video whose pictures could not be read is actionable when its sound reached the model" do
+      clip = %{attachment({:unusable, {:needs_ffmpeg, :video}}) | kind: :video}
+
+      heard =
+        message(content: "", inbound_attachments: [%{clip | sound: {:transcript, "cheers"}}])
+
+      silent = message(content: "", inbound_attachments: [%{clip | sound: :no_speech}])
+
+      assert Message.actionable?(heard)
+      refute Message.actionable?(silent)
+      assert Message.unusable_only?(silent)
+    end
+
     test "a caption makes a message with unusable attachments actionable (the manifest names them)" do
       msg =
         message(

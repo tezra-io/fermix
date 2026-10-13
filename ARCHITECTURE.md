@@ -642,11 +642,14 @@ runs the one attachment pipeline, runs slash commands unless the channel
 disables them, and hands the turn to `Gateway.Queue`. Channels only declare
 what their platform gave them; `Gateway.Attachments` fetches each attachment,
 names its kind from the bytes (`FermixCore.Attachments.Kind`), renders it (a
-picture as it came, a GIF or video as one still, a PDF or text file as its
-bytes, audio through `Gateway.Transcription`) and answers a message whose
-attachments are all unreadable itself. The turn composes the `[attachments]`
-manifest into the persisted user text (`FermixCore.Attachments.Manifest`) and
-the content parts the encoders read.
+picture as it came; a GIF or video as frames read by an installed `ffmpeg`,
+`FermixCore.Attachments.Frames`, else as one still; a PDF or text file as its
+bytes; audio and a video's sound through `Gateway.Transcription`) and answers a
+message whose attachments are all unreadable itself. An operator turn keeps
+the attachments under the workspace's `media/inbound/`
+(`FermixCore.Attachments.Workspace`, 14 days and 1 GiB), then composes the
+`[attachments]` manifest, with each saved path, into the persisted user text
+(`FermixCore.Attachments.Manifest`) and the content parts the encoders read.
 `FermixChannels.Dispatcher` remains only as a thin alias for `Gateway.ingest/2`,
 used by tests.
 

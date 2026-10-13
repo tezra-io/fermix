@@ -448,6 +448,72 @@ def test_suite_image_rejects_a_symlink_that_escapes_fixtures(tmp_path):
                for problem in caught.value.problems)
 
 
+def test_a_multi_turn_case_attaches_its_fixture_to_the_first_turn(tmp_path):
+    # M67: the turn after an attachment asks about it again, which is how a
+    # saved attachment is proved reopened through the real agent path.
+    fixtures = tmp_path / "fixtures"
+    fixtures.mkdir()
+    (fixtures / "known.png").write_bytes(b"fixture")
+    _write_raw_suite(tmp_path, """\
+suite: image_turns
+title: Image turns
+risk: host_readonly
+scenarios:
+  - id: example
+    cases:
+      - id: one
+        image: fixtures/known.png
+        turns:
+          - query: keep this
+          - query: what was in it?
+      - id: two
+        query: two
+""")
+    case = suites.load_all(str(tmp_path))[0].scenarios[0].cases[0]
+    assert [turn.query for turn in case.turns] == ["keep this", "what was in it?"]
+    assert case.images == [str((fixtures / "known.png").resolve())]
+
+
+def test_run_case_sends_a_multi_turn_case_attachment_with_the_first_turn_only(
+        tmp_path, monkeypatch):
+    suite = _write_suite(tmp_path, "host_readonly")
+    scenario, case = suite.scenarios[0], suite.scenarios[0].cases[0]
+    case.turns = [suites.Turn("keep this"), suites.Turn("what was in it?")]
+    case.images = ["/fixtures/known.png"]
+    cfg = SimpleNamespace(
+        budgets=SimpleNamespace(max_cost_usd=1.0, max_duration_ms=1_000),
+        daemon=SimpleNamespace(default_timeout_ms=1_000),
+        opik=SimpleNamespace(poll_timeout_s=1, poll_interval_s=0.1, ui_base="http://opik"),
+        rubric_failures="fail")
+    sent = []
+
+    def drive(_cfg, _session, query, **kwargs):
+        sent.append((query, kwargs.get("attachments")))
+        return driver.DriveResult(ok=True, status="ok", response="answer", error=None,
+                                  session_id="s", exit_code=0, sent_at=run_eval.now_utc(),
+                                  elapsed_ms=10.0)
+
+    monkeypatch.setattr(driver, "drive_query", drive)
+    monkeypatch.setattr(grade, "grade", lambda *_a, **_k: [
+        SimpleNamespace(key="trace_complete", passed=True, detail="ok", conclusive=True)])
+    view = SimpleNamespace(trace_complete=True, telemetry_complete=True, reply="answer",
+                           tool_spans=[], tool_names=[], cost=0.0, duration_ms=10.0,
+                           tokens=1, iterations=1, subagent_spawns=0, main_models=["m"],
+                           main_providers=["p"], main_efforts=["medium"])
+    monkeypatch.setattr(grade.TurnView, "build", lambda *_a, **_k: view)
+
+    class Traces:
+        def poll_for_turn(self, *_a, **_k):
+            return {"id": f"trace-{len(sent)}"}
+
+        def await_complete(self, found):
+            return {"id": found["id"]}, []
+
+    run_eval.run_case(cfg, Traces(), suite, scenario, case,
+                      "20260715T151102Z01234567", 1, False)
+    assert sent == [("keep this", ["/fixtures/known.png"]), ("what was in it?", None)]
+
+
 def test_behavioral_config_rejects_unknown_judge_backend(tmp_path):
     path = tmp_path / "behavioral_config.yaml"
     path.write_text("judge: {backend: mystery, enabled: false, model: judge}\n")

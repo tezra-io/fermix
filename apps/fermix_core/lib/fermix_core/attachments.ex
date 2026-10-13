@@ -12,12 +12,19 @@ defmodule FermixCore.Attachments do
 
   `status` says how the attachment reached the model:
 
-    * `:ready` — its bytes ride the turn: a picture, a PDF, the still of a GIF or
-      video (`poster`), or a text file inlined under the manifest;
+    * `:ready` — its bytes ride the turn: a picture, a PDF, a GIF or video by
+      what was read of it (`frames`, ffmpeg's frames when it is installed, else
+      `poster`, the one still the sender made or a GIF's first frame), or a
+      text file inlined under the manifest;
     * `:transcribed` — its sound became the transcript composed into the text
       (a voice note, a Telegram video note);
     * `{:unusable, reason}` — nothing of it reached the model, and the manifest
       or the gateway's reply names it with the one sentence its reason has.
+
+  Two more facts ride beside `status`: `sound`, what became of a video's sound
+  (D5: a transcript, no speech, or a named failure), and `saved`, where an
+  operator turn kept it in the workspace (D1, `FermixCore.Attachments.Workspace`),
+  or why it could not.
 
   Bytes are turn-local and never reach a log or a trace: `inspect/1` shows only
   the fields that describe the attachment.
@@ -60,6 +67,7 @@ defmodule FermixCore.Attachments do
           | {:too_many, pos_integer()}
           | {:turn_full, pos_integer()}
           | {:needs_ffmpeg, :animation | :video}
+          | {:render_failed, term()}
           | {:no_still, String.t()}
           | {:poster_unavailable, :animation | :video, term()}
           | {:still_unsupported, String.t()}
@@ -72,6 +80,19 @@ defmodule FermixCore.Attachments do
 
   @type still :: %{mime_type: String.t(), bytes: binary()}
 
+  @typedoc """
+  What became of a video's sound (D5): a transcript, no speech in it, no sound
+  track at all (ffmpeg's reading, so no transcription ran), or a failure. An
+  animation is silent and has none.
+  """
+  @type sound :: {:transcript, String.t()} | :no_speech | :no_sound | {:failed, term()}
+
+  @typedoc """
+  Where an operator turn kept the attachment (D1): its own path and the paths of
+  the still or frames saved beside it, or the sentence saying why it could not.
+  """
+  @type saved :: {:saved, String.t(), [String.t()]} | {:not_saved, String.t()}
+
   @type t :: %__MODULE__{
           kind: kind(),
           mime_type: String.t(),
@@ -81,10 +102,13 @@ defmodule FermixCore.Attachments do
           hint: hint() | nil,
           bytes: binary() | nil,
           poster: still() | nil,
-          status: status()
+          frames: [still()],
+          status: status(),
+          sound: sound() | nil,
+          saved: saved() | nil
         }
 
-  @derive {Inspect, only: [:kind, :mime_type, :name, :size_bytes, :status]}
+  @derive {Inspect, only: [:kind, :mime_type, :name, :size_bytes, :status, :saved]}
   @enforce_keys [:kind, :mime_type]
   defstruct [
     :kind,
@@ -95,7 +119,10 @@ defmodule FermixCore.Attachments do
     :hint,
     bytes: nil,
     poster: nil,
-    status: :ready
+    frames: [],
+    status: :ready,
+    sound: nil,
+    saved: nil
   ]
 
   # The text one message inlines under its manifest, all its text files
@@ -108,9 +135,10 @@ defmodule FermixCore.Attachments do
 
   @doc """
   The neutral content parts a turn's attachments put on the user message, in
-  attachment order: a picture as `:image`, a GIF or video by its still as
-  `:image`, a PDF as `:document`. A text file rides the manifest instead and a
-  transcript the text, so neither has a part; nothing unusable has one.
+  attachment order: a picture as `:image`, a GIF or video by its frames or its
+  still, each an `:image`, a PDF as `:document`. A text file rides the manifest
+  instead and a transcript the text, so neither has a part; nothing unusable
+  has one.
   """
   @spec parts([t()]) :: [FermixCore.Providers.Adapter.content_part()]
   def parts(attachments) when is_list(attachments) do
@@ -119,6 +147,10 @@ defmodule FermixCore.Attachments do
 
   defp part(%__MODULE__{status: :ready, kind: :still} = att),
     do: [%{type: :image, mime_type: att.mime_type, data: att.bytes}]
+
+  defp part(%__MODULE__{status: :ready, kind: kind, frames: [_ | _] = frames})
+       when kind in [:animation, :video],
+       do: Enum.map(frames, &%{type: :image, mime_type: &1.mime_type, data: &1.bytes})
 
   defp part(%__MODULE__{status: :ready, kind: kind, poster: %{} = still})
        when kind in [:animation, :video],

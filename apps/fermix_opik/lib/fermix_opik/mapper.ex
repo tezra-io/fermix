@@ -492,6 +492,49 @@ defmodule FermixOpik.Mapper do
   end
 
   @doc """
+  Build a span from a `[:fermix, :attachment, :save]` event — the workspace save
+  of one operator turn's inbound attachments (M67 D1), lasting its prune and
+  writes. Counts only: paths never ride. A save that left any attachment unsaved
+  is flagged errored with the first failure's sentence, so it is not silently
+  green. `session_id` places the span and is not repeated in its metadata.
+  """
+  @spec attachment_save_span(map(), map(), keyword()) :: map()
+  def attachment_save_span(metadata, measurements, opts) do
+    ended = Keyword.fetch!(opts, :ended)
+    started = start_of(ended, div(Map.get(measurements, :duration_us, 0), 1000))
+
+    %{
+      id: new_id(started),
+      trace_id: Keyword.fetch!(opts, :trace_id),
+      parent_span_id: Keyword.get(opts, :parent_span_id),
+      project_name: Keyword.fetch!(opts, :project_name),
+      name: "attachment_save",
+      type: "general",
+      start_time: iso(started),
+      end_time: iso(ended),
+      metadata:
+        measurements
+        |> Map.take([:saved, :failed, :files, :bytes, :pruned_files, :pruned_bytes])
+        |> Map.merge(%{
+          channel: stringify(Map.get(metadata, :channel)),
+          outcome: stringify(Map.get(metadata, :outcome))
+        })
+        |> drop_nil()
+    }
+    |> maybe_save_failure(metadata)
+    |> drop_nil()
+  end
+
+  defp maybe_save_failure(span, %{outcome: :failed} = metadata),
+    do:
+      Map.put(span, :error_info, %{
+        exception_type: "AttachmentSaveFailed",
+        message: to_string(Map.get(metadata, :detail) || "an attachment was not saved")
+      })
+
+  defp maybe_save_failure(span, _metadata), do: span
+
+  @doc """
   Build a point span from a `[:fermix, :agent_loop, :context_compaction]` event
   — one reduction the agent loop applied to a turn's tool results (older results
   folded into digests). The byte pair is the reduction's effect; `count` is

@@ -18,9 +18,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.SendAttachment
+  alias FermixCore.Tools.ViewImage
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -2224,7 +2226,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
       user =
         %{channel: "telegram", chat_id: "attach_parts", inbound_attachments: attachments}
-        |> capture_prompt()
+        |> capture_prompt(sandbox_config: attachment_sandbox())
         |> List.last()
 
       assert user.content =~ ~r/\Ahow does this render\?\n\n\[attachments\]\n/
@@ -2238,17 +2240,19 @@ defmodule FermixCore.Agents.TurnRunnerTest do
              ]
     end
 
-    test "the history keeps the manifest, never the bytes" do
+    test "the history keeps the manifest and where each file is, never the bytes" do
       store = start_voice_store()
       registry = :"tr_attach_reg_#{System.unique_integer([:positive])}"
       start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+      sandbox = attachment_sandbox()
+      png = <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A, "PNG-BYTES">>
 
       still = %Attachments{
         kind: :still,
         mime_type: "image/png",
         name: "chart.png",
-        size_bytes: 9,
-        bytes: "PNG-BYTES"
+        size_bytes: byte_size(png),
+        bytes: png
       }
 
       msg = %{
@@ -2265,7 +2269,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
           adapter: CapturePromptAdapter,
           adapter_opts: [model: "mock-model", test_pid: self()],
           capability_registry: registry,
-          conversation_store: store
+          conversation_store: store,
+          sandbox_config: sandbox
         )
 
       assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
@@ -2273,9 +2278,76 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       [user | _rest] =
         ConversationStore.get_history({"telegram", "attach_history", :root}, server: store)
 
-      assert user.content == "[attachments]\n1. chart.png · image · 9 bytes · attached as image 1"
+      assert [_whole, path] =
+               Regex.run(
+                 ~r/\A\[attachments\]\n1\. chart\.png · image · 17 bytes · attached as image 1 · saved at (\S+)\z/,
+                 user.content
+               )
+
+      assert path =~ ~r"/workspace/media/inbound/\d{4}-\d{2}-\d{2}/chart-[0-9a-f]{8}\.png\z"
       refute inspect(user) =~ "PNG-BYTES"
+
+      # A later turn opens it from the path the history names (the second turn
+      # the eval schema cannot drive with an attachment).
+      assert {:ok, %{success: true, images: [%{mime_type: "image/png", data: ^png}]}} =
+               ViewImage.execute(%{"paths" => [path]}, %{
+                 agent_name: "main",
+                 conversation_key: :test,
+                 sandbox_config: sandbox
+               })
     end
+
+    test "a guest's turn keeps nothing in the workspace" do
+      sandbox = attachment_sandbox()
+      still = %Attachments{kind: :still, mime_type: "image/png", size_bytes: 3, bytes: "png"}
+
+      user =
+        %{
+          channel: "telegram",
+          chat_id: "attach_guest",
+          source_trust: :guest,
+          inbound_attachments: [still]
+        }
+        |> capture_prompt(sandbox_config: sandbox)
+        |> List.last()
+
+      assert user.content =~ "1. image · 3 bytes · attached as image 1"
+      refute user.content =~ "saved"
+      refute File.exists?(Path.join(sandbox.workspace_root, "media"))
+    end
+
+    test "a Live hand-off's screen frame is never kept" do
+      sandbox = attachment_sandbox()
+
+      frame = %Attachments{
+        kind: :still,
+        mime_type: "image/jpeg",
+        name: "screen frame",
+        size_bytes: 3,
+        bytes: "jpg"
+      }
+
+      user =
+        "what is on my screen"
+        |> voice_msg()
+        |> Map.put(:inbound_attachments, [frame])
+        |> capture_prompt(sandbox_config: sandbox)
+        |> List.last()
+
+      assert user.parts == [%{type: :image, mime_type: "image/jpeg", data: "jpg"}]
+      refute user.content =~ "saved"
+      refute File.exists?(Path.join(sandbox.workspace_root, "media"))
+    end
+  end
+
+  # A workspace of the test's own, so an operator turn's saved attachments
+  # never land in a shared home.
+  defp attachment_sandbox do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("tr-attachments")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    workspace = Path.join(dir, "workspace")
+    File.mkdir_p!(workspace)
+    SandboxConfig.normalize(mode: :strict, workspace_root: workspace)
   end
 
   # M56 §4.4: a typed chat turn during a Live call in the chat is told the call

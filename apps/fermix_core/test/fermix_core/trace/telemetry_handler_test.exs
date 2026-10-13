@@ -502,6 +502,86 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
              "PNG-BYTES"
   end
 
+  test "a video's frames and the fate of its sound reach the ingest row, never the words", %{
+    dir: dir,
+    server: server
+  } do
+    clip = %FermixCore.Attachments{
+      kind: :video,
+      mime_type: "video/mp4",
+      size_bytes: 40,
+      bytes: "MP4-BYTES",
+      frames: [%{mime_type: "image/jpeg", bytes: "F1"}, %{mime_type: "image/jpeg", bytes: "F22"}],
+      sound: {:transcript, "SECRET-WORDS"}
+    }
+
+    deaf = %{clip | frames: [], status: {:unusable, {:render_failed, {:ffmpeg_exit, 1, "bad"}}}}
+    deaf = %{deaf | sound: {:failed, :not_configured}}
+    mute = %{clip | sound: :no_sound}
+
+    capture_content(false)
+    :ok = AttachmentTelemetry.emit_ingest("slack", clip, 9_000)
+    :ok = AttachmentTelemetry.emit_ingest("slack", deaf, 9_100)
+    :ok = AttachmentTelemetry.emit_ingest("slack", mute, 9_200)
+    sync(server)
+
+    [read, failed, silent] =
+      dir |> read_entries(:agent_event) |> Enum.filter(&(&1["event"] == "attachment_ingest"))
+
+    assert silent["sound"] == "no_sound"
+
+    assert read["outcome"] == "frames"
+    assert read["parts"] == 2
+    assert read["rendered_bytes"] == 5
+    assert read["sound"] == "transcript"
+    assert read["sound_detail"] == nil
+
+    assert failed["outcome"] == "unusable"
+    assert failed["reason"] == "render_failed"
+    assert failed["detail"] =~ "ffmpeg_exit"
+    assert failed["sound"] == "failed"
+    assert failed["sound_detail"] == ":not_configured"
+
+    refute File.read!(Path.join([dir, Date.to_iso8601(Date.utc_today()), "agent_event.jsonl"])) =~
+             "SECRET-WORDS"
+  end
+
+  test "a workspace save becomes an attachment_save agent_event row", %{
+    dir: dir,
+    server: server
+  } do
+    stats = %{
+      saved: 2,
+      failed: 1,
+      files: 3,
+      bytes: 120,
+      pruned_files: 4,
+      pruned_bytes: 900,
+      first_failure: "could not write media file: no space left on device"
+    }
+
+    :ok = AttachmentTelemetry.emit_save("telegram", "main-77", stats, 3_400)
+    sync(server)
+
+    [row] = dir |> read_entries(:agent_event) |> Enum.filter(&(&1["event"] == "attachment_save"))
+
+    assert row["agent"] == "telegram"
+    assert row["session_id"] == "main-77"
+    assert row["outcome"] == "failed"
+    assert row["detail"] == "could not write media file: no space left on device"
+
+    assert Map.take(row, ~w(saved failed files bytes pruned_files pruned_bytes duration_us)) ==
+             %{
+               "saved" => 2,
+               "failed" => 1,
+               "files" => 3,
+               "bytes" => 120,
+               "pruned_files" => 4,
+               "pruned_bytes" => 900,
+               "duration_us" => 3_400
+             }
+  end
+
   test "memory:review event creates a memory_review agent_event trace", %{
     dir: dir,
     server: server

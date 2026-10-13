@@ -769,6 +769,14 @@ defmodule FermixOpik.Aggregation do
     add_child_span(state, meta, at, &Mapper.timeout_span(meta, meas, &1))
   end
 
+  # An operator turn's workspace save of its inbound attachments
+  # ([:fermix, :attachment, :save], M67 D1): a point span under the turn's trace
+  # via the shared session_id, emitted before the turn's first provider call.
+  # session_id nil → place_under no-ops.
+  def apply_event(state, [:fermix, :attachment, :save], meas, meta, at) do
+    add_child_span(state, meta, at, &Mapper.attachment_save_span(meta, meas, &1))
+  end
+
   # In-loop context compaction ([:fermix, :agent_loop, :context_compaction]) and
   # the recovery rounds after a provider refused a request as too large
   # ([:fermix, :agent_loop, :context_recovery]): point spans under the run that

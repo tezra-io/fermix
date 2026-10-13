@@ -94,6 +94,10 @@ defmodule FermixCore.Sandbox do
 
   def pre_execution_denial(_other), do: nil
 
+  @doc "The workspace root of the sandbox config `context` names (the live one by default)."
+  @spec workspace_root(map()) :: String.t()
+  def workspace_root(context) when is_map(context), do: config_from(context).workspace_root
+
   @spec write_path(String.t(), atom(), map()) :: {:ok, String.t()} | {:error, term()}
   def write_path(path, operation, context)
       when is_binary(path) and is_atom(operation) and is_map(context) do

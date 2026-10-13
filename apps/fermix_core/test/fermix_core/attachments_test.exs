@@ -25,6 +25,24 @@ defmodule FermixCore.AttachmentsTest do
              ]
     end
 
+    test "a GIF or video ffmpeg read rides as each of its frames, in order" do
+      clip =
+        att(
+          kind: :video,
+          mime_type: "video/mp4",
+          bytes: "mp4",
+          frames: [
+            %{mime_type: "image/jpeg", bytes: "f1"},
+            %{mime_type: "image/jpeg", bytes: "f2"}
+          ]
+        )
+
+      assert Attachments.parts([clip]) == [
+               %{type: :image, mime_type: "image/jpeg", data: "f1"},
+               %{type: :image, mime_type: "image/jpeg", data: "f2"}
+             ]
+    end
+
     test "text rides the manifest, a transcript the text, and nothing unusable rides at all" do
       attachments = [
         att(kind: :text, mime_type: "text/plain", bytes: "notes"),
@@ -48,10 +66,19 @@ defmodule FermixCore.AttachmentsTest do
     end
   end
 
-  test "inspect never prints the bytes" do
-    inspected = inspect(att(kind: :still, mime_type: "image/png", bytes: "SECRET-BYTES"))
+  test "inspect never prints the bytes, the frames or a transcript" do
+    inspected =
+      inspect(
+        att(
+          kind: :video,
+          mime_type: "video/mp4",
+          bytes: "SECRET-BYTES",
+          frames: [%{mime_type: "image/jpeg", bytes: "SECRET-FRAME"}],
+          sound: {:transcript, "SECRET-WORDS"}
+        )
+      )
 
-    refute inspected =~ "SECRET-BYTES"
-    assert inspected =~ "image/png"
+    refute inspected =~ "SECRET"
+    assert inspected =~ "video/mp4"
   end
 end
