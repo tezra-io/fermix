@@ -393,7 +393,7 @@ Before any spend the runner reads the daemon's own capability registry (`fermix
 capabilities --json`) and holds out every selected task whose `requires_tools` /
 `requires_tools_all` that daemon does not carry. Registration is a boot snapshot, so a
 vendor CLI missing from `PATH` when the daemon started — a GitHub-hosted runner ships
-neither `codex` nor `claude`, which is why the CI eval box installs `codex` before its
+neither `codex` nor `claude`, which is why the CI eval box installs `claude` before its
 daemon boots (`ci/README.md`) — puts `cap_harness` out of reach however well the model
 reasons, and scoring it 0.00 reports an environment gap as a candidate failure. A
 held-out task is never driven and never scored: it is named in the run's `note: NOT

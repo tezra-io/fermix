@@ -23,6 +23,11 @@ permissions:
 jobs:
   capability:
     uses: ./.github/workflows/eval-box.yml
+    # Only this tier signs Claude Code in through Workload Identity Federation, so
+    # only this job grants id-token: write; eval-box inherits its caller's token.
+    permissions:
+      contents: read
+      id-token: write
     with:
       tier: capability
       ref: dev

@@ -28,10 +28,6 @@ on:
         required: true
       EVAL_JUDGE_API_KEY:
         required: false
-      # Read only by the capability tier, whose Codex step refuses an empty value;
-      # optional so the nightly regression tier does not depend on it.
-      EVAL_CODEX_API_KEY:
-        required: false
       FERMIX_OPIK_API_KEY:
         required: true
       FERMIX_OPIK_WORKSPACE:
@@ -64,8 +60,12 @@ on:
         type: string
         default: gpt-5.6-luna
 
-permissions:
-  contents: read
+# No `permissions` here or on the job: the box inherits its caller's token, so only
+# the job that runs the capability tier (eval-weekly's) grants id-token: write for
+# the Claude Code sign-in, and the regression and dangerous tiers never hold the
+# right to mint GitHub OIDC tokens. A direct dispatch gets the repository's
+# read-only default, which the sign-in step refuses with a sentence: run the
+# capability tier on demand through eval-weekly instead.
 
 concurrency:
   group: eval-box
@@ -140,81 +140,198 @@ jobs:
         run: mix deps.get
 
       # The coding-harness tasks (suites/capability/harness.yaml) delegate to a
-      # vendor CLI, and the daemon advertises `codex_run` only when `codex` is on
-      # its PATH at boot, so this finishes before the daemon starts. A GitHub
-      # runner ships no vendor CLI; without this step the runner holds those
-      # tasks out as NOT EVALUATED and the release gate is red for that alone.
+      # vendor CLI, and the daemon advertises `claude_code_run` only when `claude`
+      # is on its PATH at boot, so this finishes before the daemon starts. A GitHub
+      # runner ships no vendor CLI; without this step the runner holds those tasks
+      # out as NOT EVALUATED and the release gate is red for that alone.
       #
-      # Signed in and able to sandbox, or the tier stops here. A codex that is
-      # installed but signed out, or that cannot start its Linux sandbox (its
-      # bundled bwrap needs unprivileged user namespaces), is worse than none:
-      # the daemon advertises `codex_run`, every delegated run fails, and the
-      # tasks score 0.00 as the candidate's failure.
+      # Signed in and on the pinned model, or the tier stops here. A claude that
+      # is installed but cannot authenticate is worse than none: the daemon
+      # advertises `claude_code_run`, every delegated run fails, and the tasks
+      # score 0.00 as the candidate's failure.
       #
-      # Where the credential lives: the daemon inherits this job's HOME and sets
-      # no CODEX_HOME, and Harness.Run spawns codex under `env -i` with HOME, PATH,
-      # TERM and USER only (the codex adapter passes no env), so a run reads
-      # $HOME/.codex/auth.json, the file `codex login` writes here. Both checks
-      # run under that same wiped environment, so they prove what a run will
-      # meet rather than what this step can see. The file is never uploaded (the
-      # artifact step takes benchmark/reports/ and the daemon log) and goes with
-      # the VM.
+      # Authentication is Workload Identity Federation and nothing else: no API
+      # key exists on this box. Harness.Run spawns claude under `env -i` with HOME,
+      # PATH, TERM and USER only (the claude adapter passes no env unless a run
+      # sets `bare`), so the federation settings live where claude finds them from
+      # HOME alone: an `oidc_federation` profile in ~/.config/anthropic, the
+      # documented default configuration directory, made active by its
+      # `active_config` file and naming an identity-token file. The IDs are not
+      # secrets and come from repository variables; ANTHROPIC_EVAL_WORKSPACE_ID
+      # may stay empty while the federation rule covers a single workspace.
       #
-      # Pinned: one release's Linux package (codex with the bwrap and rg it
-      # bundles, the layout codex's own installer lays down), its sha256 copied
-      # from that release's codex-package_SHA256SUMS. Bump the two together.
-      - name: Install and sign in the Codex CLI (capability tier)
+      # The identity token is this job's GitHub OIDC token. GitHub's expire about
+      # five minutes after issue, each can be exchanged only once (its `jti`), and
+      # claude re-reads the file at every exchange, so after the preflight a
+      # background loop replaces it every WIF_REFRESH_SECONDS, atomically, for at
+      # most WIF_REFRESH_MAX rounds (longer than the tier's timeout). The step
+      # "Stop the Claude Code token refresher" ends it and fails the job if any
+      # refresh failed. The token file sits under RUNNER_TEMP, outside the
+      # checkout, the eval home and the uploaded artifact, and goes with the VM.
+      #
+      # Known gap: a run the candidate starts with `bare: true` reads only
+      # ANTHROPIC_API_KEY (bare mode reads no profile and no federation settings),
+      # which this box never provides, so such a run fails to authenticate.
+      #
+      # The model is pinned in ~/.claude/settings.json, with self-updates off; a
+      # `model` the candidate passes to claude_code_run still overrides the pin.
+      #
+      # Pinned: one release's native linux-x64 binary, its sha256 copied from that
+      # release's manifest.json, whose detached signature verifies against the
+      # Claude Code release signing key (31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF
+      # 1A7E CACE). Bump the two together.
+      #
+      # The preflight runs under the same wiped environment a harness run gets, so
+      # it proves what a run will meet: `claude auth status` must name the
+      # federation profile, and one real call must succeed on the pinned model with
+      # no API key in play. That call costs well under a cent per weekly run.
+      - name: Install and sign in Claude Code (capability tier)
         if: inputs.tier == 'capability'
         env:
-          CODEX_VERSION: "0.162.1"
-          CODEX_PACKAGE_SHA256: a676f5722aae0d86cbe3764332f08eab1fdd89dc0a300b3ad4ffbf48611fa3e3
-          EVAL_CODEX_API_KEY: ${{ secrets.EVAL_CODEX_API_KEY }}
+          CLAUDE_CODE_VERSION: "2.1.296"
+          CLAUDE_CODE_SHA256: 24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de
+          CLAUDE_MODEL: claude-haiku-5-5
+          WIF_PROFILE: fermix-eval
+          WIF_REFRESH_SECONDS: "60"
+          WIF_REFRESH_MAX: "200"
+          ANTHROPIC_EVAL_ORGANIZATION_ID: ${{ vars.ANTHROPIC_EVAL_ORGANIZATION_ID }}
+          ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID }}
+          ANTHROPIC_EVAL_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_EVAL_FEDERATION_RULE_ID }}
+          ANTHROPIC_EVAL_WORKSPACE_ID: ${{ vars.ANTHROPIC_EVAL_WORKSPACE_ID }}
         run: |
           set -euo pipefail
-          if [ -z "${EVAL_CODEX_API_KEY:-}" ]; then
-            echo "::error::EVAL_CODEX_API_KEY is empty: the capability tier's delegated coding tasks (cap_harness) need a signed-in Codex CLI. Create the EVAL_CODEX_API_KEY repository secret (a dedicated OpenAI API key)."
-            exit 1
+          fail() { echo "::error::$*"; exit 1; }
+          for name in ANTHROPIC_EVAL_ORGANIZATION_ID ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID \
+                      ANTHROPIC_EVAL_FEDERATION_RULE_ID; do
+            if [ -z "${!name:-}" ]; then
+              fail "The repository variable $name is empty: the capability tier's delegated coding tasks (cap_harness) need Claude Code signed in through Workload Identity Federation. Set it under Settings > Secrets and variables > Actions > Variables."
+            fi
+          done
+          if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
+            fail "This job cannot request a GitHub OIDC token: the job that calls eval-box.yml must grant 'id-token: write' (eval-weekly's capability job does; a direct eval-box dispatch cannot, so run the capability tier through eval-weekly)."
           fi
           arch="$(uname -m)"
           if [ "$arch" != "x86_64" ]; then
-            echo "::error::The pinned Codex package is built for x86_64; this runner is $arch."
-            exit 1
+            fail "The pinned Claude Code binary is built for x86_64; this runner is $arch."
           fi
-          asset="codex-package-x86_64-unknown-linux-musl.tar.gz"
-          archive="$RUNNER_TEMP/$asset"
-          install_dir="$RUNNER_TEMP/codex-$CODEX_VERSION"
-          curl -fsSL --retry 3 -o "$archive" \
-            "https://github.com/openai/codex/releases/download/rust-v$CODEX_VERSION/$asset"
-          actual="$(sha256sum "$archive" | cut -d' ' -f1)"
-          if [ "$actual" != "$CODEX_PACKAGE_SHA256" ]; then
-            echo "::error::Codex $CODEX_VERSION package checksum mismatch: expected $CODEX_PACKAGE_SHA256, got $actual."
-            exit 1
+
+          install_dir="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION/bin"
+          claude="$install_dir/claude"
+          download="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION.download"
+          curl -fsSL --retry 3 -o "$download" \
+            "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/linux-x64/claude"
+          actual="$(sha256sum "$download" | cut -d' ' -f1)"
+          if [ "$actual" != "$CLAUDE_CODE_SHA256" ]; then
+            rm -f "$download"
+            fail "Claude Code $CLAUDE_CODE_VERSION binary checksum mismatch: expected $CLAUDE_CODE_SHA256, got $actual."
           fi
           mkdir -p "$install_dir"
-          tar -xzf "$archive" -C "$install_dir"
-          rm -f "$archive"
-          codex="$install_dir/bin/codex"
-          "$codex" --version
-          # The key travels on stdin, never on argv.
-          if ! printenv EVAL_CODEX_API_KEY | "$codex" login --with-api-key; then
-            echo "::error::codex login --with-api-key failed."
-            exit 1
+          install -m 0755 "$download" "$claude"
+          rm -f "$download"
+          "$claude" --version
+
+          # Claude Code's user config: the model under test, and no self-updates.
+          mkdir -p "$HOME/.claude"
+          jq -n --arg model "$CLAUDE_MODEL" \
+            '{model: $model, env: {DISABLE_AUTOUPDATER: "1", DISABLE_UPDATES: "1"}}' \
+            > "$HOME/.claude/settings.json"
+
+          wif_dir="$RUNNER_TEMP/anthropic-wif"
+          jwt="$wif_dir/github-oidc.jwt"
+          anthropic_dir="$HOME/.config/anthropic"
+          (umask 077 && mkdir -p "$wif_dir" "$anthropic_dir/configs")
+          jq -n --arg rule "$ANTHROPIC_EVAL_FEDERATION_RULE_ID" \
+                --arg account "$ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID" \
+                --arg org "$ANTHROPIC_EVAL_ORGANIZATION_ID" \
+                --arg workspace "${ANTHROPIC_EVAL_WORKSPACE_ID:-}" \
+                --arg token "$jwt" '
+            {version: "1.0",
+             authentication: {type: "oidc_federation", federation_rule_id: $rule,
+                              service_account_id: $account,
+                              identity_token: {source: "file", path: $token}},
+             organization_id: $org}
+            + (if $workspace == "" then {} else {workspace_id: $workspace} end)' \
+            > "$anthropic_dir/configs/$WIF_PROFILE.json"
+          printf '%s\n' "$WIF_PROFILE" > "$anthropic_dir/active_config"
+
+          # A fresh GitHub OIDC token, written beside the target and renamed over it
+          # so claude never reads half a token. Prints nothing it fetched.
+          fetch_jwt() {
+            local tmp
+            tmp="$(mktemp "$wif_dir/github-oidc.XXXXXX")"
+            if curl -fsS --retry 3 --max-time 30 \
+                 -H "Authorization: Bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+                 "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=https://api.anthropic.com" \
+                 | jq -er '.value' > "$tmp" \
+               && grep -Eqx '[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' "$tmp"; then
+              mv -f "$tmp" "$jwt"
+              return 0
+            fi
+            rm -f "$tmp"
+            return 1
+          }
+          if ! fetch_jwt; then
+            fail "Could not fetch a GitHub OIDC token for the audience https://api.anthropic.com."
           fi
+
           # What a harness run gets: the daemon's HOME and PATH, TERM and USER, nothing else.
-          run_env=(env -i HOME="$HOME" PATH="$install_dir/bin:$PATH"
+          run_env=(env -i HOME="$HOME" PATH="$install_dir:$PATH"
                    TERM=xterm-256color USER="$(id -un)")
-          # Success output shows the key's first characters, which log masking
-          # (whole secret values only) would publish, so it is printed only on failure.
-          if ! status="$("${run_env[@]}" "$codex" login status 2>&1)"; then
-            echo "::error::codex login status failed in the environment a harness run gets, so the daemon would advertise a signed-out codex_run: $status"
-            exit 1
+          # Which credential claude selects (network-free).
+          if ! source_line="$("${run_env[@]}" "$claude" auth status --text 2>&1)"; then
+            fail "claude finds no credential in the environment a harness run gets: $source_line"
           fi
-          if ! sandbox="$("${run_env[@]}" "$codex" sandbox -- /bin/true 2>&1)"; then
-            echo "::error::codex cannot start its Linux sandbox on this runner, so every delegated run would fail: $sandbox"
-            exit 1
+          case "$source_line" in
+            *oidc_federation*"profile $WIF_PROFILE"*) ;;
+            *) fail "claude selects a credential other than the $WIF_PROFILE federation profile: $source_line" ;;
+          esac
+          # One real call, in the output mode the claude adapter renders, from an
+          # empty directory so no project settings apply.
+          probe_dir="$RUNNER_TEMP/claude-code-preflight"
+          events="$probe_dir/events.jsonl"
+          mkdir -p "$probe_dir"
+          call_status=0
+          (cd "$probe_dir" && "${run_env[@]}" "$claude" -p --output-format stream-json --verbose \
+             --max-turns 1 -- 'Reply with the single word OK.') \
+            < /dev/null > "$events" 2> "$probe_dir/stderr.log" || call_status=$?
+          from_events() { jq -Rrn "[inputs | fromjson?] | $1" "$events"; }
+          is_error="$(from_events 'map(select(.type == "result")) | last | .is_error | tostring')"
+          reply="$(from_events 'map(select(.type == "result")) | last | .result // "no result event"')"
+          key_source="$(from_events 'map(select(.type == "system" and .subtype == "init")) | first | .apiKeySource // "missing"')"
+          session_model="$(from_events 'map(select(.type == "system" and .subtype == "init")) | first | .model // "missing"')"
+          used_models="$(from_events 'map(select(.type == "result")) | last | .modelUsage // {} | keys | join(",")')"
+          if [ "$call_status" -ne 0 ] || [ "$is_error" != "false" ]; then
+            fail "The preflight call failed in the environment a harness run gets (exit $call_status): $reply $(tail -n 3 "$probe_dir/stderr.log" | tr '\n' ' ')"
           fi
-          echo "Codex $CODEX_VERSION is signed in with EVAL_CODEX_API_KEY and its sandbox starts."
-          echo "$install_dir/bin" >> "$GITHUB_PATH"
+          if [ "$key_source" != "none" ]; then
+            fail "The preflight call authenticated with an API key (apiKeySource: $key_source), not the $WIF_PROFILE federation profile."
+          fi
+          if [ "$session_model" != "$CLAUDE_MODEL" ] || [ "$used_models" != "$CLAUDE_MODEL" ]; then
+            fail "The preflight call ran on '$used_models' (session model '$session_model'), not the pinned $CLAUDE_MODEL."
+          fi
+
+          # The call spent the token in the file: replace it before any harness run
+          # can need an exchange, then keep replacing it in the background.
+          if ! fetch_jwt; then
+            fail "Could not fetch a fresh GitHub OIDC token after the preflight call."
+          fi
+          refresh_loop() {
+            local round
+            for ((round = 1; round <= WIF_REFRESH_MAX; round++)); do
+              sleep "$WIF_REFRESH_SECONDS"
+              if fetch_jwt; then
+                echo "$(date -u +%FT%TZ) refreshed"
+              else
+                echo "$(date -u +%FT%TZ) refresh FAILED"
+              fi
+            done
+            echo "$(date -u +%FT%TZ) stopped at the cap of $WIF_REFRESH_MAX refreshes"
+          }
+          refresh_loop < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
+          echo "$!" > "$wif_dir/refresher.pid"
+          disown
+          echo "Claude Code $CLAUDE_CODE_VERSION signs in through the $WIF_PROFILE federation profile and answers on $CLAUDE_MODEL."
+          echo "$install_dir" >> "$GITHUB_PATH"
 
       - name: Seed the disposable home and boot the daemon
         env:
@@ -228,6 +345,9 @@ jobs:
           FERMIX_OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
           set -euo pipefail
+          # The job's OIDC request credential (id-token: write) belongs to the Claude
+          # Code sign-in step; the daemon and every process it spawns go without it.
+          unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           # Checker trials may commit inside the eval workspace; give git an identity.
           git config --global user.name "fermix-eval-box"
           git config --global user.email "eval-box@localhost"
@@ -394,6 +514,30 @@ jobs:
         env:
           FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
         run: benchmark/bin/capability-daemon.sh down
+
+      - name: Stop the Claude Code token refresher
+        # After the daemon is down, so no delegated run can still need a fresh
+        # identity token; `always()` so a failed tier step does not leave it running.
+        if: ${{ always() && inputs.tier == 'capability' }}
+        run: |
+          set -euo pipefail
+          wif_dir="$RUNNER_TEMP/anthropic-wif"
+          if [ ! -f "$wif_dir/refresher.pid" ]; then
+            echo "No token refresher was started: the Claude Code sign-in step did not finish."
+            exit 0
+          fi
+          pid="$(cat "$wif_dir/refresher.pid")"
+          if kill -0 "$pid" 2>/dev/null; then
+            kill "$pid"
+          fi
+          counts="$(awk '/ refreshed$/ {r++} / refresh FAILED$/ {f++} END {print r + 0, f + 0}' "$wif_dir/refresher.log")"
+          read -r refreshed failed <<<"$counts"
+          echo "Identity-token refresher: $refreshed refreshed, $failed failed."
+          if [ "$failed" -gt 0 ]; then
+            grep -v ' refreshed$' "$wif_dir/refresher.log"
+            echo "::error::$failed identity-token refreshes failed during the capability tier, so a delegated claude_code_run may have failed to authenticate: read this run's cap_harness scores as a possible environment failure, not the candidate's."
+            exit 1
+          fi
 
       - name: Daemon log tail (failure diagnostics)
         if: failure()
