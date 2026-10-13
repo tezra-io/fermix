@@ -164,8 +164,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:532`,
-  `:536`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:595`,
+  `:599`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -186,6 +186,13 @@ watch was added to the model).
   the reply, that the reply will carry the Computer History stamp `commit/4`
   puts on it (`tell_history_tainted`, M56 §9), so the Live session never
   says it. It is a send inside the turn's own steps and moves no Queue state.
+- What a turn does with its attachments before its loop (M67).
+  `run_message_loop` composes their manifest into the user text that
+  `persist_user_message` stores and, on the owner's chat turn, first saves
+  them to the workspace (`with_attachments`, `turn_runner.ex:472`). These are
+  file writes inside the turn's own steps, before its user message is
+  persisted, and move no Queue state: a stop or crash during them is one at
+  the turn's start, with nothing of the turn in history yet.
 - What an owner's turn reads before its loop: the gists of the last voice
   calls (`inject_recent_calls`, M56 §4.2), one Repo read inside the turn's own
   steps that moves no Queue state.
@@ -240,7 +247,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:151`).
+  `turn_runner.ex:156`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1095-1100`, `:1145-1158`).
@@ -265,7 +272,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:182`). The claim happens only after that returns
+  `turn_runner.ex:188`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
