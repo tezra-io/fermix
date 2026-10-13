@@ -32,16 +32,18 @@ defmodule FermixCore.Plugins.Dist.TreeDigestTest do
   end
 
   describe "cross-language golden fixtures" do
-    test "the fixture directory is present" do
-      if @fixture_files == [] do
-        IO.puts(
-          :stderr,
-          "\n  SKIPPED: #{@fixture_dir} not found — clone tezra-io/fermix-plugins " <>
-            "beside this repo to run the cross-language tree-digest contract.\n"
-        )
-      end
+    # ExUnit reports the absent checkout as a skip with its reason. A notice
+    # written to `:stderr` from this async test raced the async tests that
+    # capture stderr, and failed with "the device does not exist" whenever one
+    # of them held the device.
+    if @fixture_files == [] do
+      @tag skip:
+             "#{@fixture_dir} not found — clone tezra-io/fermix-plugins beside this repo " <>
+               "to run the cross-language tree-digest contract"
+    end
 
-      assert true
+    test "the fixture directory is present" do
+      assert @fixture_files != []
     end
 
     for file <- @fixture_files do
