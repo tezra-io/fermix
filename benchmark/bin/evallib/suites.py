@@ -16,6 +16,7 @@ import yaml
 from . import companion
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
+from .rubric import numbered_requirements
 from .scoring import MATCH_METHODS, _parse_number
 
 _SCORE_KEYS = {"match", "expected", "tolerance", "single"}
@@ -657,6 +658,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             if rubric is not None and not isinstance(rubric, str):
                 problems.append(f"{cloc}: `rubric` must be a string")
                 rubric = None
+            if rubric is not None:
+                # A numbered rubric is graded per requirement; a numbering the
+                # harness would miscount must fail here, not grade as prose.
+                _texts, numbering_error = numbered_requirements(rubric)
+                if numbering_error:
+                    problems.append(f"{cloc}: `rubric` {numbering_error}")
             score_spec = cs.get("score")
             if score_spec is not None:
                 _validate_score(score_spec, f"{cloc}.score", problems)

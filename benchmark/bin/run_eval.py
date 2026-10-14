@@ -1115,7 +1115,9 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
             "judge_reasoning_effort": result.reasoning_effort,
             "finish_reason": result.finish_reason,
             "input_tokens": result.input_tokens,
-            "output_tokens": result.output_tokens, "total_tokens": result.total_tokens}
+            "output_tokens": result.output_tokens, "total_tokens": result.total_tokens,
+            # Numbered rubrics: [{"n", "met", "why"}]; None for a prose rubric.
+            "requirements": result.requirements}
 
 
 def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=None):
@@ -1298,6 +1300,10 @@ def _redact_case(case: dict) -> None:
     rubric = case.get("rubric")
     if rubric and rubric.get("rationale"):
         rubric["rationale"] = "[redacted by default]"
+    # `n` and `met` stay, so a redacted report still says which numbered
+    # requirement failed; `why` is the judge's prose about the reply.
+    for requirement in (rubric or {}).get("requirements") or []:
+        requirement["why"] = "[redacted by default]"
 
 
 def _redact_error_strings(value, error_context: bool = False) -> None:

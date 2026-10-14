@@ -249,6 +249,17 @@ the `query` shorthand; multi-turn uses `turns`.
   two values, `openai` and `none`; the model is `judge.model`, and actual candidate
   and judge model equality is refused. Ordinary agent turns are never used as
   judges.
+  A rubric is **numbered** when it lists its requirements on lines starting
+  `1. `, `2. `, … (use a `|` block so the lines survive YAML folding). The judge
+  then decides each requirement (`met` and a one-sentence `why`) and the harness
+  computes the verdict: pass when every requirement is met, score the fraction
+  met. results.json records them as `rubric.requirements`; a redacted report
+  keeps each `n` and `met` and drops the `why`, so it still reads "judge: failed
+  requirement 2 of 5". A line indented under a requirement continues it; a closing
+  unindented line such as `Not required: …` is guidance the judge must not
+  demand. The numbering must run 1..N in order, each once, with nothing but
+  indented continuation or blank lines between items, or the suite fails to
+  load. Any other rubric is prose and gets one whole verdict.
 - `timeout_ms` (int, optional) — overrides `defaults.timeout_ms` for this case.
   The value bounds `fermix ask`; trace discovery and a bounded settlement window
   follow. The measured duration gate uses the driver's end-to-end wall clock,
