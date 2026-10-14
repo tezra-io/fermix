@@ -67,17 +67,15 @@ defmodule FermixChannels.Mobile.Router do
     ]
   end
 
-  # Pairing failures are counted per source address, so a noisy peer is refused
-  # alone and the window stays open: this connection's pairing calls carry its own.
+  # The session counts pairing failures per peer, so a noisy peer is refused
+  # alone and the window stays open: a WebSocket's peer is its source address.
   defp handler_state(conn, opts) do
-    source = conn.remote_ip
     max_media_bytes = Keyword.get(opts, :max_media_bytes, @default_max_media_bytes)
 
     opts
     |> Map.new()
     |> Map.put(:authenticated_max_heap_size, authenticated_heap_cap(max_media_bytes))
-    |> Map.put_new(:current_pair, &PairManager.current(&1, source))
-    |> Map.put_new(:record_pair_failure, &PairManager.record_failure(&1, &2, source))
+    |> Map.put(:peer, conn.remote_ip)
   end
 
   defp authenticated_heap_cap(max_media_bytes) when is_integer(max_media_bytes) do

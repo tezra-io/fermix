@@ -29,7 +29,7 @@ defmodule FermixChannels.Mobile.Listener do
   # connections in all, and an HTTP request slower than this before the
   # upgrade is closed. The WebSocket idle timeout governs after the upgrade.
   # `TlsTransport` ends a TLS handshake at ten seconds and the whole HTTP
-  # phase at its upgrade deadline, and `SocketHandler` ends a socket that has
+  # phase at its upgrade deadline, and `Session` ends a socket that has
   # not said hello or sent its pair request, so a peer that stays silent, or
   # keeps talking HTTP, gives its slot back instead of holding it.
   @num_acceptors 4

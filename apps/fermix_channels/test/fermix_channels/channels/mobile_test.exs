@@ -518,7 +518,7 @@ defmodule FermixChannels.Channels.MobileTest do
     assert :ok = Approvals.announce(approvals, "main", phone_card, :mobile)
 
     {:ok, state} =
-      SocketHandler.init(
+      init_socket(
         phone_hello_state(%{
           encode_server: fn
             "hello_ack", _payload, 1 ->
@@ -1099,4 +1099,8 @@ defmodule FermixChannels.Channels.MobileTest do
 
   defp restore_env(key, {:ok, value}), do: Application.put_env(:fermix_channels, key, value)
   defp restore_env(key, :error), do: Application.delete_env(:fermix_channels, key)
+
+  # The peer `Mobile.Router` names for every WebSocket: the session requires one.
+  defp init_socket(opts),
+    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
 end

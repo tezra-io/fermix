@@ -618,7 +618,7 @@ A channel **render** is a point of the same family:
 error's class). Telegram emits it per rendered reply (`:ok`, or
 `:plain_fallback` when a chunk is resent as raw Markdown). The mobile socket
 emits it only when it drops a fan-out event it cannot encode for one phone
-(`FermixChannels.Mobile.SocketHandler`, `drop_event/4`): `status` is the
+(`FermixChannels.Mobile.Session`, `drop_event/4`): `status` is the
 reason's leading atom (`event_too_large`, `null_field`, `invalid_payload`,
 …, or `encode_failed`), never the event, and the session stays open, because
 an outbound encode failure is the daemon's fault, not the phone's. A waiting

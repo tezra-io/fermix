@@ -37,7 +37,7 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
   alias FermixChannels.Mobile.Push.PigeonDispatcher
-  alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Mobile.Session
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
 
   @max_wait_ms 120_000
@@ -743,7 +743,7 @@ defmodule FermixChannels.Mobile.Management do
       # Discovery orders candidates best first, so the link keeps the likeliest
       # routes, as hello_ack does, and stays a QR code a phone can scan.
       addresses =
-        candidates |> Enum.take(SocketHandler.max_candidates()) |> Enum.map(& &1.address)
+        candidates |> Enum.take(Session.max_candidates()) |> Enum.map(& &1.address)
 
       query =
         URI.encode_query([

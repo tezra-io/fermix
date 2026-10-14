@@ -540,7 +540,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         pending_approvals: fn "main" -> [] end
       })
       |> Map.merge(Map.new(overrides))
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -561,7 +561,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         end
       })
       |> Map.merge(Map.new(overrides))
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -578,7 +578,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         schedule_handshake_deadline: fn _message, _delay -> make_ref() end,
         cancel_handshake_deadline: fn _ref -> false end
       })
-      |> SocketHandler.init()
+      |> init_socket()
 
     state
   end
@@ -736,4 +736,8 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
 
   defp restore_env({key, {:ok, value}}), do: Application.put_env(:fermix_channels, key, value)
   defp restore_env({key, :error}), do: Application.delete_env(:fermix_channels, key)
+
+  # The peer `Mobile.Router` names for every WebSocket: the session requires one.
+  defp init_socket(opts),
+    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
 end

@@ -26,7 +26,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
              )
 
     assert {:ok, socket} =
-             SocketHandler.init(
+             init_socket(
                gateway_keypair: gateway,
                device_store: :device_store,
                device_registry: registry,
@@ -109,7 +109,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
              )
 
     assert {:ok, socket} =
-             SocketHandler.init(
+             init_socket(
                gateway_keypair: gateway,
                device_registry: registry,
                pair_manager: pair_manager,
@@ -215,7 +215,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
              )
 
     assert {:ok, socket} =
-             SocketHandler.init(
+             init_socket(
                gateway_keypair: gateway,
                device_store: :device_store,
                device_registry: :unused_registry,
@@ -345,4 +345,8 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
       "caps" => %{"commands" => [], "media" => true, "streaming" => true}
     }
   end
+
+  # The peer `Mobile.Router` names for every WebSocket: the session requires one.
+  defp init_socket(opts),
+    do: opts |> Map.new() |> Map.put_new(:peer, {127, 0, 0, 1}) |> SocketHandler.init()
 end

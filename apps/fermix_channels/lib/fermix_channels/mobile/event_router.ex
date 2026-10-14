@@ -17,7 +17,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
   alias FermixChannels.Mobile.DeviceRegistry
-  alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Mobile.Session
   alias FermixCore.Companion.Timeline
 
   # A page above the 4 KiB header travels as continuation frames; this bounds
@@ -142,9 +142,9 @@ defmodule FermixChannels.Mobile.EventRouter do
       ingress_context: context,
       reply_to: reply_to,
       # A request that fails after its worker returned is told to the device
-      # as the socket tells a failed worker's (`SocketHandler.request_error/2`).
+      # as the socket tells a failed worker's (`Session.request_error/2`).
       report_failure: fn client_msg_id, cause ->
-        sink.(reply_to, SocketHandler.request_error({:request_failed, cause}, client_msg_id))
+        sink.(reply_to, Session.request_error({:request_failed, cause}, client_msg_id))
       end,
       attempt_key: :mobile_attempt,
       max_page_bytes: @max_page_bytes,

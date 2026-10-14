@@ -5,7 +5,7 @@ defmodule FermixChannels.Mobile.Protocol do
   A frame is a 32-bit unsigned big-endian JSON-header length, the JSON header,
   then optional raw bytes. The enclosing Noise transport supplies secrecy,
   authentication, and message boundaries. This module performs no I/O and owns
-  no connection state; `Mobile.SocketHandler` owns hello-first and sequence
+  no connection state; `Mobile.Session` owns hello-first and sequence
   ordering checks.
 
   The canonical cross-repository export lives under `fermix_core/priv/mobile/`.

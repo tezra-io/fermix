@@ -6,7 +6,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.Router
-  alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Mobile.Session
   alias FermixTestSupport.WireSchema
 
   @priv_dir Application.app_dir(:fermix_core, "priv/mobile")
@@ -105,11 +105,11 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert message["x-max-bytes"] == 512
 
     for def <- ~w(hello_ack pair_approved) do
-      assert defs[def]["properties"]["candidates"]["maxItems"] == SocketHandler.max_candidates()
+      assert defs[def]["properties"]["candidates"]["maxItems"] == Session.max_candidates()
     end
 
     link_candidates = defs["pairingLink"]["properties"]["candidates"]["contentSchema"]
-    assert link_candidates["maxItems"] == SocketHandler.max_candidates()
+    assert link_candidates["maxItems"] == Session.max_candidates()
   end
 
   test "schema pins the continuation frames and the event cap", %{schema: schema} do
@@ -450,7 +450,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     [_before, errors] = String.split(protocol, "## Errors", parts: 2)
     [table, _after] = String.split(errors, "## Close codes", parts: 2)
 
-    for code <- SocketHandler.typed_refusals() ++ ["media_fetch_backlog_full"] do
+    for code <- Session.typed_refusals() ++ ["media_fetch_backlog_full"] do
       assert table =~ "`#{code}`", "PROTOCOL.md's Errors table has no code #{code}"
     end
   end

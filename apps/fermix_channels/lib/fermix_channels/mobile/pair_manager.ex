@@ -225,10 +225,6 @@ defmodule FermixChannels.Mobile.PairManager do
     GenServer.call(server, {:attestation_statuses, session_id}, @status_wait_ms + 5_000)
   end
 
-  @spec record_failure(GenServer.server(), session_id()) ::
-          {:ok, 0..4} | {:error, :timeout | :rate_limited | :session_not_found}
-  def record_failure(server, session_id), do: record_failure(server, session_id, :unknown)
-
   @doc """
   Count one failed handshake from `source`. Its fifth refuses that source for
   the rest of the window, which stays open for everyone else. With a request
