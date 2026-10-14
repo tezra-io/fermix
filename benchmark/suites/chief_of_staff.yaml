@@ -80,11 +80,22 @@ scenarios:
               too, and tell me what changed.
             expect:
               reply_matches: '(?is)(?=.*board memo)(?=.*customer escalation)(?=.*design review)'
+        # 2026-10-14: re-graded under the Claude judge, "separates known facts
+        # from open ownership" split the two judges on the same reply: one
+        # read a sentence saying the escalation still needs an owner as the
+        # separation, the other wanted an unknowns list. It now says that
+        # either counts. The same re-grade caught a reply that called the
+        # memo's move "three hours later" and invented a completed design
+        # review, so stating the updates exactly is now written down too.
         rubric: >
           The revision is decisive and ordered, promotes the new deadlines
           (board memo at 15:00, escalation owner by noon), demotes the
           contained P1 and the unblocked approval, and says what moved and
-          why. It separates known facts from open ownership.
+          why, giving every changed time as the update states it and
+          inventing no status the updates did not report. It makes clear
+          which items are settled and which still lack an owner (the
+          customer escalation), in a list or in a sentence; a separate
+          unknowns section is not required.
       - id: people_and_customer_update
         turns:
           - query: |
