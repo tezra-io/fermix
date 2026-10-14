@@ -39,7 +39,7 @@ from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
                                     ServerError, case_uses_fixture)
-from evallib.opik import OpikClient, OpikError, valid_run_id
+from evallib.opik import OpikClient, OpikError, parse_ts, valid_run_id
 from evallib.session_ids import sess
 from evallib.suites import (ALWAYS_STICKY_GATES, RISK_LEVELS, STICKY_GATE_KEYS,
                             SuiteError, load_all)
@@ -515,6 +515,42 @@ def _configured_workspace(fermix_home: str) -> str:
     return os.path.realpath(os.path.expandvars(os.path.expanduser(workspace_raw)))
 
 
+def configured_timezone(fermix_home: str) -> str | None:
+    """The personalization timezone the daemon labels its date note with, or None
+    when the home configures none (the note then carries no label)."""
+    home = os.path.realpath(os.path.expanduser(fermix_home))
+    with open(os.path.join(home, "config.toml"), "rb") as handle:
+        raw = tomllib.load(handle)
+    label = raw.get("fermix_core", {}).get("personalization", {}).get("timezone")
+    return label.strip() if isinstance(label, str) and label.strip() else None
+
+
+def judge_date_facts(turn_records: list[dict], timezone_label: str | None) -> list[str]:
+    """What `FermixCore.Prompt.CurrentDate` told the candidate, as judge reference facts.
+
+    The daemon puts the UTC date (and the user's timezone) in front of every turn, so
+    the candidate turns "the day after tomorrow" into "Friday, October 16" and is
+    right to. A judge that never saw the date graded exactly that as an invented
+    time. One fact per UTC day the graded turns started on, in turn order."""
+    if not turn_records:
+        raise ValueError("no graded turn to date for the judge")
+    days = []
+    for record in turn_records:
+        started = parse_ts(record.get("started_at"))
+        if started is None:
+            raise ValueError("a graded turn has no trace start time; the judge cannot "
+                             "be told the date the candidate saw")
+        day = started.astimezone(timezone.utc).strftime("%A, %Y-%m-%d")
+        if day not in days:
+            days.append(day)
+    label = (f" The user's timezone is {timezone_label} — their local date can "
+             "differ from UTC near midnight." if timezone_label else "")
+    which = "On every turn, " if len(days) == 1 else "On the turns sent that day, "
+    return [f"{which}the assistant's system prompt carried this note: \"Current date: "
+            f"{day} (UTC).{label}\" Words like today and tomorrow in the conversation "
+            "are relative to that date." for day in days]
+
+
 def workspace_revision_error(workspace: str, harness_repo: str) -> str | None:
     harness_sha = _git_value(harness_repo, "rev-parse", "HEAD")
     workspace_sha = _git_value(workspace, "rev-parse", "HEAD")
@@ -811,6 +847,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on,
         "iterations": view.iterations,
         "subagent_spawns": view.subagent_spawns,
         "trace_id": trace["id"],
+        "started_at": trace.get("start_time"),
         "trace_url": f"{cfg.opik.ui_base}/api/v1/private/traces/{trace['id']}",
         "main_models": view.main_models,
         "main_providers": view.main_providers,
@@ -829,7 +866,7 @@ def run_operator_case(cfg, client, suite, scn, case, run_id, trial, judge_on,
     candidate_routes = _candidate_routes_from_turns([rec])
     rubric = None if incomplete else _rubric_record(
         cfg, case, scn, run_id, trial, judge_on, transcript, evidence,
-        candidate_routes, candidate_session=marker)
+        candidate_routes, turn_records=[rec], candidate_session=marker)
     negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
     gate_ok = gate_ok and not negative_failed
     outcome = operator_outcome(gate_ok, incomplete, rubric, cfg.rubric_failures,
@@ -921,7 +958,7 @@ def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
                   {"role": "assistant", "content": reply}]
     rubric = None if evidence_incomplete else _rubric_record(
         cfg, case, scn, run_id, trial, judge_on, transcript, [_tool_evidence(view, 0)],
-        _candidate_routes_from_turns([rec]), candidate_session=marker)
+        _candidate_routes_from_turns([rec]), turn_records=[rec], candidate_session=marker)
     negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
     gate_ok = all(gate.passed for gate in gates) and not negative_failed
     outcome = operator_outcome(gate_ok, evidence_incomplete, rubric, cfg.rubric_failures,
@@ -1022,7 +1059,7 @@ def _record_graded_turn(rec, cfg, trace, gates, view, note) -> None:
         "reply": view.reply, "cost_usd": view.cost,
         "duration_ms": view.duration_ms, "tokens": view.tokens,
         "iterations": view.iterations, "subagent_spawns": view.subagent_spawns,
-        "trace_id": trace["id"],
+        "trace_id": trace["id"], "started_at": trace.get("start_time"),
         "trace_url": f"{cfg.opik.ui_base}/api/v1/private/traces/{trace['id']}",
         "main_models": view.main_models, "main_providers": view.main_providers,
         "main_efforts": view.main_efforts,
@@ -1049,7 +1086,7 @@ def _candidate_routes_from_turns(records: list[dict]) -> list[dict]:
 
 
 def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence,
-                   candidate_routes, candidate_session=None):
+                   candidate_routes, *, turn_records, candidate_session=None):
     if not case.rubric:
         return None
     if not judge_on or not case.judge:
@@ -1063,6 +1100,8 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
         cfg, last_query, reply, case.rubric,
         tag=candidate_session or sess(run_id, "judge", scn.id, case.id, str(trial)),
         transcript=transcript, tool_evidence=evidence,
+        reference_facts=judge_date_facts(
+            turn_records, configured_timezone(cfg.daemon.fermix_home)),
         candidate_routes=candidate_routes,
     )
     if not result.evaluated:
@@ -1160,7 +1199,7 @@ def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=Non
     candidate_routes = _candidate_routes_from_turns(records)
     rubric = None if incomplete else _rubric_record(
         cfg, case, scn, run_id, trial, judge_on, transcript, evidence,
-        candidate_routes, candidate_session=session)
+        candidate_routes, turn_records=records, candidate_session=session)
     # A turn that broke the loop on incomplete evidence never reached the
     # `gate_ok` update below it, so its negative gates are read back off the
     # records rather than inferred from `gate_ok` — and `gate_ok` itself is

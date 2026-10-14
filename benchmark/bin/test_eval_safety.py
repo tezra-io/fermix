@@ -205,7 +205,7 @@ def test_explicit_openai_refuses_configured_candidate_model_before_dispatch(monk
     assert "matches candidate" in result.error
 
 
-def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
+def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch, tmp_path):
     observed = []
 
     def fake_judge(*_args, **kwargs):
@@ -215,7 +215,9 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
             backend="openai", provider="openai", model="judge-model", called=True)
 
     monkeypatch.setattr(judge, "judge_case", fake_judge)
-    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"))
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
     case = SimpleNamespace(id="case", rubric="Judge.", judge=True)
     scn = SimpleNamespace(id="multi")
     candidates = [
@@ -226,10 +228,72 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch):
     record = run_eval._rubric_record(
         cfg, case, scn, "run", 1, True,
         [{"role": "user", "content": "q"},
-         {"role": "assistant", "content": "a"}], [], candidates)
+         {"role": "assistant", "content": "a"}], [], candidates,
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
 
     assert observed == candidates
     assert record["judge_model"] == "judge-model"
+
+
+def test_judge_is_told_the_date_the_candidate_was_told():
+    """The daemon puts `Prompt.CurrentDate`'s note in front of every turn, so a
+    reply that turns "the day after tomorrow" into "Friday, October 16" is grounded.
+    A judge that never saw the date graded exactly that as an invented time."""
+    records = [{"started_at": "2026-10-14T03:17:47.261Z"},
+               {"started_at": "2026-10-14T03:17:57.508Z"}]
+    facts = run_eval.judge_date_facts(records, "America/New_York")
+    assert facts == [
+        "On every turn, the assistant's system prompt carried this note: \"Current "
+        "date: Wednesday, 2026-10-14 (UTC). The user's timezone is America/New_York "
+        "— their local date can differ from UTC near midnight.\" Words like today "
+        "and tomorrow in the conversation are relative to that date."]
+
+
+def test_judge_date_facts_follow_a_conversation_across_utc_midnight():
+    records = [{"started_at": "2026-10-13T23:59:58Z"}, {"started_at": "2026-10-14T00:00:03Z"}]
+    facts = run_eval.judge_date_facts(records, None)
+    assert len(facts) == 2
+    assert facts[0].startswith("On the turns sent that day, ")
+    assert "\"Current date: Tuesday, 2026-10-13 (UTC).\"" in facts[0]
+    assert "\"Current date: Wednesday, 2026-10-14 (UTC).\"" in facts[1]
+
+
+def test_judge_date_facts_refuse_a_turn_without_a_trace_start():
+    with pytest.raises(ValueError, match="start time"):
+        run_eval.judge_date_facts([{"started_at": None}], None)
+    with pytest.raises(ValueError, match="no graded turn"):
+        run_eval.judge_date_facts([], None)
+
+
+def test_configured_timezone_reads_the_daemons_personalization_label(tmp_path):
+    config_path = tmp_path / "config.toml"
+    config_path.write_text('[fermix_core.personalization]\ntimezone = "America/New_York"\n')
+    assert run_eval.configured_timezone(str(tmp_path)) == "America/New_York"
+    config_path.write_text('[sandbox]\nmode = "strict"\n')
+    assert run_eval.configured_timezone(str(tmp_path)) is None
+
+
+def test_rubric_record_sends_the_candidates_date_to_the_judge(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_judge(*_args, **kwargs):
+        seen.update(kwargs)
+        return judge.JudgeResult(
+            evaluated=True, passed=True, score=1.0, rationale="ok",
+            backend="anthropic", provider="anthropic", model="judge-model", called=True)
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text(
+        '[fermix_core.personalization]\ntimezone = "America/New_York"\n')
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric="Judge.", judge=True)
+    records = [{"started_at": "2026-10-14T03:17:47.261Z"}]
+    run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}], turn_records=records)
+    assert seen["reference_facts"] == run_eval.judge_date_facts(records, "America/New_York")
 
 
 def test_judge_accounting_counts_only_dispatched_calls():
