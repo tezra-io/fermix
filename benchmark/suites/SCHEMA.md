@@ -240,7 +240,10 @@ the `query` shorthand; multi-turn uses `turns`.
   When the suite/case has `judge: true`, selecting that case requires `--judge`;
   `judge: false` leaves the rubric as manual review guidance and the automated
   outcome is `INCOMPLETE`, never PASS. Multi-turn
-  judging receives the full ordered transcript plus span-backed tool evidence.
+  judging receives the full ordered transcript plus span-backed tool evidence,
+  and, as a reference fact, the current-date note the daemon put in front of
+  each turn, so a weekday or date the model derived from it is not graded as
+  invented.
   The judge is the **external OpenAI API**, called directly by the harness — there
   is no in-daemon judge. `judge.backend` in this benchmark's config takes exactly
   two values, `openai` and `none`; the model is `judge.model`, and actual candidate
