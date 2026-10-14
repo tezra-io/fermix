@@ -13,7 +13,7 @@ its refresh began (`mark_reauthorization_required`). Logout deletes the entry,
 then has the profile's manager forget its tokens and stops it (plugin logout,
 `plugins/auth.ex:66-89` → `TokenSupervisor.forget_signed_out`,
 `token_supervisor.ex:131-153`) or only forgets them (the provider sign-out of
-anthropic and xai, `management/auth.ex:147-154`, `:390-394`). A logout from a
+anthropic and xai, `management/auth.ex:147-154`, `:394-398`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
 `cli/daemon.ex:852-882` → `TokenSupervisor.forget_signed_out`).
@@ -24,7 +24,7 @@ writes instead of deleting: under the profile lock it revokes the session
 upstream and writes the entry back with no token, then calls
 `TokenSupervisor.forget_signed_out` (`auth/chatgpt/logout.ex:35-49`, `:71-86`).
 It is reached through `ChatGPT.logout` from the app's `auth.logout`
-(`management/auth.ex:381-388`), `fermix auth logout` (`auth_command.ex:284-310`)
+(`management/auth.ex:385-392`), `fermix auth logout` (`auth_command.ex:284-310`)
 and the web setup. Every reader treats an entry with no token as gone:
 `Store.read` refuses it as `:missing_access_token` (`store.ex:345-354`), and a
 manager maps that to signed out exactly as it maps a deleted entry
@@ -96,7 +96,7 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
   (delete, then `forget`), not the plugin logout (delete, then
   `forget_signed_out`: forget, then `stop_profile`), which ChatGPT's sign-out
   also ends in. The provider sign-out goes on to `forget` even when the entry
-  is already gone (`management/auth.ex:399-408`). The in-daemon plugin logout
+  is already gone (`management/auth.ex:403-412`). The in-daemon plugin logout
   stops at the failed delete (`plugins/auth.ex:70-72`, `:84-88`). ChatGPT's
   sign-out writes nothing when it finds no registration and goes on to
   `forget_signed_out` (`chatgpt/logout.ex:71-77`). Both CLI logouts go on to
@@ -125,7 +125,7 @@ least one check):
   logout and ChatGPT's sign-out have it forget its tokens and stop it
   (`plugins/auth.ex:73`, `chatgpt/logout.ex:46` →
   `token_supervisor.ex:149-153`), the provider sign-out of anthropic and xai
-  has it forget them (`management/auth.ex:392`, `:417` →
+  has it forget them (`management/auth.ex:396`, `:421` →
   `token_supervisor.ex:123-129` → `token_manager.ex:196-199`).
 - `PluginLogoutForgets`: the in-daemon plugin logout calls
   `forget_signed_out`, the same call as a CLI logout's notice, so the manager
