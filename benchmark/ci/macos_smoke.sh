@@ -9,7 +9,7 @@
 set -euo pipefail
 
 BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../bin" && pwd)"
-SMOKE_MODEL="${SMOKE_MODEL:-gpt-5.6-luna}"
+SMOKE_MODEL="${SMOKE_MODEL:-gpt-6-luna}"
 
 export FERMIX_CAP_HOME="${FERMIX_CAP_HOME:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/fermix-smoke-eval}"
 export FERMIX_CAP_OPIK=0

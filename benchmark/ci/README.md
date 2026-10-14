@@ -12,7 +12,19 @@ box anatomy; thin callers own cadence:
 | T2b dangerous | `sandbox_verify` named scenario, destructive profile | `eval-weekly.yml` → eval-box, after T2a | weekly; red files a critical issue |
 
 All tiers also run on demand: Actions → eval-box → Run workflow (pick the tier).
-Scheduled workflows execute the file on `main` but always **check out `dev`**.
+Scheduled workflows execute the file on `main` but always **check out `dev`**
+(the nightly checks out the dev commit its `changes` job resolved, so a green
+record names exactly what ran).
+
+**An unchanged nightly is skipped.** A scheduled nightly runs its tiers only
+when dev's commit, or the commit main's workflows ran from, differs from a green
+nightly's in the same ISO week (UTC). The `changes` job looks up an actions/cache
+key naming both commits and the week. `record-green` saves that key once the
+regression tier and the macOS smoke are both green. The week in the key re-runs
+unchanged code once a week. Cache eviction can't provide that re-run, because
+each nightly lookup counts as an access. A skipped night files no issue. If the
+`changes` job fails or is cancelled, the tiers it skipped file the usual
+"produced no evidence" issue. A manual dispatch of `eval-nightly` always runs.
 
 **Read the T2a exit code before blaming the model.** `run_capability.py`
 separates the measurement job from the quality gate: `4` means the measurement
@@ -157,7 +169,7 @@ and the daemon's environment drops the request credential. No workflow reads the
 `EVAL_JUDGE_API_KEY` secret any more (it fed the retired OpenAI judge).
 
 **Model rule:** the candidate model (eval-box input `model`, default
-`gpt-5.6-luna`) must differ from `judge.model` in `benchmark/config.yaml` and
+`gpt-6-luna`) must differ from `judge.model` in `benchmark/config.yaml` and
 `benchmark/behavioral_config.yaml` (`claude-opus-5-5`) — the harness refuses a
 judge that matches the candidate, vendor prefixes and release dates aside.
 
