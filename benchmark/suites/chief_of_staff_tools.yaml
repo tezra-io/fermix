@@ -75,6 +75,11 @@ scenarios:
           # A negated conclusion ("not at risk", "no need to hold/delay") is the
           # one wording that is wrong on this evidence whatever else is said.
           reply_not_matches: '(?is)\bnot at risk\b|\bno (?:need|reason) to (?:hold|delay)\b|\bdoes not need (?:a |to )?(?:be held|hold|delay)\b'
+        # 2026-10-14: the four launch files name days relative to today, not
+        # weekdays. The judge is told the date the model saw, and on a CI run
+        # dated Wednesday it failed 1 of 3 briefs for treating the files'
+        # "Tuesday 09:00" readiness review as still ahead; relative days read
+        # the same on every date. The rubric is unchanged.
         rubric: >
           Grounds a decisive launch brief in all four files, prioritizes the
           unresolved P1 and the Northstar escalation owner deadline, does not
@@ -97,9 +102,41 @@ scenarios:
             - 'benchmark/suites/fixtures/chief_of_staff/hiring_inbox\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/hiring_tracker\.md'
             - 'benchmark/suites/fixtures/chief_of_staff/hiring_notes\.md'
-          reply_matches: '(?is)(?=.*Maya)(?=.*\bStaff\b)(?=.*Friday)(?=.*scorecard)(?=.*Jordan)'
-        rubric: >
-          Uses all four files, preserves the Staff-level (not Principal)
-          correction, treats Friday noon as the hard deadline, and gives a
-          conditional recommendation that names the missing scorecard and the
-          unapproved compensation exception rather than inventing either.
+          reply_matches: '(?is)(?=.*Maya)(?=.*\bStaff\b)(?=.*\bnoon\b|.*12:00)(?=.*scorecard)(?=.*Jordan)'
+        # 2026-10-14: the rubric is a numbered list, the tracker says who
+        # corrected the level and that it is settled, and the files name days
+        # relative to today, so the reply anchor is the noon deadline, not
+        # "Friday". The owner ruled that treating Staff vs Principal as open
+        # in any form (a step to confirm it, a risk it may be Principal, "the
+        # broader context may imply a different level") is a defect; the prose
+        # rubric passed 8 of the 12 recorded replies that do it on every
+        # grade, and all 3 CI trials, which do it too. Under the list,
+        # re-graded with the date fact, those 15 fail every grade on the level
+        # and the one correct recorded reply passes. Requirement 2 says that
+        # weighing the compensation exception against the Staff level is fine
+        # because one grade in four read that reply's band risk as reopening
+        # the level. Three such replies written on purpose fail and two
+        # correct ones pass, 3/3 each, and all 3 live replies on the corrected
+        # tracker keep the level settled.
+        rubric: |
+          It passes only when every numbered requirement holds:
+          1. The reply uses facts from all four files.
+          2. It treats the role as settled at Staff Engineer, as the tracker
+             records. It fails if it treats the level as open in any form: a
+             step to confirm, verify or resolve the level; a question or unknown
+             about it; a risk that the role, the offer or the evaluation may be
+             Principal or another level; a suggestion that other context may
+             imply a different level; or a recommendation conditioned on the
+             level. Stating the level ("Staff Engineer, not Principal"),
+             reminding people to keep the evaluation and the offer at Staff, or
+             weighing the compensation exception against the Staff level is
+             fine.
+          3. It treats the expiry of Maya's competing offer, at noon on the day
+             the inbox and calendar give, as the hard deadline.
+          4. Its recommendation is conditional and names both the missing final
+             scorecard and the unapproved compensation exception as open
+             dependencies.
+          5. It invents neither the scorecard's content nor the compensation
+             decision.
+          Not required: a final hire or no-hire, a particular set of unknowns,
+          restating the request, or any particular wording, length or format.
