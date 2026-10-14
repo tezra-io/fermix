@@ -662,8 +662,10 @@ def test_both_runner_configs_judge_with_claude_away_from_the_candidate(monkeypat
     cfg = config.load(skill_dir, os.path.join(skill_dir, name))
     assert (cfg.judge.backend, cfg.judge.model) == ("anthropic", "claude-opus-5-5")
     workflow = pathlib.Path(skill_dir).parent / ".github" / "workflows" / "eval-box.yml"
-    candidate = re.search(r"default: (gpt-[\w.-]+)", workflow.read_text()).group(1)
-    assert judge._model_key(candidate) != judge._model_key(cfg.judge.model)
+    # The scheduled tiers (workflow_call) and a direct dispatch run one candidate.
+    candidates = re.findall(r"default: (gpt-[\w.-]+)", workflow.read_text())
+    assert candidates == ["gpt-6-luna", "gpt-6-luna"]
+    assert judge._model_key(candidates[0]) != judge._model_key(cfg.judge.model)
 
 
 def test_behavioral_config_rejects_non_finite_budget(tmp_path):

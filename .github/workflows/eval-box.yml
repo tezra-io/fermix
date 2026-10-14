@@ -22,7 +22,7 @@ on:
       model:
         description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
         type: string
-        default: gpt-5.6-luna
+        default: gpt-6-luna
     secrets:
       OPENAI_API_KEY:
         required: true
@@ -56,7 +56,7 @@ on:
       model:
         description: "Candidate model — must differ from judge.model in benchmark/config.yaml"
         type: string
-        default: gpt-5.6-luna
+        default: gpt-6-luna
 
 # No `permissions` here or on the job: the box inherits its caller's token, so only
 # the jobs that run a JUDGED tier (eval-nightly's regression, eval-weekly's
