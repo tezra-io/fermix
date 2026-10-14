@@ -80,35 +80,58 @@ scenarios:
               too, and tell me what changed.
             expect:
               reply_matches: '(?is)(?=.*board memo)(?=.*customer escalation)(?=.*design review)'
-        # 2026-10-14: re-graded under the Claude judge, "separates known facts
-        # from open ownership" split the two judges on the same reply: one
-        # read a sentence saying the escalation still needs an owner as the
-        # separation, the other wanted an unknowns list. It now says either
-        # counts, and that the updates are given exactly with no invented
-        # status. The briefing used to name weekdays ("design review
-        # Tuesday", "memo due Wednesday") beside "today"; the model sees the
-        # real date on every turn and the judge does not, so on a Wednesday
-        # run a reply calling the review past, or the memo's move to 15:00
-        # "three hours later", was right and was graded as an invention. The
-        # days are now relative to today, so on any date the review is still
-        # ahead and the memo moves earlier.
-        rubric: >
-          The revision is decisive and ordered, promotes the new deadlines
-          (board memo at 15:00, escalation owner by noon), demotes the
-          contained P1 and the unblocked approval, and says what moved and
-          why, giving every changed time as the update states it and
-          inventing no status the updates did not report. It makes clear
-          which items are settled and which still lack an owner (the
-          customer escalation), in a list or in a sentence; a separate
-          unknowns section is not required.
+        # 2026-10-14: the rubric is a numbered list of the requirements that
+        # decide the case. As prose ("decisive and ordered") it split the
+        # Claude judge on borderline replies (5 of 8 in the deep dive's
+        # re-grade). Re-graded three times each with the date fact, the 22
+        # recorded replies on this briefing get one verdict each: 19 pass and
+        # 3 fail for misstating the original briefing (the memo "moved up
+        # from third", the review "moves up", the P1 "no longer the lead
+        # priority"), the error the owner ruled a defect in
+        # people_and_customer_update. A wrong time and an invented status fail
+        # 3/3, two correct revisions pass 3/3, a live run passed 2 of 3 (the
+        # third: the review "moved from first place") and the 3 CI trials
+        # pass 3/3. The days are relative to today, never weekdays: the model
+        # sees the real date, so the old weekday briefing made "the review is
+        # past" or "the memo moved three hours later" right on some dates, and
+        # its 11 recorded replies are the only ones that still split.
+        rubric: |
+          Grade the final reply, the revised briefing. It passes only when every
+          numbered requirement holds:
+          1. It gives three ordered priorities, and two of them are the board
+             memo, now due today at 15:00, and getting the customer escalation
+             an owner by noon.
+          2. It demotes the contained P1 and Lea's approval: neither ranks above
+             the memo or the escalation, and neither is treated as still active
+             (a follow-up or watch item on the contained P1 is fine).
+          3. It says what changed from the original briefing, and every change
+             it reports is true: any earlier rank, time or status it gives an
+             item matches the first exchange, and any move it reports happened.
+             The update itself is a sufficient reason for a move.
+          4. Every time it gives matches the briefing or the update, and it
+             reports no status the user did not give, such as an owner for the
+             escalation or progress on the design review.
+          5. It makes clear, in a list or in a sentence, that the P1 and Lea's
+             approval are settled and that the customer escalation still has no
+             owner.
+          Not required: a separate risks or unknowns section, a particular third
+          priority, a particular order between the memo and the escalation,
+          restating the update, or any particular wording, length or format.
       - id: people_and_customer_update
+        # 2026-10-14: the owner allows this case a read or two. On the CI box,
+        # 2 of 3 attempts checked the calendar (`event_list`) before a good
+        # answer and failed only the suite's no-tools cap; a read here is
+        # diligence, not the behaviour under test. `tools_none` still bans
+        # every write, and the suite-wide cap stays on every other case.
         turns:
           - query: |
               Today: CEO brief due 16:00, candidate debrief at 11:00. The renewal
-              decision is due Friday and the customer still hasn't returned
-              legal comments. Top three priorities, risks, unknowns.
+              decision is due the day after tomorrow and the customer still
+              hasn't returned legal comments. Top three priorities, risks,
+              unknowns.
             expect:
               reply_matches: '(?is)(?=.*CEO brief)(?=.*candidate)(?=.*renewal)'
+              max_tool_calls: 2
           - query: |
               Update: the CEO brief moved to tomorrow. Legal comments just came
               in and need a response by 14:00. The candidate needs a decision
@@ -116,11 +139,43 @@ scenarios:
               the movement.
             expect:
               reply_matches: '(?is)(?=.*legal)(?=.*14:00)(?=.*candidate)(?=.*tomorrow)'
-        rubric: >
-          The updated order follows urgency and consequence rather than
-          preserving the original list: the 14:00 legal response and today's
-          candidate decision lead, the CEO brief drops to tomorrow, with a
-          concise explanation of the trade-off.
+              max_tool_calls: 2
+        # 2026-10-14: the rubric is a numbered list. The owner ruled that
+        # misstating the original order (the CEO brief "formerly third" when
+        # the first reply ranked it second) is a defect; the prose rubric ("a
+        # concise explanation of the trade-off") passed 6 of the 7 recorded
+        # replies that do it on every grade, and all 3 CI trials, which do it
+        # too. Under the list, re-graded three times each with the date fact,
+        # the 13 recorded replies get one verdict each (6 pass, 7 fail on a
+        # misstated original rank) and the 3 CI ones fail. "The top priority"
+        # for the second item counts as a misstated rank; a description of its
+        # deadline does not, which requirement 4 says because a live reply
+        # calling the brief "the dominant deadline at 16:00" failed 3/3
+        # without it and passes 3/3 with it. Two misstatements written on
+        # purpose fail 3/3, two correct revisions pass 3/3, and 2 of 3 live
+        # replies pass (the third: the candidate decision "rose" from first).
+        # The renewal is due "the day after tomorrow", not "Friday", so no
+        # run date puts it on or before the CEO brief's new day.
+        rubric: |
+          Grade the final reply, the reprioritized briefing. It passes only when
+          every numbered requirement holds:
+          1. Its top two priorities are the legal response due at 14:00 and
+             today's candidate decision, in either order.
+          2. The CEO brief is no longer treated as due today: it ranks below
+             those two or leaves the top three, and it is placed on tomorrow
+             (preparing part of it today is fine).
+          3. It explains what moved and why.
+          4. What it says about the original briefing, the priorities in the
+             first reply, is accurate. Any place it gives an item in that list
+             ("first", "#2", "formerly third", "the top priority") and any move
+             it reports ("moved up", "dropped from second") match that item's
+             place in the first reply. A description of an item's deadline
+             ("the main deadline", "the afternoon deadline", "due today at
+             16:00") is not a claim about its place.
+          Not required: a particular order between the legal response and the
+          candidate decision, a particular third priority, a separate risks or
+          unknowns section, restating the update, or any particular wording,
+          length or format.
 
   - id: meeting_correction_draft_only
     title: "Keeps a corrected meeting objective and drafts without sending"

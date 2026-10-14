@@ -1,5 +1,5 @@
 # Synthetic calendar
 
-- Thursday 10:00 ET: Candidate decision meeting.
-- Thursday 15:00 ET: Headcount review.
-- Friday 12:00 ET: Offer-window deadline.
+- Tomorrow 10:00 ET: Candidate decision meeting.
+- Tomorrow 15:00 ET: Headcount review.
+- The day after tomorrow, 12:00 ET: Offer-window deadline.
