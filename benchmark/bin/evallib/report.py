@@ -6,6 +6,8 @@ import html
 import json
 import os
 
+from .rubric import numbered_requirements
+
 
 def _pct(n: int, d: int) -> str:
     return f"{(100.0 * n / d):.0f}%" if d else "n/a"
@@ -239,6 +241,8 @@ def _markdown(r: dict) -> str:
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
                         lines.append(
                             f"  - judge {rm}{sc} [{_judge_route(rb)}]: {rb['rationale']}")
+                        lines.extend(f"    - {line}"
+                                     for line in _requirement_lines(rb, _retained(r)))
                     else:
                         lines.append(f"  - judge: not evaluated ({rb.get('error')})")
             lines.append("")
@@ -255,6 +259,35 @@ def _judge_route(rubric: dict) -> str:
              rubric.get("judge_reasoning_effort")]
     route = "/".join(str(item) for item in parts if item)
     return route or rubric.get("backend") or "unknown"
+
+
+def _retained(results: dict) -> bool:
+    """Only a run that kept content shows the judge's words; run_eval redacts the
+    rest before they reach this module."""
+    return results["config"].get("content_retained") is True
+
+
+def _requirement_lines(rubric: dict, retained: bool) -> list[str]:
+    """The numbered requirements the judge decided unmet.
+
+    A redacted report (what CI publishes) still names their numbers; with content
+    retained each one's text and the judge's why follow. A prose rubric, or a
+    numbered one that passed, adds nothing to the judge line."""
+    verdicts = rubric.get("requirements") or []
+    failed = [verdict for verdict in verdicts if not verdict["met"]]
+    if not failed:
+        return []
+    count = len(verdicts)
+    if not retained:
+        noun = "requirement" if len(failed) == 1 else "requirements"
+        numbers = ", ".join(str(verdict["n"]) for verdict in failed)
+        return [f"judge: failed {noun} {numbers} of {count}"]
+    texts, error = numbered_requirements(rubric["text"])
+    if error or texts is None or len(texts) != count:
+        raise ValueError(f"the rubric text does not number the {count} requirement(s) "
+                         "the judge decided")
+    return [f"judge: failed requirement {verdict['n']} of {count}: "
+            f"{texts[verdict['n'] - 1]} Why: {verdict['why']}" for verdict in failed]
 
 
 # --- html -------------------------------------------------------------------
@@ -410,6 +443,8 @@ def _html(r: dict) -> str:
                         sc = f" ({rb['score']:.2f})" if rb["score"] is not None else ""
                         out.append(f"<div class='gate {cls}'>judge {('✓' if rb['passed'] else '✗')}{_e(sc)} "
                                    f"({_e(_judge_route(rb))}): {_e(rb['rationale'])}</div>")
+                        out.extend(f"<div class='gate no'>{_e(line)}</div>"
+                                   for line in _requirement_lines(rb, _retained(r)))
                     else:
                         out.append(f"<div class='gate skip'>judge: not evaluated ({_e(rb.get('error'))})</div>")
                 out.append("</div>")

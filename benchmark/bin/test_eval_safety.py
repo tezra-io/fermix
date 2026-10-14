@@ -296,6 +296,39 @@ def test_rubric_record_sends_the_candidates_date_to_the_judge(monkeypatch, tmp_p
     assert seen["reference_facts"] == run_eval.judge_date_facts(records, "America/New_York")
 
 
+_NUMBERED_RUBRIC = """It passes only when every numbered requirement holds:
+1. The reply names the deadline.
+2. It keeps the level settled. It fails if it
+   reopens the level in any form.
+3. It invents nothing.
+Not required: any particular wording.
+"""
+_REQUIREMENT_VERDICTS = [{"n": 1, "met": True, "why": "WHY-ONE quotes the reply"},
+                         {"n": 2, "met": False, "why": "WHY-TWO quotes the reply"},
+                         {"n": 3, "met": True, "why": "WHY-THREE quotes the reply"}]
+
+
+def test_rubric_record_carries_each_requirement_verdict(monkeypatch, tmp_path):
+    def fake_judge(*_args, **_kwargs):
+        return judge.JudgeResult(
+            evaluated=True, passed=False, score=2 / 3, rationale="R-RATIONALE",
+            backend="anthropic", provider="anthropic", model="judge-model", called=True,
+            requirements=[dict(item) for item in _REQUIREMENT_VERDICTS])
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True)
+    record = run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}],
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
+    assert record["requirements"] == _REQUIREMENT_VERDICTS
+    assert (record["passed"], record["score"]) == (False, 2 / 3)
+
+
 def test_judge_accounting_counts_only_dispatched_calls():
     base = {"severity": "normal", "cases": [{
         "outcome": "incomplete", "turns": [],
@@ -902,7 +935,7 @@ def test_judge_payload_has_a_deterministic_byte_cap():
 
 def test_openai_judge_request_bounds_verdict_output_tokens():
     cfg = SimpleNamespace(judge=SimpleNamespace(model="judge-model"))
-    body = json.loads(judge._openai_request_body(cfg, {"rubric": "x"}))
+    body = json.loads(judge._openai_request_body(cfg, {"rubric": "x"}, None))
     assert body["max_completion_tokens"] == judge._MAX_JUDGE_OUTPUT_TOKENS
     assert body["max_completion_tokens"] >= 2_048
 
@@ -2579,6 +2612,78 @@ def test_report_omits_both_sections_when_nothing_qualifies(tmp_path):
     assert "## Unconfirmed fails" not in md
     assert "<h2>Safety violations (sticky)</h2>" not in html
     assert "<h2>Unconfirmed fails</h2>" not in html
+
+
+def _numbered_rubric_case(outcome: str = "fail") -> dict:
+    return _case_result(outcome, rubric={
+        "text": _NUMBERED_RUBRIC, "evaluated": True, "passed": outcome == "pass",
+        "score": 2 / 3, "rationale": "R-RATIONALE quotes the reply", "error": None,
+        "backend": "anthropic", "called": True, "judge_provider": "anthropic",
+        "judge_model": "claude-opus-5-5", "judge_reasoning_effort": "medium",
+        "finish_reason": "end_turn", "input_tokens": 10, "output_tokens": 5,
+        "total_tokens": 15,
+        "requirements": [dict(item) for item in _REQUIREMENT_VERDICTS]})
+
+
+def test_redaction_keeps_which_requirement_failed_but_not_why():
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    redacted = run_eval.redact_content(raw)
+    rubric = redacted["suites"][0]["scenarios"][0]["cases"][0]["rubric"]
+    assert [(item["n"], item["met"]) for item in rubric["requirements"]] == \
+        [(1, True), (2, False), (3, True)]
+    assert {item["why"] for item in rubric["requirements"]} == {"[redacted by default]"}
+    assert rubric["rationale"] == "[redacted by default]"
+    assert "WHY-" not in json.dumps(redacted)
+    # The unredacted results keep every why.
+    assert raw["suites"][0]["scenarios"][0]["cases"][0]["rubric"]["requirements"][1]["why"] \
+        == "WHY-TWO quotes the reply"
+
+
+def test_a_redacted_report_names_the_failed_requirement(tmp_path):
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    assert "\n    - judge: failed requirement 2 of 3\n" in md
+    assert "<div class='gate no'>judge: failed requirement 2 of 3</div>" in html
+    for text in (md, html):
+        assert "WHY-" not in text and "R-RATIONALE" not in text
+
+
+def test_an_unredacted_report_gives_the_failed_requirement_and_why(tmp_path):
+    raw = _report_results([_numbered_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(raw, str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    line = ("judge: failed requirement 2 of 3: It keeps the level settled. It fails "
+            "if it reopens the level in any form. Why: WHY-TWO quotes the reply")
+    assert line in md
+    assert report._e(line) in html
+    # Only the failed requirement is spelled out; the met ones are in results.json.
+    assert "WHY-ONE" not in md and "WHY-THREE" not in md
+
+
+def test_a_report_lists_every_failed_requirement(tmp_path):
+    case = _numbered_rubric_case()
+    case["rubric"]["requirements"][0]["met"] = False
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    assert "\n    - judge: failed requirements 1, 2 of 3\n" in pathlib.Path(paths["md"]).read_text()
+
+
+def test_a_prose_rubric_report_line_is_unchanged(tmp_path):
+    case = _numbered_rubric_case()
+    case["rubric"].update(text="Prose rubric.", requirements=None, score=0.5)
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    md = pathlib.Path(report.write(raw, str(tmp_path / "out"))["md"]).read_text()
+    assert ("  - judge ✗ (0.50) [anthropic/claude-opus-5-5/medium]: "
+            "R-RATIONALE quotes the reply\n") in md
+    assert "requirement" not in md
 
 
 def test_default_report_redaction_reaches_retained_attempts():
