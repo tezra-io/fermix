@@ -30,6 +30,12 @@ permissions:
 jobs:
   regression:
     uses: ./.github/workflows/eval-box.yml
+    # The regression tier is judged by Claude, signed in through Workload Identity
+    # Federation, so this job grants id-token: write; eval-box inherits its
+    # caller's token.
+    permissions:
+      contents: read
+      id-token: write
     with:
       tier: regression
       ref: dev

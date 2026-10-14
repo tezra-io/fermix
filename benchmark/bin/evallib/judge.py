@@ -1,9 +1,14 @@
 """Independent LLM-as-judge support for per-case quality rubrics.
 
-Backends:
-  openai — call an explicit OpenAI-compatible /chat/completions endpoint using
-           EVAL_JUDGE_API_KEY, EVAL_JUDGE_BASE_URL, and judge.model.
-  none   — skip judging.
+Backends (config `judge.backend`, one code path each):
+  anthropic — the Claude API through the official SDK. The client is built with no
+              credential argument, so the SDK resolves the credential itself:
+              ANTHROPIC_API_KEY, else ANTHROPIC_AUTH_TOKEN, else the selected or
+              active profile under ~/.config/anthropic (an `ant auth login` profile
+              locally, the eval box's Workload Identity Federation profile in CI).
+  openai    — an explicit OpenAI-compatible /chat/completions endpoint using
+              EVAL_JUDGE_API_KEY, EVAL_JUDGE_BASE_URL, and judge.model.
+  none      — skip judging.
 
 Structural gates remain the hard safety/flow signal; the judge only scores prose.
 """
@@ -14,11 +19,16 @@ import http.client
 import json
 import math
 import os
+import re
 import ssl
 import time
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
+from pathlib import Path
+
+import anthropic
+from anthropic.lib.credentials import CredentialsFile, WorkloadIdentityCredentials
 
 NOT_RECORDED = "not recorded"
 _MAX_JUDGE_PAYLOAD_BYTES = 64 * 1024
@@ -32,6 +42,24 @@ _JUDGE_HTTP_TIMEOUT_S = 30
 _RETRYABLE_JUDGE_STATUS = frozenset({500, 502, 503, 504})
 _COMPLETION_REASONS = {"stop", "end_turn", "stop_sequence", "completed"}
 _TRUNCATION_REASONS = {"length", "max_tokens", "max_output_tokens", "incomplete"}
+
+# The Claude judge's request policy. Claude Opus 5.5 always thinks (a request that
+# disables thinking is a 400) and defaults to medium effort; the effort is set
+# here so neither a model nor an SDK default can move the judge silently. Thinking
+# counts toward max_tokens, so the cap leaves room for it beside the verdict.
+_ANTHROPIC_EFFORT = "medium"
+_MAX_ANTHROPIC_OUTPUT_TOKENS = 16_000
+_ANTHROPIC_TIMEOUT_S = 180
+# The SDK retries connection errors, 408, 409, 429 and 5xx itself, with backoff.
+_ANTHROPIC_MAX_RETRIES = 2
+_MAX_ERROR_DETAIL_CHARS = 300
+_NO_ANTHROPIC_CREDENTIAL = (
+    "anthropic judge found no credential: export ANTHROPIC_API_KEY (bin/tier.sh "
+    "exports it from the macOS keychain item fermix:ANTHROPIC_API_KEY) or sign in "
+    "with `ant auth login`; on the eval box the federation sign-in step writes the "
+    "profile")
+# A release date at the end of a model id: claude-haiku-4-5-20251001, gpt-4o-2024-08-06.
+_MODEL_DATE_SUFFIX = re.compile(r"-\d{4}-?\d{2}-?\d{2}$")
 
 _SYSTEM = """You grade one interaction between a user and an AI personal assistant
 against a rubric written by the eval's author.
@@ -74,22 +102,19 @@ through 1.0) and pass (a boolean). No prose or code fences outside the object.""
 
 # Structured output makes the verdict parse deterministic; `_verdict_from` still
 # validates every field, because a provider may ignore the schema.
+_VERDICT_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "rationale": {"type": "string"},
+        "score": {"type": "number"},
+        "pass": {"type": "boolean"},
+    },
+    "required": ["rationale", "score", "pass"],
+    "additionalProperties": False,
+}
 _VERDICT_FORMAT = {
     "type": "json_schema",
-    "json_schema": {
-        "name": "verdict",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "rationale": {"type": "string"},
-                "score": {"type": "number"},
-                "pass": {"type": "boolean"},
-            },
-            "required": ["rationale", "score", "pass"],
-            "additionalProperties": False,
-        },
-    },
+    "json_schema": {"name": "verdict", "strict": True, "schema": _VERDICT_SCHEMA},
 }
 
 
@@ -269,8 +294,18 @@ def _route_from(value) -> tuple[dict | None, str | None]:
     }, None
 
 
+def _model_key(model: str) -> str:
+    """One spelling per model, so the separation check cannot be passed by a
+    vendor prefix ("anthropic/claude-opus-5-5" from an aggregator,
+    "anthropic.claude-opus-5-5" on Bedrock), by case, or by a release date
+    ("claude-haiku-4-5-20251001" is the model "claude-haiku-4-5" names)."""
+    key = model.strip().lower().rsplit("/", 1)[-1].removeprefix("anthropic.")
+    return _MODEL_DATE_SUFFIX.sub("", key)
+
+
 def _same_model_error(route: dict, candidates: list[dict]) -> str | None:
-    if any(candidate["model"] == route["model"] for candidate in candidates):
+    judge_key = _model_key(route["model"])
+    if any(_model_key(candidate["model"]) == judge_key for candidate in candidates):
         return (f"judge model {route['model']!r} matches candidate actual model; "
                 "configure a different judge_model")
     return None
@@ -281,6 +316,11 @@ def precondition_error(cfg) -> str | None:
     backend = cfg.judge.backend
     if backend == "none":
         return "judge backend is 'none'"
+    if backend == "anthropic":
+        if not _nonempty(cfg.judge.model):
+            return "anthropic judge needs config judge.model or EVAL_JUDGE_MODEL"
+        _source, error = _anthropic_credential()
+        return error
     if backend == "openai":
         if not os.environ.get("EVAL_JUDGE_API_KEY"):
             return "openai judge needs EVAL_JUDGE_API_KEY"
@@ -426,6 +466,189 @@ def _judge_openai(cfg, data: dict, candidates: list[dict]) -> JudgeResult:
     return verdict
 
 
+def _profile_auth_type(path) -> str:
+    """The `authentication.type` a profile's config file declares, for reporting."""
+    try:
+        return str(json.loads(Path(path).read_text(encoding="utf-8"))["authentication"]["type"])
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return f"unreadable profile config: {type(exc).__name__}"
+
+
+def _credential_source(client) -> str | None:
+    """Names the credential the SDK client selected, never its value; None when it
+    resolved nothing (a request would then fail on the missing auth header)."""
+    if client.api_key:
+        return "ANTHROPIC_API_KEY"
+    if client.auth_token:
+        return "ANTHROPIC_AUTH_TOKEN"
+    provider = client.credentials
+    if provider is None:
+        return None
+    if isinstance(provider, CredentialsFile):
+        return f"profile {provider.profile} ({_profile_auth_type(provider.config_path)})"
+    if isinstance(provider, WorkloadIdentityCredentials):
+        return "federation environment variables"
+    return type(provider).__name__
+
+
+def _anthropic_credential() -> tuple[str | None, str | None]:
+    """(credential source, error) as the SDK resolves it, without a network call."""
+    try:
+        with anthropic.Anthropic() as client:
+            source = _credential_source(client)
+    except anthropic.AnthropicError as exc:
+        return None, f"anthropic judge credential could not be resolved: {_clip(exc)}"
+    return source, (None if source else _NO_ANTHROPIC_CREDENTIAL)
+
+
+def _clip(value) -> str:
+    text = " ".join(str(value).split())
+    if len(text) <= _MAX_ERROR_DETAIL_CHARS:
+        return text
+    return text[:_MAX_ERROR_DETAIL_CHARS] + "…"
+
+
+def _anthropic_error(exc: anthropic.AnthropicError) -> str:
+    """One sentence naming why the Claude judge produced no verdict. API errors
+    carry the status, the error type and the request id; never the request."""
+    if isinstance(exc, anthropic.APIStatusError):
+        error = exc.body.get("error") if isinstance(exc.body, dict) else None
+        detail = error.get("message") if isinstance(error, dict) else exc.message
+        kind = f", {exc.type}" if exc.type else ""
+        request = f" [request {exc.request_id}]" if exc.request_id else ""
+        return (f"anthropic judge API error (HTTP {exc.status_code}{kind}): "
+                f"{_clip(detail)}{request}")
+    if isinstance(exc, anthropic.APIConnectionError):
+        return f"anthropic judge could not reach the API: {_clip(exc)}"
+    if isinstance(exc, anthropic.APIError):
+        return f"anthropic judge API error: {_clip(exc)}"
+    # CredentialsError, WorkloadIdentityError: the identity token, the profile or
+    # the token exchange failed before any model call.
+    return f"anthropic judge credential failed: {_clip(exc)}"
+
+
+def _anthropic_request(cfg, data: dict) -> dict:
+    # No `thinking` (always on for Claude Opus 5.5; disabling it is a 400) and no
+    # `temperature` (sampling parameters are rejected); effort is the only control.
+    return {
+        "model": cfg.judge.model,
+        "max_tokens": _MAX_ANTHROPIC_OUTPUT_TOKENS,
+        "system": _SYSTEM,
+        "messages": [{"role": "user",
+                      "content": json.dumps(data, ensure_ascii=False, allow_nan=False)}],
+        "output_config": {"effort": _ANTHROPIC_EFFORT,
+                          "format": {"type": "json_schema", "schema": _VERDICT_SCHEMA}},
+    }
+
+
+def _anthropic_exchange(cfg, data: dict):
+    """One verdict request: (credential source, response or None, failure or None).
+
+    A fresh client per verdict, closed on every path. Under a profile the SDK keeps
+    the access token in ~/.config/anthropic/credentials/<profile>.json and reuses it
+    until 30 s before it expires, so a later client exchanges no identity token."""
+    source = None
+    try:
+        with anthropic.Anthropic() as client:
+            source = _credential_source(client)
+            if source is None:
+                return None, None, _failure("anthropic", _NO_ANTHROPIC_CREDENTIAL)
+            response = client.with_options(
+                timeout=_ANTHROPIC_TIMEOUT_S, max_retries=_ANTHROPIC_MAX_RETRIES,
+            ).messages.create(**_anthropic_request(cfg, data))
+    except anthropic.AnthropicError as exc:
+        # Only an APIError reached (or tried to reach) the model; a credential
+        # failure never dispatched the verdict.
+        return source, None, _failure("anthropic", _anthropic_error(exc),
+                                      called=isinstance(exc, anthropic.APIError))
+    return source, response, None
+
+
+def _anthropic_usage(usage) -> tuple[int | None, int | None, int | None]:
+    """(input, output, total) like the OpenAI backend's: input includes cache reads
+    and writes, output includes thinking."""
+    if usage is None:
+        return None, None, None
+    base = _token_count(usage.input_tokens)
+    output = _token_count(usage.output_tokens)
+    if base is None or output is None:
+        return base, output, None
+    cached = sum(_token_count(value) or 0 for value in (
+        usage.cache_creation_input_tokens, usage.cache_read_input_tokens))
+    return base + cached, output, base + cached + output
+
+
+def _with_usage(result: JudgeResult, usage) -> JudgeResult:
+    result.input_tokens, result.output_tokens, result.total_tokens = _anthropic_usage(usage)
+    return result
+
+
+def _anthropic_text(response) -> tuple[str | None, str | None]:
+    """(verdict text, error): the stop reason must prove completion and exactly one
+    text block must carry the verdict (thinking blocks come first and are skipped)."""
+    if response.stop_reason == "refusal":
+        details = response.stop_details
+        category = details.category if details is not None and details.category else None
+        return None, ("anthropic judge refused to grade this case (stop_reason refusal, "
+                      f"{'category ' + category if category else 'no category given'})")
+    finish_error = _finish_reason_error(response.stop_reason, "anthropic")
+    if finish_error:
+        return None, finish_error
+    texts = [block.text for block in response.content if block.type == "text"]
+    if len(texts) != 1:
+        return None, f"anthropic judge returned {len(texts)} text blocks; expected one verdict"
+    if len(texts[0].encode("utf-8")) > _MAX_JUDGE_OUTPUT_BYTES:
+        return None, "anthropic judge verdict exceeds the output byte cap"
+    return texts[0], None
+
+
+def _anthropic_verdict(response, candidates: list[dict]) -> JudgeResult:
+    route, route_error = _route_from({"provider": "anthropic", "model": response.model,
+                                      "reasoning_effort": _ANTHROPIC_EFFORT})
+    error = route_error or _same_model_error(route, candidates)
+    text = None
+    if not error:
+        text, error = _anthropic_text(response)
+    if error:
+        return _with_usage(_failure("anthropic", error, called=True), response.usage)
+    verdict = _with_usage(_verdict_from(text, "anthropic"), response.usage)
+    verdict.called = True
+    verdict.provider = route["provider"]
+    verdict.model = route["model"]
+    verdict.reasoning_effort = route["reasoning_effort"]
+    verdict.finish_reason = response.stop_reason
+    return verdict
+
+
+def _judge_anthropic(cfg, data: dict, candidates: list[dict]) -> JudgeResult:
+    separation_error = _same_model_error({"model": cfg.judge.model}, candidates)
+    if separation_error:
+        return _failure("anthropic", separation_error)
+    _source, response, failure = _anthropic_exchange(cfg, data)
+    return failure or _anthropic_verdict(response, candidates)
+
+
+# A case whose verdict is not in doubt: the preflight proves the sign-in, the
+# request shape and the model, not the judge's taste.
+_PREFLIGHT_DATA = {
+    "rubric": "The reply must say OK.",
+    "ordered_transcript": [{"role": "user", "content": "Reply with the single word OK."},
+                           {"role": "assistant", "content": "OK."}],
+    "tool_evidence": [],
+    "reference_facts": [],
+}
+
+
+def preflight(cfg) -> tuple[str | None, JudgeResult]:
+    """One real verdict through the configured Claude judge, exactly as a tier
+    would send it: (the credential source the SDK selected, the result)."""
+    if cfg.judge.backend != "anthropic":
+        return None, _failure(str(cfg.judge.backend),
+                              "the judge preflight checks the anthropic backend only")
+    source, response, failure = _anthropic_exchange(cfg, _PREFLIGHT_DATA)
+    return source, failure or _anthropic_verdict(response, [])
+
+
 def _openai_request_body(cfg, data: dict) -> bytes:
     # No `temperature`: reasoning judge models accept only the default and refuse the
     # whole request otherwise (gpt-6-luna answers 400 unsupported_value). Judge variance
@@ -461,6 +684,8 @@ def judge_case(cfg, query: str, reply: str, rubric: str, tag: str,
     candidates, candidate_error = _normalize_candidate_routes(candidate_routes)
     if candidate_error:
         return _failure(str(backend), candidate_error)
+    if backend == "anthropic":
+        return _judge_anthropic(cfg, data, candidates)
     if backend == "openai":
         return _judge_openai(cfg, data, candidates)
     return _failure(str(backend), f"unsupported judge backend: {backend!r}")

@@ -15,14 +15,15 @@ opik:
   ui_base: "http://localhost:5173"
 
 judge:
-  # Independent external judge: the OpenAI API via EVAL_JUDGE_API_KEY. The
-  # benchmark Makefile resolves that key from the daemon's keychain slot
-  # (fermix:OPENAI_API_KEY) when the env var isn't exported, so `make
-  # regression` works with zero setup. Valid backends: "openai" | "none" —
-  # there is no in-daemon judge backend. The judge model must differ from the
-  # candidate model.
-  backend: "openai"
-  model: "gpt-6-luna"
+  # Independent external judge: the Claude API through the official SDK, which
+  # resolves the credential itself. bin/tier.sh exports ANTHROPIC_API_KEY from the
+  # daemon's keychain slot (fermix:ANTHROPIC_API_KEY) when the env var isn't
+  # exported, so `make regression` works with zero setup; otherwise an `ant auth
+  # login` profile, and in CI the eval box's federation profile. Valid backends:
+  # "anthropic" | "openai" (EVAL_JUDGE_API_KEY) | "none" — there is no in-daemon
+  # judge backend. The judge model must differ from the candidate model.
+  backend: "anthropic"
+  model: "claude-opus-5-5"
   enabled: false
 
 # Behavioral regressions fail incomplete on provider limits; they never wait for

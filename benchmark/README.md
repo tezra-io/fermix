@@ -39,23 +39,31 @@ channels or realtime, and provide both `--confirm-daemon-isolated` and
 `fermix-capability-eval` for capability runs. The confirmations are operator
 attestations, not containment.
 
-Judged runs use an **independent external judge** — the OpenAI API, called
-directly by the harness (no daemon or core involvement). Configure it in **this
-benchmark's config** (`config.yaml` / `behavioral_config.yaml`):
+Judged runs use an **independent external judge** — the Claude API through the
+official `anthropic` SDK, called directly by the harness (no daemon or core
+involvement). Configure it in **this benchmark's config** (`config.yaml` /
+`behavioral_config.yaml`):
 
 ```yaml
 judge:
-  backend: "openai"        # or "none" to skip rubric judging
-  model: "gpt-6-luna"      # must differ from the candidate model
+  backend: "anthropic"       # "openai" for an OpenAI-compatible judge, "none" to skip
+  model: "claude-opus-5-5"   # must differ from the candidate model
 ```
 
-The call authenticates with `EVAL_JUDGE_API_KEY`; the `make` judged targets
-resolve it from the same OpenAI key the daemon uses (macOS keychain service
-`fermix:OPENAI_API_KEY`), so there's no separate setup — export
-`EVAL_JUDGE_API_KEY` to override, or `EVAL_JUDGE_BASE_URL` / `EVAL_JUDGE_MODEL`
-to point elsewhere. The judge scores only prose against the rubric (structural
-gates remain the hard safety/flow signal), and the harness refuses a judge model
-that matches the candidate so the field is never graded by one of its own.
+The SDK resolves the credential itself: `ANTHROPIC_API_KEY`, else an `ant auth
+login` profile. The `make` judged targets (through `bin/tier.sh`) export
+`ANTHROPIC_API_KEY` from the same Anthropic key the daemon uses (macOS keychain
+service `fermix:ANTHROPIC_API_KEY`) when it is not already exported, so there's no
+separate setup; with neither, the run refuses with a sentence naming both ways. The
+CI eval box has no key at all: it signs in through Workload Identity Federation
+(see `.github/workflows/eval-box.yml`). The judge runs at an explicit `medium`
+effort; a refusal, an API error or a failed sign-in leaves the case
+**INCOMPLETE**, never a pass. The `openai` backend reads `EVAL_JUDGE_API_KEY`
+(export it yourself) and `EVAL_JUDGE_BASE_URL`; `EVAL_JUDGE_BACKEND` /
+`EVAL_JUDGE_MODEL` switch the configured judge for one run. The judge scores only
+prose against the rubric (structural gates remain the hard safety/flow signal), and
+the harness refuses a judge model that matches the candidate (vendor prefixes and
+release dates aside) so the field is never graded by one of its own.
 
 `private_account_read` alone may use the development daemon with
 `--confirm-private-data`. Non-checker `expensive` work may use it with
@@ -160,7 +168,7 @@ that task's weight in the score and the sweep's time.
 ```sh
 make estimate           # rough turn/time/price range, no model calls
 make capability-auto     # full 27-task sweep: seed+start a disposable daemon, run, tear down
-make capability-judged   # 4 rubric tasks, dev daemon, external OpenAI judge
+make capability-judged   # 4 rubric tasks, dev daemon, external Claude judge
 make capability-readonly # cap_web_research + cap_web_app, dev daemon, read-only
 make rank                # render the leaderboard: markdown + reports/capability/leaderboard.html
 ```
@@ -340,7 +348,7 @@ Useful flags on `bin/run_capability.py`:
 | `--trials N` | trials per task (pass^k reliability needs N≥3; default 3). `--k` above `--trials` is refused before anything is driven (exit 2) — a clamped pass^3 must never be published in a pass^5 column |
 | `--suite NAME` | one suite — `cap_web_research` (live-fetch, provenance-gated), `cap_data_extraction`, `cap_coding` (end-state checker), `cap_memory` (cross-session durable memory), `cap_response_quality` (independent judge) |
 | `--max-tasks N` | limit the number of tasks driven; not a dollar/spend cap |
-| `--judge` | enable the independent external OpenAI judge (scores rubric prose; `EVAL_JUDGE_API_KEY` auto-resolved from the keychain) |
+| `--judge` | enable the independent external Claude judge (scores rubric prose; `ANTHROPIC_API_KEY` auto-resolved from the keychain by `bin/tier.sh`) |
 | `--confirm-daemon-isolated` | attest that an isolated-profile run is using the declared disposable daemon |
 | `--confirm-isolated-env` | attest selected `isolated_mutation` tasks use the disposable capability home/workspace |
 | `--confirm-cost` | acknowledge selected `expensive` cases may spawn several billed calls |
@@ -555,8 +563,8 @@ Notes:
   `gpt-5.6-sol`, both `provider=openai`.)
 - For a **fair** ranking when `--judge` is on, keep `judge.model` fixed and
   different from every candidate model. The runner verifies the actual routes and
-  refuses a match. Point `EVAL_JUDGE_BASE_URL` at a separately operated endpoint
-  if one is required.
+  refuses a match. With the `openai` backend, point `EVAL_JUDGE_BASE_URL` at a
+  separately operated endpoint if one is required.
 - **Usage-limit backoff, then fail-fast (exit 4).** If the daemon's model hits a
   usage/rate/quota limit mid-sweep, Fermix returns a canned "try again" reply —
   scoring it would count Fermix's own limit as a task failure. So the runner **waits
@@ -585,7 +593,7 @@ Notes:
 
 | Goal | Command | Notes |
 |---|---|---|
-| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external OpenAI judge, development daemon |
+| Behavioral regression (did a change break anything) | `make regression` | 21-case `host-safe-core`, independent external Claude judge, development daemon |
 | Overfitting check (public vs held-out) | put your held-out suites in a dir OUTSIDE the repo, set `private_suites.dir` in config.yaml, run `… --private`, compare the `provider/model` vs `…:private` rows | golds stay out of the repo and no held-out dataset/experiment is written; candidate prompts/replies still enter the configured Opik trace project, so choose project separation appropriate to the data; see `suites/capability/private/holdout.example.yaml` |
 | **Uplift** (Fermix vs raw model) | `make baseline` then `bin/run_uplift.py --fermix <results.json> --baseline <results.json>` | needs `EVAL_BASELINE_API_KEY` + `EVAL_BASELINE_MODEL` (same model the Fermix arm served). The claim is **the whole Fermix system vs a raw single call**, not the contribution of tools — the arms also differ in scaffold, memory and execution policy |
 | **Configuration arms** (Fermix against another Fermix) | `make arms ARMS=arms/<name>.yaml` | one task selection against several daemon CONFIGURATIONS — §5e |

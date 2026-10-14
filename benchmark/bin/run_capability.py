@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pyyaml>=6,<7", "certifi"]
+# dependencies = ["pyyaml>=6,<7", "certifi", "anthropic>=1.13,<2"]
 # ///
 """Fermix capability eval — score the model the dev daemon currently serves.
 

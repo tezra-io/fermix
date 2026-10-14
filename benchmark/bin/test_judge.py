@@ -1,14 +1,21 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "certifi"]
+# dependencies = ["pytest>=8.4", "pyyaml>=6,<7", "certifi", "anthropic>=1.13,<2"]
 # ///
-"""Specs for the judge's HTTP transport policy.
+"""Specs for the judge's backends.
 
-The judge is the only producer of `incomplete` that has no retry of its own
-(the Opik half got one in 4f35defc). A transient provider 5xx must not void a
-run whose structural gates all passed; a *rejected* or malformed verdict must
-never be re-rolled, because re-rolling launders a real refusal into a pass.
+The OpenAI backend's HTTP transport policy: the judge is the only producer of
+`incomplete` that has no retry of its own (the Opik half got one in 4f35defc). A
+transient provider 5xx must not void a run whose structural gates all passed; a
+*rejected* or malformed verdict must never be re-rolled, because re-rolling
+launders a real refusal into a pass.
+
+The Anthropic backend runs against a stubbed SDK client (no network, no real
+credential): every way it can fail (a refusal, an API error, a failed token
+exchange, no credential at all) must leave the case incomplete with a sentence
+naming the cause, never a pass and never a silent fail. Credential resolution
+itself runs the real SDK against a throwaway HOME.
 """
 
 from __future__ import annotations
@@ -21,11 +28,15 @@ import urllib.error
 from pathlib import Path
 from types import SimpleNamespace
 
+import anthropic
+import httpx2
 import pytest
+from anthropic.lib.credentials import WorkloadIdentityError
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from evallib import judge  # noqa: E402
+import judge_preflight  # noqa: E402
 
 VERDICT = json.dumps({"pass": True, "score": 0.9, "rationale": "ok"})
 
@@ -168,5 +179,383 @@ def test_a_verdict_in_schema_order_parses(dispatch):
     assert result.score == 1.0
 
 
+
+# --- the anthropic backend ---------------------------------------------------
+
+ANTHROPIC_MODEL = "claude-opus-5-5"
+CANDIDATES = [{"provider": "openai", "model": "gpt-5.6-luna"}]
+# Every variable the SDK reads for a credential, a profile or a host. A test that
+# resolves credentials must establish each of these itself, never inherit one.
+SDK_ENV = ("ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_PROFILE",
+           "ANTHROPIC_CONFIG_DIR", "ANTHROPIC_BASE_URL", "ANTHROPIC_CUSTOM_HEADERS",
+           "ANTHROPIC_FEDERATION_RULE_ID", "ANTHROPIC_ORGANIZATION_ID",
+           "ANTHROPIC_SERVICE_ACCOUNT_ID", "ANTHROPIC_WORKSPACE_ID", "ANTHROPIC_SCOPE",
+           "ANTHROPIC_IDENTITY_TOKEN", "ANTHROPIC_IDENTITY_TOKEN_FILE")
+PROFILE_SOURCE = "profile fermix-eval (oidc_federation)"
+
+
+def _anthropic_cfg(model: str = ANTHROPIC_MODEL):
+    return SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model=model))
+
+
+def _message(*, text: str = VERDICT, stop_reason: str = "end_turn",
+             model: str = ANTHROPIC_MODEL, stop_details=None, content=None,
+             usage=None) -> anthropic.types.Message:
+    """A real SDK Message: a thinking block (empty under the default display) then the verdict."""
+    blocks = content if content is not None else [
+        {"type": "thinking", "thinking": "", "signature": "invented-signature"},
+        {"type": "text", "text": text}]
+    return anthropic.types.Message.model_validate({
+        "id": "msg_invented", "type": "message", "role": "assistant", "model": model,
+        "content": blocks, "stop_reason": stop_reason, "stop_sequence": None,
+        "stop_details": stop_details,
+        "usage": usage or {"input_tokens": 120, "output_tokens": 40,
+                           "cache_creation_input_tokens": 0, "cache_read_input_tokens": 0}})
+
+
+def _status_error(cls, status: int, kind: str, message: str):
+    response = httpx2.Response(
+        status, request=httpx2.Request("POST", "https://api.anthropic.com/v1/messages"),
+        headers={"request-id": "req_invented"})
+    body = {"type": "error", "error": {"type": kind, "message": message}}
+    return cls(f"Error code: {status} - {body}", response=response, body=body)
+
+
+class _FakeAnthropic:
+    """Stands in for `anthropic.Anthropic()`: records how it was built, the options
+    and every request, and answers with the scripted outcomes in order."""
+
+    def __init__(self, state, *args, **kwargs):
+        state.constructed.append((args, kwargs))
+        self.api_key, self.auth_token = state.api_key, None
+        self.credentials = state.credentials
+        self.messages = SimpleNamespace(create=self._create)
+        self._state = state
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        self._state.closed += 1
+        return False
+
+    def with_options(self, **options):
+        self._state.options.append(options)
+        return self
+
+    def _create(self, **request):
+        self._state.requests.append(request)
+        outcome = self._state.outcomes.pop(0)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+
+@pytest.fixture
+def sdk(monkeypatch):
+    """Replaces the SDK client; by default it resolved an API key."""
+    state = SimpleNamespace(constructed=[], options=[], requests=[], outcomes=[],
+                            closed=0, api_key="invented-key", credentials=None)
+    monkeypatch.setattr(judge.anthropic, "Anthropic",
+                        lambda *args, **kwargs: _FakeAnthropic(state, *args, **kwargs))
+
+    def run(*outcomes, cfg=None, candidates=CANDIDATES):
+        state.outcomes = list(outcomes)
+        return judge.judge_case(cfg or _anthropic_cfg(), "q", "r", "Judge this.", "case",
+                                candidate_routes=candidates)
+
+    state.run = run
+    return state
+
+
+def test_an_anthropic_verdict_is_parsed_and_its_route_recorded(sdk):
+    result = sdk.run(_message())
+    assert result.evaluated is True and result.passed is True and result.score == 0.9
+    assert result.called is True and result.error is None
+    assert (result.backend, result.provider, result.model) == (
+        "anthropic", "anthropic", ANTHROPIC_MODEL)
+    assert result.reasoning_effort == "medium"
+    assert result.finish_reason == "end_turn"
+
+
+def test_the_client_resolves_its_own_credential_and_is_closed(sdk):
+    sdk.run(_message())
+    # No credential argument: the SDK picks the API key, profile or federation
+    # profile itself, so the judge never chooses or holds one.
+    assert sdk.constructed == [((), {})]
+    assert sdk.closed == 1
+    assert sdk.options == [{"timeout": judge._ANTHROPIC_TIMEOUT_S,
+                            "max_retries": judge._ANTHROPIC_MAX_RETRIES}]
+
+
+def test_the_anthropic_request_asks_for_the_verdict_schema_at_an_explicit_effort(sdk):
+    sdk.run(_message())
+    (request,) = sdk.requests
+    assert request["model"] == ANTHROPIC_MODEL
+    assert request["system"] == judge._SYSTEM
+    # Claude Opus 5.5 always thinks and defaults to medium effort: the effort is
+    # explicit, and nothing tries to turn thinking off (a 400 on that model).
+    assert "thinking" not in request and "temperature" not in request
+    output = request["output_config"]
+    assert output["effort"] == "medium"
+    assert output["format"]["type"] == "json_schema"
+    schema = output["format"]["schema"]
+    assert set(schema["properties"]) == {"pass", "score", "rationale"}
+    assert set(schema["required"]) == set(schema["properties"])
+    assert schema["additionalProperties"] is False
+    # Thinking counts toward max_tokens, so the cap leaves room beside the verdict.
+    assert request["max_tokens"] >= 16_000
+    (message,) = request["messages"]
+    sent = json.loads(message["content"])
+    assert message["role"] == "user" and sent["tool_evidence"] == judge.NOT_RECORDED
+
+
+def test_anthropic_usage_is_recorded_like_the_openai_backend(sdk):
+    result = sdk.run(_message(usage={"input_tokens": 120, "output_tokens": 40,
+                                     "cache_creation_input_tokens": 10,
+                                     "cache_read_input_tokens": 5}))
+    # Prompt tokens include the cached ones, as OpenAI's prompt_tokens do.
+    assert (result.input_tokens, result.output_tokens, result.total_tokens) == (135, 40, 175)
+
+
+def test_a_refusal_is_incomplete_with_a_sentence_naming_it(sdk):
+    result = sdk.run(_message(stop_reason="refusal", content=[], stop_details={
+        "type": "refusal", "category": "cyber", "explanation": "invented explanation"}))
+    assert result.evaluated is False and result.passed is None and result.score is None
+    assert result.called is True
+    assert "refused" in result.error and "cyber" in result.error
+    assert result.total_tokens == 160
+
+
+def test_a_refusal_without_a_category_still_says_it_refused(sdk):
+    result = sdk.run(_message(stop_reason="refusal", content=[]))
+    assert result.evaluated is False
+    assert "refused" in result.error and "no category" in result.error
+
+
+def test_an_api_error_is_incomplete_and_names_the_status(sdk):
+    result = sdk.run(_status_error(anthropic.InternalServerError, 529, "overloaded_error",
+                                   "Overloaded"))
+    assert result.evaluated is False and result.passed is None
+    assert result.called is True
+    assert "HTTP 529" in result.error and "overloaded_error" in result.error
+    assert "req_invented" in result.error
+
+
+def test_an_unreachable_api_is_incomplete(sdk):
+    request = httpx2.Request("POST", "https://api.anthropic.com/v1/messages")
+    result = sdk.run(anthropic.APITimeoutError(request))
+    assert result.evaluated is False
+    assert "could not reach" in result.error
+
+
+def test_a_failed_token_exchange_is_incomplete_and_names_the_credential(sdk):
+    # A federation profile resolved, and its token exchange fails inside the request.
+    sdk.api_key, sdk.credentials = None, SimpleNamespace()
+    result = sdk.run(WorkloadIdentityError(
+        "token exchange failed (HTTP 401): {'error': 'invalid_grant'}", status_code=401))
+    assert result.evaluated is False
+    # The exchange failed before any model call, so the call counter must not move.
+    assert result.called is False
+    assert "credential" in result.error and "HTTP 401" in result.error
+
+
+def test_a_missing_credential_is_incomplete_and_never_dispatched(sdk):
+    sdk.api_key = None
+    result = sdk.run(_message())
+    assert result.evaluated is False and result.called is False
+    assert sdk.requests == []
+    for way in ("ANTHROPIC_API_KEY", "fermix:ANTHROPIC_API_KEY", "ant auth login"):
+        assert way in result.error, way
+
+
+def test_a_truncated_anthropic_verdict_is_incomplete(sdk):
+    result = sdk.run(_message(stop_reason="max_tokens", text="{"))
+    assert result.evaluated is False
+    assert "truncated" in result.error
+
+
+def test_a_reply_with_no_verdict_text_is_incomplete(sdk):
+    result = sdk.run(_message(content=[
+        {"type": "thinking", "thinking": "", "signature": "invented-signature"}]))
+    assert result.evaluated is False
+    assert "text block" in result.error
+
+
+def test_the_anthropic_invalid_verdict_error_never_echoes_judge_prose(sdk):
+    secret = "CANDIDATE-PROSE-MARKER"
+    result = sdk.run(_message(text=secret))
+    assert result.evaluated is False
+    assert secret not in result.error
+    assert "invalid verdict shape" in result.error
+
+
+def test_a_rejecting_anthropic_verdict_is_a_real_fail_not_incomplete(sdk):
+    result = sdk.run(_message(text=json.dumps(
+        {"rationale": "missed one", "score": 0.5, "pass": False})))
+    assert result.evaluated is True and result.passed is False and result.score == 0.5
+
+
+def test_the_same_model_as_the_candidate_is_refused_before_dispatch(sdk):
+    result = sdk.run(_message(), candidates=[{"provider": "anthropic",
+                                              "model": ANTHROPIC_MODEL}])
+    assert result.evaluated is False and result.called is False
+    assert "matches candidate" in result.error
+    assert sdk.requests == []
+
+
+def test_a_provider_prefixed_candidate_is_still_the_same_model(sdk):
+    # An aggregator route spells the judge's own model with a vendor prefix.
+    for spelling in ("anthropic/claude-opus-5-5", "anthropic.claude-opus-5-5",
+                     "Claude-Opus-5-5"):
+        result = sdk.run(_message(), candidates=[{"provider": "openrouter",
+                                                  "model": spelling}])
+        assert "matches candidate" in result.error, spelling
+    assert sdk.requests == []
+
+
+def test_the_served_model_is_checked_against_the_candidates(sdk):
+    # The configured alias differs from the candidate, but the model that answered
+    # is the candidate's own, spelled with its release date.
+    result = sdk.run(_message(model="claude-haiku-4-5-20251001"),
+                     cfg=_anthropic_cfg("claude-haiku-4-5-latest"),
+                     candidates=[{"provider": "anthropic", "model": "claude-haiku-4-5"}])
+    assert result.evaluated is False and result.called is True
+    assert "matches candidate" in result.error
+
+
+def test_the_precondition_names_a_missing_anthropic_credential(sdk):
+    cfg = _anthropic_cfg()
+    assert judge.precondition_error(cfg) is None
+    sdk.api_key = None
+    error = judge.precondition_error(cfg)
+    assert "no credential" in error and "ant auth login" in error
+    assert sdk.requests == []
+    assert "judge.model" in judge.precondition_error(_anthropic_cfg(model=" "))
+
+
+# --- credential resolution through the real SDK --------------------------------
+
+@pytest.fixture
+def sdk_home(monkeypatch, tmp_path):
+    """A throwaway HOME with no Anthropic credential of any kind."""
+    for name in SDK_ENV:
+        monkeypatch.delenv(name, raising=False)
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    return home
+
+
+def _federation_profile(home: Path) -> None:
+    """The profile the eval box writes, with invented identifiers."""
+    config = home / ".config" / "anthropic"
+    (config / "configs").mkdir(parents=True)
+    config.chmod(0o700)
+    (config / "configs" / "fermix-eval.json").write_text(json.dumps({
+        "version": "1.0",
+        "authentication": {"type": "oidc_federation",
+                           "federation_rule_id": "fdrl_011CInventedRule000001",
+                           "service_account_id": "svac_011CInventedAccount0001",
+                           "identity_token": {"source": "file",
+                                              "path": str(home / "github-oidc.jwt")}},
+        "organization_id": "5b0e6d2a-1c3f-4e8b-9a7d-2f4c6e8a0b1d"}))
+    (config / "active_config").write_text("fermix-eval\n")
+
+
+def test_no_credential_anywhere_resolves_to_none(sdk_home):
+    assert judge._anthropic_credential() == (None, judge._NO_ANTHROPIC_CREDENTIAL)
+
+
+def test_an_active_federation_profile_is_the_credential(sdk_home):
+    _federation_profile(sdk_home)
+    assert judge._anthropic_credential() == (PROFILE_SOURCE, None)
+
+
+def test_a_stray_api_key_shadows_the_federation_profile(sdk_home, monkeypatch):
+    # The documented trap: a key wins over every profile. The CI preflight names
+    # the source it found, so a shadowed profile cannot pass it.
+    _federation_profile(sdk_home)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "invented-key")
+    assert judge._anthropic_credential() == ("ANTHROPIC_API_KEY", None)
+
+
+def test_a_broken_selected_profile_is_a_sentence_not_an_exception(sdk_home, monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_PROFILE", "missing-profile")
+    source, error = judge._anthropic_credential()
+    assert source is None
+    assert "could not be resolved" in error and "missing-profile" in error
+
+
+# --- the CI preflight -------------------------------------------------------------
+
+def _preflight_config(tmp_path: Path, model: str = ANTHROPIC_MODEL) -> str:
+    path = tmp_path / "judge.yaml"
+    path.write_text(f"judge: {{backend: anthropic, model: {model}, enabled: false}}\n")
+    return str(path)
+
+
+@pytest.fixture
+def preflight(sdk, sdk_home, tmp_path, capsys, monkeypatch):
+    """Runs bin/judge_preflight.py's main against the stubbed client, resolving
+    the credential from a real federation profile in a throwaway HOME."""
+    monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
+    monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
+    _federation_profile(sdk_home)
+    sdk.api_key = None
+    sdk.credentials = anthropic.lib.credentials.CredentialsFile("fermix-eval")
+
+    def run(*outcomes, expect=PROFILE_SOURCE, model=ANTHROPIC_MODEL):
+        sdk.outcomes = list(outcomes)
+        argv = ["--config", _preflight_config(tmp_path, model)]
+        if expect is not None:
+            argv += ["--expect-source", expect]
+        status = judge_preflight.main(argv)
+        out = capsys.readouterr()
+        return SimpleNamespace(status=status, output=out.out + out.err)
+
+    return run
+
+
+def test_the_preflight_proves_the_source_and_the_model(preflight, sdk):
+    r = preflight(_message())
+    assert r.status == 0, r.output
+    assert PROFILE_SOURCE in r.output and ANTHROPIC_MODEL in r.output
+    # One real verdict, in the exact request shape a tier sends.
+    (request,) = sdk.requests
+    assert request["output_config"]["effort"] == "medium"
+
+
+def test_the_preflight_refuses_another_credential_source(preflight, sdk):
+    sdk.credentials, sdk.api_key = None, "invented-key"
+    r = preflight(_message())
+    assert r.status == 1
+    assert "ANTHROPIC_API_KEY" in r.output and PROFILE_SOURCE in r.output
+
+
+def test_the_preflight_refuses_another_served_model(preflight):
+    r = preflight(_message(model="claude-opus-5"))
+    assert r.status == 1
+    assert "claude-opus-5" in r.output and ANTHROPIC_MODEL in r.output
+
+
+def test_the_preflight_fails_with_the_judges_own_sentence(preflight):
+    r = preflight(_status_error(anthropic.AuthenticationError, 401,
+                                "authentication_error", "invalid bearer token"))
+    assert r.status == 1
+    assert "HTTP 401" in r.output and "authentication_error" in r.output
+
+
+def test_the_preflight_refuses_a_backend_that_is_not_anthropic(tmp_path, capsys, monkeypatch):
+    monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
+    monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
+    path = tmp_path / "judge.yaml"
+    path.write_text("judge: {backend: openai, model: gpt-6-luna, enabled: false}\n")
+    assert judge_preflight.main(["--config", str(path)]) == 1
+    assert "anthropic" in capsys.readouterr().out
+
+
 if __name__ == "__main__":
-    raise SystemExit(pytest.main([__file__, "-q"]))
+    # No third-party pytest plugins: the anthropic SDK imports anyio first, and its
+    # autoloaded plugin would only warn that it could not be rewritten.
+    raise SystemExit(pytest.main([__file__, "-q", "--disable-plugin-autoload"]))

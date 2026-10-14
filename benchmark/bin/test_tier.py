@@ -6,10 +6,10 @@
 """Tests for bin/tier.sh — the one definition of what each live eval tier runs.
 
 Every assertion goes through `tier.sh --print`, which renders the argv the tier
-would exec instead of execing it: no daemon, no network, no spend. The judge-key
-resolution is exercised with EVAL_JUDGE_API_KEY exported, and with a stub
-`security` first on PATH for the unset case, so no test ever reads the real
-keychain. Run: `uv run bin/test_tier.py`."""
+would exec instead of execing it: no daemon, no network, no spend. The judge's
+Anthropic credential is exercised with ANTHROPIC_API_KEY exported, and with a stub
+`security` first on PATH that answers (or not) for the one keychain item tier.sh
+may read, so no test ever reads the real keychain. Run: `uv run bin/test_tier.py`."""
 from __future__ import annotations
 
 import os
@@ -24,17 +24,33 @@ TIER_SH = os.path.join(HERE, "tier.sh")
 BENCH = os.path.dirname(HERE)
 
 # Anything the script reads must be established by the test, never inherited.
-CONTROLLED = ("EVAL_JUDGE_API_KEY", "CONFIRM_DAEMON_ISOLATED",
-              "CONFIRM_ISOLATED_ENV", "CONFIRM_COST")
+CONTROLLED = ("ANTHROPIC_API_KEY", "EVAL_JUDGE_API_KEY", "CONFIRM_DAEMON_ISOLATED",
+              "CONFIRM_ISOLATED_ENV", "CONFIRM_COST", "STUB_KEYCHAIN_KEY",
+              "STUB_SECURITY_LOG")
+KEYCHAIN_ITEM = "fermix:ANTHROPIC_API_KEY"
+KEYCHAIN_SOURCE = f"<keychain {KEYCHAIN_ITEM}>"
+# An invented key: it may reach the runner's environment, never any output.
+INVENTED_KEY = "invented-anthropic-key-5c1e"
+
+# Holds exactly one item, the daemon's Anthropic key, and answers for it only when
+# the test sets STUB_KEYCHAIN_KEY; every lookup is logged when STUB_SECURITY_LOG is set.
+SECURITY_STUB = """#!/bin/sh
+[ -z "${STUB_SECURITY_LOG:-}" ] || printf '%s\\n' "$*" >> "$STUB_SECURITY_LOG"
+if [ -n "${STUB_KEYCHAIN_KEY:-}" ] && \\
+   [ "$*" = "find-generic-password -s fermix:ANTHROPIC_API_KEY -a fermix -w" ]; then
+  printf '%s\\n' "$STUB_KEYCHAIN_KEY"; exit 0
+fi
+exit 44
+"""
 
 
 @pytest.fixture(scope="module")
 def stub_path(tmp_path_factory):
-    """A PATH prefix whose `security` answers nothing, like a missing keychain
-    entry — the real keychain is never consulted by these tests."""
+    """A PATH prefix whose `security` stands in for the keychain — the real
+    keychain is never consulted by these tests."""
     d = tmp_path_factory.mktemp("stubbin")
     stub = d / "security"
-    stub.write_text("#!/bin/sh\nexit 44\n")
+    stub.write_text(SECURITY_STUB)
     stub.chmod(0o755)
     return str(d)
 
@@ -48,12 +64,12 @@ def run_print(tier, stub_path, *, args=None, **env_overrides):
 
 
 def plan(tier, stub_path, **env_overrides):
-    """(judge-key marker or None, argv list) for one tier."""
+    """(judge-credential marker or None, argv list) for one tier."""
     p = run_print(tier, stub_path, **env_overrides)
     assert p.returncode == 0, p.stderr
     lines = p.stdout.strip().split("\n")
     judge = None
-    if lines and lines[0].startswith("EVAL_JUDGE_API_KEY="):
+    if lines and lines[0].startswith("ANTHROPIC_API_KEY="):
         judge = lines[0].split("=", 1)[1]
         lines = lines[1:]
     return judge, lines
@@ -64,14 +80,14 @@ def plan(tier, stub_path, **env_overrides):
 # silent drift here is a tier that stops measuring what its name claims.
 
 def test_regression_runs_the_host_safe_core_judged_suite(stub_path):
-    judge, argv = plan("regression", stub_path, EVAL_JUDGE_API_KEY="sk-test-judge")
+    judge, argv = plan("regression", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_eval.py", "--tag", "host-safe-core",
                     "--judge", "--fail-retries", "2"]
-    assert judge == "<set>"
+    assert judge == "<environment>"
 
 
 def test_behavioral_isolated_carries_both_attestations(stub_path):
-    _judge, argv = plan("behavioral-isolated", stub_path, EVAL_JUDGE_API_KEY="sk-test-judge")
+    _judge, argv = plan("behavioral-isolated", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_eval.py", "--profile", "isolated_mutation",
                     "--all", "--judge", "--fail-retries", "2",
                     "--confirm-daemon-isolated", "--confirm-isolated-env"]
@@ -105,11 +121,11 @@ def test_capability_grants_are_independent(stub_path):
 
 
 def test_capability_judged_binarizes_the_taste_axis_at_half(stub_path):
-    judge, argv = plan("capability-judged", stub_path, EVAL_JUDGE_API_KEY="sk-test-judge")
+    judge, argv = plan("capability-judged", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY)
     assert argv == ["uv", "run", "bin/run_capability.py", "--suite",
                     "cap_response_quality", "--trials", "5", "--judge",
                     "--threshold", "0.5"]
-    assert judge == "<set>"
+    assert judge == "<environment>"
 
 
 def test_capability_readonly_selects_only_the_read_only_suites(stub_path):
@@ -119,22 +135,69 @@ def test_capability_readonly_selects_only_the_read_only_suites(stub_path):
     assert judge is None
 
 
-# --- the judge key ----------------------------------------------------------
+# --- the judge's Anthropic credential ----------------------------------------
 
 def test_the_judge_key_value_is_never_printed(stub_path):
-    p = run_print("regression", stub_path, EVAL_JUDGE_API_KEY="sk-secret-value")
-    assert p.returncode == 0, p.stderr
-    assert "sk-secret-value" not in p.stdout
-    assert "sk-secret-value" not in p.stderr
-    assert "EVAL_JUDGE_API_KEY=<set>" in p.stdout
+    for env in ({"ANTHROPIC_API_KEY": INVENTED_KEY}, {"STUB_KEYCHAIN_KEY": INVENTED_KEY}):
+        p = run_print("regression", stub_path, **env)
+        assert p.returncode == 0, p.stderr
+        assert INVENTED_KEY not in p.stdout + p.stderr
+
+
+def test_the_keychain_item_is_the_daemons_anthropic_key(stub_path, tmp_path):
+    log = tmp_path / "security.log"
+    judge, _argv = plan("regression", stub_path, STUB_KEYCHAIN_KEY=INVENTED_KEY,
+                        STUB_SECURITY_LOG=str(log))
+    assert judge == KEYCHAIN_SOURCE
+    assert log.read_text().splitlines() == [
+        f"find-generic-password -s {KEYCHAIN_ITEM} -a fermix -w"]
+
+
+def test_an_exported_key_wins_and_the_keychain_is_not_read(stub_path, tmp_path):
+    log = tmp_path / "security.log"
+    judge, _argv = plan("regression", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY,
+                        STUB_KEYCHAIN_KEY="another-invented-key", STUB_SECURITY_LOG=str(log))
+    assert judge == "<environment>"
+    assert not log.exists()
 
 
 def test_an_unanswered_keychain_leaves_the_judge_key_unset(stub_path):
-    # The stub `security` exits nonzero with no output; that is not fatal — the
-    # runner refuses the judged run itself, with a message about the key.
+    # Not fatal here: the SDK may still find an `ant auth login` profile (or the
+    # eval box's federation profile), and the runner's judge precondition refuses
+    # the run with a sentence when nothing resolves.
     judge, argv = plan("regression", stub_path)
     assert judge == "<unset>"
     assert argv[:3] == ["uv", "run", "bin/run_eval.py"]
+
+
+def test_the_retired_openai_judge_key_is_not_resolved(stub_path):
+    p = run_print("regression", stub_path, EVAL_JUDGE_API_KEY=INVENTED_KEY)
+    assert p.returncode == 0, p.stderr
+    assert p.stdout.splitlines()[0] == "ANTHROPIC_API_KEY=<unset>"
+    assert "EVAL_JUDGE_API_KEY" not in p.stdout + p.stderr
+
+
+@pytest.mark.parametrize("tier", ["capability", "capability-readonly"])
+def test_an_unjudged_tier_never_reads_the_keychain(stub_path, tmp_path, tier):
+    log = tmp_path / "security.log"
+    judge, _argv = plan(tier, stub_path, STUB_KEYCHAIN_KEY=INVENTED_KEY,
+                        STUB_SECURITY_LOG=str(log))
+    assert judge is None
+    assert not log.exists()
+
+
+def test_the_keychain_key_reaches_the_runner_and_no_output(stub_path, tmp_path):
+    # The real exec path, with a stub `uv` recording the environment it was given.
+    seen = tmp_path / "runner-env"
+    uv = tmp_path / "uv"
+    uv.write_text(f'#!/bin/sh\nprintf "%s" "${{ANTHROPIC_API_KEY:-}}" > "{seen}"\n')
+    uv.chmod(0o755)
+    p = run_print(None, str(tmp_path) + os.pathsep + stub_path, args=["regression"],
+                  STUB_KEYCHAIN_KEY=INVENTED_KEY)
+    assert p.returncode == 0, p.stderr
+    assert seen.read_text() == INVENTED_KEY
+    assert INVENTED_KEY not in p.stdout + p.stderr
+    assert KEYCHAIN_ITEM in p.stderr
 
 
 # --- refusals ---------------------------------------------------------------
@@ -225,10 +288,10 @@ def test_a_failed_private_sync_starts_nothing(tmp_path, stub_path):
 
 
 def test_capability_private_runs_the_holdout_judged(stub_path):
-    judge, argv = plan("capability-private", stub_path, EVAL_JUDGE_API_KEY="k",
+    judge, argv = plan("capability-private", stub_path, ANTHROPIC_API_KEY=INVENTED_KEY,
                        CONFIRM_DAEMON_ISOLATED="1", CONFIRM_ISOLATED_ENV="1",
                        CONFIRM_COST="1")
-    assert judge == "<set>"
+    assert judge == "<environment>"
     assert argv[:3] == ["uv", "run", "bin/run_capability.py"]
     assert {"--private", "--judge", "--confirm-daemon-isolated", "--confirm-isolated-env",
             "--confirm-cost"} <= set(argv)

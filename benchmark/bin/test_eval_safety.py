@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
+# dependencies = ["pytest>=8.4", "pyyaml>=6,<7", "certifi", "anthropic>=1.13,<2"]
 # ///
 """Pure regression specifications for behavioral-eval safety and outcomes.
 
@@ -537,8 +537,36 @@ def test_openai_judge_requires_a_model_and_removed_backends_are_rejected(monkeyp
     # The removed daemon-backed 'fermix' backend is no longer a valid choice.
     fermix = tmp_path / "fermix.yaml"
     fermix.write_text("judge: {backend: fermix, model: x, enabled: false}\n")
-    with pytest.raises(ValueError, match="openai or none"):
+    with pytest.raises(ValueError, match="anthropic, openai or none"):
         config.load(str(tmp_path), str(fermix))
+
+
+def test_anthropic_judge_requires_a_model(monkeypatch, tmp_path):
+    monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
+    monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
+    missing = tmp_path / "missing.yaml"
+    missing.write_text("judge: {backend: anthropic, enabled: false}\n")
+    with pytest.raises(ValueError, match="judge.model"):
+        config.load(str(tmp_path), str(missing))
+    good = tmp_path / "good.yaml"
+    good.write_text("judge: {backend: anthropic, model: claude-opus-5-5, enabled: false}\n")
+    loaded = config.load(str(tmp_path), str(good)).judge
+    assert (loaded.backend, loaded.model) == ("anthropic", "claude-opus-5-5")
+
+
+@pytest.mark.parametrize("name", ["config.yaml", "behavioral_config.yaml"])
+def test_both_runner_configs_judge_with_claude_away_from_the_candidate(monkeypatch, name):
+    # run_eval.py loads behavioral_config.yaml and run_capability.py config.yaml;
+    # both tiers sign in to the same judge, and it must never be the candidate
+    # the eval box runs (eval-box.yml's `model` default).
+    monkeypatch.delenv("EVAL_JUDGE_BACKEND", raising=False)
+    monkeypatch.delenv("EVAL_JUDGE_MODEL", raising=False)
+    skill_dir = os.path.dirname(HERE)
+    cfg = config.load(skill_dir, os.path.join(skill_dir, name))
+    assert (cfg.judge.backend, cfg.judge.model) == ("anthropic", "claude-opus-5-5")
+    workflow = pathlib.Path(skill_dir).parent / ".github" / "workflows" / "eval-box.yml"
+    candidate = re.search(r"default: (gpt-[\w.-]+)", workflow.read_text()).group(1)
+    assert judge._model_key(candidate) != judge._model_key(cfg.judge.model)
 
 
 def test_behavioral_config_rejects_non_finite_budget(tmp_path):
@@ -608,8 +636,8 @@ def test_behavioral_config_defaults_to_the_dev_daemon(monkeypatch):
     cfg = config.load(os.path.dirname(HERE), config_path)
     assert cfg.daemon.fermix_home == os.path.expanduser("~/.fermix-dev")
     assert cfg.opik.project == "fermix-dev"
-    assert cfg.judge.backend == "openai"
-    assert cfg.judge.model == "gpt-6-luna"
+    assert cfg.judge.backend == "anthropic"
+    assert cfg.judge.model == "claude-opus-5-5"
 
 
 def test_daemon_sandbox_requires_strict_eval_scoped_workspace(tmp_path):
@@ -1986,7 +2014,9 @@ def test_unpriced_or_iterationless_trace_is_still_gradable():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    # No third-party pytest plugins: the anthropic SDK imports anyio first, and its
+    # autoloaded plugin would only warn that it could not be rewritten.
+    sys.exit(pytest.main([__file__, "-q", "--disable-plugin-autoload"]))
 
 
 def test_report_states_an_aborted_run_stopped_early(tmp_path):

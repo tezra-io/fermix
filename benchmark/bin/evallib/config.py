@@ -96,7 +96,7 @@ class OpikCfg:
 
 @dataclass
 class JudgeCfg:
-    backend: str          # openai | none
+    backend: str          # anthropic | openai | none
     enabled: bool
     model: str | None
 
@@ -190,18 +190,18 @@ def load(skill_dir: str, path: str | None = None) -> Config:
         api_key=os.environ.get("OPIK_API_KEY") or None,
         workspace=os.environ.get("OPIK_WORKSPACE") or None,
     )
-    backend = os.environ.get("EVAL_JUDGE_BACKEND", j.get("backend", "openai"))
-    if backend not in ("openai", "none"):
-        raise ValueError("config `judge.backend` must be openai or none")
+    backend = os.environ.get("EVAL_JUDGE_BACKEND", j.get("backend", "anthropic"))
+    if backend not in ("anthropic", "openai", "none"):
+        raise ValueError("config `judge.backend` must be anthropic, openai or none")
     enabled = j.get("enabled", False)
     if not isinstance(enabled, bool):
         raise ValueError("config `judge.enabled` must be a boolean")
     model = None
-    if backend == "openai":
+    if backend != "none":
         model = os.environ.get("EVAL_JUDGE_MODEL", j.get("model"))
         if not isinstance(model, str) or not model.strip():
             raise ValueError(
-                "config `judge.model` must be a non-empty string for openai judging")
+                f"config `judge.model` must be a non-empty string for {backend} judging")
         model = model.strip()
     judge = JudgeCfg(backend=backend, enabled=enabled, model=model)
     budgets = BudgetCfg(
