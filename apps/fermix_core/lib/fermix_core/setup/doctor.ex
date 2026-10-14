@@ -31,6 +31,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Meetings.SidecarInstaller, as: MeetbotInstaller
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.PrimaryConfig
@@ -132,7 +133,7 @@ defmodule FermixCore.Setup.Doctor do
   @type probe_error ::
           {:misconfigured, reason :: String.t()}
           | {:auth_scope_mismatch, surface :: String.t(), hint :: String.t()}
-          | {:server_error, status :: pos_integer(), body :: term()}
+          | {:server_error, status :: pos_integer(), message :: String.t()}
           | {:network, reason :: term()}
   @type key_probe_error ::
           :no_key
@@ -1456,6 +1457,9 @@ defmodule FermixCore.Setup.Doctor do
     {:error, {:auth_scope_mismatch, surface, hint_for(surface)}}
   end
 
+  # Any other answer carries the message every failed call carries
+  # (`Providers.Error.status_message/2`), never the body itself: an HTML error
+  # page from a proxy in front of the provider is kilobytes of markup.
   defp classify(
          {:ok, %Req.Response{status: status, body: body}},
          _provider,
@@ -1463,7 +1467,7 @@ defmodule FermixCore.Setup.Doctor do
          _surface,
          _start
        ) do
-    {:error, {:server_error, status, body}}
+    {:error, {:server_error, status, ProviderError.status_message(status, body)}}
   end
 
   defp classify({:error, reason}, _provider, _model, _surface, _start) do

@@ -491,10 +491,7 @@ defmodule FermixCore.Application do
       match?({:ok, _api_key}, CoreConfig.provider_api_key(:openai))
   end
 
-  defp trace_opts do
-    trace_config = Application.get_env(:fermix_core, :trace, [])
-    [base_dir: Keyword.get(trace_config, :base_dir, default_trace_dir())]
-  end
+  defp trace_opts, do: [base_dir: trace_dir()]
 
   defp jobs_scheduler_opts do
     Application.get_env(:fermix_core, :jobs, [])
@@ -554,6 +551,21 @@ defmodule FermixCore.Application do
       {:error, reason} ->
         Logger.warning("Failed to install log redaction on default handler: #{inspect(reason)}")
     end
+  end
+
+  @doc """
+  The directory `FermixCore.Trace` writes its JSONL rows under:
+  `[:fermix_core, :trace] :base_dir`, else the workspace's `traces` directory.
+
+  Public so the Doctor's provider health check
+  (`FermixCore.Setup.ProviderHealth`) reads the rows the Trace child writes:
+  one resolver for "where are the traces", not two that can drift.
+  """
+  @spec trace_dir() :: Path.t()
+  def trace_dir do
+    :fermix_core
+    |> Application.get_env(:trace, [])
+    |> Keyword.get_lazy(:base_dir, &default_trace_dir/0)
   end
 
   defp default_trace_dir, do: ConfigStore.workspace_paths().traces

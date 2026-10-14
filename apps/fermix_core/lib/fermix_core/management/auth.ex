@@ -223,10 +223,10 @@ defmodule FermixCore.Management.Auth do
   # connection completes as every other one does.
   defp finish_chatgpt({:ok, %{plan_usage: :on, account: account}}, report, opts) do
     report.({:phase, "verifying"})
-    :ok = ensure_live_model(opts)
+    model_warning = ensure_live_model(opts)
 
     with :ok <- complete_connection(:openai_codex, opts) do
-      {:ok, %{"account_label" => account}}
+      {:ok, put_model_warning(%{"account_label" => account}, model_warning)}
     end
   end
 
@@ -237,20 +237,24 @@ defmodule FermixCore.Management.Auth do
     do: {:error, {:unavailable, chatgpt_sentence(reason)}}
 
   # A configured model the account does not list is replaced by one it does
-  # (`Setup.LiveModel`). The job result has no field a client renders for a
-  # listing that failed, so that is logged and the sign-in still completes: the
-  # account is connected either way.
+  # (`Setup.LiveModel`). A check that failed is logged and answered as the
+  # result's `model_warning`, the same words `fermix auth login` prints, and the
+  # sign-in still completes: the account is connected either way.
   defp ensure_live_model(opts) do
     ensure = Keyword.get(opts, :live_model, &LiveModel.ensure/2)
 
     case ensure.(:openai_codex, []) do
       {:ok, %{model: _model}} ->
-        :ok
+        nil
 
       {:error, sentence} ->
         Logger.warning("management auth: the ChatGPT model list was not read: #{sentence}")
+        "The default model was not checked against your ChatGPT account. #{sentence}"
     end
   end
+
+  defp put_model_warning(result, nil), do: result
+  defp put_model_warning(result, warning), do: Map.put(result, "model_warning", warning)
 
   # A stored token is inert until the route selects it, so connecting and
   # switching the route are one operation: reporting success without the second

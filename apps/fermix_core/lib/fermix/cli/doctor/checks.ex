@@ -46,6 +46,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Status, as: PluginStatus
   alias FermixCore.Prompt.TemplateReconciler
+  alias FermixCore.Providers.Descriptor, as: ProviderDescriptor
   alias FermixCore.Providers.ModelCatalog
   alias FermixCore.Providers.RoutingOverrides
   alias FermixCore.Providers.Selection
@@ -55,6 +56,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.Setup.Coexistence
   alias FermixCore.Setup.ConfigStore
   alias FermixCore.Setup.Doctor, as: ProviderProbe
+  alias FermixCore.Setup.ProviderHealth
   alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretMigration
   alias FermixCore.Setup.SecretPaths
@@ -641,8 +643,11 @@ defmodule Fermix.CLI.Doctor.Checks do
       {:error, {:auth_scope_mismatch, surface, hint}} ->
         fail("auth probe", "auth rejected by #{surface}: #{hint}")
 
-      {:error, {:server_error, status, _body}} ->
-        warn("auth probe", "provider returned HTTP #{status} (transient?)")
+      # One probe cannot tell a blip from an outage, so a refusal that is not
+      # about the credential stays a warning; `provider_health` judges the
+      # calls the provider has been answering.
+      {:error, {:server_error, status, message}} ->
+        warn("auth probe", server_error_detail(status, message))
 
       {:error, {:network, reason}} ->
         warn("auth probe", "network error: #{inspect(reason)}")
@@ -651,6 +656,56 @@ defmodule Fermix.CLI.Doctor.Checks do
     # E.g. hand-edited config with multiple primary providers — report it
     # as a failed check instead of aborting the whole --full run.
     error in ArgumentError -> fail("auth probe", Exception.message(error))
+  end
+
+  # The message already names the status when it is the floor ("HTTP 503") or
+  # the sentence for an HTML error page, so it is not named twice.
+  defp server_error_detail(status, message) do
+    label = ProviderDescriptor.fetch!(ProviderProbe.active_provider()).label
+
+    if String.starts_with?(message, "HTTP #{status}"),
+      do: "#{label} answered #{message}",
+      else: "#{label} answered HTTP #{status}: #{message}"
+  end
+
+  @doc """
+  Whether the primary provider has been answering, judged from the calls Fermix
+  already made (`Setup.ProviderHealth`), so it sends nothing and belongs in the
+  local run. `:trace_dir`, `:now` and `:provider` are injectable; they default
+  to the directory the Trace child writes, the clock and the primary provider.
+  """
+  @spec provider_health(keyword()) :: result()
+  def provider_health(opts \\ []) when is_list(opts) do
+    provider = Keyword.get_lazy(opts, :provider, &ProviderProbe.active_provider/0)
+    now = Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
+    trace_dir = Keyword.get_lazy(opts, :trace_dir, &FermixCore.Application.trace_dir/0)
+
+    case ProviderHealth.read(trace_dir, provider, now) do
+      {:ok, record} ->
+        record.rows
+        |> ProviderHealth.summarize(provider, now)
+        |> provider_health_result(record.undecodable)
+
+      {:error, {path, reason}} ->
+        warn("provider health", "could not read #{path}: #{:file.format_error(reason)}")
+    end
+  rescue
+    # The primary provider is unreadable (two marked primary, or an unknown one):
+    # the row says so instead of ending the whole run.
+    error in ArgumentError -> fail("provider health", Exception.message(error))
+  end
+
+  defp provider_health_result({status, detail}, 0),
+    do: %{name: "provider health", status: status, detail: detail}
+
+  defp provider_health_result({status, detail}, undecodable) do
+    lines = if undecodable == 1, do: "line", else: "lines"
+
+    %{
+      name: "provider health",
+      status: status,
+      detail: "#{detail}; #{undecodable} unreadable #{lines} in the call record skipped"
+    }
   end
 
   # Fallback health (§8): configured non-primary providers are listed as

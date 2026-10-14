@@ -110,6 +110,8 @@ defmodule FermixCore.Management.Doctor.Descriptor do
   defp local_checks(check_opts) do
     [
       spec("readiness", :runtime, :critical, :always, &Checks.readiness/0),
+      # Offline: it judges the calls the trace already recorded and sends none.
+      spec("provider_health", :connectivity, :critical, :configured, &Checks.provider_health/0),
       spec("fallback_providers", :configuration, :warning, :always, &Checks.fallback_providers/0),
       spec("workspace_layout", :runtime, :critical, :always, &Checks.workspace_layout/0),
       spec("service_unit", :runtime, :critical, :platform, fn ->

@@ -400,6 +400,9 @@ events into those files. `FermixCore.Telemetry` owns correlation IDs and content
 capture, which is on unless `FERMIX_TRACE_CONTENT=0`. Tools emit through
 `Tools.Telemetry.exec/5` and provider calls through
 `Providers.Telemetry.emit_call/3`; `docs/TELEMETRY_CONTRACT.md` is the contract.
+The local Doctor reads the `llm_call` rows back: `Setup.ProviderHealth` judges
+the primary provider from its recent calls, and finds them through
+`FermixCore.Application.trace_dir/0`, the resolver the `Trace` child starts with.
 
 Architecture Invariant: trace writes are best-effort. Failure to write a trace is
 logged and should not take down the runtime.

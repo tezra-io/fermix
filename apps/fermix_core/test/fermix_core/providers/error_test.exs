@@ -6,6 +6,9 @@ defmodule FermixCore.Providers.ErrorTest do
   alias FermixCore.Providers.Transient
 
   @no_reason "The response body was empty, so the provider gave no reason for this status."
+  @cloudflare_page "../../fixtures/providers/cloudflare_520.html"
+                   |> Path.expand(__DIR__)
+                   |> File.read!()
 
   # Every route leaves through the one proxy, so a failed proxy hop is never a
   # reason to sweep the failover chain.
@@ -143,6 +146,89 @@ defmodule FermixCore.Providers.ErrorTest do
       {:provider_error, error} = ProviderError.api(:openai_codex, :codex, 404, %{})
 
       assert error.message == "HTTP 404"
+    end
+  end
+
+  # Cloudflare answered every OpenAI Codex call with HTTP 520 and its HTML error
+  # page (2026-10-14). The page became the error's message, so the daemon log
+  # and the trace row carried kilobytes of markup and no status.
+  describe "api/5 when the body is an HTML error page" do
+    test "Cloudflare's page becomes one sentence naming the status and Cloudflare" do
+      {:provider_error, error} =
+        ProviderError.api(:openai_codex, :chatgpt_plan, 520, @cloudflare_page)
+
+      assert error.message ==
+               "HTTP 520 from Cloudflare in front of the provider, " <>
+                 "with an HTML error page instead of an API answer"
+
+      refute error.message =~ "<"
+      assert error.kind == :provider_unavailable
+      assert error.status == 520
+    end
+
+    test "a page that does not name Cloudflare gets the sentence without it" do
+      page = "<html><head><title>502 Bad Gateway</title></head><body>nginx</body></html>"
+      {:provider_error, error} = ProviderError.api(:openai, :responses, 502, page)
+
+      assert error.message == "HTTP 502 with an HTML error page instead of an API answer"
+    end
+
+    test "the page is recognised after blank lines and in any case" do
+      page = "\n  <!doctype HTML>\n<HTML><body>Bad gateway</body></HTML>"
+      {:provider_error, error} = ProviderError.api(:openai, :responses, 502, page)
+
+      assert error.message =~ "HTML error page"
+      refute error.message =~ "<"
+    end
+
+    # The kind is read from the page's own text exactly as before; only the
+    # message it carries changes.
+    test "classification reads the page as it did before" do
+      throttled = "<!DOCTYPE html><html><body>You are being rate limited.</body></html>"
+
+      assert {:provider_error, %{kind: :rate_limit}} =
+               ProviderError.api(:openai, :responses, 400, throttled)
+
+      assert {:provider_error, %{kind: :auth}} =
+               ProviderError.api(:openai, :responses, 403, @cloudflare_page)
+    end
+  end
+
+  describe "status_message/2" do
+    test "is the message api/5 carries, for every kind of body" do
+      bodies = [
+        @cloudflare_page,
+        "service unavailable",
+        ~s({"error":{"message":"Model not found"}}),
+        %{"error" => %{"message" => "Model not found"}},
+        %{"detail" => "plan usage is off"},
+        %{},
+        ""
+      ]
+
+      for body <- bodies do
+        {:provider_error, error} = ProviderError.api(:openai, :responses, 520, body)
+        assert ProviderError.status_message(520, body) == error.message
+      end
+    end
+
+    test "plain text, JSON and blank bodies keep the messages they had" do
+      assert ProviderError.status_message(503, "service unavailable") == "service unavailable"
+
+      assert ProviderError.status_message(404, ~s({"error":{"message":"Model not found"}})) ==
+               "Model not found"
+
+      assert ProviderError.status_message(404, %{"error" => %{"message" => "Model not found"}}) ==
+               "Model not found"
+
+      assert ProviderError.status_message(404, %{}) == "HTTP 404"
+      assert ProviderError.status_message(404, "") == @no_reason
+    end
+
+    test "a sentence it already rendered comes back unchanged" do
+      sentence = ProviderError.status_message(520, @cloudflare_page)
+
+      assert ProviderError.status_message(520, sentence) == sentence
     end
   end
 end

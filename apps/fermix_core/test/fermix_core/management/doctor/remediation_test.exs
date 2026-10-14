@@ -17,6 +17,21 @@ defmodule FermixCore.Management.Doctor.RemediationTest do
     assert Remediation.fetch("no_such_check", "failed") == nil
   end
 
+  # Every recent call failing is an outage the operator can route around by
+  # making another provider primary; one failed call can be a blip, so the
+  # warning has nothing to press.
+  test "provider health names its remedy for a failure and a warning" do
+    assert %{"title" => _title, "body" => _body, "action" => failed} =
+             Remediation.fetch("provider_health", "failed")
+
+    assert failed == %{"kind" => "settings_pane", "target" => "providers"}
+
+    assert %{"title" => _title, "body" => _body, "action" => warning} =
+             Remediation.fetch("provider_health", "warning")
+
+    assert warning == %{"kind" => "none", "target" => nil}
+  end
+
   test "an entry carries a title, a body and one action" do
     assert %{"title" => title, "body" => body, "action" => action} =
              Remediation.fetch("legacy_service_unit", "warning")

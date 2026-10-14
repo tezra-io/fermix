@@ -4,6 +4,36 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Doctor says when your provider is down.** A new `provider health` row
+  judges the primary provider from the calls Fermix already made in the last
+  24 hours, so it sends nothing and runs in every Doctor run, the app's
+  included. When every recent call failed it fails and says how many, over
+  what time and what the latest got, such as "OpenAI Codex: all 6 calls in the
+  last 41 minutes failed; the latest got HTTP 520 from Cloudflare in front of
+  the provider, with an HTML error page instead of an API answer". When only
+  the latest failed it warns, since one failure can be a blip. A refusal of
+  one request, such as a conversation too long for the model, does not count
+  against the provider.
+
+### Fixed
+
+- **A provider's HTML error page is no longer the error.** When something in
+  front of a provider, such as Cloudflare, answered with an HTML error page,
+  the whole page became the error: the daemon log line and the trace carried
+  kilobytes of markup and no status. The error is now one line naming the
+  status, and Cloudflare when the page names it. `fermix doctor --full`'s auth
+  probe says the same line instead of "(transient?)", and the new provider
+  health row judges whether it keeps happening.
+- **Signing in with ChatGPT says when the model was not checked.** When the
+  account's model list could not be read during sign-in, the app reported a
+  plain success and the default model was left unchecked. The sign-in still
+  completes, and its result now says the model was not checked and why
+  (`model_warning`), as `fermix auth login` already did.
+
 ## [0.15.0] - 2026-10-13
 
 ### Added

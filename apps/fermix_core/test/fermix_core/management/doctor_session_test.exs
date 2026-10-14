@@ -140,6 +140,13 @@ defmodule FermixCore.Management.DoctorSessionTest do
       refute "place_probe" in ids
     end
 
+    # It reads the calls the trace already recorded and sends nothing, so plain
+    # `fermix doctor` and the app's Doctor show it without the network checks.
+    test "the provider health check is one local row" do
+      assert Enum.count(ids(:local, []), &(&1 == "provider_health")) == 1
+      refute "provider_health" in ids(:network, [])
+    end
+
     # The key check asks OpenAI, so it runs only when the network is asked for.
     test "the voice key check is a network row" do
       assert "realtime_key" in ids(:network, [])

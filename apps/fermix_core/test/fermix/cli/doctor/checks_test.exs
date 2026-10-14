@@ -1,6 +1,8 @@
 defmodule Fermix.CLI.Doctor.ChecksTest do
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog, only: [with_log: 1]
+
   alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Acp.Identity
   alias FermixCore.Acp.IdentityStore
@@ -2443,6 +2445,127 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "503"
+    end
+
+    defp cloudflare_520(conn) do
+      page = File.read!(Path.expand("../../../fixtures/providers/cloudflare_520.html", __DIR__))
+
+      conn
+      |> Plug.Conn.put_resp_content_type("text/html")
+      |> Plug.Conn.send_resp(520, page)
+    end
+
+    # One probe cannot tell a blip from an outage, so a 5xx stays a warning;
+    # `provider_health` judges the history. The detail is the sentence every
+    # failed call carries, never the page Cloudflare answered with.
+    test "a 520 with Cloudflare's page warns with the sentence" do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai)
+
+      result = Checks.auth_probe(req_options: [plug: &cloudflare_520/1])
+
+      assert result.status == :warn
+
+      assert result.detail ==
+               "OpenAI answered HTTP 520 from Cloudflare in front of the provider, " <>
+                 "with an HTML error page instead of an API answer"
+
+      refute result.detail =~ "transient"
+    end
+
+    # The owner's case (2026-10-14): the OpenAI Codex probe is a real turn
+    # through the adapter, and Cloudflare answered it with the same page.
+    test "an OpenAI Codex 520 warns with the same sentence" do
+      Application.put_env(:fermix_core, :providers, openai_codex: [default_model: "gpt-6.1-sol"])
+      Application.put_env(:fermix_core, :agent, name: "fermix", provider: :openai_codex)
+
+      {result, _log} =
+        with_log(fn ->
+          Checks.auth_probe(
+            chatgpt_route_status: fn _opts -> :ok end,
+            access_token: "plan-token",
+            req_options: [plug: &cloudflare_520/1]
+          )
+        end)
+
+      assert result.status == :warn
+
+      assert result.detail ==
+               "OpenAI Codex answered HTTP 520 from Cloudflare in front of the provider, " <>
+                 "with an HTML error page instead of an API answer"
+    end
+  end
+
+  # The local Doctor's view of the primary provider: the calls the trace already
+  # recorded, read from a temporary trace directory.
+  describe "provider_health/1" do
+    setup do
+      dir = FermixTestSupport.SafeRm.make_tmp_dir!("checks-provider-health")
+      on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+      %{dir: dir, now: ~U[2026-10-14 03:00:00Z]}
+    end
+
+    # A row is written as JSON; a string is written as the raw line it is.
+    defp health(dir, now, rows) do
+      day = Path.join(dir, "2026-10-14")
+      File.mkdir_p!(day)
+      File.write!(Path.join(day, "llm_call.jsonl"), Enum.map(rows, &[jsonl(&1), "\n"]))
+      Checks.provider_health(trace_dir: dir, now: now, provider: :openai_codex)
+    end
+
+    defp jsonl(raw) when is_binary(raw), do: raw
+    defp jsonl(row), do: Jason.encode!(row)
+
+    defp call(now, minutes_ago, status, fields \\ %{}) do
+      ts = now |> DateTime.add(-minutes_ago * 60) |> DateTime.to_iso8601()
+
+      Map.merge(
+        %{"provider" => "openai_codex", "status" => status, "ts" => ts},
+        fields
+      )
+    end
+
+    test "passes when the latest call succeeded", %{dir: dir, now: now} do
+      result = health(dir, now, [call(now, 3, "ok")])
+
+      assert result.name == "provider health"
+      assert result.status == :ok
+      assert result.detail =~ "3 minutes ago"
+    end
+
+    test "warns when the latest call failed after one that worked", %{dir: dir, now: now} do
+      failed = call(now, 2, "error", %{"error_status" => 520, "error" => "bad gateway"})
+      result = health(dir, now, [call(now, 9, "ok"), failed])
+
+      assert result.status == :warn
+      assert result.detail =~ "HTTP 520: bad gateway"
+    end
+
+    test "fails when every call failed", %{dir: dir, now: now} do
+      failed = call(now, 2, "error", %{"error_status" => 520, "error" => "bad gateway"})
+      result = health(dir, now, [call(now, 9, "error"), failed])
+
+      assert result.status == :fail
+      assert result.detail =~ "all 2 calls"
+    end
+
+    test "names the unreadable lines it skipped", %{dir: dir, now: now} do
+      result = health(dir, now, [call(now, 9, "ok"), "{\"cut", call(now, 3, "ok")])
+
+      assert result.status == :ok
+      assert result.detail =~ "3 minutes ago"
+      assert result.detail =~ "1 unreadable line"
+    end
+
+    test "warns, naming the file, when the call record cannot be read", %{dir: dir, now: now} do
+      not_a_dir = Path.join(dir, "file")
+      File.write!(not_a_dir, "")
+
+      result = Checks.provider_health(trace_dir: not_a_dir, now: now, provider: :openai_codex)
+
+      assert result.status == :warn
+      assert result.detail =~ Path.join([not_a_dir, "2026-10-14", "llm_call.jsonl"])
+      assert result.detail =~ "not a directory"
     end
   end
 

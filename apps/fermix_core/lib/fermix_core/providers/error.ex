@@ -14,6 +14,7 @@ defmodule FermixCore.Providers.Error do
   """
 
   @empty_body_message "The response body was empty, so the provider gave no reason for this status."
+  @html_page_tail "with an HTML error page instead of an API answer"
 
   @type provider :: atom()
   @type adapter :: atom()
@@ -62,20 +63,39 @@ defmodule FermixCore.Providers.Error do
       when is_atom(provider) and is_atom(adapter) and is_integer(status) and status > 0 do
     decoded = decode_body(body)
     code = error_code(decoded)
-    message = api_message(body, decoded, status)
 
+    # The kind reads the body's own text, an HTML page included, exactly as it
+    # did before pages were rendered as one sentence; only the message changes.
     {:provider_error,
      %{
        provider: provider,
        adapter: adapter,
        status: status,
-       kind: api_kind(status, code, message),
+       kind: api_kind(status, code, api_message(body, decoded, status)),
        code: code,
-       message: message,
+       message: status_message(status, body),
        provider_words: Keyword.get(opts, :provider_words),
        stage: stage_opt(opts)
      }
      |> maybe_put(:param, error_param(decoded))}
+  end
+
+  @doc """
+  The message a failed call carries for an HTTP status and its body.
+
+  The provider's own words when the body has them (`error.message`, a bare
+  `message` or `detail`, or plain text), the status when it has none, and one
+  sentence when the body is an HTML document: a proxy or CDN in front of the
+  provider answered instead of its API, and the page itself is kilobytes of
+  markup. Cloudflare answered every OpenAI Codex call with HTTP 520 and its
+  page (2026-10-14), and the page became the message in the daemon log, the
+  trace row and Doctor.
+  """
+  @spec status_message(pos_integer(), term()) :: String.t()
+  def status_message(status, body) when is_integer(status) and status > 0 do
+    if html_page?(body),
+      do: html_page_message(status, body),
+      else: api_message(body, decode_body(body), status)
   end
 
   @doc """
@@ -271,6 +291,21 @@ defmodule FermixCore.Providers.Error do
   end
 
   defp blank_body?(body), do: is_binary(body) and String.trim(body) == ""
+
+  defp html_page?(body) when is_binary(body) do
+    start = body |> String.trim_leading() |> String.slice(0, 9) |> String.downcase()
+    String.starts_with?(start, ["<!doctype", "<html"])
+  end
+
+  defp html_page?(_body), do: false
+
+  # The page names who answered. Cloudflare's says so in its title, its error
+  # code and its Ray ID; any other page is named only by what it is.
+  defp html_page_message(status, page) do
+    if page |> String.downcase() |> String.contains?("cloudflare"),
+      do: "HTTP #{status} from Cloudflare in front of the provider, #{@html_page_tail}",
+      else: "HTTP #{status} #{@html_page_tail}"
+  end
 
   defp decode_body(body) when is_map(body), do: body
 

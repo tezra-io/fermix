@@ -173,6 +173,7 @@ defmodule FermixCore.Management.AuthTest do
       assert {:ok, done} = terminal(jobs, view["job_id"])
       assert done["status"] == "completed"
       assert done["result"] == %{"account_label" => "owner@example.com"}
+      refute Map.has_key?(done["result"], "model_warning")
 
       assert_received {:login, keys}
       assert Enum.sort(keys) == [:opener, :puts]
@@ -182,7 +183,8 @@ defmodule FermixCore.Management.AuthTest do
     end
 
     # The account is connected whether or not its model list could be read, so
-    # a listing that failed is logged and the sign-in still completes.
+    # a listing that failed is logged, the sign-in still completes, and its
+    # result says the model was not checked.
     test "a model list that cannot be read does not fail the sign-in", %{jobs: jobs} do
       owner = self()
 
@@ -202,6 +204,15 @@ defmodule FermixCore.Management.AuthTest do
         end)
 
       assert done["status"] == "completed"
+
+      assert done["result"] == %{
+               "account_label" => "owner@example.com",
+               "model_warning" =>
+                 "The default model was not checked against your ChatGPT account. " <>
+                   "No models were listed."
+             }
+
+      assert Copy.violations(done["result"]["model_warning"], :prose) == []
       assert_received {:promoted, :openai_codex}
       assert log =~ "the ChatGPT model list was not read: No models were listed."
     end
