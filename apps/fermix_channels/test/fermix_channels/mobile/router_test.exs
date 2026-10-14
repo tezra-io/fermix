@@ -85,7 +85,8 @@ defmodule FermixChannels.Mobile.RouterTest do
          name: nil,
          ensure_identity: fn -> {:ok, %{gateway_public_key: <<1::256>>}} end,
          activate_listener: fn _identity -> :ok end,
-         emit_pair: fn _status, _duration_us -> :ok end}
+         emit_pair: fn _status, _duration_us, _facts -> :ok end,
+         status_fetch: fn -> {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}} end}
       )
 
     assert {:ok, window} = PairManager.open(manager)

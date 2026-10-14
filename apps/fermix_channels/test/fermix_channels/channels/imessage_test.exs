@@ -131,6 +131,13 @@ defmodule FermixChannels.Channels.IMessageTest do
           "name" => "IMG.HEIC",
           "mime" => "image/heic",
           "bytes" => 9_000
+        },
+        # A link's preview card: Messages' own, not something the sender attached.
+        %{
+          "index" => 2,
+          "guid" => "at2",
+          "name" => "8F1C0D2A-77B1-4E0A-9A44-2C1D3E4F5A6B.pluginPayloadAttachment",
+          "bytes" => 2_210
         }
       ]
 
@@ -170,8 +177,18 @@ defmodule FermixChannels.Channels.IMessageTest do
              } = message.metadata
 
       assert message.attachments == [
-               %{kind: :audio, file_id: {guid, 0}, mime_type: "audio/x-caf", size_bytes: 4_821},
-               %{kind: :image, file_id: {guid, 1}, mime_type: "image/heic", size_bytes: 9_000}
+               %{
+                 file_id: {guid, 0},
+                 mime_type: "audio/x-caf",
+                 size_bytes: 4_821,
+                 file_name: "voice.caf"
+               },
+               %{
+                 file_id: {guid, 1},
+                 mime_type: "image/heic",
+                 size_bytes: 9_000,
+                 file_name: "IMG.HEIC"
+               }
              ]
     end
 

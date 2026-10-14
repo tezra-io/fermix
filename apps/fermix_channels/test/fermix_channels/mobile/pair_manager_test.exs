@@ -40,10 +40,12 @@ defmodule FermixChannels.Mobile.PairManagerTest do
         send(test_pid, {:device_persisted, device})
         {:ok, Map.put(device, :persisted, true)}
       end,
-      emit_pair: fn status, duration_us ->
+      emit_pair: fn status, duration_us, facts ->
         send(test_pid, {:pair_telemetry, status, duration_us})
+        send(test_pid, {:pair_facts, status, facts})
         :ok
       end,
+      status_fetch: &fresh_statuses/0,
       session_id_generator: fn -> "pair-session" end,
       device_id_generator: fn -> "device-id" end,
       secret_generator: fn -> <<2::256>> end,
@@ -95,6 +97,11 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert persisted.noise_pk == <<4::256>>
     assert persisted.apns_key_salt == <<3::256>>
     assert persisted.created_at == ~U[2026-08-12 20:00:00Z]
+    assert persisted.platform == "android"
+    assert persisted.signer_role == :development
+    assert persisted.version_code == 42
+    assert persisted.boot_state == :verified
+    assert persisted.device_locked == true
     refute Map.has_key?(persisted, :secret)
     refute Map.has_key?(persisted, :session_id)
     refute Map.has_key?(persisted, :sas)
@@ -102,6 +109,10 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:ok, %{approved: true, device: ^approved}} = Task.await(decision)
     assert_receive {:mobile_pair_decision, "pair-session", {:ok, ^approved}}
     assert_receive {:pair_telemetry, :approved, 0}
+
+    assert_receive {:pair_facts, :approved,
+                    %{platform: :android, attestation: :verified, signer_role: :development}}
+
     assert :none = PairManager.current(ctx.manager)
   end
 
@@ -139,6 +150,43 @@ defmodule FermixChannels.Mobile.PairManagerTest do
              submit(ctx, %{app_version: <<0xFF, 0xFE>>})
 
     assert {:ok, %{request: nil}} = PairManager.current(ctx.manager)
+  end
+
+  # The owner reads the platform beside the code to compare, so only the
+  # phone's own two words enter the window.
+  test "a request names the platform the phone runs on, one of the two a phone can be", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    for platform <- ["windows", "", nil] do
+      assert {:error, {:invalid_pair_request, :platform}} =
+               submit(ctx, %{platform: platform})
+    end
+
+    assert {:ok, %{platform: "android"}} = submit(ctx, %{platform: "android"})
+
+    assert {:ok, %{request: %{platform: "android"}}} =
+             PairManager.session(ctx.manager, "pair-session")
+  end
+
+  # M51 D3: only a phone whose attestation was verified reaches the owner, and
+  # what the verification found travels with its request to the device row.
+  test "a request without verified attestation facts is refused at intake", ctx do
+    assert {:ok, _window} = PairManager.open(ctx.manager)
+
+    for attestation <- [
+          nil,
+          %{},
+          %{facts() | boot_state: :unverified},
+          %{facts() | device_locked: false},
+          %{facts() | signer_role: :stranger},
+          %{facts() | platform: "ios"}
+        ] do
+      assert {:error, {:invalid_pair_request, :attestation}} =
+               submit(ctx, %{attestation: attestation})
+    end
+
+    assert {:ok, %{request: nil}} = PairManager.current(ctx.manager)
+    assert {:ok, %{attestation: %{signer_role: :development}}} = submit(ctx, %{})
   end
 
   test "one intake bound rejects oversized device text before the owner is prompted", ctx do
@@ -413,7 +461,11 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     manager =
       start_supervised!(
         {PairManager,
-         name: nil, root: root, device_store: nil, activate_listener: fn _identity -> :ok end},
+         name: nil,
+         root: root,
+         device_store: nil,
+         activate_listener: fn _identity -> :ok end,
+         status_fetch: &fresh_statuses/0},
         id: make_ref()
       )
 
@@ -472,7 +524,8 @@ defmodule FermixChannels.Mobile.PairManagerTest do
          device_store: nil,
          ensure_identity: fn -> {:ok, %{gateway_public_key: <<1::256>>}} end,
          activate_listener: fn _identity -> :ok end,
-         emit_pair: fn _status, _duration_us -> :ok end},
+         emit_pair: fn _status, _duration_us, _facts -> :ok end,
+         status_fetch: &fresh_statuses/0},
         id: make_ref()
       )
 
@@ -481,9 +534,14 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     assert {:ok, _request} =
              PairManager.submit_request(manager, window.session_id, request_attrs())
 
+    monitor = Process.monitor(manager)
     assert {:ok, device} = PairManager.approve(manager, window.session_id)
     assert device.device_id == String.downcase(device.device_id)
     assert {:ok, [_stored]} = DeviceStore.list(root: root)
+
+    # The store's file was written from the manager's own process, and any
+    # linked exit stops the manager: the write links it to nothing.
+    refute_receive {:DOWN, ^monitor, :process, ^manager, _reason}, 200
   end
 
   # The half-open case the takeover cannot reach: the owner approved while the
@@ -514,7 +572,8 @@ defmodule FermixChannels.Mobile.PairManagerTest do
          device_store: nil,
          ensure_identity: fn -> {:ok, %{gateway_public_key: <<1::256>>}} end,
          activate_listener: fn _identity -> :ok end,
-         emit_pair: fn _status, _duration_us -> :ok end},
+         emit_pair: fn _status, _duration_us, _facts -> :ok end,
+         status_fetch: &fresh_statuses/0},
         id: make_ref()
       )
 
@@ -540,7 +599,8 @@ defmodule FermixChannels.Mobile.PairManagerTest do
                status: :awaiting_scan,
                remaining_ms: @ttl_ms,
                request: nil,
-               device_id: nil
+               device_id: nil,
+               refusal: nil
              }
 
       advance(ctx, 1_500)
@@ -609,6 +669,265 @@ defmodule FermixChannels.Mobile.PairManagerTest do
       assert {:error, :pairing_active} = PairManager.open(ctx.manager)
       assert :ok = PairManager.cancel(ctx.manager, "pair-session")
       assert {:ok, _window} = PairManager.open(ctx.manager)
+    end
+  end
+
+  describe "a refused attestation ends the session" do
+    # MILESTONE_51_MANAGEMENT_MOBILE_PAIRING §4: a refused proof never reaches
+    # the owner; the session ends failed, and everything waiting on it learns
+    # why in the phone's own word.
+    test "a refused proof closes the window as failed with the check that refused it", ctx do
+      assert {:ok, _window} = PairManager.open(ctx.manager)
+      waiter = Task.async(fn -> PairManager.await_request(ctx.manager, "pair-session", 1_000) end)
+      assert_waiter_registered(ctx.manager, :request_waiter)
+
+      assert :ok =
+               PairManager.refuse(
+                 ctx.manager,
+                 "pair-session",
+                 refusal(:attestation, :root_of_trust)
+               )
+
+      assert {:error, :attestation} = Task.await(waiter)
+      assert :none = PairManager.current(ctx.manager)
+
+      assert {:ok, record} = PairManager.session(ctx.manager, "pair-session")
+      assert record.status == :attestation
+      assert record.request == nil
+      assert record.remaining_ms == nil
+      assert record.refusal == %{reason: :attestation, check: :root_of_trust}
+
+      assert_receive {:pair_telemetry, :attestation, 0}
+
+      assert_receive {:pair_facts, :attestation,
+                      %{platform: :android, attestation: :refused, signer_role: nil}}
+
+      refute_receive {:device_persisted, _device}
+    end
+
+    test "an unusable status list and an unsupported platform end it the same way", ctx do
+      for {reason, check, platform, attestation} <- [
+            {:attestation_unavailable, :revocation, "android", :unavailable},
+            {:platform_unsupported, :platform, "ios", :refused}
+          ] do
+        manager =
+          start_supervised!({PairManager, Keyword.put(ctx.opts, :name, nil)}, id: make_ref())
+
+        assert {:ok, %{session_id: session_id}} = PairManager.open(manager)
+
+        refusal = %{refusal(reason, check) | platform: platform}
+        assert :ok = PairManager.refuse(manager, session_id, refusal)
+
+        assert {:ok, %{status: ^reason, refusal: %{reason: ^reason, check: ^check}}} =
+                 PairManager.session(manager, session_id)
+
+        assert PairManager.outcome_reason(reason) == reason
+        assert_receive {:pair_facts, ^reason, %{attestation: ^attestation}}
+      end
+    end
+
+    # A phone waiting for the owner proved the pairing secret; another phone's
+    # refused proof cannot end that ceremony.
+    test "a refusal while a phone waits for the owner leaves its ceremony open", ctx do
+      assert {:ok, _window} = PairManager.open(ctx.manager)
+      assert {:ok, _request} = submit(ctx, %{})
+
+      assert {:error, :request_pending} =
+               PairManager.refuse(ctx.manager, "pair-session", refusal(:attestation, :chain))
+
+      assert {:ok, %{status: :awaiting_decision}} =
+               PairManager.session(ctx.manager, "pair-session")
+    end
+
+    test "a refusal names one of the three reasons and a closed window refuses nothing", ctx do
+      assert {:error, :session_not_found} =
+               PairManager.refuse(ctx.manager, "pair-session", refusal(:attestation, :key))
+
+      assert {:ok, _window} = PairManager.open(ctx.manager)
+
+      assert_raise FunctionClauseError, fn ->
+        PairManager.refuse(ctx.manager, "pair-session", refusal(:denied, :key))
+      end
+    end
+  end
+
+  describe "the attestation status list" do
+    # M51 §6.2 check 7: Google's list is fetched out of band when a window
+    # opens, never on the phone's request, and used only while fresh.
+    test "opening a window fetches the list once and serves it while it is fresh", ctx do
+      test_pid = self()
+      manager = status_manager(ctx, fn -> send(test_pid, :fetched) && listed(["abc"]) end)
+
+      assert {:ok, %{session_id: session_id}} = PairManager.open(manager)
+      assert_receive :fetched
+      assert {:ok, serials} = await_statuses(manager, session_id)
+      assert MapSet.member?(serials, "abc")
+
+      assert :ok = PairManager.cancel(manager, session_id)
+      assert {:ok, %{session_id: second}} = PairManager.open(manager)
+      refute_receive :fetched
+      assert {:ok, ^serials} = PairManager.attestation_statuses(manager, second)
+    end
+
+    test "a list that goes stale within the next window is fetched again when it opens", ctx do
+      test_pid = self()
+      manager = status_manager(ctx, fn -> send(test_pid, :fetched) && listed([], 600_000) end)
+
+      assert {:ok, %{session_id: first}} = PairManager.open(manager)
+      assert_receive :fetched
+      assert {:ok, _serials} = await_statuses(manager, first)
+      assert :ok = PairManager.cancel(manager, first)
+
+      advance(ctx, 600_000 - 60_000)
+      assert {:ok, _window} = PairManager.open(manager)
+      assert_receive :fetched
+    end
+
+    # The second window's refresh fails: the list it holds is used until its
+    # max-age, then it is stale, and the request fetches nothing.
+    test "a list past its max-age is stale and nothing fetches it on the request", ctx do
+      test_pid = self()
+
+      results =
+        start_supervised!({Agent, fn -> [listed([], 600_000), {:error, :timeout}] end},
+          id: :results
+        )
+
+      manager =
+        status_manager(ctx, fn ->
+          send(test_pid, :fetched)
+          Agent.get_and_update(results, fn [next | rest] -> {next, rest} end)
+        end)
+
+      assert {:ok, %{session_id: first}} = PairManager.open(manager)
+      assert_receive :fetched
+      assert {:ok, _serials} = await_statuses(manager, first)
+      assert :ok = PairManager.cancel(manager, first)
+
+      advance(ctx, 600_000 - 60_000)
+      assert {:ok, %{session_id: second}} = PairManager.open(manager)
+      assert_receive :fetched
+      assert {:ok, _serials} = await_statuses(manager, second)
+
+      advance(ctx, 60_001)
+      assert {:error, :status_list_stale} = PairManager.attestation_statuses(manager, second)
+      refute_receive :fetched
+    end
+
+    test "a failed fetch leaves no list: the request is told so, and fetches nothing", ctx do
+      test_pid = self()
+
+      manager =
+        status_manager(ctx, fn ->
+          send(test_pid, :fetched)
+          {:error, :status_list_too_large}
+        end)
+
+      assert {:ok, %{session_id: session_id}} = PairManager.open(manager)
+      assert_receive :fetched
+      assert {:error, :status_list_missing} = await_statuses(manager, session_id)
+      refute_receive :fetched
+    end
+
+    test "a request waits for a fetch in flight, a bounded time", ctx do
+      test_pid = self()
+
+      manager =
+        status_manager(ctx, fn ->
+          send(test_pid, {:fetching, self()})
+
+          receive do
+            {:release, result} -> result
+          end
+        end)
+
+      assert {:ok, %{session_id: session_id}} = PairManager.open(manager)
+      assert_receive {:fetching, fetcher}
+      assert_receive {:timer_armed, _ref, {:status_fetch_deadline, _token}, 20_000}
+
+      waiting = Task.async(fn -> PairManager.attestation_statuses(manager, session_id) end)
+      assert_receive {:timer_armed, _ref, {:status_wait_timeout, _token} = timeout, 10_000}
+      send(fetcher, {:release, listed(["abc"])})
+      assert {:ok, serials} = Task.await(waiting)
+      assert MapSet.member?(serials, "abc")
+      send(manager, timeout)
+
+      assert :ok = PairManager.cancel(manager, session_id)
+      advance(ctx, 86_400_000)
+      assert {:ok, %{session_id: second}} = PairManager.open(manager)
+      assert_receive {:fetching, _second_fetcher}
+      late = Task.async(fn -> PairManager.attestation_statuses(manager, second) end)
+      assert_receive {:timer_armed, _ref, {:status_wait_timeout, _token} = expired_wait, 10_000}
+      send(manager, expired_wait)
+      assert {:error, :status_list_wait_timeout} = Task.await(late)
+    end
+
+    test "a fetch that outlives its deadline is stopped and leaves no list", ctx do
+      test_pid = self()
+
+      manager =
+        status_manager(ctx, fn ->
+          send(test_pid, {:fetching, self()})
+
+          receive do
+            :never -> listed([])
+          end
+        end)
+
+      assert {:ok, %{session_id: session_id}} = PairManager.open(manager)
+      assert_receive {:fetching, fetcher}
+      monitor = Process.monitor(fetcher)
+      assert_receive {:timer_armed, _ref, {:status_fetch_deadline, _token} = deadline, 20_000}
+
+      waiting = Task.async(fn -> PairManager.attestation_statuses(manager, session_id) end)
+      assert_receive {:timer_armed, _ref, {:status_wait_timeout, _token}, 10_000}
+      send(manager, deadline)
+
+      assert {:error, :status_list_missing} = Task.await(waiting)
+      assert_receive {:DOWN, ^monitor, :process, ^fetcher, _reason}
+    end
+
+    test "a manager that stops ends its fetch in flight", ctx do
+      test_pid = self()
+
+      manager =
+        status_manager(ctx, fn ->
+          send(test_pid, {:fetching, self()})
+
+          receive do
+            :never -> listed([])
+          end
+        end)
+
+      assert {:ok, _window} = PairManager.open(manager)
+      assert_receive {:fetching, fetcher}
+      monitor = Process.monitor(fetcher)
+      stop_supervised!(:status_manager)
+      assert_receive {:DOWN, ^monitor, :process, ^fetcher, _reason}
+    end
+
+    # The manager traps exits only so terminate/2 stops a fetch on shutdown;
+    # the exit of any other process linked to it, for any reason, stops it,
+    # loudly.
+    test "a linked process that crashes stops the manager with a log line", ctx do
+      monitor = Process.monitor(ctx.manager)
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          spawn(fn ->
+            Process.link(ctx.manager)
+            exit(:linked_crash)
+          end)
+
+          assert_receive {:DOWN, ^monitor, :process, _pid, {:linked_exit, :linked_crash}}
+        end)
+
+      assert log =~ "mobile pairing manager stopped: a linked process exited: :linked_crash"
+    end
+
+    test "only a window's own socket asks for the list", ctx do
+      assert {:error, :session_not_found} =
+               PairManager.attestation_statuses(ctx.manager, "pair-session")
     end
   end
 
@@ -682,6 +1001,27 @@ defmodule FermixChannels.Mobile.PairManagerTest do
     start_supervised!({PairManager, opts}, id: :counted_manager)
   end
 
+  defp status_manager(ctx, fetch) do
+    opts =
+      Keyword.merge(ctx.opts,
+        name: :"pair_manager_#{System.unique_integer([:positive])}",
+        status_fetch: fetch
+      )
+
+    start_supervised!({PairManager, opts}, id: :status_manager)
+  end
+
+  defp listed(serials, max_age_ms \\ 86_400_000),
+    do: {:ok, %{serials: MapSet.new(serials), max_age_ms: max_age_ms}}
+
+  # The fetch runs beside the manager, so the first read can come before it
+  # lands: a read made while it is in flight waits for it.
+  defp await_statuses(manager, session_id) do
+    PairManager.attestation_statuses(manager, session_id)
+  end
+
+  defp refusal(reason, check), do: %{reason: reason, check: check, platform: "android"}
+
   # Ten addresses, five failures each: twice what once closed a window.
   defp fail_from_many_addresses(ctx) do
     for host <- 1..10, _attempt <- 1..5 do
@@ -713,13 +1053,29 @@ defmodule FermixChannels.Mobile.PairManagerTest do
         name: "Sujeeth's iPhone",
         model: "iPhone17,1",
         app_version: "1.0",
+        platform: "android",
         noise_pk: <<4::256>>,
         sas: "047291",
+        attestation: facts(),
         socket_pid: self()
       },
       overrides
     )
   end
+
+  # What a verified attestation tells the owner (`Mobile.Attestation.verify/3`).
+  defp facts do
+    %{
+      platform: "android",
+      security_level: :trusted_environment,
+      signer_role: :development,
+      version_code: 42,
+      boot_state: :verified,
+      device_locked: true
+    }
+  end
+
+  defp fresh_statuses, do: {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}}
 
   defp assert_waiter_registered(manager, key, attempts \\ 50)
   defp assert_waiter_registered(_manager, _key, 0), do: flunk("waiter was not registered")

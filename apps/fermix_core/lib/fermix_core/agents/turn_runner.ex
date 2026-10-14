@@ -33,6 +33,9 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Attachments
+  alias FermixCore.Attachments.Manifest
+  alias FermixCore.Attachments.Workspace
   alias FermixCore.ComputerHistory.Gate, as: ComputerHistoryGate
   alias FermixCore.ComputerHistory.RecentActivity
   alias FermixCore.ComputerHistory.Taint
@@ -42,6 +45,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Net.Egress
   alias FermixCore.Prompt.ChannelPresentation
   alias FermixCore.Prompt.CurrentDate
+  alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.Failover
   alias FermixCore.Providers.ModelCatalog
@@ -305,9 +309,26 @@ defmodule FermixCore.Agents.TurnRunner do
       reply_for(last_reason, surface)
   end
 
-  defp reply_for({:image_unsupported, provider, model}, _surface) do
+  # A route that cannot take a part of the turn (M67): failover tried the rest
+  # of the chain first, so this sentence shows only when none could.
+  defp reply_for({:attachment_unsupported, :image, provider, model}, _surface) do
     "That message includes an image, but the current model (#{provider}/#{model}) can't accept " <>
       "images. Switch to a vision-capable model, or send text only."
+  end
+
+  defp reply_for({:attachment_unsupported, {:image_format, mime}, provider, model}, _surface) do
+    "That message includes a #{mime} picture, which the current model (#{provider}/#{model}) " <>
+      "can't accept. Send it as a JPEG or PNG, or switch models."
+  end
+
+  defp reply_for({:attachment_unsupported, :document, provider, model}, _surface) do
+    readers =
+      Descriptor.all()
+      |> Enum.filter(& &1.documents?)
+      |> Enum.map_join(", ", & &1.label)
+
+    "That message includes a PDF, but the current model (#{provider}/#{model}) can't take a " <>
+      "PDF inline. Switch to a vision model on one of #{readers}, or send the pages as pictures."
   end
 
   # The summarizer's own refusals are atoms (`:empty_summary`, `:too_deep`)
@@ -392,29 +413,67 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp max_iterations_error?(_reason), do: false
 
-  # Build the user turn. Text-only stays a bare `%{role, content}` map —
-  # byte-identical to the pre-multimodal shape (no `:image_parts` key), so
-  # accounting, compaction, persistence, and the provider prompt cache are
-  # untouched. Inbound images the gateway materialized (M14) ride a transient
-  # `:image_parts` list the provider encoder reads; they are never persisted.
-  defp build_user_message(msg) do
-    base = %{role: "user", content: msg.content}
+  # The gateway's inbound attachments (M67) become two things: the manifest
+  # composed into the user text, which is what is persisted (so history and
+  # compaction know what was attached, what could not be read and where each
+  # file was kept), and the turn-local content parts the provider encoders read.
+  # A turn without attachments keeps its text byte-identical and has no parts.
+  defp with_attachments(msg, state, session_id, voice_call) do
+    attachments =
+      msg
+      |> Map.get(:inbound_attachments)
+      |> List.wrap()
+      |> keep_in_workspace(msg, state, session_id, voice_call)
 
-    case Map.get(msg, :media_parts) || [] do
-      [] -> base
-      parts -> Map.put(base, :image_parts, parts)
+    {%{msg | content: Manifest.compose(msg.content, attachments)}, Attachments.parts(attachments)}
+  end
+
+  # D1: an owner's chat turn keeps its attachments in the workspace, so a later
+  # turn can open them. A guest's turn keeps nothing (the owner's workspace is
+  # not a guest's locker), nor does a Live hand-off, whose screen frame is never
+  # persisted. `turn_state.sandbox_config` names the sandbox, else the live one.
+  defp keep_in_workspace([], _msg, _state, _session_id, _voice_call), do: []
+
+  defp keep_in_workspace(attachments, msg, state, session_id, :none) do
+    case profile_trust(Map.get(msg, :source_trust)) do
+      :operator ->
+        Workspace.save(attachments, sandbox_context(state),
+          channel: msg.channel,
+          session_id: session_id
+        )
+
+      :guest ->
+        attachments
     end
   end
 
+  defp keep_in_workspace(attachments, _msg, _state, _session_id, {:ok, _voice_call}),
+    do: attachments
+
+  defp sandbox_context(%{sandbox_config: config}) when not is_nil(config),
+    do: %{sandbox_config: config}
+
+  defp sandbox_context(_state), do: %{}
+
+  # Build the user turn. Text-only stays a bare `%{role, content}` map —
+  # byte-identical to the pre-multimodal shape (no `:parts` key), so
+  # accounting, compaction, persistence, and the provider prompt cache are
+  # untouched. Inbound pictures and PDFs ride a transient `:parts` list the
+  # provider encoder reads; they are never persisted.
+  defp build_user_message(msg, []), do: %{role: "user", content: msg.content}
+  defp build_user_message(msg, parts), do: %{role: "user", content: msg.content, parts: parts}
+
   defp run_message_loop(msg, state, deliver, stream_callback, activity_callback) do
     start = System.monotonic_time(:millisecond)
+    # `:none` on every non-voice turn, which is what keeps each voice seam below
+    # a one-sided read rather than a branch in the shared turn path (M41 §7).
+    voice_call = VoiceCall.from_message(msg)
+    session_id = session_id(voice_call)
+    {msg, parts} = with_attachments(msg, state, session_id, voice_call)
     conversation_key = ConversationKey.from(msg)
     %RuntimeContext{} = ctx = state.runtime_context
     cache_status = Map.get(msg, :__runtime_context_cache_status, :hit)
     source_trust = Map.get(msg, :source_trust)
-    # `:none` on every non-voice turn, which is what keeps each voice seam below
-    # a one-sided read rather than a branch in the shared turn path (M41 §7).
-    voice_call = VoiceCall.from_message(msg)
     # Computed BEFORE the profile is selected (MILESTONE_29 §17.6(b)): the
     # harness surface is decided by one input per turn, and both consumers of
     # that decision — this selection and each tool's `advertise?/1`, which reads
@@ -439,7 +498,7 @@ defmodule FermixCore.Agents.TurnRunner do
         ConversationStore.get_history(conversation_key, server: state.conversation_store)
       end)
 
-    user_message = build_user_message(msg)
+    user_message = build_user_message(msg, parts)
 
     {history, preflight_compaction} =
       maybe_preflight_auto_compact(conversation_key, state, history)
@@ -474,7 +533,7 @@ defmodule FermixCore.Agents.TurnRunner do
       # call id, which is what nests the turn's provider spans under the
       # `voice_live` root (M41 §9). `nil` on every other turn, so the loop's
       # adapter opts are byte-identical to before.
-      session_id: session_id(voice_call),
+      session_id: session_id,
       parent_session: parent_session(voice_call),
       capability_registry: state.capability_registry,
       provider: state.provider,
@@ -561,9 +620,9 @@ defmodule FermixCore.Agents.TurnRunner do
       # Plain data, never the channel module — the `react` tool reads it to gate
       # its own advertisement and build the emoji enum (EMOJI_REACTION_ACKS §5.4).
       reaction_spec: Map.get(msg, :reaction_spec),
-      # This-turn inbound channel images (M14), so `generate_image` edit can
-      # reference `inbound:last`. Transient like `:image_parts`, never persisted.
-      inbound_images: Map.get(msg, :media_parts) || []
+      # This-turn inbound channel pictures (M14), so `generate_image` edit can
+      # reference `inbound:last`. Transient like `:parts`, never persisted.
+      inbound_images: Enum.filter(parts, &match?(%{type: :image}, &1))
     }
 
     # The composed prompt + runtime section are cached per profile, so neither
@@ -1194,10 +1253,10 @@ defmodule FermixCore.Agents.TurnRunner do
          context_tokens
        ) do
     {_adapter, [{lead_key, _lead_opts} | _rest]} = target = compaction_target(state)
-    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
 
-    if context_tokens / context_window >= threshold do
+    if context_tokens >=
+         ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
       compact_preflight_history(conversation_key, history, state, target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
@@ -1272,10 +1331,10 @@ defmodule FermixCore.Agents.TurnRunner do
 
   defp maybe_auto_compact_now(conversation_key, state, compaction_target, config, context_tokens) do
     {_adapter, [{lead_key, _lead_opts} | _rest]} = compaction_target
-    context_window = ModelCatalog.context_window_for(lead_key.provider, lead_key.model)
     threshold = CompactionConfig.threshold(config)
 
-    if context_tokens / context_window >= threshold do
+    if context_tokens >=
+         ModelCatalog.compact_at_tokens_for(lead_key.provider, lead_key.model, threshold) do
       compact_when_over_threshold(conversation_key, state, compaction_target, config)
     else
       emit_auto_compaction_skipped(conversation_key, :under_threshold)
@@ -1361,7 +1420,7 @@ defmodule FermixCore.Agents.TurnRunner do
         Compactor.compact(history,
           enabled: true,
           token_budget:
-            trunc(0.5 * ModelCatalog.context_window_for(route_key.provider, route_key.model)),
+            trunc(0.5 * ModelCatalog.context_budget_for(route_key.provider, route_key.model)),
           route: {route_key, compaction_adapter_opts(adapter_opts, config)},
           adapter: adapter || route_adapter,
           context: compaction_context(conversation_key, state)

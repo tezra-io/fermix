@@ -25,13 +25,35 @@ defmodule FermixChannels.TelemetryTest do
     :ok
   end
 
-  test "pair events expose only the bounded terminal status" do
+  # M51 §14: the pair event carries the platform, the attestation's outcome
+  # and the signer role, all atoms, and never a chain, a key or a name.
+  test "pair events expose only the bounded terminal status and attestation facts" do
+    facts = %{platform: :android, attestation: :verified, signer_role: :development}
+
     for status <- [:approved, :denied, :expired, :cancelled, :device_disconnected] do
-      assert :ok = Telemetry.emit_pair(:mobile, status, 17)
+      assert :ok = Telemetry.emit_pair(:mobile, status, 17, facts)
 
       assert_receive {:mobile_channel_telemetry, @pair_event, %{count: 1, duration_us: 17},
-                      %{channel: :mobile, status: ^status}}
+                      metadata}
+
+      assert metadata == Map.merge(%{channel: :mobile, status: status}, facts)
     end
+
+    for {status, attestation} <- [
+          attestation: :refused,
+          platform_unsupported: :refused,
+          attestation_unavailable: :unavailable
+        ] do
+      refused = %{platform: :ios, attestation: attestation, signer_role: nil}
+      assert :ok = Telemetry.emit_pair(:mobile, status, 3, refused)
+
+      assert_receive {:mobile_channel_telemetry, @pair_event, %{count: 1, duration_us: 3},
+                      %{status: ^status, attestation: ^attestation, signer_role: nil}}
+    end
+
+    nobody = %{platform: nil, attestation: nil, signer_role: nil}
+    assert :ok = Telemetry.emit_pair(:mobile, :expired, 5, nobody)
+    assert_receive {:mobile_channel_telemetry, @pair_event, _measurements, %{platform: nil}}
   end
 
   test "push events expose only the bounded delivery status" do
@@ -44,10 +66,24 @@ defmodule FermixChannels.TelemetryTest do
   end
 
   test "unsupported statuses and negative durations fail loud" do
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :failed, 1) end
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :rate_limited, 1) end
+    facts = %{platform: :android, attestation: :verified, signer_role: :release}
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :failed, 1, facts) end
+
+    assert_raise FunctionClauseError, fn ->
+      Telemetry.emit_pair(:mobile, :rate_limited, 1, facts)
+    end
+
+    for bad <- [
+          %{facts | platform: "android"},
+          %{facts | attestation: :maybe},
+          %{facts | signer_role: "release"},
+          Map.put(facts, :chain, <<1, 2>>)
+        ] do
+      assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, 1, bad) end
+    end
+
     assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :skipped, 1) end
-    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, -1) end
+    assert_raise FunctionClauseError, fn -> Telemetry.emit_pair(:mobile, :approved, -1, facts) end
     assert_raise FunctionClauseError, fn -> Telemetry.emit_push(:mobile, :sent, -1) end
   end
 

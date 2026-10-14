@@ -380,11 +380,27 @@ defmodule FermixChannels.Companion.Requests do
   defp resolve_attachments(%{type: "msg", payload: payload} = event, opts) do
     ids = Map.get(payload, "attach_ids", [])
 
-    with {:ok, attachments} <- fetch_attachments(ids, opts) do
+    with {:ok, attachments} <- fetch_attachments(ids, opts),
+         {posters, attachments} = Enum.split_with(attachments, &poster?/1),
+         :ok <- posters_paired(posters, attachments) do
       refs = Enum.map(attachments, &timeline_ref/1)
-      payload = Map.put(payload, "attachments", Enum.map(attachments, &gateway_attachment/1))
-      {:ok, %{event | payload: payload}, refs}
+      declared = Enum.map(attachments, &gateway_attachment(&1, posters))
+      {:ok, %{event | payload: Map.put(payload, "attachments", declared)}, refs}
     end
+  end
+
+  # A still uploaded with `poster_of` is the poster frame of the video it names
+  # in the same message, not an attachment of its own (M67).
+  defp poster?(attachment), do: is_binary(value(attachment, :poster_of))
+
+  # A poster naming no attachment of this message would be dropped unseen, so
+  # the message is refused instead.
+  defp posters_paired(posters, attachments) do
+    ids = MapSet.new(attachments, &value(&1, :attach_id))
+
+    if Enum.all?(posters, &MapSet.member?(ids, value(&1, :poster_of))),
+      do: :ok,
+      else: {:error, {:invalid_field, "poster_of"}}
   end
 
   defp fetch_attachments(ids, opts) when is_list(ids) do
@@ -653,12 +669,28 @@ defmodule FermixChannels.Companion.Requests do
 
   defp timeline_messages(page), do: {:error, {:invalid_history_page, page}}
 
-  defp gateway_attachment(attachment) do
+  # The phone declares; the gateway's attachment pipeline names the kind from
+  # the bytes and treats the phone's `kind` as a hint (M67).
+  defp gateway_attachment(attachment, posters) do
+    attach_id = value(attachment, :attach_id)
+
     %{
-      file_id: value(attachment, :attach_id),
-      kind: attachment |> value(:kind) |> normalize_kind(),
+      file_id: attach_id,
+      hint: attachment |> value(:kind) |> hint(),
       mime_type: value(attachment, :mime_type),
-      size_bytes: value(attachment, :size_bytes)
+      size_bytes: value(attachment, :size_bytes),
+      file_name: value(attachment, :file_name),
+      poster: posters |> Enum.find(&(value(&1, :poster_of) == attach_id)) |> poster()
+    }
+  end
+
+  defp poster(nil), do: nil
+
+  defp poster(still) do
+    %{
+      file_id: value(still, :attach_id),
+      mime_type: value(still, :mime_type),
+      size_bytes: value(still, :size_bytes)
     }
   end
 
@@ -672,10 +704,13 @@ defmodule FermixChannels.Companion.Requests do
     |> maybe_put("filename", value(attachment, :file_name))
   end
 
-  defp normalize_kind(kind) when kind in ["image", :image], do: :image
-  defp normalize_kind(kind) when kind in ["audio", :audio], do: :audio
-  defp normalize_kind(kind) when is_atom(kind), do: kind
-  defp normalize_kind(_kind), do: :document
+  defp hint(kind) when is_atom(kind) and not is_nil(kind), do: kind |> Atom.to_string() |> hint()
+  defp hint("image"), do: :photo
+  defp hint("animation"), do: :animation
+  defp hint("video"), do: :video
+  defp hint("audio"), do: :audio
+  defp hint(kind) when kind in ["document", "file"], do: :document
+  defp hint(_unknown), do: nil
 
   defp emit(opts, target, event), do: Keyword.fetch!(opts, :event_sink).(target, event)
 

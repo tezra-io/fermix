@@ -645,7 +645,8 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
       inbox = Path.join([ctx.home, "imessage", "inbox", "IMG-GUID"])
       File.mkdir_p!(inbox)
       image = Path.join(inbox, "0-photo.png")
-      File.write!(image, "png-bytes")
+      png = FermixTestSupport.AttachmentFixtures.png()
+      File.write!(image, png)
 
       FakeHelper.script(
         ctx.fake,
@@ -668,7 +669,17 @@ defmodule FermixChannels.Channels.IMessage.ListenerTest do
       )
 
       assert_receive {:agent_message,
-                      %{content: "look", media_parts: [%{type: :image, data: "png-bytes"}]}}
+                      %{
+                        content: "look",
+                        inbound_attachments: [
+                          %FermixCore.Attachments{
+                            kind: :still,
+                            name: "photo.png",
+                            bytes: ^png,
+                            status: :ready
+                          }
+                        ]
+                      }}
 
       refute File.exists?(image)
     end

@@ -7,7 +7,9 @@ defmodule FermixCore.Providers.XAI.Responses do
   adapters via `OpenAI.ResponsesShared`; telemetry and structured errors
   say `:xai`, never `:openai`. xAI-specific shaping (design doc §6):
 
-    * `store: false` and `parallel_tool_calls: true` on every request.
+    * `store: false` and `parallel_tool_calls: true` on every request, so
+      every continuation step re-sends the `instructions` the turn started
+      with (nothing is kept server-side).
     * Reasoning effort `none|low|medium|high|xhigh` via `ReasoningEffort`
       (above-ceiling clamps to `xhigh`, and to the model's own ceiling
       where the catalog sets a lower one — every Grok but 4.6 tops out at
@@ -80,6 +82,7 @@ defmodule FermixCore.Providers.XAI.Responses do
     model = Keyword.fetch!(opts, :model)
 
     %{
+      instructions: instructions,
       input: prior_input,
       output_items: output_items,
       tools: tools,
@@ -94,10 +97,19 @@ defmodule FermixCore.Providers.XAI.Responses do
       ResponsesShared.substitute_tool_results(prior_input, substitutions) ++
         output_items ++ outputs
 
-    body = build_body(model, next_input, nil, tools, opts)
+    body = build_body(model, next_input, instructions, tools, opts)
 
     turn_state =
-      turn_state(model, auth, next_input, nil, tools, capabilities, invariant_metrics, opts)
+      turn_state(
+        model,
+        auth,
+        next_input,
+        instructions,
+        tools,
+        capabilities,
+        invariant_metrics,
+        opts
+      )
 
     post(base_url(opts), auth, body, req_options, turn_state)
   end
@@ -181,6 +193,7 @@ defmodule FermixCore.Providers.XAI.Responses do
     %{
       model: model,
       auth_mode: auth_mode(auth),
+      instructions: instructions,
       input: input,
       tools: tools,
       capabilities: capabilities,
@@ -310,14 +323,21 @@ defmodule FermixCore.Providers.XAI.Responses do
 
   defp handle_response({:ok, %Req.Response{status: 200, body: body}}, turn_state)
        when is_map(body) do
-    ResponsesShared.build_turn(
-      body,
-      turn_state.model,
-      turn_state.input,
-      turn_state.tools,
-      turn_state.capabilities,
-      turn_state.invariant_metrics
-    )
+    {:ok, turn} =
+      ResponsesShared.build_turn(
+        body,
+        turn_state.model,
+        turn_state.input,
+        turn_state.tools,
+        turn_state.capabilities,
+        turn_state.invariant_metrics
+      )
+
+    {:ok,
+     %{
+       turn
+       | provider_state: Map.put(turn.provider_state, :instructions, turn_state.instructions)
+     }}
   end
 
   defp handle_response({:ok, %Req.Response{status: status, body: body}}, _turn_state) do

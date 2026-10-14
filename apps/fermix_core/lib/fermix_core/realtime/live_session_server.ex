@@ -92,6 +92,11 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   # How long after its audio has had time to play a reply counts as over: the
   # pet buffers a little before it plays.
   @reply_margin_ms 300
+  # The microphone held while the provider session starts: ten seconds of
+  # 24 kHz PCM16, more than a slow connect and the start deadline together, so
+  # a start that succeeds loses none of the first words, and a bound on what a
+  # start that hangs can hold before the deadline ends the call.
+  @max_held_audio_bytes 480_000
 
   # How far back a delegation's request reads. Long enough for a correction and
   # a confirmation, short enough that an unrelated earlier topic cannot be
@@ -308,6 +313,10 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       turn_sessions: %{},
       last_activity_ms: %{},
       pending_appends: [],
+      # The microphone from `listening` until the provider session is up,
+      # newest first, and its size (`@max_held_audio_bytes`).
+      held_audio: [],
+      held_audio_bytes: 0,
       # What `session.start` carried, `nil` until it is sent: kept so a start
       # the provider refused over its input can be sent once more without it.
       start: nil,
@@ -421,14 +430,16 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   def handle_cast({:chat, event}, state), do: {:noreply, mirror_chat(state, event)}
 
   def handle_cast({:audio_chunk, audio}, state) do
-    case audio_drop_reason(state, audio) do
-      nil ->
+    case audio_route(state, audio) do
+      :send ->
         state = send_provider(state, OpenAILiveClient.audio_append_event(audio))
         {:noreply, advance_operator_turn(state)}
 
-      reason ->
-        Logger.debug("voice_live: dropped microphone chunk (#{reason})")
-        {:noreply, state}
+      :hold ->
+        {:noreply, hold_audio(state, audio)}
+
+      {:drop, reason} ->
+        {:noreply, drop_audio(state, reason)}
     end
   end
 
@@ -541,6 +552,8 @@ defmodule FermixCore.Realtime.LiveSessionServer do
   ## Call start
 
   defp start_call(state) do
+    state = listen_while_starting(state)
+
     with {:ok, bridge} <- resolve_bridge(state),
          {:ok, instructions} <- resolve_prompt(state),
          {:ok, {input, input_tainted?}} <- resolve_input(state, bridge),
@@ -553,6 +566,15 @@ defmodule FermixCore.Realtime.LiveSessionServer do
       {:error, reason} -> {:error, reason, notify_error(state, reason)}
     end
   end
+
+  # The person may speak from the moment the call is accepted: what they say is
+  # held until the provider session is up and then passed on in order
+  # (`release_held_audio/1`). The start behind it, the call's context, the
+  # connect and the provider's session start, is over a second, so the pet
+  # listens as soon as its microphone is up rather than after all of it. A
+  # start that fails says so with an error frame, a local failure within
+  # moments.
+  defp listen_while_starting(state), do: notify_state(state, "listening")
 
   # The provider answered the handshake with a refusal — a 401 for a stale or
   # wrong key is the common one. Its own sentence is the only diagnosis anyone
@@ -658,7 +680,7 @@ defmodule FermixCore.Realtime.LiveSessionServer do
           |> start_timers()
           |> sync_mute()
           |> notify_call_ready()
-          |> notify_state("listening")
+          |> release_held_audio()
 
         {:noreply, state}
 
@@ -1734,13 +1756,47 @@ defmodule FermixCore.Realtime.LiveSessionServer do
     end
   end
 
-  defp audio_drop_reason(%{provider_ready?: false}, _audio), do: :provider_not_ready
-  defp audio_drop_reason(%{muted?: true}, _audio), do: :muted
+  # A chunk goes to the provider once its session is up, is held while the
+  # session starts (the socket is open and `session.start` sent), and is
+  # dropped otherwise.
+  defp audio_route(%{muted?: true}, _audio), do: {:drop, :muted}
 
-  defp audio_drop_reason(_state, audio) when rem(byte_size(audio), 2) != 0,
-    do: :odd_pcm16_frame
+  defp audio_route(_state, audio) when rem(byte_size(audio), 2) != 0,
+    do: {:drop, :odd_pcm16_frame}
 
-  defp audio_drop_reason(_state, _audio), do: nil
+  defp audio_route(%{provider_ready?: true}, _audio), do: :send
+
+  defp audio_route(%{live_pid: pid, closing?: false}, _audio) when is_pid(pid), do: :hold
+
+  defp audio_route(_state, _audio), do: {:drop, :provider_not_ready}
+
+  defp hold_audio(state, audio) do
+    held = state.held_audio_bytes + byte_size(audio)
+
+    if held > @max_held_audio_bytes do
+      drop_audio(state, :held_audio_full)
+    else
+      %{state | held_audio: [audio | state.held_audio], held_audio_bytes: held}
+    end
+  end
+
+  defp drop_audio(state, reason) do
+    Logger.debug("voice_live: dropped microphone chunk (#{reason})")
+    state
+  end
+
+  # The provider session is up: what the person said while it started goes to
+  # it first, oldest first, and the turn reads it as it reads any speech.
+  defp release_held_audio(%{held_audio: []} = state), do: state
+
+  defp release_held_audio(state) do
+    state =
+      state.held_audio
+      |> Enum.reverse()
+      |> Enum.reduce(state, &send_provider(&2, OpenAILiveClient.audio_append_event(&1)))
+
+    advance_operator_turn(%{state | held_audio: [], held_audio_bytes: 0})
+  end
 
   ## The call record
 

@@ -8,7 +8,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   decoded payload and never reconstructed from client-controlled JSON, and it
   supplies what only the phone has: attribution of each claim to its device,
   replies addressed to that device, link previews after a user row is written,
-  and a push once a request settles without a turn.
+  and, once a request settles without a turn, the ending of the turn its
+  `accepted` opened on the phones, and a push.
   """
 
   alias FermixChannels.Channels.Mobile
@@ -22,6 +23,8 @@ defmodule FermixChannels.Mobile.EventRouter do
   # A page above the 4 KiB header travels as continuation frames; this bounds
   # the one event they carry.
   @max_page_bytes 256 * 1_024
+  # The one profile (`PROTOCOL.md`); `request_status` names none.
+  @profile "main"
 
   @type ingress_context :: %{
           required(:transport) => :mobile,
@@ -52,14 +55,24 @@ defmodule FermixChannels.Mobile.EventRouter do
     Requests.request(event, transport, opts)
   end
 
-  defp dispatch(%{type: "history_pull", payload: payload}, transport, opts),
-    do: Requests.history(payload, transport, opts)
+  defp dispatch(%{type: "history_pull", payload: payload}, transport, opts) do
+    sink = Keyword.fetch!(opts, :event_sink)
+    shaped = fn target, page -> sink.(target, mobile_page(page, payload)) end
+    Requests.history(payload, transport, Keyword.put(opts, :event_sink, shaped))
+  end
 
   defp dispatch(%{type: "read_state", payload: payload}, _transport, opts),
     do: Requests.read_state(payload, opts)
 
   defp dispatch(%{type: "cancel", payload: payload}, _transport, opts),
     do: Requests.cancel(payload, opts)
+
+  defp dispatch(%{type: "request_status", payload: %{"client_msg_ids" => ids}}, transport, opts) do
+    with {:ok, requests} <- request_outcomes(ids, opts) do
+      page = %{"t" => "request_status_page", "requests" => requests}
+      Keyword.fetch!(opts, :event_sink).(transport.reply_to, page)
+    end
+  end
 
   defp dispatch(%{type: "ping"}, transport, opts) do
     Keyword.fetch!(opts, :event_sink).(transport.reply_to, %{"t" => "pong"})
@@ -69,6 +82,54 @@ defmodule FermixChannels.Mobile.EventRouter do
     do: {:error, {:unsupported_event, type}}
 
   defp dispatch(_event, _transport, _opts), do: {:error, :invalid_event}
+
+  # A page on this wire (mobile protocol 2) always carries `next_after_seq`,
+  # and a backward one names its cursor `prev_before_seq`: the oldest row
+  # sent, when an older row exists. A backward page's `next_after_seq` is
+  # its newest row, or the row just before `before_seq` when it is empty.
+  defp mobile_page(%{"t" => "history_page"} = page, %{"before_seq" => before_seq}) do
+    {older, page} = Map.pop(page, "next_before_seq")
+
+    page
+    |> Map.put("next_after_seq", newest_seq(page["messages"], before_seq - 1))
+    |> maybe_put("prev_before_seq", older)
+  end
+
+  defp mobile_page(page, _payload), do: page
+
+  defp newest_seq([], empty), do: empty
+  defp newest_seq(messages, _empty), do: List.last(messages)["server_seq"]
+
+  # How each request a reconnecting phone asks after stands, read from its
+  # durable claim, in the order asked. An id the daemon never claimed (or
+  # whose claim expired) is left out.
+  defp request_outcomes(ids, opts) do
+    ids
+    |> Enum.reduce_while({:ok, []}, fn id, {:ok, outcomes} ->
+      case store(opts).get_client_request(@profile, id, Keyword.get(opts, :store_opts, [])) do
+        {:ok, request} -> {:cont, {:ok, [request_outcome(request) | outcomes]}}
+        {:error, :not_found} -> {:cont, {:ok, outcomes}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> then(fn
+      {:ok, outcomes} -> {:ok, Enum.reverse(outcomes)}
+      {:error, reason} -> {:error, reason}
+    end)
+  end
+
+  defp request_outcome(request) do
+    %{"client_msg_id" => request.client_msg_id, "status" => request.status}
+    |> maybe_put("turn_id", request.turn_id)
+    |> maybe_put("result_server_seq", request.result_server_seq)
+    |> maybe_put("error", failure_code(request))
+  end
+
+  # A failed request's word, as its turn's `turn_error` would have carried
+  # it: `cancelled` when it was stopped, `request_failed` otherwise.
+  defp failure_code(%{status: "failed", cancelled_at: %DateTime{}}), do: "cancelled"
+  defp failure_code(%{status: "failed"}), do: "request_failed"
+  defp failure_code(_request), do: nil
 
   defp transport(device_id, context, opts) do
     reply_to = {:device, device_id}
@@ -88,7 +149,7 @@ defmodule FermixChannels.Mobile.EventRouter do
       attempt_key: :mobile_attempt,
       max_page_bytes: @max_page_bytes,
       after_user_append: &after_user_append/4,
-      after_settle: &schedule_settled_push/3
+      after_settle: &after_settle/3
     }
   end
 
@@ -112,6 +173,24 @@ defmodule FermixChannels.Mobile.EventRouter do
       store_opts: Keyword.get(opts, :store_opts, [])
     )
   end
+
+  # A request settled here rather than by a turn (an inline answer, a deferred
+  # command's end) streamed nothing that ends the turn its `accepted` opened
+  # on the phones, so a completed one ends it with `turn_done` (mobile
+  # protocol 2), on every phone, as its reply reached them. A failed one is
+  # left to the phone's `request_status`.
+  defp after_settle(profile, request, opts) do
+    with :ok <- end_phone_turn(profile, request, opts) do
+      schedule_settled_push(profile, request, opts)
+    end
+  end
+
+  defp end_phone_turn(profile, %{status: "completed", client_msg_id: client_id}, opts) do
+    event = Output.turn_done(Mobile.request_turn_id(client_id))
+    Keyword.fetch!(opts, :event_sink).({:phones, profile}, event)
+  end
+
+  defp end_phone_turn(_profile, %{status: "failed"}, _opts), do: :ok
 
   defp schedule_settled_push(profile, request, opts) do
     case Map.get(request, :result_server_seq) do
@@ -137,6 +216,9 @@ defmodule FermixChannels.Mobile.EventRouter do
 
   defp emit_registered({:profile, profile}, event), do: Fanout.announce(profile, event)
 
+  defp emit_registered({:phones, profile}, event),
+    do: Fanout.announce(profile, event, audience: :mobile)
+
   defp authenticated_device(%{
          transport: :mobile,
          authenticated_device_id: device_id
@@ -147,4 +229,7 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp authenticated_device(_context), do: {:error, :unauthenticated_mobile_transport}
 
   defp store(opts), do: Keyword.get(opts, :store, Timeline)
+
+  defp maybe_put(map, _key, nil), do: map
+  defp maybe_put(map, key, value), do: Map.put(map, key, value)
 end

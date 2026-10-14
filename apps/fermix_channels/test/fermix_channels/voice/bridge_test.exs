@@ -380,14 +380,23 @@ defmodule FermixChannels.Voice.BridgeTest do
       Bridge.close_call(handle)
     end
 
-    test "a screen frame rides the turn as transient media", ctx do
+    test "a screen frame rides the turn as a transient picture", ctx do
       handle = open(ctx)
       frame = %{mime_type: "image/png", data: "bytes"}
 
       {:ok, _ref} = Bridge.submit(handle, request(%{screen_frame: frame}), callbacks())
 
       assert_receive {:turn_started, msg, _pid}, 5_000
-      assert msg.media_parts == [frame]
+
+      assert [
+               %FermixCore.Attachments{
+                 kind: :still,
+                 mime_type: "image/png",
+                 name: "screen frame",
+                 bytes: "bytes",
+                 status: :ready
+               }
+             ] = msg.inbound_attachments
 
       Bridge.close_call(handle)
     end

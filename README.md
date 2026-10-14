@@ -231,7 +231,7 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 - **Discord** — Gateway DM and app-mention ingress, REST replies.
 - **Signal** — `signal-cli` receive loop, subprocess send path.
 - **iMessage (Mac only)** — a signed helper app, Fermix Messages, reads and sends through Messages on the Mac Fermix runs on; it holds the Full Disk Access and Automation grants and the confirmed list of who Fermix may message. Direct iMessage conversations, plain-text replies.
-- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, advertised over Bonjour and reachable on a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is off by default and is managed over the management protocol: the `channels.mobile` settings section (enable, port, listen address, mDNS announcement; a change needs a restart) and the `mobile.*` pairing and paired-device methods that the desktop apps' Phone pane is built on. That pane ships with the apps; until then a dev or Linux host pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`, and hand-writing `enabled = true` under `[fermix_channels.mobile]` in `config.toml` and restarting the daemon remains a valid way to turn the channel on there. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
+- **Mobile (phone)** — daemon-side groundwork for a first-party phone companion: a dedicated Noise-encrypted listener on `:4031`, reachable over the LAN or a tailnet. One socket per paired device carries streaming replies, tool activity, chunked media, slash commands, and cursor-exact history sync. The channel is on by default (its listener starts once the first pairing begins; the mDNS announcement is off unless turned on) and is managed over the management protocol: the `channels.mobile` settings section (the enable switch applies at once; a port, listen address or mDNS announcement change needs a restart) and the `mobile.*` pairing and paired-device methods that the Mac app's Phone row is built on (it turns the channel on and pairs in one place; the Linux app has no Phone pane yet). A dev or Linux host pairs with `fermix pair`, which drives the same methods, and revokes with `fermix devices revoke`; where the channel is off (`enabled = false` under `[fermix_channels.mobile]`), `fermix pair` asks to turn it on first, with no restart. On an app-managed Mac, pairing happens in the app, never through the CLI. No phone app is released yet (the iPhone app ships in its own release, and an Android app is in design), so there is nothing to pair with today.
 - **CLI** — local stdin/stdout smoke path through the same dispatcher and `MainAgent`.
 
 ### HTTP endpoints
@@ -239,8 +239,9 @@ All channels normalize inbound messages and dispatch them through the same `Ferm
 | Method | Path | Purpose |
 |--------|------|---------|
 | `GET` | `/health/live` | Process liveness only |
-| `GET` | `/health/ready` | Structured readiness and runtime health |
+| `GET` | `/health/ready` | Readiness status alone (`status`, `app`, `version`, `timestamp`): 200 when ready, 503 otherwise; the full report is `fermix health --json` |
 | `GET` | `/health` | Backward-compatible alias of `/health/ready` |
+| `GET` | `/` | Runtime dashboard LiveView; needs the setup session, as `/setup` does |
 | `GET` | `/setup` | Shared setup/readiness LiveView |
 | `GET` | `/webhook/whatsapp` | WhatsApp verification challenge |
 | `POST` | `/webhook/whatsapp` | WhatsApp webhook ingress |
@@ -401,7 +402,7 @@ Observability:
 - Structured JSONL traces under `FERMIX_HOME/traces/YYYY-MM-DD/<type>.jsonl`
 - Rotating log file at `FERMIX_HOME/logs/fermix.log`
 - Telemetry events for provider calls, tool execution, channel ingress, and agent lifecycle
-- `/health/ready` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status
+- `fermix health --json` reports config paths, provider status, per-channel status, memory backend status, and Realtime voice status; `/health/ready` answers only the readiness status
 
 ## Develop
 

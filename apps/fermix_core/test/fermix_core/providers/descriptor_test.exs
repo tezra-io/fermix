@@ -126,4 +126,30 @@ defmodule FermixCore.Providers.DescriptorTest do
       end
     end
   end
+
+  describe "what a route takes inline (M67)" do
+    test "a PDF goes inline on Anthropic, OpenAI, OpenAI Codex, OpenRouter and Venice only" do
+      inline = for id <- Descriptor.ids(), Descriptor.documents?(id), do: id
+      assert inline == [:openai_codex, :openai, :anthropic, :openrouter, :venice]
+    end
+
+    test "SpaceXAI takes JPEG and PNG only; the OpenAI wires and Anthropic add WebP and GIF" do
+      assert Descriptor.image_format?(:xai, "image/png")
+      assert Descriptor.image_format?(:xai, "image/jpeg")
+      refute Descriptor.image_format?(:xai, "image/webp")
+      refute Descriptor.image_format?(:xai, "image/gif")
+
+      for id <- [:openai_codex, :openai, :anthropic], mime <- ~w(image/webp image/gif) do
+        assert Descriptor.image_format?(id, mime), "#{id} must take #{mime}"
+      end
+
+      refute Descriptor.image_format?(:anthropic, "image/heic")
+    end
+
+    test "a provider whose format depends on the model, and one outside the registry, are permissive" do
+      assert Descriptor.image_format?(:openrouter, "image/heic")
+      assert Descriptor.image_format?(:mock, "image/heic")
+      assert Descriptor.documents?(:mock)
+    end
+  end
 end

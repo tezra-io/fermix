@@ -43,7 +43,7 @@ defmodule FermixCore.Plugins.Dist.TreeDigestTest do
     end
 
     test "the fixture directory is present" do
-      assert @fixture_files != []
+      refute Enum.empty?(@fixture_files)
     end
 
     for file <- @fixture_files do

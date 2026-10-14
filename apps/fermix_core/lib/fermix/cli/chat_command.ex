@@ -5,13 +5,6 @@ defmodule Fermix.CLI.ChatCommand do
 
   alias Fermix.CLI.Daemon.Client
 
-  @image_mime %{
-    ".png" => "image/png",
-    ".jpg" => "image/jpeg",
-    ".jpeg" => "image/jpeg",
-    ".gif" => "image/gif",
-    ".webp" => "image/webp"
-  }
   @max_attach_bytes 20 * 1_024 * 1_024
 
   @spec run([String.t()]) :: non_neg_integer()
@@ -26,9 +19,9 @@ defmodule Fermix.CLI.ChatCommand do
   end
 
   defp run_with_opts(opts, words) do
-    with {:ok, images} <- images_from(opts),
-         {:ok, content} <- content_from(words, opts, images),
-         {:ok, reply} <- request_agent(content, images, opts) do
+    with {:ok, attachments} <- attachments_from(opts),
+         {:ok, content} <- content_from(words, opts, attachments),
+         {:ok, reply} <- request_agent(content, attachments, opts) do
       render_reply(reply, opts)
     else
       {:error, :usage} -> usage()
@@ -68,7 +61,7 @@ defmodule Fermix.CLI.ChatCommand do
   defp valid_timeout?(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0, do: true
   defp valid_timeout?(_timeout_ms), do: false
 
-  defp content_from(words, opts, images) do
+  defp content_from(words, opts, attachments) do
     content =
       cond do
         words != [] -> Enum.join(words, " ")
@@ -80,50 +73,41 @@ defmodule Fermix.CLI.ChatCommand do
 
     cond do
       content != "" -> {:ok, content}
-      # An image-only turn (no text) is valid when an attachment is present.
-      images != [] -> {:ok, ""}
+      # An attachment-only turn (no text) is valid when an attachment is present.
+      attachments != [] -> {:ok, ""}
       true -> {:error, :usage}
     end
   end
 
-  # Read each `--attach PATH` into a JSON-safe image payload (mime + base64).
-  # Fail loud on an unreadable path, an over-cap file, or a non-image extension.
-  defp images_from(opts) do
+  # Read each `--attach PATH` into a JSON-safe payload (file name + base64). Any
+  # file goes: the CLI declares, and the daemon's attachment pipeline names its
+  # kind from the bytes and caps it, as for any channel (M67). Fail loud on an
+  # unreadable path or an over-cap file.
+  defp attachments_from(opts) do
     opts
     |> Keyword.get_values(:attach)
     |> Enum.reduce_while({:ok, []}, fn path, {:ok, acc} ->
-      case read_image(path) do
-        {:ok, image} -> {:cont, {:ok, [image | acc]}}
+      case read_attachment(path) do
+        {:ok, attachment} -> {:cont, {:ok, [attachment | acc]}}
         {:error, reason} -> {:halt, {:error, reason}}
       end
     end)
     |> case do
-      {:ok, images} -> {:ok, Enum.reverse(images)}
+      {:ok, attachments} -> {:ok, Enum.reverse(attachments)}
       other -> other
     end
   end
 
-  defp read_image(path) do
-    with {:ok, mime} <- image_mime(path),
-         {:ok, %{size: size}} when size <= @max_attach_bytes <- File.stat(path),
+  defp read_attachment(path) do
+    with {:ok, %{size: size}} when size <= @max_attach_bytes <- File.stat(path),
          {:ok, bytes} <- File.read(path) do
-      {:ok, %{"mime_type" => mime, "data_base64" => Base.encode64(bytes)}}
+      {:ok, %{"file_name" => Path.basename(path), "data_base64" => Base.encode64(bytes)}}
     else
       {:ok, %{size: size}} ->
         {:error, "attachment #{path} is #{size} bytes; exceeds the #{@max_attach_bytes}-byte cap"}
 
-      {:error, :unsupported_attachment} ->
-        {:error, "unsupported attachment type: #{path} (expected .png/.jpg/.jpeg/.gif/.webp)"}
-
       {:error, reason} ->
         {:error, "cannot read attachment #{path}: #{inspect(reason)}"}
-    end
-  end
-
-  defp image_mime(path) do
-    case Map.fetch(@image_mime, path |> Path.extname() |> String.downcase()) do
-      {:ok, mime} -> {:ok, mime}
-      :error -> {:error, :unsupported_attachment}
     end
   end
 
@@ -134,19 +118,21 @@ defmodule Fermix.CLI.ChatCommand do
     end
   end
 
-  defp request_agent(content, images, opts) do
+  defp request_agent(content, attachments, opts) do
     timeout_ms = Keyword.get_lazy(opts, :timeout, &default_timeout_ms/0)
 
     params =
       %{"content" => content, "timeout_ms" => timeout_ms, "cwd" => File.cwd!()}
       |> maybe_put("session_id", Keyword.get(opts, :session))
-      |> maybe_put_images(images)
+      |> maybe_put_attachments(attachments)
 
     Client.agent_message(params, timeout: max(timeout_ms, 0) + 1_000)
   end
 
-  defp maybe_put_images(params, []), do: params
-  defp maybe_put_images(params, images), do: Map.put(params, "images", images)
+  defp maybe_put_attachments(params, []), do: params
+
+  defp maybe_put_attachments(params, attachments),
+    do: Map.put(params, "attachments", attachments)
 
   defp render_reply(%{"status" => "ok"} = reply, opts) do
     if Keyword.get(opts, :json, false) do
@@ -189,7 +175,8 @@ defmodule Fermix.CLI.ChatCommand do
            fermix chat [--session ID] [--timeout MS] [--json] [--attach PATH]... MESSAGE...
            fermix chat --stdin [--session ID] [--timeout MS] [--json] [--attach PATH]...
 
-    --attach PATH   attach a local image (.png/.jpg/.jpeg/.gif/.webp); repeatable
+    --attach PATH   attach a local file (a picture, GIF, video, PDF, text file or
+                    voice note; up to 20 MiB); repeatable
     """)
 
     2

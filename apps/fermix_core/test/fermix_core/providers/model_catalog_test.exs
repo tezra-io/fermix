@@ -64,17 +64,36 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
 
     # The plan route serves the public API's models, so a listed slug takes the
-    # openai catalog's window; a slug neither knows takes the unknown-model one.
-    test "an openai_codex slug takes the openai catalog's window" do
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-6.1-sol") ==
-               ModelCatalog.context_window_for(:openai, "gpt-6.1-sol")
+    # openai catalog's facts; a slug neither knows takes the unknown-model window.
+    test "an openai_codex slug takes the openai catalog's facts" do
+      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6-luna) do
+        assert ModelCatalog.context_window_for(:openai_codex, model) == 1_050_000
+      end
 
-      assert ModelCatalog.context_window_for(:openai_codex, "gpt-5.5") ==
-               ModelCatalog.context_window_for(:openai, "gpt-5.5")
+      for model <- ~w(gpt-5.6-sol gpt-5.6-terra gpt-5.6-luna gpt-5.5 gpt-5.4 gpt-5.4-mini) do
+        assert ModelCatalog.context_window_for(:openai_codex, model) ==
+                 ModelCatalog.context_window_for(:openai, model)
+
+        assert ModelCatalog.compaction_ceiling_for(:openai_codex, model) == nil
+      end
 
       assert ModelCatalog.context_window_for(:openai_codex, "gpt-plan-unlisted",
                unknown_model_telemetry: false
              ) == 100_000
+
+      assert ModelCatalog.compaction_ceiling_for(:openai_codex, "gpt-plan-unlisted") == nil
+    end
+
+    # A ChatGPT plan has usage limits, not the API's 272k repricing, so a GPT-6
+    # conversation on Codex compacts at 500k; the direct API keeps its calibration.
+    test "a GPT-6 conversation on openai_codex compacts at 500k" do
+      for model <- ~w(gpt-6-astra gpt-6.1-sol gpt-6-luna), threshold <- [0.85, 0.95, 1.0] do
+        assert ModelCatalog.compact_at_tokens_for(:openai_codex, model, threshold) == 500_000
+        assert ModelCatalog.context_budget_for(:openai_codex, model) == 500_000
+        assert ModelCatalog.compact_at_tokens_for(:openai, model, 0.85) == 272_000
+      end
+
+      assert ModelCatalog.compact_at_tokens_for(:openai_codex, "gpt-5.6-sol", 0.85) == 231_200
     end
 
     test "the openai catalog's facts never make an openai_codex slug a known model" do
@@ -172,14 +191,13 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-sol") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-terra") == 272_000
       assert ModelCatalog.context_window_for(:openai, "gpt-5.6-luna") == 272_000
-      # Anthropic 4.6+ ships 1M by default at standard pricing; only Haiku is 200k.
-      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-4-6") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-sonnet-5-5") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-fable-5-1") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-opus-5-5") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-opus-5") == 1_000_000
-      assert ModelCatalog.context_window_for(:anthropic, "claude-opus-4-8") == 1_000_000
+      # Claude 4.6+ and Haiku 5.5 take 1M tokens; Haiku 4.5 is 200k. The
+      # cost line rides `compaction_ceiling`, not the window.
+      for model <- ~w(claude-sonnet-4-6 claude-sonnet-5-5 claude-fable-5 claude-fable-5-1
+                      claude-opus-5-5 claude-opus-5 claude-opus-4-8 claude-haiku-5-5) do
+        assert ModelCatalog.context_window_for(:anthropic, model) == 1_000_000
+      end
+
       assert ModelCatalog.context_window_for(:anthropic, "claude-haiku-4-5") == 200_000
       # xAI: Grok 4.7 = 500k, Grok 4.6 = 500k, Grok 4.5 = 500k, Grok 4.3 = 1M, Grok 4.20 = 1M.
       # A newer generation is not a bigger window here — 4.6/4.5 are half of 4.3.
@@ -237,6 +255,55 @@ defmodule FermixCore.Providers.ModelCatalogTest do
     end
   end
 
+  describe "compaction ceilings" do
+    @claude_1m ~w(claude-sonnet-4-6 claude-sonnet-5-5 claude-fable-5 claude-fable-5-1
+                  claude-opus-5-5 claude-opus-5 claude-opus-4-8)
+    @openrouter_claude ~w(anthropic/claude-sonnet-4.6 anthropic/claude-sonnet-5.5
+                          anthropic/claude-fable-5.1 anthropic/claude-fable-5
+                          anthropic/claude-opus-5.5 anthropic/claude-opus-4.8)
+
+    test "a 1M Claude model compacts at 200k whatever the threshold" do
+      for model <- @claude_1m, threshold <- [0.5, 0.7, 0.85, 0.95, 1.0] do
+        assert ModelCatalog.compact_at_tokens_for(:anthropic, model, threshold) == 200_000
+      end
+
+      for model <- @openrouter_claude do
+        assert ModelCatalog.compact_at_tokens_for(:openrouter, model, 0.85) == 200_000
+      end
+    end
+
+    test "a threshold below the ceiling still compacts earlier" do
+      assert ModelCatalog.compact_at_tokens_for(:anthropic, "claude-opus-5-5", 0.1) == 100_000
+    end
+
+    # Above 100,000 prompt tokens Haiku 5.5 bills input and output at 5x.
+    test "Haiku 5.5 compacts at its 100k price line" do
+      assert ModelCatalog.compact_at_tokens_for(:anthropic, "claude-haiku-5-5", 0.85) == 100_000
+      assert ModelCatalog.context_budget_for(:anthropic, "claude-haiku-5-5") == 100_000
+    end
+
+    test "a model without a ceiling compacts at the threshold of its window" do
+      assert ModelCatalog.compaction_ceiling_for(:anthropic, "claude-haiku-4-5") == nil
+      assert ModelCatalog.compact_at_tokens_for(:anthropic, "claude-haiku-4-5", 0.85) == 170_000
+      assert ModelCatalog.compact_at_tokens_for(:openai, "gpt-6-astra", 0.85) == 272_000
+      assert ModelCatalog.compact_at_tokens_for(:openai, "gpt-6-astra", 0.95) == 304_000
+    end
+
+    test "the context budget is the window, or the ceiling when lower" do
+      for model <- @claude_1m do
+        assert ModelCatalog.compaction_ceiling_for(:anthropic, model) == 200_000
+        assert ModelCatalog.context_budget_for(:anthropic, model) == 200_000
+      end
+
+      assert ModelCatalog.context_budget_for(:anthropic, "claude-haiku-4-5") == 200_000
+      assert ModelCatalog.context_budget_for(:openai, "gpt-6-astra") == 320_000
+    end
+
+    test "an unknown model has no ceiling" do
+      assert ModelCatalog.compaction_ceiling_for(:anthropic, "claude-custom") == nil
+    end
+  end
+
   describe "max_output_tokens_for/2" do
     test "returns cataloged output ceilings for Anthropic models" do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-sonnet-4-6") == 64_000
@@ -246,6 +313,7 @@ defmodule FermixCore.Providers.ModelCatalogTest do
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-opus-4-8") == 128_000
+      assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-5-5") == 128_000
       assert ModelCatalog.max_output_tokens_for(:anthropic, "claude-haiku-4-5") == 64_000
     end
 

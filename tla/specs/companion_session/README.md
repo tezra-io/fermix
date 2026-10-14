@@ -126,7 +126,9 @@ answers however busy it is, so the model folds the Queue's stop into that
   queue's checkout (`MainAgent.turn_state` -> `Voice.Bridge.chat_call` ->
   `Companion.every_client_reads?`): only a turn this socket's transport runs,
   while every client joined then declared version 2. A phone turn in the chat
-  (M56 D9) is never offered it: the phone's wire has no such ending. Each
+  (M56 D9) is never offered it: the phone's channel writes a reply as it
+  comes, so there is no held reply to drop (`Voice.Bridge.chat_call` offers it
+  to the companion channel alone). Each
   client's version is fixed for the run (`V1Clients`), and the clients joined
   at the start are kept as the turn's watchers.
 - Every writer gets `server_seq` from the per-profile counter inside the
@@ -208,8 +210,8 @@ the checks that show a rule needs it):
 - `CancelMarksRequest`: a cancel is recorded on its request first
   (`Requests.cancel`, `requests.ex:157-173`; `cancel_request`,
   `mobile_sql.ex:546-565`). `Turns` reads the mark and enqueues in one step
-  (`hand_off`, `turns.ex:328-343`), and sends every stop of a turn it handed
-  off itself, after the enqueue (`turns.ex:242-246`, `stop_in_queue`,
+  (`hand_off`, `turns.ex:330-345`), and sends every stop of a turn it handed
+  off itself, after the enqueue (`turns.ex:244-248`, `stop_in_queue`,
   `:449-460`). `FALSE` is the code before 431d5663: the Connection called
   `Queue.stop_turn` directly.
 - `OutcomeEndsTurn`: a turn ends on the wire only from the Queue's outcome, in
@@ -220,12 +222,12 @@ the checks that show a rule needs it):
   answered without a turn stayed `running`, and the next boot ran it again.
 - `SettleUnlessHandedOff`: `Turns` settles that request only if no turn was
   handed off for it (`handle_cast({:settle_unless_handed_off, ...})`,
-  `turns.ex:288-294`). `FALSE` completes it regardless, as the code before did
+  `turns.ex:290-296`). `FALSE` completes it regardless, as the code before did
   for every `command`, so a command that became a turn (`/ultra`) had its reply
   refused.
 - `FailsUnsettled`: a settlement that fails is followed by one failure write
   for the attempt and by `error{request_failed, client_msg_id}` to the client
-  that sent the request (`settle_inline`, `run_settle`, `turns.ex:361-396`;
+  that sent the request (`settle_inline`, `run_settle`, `turns.ex:363-398`;
   `fail_attempt`, `report_failure`, `requests.ex:340-360`), through the
   transport's `report_failure`, which the connection writes as a failed
   worker's error (`connection.ex:510-517`, `:159-160`). `FALSE` only logs the
@@ -401,14 +403,15 @@ of an entity its rules are about. All still hold:
   turns run in this conversation's queue too (M56 D9): a phone turn waits as
   another sender's would, its cancel names its own message id (the named stop
   `turn_queue` proves), it is never offered silence, and it ends on its own
-  wire. A delivery written through `Channels.Companion.send_message` (the
+  wire: a completed one with `turn_done` after the rows it wrote (mobile
+  protocol 2, `announce_completed`), which no rule here reads. A delivery written through `Channels.Companion.send_message` (the
   job's row) is also pushed to the phones while their channel runs, after its
   announce (`Mobile.schedule_push`, the proactive row's push `mobile_push`
   models); no rule here reads it.
 - A phone's revocation. `Turns` runs it in its own mailbox as a cancel of
   every unsettled request the device claimed: one step marks them all and
   stops each turn it handed off (`handle_cast({:revoke_device, ...})`,
-  `turns.ex:296-308`), so the device registry that forgot the phone never
+  `turns.ex:298-310`), so the device registry that forgot the phone never
   waits on the store.
 - A cancel that arrives before its request is claimed. There is no request to
   mark, so `cancel_request` answers `not_found`. `PROTOCOL.md` scopes the
@@ -419,16 +422,16 @@ of an entity its rules are about. All still hold:
 - A daemon restart and boot recovery. Recovery hands a request off through the
   same `Turns` step, so it reads the mark (431d5663); the model has no boot
   step to check that.
-- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:310-316`),
+- A Queue crash (`Turns` ends its turns as `interrupted`, `turns.ex:312-318`),
   and a hand-off `Turns` cannot complete (a mark it cannot read, a Queue
   already gone), which ends like a marked one. A cancel whose stop finds its
-  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:449-460`)
+  Queue gone is left to that `:DOWN`: `stop_in_queue` (`turns.ex:451-462`)
   waits with no timeout, so its call exits only when the Queue was already dead
   (`:noproc`) or dies during the stop (its exit reason), and it catches only
   that exit of its own call; until the review's third round (its R3-2) a Queue
   that died during the stop crashed `Turns`. A store call that exits inside
   `Turns` is logged as that request's error and the turn still ends once
-  (`guarded/3`, `turns.ex:559-569`). A raise in `Turns`' own code or store
+  (`guarded/3`, `turns.ex:566-576`). A raise in `Turns`' own code or store
   calls is a defect: it crashes `Turns` to `Companion.Supervisor`
   (`rest_for_one`), which releases the requests it fenced. A request worker's
   crash.

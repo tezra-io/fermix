@@ -9,13 +9,22 @@ defmodule Fermix.CLI.PairCommand do
   six-digit code with the operator, and answers with `mobile.pair.decide`. Any
   failure after the window opened closes it through `mobile.pair.cancel` before
   the command exits, so a broken run never leaves a window waiting for a scan.
+
+  Pairing is one step (M51 §2.1). The phone channel's switch is live, so when
+  the daemon says the channel is off this command asks the owner, turns it on
+  with `settings.apply` and opens the window, once: a second refusal is
+  reported, never asked again. On a home Fermix.app manages the switch is the
+  app's, so the command points there and writes nothing.
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.TerminalQR
   alias FermixCore.Management.Mobile
 
   @call_timeout_ms 5_000
+  # A settings write with its readiness recompute, as `fermix settings` allows.
+  @settings_timeout_ms 30_000
   @poll_interval_ms 1_000
   # Slack beyond the window's own time. The daemon closes the window on its own
   # clock; this only bounds how long the command waits for it to say so.
@@ -27,6 +36,7 @@ defmodule Fermix.CLI.PairCommand do
   @max_text_bytes 128
   @session_id_pattern ~r/^[A-Za-z0-9_-]{1,128}$/
   @sas_pattern ~r/^\d{6}$/
+  @build_roles ~w(release development)
   @uuid_pattern ~r/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/
   @control_chars ~r/[\x{0000}-\x{001F}\x{007F}-\x{009F}]/u
   @uri_prefix "fermix://pair?"
@@ -43,23 +53,75 @@ defmodule Fermix.CLI.PairCommand do
     end
   end
 
-  defp pair(io, deps) do
+  defp pair(io, deps), do: start(io, deps, :may_turn_on)
+
+  defp start(io, deps, offer) do
     case call(deps, "mobile.pair.start", %{}) do
-      {:ok, %{"state" => "failed"} = view} -> refused_start(view, io)
+      {:ok, %{"state" => "failed"} = view} -> refused_start(view, io, deps, offer)
       {:ok, view} -> opened(view, io, deps)
       {:error, reason} -> start_error(reason, io)
     end
   end
 
   # Nothing was opened, so there is nothing to cancel.
-  defp refused_start(%{"failure" => %{"sentence" => sentence}}, io) when is_binary(sentence) do
+  defp refused_start(%{"failure" => %{"sentence" => sentence}}, io, deps, offer)
+       when is_binary(sentence) do
     IO.puts(io.stderr, "fermix pair: #{scrub(sentence)}")
-    if sentence == Mobile.off_sentence(), do: IO.puts(io.stderr, enable_hint())
-    1
+    if sentence == Mobile.off_sentence(), do: channel_off(io, deps, offer), else: 1
   end
 
-  defp refused_start(_view, io),
+  defp refused_start(_view, io, _deps, _offer),
     do: fail(io, "fermix pair: the daemon answered an invalid pairing refusal")
+
+  # The switch is the app's on a home Fermix.app manages: the Phone row turns the
+  # channel on and pairs in one place, and this command writes nothing.
+  defp channel_off(io, deps, :may_turn_on) do
+    cond do
+      deps.app_managed?.() ->
+        fail(
+          io,
+          "pair from Fermix.app instead: the Phone row in its Channels settings turns " <>
+            "the channel on and shows the pairing code"
+        )
+
+      confirm?(io, "Turn the phone channel on now? [y/N] ") ->
+        turn_on(io, deps)
+
+      true ->
+        fail(
+          io,
+          "turn it on with `fermix settings set channels.mobile mobile_enabled=true`, " <>
+            "then run `fermix pair` again"
+        )
+    end
+  end
+
+  defp channel_off(_io, _deps, :asked), do: 1
+
+  # A side effect is the daemon saying the channel did not follow the switch;
+  # the second start then says what stands in the way.
+  defp turn_on(io, deps) do
+    params = %{"section" => "channels.mobile", "values" => %{"mobile_enabled" => true}}
+
+    case deps.client.("settings.apply", params, timeout: @settings_timeout_ms) do
+      {:ok, %{"side_effects" => []}} ->
+        IO.puts(io.stdout, "Turned the phone channel on.")
+        start(io, deps, :asked)
+
+      {:ok, %{"side_effects" => [_ | _] = effects}} ->
+        for effect <- effects,
+            is_binary(effect),
+            do: IO.puts(io.stderr, "fermix pair: #{scrub(effect)}")
+
+        start(io, deps, :asked)
+
+      {:ok, _reply} ->
+        fail(io, "fermix pair: the daemon answered an invalid settings write")
+
+      {:error, reason} ->
+        fail(io, "fermix pair: #{describe(reason)}")
+    end
+  end
 
   defp start_error(:not_running, io), do: daemon_not_running(io)
 
@@ -152,12 +214,17 @@ defmodule Fermix.CLI.PairCommand do
 
   defp decide_if_asked(view, _session_id, _io, _deps), do: {:ok, view}
 
+  # Only a phone whose attestation was verified reaches the owner (M51 D3), so
+  # a request without its build role and a verified, locked boot is not one the
+  # daemon can have asked about.
   defp pairing_request(%{"sas" => sas, "attestation" => %{"sentence" => sentence}} = request)
        when is_binary(sas) and is_binary(sentence) do
     valid? =
       valid_text?(Map.get(request, "device_name")) and
         valid_text?(Map.get(request, "model")) and
-        Regex.match?(@sas_pattern, sas)
+        Regex.match?(@sas_pattern, sas) and
+        Map.get(request, "build_role") in @build_roles and
+        Map.get(request, "boot_state") == %{"verified" => true, "locked" => true}
 
     if valid?, do: {:ok, request}, else: {:error, :invalid_pairing_request}
   end
@@ -165,14 +232,20 @@ defmodule Fermix.CLI.PairCommand do
   defp pairing_request(_request), do: {:error, :invalid_pairing_request}
 
   # The human is the comparator: approve only when the phone shows the same
-  # six digits. A blank answer or a closed input denies.
+  # six digits. A blank answer or a closed input denies. The build role and the
+  # boot state are what the phone's attestation proved (M51 section 6.2).
   defp prompt_approval(request, io) do
     IO.puts(io.stdout, scrub(request["attestation"]["sentence"]))
 
     prompt =
       "#{safe_field(request["model"])} '#{safe_field(request["device_name"])}' requests " <>
-        "pairing. Phone shows #{request["sas"]}. Approve? [y/N] "
+        "pairing (#{request["build_role"]} build). Phone shows #{request["sas"]}. " <>
+        "Secure hardware ✓, bootloader locked ✓. Approve? [y/N] "
 
+    confirm?(io, prompt)
+  end
+
+  defp confirm?(io, prompt) do
     IO.write(io.stdout, prompt)
 
     case IO.gets(io.stdin, "") do
@@ -250,7 +323,8 @@ defmodule Fermix.CLI.PairCommand do
   defp deps(opts) do
     %{
       client: Keyword.get(opts, :client, &Client.request_v1/3),
-      sleep: Keyword.get(opts, :poll_sleep, &Process.sleep/1)
+      sleep: Keyword.get(opts, :poll_sleep, &Process.sleep/1),
+      app_managed?: Keyword.get(opts, :app_managed?, &HomeOwner.app_managed?/0)
     }
   end
 
@@ -274,12 +348,6 @@ defmodule Fermix.CLI.PairCommand do
   defp fail(io, message) do
     IO.puts(io.stderr, message)
     1
-  end
-
-  # The phone channel's switch on a host managed without the desktop app.
-  defp enable_hint do
-    "set `enabled = true` under `[fermix_channels.mobile]` in config.toml, " <>
-      "then run `fermix restart`"
   end
 
   defp valid_session_id?(value),

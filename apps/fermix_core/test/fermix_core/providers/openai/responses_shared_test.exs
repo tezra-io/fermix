@@ -111,14 +111,14 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
                ~s([{"role":"user","content":[{"type":"input_text","text":""}]}])
     end
 
-    test "a user turn with image_parts emits input_text + input_image (base64 data URI)" do
+    test "a user turn with parts emits input_text + input_image (base64 data URI)" do
       png = <<137, 80, 78, 71>>
 
       msgs = [
         %{
           role: "user",
           content: "what is this?",
-          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+          parts: [%{type: :image, mime_type: "image/png", data: png}]
         }
       ]
 
@@ -133,8 +133,34 @@ defmodule FermixCore.Providers.OpenAI.ResponsesSharedTest do
              }
     end
 
+    test "a PDF part emits input_file with its name and a base64 data URL (M67)" do
+      pdf = "%PDF-1.4 lease 7731"
+
+      msgs = [
+        %{
+          role: "user",
+          content: "",
+          parts: [%{type: :document, mime_type: "application/pdf", data: pdf, name: "lease.pdf"}]
+        }
+      ]
+
+      {_instructions, [item]} = ResponsesShared.build_input(msgs)
+
+      assert item == %{
+               role: "user",
+               content: [
+                 %{type: "input_text", text: ""},
+                 %{
+                   type: "input_file",
+                   filename: "lease.pdf",
+                   file_data: "data:application/pdf;base64," <> Base.encode64(pdf)
+                 }
+               ]
+             }
+    end
+
     test "an unsupported image part fails loud (no silent drop)" do
-      msgs = [%{role: "user", content: "x", image_parts: [%{type: :video, data: "x"}]}]
+      msgs = [%{role: "user", content: "x", parts: [%{type: :video, data: "x"}]}]
 
       assert_raise ArgumentError, ~r/unsupported image content part/, fn ->
         ResponsesShared.build_input(msgs)

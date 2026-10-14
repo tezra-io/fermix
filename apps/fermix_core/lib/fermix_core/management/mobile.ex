@@ -52,10 +52,34 @@ defmodule FermixCore.Management.Mobile do
   @device_store_sentence "The paired-device list could not be read. See the daemon log."
   @start_sentence "The pairing window could not be opened. See the daemon log."
   @disconnected_sentence "The phone disconnected before you decided. Start pairing again."
-  @no_attestation_sentence "This phone sent no secure-hardware proof."
+  # A phone reaches the owner only once its key attestation is verified
+  # (M51 D3); a refused one ends the session naming the check that refused it,
+  # one sentence per check of M51 section 6.2.
+  @verified_attestation_sentence "Secure hardware, locked bootloader, official Fermix build."
+  @refused_sentences [
+    key:
+      "The phone's secure-hardware proof was refused: the key it proved is not the key it connected with.",
+    chain:
+      "The phone's secure-hardware proof was refused: it is not signed by Google's attestation root.",
+    key_properties:
+      "The phone's secure-hardware proof was refused: its key was not made in the phone's secure hardware for this use.",
+    challenge: "The phone's secure-hardware proof was refused: it was not made for this pairing.",
+    root_of_trust:
+      "The phone's secure-hardware proof was refused: the phone's bootloader is unlocked or its system is not verified.",
+    application:
+      "The phone's secure-hardware proof was refused: the app is not an official Fermix build.",
+    revocation:
+      "The phone's secure-hardware proof was refused: Google revoked one of its certificates, or one has expired.",
+    platform: "The phone's secure-hardware proof was refused: only an Android phone can pair."
+  ]
+  @unavailable_attestation_sentence "Google's attestation service could not be reached."
   @no_request_sentence "No phone is waiting for a decision."
   @unknown_device_sentence "No paired phone has that id."
   @owner_only_sentence "Only the owner can pair or forget a phone; run this from your own terminal."
+  # What a settings write says when the channel did not follow its switch.
+  @switch_not_started_sentence "The phone channel is on but could not start. See the daemon log."
+  @switch_not_ready_sentence "The phone channel starts the next time Fermix starts."
+  @switch_failed_sentence "The phone channel's switch could not be applied. See the daemon log."
 
   @type refusal ::
           {:busy, String.t()}
@@ -76,11 +100,18 @@ defmodule FermixCore.Management.Mobile do
       @device_store_sentence,
       @start_sentence,
       @disconnected_sentence,
-      @no_attestation_sentence,
-      @no_request_sentence,
-      @unknown_device_sentence,
-      @owner_only_sentence
-    ]
+      @verified_attestation_sentence
+    ] ++
+      Keyword.values(@refused_sentences) ++
+      [
+        @unavailable_attestation_sentence,
+        @no_request_sentence,
+        @unknown_device_sentence,
+        @owner_only_sentence,
+        @switch_not_started_sentence,
+        @switch_not_ready_sentence,
+        @switch_failed_sentence
+      ]
   end
 
   @doc """
@@ -96,6 +127,31 @@ defmodule FermixCore.Management.Mobile do
   """
   @spec owner_only_sentence() :: String.t()
   def owner_only_sentence, do: @owner_only_sentence
+
+  @doc """
+  Starts or stops the phone channel while the daemon runs, once settings have
+  written its switch (M51 §5.5). `:ok` when the channel followed the switch;
+  otherwise the sentence the settings write publishes as a side effect. A
+  provider failure is logged here and answered with a fixed sentence, because
+  its reason names the channels app's internals.
+  """
+  @spec apply_enabled(boolean(), keyword()) :: :ok | {:error, String.t()}
+  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts) do
+    case call(opts, :apply_enabled, [enabled?]) do
+      {:ok, {:ok, state}} when state in [:started, :stopped] -> :ok
+      {:ok, {:ok, :not_started}} -> {:error, @switch_not_started_sentence}
+      {:ok, {:error, :not_ready}} -> {:error, @switch_not_ready_sentence}
+      other -> switch_failed(enabled?, other)
+    end
+  end
+
+  defp switch_failed(enabled?, reply) do
+    Logger.error(
+      "management mobile: apply_enabled(#{enabled?}) answered #{Redaction.format(reply)}"
+    )
+
+    {:error, @switch_failed_sentence}
+  end
 
   @doc "The phone channel as it stands. Answers with the channel off, too."
   @spec status(keyword()) :: result()
@@ -299,8 +355,10 @@ defmodule FermixCore.Management.Mobile do
     }
   end
 
-  defp attestation(:unavailable),
-    do: %{"status" => "unavailable", "sentence" => @no_attestation_sentence}
+  # Only a verified phone reaches the owner: any other attestation on a
+  # request is a defect between the two apps, refused loudly.
+  defp attestation(:verified),
+    do: %{"status" => "verified", "sentence" => @verified_attestation_sentence}
 
   defp outcome_view(nil), do: nil
 
@@ -314,6 +372,14 @@ defmodule FermixCore.Management.Mobile do
 
   defp failure_view(%{reason: :device_disconnected}),
     do: failure("refused", @disconnected_sentence)
+
+  defp failure_view(%{reason: :attestation_unavailable}),
+    do: failure("unavailable", @unavailable_attestation_sentence)
+
+  defp failure_view(%{reason: reason, check: check})
+       when reason in [:attestation, :platform_unsupported] do
+    failure("refused", Keyword.fetch!(@refused_sentences, check))
+  end
 
   defp failure(code, sentence), do: %{"code" => code, "sentence" => sentence}
 

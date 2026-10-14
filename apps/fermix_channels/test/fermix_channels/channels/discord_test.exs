@@ -124,19 +124,21 @@ defmodule FermixChannels.Channels.DiscordTest do
             "id" => "attachment-1",
             "url" => "https://cdn.discordapp.com/file.png",
             "content_type" => "image/png",
+            "filename" => "file.png",
             "size" => 12_345
           }
         ])
 
       assert {:ok, [message]} = Discord.parse_gateway_event(event)
 
+      # Declared as Discord gave it; the gateway pipeline names the kind (M67).
       assert message.attachments == [
                %{
-                 kind: :image,
                  url: "https://cdn.discordapp.com/file.png",
                  mime_type: "image/png",
                  file_id: "attachment-1",
-                 size_bytes: 12_345
+                 size_bytes: 12_345,
+                 file_name: "file.png"
                }
              ]
     end

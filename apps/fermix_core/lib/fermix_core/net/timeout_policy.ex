@@ -15,7 +15,13 @@ defmodule FermixCore.Net.TimeoutPolicy do
   """
 
   @typedoc "A request kind with its own timeout ceiling."
-  @type kind :: :llm_buffered | :image_generation | :media_download | :transcription | :unfurl
+  @type kind ::
+          :llm_buffered
+          | :image_generation
+          | :media_download
+          | :transcription
+          | :unfurl
+          | :attestation_status
 
   # Buffered LLM: whole-turn response budget (the full body lands at once).
   # Fermix consumes every LLM adapter except Codex in buffered mode; Codex
@@ -34,6 +40,10 @@ defmodule FermixCore.Net.TimeoutPolicy do
   # Link previews are auxiliary and must never hold a turn open. The one MiB
   # streaming cap bounds bytes; this bounds idle network time.
   @unfurl_ms 15_000
+  # Google's attestation status list (about 180 KB) is fetched when a pairing
+  # window opens, out of the phone's way; the window's wait on it is bounded
+  # separately, so this only bounds idle network time.
+  @attestation_status_ms 10_000
 
   @doc """
   Returns the `receive_timeout` (ms) for a request `kind`.
@@ -47,4 +57,5 @@ defmodule FermixCore.Net.TimeoutPolicy do
   def receive_timeout_for(:media_download), do: @media_download_ms
   def receive_timeout_for(:transcription), do: @transcription_ms
   def receive_timeout_for(:unfurl), do: @unfurl_ms
+  def receive_timeout_for(:attestation_status), do: @attestation_status_ms
 end

@@ -69,11 +69,13 @@ defmodule FermixCore.Setup.RestartState do
     {:computer_use, "Computer control settings changed since Fermix started."},
     {:computer_history, "Computer history settings changed since Fermix started."}
   ]
-  # Parts of a boot-bound section that every consumer reads on each call, so a
-  # change to them is live the moment it is applied. `sandbox.env` (mode, allow,
-  # deny and sources) is read by the shell tool and command capabilities per
-  # command (M45 §4.5); the rest of the sandbox section is read at boot.
-  @live_parts [sandbox: [:env]]
+  # Parts of a boot-bound section a change to which is live the moment it is
+  # applied, each a path inside its section. `sandbox.env` (mode, allow, deny and
+  # sources) is read by the shell tool and command capabilities per command (M45
+  # §4.5); the rest of the sandbox section is read at boot. The phone channel's
+  # switch, `channels.mobile.enabled`, starts or stops its subtree when it is
+  # written (M51 §5.5); the rest of the phone block is read when it starts.
+  @live_parts [sandbox: [[:env]], channels: [[:mobile, :enabled]]]
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"
   @external_change_sentence "The settings file changed outside Fermix."
@@ -104,7 +106,14 @@ defmodule FermixCore.Setup.RestartState do
   end
 
   defp live_part?(_section, []), do: false
-  defp live_part?(section, [part | _rest]), do: part in Keyword.get(@live_parts, section, [])
+
+  defp live_part?(section, parts) do
+    section
+    |> live_paths()
+    |> Enum.any?(fn path -> Enum.take(parts, length(path)) == path end)
+  end
+
+  defp live_paths(section), do: Keyword.get(@live_parts, section, [])
 
   @doc """
   Whether a restart is needed, and the daemon's own sentence for every reason.
@@ -352,12 +361,23 @@ defmodule FermixCore.Setup.RestartState do
   # The external-change comparison keeps reading the whole section, because an
   # outside edit to a live part would still be reverted by the next save.
   defp boot_value(snapshot, section) do
-    case {section_value(snapshot, section), Keyword.get(@live_parts, section, [])} do
-      {value, []} -> value
-      {value, parts} when is_list(value) -> Keyword.drop(value, parts)
-      {nil, _parts} -> nil
-    end
+    section
+    |> live_paths()
+    |> Enum.reduce(section_value(snapshot, section), &drop_path(&2, &1))
   end
+
+  # Order is kept, so two snapshots compare equal exactly when their boot-read
+  # parts are equal.
+  defp drop_path(value, [key]) when is_list(value), do: Keyword.delete(value, key)
+
+  defp drop_path(value, [key | rest]) when is_list(value) do
+    Enum.map(value, fn
+      {^key, inner} when is_list(inner) -> {key, drop_path(inner, rest)}
+      entry -> entry
+    end)
+  end
+
+  defp drop_path(value, _path), do: value
 
   # The fourth restart input, and the one no snapshot comparison can see: a
   # rotation writes the same `@keyring` sentinel over the same sentinel, so the

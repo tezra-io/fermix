@@ -110,6 +110,21 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert File.read!(durable_path) == bytes
   end
 
+  test "a materialized copy is named for its mime type, which a provider reads the format from",
+       %{store: store} do
+    bytes = "OggS voice"
+    digest = sha256(bytes)
+    voice_note = %{upload("v-1", bytes, digest) | kind: "audio", mime: "audio/ogg"}
+
+    assert {:ok, :upload} = MediaStore.begin_upload(store, voice_note)
+    assert :ok = MediaStore.write_chunk(store, "v-1", 0, bytes)
+    assert {:ok, ^digest} = MediaStore.finish_upload(store, "v-1", digest)
+
+    assert {:ok, %{path: temp_path}} = MediaStore.materialize_attachment(store, "v-1")
+    assert Path.extname(temp_path) == ".ogg"
+    assert :ok = FermixTestSupport.SafeRm.rm(temp_path)
+  end
+
   test "completed attachment metadata and materialization survive a store restart", %{
     root: root,
     store: store
@@ -142,6 +157,28 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
 
     assert File.read!(path) == bytes
     assert :ok = FermixTestSupport.SafeRm.rm(path)
+  end
+
+  # M67: a still uploaded as a video's poster keeps naming that video across a
+  # restart, so the message that names both can pair them.
+  test "a poster's video survives a store restart; a blank one is refused", %{
+    root: root,
+    store: store
+  } do
+    bytes = "poster"
+    digest = sha256(bytes)
+    poster = Map.put(upload("poster-1", bytes, digest), :poster_of, "clip-1")
+
+    assert {:ok, :upload} = MediaStore.begin_upload(store, poster)
+    assert :ok = MediaStore.write_chunk(store, "poster-1", 0, bytes)
+    assert {:ok, ^digest} = MediaStore.finish_upload(store, "poster-1", digest)
+    assert {:ok, %{poster_of: "clip-1"}} = MediaStore.attachment(store, "poster-1")
+
+    restarted = restart_store(root)
+    assert {:ok, %{poster_of: "clip-1"}} = MediaStore.attachment(restarted, "poster-1")
+
+    blank = Map.put(upload("poster-2", "x", sha256("x")), :poster_of, "")
+    assert {:error, {:invalid_field, :poster_of}} = MediaStore.begin_upload(restarted, blank)
   end
 
   test "deduplicated begin persists its attachment mapping before replying present", %{

@@ -692,9 +692,11 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
-            # `fermix ask --attach`; `telegram_operator` prints the paths so the
-            # operator can attach those exact files. Paths are relative to the
-            # suite file and existence-checked so validation fails loud.
+            # `fermix ask --attach` (on a multi-turn case, with the first turn
+            # only, so a later turn can ask about it again); `telegram_operator`
+            # prints the paths so the operator can attach those exact files.
+            # Paths are relative to the suite file and existence-checked so
+            # validation fails loud.
             if "image" in cs and "images" in cs:
                 problems.append(f"{cloc}: provide only one of `image` or `images`")
                 raw_images = []
@@ -713,8 +715,6 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             if raw_images is not None:
                 if raw_images == []:
                     problems.append(f"{cloc}: `images` must be a non-empty list of paths")
-                elif has_turns:
-                    problems.append(f"{cloc}: `image`/`images` supports only single-turn `query` cases")
                 else:
                     for img in raw_images:
                         if not _valid_checker_path(img):

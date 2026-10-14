@@ -446,7 +446,7 @@ defmodule FermixCore.AgentLoopTest do
         base_url: "mock://"
       }
 
-      assert {:error, {:image_unsupported, :ollama, "qwen3:32b"}} =
+      assert {:error, {:attachment_unsupported, :image, :ollama, "qwen3:32b"}} =
                run_loop(capability_registry: registry, route_key: route_key)
 
       # The gate fires BEFORE the continuation — the model is never asked.
@@ -485,7 +485,7 @@ defmodule FermixCore.AgentLoopTest do
         sandbox_config: %{mode: :strict, workspace_root: dir, allowed_roots: [dir]}
       }
 
-      assert {:error, {:image_unsupported, :ollama, "qwen3:32b"}} =
+      assert {:error, {:attachment_unsupported, :image, :ollama, "qwen3:32b"}} =
                run_loop(capability_registry: registry, route_key: route_key, context: context)
 
       assert mock_continues() == []
@@ -2873,6 +2873,30 @@ defmodule FermixCore.AgentLoopTest do
       ]
     end
 
+    # Two routes on real provider ids, so the part gate reads their descriptors;
+    # the first adapter is never called when the gate refuses its route.
+    defp part_routes(first, second) do
+      [
+        {%{
+           provider: first,
+           model: model_for(first),
+           auth_mode: :api_key,
+           base_url: "https://1/v1"
+         }, [adapter: EligibleFailAdapter, model: model_for(first), test_pid: self()]},
+        {%{
+           provider: second,
+           model: model_for(second),
+           auth_mode: :api_key,
+           base_url: "https://2/v1"
+         }, [adapter: RecoveringAdapter, model: model_for(second), test_pid: self()]}
+      ]
+    end
+
+    defp model_for(:xai), do: "grok-5"
+    defp model_for(:mistral), do: "mistral-large"
+    defp model_for(:anthropic), do: "claude-x"
+    defp model_for(:openai), do: "gpt-x"
+
     test "an eligible primary error falls over to the next route", %{registry: registry} do
       assert {:ok, %{response: "recovered"}} =
                AgentLoop.run(
@@ -2888,7 +2912,7 @@ defmodule FermixCore.AgentLoopTest do
 
     test "an image-incompatible route returns an error and falls over", %{registry: registry} do
       image = %{type: :image, mime_type: "image/png", data: <<137, 80, 78, 71>>}
-      messages = [%{role: "user", content: "", image_parts: [image]}]
+      messages = [%{role: "user", content: "", parts: [image]}]
 
       routes = [
         {%{
@@ -2911,6 +2935,87 @@ defmodule FermixCore.AgentLoopTest do
 
       refute_received {:chat, :eligible_fail}
       assert_received {:chat, :recovering}
+    end
+
+    # M67: a PDF needs a provider that reads one inline, and a picture a format
+    # the provider takes; the gate refuses before the call and fails over.
+    test "a PDF on a route that reads none inline falls over to one that does",
+         %{registry: registry} do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.4", name: "lease.pdf"}
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read this", parts: [pdf]}],
+                 routes: part_routes(:xai, :anthropic),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
+    end
+
+    test "a PDF needs a vision model even on a provider that reads PDFs", %{registry: registry} do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.4", name: "lease.pdf"}
+
+      routes = [
+        {%{
+           provider: :venice,
+           model: "z-ai-glm-5-3",
+           auth_mode: :api_key,
+           base_url: "https://1/v1"
+         }, [adapter: EligibleFailAdapter, model: "z-ai-glm-5-3", test_pid: self()]},
+        {%{
+           provider: :anthropic,
+           model: "claude-x",
+           auth_mode: :api_key,
+           base_url: "https://2/v1"
+         }, [adapter: RecoveringAdapter, model: "claude-x", test_pid: self()]}
+      ]
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read this", parts: [pdf]}],
+                 routes: routes,
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+    end
+
+    test "a picture in a format the provider refuses falls over", %{registry: registry} do
+      webp = %{type: :image, mime_type: "image/webp", data: "RIFF....WEBP"}
+
+      assert {:ok, %{response: "recovered"}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "", parts: [webp]}],
+                 routes: part_routes(:xai, :openai),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      refute_received {:chat, :eligible_fail}
+      assert_received {:chat, :recovering}
+    end
+
+    test "a part no route takes ends the chain on its named refusal", %{registry: registry} do
+      pdf = %{type: :document, mime_type: "application/pdf", data: "%PDF-1.4", name: "lease.pdf"}
+
+      assert {:error, {:all_routes_failed, attempted}} =
+               AgentLoop.run(
+                 messages: [%{role: "user", content: "read this", parts: [pdf]}],
+                 routes: part_routes(:xai, :mistral),
+                 capability_registry: registry,
+                 context: %{agent_name: "test", conversation_key: :test}
+               )
+
+      assert [
+               {:xai, {:attachment_unsupported, :document, :xai, "grok-5"}},
+               {:mistral, {:attachment_unsupported, :document, :mistral, "mistral-large"}}
+             ] = attempted
+
+      refute_received {:chat, _adapter}
     end
 
     test "an api-key auth failure does not fall over", %{registry: registry} do
@@ -3093,6 +3198,30 @@ defmodule FermixCore.AgentLoopTest do
       assert after_bytes == byte_size(text)
       # the digest call's tokens count toward the run
       assert result.total_tokens == 3 * 10 + 40_000 + 10 + 10
+    end
+
+    # A 1M Claude window would hold 850,000 tokens at the default threshold;
+    # its 200,000-token compaction ceiling is the line inside a turn too.
+    test "a route with a compaction ceiling digests at the ceiling, not at the threshold",
+         %{registry: registry} do
+      register_caps(registry, [BigTool, FermixCore.Tools.ToolResultRecall])
+
+      set_mock_responses(
+        four_big_steps(total_tokens: 210_000) ++ [turn("DIGEST-1"), turn("done")]
+      )
+
+      claude = %{
+        provider: :anthropic,
+        model: "claude-opus-5-5",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      assert {:ok, %{response: "done"}} =
+               run_loop(capability_registry: registry, route_key: claude)
+
+      assert [_digest_call] = digest_calls()
+      assert %{"call_1" => _digest} = substitutions_of(List.last(mock_continues()))
     end
 
     test "a digest no shorter than its result marks it not compressible, once",

@@ -40,6 +40,14 @@ defmodule FermixChannels.Gateway.DraftStream do
     - `:block` — completed chunks sent as separate ordinary messages; requires
       only `send` (any channel can do it).
 
+    `seal_persists?` (draft mode) says what the channel's seal is
+    (`Gateway.Channel.seal_persists?/0`). False, the default: the seal is one
+    more edit of what the edits already wrote, so the engine skips it when the
+    last successful write already shows its text, a no-op the platform may
+    reject (design §5.7). True: the edits only show the reply and the seal is
+    its write of record, the one that persists it, so the engine never takes
+    that shortcut for it, at the turn end or at a rotation seal.
+
     `measure`/`rotate_at` are the draft-rotation pair
     (CHANNEL_LONGFORM_PRESENTATION §6): the channel's rendered-length measurer
     and the card size at which the live bubble is sealed and a fresh one opened,
@@ -76,7 +84,8 @@ defmodule FermixChannels.Gateway.DraftStream do
       :measure,
       :rotate_at,
       :pacing,
-      mode: :draft
+      mode: :draft,
+      seal_persists?: false
     ]
 
     @type t :: %__MODULE__{
@@ -91,7 +100,8 @@ defmodule FermixChannels.Gateway.DraftStream do
             delete: (term() -> :ok | {:error, term()}) | nil,
             measure: (String.t() -> non_neg_integer()) | nil,
             rotate_at: pos_integer() | nil,
-            pacing: FermixChannels.Gateway.Channel.draft_pacing() | nil
+            pacing: FermixChannels.Gateway.Channel.draft_pacing() | nil,
+            seal_persists?: boolean()
           }
   end
 
@@ -127,6 +137,8 @@ defmodule FermixChannels.Gateway.DraftStream do
   `:measure` (rendered-length measurer) and `:rotate_at` (card size). Omitted,
   the draft freezes at the channel's own limit instead of rotating. `:pacing`
   is the channel's own throttle; omitted, the engine's constants apply.
+  `:seal_persists?` is true for a channel whose seal is the reply's write of
+  record; omitted, false.
   """
   @spec build_spec(module(), struct(), keyword()) :: Spec.t()
   def build_spec(channel, %{channel: channel_name} = message, opts \\ [])
@@ -140,7 +152,8 @@ defmodule FermixChannels.Gateway.DraftStream do
       discard: fn handle -> channel.discard_draft(message, handle) end,
       measure: Keyword.get(opts, :measure),
       rotate_at: Keyword.get(opts, :rotate_at),
-      pacing: Keyword.get(opts, :pacing)
+      pacing: Keyword.get(opts, :pacing),
+      seal_persists?: Keyword.get(opts, :seal_persists?, false)
     }
   end
 
@@ -190,6 +203,11 @@ defmodule FermixChannels.Gateway.DraftStream do
         is_function(spec.seal, 2) and is_function(spec.discard, 1)
 
     valid? || raise ArgumentError, "draft-mode spec requires open/edit/seal/discard closures"
+
+    is_boolean(spec.seal_persists?) ||
+      raise ArgumentError,
+            "draft seal_persists? must be a boolean, got: #{inspect(spec.seal_persists?)}"
+
     assert_rotation!(spec)
     assert_pacing!(spec)
   end
@@ -618,8 +636,11 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   # The bubble already shows exactly this text (the write that triggered the
   # rotation landed on a chunk boundary), so re-sending it would be an
-  # idempotent no-op the platform may reject.
-  defp rotation_seal_call(%{last_sent: chunk} = _state, chunk), do: {:ok, nil}
+  # idempotent no-op the platform may reject. Never for a persisting seal: it
+  # writes what no edit did.
+  defp rotation_seal_call(%{spec: %Spec{seal_persists?: false}, last_sent: chunk}, chunk),
+    do: {:ok, nil}
+
   defp rotation_seal_call(state, chunk), do: state.spec.seal.(state.handle, chunk)
 
   defp detach_bubble(state, sealed) do
@@ -1153,8 +1174,10 @@ defmodule FermixChannels.Gateway.DraftStream do
 
   # No-op seal (design §5.7): the last successful write already holds exactly
   # the final text — calling the channel again would be an idempotent no-op
-  # the platform may reject ("message is not modified").
-  defp do_seal(%{last_sent: text}, text), do: {{:ok, nil}, :ok}
+  # the platform may reject ("message is not modified"). Never for a persisting
+  # seal: it writes what no edit did.
+  defp do_seal(%{spec: %Spec{seal_persists?: false}, last_sent: text}, text),
+    do: {{:ok, nil}, :ok}
 
   defp do_seal(%{phase: :live} = state, final_text), do: seal_live(state, final_text)
 

@@ -94,10 +94,11 @@ defmodule FermixChannelsTest do
       refute listener in ChannelRegistry.transport_children(@ready)
     end
 
-    # The mobile backend ships before the iOS app exists, so an installation
-    # that never configured it — and an upgrade that only swapped the binary —
-    # must start nothing at all: no listener, no pairing state, no mDNS.
-    test "starts no part of the mobile surface until it is explicitly enabled" do
+    # The phone subtree is registered whenever setup is ready, on or off, so its
+    # switch can turn it on while the daemon runs (M51 §5.5). Its own start
+    # reads the switch and starts nothing while it is off: no listener, no
+    # pairing state, no mDNS (Mobile.SupervisorTest, "the live switch").
+    test "registers the mobile subtree once setup is ready, whatever its switch says" do
       mobile = {Mobile.Supervisor, []}
       previous = Application.get_env(:fermix_channels, :mobile)
 
@@ -109,10 +110,10 @@ defmodule FermixChannelsTest do
       end)
 
       Application.delete_env(:fermix_channels, :mobile)
-      refute mobile in ChannelRegistry.transport_children(@ready)
+      assert mobile in ChannelRegistry.transport_children(@ready)
 
       Application.put_env(:fermix_channels, :mobile, enabled: false, mode: :listener)
-      refute mobile in ChannelRegistry.transport_children(@ready)
+      assert mobile in ChannelRegistry.transport_children(@ready)
 
       Application.put_env(:fermix_channels, :mobile, enabled: true, mode: :listener)
       assert mobile in ChannelRegistry.transport_children(@ready)

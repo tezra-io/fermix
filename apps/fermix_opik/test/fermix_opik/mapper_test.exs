@@ -852,6 +852,80 @@ defmodule FermixOpik.MapperTest do
     end
   end
 
+  describe "attachment_save_span/3" do
+    test "builds a general span of what one turn kept in the workspace" do
+      measurements = %{
+        duration_us: 4_000,
+        saved: 2,
+        failed: 0,
+        files: 6,
+        bytes: 4_096,
+        pruned_files: 3,
+        pruned_bytes: 900
+      }
+
+      span =
+        Mapper.attachment_save_span(
+          %{channel: "telegram", session_id: "main-1", outcome: :saved, detail: nil},
+          measurements,
+          trace_id: "trace-1",
+          parent_span_id: "wrap-1",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.name == "attachment_save"
+      assert span.type == "general"
+      assert span.trace_id == "trace-1"
+      assert span.parent_span_id == "wrap-1"
+      assert span.end_time == "2026-06-02T12:00:03.200Z"
+      assert span.start_time == "2026-06-02T12:00:03.196Z"
+      refute Map.has_key?(span, :error_info)
+
+      assert span.metadata == %{
+               channel: "telegram",
+               outcome: "saved",
+               saved: 2,
+               failed: 0,
+               files: 6,
+               bytes: 4_096,
+               pruned_files: 3,
+               pruned_bytes: 900
+             }
+    end
+
+    test "a save that failed is flagged errored with its sentence" do
+      span =
+        Mapper.attachment_save_span(
+          %{
+            channel: "cli",
+            session_id: "main-2",
+            outcome: :failed,
+            detail: "could not write media file: no space left on device"
+          },
+          %{
+            duration_us: 10,
+            saved: 0,
+            failed: 1,
+            files: 0,
+            bytes: 0,
+            pruned_files: 0,
+            pruned_bytes: 0
+          },
+          trace_id: "t",
+          project_name: "fermix",
+          ended: @ended
+        )
+
+      assert span.metadata.outcome == "failed"
+
+      assert span.error_info == %{
+               exception_type: "AttachmentSaveFailed",
+               message: "could not write media file: no space left on device"
+             }
+    end
+  end
+
   describe "context_compaction_span/3" do
     test "builds a general point span carrying the reduction's size change" do
       metadata = %{

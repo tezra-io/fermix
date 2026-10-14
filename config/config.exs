@@ -180,12 +180,16 @@ config :fermix_channels,
     enabled: false,
     mode: :subprocess
   ],
+  # The phone channel. On by default: the listener serves only phones the owner
+  # paired, and an explicit `enabled = false` in config.toml still wins (the TOML
+  # is merged over this default at boot). The local-network (mDNS) announcement
+  # is off: the phone takes its addresses from the pairing code and hello_ack.
   mobile: [
-    enabled: false,
+    enabled: true,
     mode: :listener,
     port: 4_031,
     bind: "0.0.0.0",
-    advertise_mdns: true,
+    advertise_mdns: false,
     streaming: "draft",
     max_media_bytes: 20_971_520,
     media_store_max_bytes: 2_147_483_648,

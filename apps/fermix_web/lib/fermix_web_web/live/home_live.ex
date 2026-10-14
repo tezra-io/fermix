@@ -9,13 +9,16 @@ defmodule FermixWebWeb.HomeLive do
   is a periodic `Process.send_after(self(), :refresh, ...)` driven
   re-fetch when the WebSocket is connected.
 
-  Initial HTTP render still produces a full HTML response (so search
-  engines, curl, and tests work), then the page upgrades to live via
-  the LiveView socket and starts polling.
+  Initial HTTP render still produces a full HTML response (so curl and
+  tests work), then the page upgrades to live via the LiveView socket
+  and starts polling. Both answer only the setup session, as `/setup`
+  does: `SetupAuth` refuses the HTTP request, and `mount/3` refuses a
+  socket that connects without it (M65 security review F-02).
   """
 
   use FermixWebWeb, :live_view
 
+  alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.BootReport
   alias FermixWebWeb.HomeSnapshot
 
@@ -25,18 +28,26 @@ defmodule FermixWebWeb.HomeLive do
   # so we don't worry about network load.
   @refresh_interval_ms 3_000
 
+  # An unauthorized mount goes to `/setup`, whose SetupAuth refuses it with a
+  # 403. SetupLive sends its own unauthorized mount to `/`, refused the same way,
+  # so neither redirect can loop.
   @impl true
-  def mount(_params, _session, socket) do
+  def mount(_params, session, socket) do
+    if AccessToken.session_authorized?(setup_authorization(session)) do
+      mount_authorized(socket)
+    else
+      {:ok, redirect(socket, to: ~p"/setup")}
+    end
+  end
+
+  defp mount_authorized(socket) do
     case BootReport.current() do
       %{status: :ready} ->
         if connected?(socket), do: schedule_refresh()
 
-        # A bare `/setup` link — never mint a launch token here. This dead render
-        # is served to any unauthenticated GET `/`, so minting would hand a
-        # working SetupAuth credential to anyone who can curl the home page. An
-        # authorized operator's session cookie satisfies SetupAuth on its own; an
-        # unauthorized visitor is refused and must use the `fermix setup` CLI,
-        # which is the only launch-token minter.
+        # A bare `/setup` link — never mint a launch token here. The operator's
+        # session cookie satisfies SetupAuth on its own, and the `fermix setup`
+        # CLI stays the only launch-token minter.
         {:ok,
          socket
          |> assign(page_title: "Fermix")
@@ -46,6 +57,10 @@ defmodule FermixWebWeb.HomeLive do
       _not_ready ->
         {:ok, push_navigate(socket, to: ~p"/setup")}
     end
+  end
+
+  defp setup_authorization(session) do
+    session["setup_authorized"] || session[:setup_authorized]
   end
 
   @impl true

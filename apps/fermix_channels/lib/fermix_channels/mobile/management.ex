@@ -15,8 +15,9 @@ defmodule FermixChannels.Mobile.Management do
   `status/1`) answer atom-keyed facts; `FermixCore.Management.Mobile` turns
   them into wire JSON and owns every sentence.
 
-  Settings are boot-bound: the enable switch reaches the application env at
-  once, but the subtree starts and stops only at boot. So every verb gates on
+  The enable switch is live: once core has written it, `apply_enabled/2` starts
+  or stops the subtree at once (M51 §5.5). The port, the address and the
+  announcement are still read when the subtree starts. Every verb gates on
   whether the subtree is running, never on the switch alone, and the paired
   devices, which are a file, are listed and revoked from that file while it is
   not running.
@@ -43,6 +44,7 @@ defmodule FermixChannels.Mobile.Management do
   @max_listed_devices 64
   @v0_device_fields [:device_id, :name, :created_at, :last_seen]
   @open_states [:awaiting_scan, :awaiting_decision]
+  @refused_states [:attestation, :attestation_unavailable, :platform_unsupported]
 
   @type session_state ::
           :awaiting_scan
@@ -55,12 +57,12 @@ defmodule FermixChannels.Mobile.Management do
   @type request_view :: %{
           device_name: String.t(),
           model: String.t(),
-          platform: nil,
+          platform: String.t(),
           app_version: String.t(),
           sas: String.t(),
-          build_role: nil,
-          boot_state: nil,
-          attestation: :unavailable
+          build_role: :development | :release,
+          boot_state: %{verified: true, locked: true},
+          attestation: :verified
         }
   @type session :: %{
           session_id: String.t(),
@@ -68,15 +70,18 @@ defmodule FermixChannels.Mobile.Management do
           ttl_ms: non_neg_integer() | nil,
           request: request_view() | nil,
           outcome: nil | %{device_id: String.t()} | %{reason: :denied | :timeout | :cancelled},
-          failure: nil | %{reason: :device_disconnected}
+          failure:
+            nil
+            | %{reason: :device_disconnected}
+            | %{reason: PairManager.refusal_reason(), check: atom()}
         }
   @type device_row :: %{
           device_id: String.t(),
           name: String.t(),
           model: String.t(),
-          platform: nil,
-          signer_role: nil,
-          boot_state: nil,
+          platform: String.t() | nil,
+          signer_role: :development | :release | nil,
+          boot_state: %{verified: true, locked: true} | nil,
           push_registered: boolean(),
           created_at: String.t(),
           last_seen: String.t() | nil
@@ -377,6 +382,16 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  @doc """
+  Turns the phone channel on or off while the daemon runs, after core has
+  written the switch (`FermixCore.Management.Settings`). Answers what the
+  subtree did: see `FermixChannels.Mobile.Supervisor.switch/2`.
+  """
+  @spec apply_enabled(boolean(), keyword()) ::
+          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
+  def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts),
+    do: MobileSupervisor.switch(enabled?, Keyword.take(opts, [:parent, :device_store]))
+
   @doc "Fail-closed health for the runtime mobile channel adapter."
   @spec health() :: {:ok, map()} | {:error, term()}
   def health, do: health([])
@@ -405,10 +420,10 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
-  # The pairing verbs' gate: a running subtree serves whatever the switch says
-  # now, because settings are boot-bound. With nothing running the refusal is
-  # named before any process call: the switch off, a surface refused this
-  # boot, or one turned on that has not started yet. Without the gate these
+  # The pairing verbs' gate: a running subtree serves, and the switch decides
+  # whether it runs. With nothing running the refusal is named before any
+  # process call: the switch off, a surface refused, or one turned on that
+  # could not start (setup was not ready at boot). Without the gate these
   # surfaced as raw `{:dependency_exit, _, {:noproc, _}}` tuples.
   defp require_serving(opts) do
     cond do
@@ -542,11 +557,12 @@ defmodule FermixChannels.Mobile.Management do
       ttl_ms: record.remaining_ms,
       request: request_view(record.request),
       outcome: session_outcome(record),
-      failure: session_failure(record.status)
+      failure: session_failure(record)
     }
   end
 
   defp session_state(:device_disconnected), do: :failed
+  defp session_state(status) when status in @refused_states, do: :failed
   defp session_state(status), do: status
 
   # The words are the pair manager's, so the phone's `pair_denied` and this
@@ -558,27 +574,39 @@ defmodule FermixChannels.Mobile.Management do
 
   defp session_outcome(_record), do: nil
 
-  defp session_failure(:device_disconnected),
+  defp session_failure(%{status: :device_disconnected}),
     do: %{reason: PairManager.outcome_reason(:device_disconnected)}
 
-  defp session_failure(_status), do: nil
+  # A refused attestation names the check that refused it (M51 section 6.2).
+  defp session_failure(%{status: status, refusal: %{check: check}})
+       when status in @refused_states,
+       do: %{reason: PairManager.outcome_reason(status), check: check}
 
-  # Attestation arrives with the Android daemon work; until then every field
-  # it fills is present and empty, so the view already has its final shape.
+  defp session_failure(_record), do: nil
+
+  # The platform is the phone's own word; the rest is what its verified
+  # attestation proved (M51 D3): no request reaches the owner unverified.
   defp request_view(nil), do: nil
 
   defp request_view(request) do
     %{
       device_name: request.name,
       model: request.model,
-      platform: nil,
+      platform: request.platform,
       app_version: request.app_version,
       sas: request.sas,
-      build_role: nil,
-      boot_state: nil,
-      attestation: :unavailable
+      build_role: request.attestation.signer_role,
+      boot_state: boot_state(request.attestation),
+      attestation: :verified
     }
   end
+
+  # Only a verified boot on a locked phone pairs, so a state that is known is
+  # that one; a phone paired before attestation was verified has none.
+  defp boot_state(%{boot_state: :verified, device_locked: true}),
+    do: %{verified: true, locked: true}
+
+  defp boot_state(_facts), do: nil
 
   # The running store serializes every write, so it answers while it runs;
   # otherwise nothing else writes the file, and it is read where it lies.
@@ -661,7 +689,7 @@ defmodule FermixChannels.Mobile.Management do
   end
 
   defp idle_mdns(config) do
-    if enabled?(config) and Keyword.get(config, :advertise_mdns, true),
+    if enabled?(config) and Keyword.get(config, :advertise_mdns, false),
       do: :down,
       else: :disabled
   end
@@ -710,7 +738,8 @@ defmodule FermixChannels.Mobile.Management do
     with {:ok, gateway_public} <- binary_field(identity, :gateway_public_key, 32),
          {:ok, fingerprint} <- binary_field(identity, :tls_fingerprint, 32),
          {:ok, secret} <- binary_field(window, :secret, 32),
-         {:ok, name} <- host_label(opts) do
+         {:ok, name} <- host_label(opts),
+         {:ok, profile} <- profile_label(opts) do
       # Discovery orders candidates best first, so the link keeps the likeliest
       # routes, as hello_ack does, and stays a QR code a phone can scan.
       addresses =
@@ -718,13 +747,14 @@ defmodule FermixChannels.Mobile.Management do
 
       query =
         URI.encode_query([
-          {"v", "1"},
+          {"v", "2"},
           {"candidates", Jason.encode!(addresses)},
           {"port", Integer.to_string(port)},
           {"tls_fp", Base.encode16(fingerprint, case: :lower)},
           {"gateway_pk", Base.encode64(gateway_public)},
           {"secret", Base.encode64(secret)},
-          {"name", name}
+          {"name", name},
+          {"profile", profile}
         ])
 
       {:ok, "fermix://pair?" <> query}
@@ -747,6 +777,17 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  # The configured profile (`[fermix_core] profile`), which tells this home
+  # from another on the same host, so the phone can name the instance it pairs.
+  defp profile_label(opts) do
+    case Keyword.get_lazy(opts, :profile, fn ->
+           Application.get_env(:fermix_core, :profile, "general")
+         end) do
+      profile when is_binary(profile) and profile != "" -> {:ok, profile}
+      other -> {:error, {:invalid_profile, other}}
+    end
+  end
+
   defp expires_in_seconds(window) do
     remaining = max(window.expires_at_ms - window.opened_at_ms, 1)
     min(div(remaining + 999, 1_000), 120)
@@ -754,16 +795,21 @@ defmodule FermixChannels.Mobile.Management do
 
   defp public_device(device), do: device |> device_row() |> Map.take(@v0_device_fields)
 
-  # Platform, signer role and boot state come from Android attestation, which
-  # the ceremony does not produce yet; the row carries them empty.
+  # Platform, signer role and boot state are what the phone's attestation
+  # proved when it was approved; a phone paired before it was verified
+  # carries them empty.
   defp device_row(device) do
     %{
       device_id: value(device, :device_id),
       name: value(device, :name),
       model: value(device, :model),
-      platform: nil,
-      signer_role: nil,
-      boot_state: nil,
+      platform: value(device, :platform),
+      signer_role: value(device, :signer_role),
+      boot_state:
+        boot_state(%{
+          boot_state: value(device, :boot_state),
+          device_locked: value(device, :device_locked)
+        }),
       push_registered: push_registered?(value(device, :push_token)),
       created_at: iso8601(value(device, :created_at)),
       last_seen: iso8601(value(device, :last_seen))
@@ -813,7 +859,7 @@ defmodule FermixChannels.Mobile.Management do
   defp configured_bind(config), do: Keyword.get(config, :bind, "0.0.0.0")
 
   defp mdns_status(opts, config) do
-    if Keyword.get(config, :advertise_mdns, true) do
+    if Keyword.get(config, :advertise_mdns, false) do
       server = Keyword.get(opts, :mdns_advertiser, MdnsAdvertiser)
 
       case process_query(opts, :mdns_status, &MdnsAdvertiser.status/1, [server]) do

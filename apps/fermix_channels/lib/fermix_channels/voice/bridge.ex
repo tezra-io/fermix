@@ -80,6 +80,7 @@ defmodule FermixChannels.Voice.Bridge do
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Voice.Detached
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Attachments, as: Attachment
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.CallRecord
@@ -154,7 +155,8 @@ defmodule FermixChannels.Voice.Bridge do
   otherwise its start, and whether the turn may end with no reply (M56 §4.4,
   §6). It may only on the Mac's wire, while every companion client attached
   reads `turn_done`: the phone's turns run in the chat too (M56 D9), and its
-  wire has no ending without a reply, so a turn it runs answers briefly.
+  channel writes a reply as it comes rather than holding it, so there is no
+  reply to drop and a turn it runs answers briefly.
   """
   @impl true
   @spec chat_call(ConversationKey.t(), String.t()) :: {:ok, VoiceBridge.chat_call()} | :none
@@ -511,7 +513,7 @@ defmodule FermixChannels.Voice.Bridge do
           persist?: persist?
         }
       },
-      media_parts: media_parts(request)
+      inbound_attachments: screen_frame(request)
     })
   end
 
@@ -520,12 +522,23 @@ defmodule FermixChannels.Voice.Bridge do
   end
 
   # The newest screen frame the session buffered, if the call is sharing a
-  # screen. Transient like every other inbound image: it rides the turn and is
-  # never persisted.
-  defp media_parts(request) do
+  # screen: an attachment the session already rendered, so it rides the turn
+  # like any inbound picture and its bytes are never persisted (M67).
+  defp screen_frame(request) do
     case Map.get(request, :screen_frame) do
-      %{} = frame -> [frame]
-      nil -> []
+      %{mime_type: mime, data: data} ->
+        [
+          %Attachment{
+            kind: :still,
+            mime_type: mime,
+            name: "screen frame",
+            size_bytes: byte_size(data),
+            bytes: data
+          }
+        ]
+
+      nil ->
+        []
     end
   end
 end

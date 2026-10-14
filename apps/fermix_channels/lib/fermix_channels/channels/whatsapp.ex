@@ -99,7 +99,7 @@ defmodule FermixChannels.Channels.WhatsApp do
     message
     |> Map.get(:attachments, [])
     |> List.wrap()
-    |> Enum.any?(fn attachment -> Map.get(attachment, :kind) == :image end)
+    |> Enum.any?(fn attachment -> Map.get(attachment, :hint) == :photo end)
   end
 
   @spec verify_challenge(map()) :: {:ok, String.t()} | {:error, term()}
@@ -351,25 +351,32 @@ defmodule FermixChannels.Channels.WhatsApp do
     end
   end
 
-  defp attachments(message, type) when type in ["audio", "voice", "image", "document", "file"] do
+  # Each media message is declared as Meta gave it, its type as the hint and no
+  # kind: the gateway attachment pipeline names the kind from the bytes (M67).
+  defp attachments(message, type)
+       when type in ["audio", "voice", "image", "video", "document", "sticker"] do
     media = Map.get(message, type, %{})
 
     [
       %{
-        kind: attachment_kind(type),
+        hint: hint(type),
         url: Map.get(media, "url"),
         mime_type: Map.get(media, "mime_type"),
         file_id: Map.get(media, "id"),
-        size_bytes: Map.get(media, "size")
+        size_bytes: Map.get(media, "size"),
+        file_name: Map.get(media, "filename")
       }
     ]
   end
 
   defp attachments(_message, _type), do: []
 
-  defp attachment_kind(type) when type in ["audio", "voice"], do: :audio
-  defp attachment_kind("image"), do: :image
-  defp attachment_kind(_type), do: :file
+  defp hint("image"), do: :photo
+  defp hint("voice"), do: :voice
+  defp hint("audio"), do: :audio
+  defp hint("video"), do: :video
+  defp hint("document"), do: :document
+  defp hint("sticker"), do: :sticker
 
   defp contacts_by_wa_id(contacts) when is_list(contacts) do
     Map.new(contacts, fn contact ->

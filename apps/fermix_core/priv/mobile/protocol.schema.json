@@ -3,8 +3,8 @@
   "$id": "https://fermix.sh/mobile/protocol.schema.json",
   "title": "Fermix mobile companion protocol JSON header",
   "description": "JSON-header contract inside Noise-encrypted mobile frames, plus the pairing link. Source of truth: FermixChannels.Mobile.Protocol. See PROTOCOL.md. An optional field is absent, never null.",
-  "x-protocol-version": 1,
-  "x-supported-version-range": {"min": 1, "max": 1},
+  "x-protocol-version": 2,
+  "x-supported-version-range": {"min": 2, "max": 2},
   "x-frame-format": "uint32be-json-length + json-header + raw-bytes",
   "x-max-json-header-bytes": 4096,
   "x-max-raw-chunk-bytes": 61440,
@@ -28,7 +28,7 @@
         "t": {"enum": [
           "hello", "msg", "attach_begin", "attach_chunk", "attach_end", "command", "cancel",
           "history_pull", "media_fetch", "push_register", "ack", "read_state",
-          "pair_request", "unpair", "ping"
+          "request_status", "pair_request", "unpair", "ping"
         ]}
       },
       "allOf": [
@@ -44,6 +44,7 @@
         {"if": {"properties": {"t": {"const": "push_register"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/push_register"}},
         {"if": {"properties": {"t": {"const": "ack"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ack"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
+        {"if": {"properties": {"t": {"const": "request_status"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status"}},
         {"if": {"properties": {"t": {"const": "pair_request"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_request"}},
         {"if": {"properties": {"t": {"const": "unpair"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/unpair"}},
         {"if": {"properties": {"t": {"const": "ping"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/ping"}}
@@ -55,10 +56,10 @@
       "properties": {
         "t": {"enum": [
           "hello_ack", "accepted", "attach_status", "turn_started", "text_delta",
-          "tool_event", "text_done", "media_begin", "media_chunk", "media_end",
+          "tool_event", "text_done", "turn_done", "media_begin", "media_chunk", "media_end",
           "turn_error", "row", "reaction", "approval", "approval_resolved", "link_preview",
-          "read_state", "history_page", "notice", "pair_approved", "pair_denied",
-          "error", "pong", "event_part"
+          "read_state", "history_page", "request_status_page", "notice", "pair_approved",
+          "pair_denied", "error", "pong", "event_part"
         ]}
       },
       "allOf": [
@@ -69,6 +70,7 @@
         {"if": {"properties": {"t": {"const": "text_delta"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/text_delta"}},
         {"if": {"properties": {"t": {"const": "tool_event"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/tool_event"}},
         {"if": {"properties": {"t": {"const": "text_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/text_done"}},
+        {"if": {"properties": {"t": {"const": "turn_done"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/turn_done"}},
         {"if": {"properties": {"t": {"const": "media_begin"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_begin"}},
         {"if": {"properties": {"t": {"const": "media_chunk"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_chunk"}},
         {"if": {"properties": {"t": {"const": "media_end"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/media_end"}},
@@ -80,6 +82,7 @@
         {"if": {"properties": {"t": {"const": "link_preview"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/link_preview"}},
         {"if": {"properties": {"t": {"const": "read_state"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/read_state"}},
         {"if": {"properties": {"t": {"const": "history_page"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/history_page"}},
+        {"if": {"properties": {"t": {"const": "request_status_page"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/request_status_page"}},
         {"if": {"properties": {"t": {"const": "notice"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/notice"}},
         {"if": {"properties": {"t": {"const": "pair_approved"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_approved"}},
         {"if": {"properties": {"t": {"const": "pair_denied"}}, "required": ["t"]}, "then": {"$ref": "#/$defs/pair_denied"}},
@@ -114,6 +117,7 @@
         "t": {"const": "attach_begin"}, "attach_id": {"type": "string", "minLength": 1},
         "kind": {"type": "string", "minLength": 1}, "mime": {"type": "string", "minLength": 1},
         "size_bytes": {"type": "integer", "minimum": 0}, "name": {"type": "string", "minLength": 1},
+        "poster_of": {"type": "string", "minLength": 1},
         "sha256": {"type": "string", "pattern": "^[0-9a-fA-F]{64}$"}
       }
     },
@@ -138,8 +142,10 @@
     },
     "history_pull": {
       "allOf": [{"$ref": "#/$defs/envelope"}],
-      "required": ["v", "t", "seq", "profile_id", "after_seq", "limit"],
-      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}}
+      "description": "Exactly one cursor: after_seq pages forward, before_seq pages backward.",
+      "required": ["v", "t", "seq", "profile_id", "limit"],
+      "properties": {"t": {"const": "history_pull"}, "profile_id": {"type": "string", "minLength": 1}, "after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}, "before_seq": {"type": "integer", "minimum": 1, "maximum": 18446744073709551615}, "limit": {"type": "integer", "minimum": 1, "maximum": 200}},
+      "oneOf": [{"required": ["after_seq"]}, {"required": ["before_seq"]}]
     },
     "media_fetch": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "ref"],
@@ -157,9 +163,27 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "read_up_to_seq"],
       "properties": {"t": {"const": "read_state"}, "profile_id": {"type": "string", "minLength": 1}, "read_up_to_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615}}
     },
+    "request_status": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "client_msg_ids"],
+      "properties": {"t": {"const": "request_status"}, "client_msg_ids": {"type": "array", "minItems": 1, "maxItems": 32, "items": {"type": "string", "minLength": 1}}}
+    },
     "pair_request": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_name", "model", "app_version"],
-      "properties": {"t": {"const": "pair_request"}, "device_name": {"type": "string", "minLength": 1, "maxLength": 128}, "model": {"type": "string", "minLength": 1, "maxLength": 128}, "app_version": {"type": "string", "minLength": 1, "maxLength": 128}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "x-raw-bytes": true,
+      "required": ["v", "t", "seq", "device_name", "model", "app_version", "platform", "attestation"],
+      "description": "The raw tail is the attestation's DER certificate chain, leaf first, at most x-max-attestation-chain-bytes: attestation.cert_lengths cut it, and sum to its length.",
+      "x-max-attestation-chain-bytes": 16384,
+      "properties": {
+        "t": {"const": "pair_request"}, "device_name": {"type": "string", "minLength": 1, "maxLength": 128}, "model": {"type": "string", "minLength": 1, "maxLength": 128}, "app_version": {"type": "string", "minLength": 1, "maxLength": 128},
+        "platform": {"enum": ["ios", "android"]},
+        "attestation": {"$ref": "#/$defs/attestation"}
+      }
+    },
+    "attestation": {
+      "type": "object", "required": ["kind", "cert_lengths"],
+      "properties": {
+        "kind": {"enum": ["android_keymint", "apple_app_attest"]},
+        "cert_lengths": {"type": "array", "minItems": 1, "maxItems": 6, "items": {"type": "integer", "minimum": 1}}
+      }
     },
     "unpair": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "unpair"}}},
     "ping": {"allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq"], "properties": {"t": {"const": "ping"}}},
@@ -187,7 +211,7 @@
       "type": "object", "required": ["commands", "max_media_bytes"],
       "properties": {
         "commands": {"type": "array", "items": {"$ref": "#/$defs/commandDescriptor"}},
-        "media": {"type": "boolean"}, "streaming": {"type": "boolean"},
+        "media": {"type": "boolean"}, "streaming": {"type": "boolean"}, "turn_done": {"type": "boolean"},
         "max_media_bytes": {"type": "integer", "minimum": 0}
       }
     },
@@ -249,7 +273,8 @@
     },
     "text_delta": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "text"],
-      "properties": {"t": {"const": "text_delta"}, "turn_id": {"type": "string", "minLength": 1}, "text": {"type": "string"}}
+      "description": "text extends the bubble the turn is streaming, unless replace is present, and true: then text is the whole bubble, in place of what was shown.",
+      "properties": {"t": {"const": "text_delta"}, "turn_id": {"type": "string", "minLength": 1}, "text": {"type": "string"}, "replace": {"const": true}}
     },
     "tool_event": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "tool", "phase"],
@@ -259,6 +284,11 @@
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id", "server_seq", "text"],
       "description": "truncated is present, and true, only when text was cut to keep the event within x-max-event-bytes; the stored row is whole.",
       "properties": {"t": {"const": "text_done"}, "turn_id": {"type": "string", "minLength": 1}, "server_seq": {"type": "integer", "minimum": 1}, "text": {"type": "string"}, "truncated": {"const": true}}
+    },
+    "turn_done": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "turn_id"],
+      "description": "A completed turn's ending, once, after its last text_done: every turn a request opened ends with turn_done or turn_error.",
+      "properties": {"t": {"const": "turn_done"}, "turn_id": {"type": "string", "minLength": 1}}
     },
     "media_begin": {
       "allOf": [{"$ref": "#/$defs/envelope"}],
@@ -314,12 +344,29 @@
     },
     "history_page": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "profile_id", "messages", "next_after_seq", "history_head_seq"],
-      "description": "Messages oldest first. next_after_seq is the last message sent, or the cursor asked for on an empty page. A page holds at most limit messages and at most 256 KiB of them, so it can hold fewer: pull again from next_after_seq while it is below history_head_seq.",
+      "description": "Messages oldest first. next_after_seq is the newest message sent, or on an empty page the after_seq asked for, or before_seq - 1. A backward page carries prev_before_seq, its oldest message, only while an older one exists. A page holds at most limit messages and at most 256 KiB of them, so it can hold fewer: pull again from next_after_seq while it is below history_head_seq, and back from prev_before_seq.",
       "properties": {
         "t": {"const": "history_page"}, "profile_id": {"type": "string", "minLength": 1},
         "messages": {"type": "array", "maxItems": 200, "items": {"$ref": "#/$defs/historyMessage"}},
         "next_after_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-        "history_head_seq": {"type": "integer", "minimum": 0}
+        "history_head_seq": {"type": "integer", "minimum": 0},
+        "prev_before_seq": {"type": "integer", "minimum": 1}
+      }
+    },
+    "request_status_page": {
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "requests"],
+      "description": "The answer to request_status: each request it named that the daemon holds, in the order asked; an id it does not hold is left out.",
+      "properties": {"t": {"const": "request_status_page"}, "requests": {"type": "array", "maxItems": 32, "items": {"$ref": "#/$defs/requestOutcome"}}}
+    },
+    "requestOutcome": {
+      "type": "object", "required": ["client_msg_id", "status"],
+      "description": "error is the word of a failed request: cancelled when it was stopped, request_failed otherwise.",
+      "properties": {
+        "client_msg_id": {"type": "string", "minLength": 1},
+        "status": {"enum": ["accepted", "running", "completed", "failed"]},
+        "turn_id": {"type": "string", "minLength": 1},
+        "result_server_seq": {"type": "integer", "minimum": 1},
+        "error": {"type": "string", "minLength": 1}
       }
     },
     "notice": {
@@ -328,12 +375,13 @@
       "properties": {"t": {"const": "notice"}, "kind": {"type": "string", "minLength": 1}, "text": {"type": "string", "minLength": 1}}
     },
     "pair_approved": {
-      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles"],
-      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}}
+      "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "device_id", "candidates", "profiles", "push_salt"],
+      "description": "push_salt is the device's 32-byte push salt (apns_key_salt), standard base64 with padding.",
+      "properties": {"t": {"const": "pair_approved"}, "device_id": {"type": "string", "minLength": 1}, "candidates": {"type": "array", "maxItems": 16, "items": {"$ref": "#/$defs/candidate"}}, "profiles": {"type": "array", "items": {"$ref": "#/$defs/profile"}}, "push_salt": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"}}
     },
     "pair_denied": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "reason"],
-      "properties": {"t": {"const": "pair_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected"]}}
+      "properties": {"t": {"const": "pair_denied"}, "reason": {"enum": ["denied", "timeout", "cancelled", "device_disconnected", "attestation", "attestation_unavailable", "platform_unsupported"]}}
     },
     "error": {
       "allOf": [{"$ref": "#/$defs/envelope"}], "required": ["v", "t", "seq", "code", "message"],
@@ -360,9 +408,9 @@
       "type": "object",
       "x-uri-prefix": "fermix://pair?",
       "description": "The query of a fermix://pair link, decoded as application/x-www-form-urlencoded. Not a frame: the owner's QR code carries it. An unknown parameter is ignored.",
-      "required": ["v", "candidates", "port", "tls_fp", "gateway_pk", "secret", "name"],
+      "required": ["v", "candidates", "port", "tls_fp", "gateway_pk", "secret", "name", "profile"],
       "properties": {
-        "v": {"const": "1"},
+        "v": {"const": "2"},
         "candidates": {
           "type": "string", "contentMediaType": "application/json",
           "contentSchema": {"type": "array", "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 253}}
@@ -371,7 +419,8 @@
         "tls_fp": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
         "gateway_pk": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
         "secret": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
-        "name": {"type": "string", "minLength": 1}
+        "name": {"type": "string", "minLength": 1},
+        "profile": {"type": "string", "minLength": 1}
       }
     }
   },

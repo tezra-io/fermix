@@ -120,8 +120,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   end
 
   # The channel's surface is the management protocol: a settings section and
-  # the `mobile.*` methods a desktop Phone pane would be built on, with the
-  # config flag the route on a host with no pane. The self-reference must
+  # the `mobile.*` methods the Mac app's Phone row is built on, with the config
+  # flag the route on a host with no pane. The self-reference must
   # name both, must say pairing on an app-managed Mac is the app's, and must not
   # point an owner at surfaces that do not exist. The refutations name concrete
   # withdrawn artifacts rather than a phrasing allowlist, so a true sentence
@@ -139,6 +139,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert text =~ "mobile.*"
       assert text =~ "fermix pair"
       assert text =~ "never the CLI"
+      assert text =~ "Phone row"
+      refute text =~ "Phone pane on them yet"
       refute text =~ "Channels page"
       refute text =~ "Channels tab"
       refute text =~ "--mobile-enabled"
@@ -152,6 +154,30 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     for word <- ~w(awaiting_scan awaiting_decision cancelled device_disconnected) do
       assert reference =~ word, "the mobile reference does not describe #{word}"
     end
+  end
+
+  # M51 D3 is enforced: the agent must not tell an owner that an emulator or
+  # an unlocked phone can pair, nor that the hardware goes unchecked.
+  test "documents that a phone proves its secure hardware to pair" do
+    reference = File.read!(mobile_reference_path())
+
+    refute reference =~ "does not check a phone's secure hardware yet"
+    refute reference =~ "takes it without verifying it"
+    assert reference =~ "emulator"
+    assert reference =~ "Already paired phones keep working"
+    assert reference =~ "*Attestation*"
+  end
+
+  # The announcement ships off and the phone app finds the host through the
+  # pairing link, so the reference names the switch and never blames a missing
+  # announcement for a phone that cannot connect.
+  test "documents the local-network announcement as off by default, with its switch" do
+    reference = File.read!(mobile_reference_path())
+
+    assert reference =~ "off by default"
+    assert reference =~ "advertise_mdns = true"
+    assert reference =~ "Announce on the local network"
+    refute reference =~ "mDNS is off or blocked"
   end
 
   # The companion socket has no setting, so the runtime self-reference must not

@@ -26,7 +26,7 @@ messages covers the interleavings that matter.
   it can arrive after its own turn ended.
 - `TasksCanCrash`: the turn task dies at any step. Its own code raises or
   exits, or a linked helper exits: the typing loop (`typing.ex:24`, linked
-  until `with_indicator` returns) or DraftStream (`draft_stream.ex:182`,
+  until `with_indicator` returns) or DraftStream (`draft_stream.ex:195`,
   linked until the task exits). A helper's exit can land anywhere, including
   where nothing in the task can raise: between delivering the reply and
   marking it delivered ("shown"), in the claim gap ("invoking"), and after the
@@ -164,8 +164,8 @@ watch was added to the model).
 
 - The LLM and tools (one "loop" step), streaming drafts, and typing.
 - The access gate's parked confirmation. `run_message_loop` hands AgentLoop
-  the owner-inbox closure and the Live call id (`turn_runner.ex:532`,
-  `:536`). A parked call is a held tool result inside the one loop step, and
+  the owner-inbox closure and the Live call id (`turn_runner.ex:595`,
+  `:599`). A parked call is a held tool result inside the one loop step, and
   the owner's confirm later runs it on a task outside the Queue, not as a
   new turn.
 - The `terminal_error_owner?` branch, which only changes who sends the error
@@ -186,6 +186,13 @@ watch was added to the model).
   the reply, that the reply will carry the Computer History stamp `commit/4`
   puts on it (`tell_history_tainted`, M56 §9), so the Live session never
   says it. It is a send inside the turn's own steps and moves no Queue state.
+- What a turn does with its attachments before its loop (M67).
+  `run_message_loop` composes their manifest into the user text that
+  `persist_user_message` stores and, on the owner's chat turn, first saves
+  them to the workspace (`with_attachments`, `turn_runner.ex:472`). These are
+  file writes inside the turn's own steps, before its user message is
+  persisted, and move no Queue state: a stop or crash during them is one at
+  the turn's start, with nothing of the turn in history yet.
 - What an owner's turn reads before its loop: the gists of the last voice
   calls (`inject_recent_calls`, M56 §4.2), one Repo read inside the turn's own
   steps that moves no Queue state.
@@ -240,7 +247,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Check:** 10 (6 states).
 - **Counterexample:** the reply is delivered (`deliver_final`, `queue.ex:547`).
   `/stop` then arrives before `runner.commit` persists it (`:551` →
-  `turn_runner.ex:151`).
+  `turn_runner.ex:156`).
 - **Code:**
   - `stop_active_turn` kills the task and writes the stopped marker
     (`queue.ex:1095-1100`, `:1145-1158`).
@@ -265,7 +272,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Counterexample:** the reply is delivered, then `/stop` arrives before the
   task claims its result.
 - **Code:** `commit/4` runs auto-compaction synchronously (`queue.ex:551` →
-  `turn_runner.ex:182`). The claim happens only after that returns
+  `turn_runner.ex:188`). The claim happens only after that returns
   (`finish_turn`, `queue.ex:519`), so the window also covers post-delivery
   auto-compaction: seconds to tens of seconds when it runs. The kill aborts
   that compaction (safely: `replace_history` is one atomic call) and skips
@@ -414,7 +421,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Fix (ACP):**
   - `hand_off` (`peer.ex:597-605`) resolves the Queue's name to a pid with
     `GenServer.whereis`, as `Companion.Turns` does at its hand-off
-    (`turns.ex:273-278`), gives the prompt to that pid, and monitors it.
+    (`turns.ex:275-280`), gives the prompt to that pid, and monitors it.
     The monitor is on the process that holds the prompt, so it also covers a
     Queue that dies during the hand-off. No Queue registered: the prompt is
     refused at once (`{:queue_unavailable, name}`, the existing "could not be
@@ -481,7 +488,7 @@ counterexample, run `make -C tla check SPECS=turn_queue` and open
 - **Code:** after QUEUE-6's fix neither a stop nor the callback itself can
   kill the task in that gap. A linked helper still can: the typing loop
   (`typing.ex:24`, linked until `Typing.with_indicator` returns, which is
-  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:182`,
+  after `finish_turn`, `queue.ex:422`) or DraftStream (`draft_stream.ex:195`,
   linked until the task exits; its post-seal sweep runs beside the commit).
 - **Owner question:** close this too, by calling `finish_turn` after
   `Typing.with_indicator` returns (`turn_task/7` would take the outcome from

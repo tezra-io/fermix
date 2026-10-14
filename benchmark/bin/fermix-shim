@@ -18,15 +18,6 @@ import socket
 import struct
 import sys
 
-_IMAGE_MIME = {
-    ".png": "image/png",
-    ".jpg": "image/jpeg",
-    ".jpeg": "image/jpeg",
-    ".gif": "image/gif",
-    ".webp": "image/webp",
-}
-
-
 FERMIX_HOME = os.environ.get("FERMIX_HOME", os.path.expanduser("~/.fermix"))
 SOCKET_PATH = os.path.join(FERMIX_HOME, "daemon.sock")
 
@@ -78,19 +69,19 @@ def cmd_status(args):
         sys.exit(3)
 
 
-def _read_image(path):
-    ext = os.path.splitext(path)[1].lower()
-    mime = _IMAGE_MIME.get(ext)
-    if mime is None:
-        print(f"fermix-shim: unsupported attachment type: {path}", file=sys.stderr)
-        sys.exit(1)
+def _read_attachment(path):
+    """Any file, as `fermix ask --attach` declares it: its name and its bytes.
+
+    The daemon's attachment pipeline names the kind from the bytes (M67).
+    """
     try:
         with open(path, "rb") as fh:
             data = fh.read()
     except OSError as exc:
         print(f"fermix-shim: cannot read attachment {path}: {exc}", file=sys.stderr)
         sys.exit(1)
-    return {"mime_type": mime, "data_base64": base64.b64encode(data).decode()}
+    return {"file_name": os.path.basename(path),
+            "data_base64": base64.b64encode(data).decode()}
 
 
 def cmd_ask(args):
@@ -108,10 +99,10 @@ def cmd_ask(args):
         else:
             query_parts.append(args[i]); i += 1
     query = " ".join(query_parts)
-    images = [_read_image(p) for p in attach_paths]
+    attachments = [_read_attachment(p) for p in attach_paths]
     params = {"content": query, "session_id": session_id, "timeout_ms": timeout_ms}
-    if images:
-        params["images"] = images
+    if attachments:
+        params["attachments"] = attachments
     try:
         resp = call_daemon("agent_message", params=params,
                            timeout_s=timeout_ms / 1000.0 + 10.0)

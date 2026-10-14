@@ -40,6 +40,12 @@ defmodule FermixCore.Net.TimeoutPolicyTest do
       assert TimeoutPolicy.receive_timeout_for(:unfurl) == 15_000
     end
 
+    # Google's attestation status list is fetched off the pairing path when a
+    # window opens; a slow answer must not outlast the window it serves.
+    test "the attestation status list fetch has one centralized bounded timeout" do
+      assert TimeoutPolicy.receive_timeout_for(:attestation_status) == 10_000
+    end
+
     test "an unknown request kind fails loud — no silent default (Rule #12)" do
       # apply/3 keeps the kind opaque to the typechecker; a bare literal call here
       # is a provable type violation (zero overlap with the 3 known kinds) and

@@ -7,6 +7,7 @@ defmodule FermixChannels.Mobile.SupervisorTest do
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.Management
+  alias FermixChannels.Mobile.RequestCoordinator
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Setup.SecretWriter
   alias FermixTestSupport.SafeRm
@@ -56,6 +57,33 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert unfurl_opts[:max_children] == MobileChannel.max_concurrent_unfurls()
   end
 
+  # M51 §5.5: the candidates a phone is given are the addresses the listener
+  # answers on, so discovery is told the bind the listener is given.
+  test "discovery enumerates for the bind the listener serves" do
+    cases = [
+      {[config: [bind: "192.168.1.8"]], "192.168.1.8"},
+      {[config: [bind: "192.168.1.8"], listener: [bind: {127, 0, 0, 1}]], {127, 0, 0, 1}},
+      {[config: []], "0.0.0.0"}
+    ]
+
+    for {opts, bind} <- cases do
+      children = init_children(opts)
+      assert child_opts(children, FermixChannels.Mobile.Discovery)[:bind] == bind
+      assert child_opts(children, Listener)[:bind] == bind
+    end
+  end
+
+  test "the local-network announcement starts only when the config turns it on" do
+    for {config, enabled?} <- [
+          {[], false},
+          {[advertise_mdns: false], false},
+          {[advertise_mdns: true], true}
+        ] do
+      children = init_children(config: config)
+      assert child_opts(children, FermixChannels.Mobile.MdnsAdvertiser)[:enabled] == enabled?
+    end
+  end
+
   test "a fresh install starts a dormant listener until first pairing creates identity" do
     root =
       Path.join(
@@ -80,6 +108,76 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
     on_exit(fn -> if Process.alive?(supervisor), do: Process.exit(supervisor, :shutdown) end)
     assert Listener.status(instance_names.listener) == :dormant
+  end
+
+  # Live on/off (M51 §5.5, owner 2026-10-10): the subtree's spec stays with its
+  # parent for the whole boot and starts nothing while the switch is off, so
+  # turning the channel on or off is a child restart or termination that keeps
+  # the boot's epoch, and the daemon never restarts for it.
+  describe "the live switch" do
+    test "a subtree whose switch is off starts nothing and records no refusal" do
+      instance_names = names()
+
+      assert :ignore =
+               MobileSupervisor.start_link(switch_opts(instance_names, fn -> false end))
+
+      assert MobileSupervisor.refusal(instance_names.device_store) == :none
+      refute Process.whereis(instance_names.request_coordinator)
+    end
+
+    test "turning the channel on, off and on again keeps the boot's epoch" do
+      instance_names = names()
+      switch = start_supervised!({Agent, fn -> false end}, id: :switch)
+      parent = start_parent!(instance_names, fn -> Agent.get(switch, & &1) end)
+
+      assert [{MobileSupervisor, :undefined, :supervisor, _}] = Supervisor.which_children(parent)
+
+      Agent.update(switch, fn _ -> true end)
+      assert {:ok, :started} = MobileSupervisor.switch(true, parent: parent)
+      assert RequestCoordinator.epoch(instance_names.request_coordinator) == "live-switch-epoch"
+      assert {:ok, :started} = MobileSupervisor.switch(true, parent: parent)
+
+      Agent.update(switch, fn _ -> false end)
+
+      assert {:ok, :stopped} =
+               MobileSupervisor.switch(false,
+                 parent: parent,
+                 device_store: instance_names.device_store
+               )
+
+      refute Process.whereis(instance_names.request_coordinator)
+
+      assert {:ok, :stopped} =
+               MobileSupervisor.switch(false,
+                 parent: parent,
+                 device_store: instance_names.device_store
+               )
+
+      Agent.update(switch, fn _ -> true end)
+      assert {:ok, :started} = MobileSupervisor.switch(true, parent: parent)
+      assert RequestCoordinator.epoch(instance_names.request_coordinator) == "live-switch-epoch"
+    end
+
+    test "turning it on while the switch still reads off starts nothing" do
+      instance_names = names()
+      parent = start_parent!(instance_names, fn -> false end)
+
+      assert {:ok, :not_started} = MobileSupervisor.switch(true, parent: parent)
+      refute Process.whereis(instance_names.request_coordinator)
+    end
+
+    # Setup was not ready at boot, so no transport was registered at all.
+    test "turning it on with no subtree registered is refused as not ready" do
+      parent =
+        start_supervised!(%{
+          id: :empty_parent,
+          start: {Supervisor, :start_link, [[], [strategy: :one_for_one]]},
+          type: :supervisor
+        })
+
+      assert {:error, :not_ready} = MobileSupervisor.switch(true, parent: parent)
+      assert {:ok, :stopped} = MobileSupervisor.switch(false, parent: parent)
+    end
   end
 
   test "enabled push owns one validated dispatcher before the listener" do
@@ -431,6 +529,57 @@ defmodule FermixChannels.Mobile.SupervisorTest do
         environment: "development"
       ]
     ]
+  end
+
+  # The child specs `init/1` returns for `opts`, nothing started.
+  defp init_children(opts) do
+    assert {:ok, {_flags, children}} =
+             MobileSupervisor.init(
+               [
+                 root: "/tmp/fermix-mobile-supervisor-children-test",
+                 boot_epoch: "children-test-epoch",
+                 start_listener?: false,
+                 names: names()
+               ] ++ opts
+             )
+
+    children
+  end
+
+  defp child_opts(children, id) do
+    %{start: {_module, :start_link, [opts]}} = Enum.find(children, &(&1.id == id))
+    opts
+  end
+
+  defp switch_opts(instance_names, switch) do
+    root =
+      Path.join(
+        System.tmp_dir!(),
+        "fermix-mobile-switch-#{System.unique_integer([:positive, :monotonic])}"
+      )
+
+    on_exit(fn -> SafeRm.rm_rf!(root) end)
+
+    [
+      name: nil,
+      root: root,
+      boot_epoch: "live-switch-epoch",
+      start_listener?: false,
+      listener: [bind: {127, 0, 0, 1}, port: 0],
+      memory_enabled?: fn -> true end,
+      names: instance_names,
+      switch: switch
+    ]
+  end
+
+  defp start_parent!(instance_names, switch) do
+    child = Supervisor.child_spec({MobileSupervisor, switch_opts(instance_names, switch)}, [])
+
+    start_supervised!(%{
+      id: :live_switch_parent,
+      start: {Supervisor, :start_link, [[child], [strategy: :one_for_one]]},
+      type: :supervisor
+    })
   end
 
   defp names do

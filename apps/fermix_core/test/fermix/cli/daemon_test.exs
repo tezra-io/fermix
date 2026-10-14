@@ -939,6 +939,59 @@ defmodule Fermix.CLI.DaemonTest do
     assert Keyword.get(opts, :cwd) == "/home/owner/project"
   end
 
+  test "agent_message decodes attachments into what the CLI channel declares", %{
+    socket_path: socket_path
+  } do
+    payload = %{"file_name" => "notes.txt", "data_base64" => Base.encode64("DELTA 55")}
+
+    assert {:ok, _reply} =
+             Client.agent_message(
+               %{"content" => "", "attachments" => [payload]},
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert_receive {:bridge_call, "", opts}
+
+    assert Keyword.fetch!(opts, :attachments) == [
+             %{file_name: "notes.txt", data: "DELTA 55", size_bytes: 8}
+           ]
+  end
+
+  test "agent_message refuses a malformed attachment before the bridge", %{
+    socket_path: socket_path
+  } do
+    assert {:ok, reply} =
+             Client.agent_message(
+               %{
+                 "content" => "hi",
+                 "attachments" => [%{"file_name" => "x", "data_base64" => "!!"}]
+               },
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] =~ "invalid_attachment_payload"
+    refute_received {:bridge_call, _, _}
+  end
+
+  test "agent_message refuses the retired images parameter by name, before the bridge", %{
+    socket_path: socket_path
+  } do
+    image = %{"mime_type" => "image/png", "data_base64" => Base.encode64("png")}
+
+    assert {:ok, reply} =
+             Client.agent_message(%{"content" => "look", "images" => [image]},
+               socket_path: socket_path,
+               timeout: 2_000
+             )
+
+    assert reply["status"] == "error"
+    assert reply["error"] =~ ~s("images" parameter is retired)
+    refute_received {:bridge_call, _, _}
+  end
+
   test "agent_message forwards a nil cwd when the param is absent", %{
     socket_path: socket_path
   } do

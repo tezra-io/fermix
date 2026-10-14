@@ -381,7 +381,15 @@ defmodule FermixChannels.Channels.MobileTest do
     assert_receive {:mobile_event, "main", %{"t" => "text_delta", "text" => "draft"}}
 
     assert :ok = Mobile.edit_draft(message, handle, "draft grows")
-    assert_receive {:mobile_event, "main", %{"t" => "text_delta", "text" => " grows"}}
+    assert_receive {:mobile_event, "main", %{"t" => "text_delta", "text" => " grows"} = grown}
+    refute Map.has_key?(grown, "replace")
+
+    # A draft rewritten rather than grown is sent whole, to replace the
+    # phone's, never appended to it.
+    assert :ok = Mobile.edit_draft(message, handle, "a rewritten draft")
+
+    assert_receive {:mobile_event, "main",
+                    %{"t" => "text_delta", "text" => "a rewritten draft", "replace" => true}}
 
     assert {:ok, nil} = Mobile.seal_draft(message, handle, "final")
     assert_received {:fenced_response, "main", "client-1", 2}
@@ -432,11 +440,12 @@ defmodule FermixChannels.Channels.MobileTest do
                       "deny_command" => "/soul deny SOUL"
                     }}
 
+    # A delivery no turn streamed is the row it is, never a turn's bubble.
     assert :ok = Mobile.send_message("main", "see https://example.com", [])
 
     assert_receive {:mobile_event, "main",
                     %{
-                      "t" => "text_done",
+                      "t" => "row",
                       "text" => "see https://example.com",
                       "server_seq" => 73
                     }}
@@ -635,6 +644,13 @@ defmodule FermixChannels.Channels.MobileTest do
     assert :ok = terminal.({:completed})
     assert_receive {:push_notify, "main", 73, "final"}
     refute_receive {:push_notify, _, _, _}
+
+    # Each part seals its bubble of the turn, and the turn ends once, after them.
+    assert [
+             %{"t" => "text_done", "turn_id" => "turn-client-1", "text" => "first"},
+             %{"t" => "text_done", "turn_id" => "turn-client-1", "text" => "final"},
+             %{"t" => "turn_done", "turn_id" => "turn-client-1"}
+           ] = turn_events()
   end
 
   test "proactive text retries persist, fan out, and push exactly once" do
@@ -645,8 +661,9 @@ defmodule FermixChannels.Channels.MobileTest do
 
     assert_receive {:timeline_append, "main", %{content: "daily"}}
     refute_receive {:timeline_append, "main", %{content: "daily"}}
-    assert_receive {:mobile_event, "main", %{"t" => "text_done", "text" => "daily"}}
-    refute_receive {:mobile_event, "main", %{"t" => "text_done", "text" => "daily"}}
+    assert_receive {:mobile_event, "main", %{"t" => "row", "text" => "daily"}}
+    refute_receive {:mobile_event, "main", %{"t" => "row", "text" => "daily"}}
+    refute_received {:mobile_event, "main", %{"t" => "text_done"}}
     assert_receive {:push_notify, "main", 73, "daily"}
     refute_receive {:push_notify, _, _, _}
   end
@@ -971,6 +988,15 @@ defmodule FermixChannels.Channels.MobileTest do
       reply_fn: fn _part -> :ok end,
       turn_result_fn: Mobile.build_turn_result(message)
     }
+  end
+
+  # The turn events the phones were sent so far, in order.
+  defp turn_events do
+    {:messages, messages} = Process.info(self(), :messages)
+
+    for {:mobile_event, "main", %{"t" => type} = event} <- messages,
+        type in ~w(text_done turn_done),
+        do: event
   end
 
   # Hand the message to a queue through `Companion.Turns`, as the gateway does

@@ -435,7 +435,7 @@ defmodule FermixCore.Setup.Doctor do
       provider: provider,
       model: model,
       context_window: context_window,
-      compact_at_tokens: trunc(threshold * context_window),
+      compact_at_tokens: ModelCatalog.compact_at_tokens_for(provider, model, threshold),
       catalog: catalog_windows()
     }
   end

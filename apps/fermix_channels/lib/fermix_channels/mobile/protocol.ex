@@ -9,14 +9,15 @@ defmodule FermixChannels.Mobile.Protocol do
   ordering checks.
 
   The canonical cross-repository export lives under `fermix_core/priv/mobile/`.
-  The iOS repository vendors those files pinned by checksum.
+  A phone app vendors those files pinned by checksum.
 
   The chat events this wire shares verbatim with the companion socket
   (`FermixCore.Companion.Protocol.shared_client_events/0` and
   `shared_server_events/0`) are validated by that module, the chat
   vocabulary's one owner; this module validates the mobile transport's own
   events (hello, pairing, attachments and media, push, ack, keepalive) and the
-  `history_pull`/`history_page` pair, whose mobile shape has no backward cursor.
+  `history_pull`/`history_page` pair, whose mobile page always carries
+  `next_after_seq` and names its backward cursor `prev_before_seq`.
 
   A logical server event whose header would exceed the 4 KiB cap travels as one
   contiguous run of `event_part` frames: each raw tail is a slice of the
@@ -27,8 +28,10 @@ defmodule FermixChannels.Mobile.Protocol do
   alias FermixCore.Companion.Protocol, as: ChatProtocol
   alias FermixCore.Text
 
-  @protocol_version 1
-  @min_supported_version max(1, @protocol_version - 1)
+  @protocol_version 2
+  # Protocol 1 shipped in daemons but never had a client, so the window is the
+  # current version alone (M51 D1), not N/N-1.
+  @min_supported_version 2
   @max_header_bytes 4_096
   @max_raw_chunk_bytes 60 * 1_024
   @max_plaintext_bytes 65_535 - 16
@@ -36,17 +39,24 @@ defmodule FermixChannels.Mobile.Protocol do
   @max_event_parts div(@max_event_bytes + @max_raw_chunk_bytes - 1, @max_raw_chunk_bytes)
   @max_u64 18_446_744_073_709_551_615
   @default_max_media_bytes 20 * 1_024 * 1_024
+  @platforms ~w(ios android)
+  @attestation_kinds ~w(android_keymint apple_app_attest)
+  @max_attestation_certs 6
+  @max_attestation_chain_bytes 16 * 1_024
+  @max_status_requests 32
+  @request_states ~w(accepted running completed failed)
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state pair_request unpair ping
+    push_register ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
-    hello_ack accepted attach_status turn_started text_delta tool_event text_done
+    hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
+    link_preview read_state history_page request_status_page notice pair_approved pair_denied
+    error pong event_part
   )
-  @raw_client_events ~w(attach_chunk)
+  @raw_client_events ~w(attach_chunk pair_request)
   @raw_server_events ~w(media_chunk event_part)
 
   @client_required %{
@@ -54,11 +64,12 @@ defmodule FermixChannels.Mobile.Protocol do
     "attach_begin" => ~w(attach_id kind mime size_bytes sha256),
     "attach_chunk" => ~w(attach_id index),
     "attach_end" => ~w(attach_id sha256),
-    "history_pull" => ~w(profile_id after_seq limit),
+    "history_pull" => ~w(profile_id limit),
     "media_fetch" => ~w(ref),
     "push_register" => ~w(apns_token environment),
     "ack" => ~w(server_seq),
-    "pair_request" => ~w(device_name model app_version),
+    "request_status" => ~w(client_msg_ids),
+    "pair_request" => ~w(device_name model app_version platform attestation),
     "unpair" => [],
     "ping" => []
   }
@@ -67,14 +78,16 @@ defmodule FermixChannels.Mobile.Protocol do
     "hello_ack" =>
       ~w(session_id min_version max_version profiles candidates history_head_seq read_up_to_seq caps),
     "attach_status" => ~w(attach_id status),
+    "turn_done" => ~w(turn_id),
     "media_begin" => ~w(ref server_seq kind mime size_bytes sha256),
     "media_chunk" => ~w(ref index),
     "media_end" => ~w(ref sha256),
     "reaction" => ~w(in_reply_to emoji),
     "link_preview" => ~w(in_reply_to url site title),
-    "history_page" => ~w(profile_id messages),
+    "history_page" => ~w(profile_id messages next_after_seq history_head_seq),
+    "request_status_page" => ~w(requests),
     "notice" => ~w(kind text),
-    "pair_approved" => ~w(device_id candidates profiles),
+    "pair_approved" => ~w(device_id candidates profiles push_salt),
     "pair_denied" => ~w(reason),
     "error" => ~w(code message),
     "pong" => [],
@@ -93,7 +106,7 @@ defmodule FermixChannels.Mobile.Protocol do
   @spec protocol_version() :: pos_integer()
   def protocol_version, do: @protocol_version
 
-  @doc "Inclusive N/N-1 protocol versions accepted by this daemon."
+  @doc "Inclusive `{min, max}` protocol versions accepted by this daemon."
   @spec supported_version_range() :: {pos_integer(), pos_integer()}
   def supported_version_range, do: {@min_supported_version, @protocol_version}
 
@@ -117,11 +130,15 @@ defmodule FermixChannels.Mobile.Protocol do
   @spec max_plaintext_bytes() :: pos_integer()
   def max_plaintext_bytes, do: @max_plaintext_bytes
 
+  @doc "Maximum size of the attestation chain a `pair_request` carries as its raw tail (16 KiB)."
+  @spec max_attestation_chain_bytes() :: pos_integer()
+  def max_attestation_chain_bytes, do: @max_attestation_chain_bytes
+
   @doc "Maximum JSON size of one logical server event carried as `event_part` frames (1 MiB)."
   @spec max_event_bytes() :: pos_integer()
   def max_event_bytes, do: @max_event_bytes
 
-  @doc "Negotiate a client version against the daemon's inclusive N/N-1 window."
+  @doc "Negotiate a client version against the daemon's inclusive window."
   @spec negotiate(integer()) :: :ok | {:error, :client_too_old | :client_too_new}
   def negotiate(version) when is_integer(version) do
     {min, max} = supported_version_range()
@@ -142,7 +159,8 @@ defmodule FermixChannels.Mobile.Protocol do
          {:ok, header, bytes} <- split_frame(frame),
          {:ok, envelope} <- decode_envelope(header, @client_events),
          :ok <- validate_client_event(envelope, max_media_bytes),
-         :ok <- validate_binary(envelope.type, bytes, @raw_client_events) do
+         :ok <- validate_binary(envelope.type, bytes, @raw_client_events),
+         :ok <- validate_attestation_chain(envelope, bytes) do
       {:ok, Map.put(envelope, :bytes, bytes)}
     end
   end
@@ -467,6 +485,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_client_payload("media_fetch", payload, _max), do: nonempty(payload, "ref")
   defp validate_client_payload("push_register", payload, _max), do: validate_push(payload)
   defp validate_client_payload("ack", payload, _max), do: nonnegative_u64(payload, "server_seq")
+
+  defp validate_client_payload("request_status", payload, _max),
+    do: validate_request_status(payload)
+
   defp validate_client_payload("pair_request", payload, _max), do: validate_pair_request(payload)
   defp validate_client_payload(type, _payload, _max) when type in ~w(unpair ping), do: :ok
 
@@ -484,7 +506,8 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "kind"),
          :ok <- nonempty(payload, "mime"),
          :ok <- bounded_size(payload, "size_bytes", max),
-         :ok <- sha256(payload, "sha256") do
+         :ok <- sha256(payload, "sha256"),
+         :ok <- optional_nonempty(payload, "poster_of") do
       optional_nonempty(payload, "name")
     end
   end
@@ -503,10 +526,34 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_history_pull(payload) do
     with :ok <- nonempty(payload, "profile_id"),
-         :ok <- nonnegative_u64(payload, "after_seq") do
+         :ok <- history_cursor(payload) do
       integer_range(payload, "limit", 1, 200)
     end
   end
+
+  # Exactly one cursor: `after_seq` pages forward (the catch-up read), and
+  # `before_seq` pages backward from it (a fresh phone's newest page, then
+  # older ones).
+  defp history_cursor(%{"after_seq" => _after, "before_seq" => _before}),
+    do: {:error, {:invalid_field, "before_seq"}}
+
+  defp history_cursor(%{"before_seq" => _before} = payload),
+    do: positive_u64(payload, "before_seq")
+
+  defp history_cursor(%{"after_seq" => _after} = payload),
+    do: nonnegative_u64(payload, "after_seq")
+
+  defp history_cursor(_payload), do: {:error, {:missing_field, "after_seq"}}
+
+  # How requests stand, asked after a reconnect: 1 to 32 client message ids.
+  defp validate_request_status(%{"client_msg_ids" => ids})
+       when is_list(ids) and length(ids) in 1..@max_status_requests do
+    if Enum.all?(ids, &(is_binary(&1) and &1 != "")),
+      do: :ok,
+      else: {:error, {:invalid_field, "client_msg_ids"}}
+  end
+
+  defp validate_request_status(_payload), do: {:error, {:invalid_field, "client_msg_ids"}}
 
   defp validate_push(payload) do
     with :ok <- nonempty(payload, "apns_token") do
@@ -516,13 +563,56 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_pair_request(payload) do
     with :ok <- nonempty(payload, "device_name"),
-         :ok <- nonempty(payload, "model") do
-      nonempty(payload, "app_version")
+         :ok <- nonempty(payload, "model"),
+         :ok <- nonempty(payload, "app_version"),
+         :ok <- enum(payload, "platform", @platforms) do
+      validate_attestation(payload["attestation"])
     end
   end
 
+  # A pairing presents its secure-hardware attestation: the kind, and the
+  # length of each DER certificate of the chain its raw tail carries, leaf
+  # first. The frame checks its shape; `Mobile.Attestation` verifies it when
+  # the socket reads the `pair_request` (M51 D3).
+  defp validate_attestation(%{"kind" => kind, "cert_lengths" => lengths}) do
+    cond do
+      kind not in @attestation_kinds -> {:error, {:invalid_field, "attestation.kind"}}
+      not cert_lengths?(lengths) -> {:error, {:invalid_field, "attestation.cert_lengths"}}
+      true -> :ok
+    end
+  end
+
+  defp validate_attestation(_attestation), do: {:error, {:invalid_field, "attestation"}}
+
+  defp cert_lengths?(lengths)
+       when is_list(lengths) and length(lengths) in 1..@max_attestation_certs,
+       do: Enum.all?(lengths, &(is_integer(&1) and &1 > 0))
+
+  defp cert_lengths?(_lengths), do: false
+
+  # The certificates, cut by their lengths, are the whole tail.
+  defp validate_attestation_chain(%{type: "pair_request", payload: payload}, bytes) do
+    size = byte_size(bytes)
+
+    cond do
+      size > @max_attestation_chain_bytes ->
+        {:error, {:attestation_chain_too_large, size, @max_attestation_chain_bytes}}
+
+      Enum.sum(payload["attestation"]["cert_lengths"]) != size ->
+        {:error, {:invalid_field, "attestation.cert_lengths"}}
+
+      true ->
+        :ok
+    end
+  end
+
+  defp validate_attestation_chain(_envelope, _bytes), do: :ok
+
   defp validate_server_payload("hello_ack", payload), do: validate_hello_ack(payload)
   defp validate_server_payload("attach_status", payload), do: validate_attach_status(payload)
+  # This wire's own: the companion's `turn_done` is a version 2 event of that
+  # wire, so the shared chat vocabulary does not carry it.
+  defp validate_server_payload("turn_done", payload), do: nonempty(payload, "turn_id")
 
   defp validate_server_payload("media_begin", payload), do: validate_media_begin(payload)
   defp validate_server_payload("media_chunk", payload), do: validate_media_chunk(payload)
@@ -531,6 +621,10 @@ defmodule FermixChannels.Mobile.Protocol do
   defp validate_server_payload("reaction", payload), do: strings(payload, ~w(in_reply_to emoji))
   defp validate_server_payload("link_preview", payload), do: validate_link_preview(payload)
   defp validate_server_payload("history_page", payload), do: validate_history_page(payload)
+
+  defp validate_server_payload("request_status_page", payload),
+    do: validate_request_status_page(payload)
+
   defp validate_server_payload("notice", payload), do: strings(payload, ~w(kind text))
   defp validate_server_payload("pair_approved", payload), do: validate_pair_approved(payload)
   defp validate_server_payload("pair_denied", payload), do: nonempty(payload, "reason")
@@ -604,15 +698,41 @@ defmodule FermixChannels.Mobile.Protocol do
 
   defp validate_history_page(payload) do
     with :ok <- nonempty(payload, "profile_id"),
-         :ok <- list_field(payload, "messages") do
-      optional_nonnegative_u64(payload, "next_after_seq")
+         :ok <- list_field(payload, "messages"),
+         :ok <- nonnegative_u64(payload, "next_after_seq"),
+         :ok <- nonnegative_u64(payload, "history_head_seq") do
+      optional_positive_u64(payload, "prev_before_seq")
     end
   end
 
+  defp validate_request_status_page(%{"requests" => requests})
+       when is_list(requests) and length(requests) <= @max_status_requests do
+    if Enum.all?(requests, &request_outcome?/1),
+      do: :ok,
+      else: {:error, {:invalid_field, "requests"}}
+  end
+
+  defp validate_request_status_page(_payload), do: {:error, {:invalid_field, "requests"}}
+
+  defp request_outcome?(%{"client_msg_id" => id, "status" => status} = outcome)
+       when is_binary(id) and id != "" and status in @request_states do
+    Enum.all?(
+      [
+        optional_nonempty(outcome, "turn_id"),
+        optional_positive_u64(outcome, "result_server_seq"),
+        optional_nonempty(outcome, "error")
+      ],
+      &(&1 == :ok)
+    )
+  end
+
+  defp request_outcome?(_outcome), do: false
+
   defp validate_pair_approved(payload) do
     with :ok <- nonempty(payload, "device_id"),
-         :ok <- list_field(payload, "candidates") do
-      list_field(payload, "profiles")
+         :ok <- list_field(payload, "candidates"),
+         :ok <- list_field(payload, "profiles") do
+      base64_bytes(payload, "push_salt", 32)
     end
   end
 
@@ -708,8 +828,8 @@ defmodule FermixChannels.Mobile.Protocol do
   defp positive_u64(payload, field), do: integer_range(payload, field, 1, @max_u64)
   defp nonnegative_u64(payload, field), do: integer_range(payload, field, 0, @max_u64)
 
-  defp optional_nonnegative_u64(payload, field) do
-    if Map.has_key?(payload, field), do: nonnegative_u64(payload, field), else: :ok
+  defp optional_positive_u64(payload, field) do
+    if Map.has_key?(payload, field), do: positive_u64(payload, field), else: :ok
   end
 
   defp integer_range(payload, field, min, max) do
@@ -734,6 +854,15 @@ defmodule FermixChannels.Mobile.Protocol do
 
       _value ->
         {:error, {:invalid_field, field}}
+    end
+  end
+
+  defp base64_bytes(payload, field, size) do
+    with value when is_binary(value) <- Map.get(payload, field),
+         {:ok, decoded} when byte_size(decoded) == size <- Base.decode64(value) do
+      :ok
+    else
+      _invalid -> {:error, {:invalid_field, field}}
     end
   end
 

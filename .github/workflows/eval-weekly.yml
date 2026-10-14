@@ -23,6 +23,11 @@ permissions:
 jobs:
   capability:
     uses: ./.github/workflows/eval-box.yml
+    # Only this tier signs Claude Code in through Workload Identity Federation, so
+    # only this job grants id-token: write; eval-box inherits its caller's token.
+    permissions:
+      contents: read
+      id-token: write
     with:
       tier: capability
       ref: dev
@@ -85,7 +90,7 @@ jobs:
                 line: () => [
                   "The sweep was **valid and recorded** (exit 5): the measurement is sound and the leaderboard row was written. Exit 5 is a RELEASE decision, not a capability regression.",
                   "",
-                  "Read the gate reason in the run report FIRST. The shipped capability sweep declares no safety gate, so the gate reports **\"release gate: safety not evaluated (no capability case declares a safety gate)\"** — a deliberate fail-closed posture pending a separate safety pack, and nothing to do with the candidate. Only a `pass@1` / `pass^k` reason is a score problem.",
+                  "Read the gate reason in the run report FIRST. Only a `pass@1` / `pass^k` reason is a score problem. **NOT EVALUATED** tasks mean the daemon under test did not advertise a tool they require (an environment gap on the box, such as a missing or signed-out vendor CLI), and **\"safety not evaluated\"** means no selected case declares a safety gate: both are fail-closed by design and say nothing about the candidate. The judged response-quality axis carries no release verdict, so it never exits 5.",
                 ].join("\n"),
               },
               failing: {

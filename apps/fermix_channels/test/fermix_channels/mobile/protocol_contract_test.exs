@@ -1,6 +1,7 @@
 defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
@@ -16,6 +17,12 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   @client_binary_fixtures Path.join(@priv_dir, "fixtures/client_binary_frames.jsonl")
   @server_binary_fixtures Path.join(@priv_dir, "fixtures/server_binary_frames.jsonl")
   @pairing_links Path.join(@priv_dir, "fixtures/pairing_links.jsonl")
+  @attestation_roots Path.join(@priv_dir, "attestation_roots.json")
+  @android_signers Path.join(@priv_dir, "android_signers.json")
+  # M51 §7: the trust inputs a phone's attestation is verified against are
+  # exported, and a changed byte in either is a changed contract.
+  @attestation_roots_sha256 "1c8f9da8b5a13da216198541d276e424c6a73c72af9fa3433f43e096100ae5ed"
+  @android_signers_sha256 "27dce7a69692b7b7c2329e2cae0c9b00e7a61e92276e2a05178ebb647713421c"
 
   setup_all do
     %{
@@ -74,6 +81,21 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     end
   end
 
+  # M51 D1: a pairing presents its attestation as the request's raw tail, and
+  # is answered with the push salt the phone derives its push key from.
+  test "schema pins the pairing request's attestation and the approval's push salt",
+       %{schema: schema} do
+    defs = schema["$defs"]
+    request = defs["pair_request"]
+
+    assert request["x-raw-bytes"] == true
+    assert "platform" in request["required"] and "attestation" in request["required"]
+    assert request["properties"]["platform"]["enum"] == ~w(ios android)
+    assert request["x-max-attestation-chain-bytes"] == Protocol.max_attestation_chain_bytes()
+    assert defs["attestation"]["properties"]["cert_lengths"]["maxItems"] == 6
+    assert "push_salt" in defs["pair_approved"]["required"]
+  end
+
   # D1(b) and D1(e): every error message is bounded, and every list of
   # candidates a phone is given keeps the same best-first few.
   test "schema pins the error message and candidate bounds the daemon keeps", %{schema: schema} do
@@ -109,14 +131,55 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   end
 
   # The phone is told why a pairing ended in the words management uses, and
-  # only in words a window that closes on a waiting phone can produce.
-  test "pair_denied names every way a waiting pairing can end", %{schema: schema} do
+  # only in words a closing window can produce: a waiting phone's ending, or
+  # its attestation refused before the owner was asked (M51 §7).
+  test "pair_denied names every way a pairing can end", %{schema: schema} do
     sent =
-      [:denied, :expired, :cancelled, :device_disconnected]
+      [
+        :denied,
+        :expired,
+        :cancelled,
+        :device_disconnected,
+        :attestation,
+        :attestation_unavailable,
+        :platform_unsupported
+      ]
       |> Enum.map(&(&1 |> PairManager.outcome_reason() |> Atom.to_string()))
 
     assert schema["$defs"]["pair_denied"]["properties"]["reason"]["enum"] == sent
     assert "timeout" in sent
+  end
+
+  # The verifier reads both files when it compiles; these are the bytes it
+  # read.
+  test "the attestation trust inputs are the pinned bytes, read by the verifier" do
+    assert sha256_file(@attestation_roots) == @attestation_roots_sha256
+    assert sha256_file(@android_signers) == @android_signers_sha256
+
+    roots = @attestation_roots |> File.read!() |> Jason.decode!()
+    assert roots["source"] == "https://android.googleapis.com/attestation/root"
+    loaded = Attestation.roots()
+
+    assert Enum.map(loaded, &sha256(&1.der)) == Enum.map(roots["roots"], & &1["sha256"])
+
+    signers = @android_signers |> File.read!() |> Jason.decode!()
+    assert %{package: package, signers: by_digest} = Attestation.signers()
+    assert package == signers["package"]
+
+    assert Enum.map(by_digest, fn {digest, role} ->
+             {Base.encode16(digest, case: :lower), Atom.to_string(role)}
+           end) ==
+             Enum.map(signers["signers"], &{&1["sha256"], &1["role"]})
+  end
+
+  test "documentation tells an operator what cannot pair", %{protocol: protocol} do
+    assert protocol =~ "attestation_roots.json"
+    assert protocol =~ "android_signers.json"
+    assert protocol =~ "An emulator"
+    assert protocol =~ "attestation_unavailable"
+    assert protocol =~ "platform_unsupported"
+    assert protocol =~ "whether its attestation verified or not"
+    refute protocol =~ "does not verify it yet"
   end
 
   # Absent optional fields are absent keys on this wire: every producer drops a
@@ -270,8 +333,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
              server_errors(server_event("history_page", page), schema)
 
     refute server_errors(server_event("future_event", %{}), schema) == []
-    refute server_errors(%{"v" => 1, "t" => "pong", "seq" => 0}, schema) == []
-    assert server_errors(%{"v" => 1, "t" => "pong", "seq" => 1}, schema) == []
+    refute server_errors(%{"v" => 2, "t" => "pong", "seq" => 0}, schema) == []
+    assert server_errors(%{"v" => 2, "t" => "pong", "seq" => 1}, schema) == []
 
     bad_caps = %{"commands" => [%{"name" => "help"}], "max_media_bytes" => 1}
     hello_ack = server_event("hello_ack", Map.put(hello_ack_payload(), "caps", bad_caps))
@@ -334,7 +397,9 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       [%{"query" => query}] = jsonl(@pairing_links)
 
       for {field, value} <- [
-            {"v", "2"},
+            {"v", "1"},
+            {"v", "3"},
+            {"profile", ""},
             {"candidates", "not json"},
             {"candidates", ~s({"host":"x"})},
             {"candidates", Jason.encode!(List.duplicate("192.168.1.8", 17))},
@@ -351,6 +416,14 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
                  [],
                "a pairing link with #{field}=#{value} was accepted"
       end
+
+      refute WireSchema.errors(
+               Map.delete(query, "profile"),
+               WireSchema.ref("pairingLink"),
+               schema
+             ) ==
+               [],
+             "a pairing link with no profile was accepted"
     end
   end
 
@@ -430,6 +503,9 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     assert File.exists?(Path.join(@priv_dir, "push_vectors.json"))
   end
 
+  defp sha256_file(path), do: path |> File.read!() |> sha256()
+  defp sha256(bytes), do: Base.encode16(:crypto.hash(:sha256, bytes), case: :lower)
+
   defp jsonl(path) do
     path
     |> File.read!()
@@ -446,14 +522,14 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   end
 
   defp server_event(type, payload) do
-    Map.merge(payload, %{"v" => 1, "t" => type, "seq" => 1})
+    Map.merge(payload, %{"v" => 2, "t" => type, "seq" => 1})
   end
 
   defp hello_ack_payload do
     %{
       "session_id" => "session",
-      "min_version" => 1,
-      "max_version" => 1,
+      "min_version" => 2,
+      "max_version" => 2,
       "profiles" => [%{"id" => "main", "name" => "Fermix"}],
       "candidates" => [],
       "history_head_seq" => 0,
@@ -499,7 +575,8 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
         {:ok, {{0, 0, 0, 0}, String.to_integer(query["port"])}}
       end,
       discover: fn -> {:ok, candidates} end,
-      host_label: fn -> query["name"] end
+      host_label: fn -> query["name"] end,
+      profile: query["profile"]
     ]
   end
 

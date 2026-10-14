@@ -260,6 +260,44 @@ defmodule FermixOpik.AggregationTest do
     assert timeout.error_info.exception_type == "Timeout"
   end
 
+  @attachment_save_event [:fermix, :attachment, :save]
+
+  describe "inbound attachment saves (M67 D1)" do
+    test "the reporter subscribes to the save event" do
+      assert @attachment_save_event in FermixOpik.Reporter.events()
+    end
+
+    test "a turn's workspace save nests as a point span under the turn" do
+      {_state, closed} =
+        run([
+          {@attachment_save_event,
+           %{
+             duration_us: 2_000,
+             saved: 1,
+             failed: 0,
+             files: 1,
+             bytes: 9,
+             pruned_files: 0,
+             pruned_bytes: 0
+           }, %{channel: "telegram", session_id: "main-1", outcome: :saved, detail: nil}},
+          {[:fermix, :provider, :call], %{duration_ms: 1_000},
+           %{provider: :openai, model: "gpt-5.5", status: :ok, session_id: "main-1"}},
+          {[:fermix, :agent, :message], %{iterations: 1, total_tokens: 10},
+           %{channel: :telegram, chat_id: "c1", sender: "u1", session_id: "main-1", agent: "main"}}
+        ])
+
+      assert [%{trace: trace, spans: spans}] = closed
+      assert trace.name == "agent:main"
+      wrapper = span_named(spans, "agent:main")
+      save = span_named(spans, "attachment_save")
+
+      assert save.parent_span_id == wrapper.id
+      assert save.trace_id == trace.id
+      assert save.metadata.saved == 1
+      assert save.metadata.outcome == "saved"
+    end
+  end
+
   @compaction_event [:fermix, :agent_loop, :context_compaction]
   @recovery_event [:fermix, :agent_loop, :context_recovery]
 

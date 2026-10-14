@@ -22,7 +22,7 @@ defmodule FermixCore.Tools.ViewImage do
   @max_paths 6
   @max_file_bytes 10 * 1024 * 1024
   @max_total_bytes 24 * 1024 * 1024
-  @allowed_mimes ["image/jpeg", "image/png", "image/webp"]
+  @allowed_mimes ["image/jpeg", "image/png", "image/webp", "image/gif"]
   @action :view_image
 
   @impl true
@@ -33,7 +33,7 @@ defmodule FermixCore.Tools.ViewImage do
   @spec description() :: String.t()
   def description do
     "Look at local image files. Returns the images themselves so you can see them, " <>
-      "in the order given. JPEG, PNG and WebP only; 1-6 files per call."
+      "in the order given. JPEG, PNG, WebP and GIF only; 1-6 files per call."
   end
 
   @impl true
@@ -87,7 +87,7 @@ defmodule FermixCore.Tools.ViewImage do
       %{tag: "sandbox_denied", description: "a path is outside the sandbox roots"},
       %{tag: "not_regular_file", description: "a path is missing, empty, or not a regular file"},
       %{tag: "image_too_large", description: "one file or the batch exceeds the byte cap"},
-      %{tag: "image_type_unsupported", description: "the bytes are not JPEG, PNG or WebP"}
+      %{tag: "image_type_unsupported", description: "the bytes are not JPEG, PNG, WebP or GIF"}
     ]
   end
 

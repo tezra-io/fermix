@@ -6,8 +6,10 @@ defmodule FermixCore.Management.Settings.Mobile do
   A section of its own rather than a channels-inventory entry, because the
   inventory expresses credential rows and the phone channel has none: it needs
   a toggle, a port and an address. Every row is a projection of the one
-  `[fermix_channels.mobile]` block, and every one is boot-bound, because the
-  listener and the local-network announcement are started once per boot.
+  `[fermix_channels.mobile]` block. The toggle is live: a write starts or stops
+  the phone channel at once (`FermixCore.Management.Settings`, M51 §5.5). The
+  port, the address and the announcement are boot-bound, because the channel
+  reads them when it starts.
 
   Identity and protocol version are runtime facts rather than settings, so
   they are published on `mobile.status` and are not rows here.
@@ -35,12 +37,13 @@ defmodule FermixCore.Management.Settings.Mobile do
   def rows("channels.mobile", snapshot) when is_map(snapshot) do
     block = Source.channel(snapshot, :mobile)
     restart = Row.restart?(:channels)
+    switch_restart = Row.restart?([:channels, :mobile, :enabled])
 
     [
       Row.new("mobile_enabled", :toggle, "Phone companion",
         footer: "Lets a paired phone chat with this Fermix over your network.",
         value: Source.boolean(block, :enabled, false),
-        restart: restart
+        restart: switch_restart
       ),
       Row.new("mobile_port", :number, "Port",
         footer: "The phone reaches this port. Change it only if something else uses it.",
@@ -53,14 +56,14 @@ defmodule FermixCore.Management.Settings.Mobile do
       ),
       Row.new("mobile_bind", :text, "Listen on",
         footer:
-          "`0.0.0.0` for every network, or one address, such as your Tailscale IP, " <>
+          "Every network by default, or one address, such as your Tailscale IP, " <>
             "to listen only there.",
         value: Source.string(block, :bind, @default_bind),
         restart: restart
       ),
       Row.new("mobile_advertise_mdns", :toggle, "Announce on the local network",
         footer: "Off when you want the phone to reach this machine only over Tailscale.",
-        value: Source.boolean(block, :advertise_mdns, true),
+        value: Source.boolean(block, :advertise_mdns, false),
         restart: restart
       )
     ]

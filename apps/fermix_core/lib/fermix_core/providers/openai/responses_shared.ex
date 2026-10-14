@@ -469,19 +469,19 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
 
   defp message_to_item(message), do: user_item(message)
 
-  # User content: the text caption (a plain string) plus any image parts the
-  # gateway materialized (M14). Appending image parts to the single-element text
+  # User content: the text caption (a plain string) plus any picture or PDF parts
+  # the gateway rendered (M14, M67). Appending parts to the single-element text
   # list keeps text-only turns byte-identical to the pre-multimodal shape, so the
   # provider prompt-cache prefix is unaffected (see the characterization test).
   defp user_item(message) do
     text = Map.get(message, :content) || ""
 
-    image_parts =
+    parts =
       message
-      |> Map.get(:image_parts, [])
+      |> Map.get(:parts, [])
       |> Enum.map(&image_part_to_responses/1)
 
-    %{role: "user", content: [%{type: "input_text", text: text} | image_parts]}
+    %{role: "user", content: [%{type: "input_text", text: text} | parts]}
   end
 
   # Image bytes ride as a base64 data URI in `image_url` (the same field a remote
@@ -489,6 +489,17 @@ defmodule FermixCore.Providers.OpenAI.ResponsesShared do
   defp image_part_to_responses(%{type: :image, mime_type: mime, data: data})
        when is_binary(mime) and is_binary(data),
        do: %{type: "input_image", image_url: "data:#{mime};base64,#{Base.encode64(data)}"}
+
+  # A PDF rides as an `input_file` with its name and a base64 data URL (M67).
+  defp image_part_to_responses(
+         %{type: :document, mime_type: "application/pdf", data: data} = part
+       )
+       when is_binary(data),
+       do: %{
+         type: "input_file",
+         filename: Map.fetch!(part, :name),
+         file_data: "data:application/pdf;base64,#{Base.encode64(data)}"
+       }
 
   defp image_part_to_responses(part),
     do:

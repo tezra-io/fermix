@@ -1032,24 +1032,16 @@ defmodule FermixChannels.Channels.Telegram do
     {:ok, [message]}
   end
 
-  # Inbound photos arrive as a list of PhotoSize (file_id only — no URL); the
-  # bytes are fetched lazily by download_attachment/2 at the gateway media-ingest
-  # step. Audio-bearing messages (voice/audio/audio-MIME document/video note)
-  # parse to a single `:audio` attachment the gateway transcription step consumes
-  # (M21 §5.2/D17). A message carries at most one of these media keys, so clause
-  # order among them is irrelevant — each must precede the catch-all.
+  # Each media key is declared as the platform gave it, with no kind: the gateway
+  # attachment pipeline names the kind from the bytes (M67). Photos arrive as a
+  # list of PhotoSize (file_id only — no URL); every file's bytes are fetched
+  # lazily by download_attachment/2. Clause order matters once: an animation
+  # message also sets `document` (Bot API), so its clause precedes the document
+  # one. A message carries one media key otherwise.
   defp parse_attachments(%{"photo" => sizes}) when is_list(sizes) and sizes != [] do
     case largest_photo(sizes) do
       %{"file_id" => file_id} = size when is_binary(file_id) ->
-        [
-          %{
-            kind: :image,
-            file_id: file_id,
-            url: nil,
-            mime_type: "image/jpeg",
-            size_bytes: Map.get(size, "file_size")
-          }
-        ]
+        [declare(size, "image/jpeg", :photo)]
 
       _ ->
         []
@@ -1057,36 +1049,68 @@ defmodule FermixChannels.Channels.Telegram do
   end
 
   # Voice note = OGG/Opus; Telegram fixes the container, so the mime is constant.
-  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id) do
-    [audio_attachment_ref(file_id, "audio/ogg", Map.get(voice, "file_size"))]
-  end
+  defp parse_attachments(%{"voice" => %{"file_id" => file_id} = voice}) when is_binary(file_id),
+    do: [declare(voice, "audio/ogg", :voice)]
 
-  # Audio file (music/clip): carries its own declared mime type.
-  defp parse_attachments(%{"audio" => %{"file_id" => file_id} = audio}) when is_binary(file_id) do
-    [audio_attachment_ref(file_id, Map.get(audio, "mime_type"), Map.get(audio, "file_size"))]
-  end
+  # A GIF: Telegram converts every one to a silent MP4.
+  defp parse_attachments(%{"animation" => %{"file_id" => file_id} = animation})
+       when is_binary(file_id),
+       do: [declare(animation, Map.get(animation, "mime_type", "video/mp4"), :animation)]
+
+  defp parse_attachments(%{"video" => %{"file_id" => file_id} = video}) when is_binary(file_id),
+    do: [declare(video, Map.get(video, "mime_type", "video/mp4"), :video)]
 
   # Round video note (≤1 min): the payload has no mime field — hosted backends
   # take the MP4 container directly (D17), so the mime is fixed to video/mp4.
   defp parse_attachments(%{"video_note" => %{"file_id" => file_id} = note})
-       when is_binary(file_id) do
-    [audio_attachment_ref(file_id, "video/mp4", Map.get(note, "file_size"))]
-  end
+       when is_binary(file_id),
+       do: [declare(note, "video/mp4", :video_note)]
 
-  # A document is transcribable only when it declares an audio mime type; any
-  # other document falls through to the catch-all (unparsed, as before).
-  defp parse_attachments(%{
-         "document" => %{"file_id" => file_id, "mime_type" => "audio/" <> _ = mime} = doc
-       })
-       when is_binary(file_id) do
-    [audio_attachment_ref(file_id, mime, Map.get(doc, "file_size"))]
-  end
+  # Audio file (music/clip): carries its own declared mime type.
+  defp parse_attachments(%{"audio" => %{"file_id" => file_id} = audio}) when is_binary(file_id),
+    do: [declare(audio, Map.get(audio, "mime_type"), :audio)]
+
+  defp parse_attachments(%{"sticker" => %{"file_id" => file_id} = sticker})
+       when is_binary(file_id),
+       do: [declare(sticker, sticker_mime(sticker), :sticker)]
+
+  # Any document, whatever its mime: the pipeline reads it or names why not.
+  defp parse_attachments(%{"document" => %{"file_id" => file_id} = document})
+       when is_binary(file_id),
+       do: [declare(document, Map.get(document, "mime_type"), :document)]
 
   defp parse_attachments(_msg), do: []
 
-  defp audio_attachment_ref(file_id, mime_type, size_bytes) do
-    %{kind: :audio, file_id: file_id, url: nil, mime_type: mime_type, size_bytes: size_bytes}
+  defp declare(%{"file_id" => file_id} = object, mime_type, hint) do
+    %{
+      file_id: file_id,
+      url: nil,
+      mime_type: mime_type,
+      size_bytes: Map.get(object, "file_size"),
+      file_name: Map.get(object, "file_name"),
+      hint: hint,
+      duration_s: Map.get(object, "duration"),
+      poster: poster(Map.get(object, "thumbnail"))
+    }
   end
+
+  # Animation, Video, VideoNote, Document and Sticker carry an optional
+  # `thumbnail` PhotoSize: the still the sender's app made, which a GIF or video
+  # reaches the model as when ffmpeg is not installed (M67 D2).
+  defp poster(%{"file_id" => file_id} = size) when is_binary(file_id),
+    do: %{
+      file_id: file_id,
+      url: nil,
+      mime_type: "image/jpeg",
+      size_bytes: Map.get(size, "file_size")
+    }
+
+  defp poster(_none), do: nil
+
+  # A sticker is a WebP still, a WebM video, or an animated TGS (Lottie) file.
+  defp sticker_mime(%{"is_animated" => true}), do: "application/x-tgsticker"
+  defp sticker_mime(%{"is_video" => true}), do: "video/webm"
+  defp sticker_mime(_still), do: "image/webp"
 
   # A multi-attachment message ("album") shares a media_group_id across the
   # separate updates Telegram delivers it as; the poller buffers by this id so

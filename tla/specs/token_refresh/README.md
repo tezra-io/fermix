@@ -635,7 +635,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   `anthropic_oauth` and `xai_oauth` profiles included. `TokenManager` does not
   trap exits, so a `get_token` call queued on that manager at that moment exits
   in its caller (a provider request, `providers/anthropic/messages.ex:621`,
-  `providers/xai/responses.ex:233`) instead of answering
+  `providers/xai/responses.ex:246`) instead of answering
   `{:error, :reauthorization_required}`; the OpenAI Codex route catches that
   exit and answers an error (`providers/openai/chatgpt_plan.ex:295-305`). The
   window is one message. The in-daemon plugin logout reaches it through the

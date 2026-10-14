@@ -622,8 +622,7 @@ defmodule FermixChannels.Channels.Acp.Peer do
       reply_target: session.id,
       request_cwd: session.cwd,
       session_env: session_env,
-      metadata: metadata,
-      media_parts: []
+      metadata: metadata
     })
   end
 

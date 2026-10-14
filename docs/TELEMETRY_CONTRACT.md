@@ -587,14 +587,22 @@ of their own: the row is a companion write, logged on failure.
 Pairing decisions and push deliveries are **point events with no agent
 session** (like plugin dist): a pairing resolves in `PairManager` and a push
 fires after the turn already closed. Both go through `FermixChannels.Telemetry`
-— `emit_pair(channel, status, duration_us)` with
-`status ∈ approved | denied | expired | cancelled | device_disconnected`
+— `emit_pair(channel, status, duration_us, facts)` with
+`status ∈ approved | denied | expired | cancelled | device_disconnected |
+attestation | attestation_unavailable | platform_unsupported`
 (`cancelled`: the window closed before a decision, by an owner's cancel, a
 dropped `fermix pair` connection or a failed setup; `device_disconnected`: the
-phone was gone when the owner approved), and
+phone was gone when the owner approved; the last three: the phone's key
+attestation was refused, Google's status list could not be used, or the phone
+is not Android, each ending the window before the owner was asked), and
 `emit_push(channel, status, duration_us)` with `status ∈ sent | failed` —
 emitting `[:fermix, :channel, :pair]` / `[:fermix, :channel, :push]`
-(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only).
+(`count: 1` + `duration_us`; `channel`/`status` metadata, atoms only). The
+pair event's `facts` add `platform` (`android | ios`), `attestation`
+(`verified | refused | unavailable`) and `signer_role` (`development |
+release`, set only when verified), each `nil` when no phone got that far;
+never a chain, a key or a name. A refusal's internal check and detail go to
+the daemon log (`mobile pairing refused: …`), not the event.
 `expired` is the window's own end, which the phone and the management wire
 both call `timeout`. Failed handshakes refuse only the address they came from
 and never end a window, so they have no pair status. Never hand-roll the
@@ -639,6 +647,55 @@ database becoming unavailable, a missing grant or unconfirmed recipients at
 boot, a suspected reply loop) and never per failure, and a message body the
 helper could not decode is the `emit_parse(:imessage, :decode_error, …)` parse
 status, not a new event name.
+
+## Inbound attachments (a pre-turn point per attachment)
+
+The gateway's attachment pipeline (`FermixChannels.Gateway.Attachments`, M67)
+emits **one point event per inbound attachment**, once what reached the model is
+settled, through its one emitter `FermixCore.Attachments.Telemetry.emit_ingest/3`:
+`[:fermix, :attachment, :ingest]` with measurements `duration_us` (download,
+classification and rendering, ffmpeg included), `bytes` (its size),
+`rendered_bytes` (what rides the turn inline: the picture, the frames or the
+still, the PDF or the text) and `parts` (content parts it adds: one per frame),
+and metadata `channel`, `kind`
+(`still | animation | video | audio | document | text | unknown`), `mime`,
+`outcome` (`image | frames | poster | document | text | transcript | unusable`:
+`frames` when an installed ffmpeg read a GIF's or a video's frames, `poster`
+when the one still the sender made or a GIF's first frame went instead),
+`reason` (the unusable reason's leading atom, such as `too_large`,
+`needs_ffmpeg` (no ffmpeg here), `render_failed` (ffmpeg ran and failed) or
+`download_failed`, else nil), `detail` (the whole reason, inspected and bounded
+to 200 characters, so an HTTP status or ffmpeg's exit and last words reach the
+trace and not only the log; a `render_failed` detail is `{:ffmpeg_exit, code,
+words}`, `{:timeout, ms}`, `{:output_overflow, bytes}` or `:no_frames`; else
+nil), `sound` (a video's sound, transcribed beside its pictures: `transcript`,
+`no_speech`, `no_sound` (ffmpeg found no sound track, so no transcription ran)
+or `failed`; nil for anything else, an animation included) and `sound_detail`
+(the transcription failure, bounded the same way, else nil). A video's transcription also emits the usual
+`[:fermix, :transcription, :message]`. The file name rides as `name` only under
+`capture_content?`; bytes and transcripts never ride. It runs before any turn,
+like ingress transcription, so it has no session: `Trace.TelemetryHandler`
+records it as an `attachment_ingest` `agent_event` row keyed on `kind`, and
+Opik does **not** subscribe. A message whose attachments are all unreadable is
+answered at the gateway and counted as `[:fermix, :dispatcher, :ingress_failed]`
+with `reason: :attachments_unusable`. Never hand-roll the event.
+
+An operator turn that keeps its attachments in the workspace
+(`FermixCore.Attachments.Workspace`, `media/inbound/<date>/`) emits **one point
+event per turn** through `FermixCore.Attachments.Telemetry.emit_save/4`:
+`[:fermix, :attachment, :save]` with measurements `duration_us` (the prune and
+the writes), `saved` and `failed` (attachments), `files` and `bytes` (written,
+the stills and frames beside each attachment included), `pruned_files` and
+`pruned_bytes` (what the 14-day, 1 GiB prune deleted first), and metadata
+`channel`, `session_id` (the turn's), `outcome` (`saved`, or `failed` when any
+attachment was not saved) and `detail` (the first failure's sentence, bounded
+to 200 characters, else nil; a sentence names folders, never a sender's file
+name). A guest's turn and a Live hand-off save nothing and emit nothing.
+`Trace.TelemetryHandler` records it as an `attachment_save` `agent_event` row
+keyed on `channel`, and the Opik exporter places it under the turn's trace as an
+`attachment_save` span (`FermixOpik.Mapper.attachment_save_span/3`: the counts,
+`channel` and `outcome`, flagged errored with `detail` when the outcome is
+`failed`). A failed save never fails the turn: the manifest names it as well.
 
 ## Computer-history summarizer (a headless run with no bookends)
 

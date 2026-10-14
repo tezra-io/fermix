@@ -4,7 +4,8 @@ defmodule FermixChannels.Gateway do
   for inbound channel messages.
 
   It normalizes each message, authorizes it (dropping denied senders before
-  transcription), transcribes audio, dispatches slash commands, and otherwise
+  any attachment is fetched), runs the attachment pipeline (which transcribes
+  audio), dispatches slash commands, and otherwise
   hands the turn to the queue via the agent delivery seam (building an outbound
   `reply_fn` so core replies without knowing the channel). Channel transports
   (pollers, webhooks, CLI) all route through here; `FermixChannels.Dispatcher`
@@ -13,18 +14,18 @@ defmodule FermixChannels.Gateway do
 
   require Logger
 
+  alias FermixChannels.Gateway.Attachments
   alias FermixChannels.Gateway.Authorizer
   alias FermixChannels.Gateway.ChannelRegistry
   alias FermixChannels.Gateway.Commands
   alias FermixChannels.Gateway.Delivery
   alias FermixChannels.Gateway.DraftStream
-  alias FermixChannels.Gateway.MediaIngest
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.OwnerInboxApproval
   alias FermixChannels.Gateway.ReplyContext
   alias FermixChannels.Gateway.Source
-  alias FermixChannels.Gateway.Transcription
   alias FermixCore.Agents.ConversationKey
+  alias FermixCore.Attachments.Manifest
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.ConversationStore
   alias FermixCore.Telemetry
@@ -113,7 +114,7 @@ defmodule FermixChannels.Gateway do
             DraftStream.build_spec(
               channel,
               message,
-              rotation_opts(channel) ++ pacing_opts(channel)
+              rotation_opts(channel) ++ pacing_opts(channel) ++ seal_opts(channel)
             )
 
       "block" ->
@@ -163,6 +164,15 @@ defmodule FermixChannels.Gateway do
   defp pacing_opts(channel) do
     if function_exported?(channel, :draft_pacing, 0),
       do: [pacing: channel.draft_pacing()],
+      else: []
+  end
+
+  # Whether the channel's seal is the reply's write of record, resolved here
+  # like pacing; without the callback the engine seals as an edit and skips a
+  # seal the last edit already wrote (design §5.7).
+  defp seal_opts(channel) do
+    if function_exported?(channel, :seal_persists?, 0),
+      do: [seal_persists?: channel.seal_persists?()],
       else: []
   end
 
@@ -219,39 +229,72 @@ defmodule FermixChannels.Gateway do
 
   @empty_inbound_reply "Your message looks empty — send some text or media I can read."
 
-  # An empty inbound message (no text, no media — a sticker, poll, blank) is not
-  # something the agent can act on. Reply once and short-circuit: returning
-  # anything other than `:actionable` drops out of the dispatch `with` into the
-  # `:replied_empty` branch, so NO turn is scheduled and the queue stays free.
-  # Provider-agnostic — no LLM is touched. Runs AFTER authorization, so an
-  # unauthorized sender is already dropped and never receives this reply.
+  # A message the agent cannot act on is answered here and schedules no turn:
+  # returning anything other than `:actionable` drops out of the dispatch `with`
+  # into the `:replied` branch, so the queue stays free. Provider-agnostic — no
+  # LLM is touched. Runs AFTER authorization, so an unauthorized sender is
+  # already dropped and never receives either reply.
+  #
+  #   * attachments came and none is usable (D4): the reply names each one and
+  #     its reason — never "looks empty" when something was attached;
+  #   * nothing came (no text, no attachment — a poll, a blank): the empty reply.
   defp ensure_actionable(%Message{} = message, reply_fn) when is_function(reply_fn, 1) do
-    if Message.actionable?(message) do
-      :actionable
-    else
-      :telemetry.execute(
-        [:fermix, :dispatcher, :empty_inbound],
-        %{count: 1},
-        %{channel: message.channel}
-      )
+    cond do
+      Message.actionable?(message) ->
+        :actionable
 
-      Logger.info(
-        "Dispatcher: empty #{message.channel} message (no text, no media); replied without scheduling a turn"
-      )
+      Message.unusable_only?(message) ->
+        reply_unusable(message, reply_fn)
 
-      _ = reply_fn.({:text, @empty_inbound_reply})
-      :replied_empty
+      true ->
+        reply_empty(message, reply_fn)
     end
   end
 
-  # Fail-loud ingress replies (M21 §5.2/D14): a transcription or attachment
-  # download failure replies to the sender with a reason-specific message instead
-  # of the old silent drop. Built only after authorization (an unauthorized
-  # sender is dropped first and never sees these) and NO turn is scheduled.
+  defp reply_empty(%Message{} = message, reply_fn) do
+    :telemetry.execute(
+      [:fermix, :dispatcher, :empty_inbound],
+      %{count: 1},
+      %{channel: message.channel}
+    )
+
+    Logger.info(
+      "Dispatcher: empty #{message.channel} message (no text, no attachment); replied without scheduling a turn"
+    )
+
+    _ = reply_fn.({:text, @empty_inbound_reply})
+    :replied
+  end
+
+  defp reply_unusable(%Message{inbound_attachments: attachments} = message, reply_fn) do
+    :telemetry.execute(
+      [:fermix, :dispatcher, :ingress_failed],
+      %{count: 1},
+      %{channel: message.channel, reason: :attachments_unusable}
+    )
+
+    Logger.info(
+      "Dispatcher: no usable attachment in #{message.channel} message " <>
+        "(#{inspect(Enum.map(attachments, & &1.status), limit: 20, printable_limit: 200)}); " <>
+        "replied without scheduling a turn"
+    )
+
+    _ = reply_fn.({:text, Manifest.unusable_reply(attachments)})
+    :replied
+  end
+
+  # Fail-loud ingress replies (M21 §5.2/D14): a transcription failure replies to
+  # the sender with a reason-specific message instead of the old silent drop.
+  # Built only after authorization (an unauthorized sender is dropped first and
+  # never sees these) and NO turn is scheduled.
   @not_configured_reply "I couldn't transcribe your voice note — no transcription " <>
                           "backend is configured. Run `fermix setup` to add one."
   @transcription_failed_reply "I couldn't transcribe your voice note — the " <>
                                 "transcription failed. Please try again."
+  # The provider heard the recording and found no speech: retrying the same
+  # clip can't help, so the reply points at the microphone instead.
+  @no_speech_reply "I couldn't hear any speech in your voice note — check your " <>
+                     "microphone and record it again."
   # An uninstalled on-device backend is an install state, not a transient
   # failure: "please try again" is a remedy that can never work, so each half
   # names the install that fixes it (the doctor wording, D14).
@@ -266,8 +309,6 @@ defmodule FermixChannels.Gateway do
   @no_on_device_build_reply "I couldn't transcribe your voice note — on-device " <>
                               "transcription is selected, but it isn't available on this " <>
                               "machine. Choose another transcription backend in settings."
-  @download_failed_reply "I couldn't download your attachment to transcribe it. " <>
-                           "Please try again."
 
   defp dispatch_message(channel, message, deps) do
     {normalize_result, normalize_duration_us} =
@@ -329,48 +370,33 @@ defmodule FermixChannels.Gateway do
       "chat_id=#{inspect(message.chat_id)}"
   end
 
-  # Transcription materialization + fail-loud replies. Runs with the delivery
+  # The attachment pipeline (M67) + fail-loud replies. Runs with the delivery
   # `reply_fn` already built, so a failure can reply to the sender. Building
-  # reply_fn ahead of transcription is behavior-identical to building it after:
+  # reply_fn ahead of the pipeline is behavior-identical to building it after:
   # the channel reply closures read only routing fields (reply_target, thread_ts,
-  # channel), which transcription/media-ingest never touch.
+  # channel), which the pipeline never touches.
   #
-  # Speech intake (D14) is the only ingress step with fail-loud sender replies: a
-  # transcription failure — including the audio-download failure the transcription
-  # step wraps as `{:attachment_download_failed, _}` — replies to the sender. Image
-  # media-ingest keeps its pre-D14 log-only behavior (its download failures wrap
-  # the same tuple, but are handled in `attach_images_and_deliver`, never here), so
-  # a failed photo download never gets the transcription-worded reply.
+  # A transcription failure is the one pipeline outcome that fails the whole
+  # message with its own reply (D14). An attachment that cannot be fetched or
+  # read is not a failure of the message: it rides on as unusable, and either
+  # the turn's manifest or `ensure_actionable/2`'s reply names it (D4).
   defp ingest_authorized(channel, reply_message, authorization, reply_fn, deps) do
-    case Transcription.maybe_transcribe_message(
-           channel,
-           reply_message,
-           deps.transcription_opts
-         ) do
+    case Attachments.ingest(channel, reply_message, deps.transcription_opts) do
       {:ok, reply_message} ->
-        with {:ok, reply_message} <-
-               MediaIngest.maybe_attach_images(channel, reply_message),
-             :ok <- notify_enriched(deps.ingest_enriched_fn, reply_message),
+        with :ok <- notify_enriched(deps.ingest_enriched_fn, reply_message),
              :actionable <- ensure_actionable(reply_message, reply_fn) do
           run_commands_or_deliver(channel, reply_message, authorization, reply_fn, deps)
         else
-          :replied_empty ->
+          :replied ->
             :ok
 
           {:error, reason} = error ->
-            Logger.error("Dispatcher ingress failed (media): #{inspect(reason)}")
+            Logger.error("Dispatcher ingress failed (enrichment): #{inspect(reason)}")
             error
         end
 
       {:error, {:transcription_failed, _reason} = wrapped} ->
         reply_ingress_failure(reply_message.channel, reply_fn, wrapped)
-
-      {:error, {:attachment_download_failed, _reason} = wrapped} ->
-        reply_ingress_failure(reply_message.channel, reply_fn, wrapped)
-
-      {:error, reason} = error ->
-        Logger.error("Dispatcher ingress failed (transcription): #{inspect(reason)}")
-        error
     end
   end
 
@@ -445,7 +471,7 @@ defmodule FermixChannels.Gateway do
   # The turn is never scheduled: reply once and return `:ok` (handled, like the
   # empty-inbound path), so the ingest batch continues to the next message.
   defp reply_ingress_failure(channel, reply_fn, wrapped) do
-    Logger.error("Dispatcher ingress failed (transcription/media): #{inspect(wrapped)}")
+    Logger.error("Dispatcher ingress failed (transcription): #{inspect(wrapped)}")
 
     :telemetry.execute(
       [:fermix, :dispatcher, :ingress_failed],
@@ -460,14 +486,12 @@ defmodule FermixChannels.Gateway do
   defp ingress_failure_copy({:transcription_failed, reason}),
     do: transcription_failure_copy(reason)
 
-  defp ingress_failure_copy({:attachment_download_failed, reason}),
-    do: download_failure_copy(reason)
-
   defp transcription_failure_copy(:not_configured), do: @not_configured_reply
   defp transcription_failure_copy({:unsupported_auth_mode, _mode}), do: @not_configured_reply
   defp transcription_failure_copy(:sidecar_not_installed), do: @sidecar_not_installed_reply
   defp transcription_failure_copy(:model_not_installed), do: @model_not_installed_reply
   defp transcription_failure_copy(:no_release_pinned), do: @no_on_device_build_reply
+  defp transcription_failure_copy(:empty_transcription), do: @no_speech_reply
 
   defp transcription_failure_copy({:file_too_large, size_mb, cap_mb}) do
     "I couldn't transcribe your voice note — it's #{size_mb} MB, over the " <>
@@ -475,13 +499,6 @@ defmodule FermixChannels.Gateway do
   end
 
   defp transcription_failure_copy(_reason), do: @transcription_failed_reply
-
-  defp download_failure_copy({:byte_cap_exceeded, _size, max_bytes}) do
-    "I couldn't download that to transcribe — it's over the " <>
-      "#{div(max_bytes, 1_048_576)} MB limit. Send a shorter clip."
-  end
-
-  defp download_failure_copy(_reason), do: @download_failed_reply
 
   defp authorize(%Message{} = message, ingress_context) do
     {result, duration_us} =

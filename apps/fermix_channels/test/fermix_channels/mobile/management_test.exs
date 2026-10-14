@@ -36,7 +36,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
       discover: fn ->
         {:ok, [%{address: "192.168.1.8", interface: "en0", scope: :lan}]}
       end,
-      host_label: fn -> "workstation" end
+      host_label: fn -> "workstation" end,
+      profile: "fermix-macos"
     ]
 
     assert {:ok, result} = Management.begin_pairing(opts)
@@ -47,9 +48,10 @@ defmodule FermixChannels.Mobile.ManagementTest do
     refute Map.has_key?(result, :secret)
 
     query = result.uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
-    assert query["v"] == "1"
+    assert query["v"] == "2"
     assert query["port"] == "40321"
     assert query["name"] == "workstation"
+    assert query["profile"] == "fermix-macos"
     assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
     assert Base.decode64!(query["gateway_pk"]) == <<1::256>>
     assert Base.decode64!(query["secret"]) == <<3::256>>
@@ -329,7 +331,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
            end,
            activate_listener: fn _identity -> :ok end,
            persist_device: fn device -> {:ok, device} end,
-           emit_pair: fn _status, _duration_us -> :ok end,
+           emit_pair: fn _status, _duration_us, _facts -> :ok end,
+           status_fetch: fn -> {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}} end,
            session_id_generator: fn -> "pair-session" end,
            device_id_generator: fn -> "device-id" end,
            secret_generator: fn -> <<3::256>> end,
@@ -390,13 +393,35 @@ defmodule FermixChannels.Mobile.ManagementTest do
       assert view.request == %{
                device_name: "Pixel 9 Pro",
                model: "Google Pixel 9 Pro",
-               platform: nil,
+               platform: "android",
                app_version: "1.0.0",
                sas: "481062",
-               build_role: nil,
-               boot_state: nil,
-               attestation: :unavailable
+               build_role: :development,
+               boot_state: %{verified: true, locked: true},
+               attestation: :verified
              }
+    end
+
+    # MILESTONE_51_MANAGEMENT_MOBILE_PAIRING §4: a refused proof never reaches
+    # the owner; the session ends failed with the check that refused it, and
+    # nothing was asked, so there is no request to show.
+    test "a refused attestation ends the session failed, naming its check", ctx do
+      for {reason, check} <- [
+            attestation: :root_of_trust,
+            attestation_unavailable: :revocation,
+            platform_unsupported: :platform
+          ] do
+        assert {:ok, _started} = Management.pair_start(ctx.opts)
+        refusal = %{reason: reason, check: check, platform: "android"}
+        assert :ok = PairManager.refuse(ctx.manager, "pair-session", refusal)
+
+        assert {:ok, view} = Management.pair_get("pair-session", ctx.opts)
+        assert view.state == :failed
+        assert view.failure == %{reason: reason, check: check}
+        assert view.request == nil
+        assert view.outcome == nil
+        assert view.ttl_ms == nil
+      end
     end
 
     test "approve ends approved with the new device id and keeps who was approved", ctx do
@@ -726,6 +751,28 @@ defmodule FermixChannels.Mobile.ManagementTest do
       end
     end
 
+    test "a phone paired with a verified attestation shows what it proved" do
+      attested =
+        "33333333-3333-4333-8333-333333333333"
+        |> device(~U[2026-10-11 08:00:00Z], nil)
+        |> Map.merge(%{
+          platform: "android",
+          signer_role: :release,
+          version_code: 7,
+          boot_state: :verified,
+          device_locked: true
+        })
+
+      assert {:ok, [row]} =
+               Management.devices_list(
+                 serving_opts(list_devices: fn :store -> {:ok, [attested]} end)
+               )
+
+      assert row.platform == "android"
+      assert row.signer_role == :release
+      assert row.boot_state == %{verified: true, locked: true}
+    end
+
     test "at most 64 rows are listed" do
       devices =
         for index <- 1..65 do
@@ -819,6 +866,21 @@ defmodule FermixChannels.Mobile.ManagementTest do
     end
   end
 
+  # The switch is live (M51 §5.5): core calls this after it writes the switch.
+  describe "apply_enabled/2" do
+    test "answers what the subtree's switch did" do
+      parent =
+        start_supervised!(%{
+          id: :apply_enabled_parent,
+          start: {Supervisor, :start_link, [[], [strategy: :one_for_one]]},
+          type: :supervisor
+        })
+
+      assert {:error, :not_ready} = Management.apply_enabled(true, parent: parent)
+      assert {:ok, :stopped} = Management.apply_enabled(false, parent: parent)
+    end
+  end
+
   describe "status/1" do
     test "with the channel off it answers from config alone, without a process call" do
       opts =
@@ -884,11 +946,35 @@ defmodule FermixChannels.Mobile.ManagementTest do
                  candidates: []
                }
 
-        assert status.mdns == :down
+        assert status.mdns == :disabled
         assert status.paired_devices == 0
         assert status.pairing == nil
         assert status.identity.present
       end
+    end
+
+    # The announcement ships off: a block that never turns it on reads it
+    # disabled whether or not the channel runs, and never asks the advertiser.
+    test "the local-network announcement is disabled unless the config turns it on" do
+      not_started =
+        [config: [enabled: true], device_store: :store, load_identity: fn [] -> {:error, :x} end] ++
+          Keyword.merge(unreachable_processes(),
+            refusal: fn :store -> :none end,
+            whereis: fn _manager -> nil end
+          )
+
+      assert {:ok, %{mdns: :disabled}} = Management.status(not_started)
+
+      announcing = Keyword.put(not_started, :config, enabled: true, advertise_mdns: true)
+      assert {:ok, %{mdns: :down}} = Management.status(announcing)
+
+      running =
+        serving_opts(
+          list_devices: fn :store -> {:ok, []} end,
+          mdns_status: fn :mdns -> flunk("an announcement that is off is not asked") end
+        )
+
+      assert {:ok, %{mdns: :disabled}} = Management.status(running)
     end
 
     test "while running, a read that fails is an error, never an empty fact" do
@@ -916,7 +1002,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
         status: :device_disconnected,
         remaining_ms: nil,
         request: nil,
-        device_id: nil
+        device_id: nil,
+        refusal: nil
       }
 
       opts =
@@ -1024,6 +1111,60 @@ defmodule FermixChannels.Mobile.ManagementTest do
       refute_received :enumerated
     end
 
+    # M51 §5.5: a listener bound to one address answers only there, so the
+    # pairing link and status name that address and no other.
+    test "a pairing link and status list only the address the listener binds" do
+      getifaddrs = fn ->
+        {:ok,
+         [
+           {~c"en0", [flags: [:up, :broadcast], addr: {192, 168, 1, 8}]},
+           {~c"en1", [flags: [:up, :broadcast], addr: {10, 0, 0, 5}]},
+           {~c"utun4", [flags: [:up, :pointtopoint], addr: {100, 64, 1, 2}]}
+         ]}
+      end
+
+      discovery =
+        start_supervised!(
+          {Discovery,
+           name: nil,
+           bind: "192.168.1.8",
+           getifaddrs: getifaddrs,
+           reverse_lookup: fn _address, _timeout_ms -> {:error, :nxdomain} end}
+        )
+
+      opts =
+        [
+          config: [enabled: true, bind: "192.168.1.8"],
+          discovery: discovery,
+          list_devices: fn :store -> {:ok, []} end
+        ]
+        |> serving_opts()
+        |> Keyword.delete(:discover)
+
+      pairing = [
+        open_pair: fn :pair ->
+          {:ok,
+           %{
+             session_id: "session-id",
+             secret: <<3::256>>,
+             identity: %{gateway_public_key: <<1::256>>, tls_fingerprint: <<2::256>>},
+             opened_at_ms: 1_000,
+             expires_at_ms: 121_000
+           }}
+        end,
+        listener_info: fn :listener -> {:ok, {{192, 168, 1, 8}, 40_321}} end,
+        host_label: fn -> "workstation" end
+      ]
+
+      assert {:ok, %{uri: uri}} = Management.begin_pairing(opts ++ pairing)
+      query = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+      assert Jason.decode!(query["candidates"]) == ["192.168.1.8"]
+
+      assert {:ok, status} = Management.status(opts)
+      assert status.listener.candidates == ["wss://192.168.1.8:4031/ws"]
+      assert status.tailnet == %{detected: false, candidates: []}
+    end
+
     # STB-6: a listener that cannot bind stays up, unavailable, and says why.
     test "a listener that cannot bind is unavailable with its reason" do
       opts =
@@ -1109,8 +1250,17 @@ defmodule FermixChannels.Mobile.ManagementTest do
                name: "Pixel 9 Pro",
                model: "Google Pixel 9 Pro",
                app_version: "1.0.0",
+               platform: "android",
                noise_pk: <<5::256>>,
                sas: "481062",
+               attestation: %{
+                 platform: "android",
+                 security_level: :trusted_environment,
+                 signer_role: :development,
+                 version_code: 42,
+                 boot_state: :verified,
+                 device_locked: true
+               },
                socket_pid: socket
              })
   end
@@ -1205,7 +1355,8 @@ defmodule FermixChannels.Mobile.ManagementTest do
       status: status,
       remaining_ms: 120_000,
       request: nil,
-      device_id: nil
+      device_id: nil,
+      refusal: nil
     }
   end
 

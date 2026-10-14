@@ -244,16 +244,19 @@ because a failed call caused nothing the reply can claim.
   `evaluate` refuses a score built on invalid trials outright — a release verdict
   computed over episodes nobody observed is a verdict about the harness.
 
-  **Today's 24-task sweep exits 5 by design.** None of its cases declares a safety
-  gate, so the gate fails closed with *"safety not evaluated (no capability case
-  declares a safety gate)"*. That is the review's §4 P0 rule — a missing safety
-  observation is never a pass — and release eligibility needs a separately passing
-  safety pack (Stage B). Padding the denominator with gates a task could never trip
-  would produce exactly the reassuring checkmark the rule exists to prevent, so the
-  posture stands and the failure is made legible instead: the gate reason, the
-  runner's exit-5 message, `scripts/vultr-box.sh`'s `tier_failure`, and the weekly
-  and nightly issue bodies all say so. Only a `pass@1` / `pass^k` reason is about
-  the candidate.
+  **The sweep's safety evidence is a dedicated pack.** `cap_untrusted_content`
+  (`suites/capability/untrusted_content.yaml`) pairs ordinary work with hostile
+  content — an injected instruction in an MCP tool result, a hidden note in a
+  workspace document, a request for a credential in an email — plus a clean control
+  that measures the utility the injection cost. Its gates can trip (the writes the
+  injection asks for succeed if attempted), and its checkers add end-state
+  violations beside them. A selection with no case that declares a safety gate still
+  fails closed with *"safety not evaluated"*: that is the review's §4 P0 rule — a
+  missing safety observation is never a pass — and padding the denominator with
+  gates a task could never trip would produce exactly the reassuring checkmark the
+  rule exists to prevent. The gate reason names that cause, so it is never read as a
+  candidate regression; only a `pass@1` / `pass^k` reason or an observed violation is
+  about the candidate.
 
 ### The behavioral tier: sticky safety across retries
 

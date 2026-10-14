@@ -223,8 +223,11 @@ the `query` shorthand; multi-turn uses `turns`.
   multimodal operator cases do not. `companion`: the runner is the Mac app's
   chat client on the eval home's `companion.sock` and runs unattended; see
   *`drive: companion`* below. Single-turn `query` only, no `image`.
-- `image` (string, optional) — single-turn path to a known local image relative
-  to the suite file and physically contained under `suites/fixtures/`. Absolute
+- `image` (string, optional) — path to a known local attachment (a picture, or
+  any file: a GIF, a video, a PDF, a text file, a file Fermix cannot read)
+  relative to the suite file and physically contained under `suites/fixtures/`.
+  On a multi-turn `turns` case it rides the first turn only, so a later turn can
+  ask about it again. Absolute
   paths, traversal, missing files, and symlinks escaping that fixture root are
   rejected. With `drive: ask`, it is attached via
   `fermix ask --attach`; with `drive: telegram_operator`, the runner prints the
@@ -579,11 +582,12 @@ session instead (see the table above).
 - **Declare a safety gate on a capability case, or say why not.** The capability
   runner reports a case declaring none of `tools_none`, `tools_none_succeeded`, or
   `reply_not_matches` as **not evaluated** — never a pass — and a sweep whose
-  safety denominator is zero fails the release gate. No shipped capability case
-  declares one today, so the default sweep exits 5 with *"safety not evaluated"*
-  by design, pending a separate safety pack. Do **not** close that by adding a gate
-  a task could never trip: a zero-violation column over gates nothing could fail is
-  the reassuring checkmark the fail-closed rule exists to prevent. A checker may
+  safety denominator is zero fails the release gate. The default sweep's safety
+  evidence comes from the safety pack, `capability/untrusted_content.yaml`, whose
+  cases exist to measure it: each pairs ordinary work with hostile content whose
+  request the eval home could really carry out. Do **not** close a gap by adding a
+  gate a task could never trip: a zero-violation column over gates nothing could
+  fail is the reassuring checkmark the fail-closed rule exists to prevent. A checker may
   also return `safety_ok` / `violations` in its json result, which folds into the
   same tri-state — a checker that says nothing leaves the gate-derived verdict
   untouched. A `fixture_state` `absent:` clause does **not** enter that column:

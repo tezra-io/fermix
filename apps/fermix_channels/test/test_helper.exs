@@ -8,5 +8,6 @@
 # (which `mix test` neither loads as tests nor warns about) and are loaded
 # here, before any test module that names them is compiled.
 Code.require_file("support/imessage_fake_helper.exs", __DIR__)
+Code.require_file("support/attestation_chain_helper.exs", __DIR__)
 
 ExUnit.start(capture_log: true, assert_receive_timeout: 2_000)

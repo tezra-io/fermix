@@ -311,6 +311,22 @@ defmodule FermixCore.Management.SettingsTest do
       end
     end
 
+    # Every app draws its model picker from this row, and the goldens only
+    # illustrate it, so this is where the catalog and the wire are held to one
+    # list: a model added to `ModelCatalog` reaches every app with no change
+    # there.
+    test "a model row offers exactly the catalog" do
+      for descriptor <- Descriptor.all() do
+        expected =
+          descriptor.id
+          |> ModelCatalog.models_for()
+          |> Enum.map(&Row.option(&1.id, &1.label))
+
+        assert row("providers.#{descriptor.id}", "default_model")["options"] == expected,
+               "providers.#{descriptor.id} offers models the catalog does not"
+      end
+    end
+
     # The macOS app draws its model picker from these options, so a catalog
     # model reaches the app only if it is published here.
     test "a model row offers the newest catalog models to the app" do
@@ -1146,9 +1162,10 @@ defmodule FermixCore.Management.SettingsTest do
   end
 
   # The phone channel is a section of its own, not an inventory channel: it has
-  # no credential, and its rows are a switch, a port and an address.
+  # no credential, and its rows are a switch, a port and an address. The switch
+  # is applied the moment it is written (M51 §5.5); the rest is read at boot.
   describe "the phone section" do
-    test "publishes four boot-bound rows with the shipped defaults" do
+    test "publishes the live switch and three boot-bound rows with the shipped defaults" do
       Application.delete_env(:fermix_channels, :mobile)
 
       assert %{id: "channels.mobile", pane: "channels", title: "Phone"} in Settings.sections()
@@ -1159,10 +1176,16 @@ defmodule FermixCore.Management.SettingsTest do
                {"mobile_enabled", "toggle", false},
                {"mobile_port", "number", 4031},
                {"mobile_bind", "text", "0.0.0.0"},
-               {"mobile_advertise_mdns", "toggle", true}
+               {"mobile_advertise_mdns", "toggle", false}
              ]
 
-      assert Enum.all?(rows, & &1["restart"])
+      assert Enum.map(rows, &{&1["key"], &1["restart"]}) == [
+               {"mobile_enabled", false},
+               {"mobile_port", true},
+               {"mobile_bind", true},
+               {"mobile_advertise_mdns", true}
+             ]
+
       refute Enum.any?(rows, & &1["read_only"])
 
       assert %{"min" => 1024, "max" => 65_535, "step" => 1, "format" => "integer", "unit" => nil} =
@@ -1196,10 +1219,11 @@ defmodule FermixCore.Management.SettingsTest do
       ]
 
       for {key, value, config_key} <- writes do
-        assert {:ok, result} = Settings.apply("channels.mobile", %{key => value})
+        assert {:ok, result} =
+                 Settings.apply("channels.mobile", %{key => value}, mobile_switch: &switched/1)
 
         assert result["applied"] == [key]
-        assert Enum.any?(result["restart"]["reasons"], &(&1["section"] == "channels"))
+
         assert Application.get_env(:fermix_channels, :mobile)[config_key] == value
         assert row("channels.mobile", key)["value"] == value
       end
@@ -1229,12 +1253,84 @@ defmodule FermixCore.Management.SettingsTest do
       Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
 
       assert {:error, _refusal} =
-               Settings.apply("channels.mobile", %{
-                 "mobile_enabled" => true,
-                 "mobile_port" => 80
-               })
+               Settings.apply(
+                 "channels.mobile",
+                 %{"mobile_enabled" => true, "mobile_port" => 80},
+                 mobile_switch: &switched/1
+               )
 
       assert Application.get_env(:fermix_channels, :mobile) == [enabled: false, port: 4031]
+      refute_received {:mobile_switch, _on?}
+    end
+
+    test "turning the switch on or off applies it at once" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+
+      assert {:ok, on} =
+               Settings.apply("channels.mobile", %{"mobile_enabled" => true},
+                 mobile_switch: &switched/1
+               )
+
+      assert_received {:mobile_switch, true}
+      assert on["side_effects"] == []
+
+      assert {:ok, _off} =
+               Settings.apply("channels.mobile", %{"mobile_enabled" => false},
+                 mobile_switch: &switched/1
+               )
+
+      assert_received {:mobile_switch, false}
+    end
+
+    test "a write that leaves the switch where it was does not touch it" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+
+      assert {:ok, _result} =
+               Settings.apply(
+                 "channels.mobile",
+                 %{"mobile_enabled" => true, "mobile_port" => 4040},
+                 mobile_switch: &switched/1
+               )
+
+      refute_received {:mobile_switch, _on?}
+    end
+
+    test "a switch the channel did not follow is said as a side effect" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+      sentence = "The phone channel is on but could not start. See the daemon log."
+
+      assert {:ok, result} =
+               Settings.apply("channels.mobile", %{"mobile_enabled" => true},
+                 mobile_switch: fn true -> {:error, sentence} end
+               )
+
+      assert result["side_effects"] == [sentence]
+      assert Application.get_env(:fermix_channels, :mobile)[:enabled] == true
+    end
+
+    # A reload is the other way the switch reaches the running config, and it
+    # asks for no restart either, so it must apply the switch too.
+    test "a reload that moves the switch applies it", %{home: home} do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+
+      assert {:ok, _result} =
+               Settings.apply("channels.mobile", %{"mobile_port" => 4040},
+                 mobile_switch: &switched/1
+               )
+
+      # Only the phone table's switch: the file also carries other channels'
+      # `enabled = false`, and turning on a Mac-only one fails the reload off a Mac.
+      path = Path.join(home, "config.toml")
+      phone_off = ~r/(\[fermix_channels\.mobile\][^\[]*?)enabled = false/
+
+      File.write!(path, Regex.replace(phone_off, File.read!(path), "\\1enabled = true"))
+      assert File.read!(path) =~ ~r/\[fermix_channels\.mobile\][^\[]*?enabled = true/
+      refute File.read!(path) =~ ~r/\[fermix_channels\.imessage\][^\[]*?enabled = true/
+
+      assert {:ok, reload} = Settings.reload(mobile_switch: &switched/1)
+      assert reload["reloaded"]
+      assert_received {:mobile_switch, true}
+      assert Application.get_env(:fermix_channels, :mobile)[:enabled] == true
     end
 
     # The block carries keys no pane writes. A write that replaced it instead of
@@ -1249,7 +1345,10 @@ defmodule FermixCore.Management.SettingsTest do
         push: push
       )
 
-      assert {:ok, _result} = Settings.apply("channels.mobile", %{"mobile_enabled" => true})
+      assert {:ok, _result} =
+               Settings.apply("channels.mobile", %{"mobile_enabled" => true},
+                 mobile_switch: &switched/1
+               )
 
       mobile = Application.get_env(:fermix_channels, :mobile)
       assert mobile[:enabled] == true
@@ -1806,6 +1905,12 @@ defmodule FermixCore.Management.SettingsTest do
 
   # Read as on a Mac, so a section that exists only there reads the same on
   # every CI leg; the platform gate itself has its own cases.
+  # The phone channel's switch as settings call it, without starting anything.
+  defp switched(on?) do
+    send(self(), {:mobile_switch, on?})
+    :ok
+  end
+
   defp rows(id) do
     {:ok, %{"rows" => rows}} = Settings.get(id, macos?: true)
     rows

@@ -153,6 +153,19 @@ defmodule FermixChannels.Gateway.Channel do
   @callback seal_draft(message(), stream_handle(), String.t()) ::
               {:ok, String.t() | nil} | {:error, term()}
 
+  @doc """
+  Whether `seal_draft/3` is the reply's write of record rather than one more
+  edit of what `edit_draft/3` already wrote: `true` for a channel whose edits
+  only show the reply and whose seal persists it. The streaming engine then
+  seals a live draft through the channel even when the last edit already shows
+  the final text. A channel without it is sealed as an edit, so a seal its
+  last edit already wrote is skipped (CHANNEL_STREAMING §5.7). A rotation seal
+  goes through `seal_draft/3` as well, so a channel whose seal also completes
+  the reply declares no `rotation_spec/0`: a rotation would complete it with
+  its first part.
+  """
+  @callback seal_persists?() :: boolean()
+
   @doc "Delete the draft (turn stopped, superseded, or errored)."
   @callback discard_draft(message(), stream_handle()) :: :ok | {:error, term()}
 
@@ -318,6 +331,7 @@ defmodule FermixChannels.Gateway.Channel do
     open_draft: 2,
     edit_draft: 3,
     seal_draft: 3,
+    seal_persists?: 0,
     discard_draft: 2,
     rotation_spec: 0,
     draft_pacing: 0,

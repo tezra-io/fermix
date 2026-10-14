@@ -11,6 +11,7 @@ defmodule FermixChannels.Gateway.PolicyTest do
   alias FermixChannels.Gateway
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Commands.Sandbox.Confirmations
+  alias FermixChannels.Gateway.DraftStream
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Mobile.DeviceStore
   alias FermixCore.Agents.ConversationKey
@@ -36,6 +37,25 @@ defmodule FermixChannels.Gateway.PolicyTest do
     def build_turn_result(%Message{id: id}) do
       test_pid = self()
       fn event -> send(test_pid, {:mobile_terminal, id, event}) end
+    end
+  end
+
+  # The phone's timeline as a draft seal writes it. The seal runs in the draft
+  # engine's process, not the test's, so the write is reported to the test by
+  # its registered name.
+  defmodule PhoneTimeline do
+    def append_client_response(profile, client_id, attempt, attrs, _opts) do
+      send(:phone_timeline_test, {:fenced_response, profile, client_id, attempt, attrs.content})
+
+      row =
+        Map.merge(attrs, %{
+          role: "assistant",
+          profile_id: profile,
+          server_seq: 73,
+          created_at: ~U[2026-10-10 09:00:00Z]
+        })
+
+      {:ok, {:created, row}}
     end
   end
 
@@ -420,6 +440,60 @@ defmodule FermixChannels.Gateway.PolicyTest do
       assert pending.ingress_context == ingress_context
     end
 
+    # A phone's draft seal is its reply's one write of record: an edit only
+    # shows the phones the text, the seal stores the row and completes the
+    # request. Through the spec the gateway builds for the real adapter, a
+    # reply whose last edit already shows all of it is still sealed.
+    test "a phone's streamed reply is stored when its last edit already shows all of it" do
+      Process.register(self(), :phone_timeline_test)
+      test_pid = self()
+      put_channels_env(:mobile_store, PhoneTimeline)
+      put_channels_env(:mobile_unfurl_launcher, fn _resolution -> :ok end)
+
+      put_channels_env(:mobile_event_sink, fn profile_id, event ->
+        send(test_pid, {:phone_event, profile_id, event})
+        :ok
+      end)
+
+      metadata = %{client_msg_id: "client-1", mobile_attempt: 2, turn_id: "turn-client-1"}
+
+      message =
+        message("hello",
+          channel: "mobile",
+          chat_id: "main",
+          reply_target: "main",
+          metadata: metadata
+        )
+
+      assert :ok =
+               Gateway.ingest([message],
+                 channel: Mobile,
+                 agent: CapturingAgent,
+                 agent_server: self(),
+                 ingress_context: %{transport: :mobile, authenticated_device_id: pair_device!()}
+               )
+
+      assert_receive {:agent_message, %{stream_spec: %DraftStream.Spec{mode: :draft} = spec}}
+
+      answer = "The whole answer, streamed."
+      pid = DraftStream.start_link(spec)
+      DraftStream.push(pid, {:text_delta, answer})
+
+      assert_receive {:phone_event, "main",
+                      %{"t" => "text_delta", "turn_id" => "turn-client-1", "text" => ^answer}}
+
+      assert {:ok, nil} = DraftStream.seal(pid, answer)
+      assert_receive {:fenced_response, "main", "client-1", 2, ^answer}
+
+      assert_receive {:phone_event, "main",
+                      %{
+                        "t" => "text_done",
+                        "turn_id" => "turn-client-1",
+                        "server_seq" => 73,
+                        "text" => ^answer
+                      }}
+    end
+
     test "a phone message without the phone's proof is refused, whatever conversation it runs in" do
       message = message("hello", channel: "mobile", chat_id: "main", reply_target: "main")
 
@@ -523,6 +597,19 @@ defmodule FermixChannels.Gateway.PolicyTest do
       case previous do
         {:ok, value} -> Application.put_env(:fermix_channels, :mobile, value)
         :error -> Application.delete_env(:fermix_channels, :mobile)
+      end
+    end)
+  end
+
+  # Restores the exact prior value (including "unset"), as put_telegram/1 does.
+  defp put_channels_env(key, value) do
+    previous = Application.fetch_env(:fermix_channels, key)
+    Application.put_env(:fermix_channels, key, value)
+
+    on_exit(fn ->
+      case previous do
+        {:ok, prior} -> Application.put_env(:fermix_channels, key, prior)
+        :error -> Application.delete_env(:fermix_channels, key)
       end
     end)
   end

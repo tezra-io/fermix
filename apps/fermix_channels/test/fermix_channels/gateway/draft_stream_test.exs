@@ -267,6 +267,24 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       refute_received {:seal, _handle, _text}
     end
 
+    # The mirror of (n): when the seal is the reply's write of record (the
+    # edits only show the reply), it is written even though the last write
+    # already holds the final text.
+    test "a persisting seal is written even when the last write holds the final text" do
+      pid = DraftStream.start_link(spec(self(), seal_persists?: true), @fast)
+
+      DraftStream.push(pid, {:text_delta, "the final text"})
+      assert_receive {:open, "the final text"}
+      assert {:ok, nil} = DraftStream.seal(pid, "the final text")
+      assert_received {:seal, :handle_1, "the final text"}
+    end
+
+    test "a seal_persists? that is not a boolean is refused where the spec is started" do
+      assert_raise ArgumentError, ~r/seal_persists\? must be a boolean/, fn ->
+        DraftStream.start_link(spec(self(), seal_persists?: nil))
+      end
+    end
+
     test "(h) seal returns the channel's overflow remainder" do
       pid =
         DraftStream.start_link(
@@ -1150,6 +1168,34 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
       DraftStream.push(pid, {:text_delta, "The actual answer of the final round."})
       assert_receive {:open, {:bubble, 2}, "The actual answer of the final round."}
       assert {:ok, nil} = DraftStream.seal(pid, "The actual answer of the final round.")
+    end
+
+    # The default seal is an edit: a commentary bubble whose last write already
+    # shows exactly its text stands as it is, with no second write of the text.
+    test "the commentary bubble that already shows its text is not sealed again" do
+      pid = DraftStream.start_link(rotating_spec(self()), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, "First round commentary."})
+      assert_receive {:open, {:bubble, 1}, "First round commentary."}
+      DraftStream.push(pid, {:iteration_started, 2})
+      DraftStream.push(pid, {:text_delta, "The actual answer of the final round."})
+
+      # The next round's bubble opens after the reset, so a seal of the first
+      # bubble would already be here.
+      assert_receive {:open, {:bubble, 2}, "The actual answer of the final round."}
+      refute_received {:seal, {:bubble, 1}, _text}
+    end
+
+    # A persisting seal is never skipped: the bubble is sealed even though its
+    # last write already shows exactly the commentary.
+    test "a persisting seal seals the commentary bubble that already shows its text" do
+      pid = DraftStream.start_link(rotating_spec(self(), seal_persists?: true), @rotate_fast)
+
+      DraftStream.push(pid, {:text_delta, "First round commentary."})
+      assert_receive {:open, {:bubble, 1}, "First round commentary."}
+      DraftStream.push(pid, {:iteration_started, 2})
+
+      assert_receive {:seal, {:bubble, 1}, "First round commentary."}
     end
   end
 

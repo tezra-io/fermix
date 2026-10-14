@@ -130,6 +130,12 @@ defmodule FermixChannels.DispatcherTest do
     def transcribe(_path, _opts), do: {:error, "OpenAI transcription error: 500"}
   end
 
+  # A recording the provider heard no speech in (a muted microphone).
+  defmodule SilentBackend do
+    def name, do: :silent_stub
+    def transcribe(_path, _opts), do: {:ok, "  "}
+  end
+
   # The on-device backend selected but never installed — an install state, not a
   # transient failure (`FermixCore.Transcription.Local`).
   defmodule SidecarNotInstalledBackend do
@@ -156,8 +162,8 @@ defmodule FermixChannels.DispatcherTest do
     end
   end
 
-  # Fails an image download. Exposes build_text_reply so a spurious reply would be
-  # observable — the point being that image (media-ingest) failures stay log-only.
+  # Fails an image download. Exposes build_text_reply so the reply that names the
+  # unreadable attachment is observable (M67 D4).
   defmodule ImageDownloadFailChannel do
     def build_text_reply(%Message{reply_target: reply_target}) do
       fn text ->
@@ -670,7 +676,7 @@ defmodule FermixChannels.DispatcherTest do
       chat_id: "123",
       reply_target: "123",
       metadata: %{message_type: "audio", user_id: "test-sender"},
-      attachments: [%{kind: :audio, file_id: "audio-1", mime_type: "audio/ogg"}]
+      attachments: [%{hint: :voice, file_id: "audio-1", mime_type: "audio/ogg"}]
     }
 
     assert :ok =
@@ -700,7 +706,7 @@ defmodule FermixChannels.DispatcherTest do
         chat_id: "123",
         reply_target: "123",
         metadata: %{message_type: "audio", user_id: "test-sender"},
-        attachments: [%{kind: :audio, file_id: "audio-x", mime_type: "audio/ogg"}]
+        attachments: [%{hint: :voice, file_id: "audio-x", mime_type: "audio/ogg"}]
       },
       overrides
     )
@@ -758,8 +764,23 @@ defmodule FermixChannels.DispatcherTest do
                       %{channel: "whatsapp", reason: :transcription_failed}}
     end
 
-    test "an image download failure stays log-only and never sends a transcription reply (D14 scope)" do
+    # M67 D4: an attachment nobody can read is named, never dropped. With no
+    # text and nothing usable the gateway answers, through the channel, and no
+    # turn runs; it never calls a message with a file in it empty.
+    test "an image whose download failed is named in the reply, with no turn and no transcription wording" do
       test_pid = self()
+      handler_id = "ingress-unusable-#{System.unique_integer([:positive])}"
+
+      :telemetry.attach(
+        handler_id,
+        [:fermix, :dispatcher, :ingress_failed],
+        fn _event, _measurements, metadata, _config ->
+          if self() == test_pid, do: send(test_pid, {:ingress_failed, metadata})
+        end,
+        nil
+      )
+
+      on_exit(fn -> :telemetry.detach(handler_id) end)
 
       message = %Message{
         id: "img-fail-#{System.unique_integer([:positive])}",
@@ -769,22 +790,57 @@ defmodule FermixChannels.DispatcherTest do
         chat_id: "123",
         reply_target: "123",
         metadata: %{user_id: "test-sender"},
-        attachments: [%{kind: :image, file_id: "img-1"}]
+        attachments: [%{hint: :photo, file_id: "img-1", mime_type: "image/jpeg"}]
       }
 
-      log =
-        capture_log(fn ->
-          assert {:error, {:attachment_download_failed, :boom}} =
-                   Dispatcher.dispatch([message],
-                     channel: ImageDownloadFailChannel,
-                     agent: CapturingAgent,
-                     agent_server: test_pid
-                   )
-        end)
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([message],
+                   channel: ImageDownloadFailChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid
+                 )
+      end)
+
+      assert_receive {:reply_sent, "123", reply, []}
+      assert reply =~ "I couldn't read the image you sent"
+      assert reply =~ "the download from the channel failed"
+      refute reply =~ "empty"
+      refute reply =~ "transcribe"
+      refute_received {:agent_message, _agent_message}
+      assert_received {:ingress_failed, %{channel: "whatsapp", reason: :attachments_unusable}}
+    end
+
+    test "with a caption, an unreadable attachment does not stop the turn: the manifest names it" do
+      test_pid = self()
+
+      message = %Message{
+        id: "img-caption-#{System.unique_integer([:positive])}",
+        content: "what is this?",
+        sender: "alice",
+        channel: "whatsapp",
+        chat_id: "123",
+        reply_target: "123",
+        metadata: %{user_id: "test-sender"},
+        attachments: [%{hint: :photo, file_id: "img-1", mime_type: "image/jpeg"}]
+      }
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([message],
+                   channel: ImageDownloadFailChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid
+                 )
+      end)
+
+      assert_receive {:agent_message, agent_message}
+      assert agent_message.content == "what is this?"
+
+      assert [%FermixCore.Attachments{status: {:unusable, {:download_failed, :boom}}}] =
+               agent_message.inbound_attachments
 
       refute_received {:reply_sent, _target, _text, _opts}
-      refute_received {:agent_message, _agent_message}
-      assert log =~ "media"
     end
 
     test "a provider transcription failure replies with a try-again message" do
@@ -804,6 +860,26 @@ defmodule FermixChannels.DispatcherTest do
       assert_receive {:ingress_reply, reply}
       assert reply =~ "transcription failed"
       assert reply =~ "try again"
+      refute_received {:agent_message, _agent_message}
+    end
+
+    test "a voice note with no speech in it says so instead of reporting a failed transcription" do
+      test_pid = self()
+
+      capture_log(fn ->
+        assert :ok =
+                 Dispatcher.dispatch([audio_message()],
+                   channel: AudioChannel,
+                   agent: CapturingAgent,
+                   agent_server: test_pid,
+                   transcription: [backend: SilentBackend],
+                   reply_fn: capture_reply(test_pid)
+                 )
+      end)
+
+      assert_receive {:ingress_reply, reply}
+      assert reply =~ "couldn't hear any speech"
+      refute reply =~ "transcription failed"
       refute_received {:agent_message, _agent_message}
     end
 
@@ -879,7 +955,7 @@ defmodule FermixChannels.DispatcherTest do
 
       message =
         audio_message(%{
-          attachments: [%{kind: :audio, file_id: "big", size_bytes: 25 * 1_024 * 1_024}]
+          attachments: [%{hint: :voice, file_id: "big", size_bytes: 25 * 1_024 * 1_024}]
         })
 
       capture_log(fn ->
@@ -1083,7 +1159,7 @@ defmodule FermixChannels.DispatcherTest do
         chat_id: "123",
         reply_target: "123",
         metadata: %{message_type: "audio", user_id: "stranger"},
-        attachments: [%{kind: :audio, file_id: "audio-deny", mime_type: "audio/ogg"}]
+        attachments: [%{hint: :voice, file_id: "audio-deny", mime_type: "audio/ogg"}]
       }
 
       log =
@@ -1383,6 +1459,9 @@ defmodule FermixChannels.DispatcherTest do
       assert agent_message.stream_spec.measure == nil
       # D8: and it keeps the engine's own pacing, byte for byte.
       assert agent_message.stream_spec.pacing == nil
+      # Without seal_persists?/0 its seal is an edit, skipped when the last
+      # edit already wrote it (design §5.7).
+      assert agent_message.stream_spec.seal_persists? == false
     end
 
     test "a channel that declares its draft pacing hands it to the engine" do

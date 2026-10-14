@@ -51,22 +51,65 @@ defmodule FermixChannels.Gateway.MessageTest do
     end
   end
 
-  describe "actionable?/1" do
+  describe "actionable?/1 and unusable_only?/1" do
     test "non-blank text is actionable" do
-      assert Message.actionable?(message(content: "hello", media_parts: []))
+      assert Message.actionable?(message(content: "hello", inbound_attachments: []))
     end
 
-    test "blank or whitespace-only text with no media is NOT actionable" do
-      refute Message.actionable?(message(content: "", media_parts: []))
-      refute Message.actionable?(message(content: "   \n  ", media_parts: []))
+    test "blank or whitespace-only text with no attachment is NOT actionable, and not unusable" do
+      for content <- ["", "   \n  "] do
+        msg = message(content: content, inbound_attachments: [])
+        refute Message.actionable?(msg)
+        refute Message.unusable_only?(msg)
+      end
     end
 
-    test "blank text WITH media (captionless image) IS actionable" do
-      assert Message.actionable?(
-               message(content: "", media_parts: [%{type: :image, data: "PNG"}])
-             )
+    test "blank text with an attachment that reached the model IS actionable" do
+      for status <- [:ready, :transcribed] do
+        msg = message(content: "", inbound_attachments: [attachment(status)])
+        assert Message.actionable?(msg)
+        refute Message.unusable_only?(msg)
+      end
+    end
+
+    test "blank text with only unusable attachments is unusable, never empty" do
+      msg =
+        message(
+          content: "",
+          inbound_attachments: [attachment({:unusable, {:unknown_type, "application/zip"}})]
+        )
+
+      refute Message.actionable?(msg)
+      assert Message.unusable_only?(msg)
+    end
+
+    test "a video whose pictures could not be read is actionable when its sound reached the model" do
+      clip = %{attachment({:unusable, {:needs_ffmpeg, :video}}) | kind: :video}
+
+      heard =
+        message(content: "", inbound_attachments: [%{clip | sound: {:transcript, "cheers"}}])
+
+      silent = message(content: "", inbound_attachments: [%{clip | sound: :no_speech}])
+
+      assert Message.actionable?(heard)
+      refute Message.actionable?(silent)
+      assert Message.unusable_only?(silent)
+    end
+
+    test "a caption makes a message with unusable attachments actionable (the manifest names them)" do
+      msg =
+        message(
+          content: "thoughts?",
+          inbound_attachments: [attachment({:unusable, {:needs_ffmpeg, :video}})]
+        )
+
+      assert Message.actionable?(msg)
+      refute Message.unusable_only?(msg)
     end
   end
+
+  defp attachment(status),
+    do: %FermixCore.Attachments{kind: :still, mime_type: "image/png", status: status}
 
   defp message(fields) do
     Message.new!(

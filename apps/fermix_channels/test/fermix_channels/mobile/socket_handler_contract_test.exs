@@ -1,11 +1,14 @@
 defmodule FermixChannels.Mobile.SocketHandlerContractTest do
   use ExUnit.Case, async: true
 
+  alias FermixChannels.Mobile.Attestation
   alias FermixChannels.Mobile.DeviceRegistry
+  alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.SocketHandler
+  alias FermixChannels.Test.AttestationChain, as: Chain
 
   @device_id "91d72be6-c253-4b73-8598-91c03f66b9d0"
   @new_device_id "1508aa90-2d73-4d7f-a49c-1cdedcd4c298"
@@ -83,6 +86,10 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert socket.server_seq == 2
   end
 
+  # The acceptance path of M51 D3: a phone whose attestation binds the key it
+  # handshook with and this window's challenge is verified by the real
+  # verifier, against the test's own root, before the owner is asked, and
+  # what was verified reaches the request the owner reads and the device row.
   test "IKpsk2 carries pair request and approval before the authenticated hello" do
     gateway = Noise.generate_keypair()
     device = Noise.generate_keypair()
@@ -90,6 +97,9 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     pair_manager = start_pair_manager(gateway)
 
     assert {:ok, window} = PairManager.open(pair_manager)
+    proof = %{noise_pk: device.public, challenge: Attestation.challenge(window.secret)}
+    chain = Chain.chain(proof)
+    trust = Chain.trust(chain)
 
     assert {:ok, client} =
              Noise.initialize(:initiator, :ikpsk2,
@@ -107,21 +117,28 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
                  {:ok, %{device_id: @new_device_id}}
                end,
                discover: fn -> {:ok, []} end,
-               hello_ack_builder: fn _state -> {:ok, hello_ack_payload()} end
+               hello_ack_builder: fn _state -> {:ok, hello_ack_payload()} end,
+               verify_pair: fn ^pair_manager, session_id, evidence ->
+                 assert session_id == window.session_id
+                 Attestation.verify(evidence, trust, DateTime.utc_now())
+               end
              )
 
     {client, socket} = complete_handshake(client, socket)
     assert socket.phase == :await_pair_request
 
     request = %{
-      "device_name" => "Contract iPhone",
-      "model" => "iPhone17,1",
-      "app_version" => "1.0.0"
+      "device_name" => "Contract Pixel",
+      "model" => "Google Pixel 9 Pro",
+      "app_version" => "1.0.0",
+      "platform" => "android",
+      "attestation" => %{"kind" => "android_keymint", "cert_lengths" => chain.lengths}
     }
 
-    request_plaintext = encode_client_frame("pair_request", request, 1)
+    request_plaintext = encode_client_frame("pair_request", request, 1, chain.bytes)
+    chain_bytes = chain.bytes
 
-    assert {:ok, %{type: "pair_request", seq: 1}} =
+    assert {:ok, %{type: "pair_request", seq: 1, bytes: ^chain_bytes}} =
              Protocol.decode_client_frame(request_plaintext)
 
     assert {:ok, request_ciphertext, client} = Noise.encrypt(client, request_plaintext)
@@ -133,8 +150,31 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert {:ok, pending} = PairManager.await_request(pair_manager, window.session_id, 100)
     assert pending.noise_pk == device.public
     assert pending.sas == Noise.sas(client)
+    assert pending.platform == "android"
+    assert pending.attestation.signer_role == :development
+
+    assert {:ok, %{request: waiting}} =
+             Management.pair_get(window.session_id, management_opts(pair_manager))
+
+    assert waiting.build_role == :development
+    assert waiting.boot_state == %{verified: true, locked: true}
+    assert waiting.attestation == :verified
 
     assert {:ok, device_record} = PairManager.approve(pair_manager, window.session_id)
+    assert device_record.platform == "android"
+    assert device_record.signer_role == :development
+    assert device_record.version_code == 42
+    assert device_record.boot_state == :verified
+    assert device_record.device_locked == true
+
+    listing =
+      management_opts(pair_manager) ++
+        [device_store: :store, list_devices: fn :store -> {:ok, [device_record]} end]
+
+    assert {:ok, [row]} = Management.devices_list(listing)
+    assert row.platform == "android"
+    assert row.signer_role == :development
+    assert row.boot_state == %{verified: true, locked: true}
 
     assert_receive {:mobile_pair_decision, session_id, {:ok, ^device_record}} = decision
     assert session_id == window.session_id
@@ -147,6 +187,7 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     assert approved["t"] == "pair_approved"
     assert approved["seq"] == 1
     assert approved["device_id"] == @new_device_id
+    assert Base.decode64!(approved["push_salt"]) == device_record.apns_key_salt
 
     hello = %{
       "device_id" => @new_device_id,
@@ -239,9 +280,18 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
        ensure_identity: fn -> {:ok, %{gateway_keypair: gateway}} end,
        activate_listener: fn _identity -> :ok end,
        persist_device: fn attrs -> {:ok, attrs} end,
-       emit_pair: fn _status, _duration_us -> :ok end,
+       emit_pair: fn _status, _duration_us, _facts -> :ok end,
+       status_fetch: fn -> {:ok, %{serials: MapSet.new(), max_age_ms: 86_400_000}} end,
        device_id_generator: fn -> @new_device_id end}
     )
+  end
+
+  defp management_opts(pair_manager) do
+    [
+      config: [enabled: true],
+      pair_manager: pair_manager,
+      whereis: fn FermixChannels.Mobile.Supervisor -> self() end
+    ]
   end
 
   defp complete_handshake(client, socket) do
@@ -267,13 +317,13 @@ defmodule FermixChannels.Mobile.SocketHandlerContractTest do
     {header, client, socket}
   end
 
-  defp encode_client_frame(type, payload, seq) do
+  defp encode_client_frame(type, payload, seq, bytes \\ <<>>) do
     header =
       payload
       |> Map.merge(%{"v" => Protocol.protocol_version(), "t" => type, "seq" => seq})
       |> Jason.encode!()
 
-    <<byte_size(header)::unsigned-big-32, header::binary>>
+    <<byte_size(header)::unsigned-big-32, header::binary, bytes::binary>>
   end
 
   defp decode_server_frame(<<header_size::unsigned-big-32, rest::binary>>) do

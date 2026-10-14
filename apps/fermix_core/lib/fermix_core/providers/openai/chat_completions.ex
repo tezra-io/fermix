@@ -27,6 +27,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Net.HttpClient
   alias FermixCore.Net.TimeoutPolicy
+  alias FermixCore.Providers.Adapter
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Providers.OpenAI.ResponsesShared
   alias FermixCore.Providers.ReasoningEffort
@@ -99,14 +100,14 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   defp replace_tool_message_content(message, text), do: %{message | content: text}
 
   # A screenshot carrier is the dedicated follow-up user turn (labelled, carrying
-  # `image_parts`) emitted after the tool messages — NOT an inbound user image
-  # (those also carry `image_parts` but never this label), so user content is
+  # `parts`) emitted after the tool messages — NOT an inbound user image
+  # (those also carry `parts` but never this label), so user content is
   # left untouched.
-  defp screenshot_message?(%{content: @image_followup_label, image_parts: [_ | _]}), do: true
+  defp screenshot_message?(%{content: @image_followup_label, parts: [_ | _]}), do: true
   defp screenshot_message?(_), do: false
 
   defp elide_screenshot_message(message),
-    do: message |> Map.delete(:image_parts) |> Map.put(:content, @image_followup_elided)
+    do: message |> Map.delete(:parts) |> Map.put(:content, @image_followup_elided)
 
   defp tool_result_message(%{call_id: call_id, output: output} = result) do
     text = to_string(output)
@@ -115,7 +116,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   end
 
   defp image_user_message(%{images: images}) do
-    %{role: "user", content: @image_followup_label, image_parts: images}
+    %{role: "user", content: @image_followup_label, parts: images}
   end
 
   defp has_images?(%{images: [_ | _]}), do: true
@@ -196,6 +197,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       |> maybe_put_tools(to_provider_tools(capabilities))
       |> maybe_put(:response_format, response_format)
       |> maybe_put_reasoning_effort(provider, reasoning_effort)
+      |> maybe_put_pdf_engine(provider, messages)
 
     ctx = %{
       provider: provider,
@@ -371,18 +373,19 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
       tool_calls = Map.get(msg, :tool_calls)
 
       %{role: msg.role}
-      |> put_content(Map.get(msg, :content), Map.get(msg, :image_parts, []), tool_calls)
+      |> put_content(Map.get(msg, :content), Map.get(msg, :parts, []), tool_calls)
       |> maybe_put_field(:tool_call_id, Map.get(msg, :tool_call_id))
       |> maybe_put_tool_calls(tool_calls)
     end)
   end
 
-  # Inbound images (M14) → a multimodal content array (text + image_url parts).
-  # Only user turns carry them; image bytes ride as a base64 data URI. Checked
-  # first so the text-only clauses below stay byte-identical when there are none.
-  defp put_content(map, content, [_ | _] = image_parts, _calls) do
+  # Inbound pictures and PDFs (M14, M67) → a multimodal content array (text +
+  # image_url / file parts). Only user turns carry them; bytes ride as a base64
+  # data URI. Checked first so the text-only clauses below stay byte-identical
+  # when there are none.
+  defp put_content(map, content, [_ | _] = parts, _calls) do
     text_part = %{type: "text", text: content || ""}
-    Map.put(map, :content, [text_part | Enum.map(image_parts, &chat_image_part/1)])
+    Map.put(map, :content, [text_part | Enum.map(parts, &chat_image_part/1)])
   end
 
   # Mistral's strict validator 422s on empty-string `content` sent alongside
@@ -399,6 +402,17 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   defp chat_image_part(%{type: :image, mime_type: mime, data: data})
        when is_binary(mime) and is_binary(data),
        do: %{type: "image_url", image_url: %{url: "data:#{mime};base64,#{Base.encode64(data)}"}}
+
+  # A PDF rides as a `file` part with its name and a base64 data URL (M67).
+  defp chat_image_part(%{type: :document, mime_type: "application/pdf", data: data} = part)
+       when is_binary(data),
+       do: %{
+         type: "file",
+         file: %{
+           filename: Map.fetch!(part, :name),
+           file_data: "data:application/pdf;base64,#{Base.encode64(data)}"
+         }
+       }
 
   defp chat_image_part(part),
     do:
@@ -454,6 +468,17 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletions do
   end
 
   defp provider_body(_provider), do: %{}
+
+  # OpenRouter parses a PDF with a paid OCR engine unless told otherwise (M67):
+  # a request that carries one pins the model's own file reading, so no OCR runs
+  # unasked. Added only then, so every other request stays byte-identical.
+  defp maybe_put_pdf_engine(body, :openrouter, messages) do
+    if Enum.any?(Adapter.content_parts(messages), &match?(%{type: :document}, &1)),
+      do: Map.put(body, :plugins, [%{id: "file-parser", pdf: %{engine: "native"}}]),
+      else: body
+  end
+
+  defp maybe_put_pdf_engine(body, _provider, _messages), do: body
 
   # Keyless providers (auth: :none, e.g. Ollama) demand no key and send no
   # authorization header — one explicit branch per configuration, not a

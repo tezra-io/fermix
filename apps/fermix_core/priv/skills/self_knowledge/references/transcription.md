@@ -1,6 +1,6 @@
 # Transcription (speech to text)
 
-Inbound audio is transcribed before the agent sees it on every media channel: Telegram (voice notes, audio files, round video notes), WhatsApp, Slack, Discord and Signal. A voice note with a caption delivers both, the caption first, then the transcript under `[voice note transcript]`. The meeting notetaker uses the same backends.
+Inbound audio is transcribed before the agent sees it on every media channel: Telegram (voice notes, audio files, round video notes), WhatsApp, Slack, Discord, Signal, iMessage, the phone and `fermix ask --attach`. A file is audio by its bytes, so an audio file sent as a document is transcribed too. A voice note with a caption delivers both, the caption first, then the transcript under `[voice note transcript]`. A video's sound is transcribed too, beside its pictures, under `[video sound: <name>]`; when it holds no speech or cannot be transcribed, the attachment list says so and the message still runs, so the replies below are for voice notes and audio only (detail: `images`). The meeting notetaker uses the same backends.
 
 ## Choosing a backend
 
@@ -34,8 +34,10 @@ The sender gets a reply and no turn is scheduled:
 |---|---|---|
 | No backend configured | "…no transcription backend is configured. Run `fermix setup` to add one." | Settings > Voice > **Voice notes** |
 | File over `max_file_mb` | the size limit | send a shorter clip |
+| Over the 20 MB download limit, or the download failed | names the voice note and why | send a shorter clip, or send it again |
 | On-device helper or model missing | "…Install it from `fermix setup` → Transcription." | choose a hosted backend in **Transcribe with** |
 | No on-device build for this machine | choose another backend | **Transcribe with** |
+| No speech in the recording | "I couldn't hear any speech in your voice note — check your microphone…" | check the microphone and record again |
 | Provider error | "transcription failed. Please try again." | try again; check the key |
 
 The replies name `fermix setup`; translate them for a Mac app user.

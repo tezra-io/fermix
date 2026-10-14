@@ -7,10 +7,10 @@ machine; `file_read` is a text reader and returns nothing useful for one. Give
 it `paths`: one to six local paths, in the order you want to refer to them
 ("reference 1", "reference 2", …). One image is a one-element list.
 
-- JPEG, PNG and WebP only. The type is identified from the file's leading bytes,
-  not from its name, so a `.png` that is really something else is refused rather
-  than misread. GIF and every other container is refused as
-  `image_type_unsupported`.
+- JPEG, PNG, WebP and GIF only (a GIF is read by its first frame). The type is
+  identified from the file's leading bytes, not from its name, so a `.png` that
+  is really something else is refused rather than misread. Every other format is
+  refused as `image_type_unsupported`.
 - 10 MiB per file, 24 MiB for the whole call, six files maximum.
 - All or nothing: one unreadable, missing, empty, oversized or wrong-typed path
   fails the whole call and names the offending reference, so you never get a
@@ -26,13 +26,94 @@ it `paths`: one to six local paths, in the order you want to refer to them
 
 ## How an image reaches the model
 
-Inbound images, `view_image` results and images a tool returns (a `browser`
+Inbound pictures, `view_image` results and images a tool returns (a `browser`
 screenshot) all reach the model as image content. Anthropic, OpenAI and OpenAI
-Codex (the Responses wire) and Grok take images. OpenRouter, Mistral, Venice and Ollama
-depend on the model: a model the built-in catalog marks text-only (Ollama's three
-default models, Venice's GLM 5.3) is refused before the call, any other model is
-sent the image and the provider refuses it if it cannot see. An image is never
-silently dropped. Prompt caching is unaffected.
+Codex (the Responses wire) take JPEG, PNG, WebP and GIF; Grok takes JPEG and
+PNG only. OpenRouter, Mistral, Venice and Ollama depend on the model: a model
+the built-in catalog marks text-only (Ollama's three default models, Venice's
+GLM 5.3) is refused before the call, any other model is sent the image and the
+provider refuses it if it cannot see. Fermix converts no picture. A route that
+cannot take one fails over to the next route that can; when none can, the reply
+says so. An image is never silently dropped. Prompt caching is unaffected.
+
+## Inbound attachments
+
+Every channel (Telegram, WhatsApp, Slack, Discord, Signal, iMessage, the phone)
+and `fermix ask --attach` hand attachments to one gateway pipeline. It fetches
+up to ten per message, four at a time, names each one's kind from its bytes
+(not its name or the platform's label), and renders it:
+
+| Kind | Reaches the model as |
+|---|---|
+| Picture (JPEG, PNG, WebP, GIF) | the picture, up to 10 MB |
+| GIF, animation, video | with ffmpeg installed: up to four frames spread over it, 1024 px on the long edge; without: one still, a GIF file's own first frame (cut from the file, no conversion) or the preview the sender's app made (Telegram's thumbnail, Slack's video thumbnail, the phone's poster). An animated WebP or sticker always takes the still |
+| A video's sound | its transcript, beside its pictures (see below); an animation and a sticker are silent |
+| PDF | a document, on Anthropic, OpenAI, OpenAI Codex, OpenRouter and Venice (OpenRouter is pinned to the model's own PDF reading, so no paid OCR runs) |
+| Text file | inlined under the attachment list; all the text files of one message share 32 KB |
+| Voice note, audio, Telegram video note | its transcript (see `transcription`) |
+
+The user text then carries an `[attachments]` list: each attachment's name,
+kind, size and what reached the model ("attached as image 1", "4 frames spread
+over it attached as images 2 to 5", "one still frame of it attached as image
+2", "attached as document 1", "inlined below") or why not ("not readable: …"),
+what became of a video's sound, and where it was saved. History keeps that
+list, never the bytes; a voice note is not listed, because its transcript is
+already the text.
+
+### ffmpeg
+
+Fermix bundles no ffmpeg and installs none. It uses one already on the
+daemon's `PATH` (Homebrew's folder included), looked for on every message, so
+`brew install ffmpeg` (macOS) or the distribution's `ffmpeg` package (Linux)
+works from the next message, with no restart. It reads only the downloaded copy
+of the attachment (MP4, MOV, 3GP, WebM, Matroska or GIF), with a 20-second
+limit. When it fails on a file, the list says so and asks for a screenshot; the
+still is not sent in its place.
+
+### A video's sound
+
+A video's sound goes to the configured transcription backend, within its size
+limit, while its pictures go as above; a MOV or 3GP goes as the MP4 it is, the
+format hosted backends read. The transcript follows the list under
+`[video sound: <name>]`. When ffmpeg is installed and finds no sound track, no
+transcription runs and the line says "it has no sound track". A clip with no
+speech, or one the backend cannot transcribe (none configured, too large, a
+format it does not take), is a note on its line ("no speech in its sound", "its
+sound could not be transcribed: …") and the message still runs: unlike a voice
+note, a video is not refused for its sound.
+
+### Saved attachments
+
+On the owner's turns every downloaded attachment, an unreadable one included,
+is saved under the workspace at `media/inbound/<YYYY-MM-DD>/<name>-<token>.<ext>`,
+and what the model saw of a GIF or video goes beside it (`…-frame1.jpg` to
+`…-frame4.jpg`, or `…-still.<ext>`). The list names each path ("saved at …"),
+so a later turn opens the file with `view_image`, `file_read`, `send_attachment`
+or an installed program long after the channel's link has expired. The folder
+keeps 14 days and 1 GB at most; before each turn writes, the oldest files go
+first. A save that fails is named on the line ("not saved: …") and the turn runs.
+A guest's attachments, and a voice call's screen frame, are never saved.
+
+What it cannot read is named, never dropped and never called empty:
+
+- a video with no still to read and no ffmpeg here: the reply says ffmpeg is not
+  installed and gives the install command (macOS: `brew install ffmpeg`; Linux:
+  the `ffmpeg` package), or asks for a screenshot; a video ffmpeg could not read
+  asks for a screenshot; an animated picture (an animated WebP or sticker) with
+  no still, or a video whose still could not be fetched, asks for a screenshot;
+- a file of another type (a Word file, a ZIP): send it as a PDF, a picture or
+  plain text;
+- a HEIC, TIFF or other picture format models do not take: send a JPEG or PNG
+  (iMessage converts HEIC itself, so it arrives as a JPEG);
+- over 20 MB, or a picture over 10 MB, or past what one message carries
+  together (20 MB) or past ten attachments: send it in its own message;
+- a file that is not what the channel called it (a "PNG" that is a web page,
+  which a channel without access to the file sends): named as such;
+- a download from the channel that failed: send it again.
+
+With a caption, the turn runs and the list names what it could not read. With
+no text and nothing readable, the gateway answers by naming each attachment and
+its reason, and no turn runs.
 
 ## Making an image (`generate_image`)
 
@@ -72,8 +153,9 @@ generate it a second time.
 ## Sending a file (`send_attachment`)
 
 `send_attachment` sends a local sandbox file out through the active channel.
-URLs are never fetched, and inbound images arriving in chat are materialized by
-the gateway rather than by a tool.
+URLs are never fetched, and inbound attachments arriving in chat are rendered by
+the gateway rather than by a tool; an inbound attachment saved under
+`media/inbound/` is one more file it can send.
 
 It also works inside a scheduled job:
 

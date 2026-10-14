@@ -114,13 +114,20 @@ defmodule FermixChannels.Application do
   defp transport_children(readiness, request_boot_epoch) do
     readiness
     |> ChannelRegistry.transport_children()
-    |> Enum.map(fn
-      {FermixChannels.Mobile.Supervisor, opts} ->
-        {FermixChannels.Mobile.Supervisor, Keyword.put(opts, :boot_epoch, request_boot_epoch)}
-
-      child ->
-        child
+    |> Enum.flat_map(fn
+      {FermixChannels.Mobile.Supervisor, []} -> phone_child(request_boot_epoch)
+      child -> [child]
     end)
+  end
+
+  # Registered on or off, with the boot's epoch, so its switch is live. A test
+  # tree never registers it, as it never registered it while the switch was
+  # boot-bound and off there: a settings write in a test must not start a phone
+  # listener or record a refusal under the operator's home.
+  defp phone_child(request_boot_epoch) do
+    if @compiled_env == :test,
+      do: [],
+      else: [FermixChannels.Mobile.Supervisor.boot_child(request_boot_epoch)]
   end
 
   # One epoch per boot for every transport's request coordinator: a request

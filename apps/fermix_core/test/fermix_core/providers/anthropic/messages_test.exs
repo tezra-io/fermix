@@ -297,7 +297,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
   end
 
   describe "chat/3 — request shape" do
-    test "a user image_parts message adds a base64 image block after the text block" do
+    test "a user message with parts adds a base64 image block after the text block" do
       png = <<137, 80, 78, 71>>
 
       Req.Test.stub(__MODULE__, fn conn ->
@@ -321,7 +321,43 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
         %{
           role: "user",
           content: "what is this?",
-          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+          parts: [%{type: :image, mime_type: "image/png", data: png}]
+        }
+      ]
+
+      assert {:ok, _turn} = Messages.chat(messages, [], chat_opts())
+    end
+
+    test "a PDF part becomes a base64 document block after the text block (M67)" do
+      pdf = "%PDF-1.4 lease 7731"
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert [%{"role" => "user", "content" => [text_block, document_block]}] =
+                 decoded["messages"]
+
+        assert text_block == %{"type" => "text", "text" => "what is the lease number?"}
+
+        # The last block of the turn also carries the cache breakpoint.
+        assert Map.delete(document_block, "cache_control") == %{
+                 "type" => "document",
+                 "source" => %{
+                   "type" => "base64",
+                   "media_type" => "application/pdf",
+                   "data" => Base.encode64(pdf)
+                 }
+               }
+
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      messages = [
+        %{
+          role: "user",
+          content: "what is the lease number?",
+          parts: [%{type: :document, mime_type: "application/pdf", data: pdf, name: "lease.pdf"}]
         }
       ]
 
@@ -347,7 +383,7 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
         %{
           role: "user",
           content: "",
-          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+          parts: [%{type: :image, mime_type: "image/png", data: png}]
         }
       ]
 
@@ -497,7 +533,8 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
             "claude-opus-5-5",
             "claude-opus-5",
             "claude-opus-4-8",
-            "claude-fable-5-1"
+            "claude-fable-5-1",
+            "claude-haiku-5-5"
           ] do
         assert {:ok, _turn} =
                  Messages.chat([%{role: "user", content: "."}], [], chat_opts(model: model))
@@ -547,7 +584,8 @@ defmodule FermixCore.Providers.Anthropic.MessagesTest do
             "claude-opus-5-5",
             "claude-opus-5",
             "claude-fable-5",
-            "claude-fable-5-1"
+            "claude-fable-5-1",
+            "claude-haiku-5-5"
           ] do
         assert {:ok, _turn} =
                  Messages.chat(

@@ -17,6 +17,17 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
   (the default) means "no per-model cap; use the provider ceiling". Consumed
   via `ModelCatalog.model_effort_ceiling/2` and applied with
   `ReasoningEffort.cap/2`.
+
+  `compaction_ceiling` is the most context, in tokens, a conversation on this
+  model carries before it compacts, whatever `compaction.threshold` says: a
+  cost line, not a capability. `nil` (the default) means compaction follows
+  the threshold of `context_window` alone. Consumed via
+  `ModelCatalog.compact_at_tokens/3`.
+
+  `openai_codex_window` is the window an OpenAI model runs within on OpenAI
+  Codex, whose ChatGPT plan has no 272k repricing: set, a Codex conversation
+  takes it as `context_window` and compacts at 500,000 tokens; `nil` (the
+  default), Codex uses the API's facts. Read only for `:openai_codex`.
   """
   @enforce_keys [:id, :label, :context_window]
   defstruct [
@@ -25,6 +36,8 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
     :context_window,
     :max_output_tokens,
     :max_reasoning_effort,
+    :compaction_ceiling,
+    :openai_codex_window,
     reasoning_effort?: true,
     vision?: true
   ]
@@ -35,6 +48,8 @@ defmodule FermixCore.Providers.ModelCatalog.Entry do
           context_window: pos_integer(),
           max_output_tokens: pos_integer() | nil,
           max_reasoning_effort: atom() | nil,
+          compaction_ceiling: pos_integer() | nil,
+          openai_codex_window: pos_integer() | nil,
           reasoning_effort?: boolean(),
           vision?: boolean()
         }

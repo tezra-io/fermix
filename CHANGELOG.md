@@ -4,6 +4,182 @@ All notable changes to Fermix are recorded here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project
 uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.15.0] - 2026-10-13
+
+### Added
+
+- **Pair the Android app and chat with it.** The phone channel now speaks
+  the Android app's protocol. The app scans the pairing code, you compare
+  the six-digit code it shows and approve, and the chat works turn after
+  turn: replies stream in, every turn ends so your next message goes out,
+  older history loads as you scroll back, and a phone that reconnects
+  learns how the messages it sent while away ended. Jobs and reminders reach
+  the phone as messages of their own. The pairing code also names the Fermix
+  profile, so the app can tell two Fermix homes on one computer apart. The
+  phone must prove its secure hardware before you are asked (see Security).
+- **Claude Haiku 5.5 is in the Anthropic model list** (`claude-haiku-5-5`),
+  the fastest and cheapest Claude. Above 100,000 prompt tokens Anthropic
+  bills it at five times the price, so a conversation on it compacts at
+  100,000 tokens. Claude Haiku 4.5 stays in the list.
+- **Every attachment you send reaches the model.** Pictures and voice notes
+  used to be the only attachments the model saw: a GIF, a video, a PDF or a
+  text file sent in a chat was left out. Now, on every channel and with
+  `fermix ask --attach`:
+  - A GIF or a video reaches the model as up to four frames spread over it
+    when `ffmpeg` is installed on the computer running Fermix. Fermix looks
+    for it on every message, so installing it works on the next one, and
+    installs nothing itself. Without `ffmpeg` the model gets one still: a
+    GIF's own first frame, or the preview the sender's app made (Telegram's
+    thumbnail, Slack's video thumbnail, the phone's poster). With neither,
+    the reply says `ffmpeg` is not installed and how to install it.
+  - A video's sound is transcribed beside its pictures. A clip with no sound
+    costs no transcription.
+  - A PDF goes to the model as a document on Anthropic, OpenAI, OpenAI
+    Codex, OpenRouter and Venice, and a text file is read into the message,
+    up to 32 KB for all of one message's files.
+  - A model that cannot take a picture or a PDF passes the turn to the next
+    one in your fallback chain that can. When none can, the reply says so.
+  - Anything Fermix cannot read (another file type, a HEIC or TIFF picture,
+    a file over 20 MB, a failed download) is named with its reason, never
+    dropped. A message with no text and nothing readable gets a reply naming
+    what could not be read, and no turn runs.
+- **Your attachments are kept for later messages.** On your own turns,
+  every attachment you send, with the frames or still the model saw, is
+  saved in the workspace under `media/inbound/<date>/` and named in the
+  conversation, so a later message can come back to it. Fermix keeps them
+  for 14 days and 1 GB at most, removing the oldest first. A guest's
+  attachments are not saved, and the conversation's history keeps the list
+  of attachments, never their contents.
+
+### Changed
+
+- **The phone channel is on by default.** A new install pairs a phone
+  without any configuration. Its phone listener waits until you first start
+  pairing a phone, which creates this computer's phone identity; from then
+  on it starts with Fermix and lets in only phones you paired. Fermix does
+  not announce itself on the local network: the phone finds it through the
+  pairing code. Turn the announcement on with Announce on the local network
+  in the Phone settings, or `advertise_mdns = true` in
+  `[fermix_channels.mobile]`, and restart. An install that saved its
+  settings before this release already has `enabled = false` in
+  `[fermix_channels.mobile]` and stays off until you turn on Phone companion
+  in the Phone settings, or set `enabled = true`, and restart. Set
+  `enabled = false` to keep the listener off. Doctor shows the channel with
+  no phone paired as passing ("on, no phone paired yet") instead of a
+  warning.
+- **Claude conversations compact at 200,000 tokens instead of 850,000.**
+  Claude models take a million tokens at the standard price, but every call
+  costs what it carries, and a chat message that arrives after the prompt
+  cache expired pays to resend the whole conversation. Every Claude model
+  with a million-token window but Haiku 5.5 (100,000, above), direct or
+  through OpenRouter, now compacts when a conversation reaches 200,000
+  tokens, whatever the compaction threshold says (a threshold low enough to
+  come first still does), and a long task digests older tool results at the
+  same line. A request over it is still sent, so no task is refused that
+  the model could read. Doctor shows the line as "compact at 200000
+  tokens". Claude Haiku 4.5, whose window is 200,000, still compacts at the
+  threshold.
+- **GPT-6 conversations on OpenAI Codex compact at 500,000 tokens instead
+  of 272,000.** A ChatGPT plan has usage limits, not the OpenAI API's double
+  price above 272,000 input tokens, so GPT-6 Astra, GPT-6.1 Sol and GPT-6
+  Luna on OpenAI Codex now run within their 1,050,000-token window and
+  compact when a conversation reaches 500,000 tokens, whatever the
+  compaction threshold says (a threshold low enough to come first still
+  does), and a long task digests older tool results at the same line.
+  Doctor shows the line as "compact at 500000 tokens". The GPT-5 models on
+  OpenAI Codex, and every model on the OpenAI API provider, are unchanged.
+- **Turning the phone channel on or off takes effect at once.** The
+  Phone companion switch used to need a restart. Turning it on now starts
+  the channel and turning it off stops it, while everything else keeps
+  running: turning it off drops connected phones and closes an open pairing
+  code, and paired phones stay paired. Changing the port, the listen address
+  or the local-network announcement still needs a restart. `fermix pair` on
+  a host where the channel is off now asks to turn it on, then shows the
+  pairing code, in one command.
+
+### Fixed
+
+- **The phone's Listen on setting reads as plain words.** Its note wrapped
+  the every-network address in code marks, which the Mac app showed as
+  stray backticks. It now says plainly that the phone listener takes every
+  network by default, or one address, such as your Tailscale IP.
+- **A phone is given only the addresses Fermix answers on.** With Listen on
+  set to one address, such as your Tailscale IP, the pairing code and every
+  reconnect still listed all of this computer's network addresses, so the
+  phone tried routes the listener never answered. They now list only that
+  address, with its Tailscale name. A reconnect also no longer fails when
+  the computer cannot list its addresses for a moment: the phone keeps the
+  routes it already has.
+- **On a Mac, pairing help points to the app.** With the phone channel
+  off, `fermix pair` against a home Fermix.app manages said to edit
+  `config.toml` and run `fermix restart`. It now points to the Phone row in
+  the app's Channels settings, which turns the channel on and pairs in one
+  place. Doctor's repair for a half-created phone identity names the same
+  row on a Mac app engine instead of `fermix pair`.
+- **A phone keeps the replies it streams.** A reply that finished streaming
+  in full, as most do, was never saved: the phone showed it as it came in,
+  dropped it when the turn ended, and the chat's history kept only your
+  message. Each streamed reply is now saved, so it stays on the phone and in
+  the Mac app's chat.
+- **A compacted chat keeps answering on Anthropic.** Compaction saved its
+  checkpoint summary with the time it ran, later than the turns it kept, so
+  once the chat reloaded from disk the summary came after them. Anthropic
+  refused that order, and every message in the chat got "Sorry, I
+  encountered an error processing your message." The summary now takes the
+  time of the last turn it covers and reloads first. A chat compacted before
+  this fix keeps its misplaced summary: send `/new` in it, or make a provider
+  other than Anthropic primary until you do.
+- **Multi-step tasks keep their instructions on OpenAI and SpaceXAI.** On the
+  OpenAI API and on SpaceXAI, every model call after the first in a task
+  was sent without Fermix's instructions (persona, rules, memory and tool
+  guidance), so a task that used tools worked through its later steps
+  without them, and the provider could not reuse its cached copy of the
+  request's opening. Every call now carries them. OpenAI Codex was not
+  affected.
+- **A GPT-Live call listens as soon as it starts.** The pet sat at rest for
+  one to two seconds after a call started, while Fermix connected to
+  OpenAI, and what you said in that time was lost. The call now shows it is
+  listening at once, and what you say while it connects is held, up to ten
+  seconds, and passed to the voice when it is ready.
+- **The phone's voice notes are transcribed.** Every voice note from the
+  phone failed on OpenAI with "Unsupported file format", because Fermix
+  passed the recording on under a name with no audio extension. It now
+  carries its format's extension, on OpenAI and SpaceXAI alike.
+- **A voice note with no speech in it says so.** A recording with nothing
+  to transcribe got "the transcription failed. Please try again.", the same
+  reply as a provider error, so a muted microphone looked like a broken
+  Fermix and recording again could not help. The reply now says no speech
+  was heard and to check the microphone.
+
+### Security
+
+- **A phone must prove its secure hardware to pair.** Fermix used to take
+  the Android app's secure-hardware proof without checking it, so anyone who
+  scanned a live pairing code could pair a key that was never in a phone's
+  secure hardware. Fermix now checks the proof before it asks you: it must
+  come from Google's attestation roots, prove the very key the phone paired
+  with, for this pairing, made in the phone's secure hardware, on a phone
+  with a locked bootloader and a verified system, by the official Fermix app,
+  with no certificate Google has revoked. A refused phone is told why and
+  the pairing ends in a sentence saying which check failed; you are never
+  asked. The approval prompt now names the app's build and the phone's boot
+  state. An emulator, an unlocked or rooted phone, and an app built and
+  signed by anyone else cannot pair, so development pairs a real, locked
+  phone. Phones you already paired stay paired and keep working.
+- **The status page and `/health` no longer show your setup to strangers.**
+  A Slack or WhatsApp webhook tunnel forwards every path to Fermix's
+  listener, and a tunnel on the same computer makes each request look local,
+  so anyone who knew the tunnel's address could read the status page at `/`
+  (scheduled job names and schedules, the models and subagents at work, the
+  voice socket's path) and `/health/ready` (the home, config and workspace
+  paths, and every setup failure, provider and channel). The status page now
+  opens only in a browser that setup signed in, the same check the setup
+  page makes, and `/health` and `/health/ready` answer everyone with the
+  readiness status alone (`status`, `app`, `version` and `timestamp`), still
+  200 when ready and 503 otherwise. The full report is unchanged for you:
+  `fermix health --json` prints it. Forward only `/webhook/slack` or
+  `/webhook/whatsapp` if your tunnel allows it.
+
 ## [0.14.0] - 2026-10-06
 
 ### Added

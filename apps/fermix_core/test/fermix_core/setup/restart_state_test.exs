@@ -30,6 +30,7 @@ defmodule FermixCore.Setup.RestartStateTest do
     home = System.get_env("FERMIX_HOME")
     core = Map.new(@env_keys, fn key -> {key, Application.get_env(:fermix_core, key)} end)
     telegram = Application.get_env(:fermix_channels, :telegram)
+    mobile = Application.get_env(:fermix_channels, :mobile)
     secret_writer = Application.get_env(:fermix_core, :secret_writer)
 
     Application.put_env(:fermix_core, :secret_writer, FermixTestSupport.SecretWriterStub)
@@ -41,6 +42,7 @@ defmodule FermixCore.Setup.RestartStateTest do
     on_exit(fn ->
       Enum.each(core, fn {key, value} -> restore(:fermix_core, key, value) end)
       restore(:fermix_channels, :telegram, telegram)
+      restore(:fermix_channels, :mobile, mobile)
       restore(:fermix_core, :secret_writer, secret_writer)
       FermixTestSupport.SecretWriterStub.reset()
 
@@ -178,6 +180,39 @@ defmodule FermixCore.Setup.RestartStateTest do
       refute RestartState.boot_bound?([:sandbox, :env])
       assert RestartState.boot_bound?([:providers, :openai])
       refute RestartState.boot_bound?([:memory])
+    end
+  end
+
+  # M51 §5.5 (owner 2026-10-10): the phone channel's switch is applied the
+  # moment it is written, so turning it on or off asks for no restart. Its port,
+  # address and announcement are still read when the subtree starts.
+  describe "the phone channel's switch" do
+    test "a switch change since boot is no restart reason" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4_031)
+      server = start_state()
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4_031)
+
+      assert RestartState.restart(server: server) == %{required: false, reasons: []}
+    end
+
+    # The negative control: the rule narrows the phone block, it does not drop it.
+    test "a port change in the same block is still a reason" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4_031)
+      server = start_state()
+
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4_131)
+
+      assert %{required: true, reasons: [reason]} = RestartState.restart(server: server)
+      assert reason.section == "channels"
+    end
+
+    test "boot_bound?/1 answers for the switch and for the rest of the block" do
+      refute RestartState.boot_bound?([:channels, :mobile, :enabled])
+      assert RestartState.boot_bound?([:channels, :mobile, :port])
+      assert RestartState.boot_bound?([:channels, :mobile])
+      assert RestartState.boot_bound?([:channels])
+      assert RestartState.boot_bound?([:channels, :telegram, :enabled])
     end
   end
 

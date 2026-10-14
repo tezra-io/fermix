@@ -53,6 +53,12 @@ config :logger, level: :warning
 
 config :fermix_core, :log, enabled: false
 
+# M67 D3: the attachment pipeline reads a GIF's or a video's frames with the
+# machine's own ffmpeg when it finds one. No test may depend on whether this
+# machine has it, so the suite has none; a test that wants frames passes
+# `ffmpeg:` a stub executable it made (`FermixCore.Attachments.Frames`).
+config :fermix_core, :ffmpeg, :missing
+
 config :fermix_core, :memory,
   enabled: false,
   extraction_enabled: false,

@@ -21,9 +21,9 @@ A chat turn:
 1. A channel adapter receives platform input (webhook, long poll, local socket,
    or CLI) and normalizes it into a `FermixChannels.Gateway.Message`.
 2. `FermixChannels.Gateway.ingest/2` authorizes the sender, builds the reply
-   function, transcribes audio and ingests images, runs slash commands, and hands
-   the turn to `Gateway.Queue`, which runs one FIFO turn at a time per
-   conversation.
+   function, runs the attachment pipeline (`Gateway.Attachments`: fetch,
+   classify, render, transcribe audio), runs slash commands, and hands the turn
+   to `Gateway.Queue`, which runs one FIFO turn at a time per conversation.
 3. The queue checks a turn-state snapshot out of `FermixCore.Agents.MainAgent`
    (the cached runtime context: bootstrap prompt, prompt memory, capability
    profiles, provider routes) and runs `FermixCore.Agents.TurnRunner` in a task.
@@ -638,8 +638,18 @@ commands are allowed.
 normalizes input into `Gateway.Message`, authorizes the sender through
 `Gateway.Authorizer` (the owner is an operator, allowlisted senders are guests,
 anyone else is dropped), builds the reply function (`Gateway.Delivery`),
-transcribes audio and ingests images, runs slash commands unless the channel
-disables them, and hands the turn to `Gateway.Queue`.
+runs the one attachment pipeline, runs slash commands unless the channel
+disables them, and hands the turn to `Gateway.Queue`. Channels only declare
+what their platform gave them; `Gateway.Attachments` fetches each attachment,
+names its kind from the bytes (`FermixCore.Attachments.Kind`), renders it (a
+picture as it came; a GIF or video as frames read by an installed `ffmpeg`,
+`FermixCore.Attachments.Frames`, else as one still; a PDF or text file as its
+bytes; audio and a video's sound through `Gateway.Transcription`) and answers a
+message whose attachments are all unreadable itself. An operator turn keeps
+the attachments under the workspace's `media/inbound/`
+(`FermixCore.Attachments.Workspace`, 14 days and 1 GiB), then composes the
+`[attachments]` manifest, with each saved path, into the persisted user text
+(`FermixCore.Attachments.Manifest`) and the content parts the encoders read.
 `FermixChannels.Dispatcher` remains only as a thin alias for `Gateway.ingest/2`,
 used by tests.
 
@@ -672,7 +682,9 @@ Current channels:
   pushed to the phones while their channel runs, as the phone's own deliveries
   are, since the two draw one timeline.
 - `Mobile` serves the iOS companion on its own Bandit TLS listener (port 4031,
-  Noise sessions, a pairing window, APNs push). It is off by default, and
+  Noise sessions, a pairing window, APNs push). It is on by default, its
+  listener dormant until the first pairing window creates the identity and
+  its mDNS announcement off unless `advertise_mdns` is set, and
   `FermixCore.Companion.Timeline` keeps each profile's synced timeline apart from
   conversation history. Its turns run in the Mac's chat conversation
   (`Mobile.joined_conversation/1`, the one `Gateway.Channel` callback that
@@ -801,16 +813,18 @@ The router exposes:
 
 - `/` (`HomeLive`), a dashboard fed by `FermixCore.Introspection` that redirects
   to `/setup` until boot is ready
-- `/setup` (`SetupLive`) behind `SetupAuth`: a one-time launch token, then a
-  session cookie; `embed=1` serves the macOS app
-- `/health` and `/health/ready` for readiness, and `/health/live` for a static
-  liveness payload
+- `/setup` (`SetupLive`); it and `/` sit behind `SetupAuth`: a one-time launch
+  token, then a session cookie, which each LiveView's mount checks again for
+  its socket; `embed=1` serves the macOS app
+- `/health` and `/health/ready` for the readiness status alone, and
+  `/health/live` for a static liveness payload; the full report stays with
+  `fermix health --json`
 - `GET`/`POST /webhook/whatsapp` and `POST /webhook/slack`
 
 `WebhookController` verifies the request and parses it with the channel adapter,
 drops duplicates, and hands the message to `Gateway.ingest/2` asynchronously
 under `FermixCore.TaskSupervisor`; a failed handoff returns 503 and rolls back
-the duplicate record. `HealthController` reports from `FermixCore.Health`.
+the duplicate record. `HealthController` reports `FermixCore.Health`'s status.
 `SetupLive` drives `Setup.Wizard` and the core setup modules. Not all ingress is
 Phoenix: the mobile listener, the OAuth loopback listener, and the Unix sockets
 (`daemon.sock`, `realtime.sock`, `acp.sock`, `companion.sock`) live in core and

@@ -18,11 +18,13 @@ defmodule FermixChannels.Companion.Turns do
       claims its outcome, and a stop in that window would leave the timeline
       holding an answer the conversation's history marks as stopped. A phone
       turn streams and writes its own rows as it runs (`Channels.Mobile`'s
-      draft and `send_message`), so here it is only settled;
+      draft and `send_message`), so here it is settled and ended;
     * `{:completed}` writes each held reply as a timeline row, announces it as
       `text_done` at its `server_seq` to the companion connections and as a
       `row` to the phones, and completes the request; a companion turn that
-      holds no reply ends with `turn_done` instead (companion protocol 2);
+      holds no reply ends with `turn_done` instead (companion protocol 2),
+      and a phone turn always does, after the rows it wrote (mobile protocol
+      2);
     * `{:cancelled}` and `{:failed, _}` settle the request as failed and
       announce `turn_error` to the transport that ran the turn; held text is
       dropped;
@@ -464,7 +466,7 @@ defmodule FermixChannels.Companion.Turns do
 
   defp finish(state, turn, {:completed}) do
     turn.replies |> Enum.reverse() |> Enum.each(&write_reply(state, turn, &1))
-    :ok = announce_no_reply(turn)
+    :ok = announce_completed(turn)
     :ok = mirror_answer(turn)
     {settle_completed(state, turn), ended(state, turn)}
   end
@@ -472,13 +474,18 @@ defmodule FermixChannels.Companion.Turns do
   defp finish(state, turn, {:cancelled}), do: {nil, fail(state, turn, :cancelled)}
   defp finish(state, turn, {:failed, reason}), do: {nil, fail(state, turn, reason)}
 
-  # A companion turn that completed holding no reply has no `text_done` to end
-  # it: it ends with `turn_done`, which only a version 2 client is sent. A
-  # phone turn wrote its own rows and is only settled.
-  defp announce_no_reply(%{transport: :companion, replies: []} = turn),
+  # A completed turn's ending. A phone turn wrote its own rows, each sealed by
+  # its `text_done`, and ends with `turn_done` on the phones (mobile protocol
+  # 2). A companion turn that holds no reply has no `text_done` to end it and
+  # ends with `turn_done`, which only a version 2 client is sent; one that
+  # holds replies ends at their `text_done`.
+  defp announce_completed(%{transport: :mobile} = turn),
+    do: Fanout.announce(turn.profile, Output.turn_done(turn.turn_id), audience: :mobile)
+
+  defp announce_completed(%{transport: :companion, replies: []} = turn),
     do: Fanout.announce(turn.profile, Output.turn_done(turn.turn_id), audience: :companion)
 
-  defp announce_no_reply(_turn), do: :ok
+  defp announce_completed(_turn), do: :ok
 
   # A turn that ended silently answered nothing for the call to hear.
   defp mirror_answer(%{silent?: true}), do: :ok

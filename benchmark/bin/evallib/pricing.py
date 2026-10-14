@@ -68,7 +68,8 @@ Venice's was read 2026-09-19 and carries its own line below. The four models
 released 2026-09-22 (gpt-6-sol, gpt-6-luna, claude-opus-5-5, grok-4.7) were
 read from the same first-party pages that day, and gpt-6.1-sol on its release
 day, 2026-09-29. The OpenRouter and Venice entries added with the catalog's
-2026-10-03 refresh were read from each one's public listing that day:
+2026-10-03 refresh were read from each one's public listing that day, and
+claude-haiku-5-5 from the first-party model page on 2026-10-10:
 
   OpenAI      https://developers.openai.com/api/docs/pricing (first-party;
               input / cached input / output for every slug). Cache WRITES are
@@ -122,7 +123,8 @@ Two known bounds, both accepted rather than modelled:
 
   * LONG-CONTEXT TIERS ARE NOT APPLIED. OpenAI reprices a request above 272k
     input tokens at 2x input/cache and 1.5x output for the whole request, xAI
-    doubles every rate at 200k, and Venice publishes an `extended` tier on 19
+    doubles every rate at 200k, Anthropic bills claude-haiku-5-5 at 5x on every
+    leg above a 100k-token prompt, and Venice publishes an `extended` tier on 19
     of its text models (grok-4-6 among them) that roughly doubles all three
     legs above a 200k input threshold. A card entry is the standard tier, so a
     turn that crosses any of those cliffs is UNDER-stated here. This partly
@@ -151,7 +153,7 @@ from typing import Protocol
 # onto a stored row. It is not an ordered sequence and the values in between
 # need not exist: `.1` never did, and renaming `.2` now would make a token that
 # is already on disk mean two different tables.
-CARD_VERSION = "2026-09-22"
+CARD_VERSION = "2026-10-10.2"
 
 
 class LlmSpanUsage(Protocol):
@@ -320,21 +322,29 @@ _ANTHROPIC_RATES: dict[str, Rate] = {
     # the cheaper one — so pricing a Sonnet by analogy to its predecessor
     # overstates it by 50%, the same wrong number the cancelled rise would give.
     "claude-sonnet-5": Rate(2.00, 10.00, 0.20, 2.50),
-    # Read first-party 2026-09-29, its release day: Sonnet 5's four legs
-    # exactly, on the standard 0.1x read tier.
-    "claude-sonnet-5-5": Rate(2.00, 10.00, 0.20, 2.50),
+    # Sonnet 5's input, output and write legs, but 0.10 cache read is 0.05x
+    # input, half Sonnet 5's: the vendor's pricing table (re-read first-party
+    # 2026-10-10) footnotes Sonnet 5.5 with Opus 5.5 on that tier. It was
+    # carded at 0.20 on its release day. Do not "fix" the read back to 0.20.
+    "claude-sonnet-5-5": Rate(2.00, 10.00, 0.10, 2.50),
     # 0.20 cache read is 0.05x input, half the standard 0.1x, and it is correct:
-    # the vendor's pricing table footnotes Opus 5.5 alone on that tier. It also
-    # UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
+    # the vendor's pricing table footnotes Opus 5.5 and Sonnet 5.5 on that tier.
+    # It also UNDERCUTS Opus 5 below on every leg. Do not "fix" the read to 0.40.
     "claude-opus-5-5": Rate(4.00, 20.00, 0.20, 5.00),
     "claude-opus-5": Rate(5.00, 25.00, 0.50, 6.25),
     # 0.25 cache read is 0.025x input, a tenth of what the sibling below pays,
     # and it is correct: the vendor's pricing table footnotes Fable 5.1 and
     # Mythos 5.1 as the only models on the 0.025x read tier, and everything else
-    # but Opus 5.5 (0.05x, above) at the standard 0.1x. Do not "fix" it to 1.00.
+    # but Opus 5.5 and Sonnet 5.5 (0.05x, above) at the standard 0.1x. Do not
+    # "fix" it to 1.00.
     "claude-fable-5-1": Rate(10.00, 50.00, 0.25, 12.50),
     "claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "claude-haiku-4-5": Rate(1.00, 5.00, 0.10, 1.25),
+    # The tier for prompts up to 100,000 tokens, read first-party 2026-10-10;
+    # above that every leg is 5x (0.50 / 2.50 / 0.05 / 0.625). Fermix compacts
+    # a Haiku 5.5 conversation at 100,000 tokens, so the standard tier is the
+    # one a run normally pays.
+    "claude-haiku-5-5": Rate(0.10, 0.50, 0.01, 0.125),
 }
 
 # xAI prices the reasoning and non-reasoning surfaces of Grok 4.20 identically;
@@ -387,7 +397,7 @@ _OPENROUTER_RATES: dict[str, Rate] = {
     # can UNDER-state what the account was actually billed.
     "moonshotai/kimi-k3": Rate(2.55, 12.75, 0.256),
     "anthropic/claude-sonnet-4.6": Rate(3.00, 15.00, 0.30, 3.75),
-    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.20, 2.50),
+    "anthropic/claude-sonnet-5.5": Rate(2.00, 10.00, 0.10, 2.50),
     "anthropic/claude-fable-5.1": Rate(10.00, 50.00, 0.25, 12.50),
     "anthropic/claude-fable-5": Rate(10.00, 50.00, 1.00, 12.50),
     "anthropic/claude-opus-5.5": Rate(4.00, 20.00, 0.20, 5.00),

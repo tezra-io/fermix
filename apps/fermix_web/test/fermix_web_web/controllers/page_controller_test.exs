@@ -1,7 +1,12 @@
 defmodule FermixWebWeb.PageControllerTest do
   use FermixWebWeb.ConnCase
 
+  import Phoenix.LiveViewTest
+
+  alias FermixCore.Health
+  alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.BootReport
+  alias FermixWebWeb.HomeLive
 
   defmodule FakeHomeSnapshot do
     def snapshot do
@@ -163,7 +168,7 @@ defmodule FermixWebWeb.PageControllerTest do
     assert body =~ "Active sessions"
     assert body =~ "realtime.sock"
     assert body =~ "Open setup"
-    # F-1: the unauthenticated home page must NOT mint or embed a launch token.
+    # F-1: the home page must NOT mint or embed a launch token.
     # The setup link is bare `/setup`; an unauthenticated visitor is refused by
     # SetupAuth (a launch token is only ever minted by the `fermix setup` CLI).
     assert setup_href = setup_href(body)
@@ -242,12 +247,86 @@ defmodule FermixWebWeb.PageControllerTest do
     setup_body = html_response(setup_conn, 200)
     assert setup_body =~ "Ready"
 
-    # /health/ready stays on the cache.
+    # /health/ready stays on the cache; the failures behind it are `Health.report/0`'s.
     ready_conn = setup_conn |> recycle() |> get(~p"/health/ready")
     ready_body = json_response(ready_conn, 503)
 
     assert ready_body["status"] == "setup_required"
-    assert Enum.any?(ready_body["failures"], &(&1["component"] == "provider:openai"))
+    assert Enum.any?(Health.report().failures, &(&1.component == "provider:openai"))
+  end
+
+  # What the FakeHomeSnapshot dashboard shows: job, schedule, models, workers, paths.
+  @dashboard_details [
+    "Daily Digest",
+    "daily_digest",
+    "every 15 minutes",
+    "gpt-5.4-mini",
+    "gpt-realtime-2",
+    "research",
+    "session-1",
+    "realtime.sock",
+    "/Users/example"
+  ]
+
+  # F-02 of the M65 security review: a webhook tunnel forwards every path to the
+  # loopback listener, so the dashboard answers only the setup session, however
+  # the request arrives.
+  describe "the setup session gates the dashboard" do
+    setup do
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "test-key"])
+      Application.put_env(:fermix_channels, :telegram, bot_token: "bot-token")
+      Application.put_env(:fermix_web, :home_snapshot, FakeHomeSnapshot)
+      BootReport.refresh()
+      :ok
+    end
+
+    test "an anonymous GET / is refused and names nothing the dashboard shows" do
+      for conn <- [build_conn(), tunneled(build_conn())] do
+        body = conn |> get(~p"/") |> response(403)
+
+        assert body =~ "setup authorization required"
+        assert body =~ "fermix setup"
+
+        for detail <- @dashboard_details do
+          refute body =~ detail
+        end
+      end
+    end
+
+    test "an authorized session renders the dashboard, tunneled or not", %{conn: conn} do
+      for conn <- [conn, tunneled(conn)] do
+        assert conn |> get(~p"/") |> html_response(200) =~ "Daily Digest"
+      end
+    end
+
+    test "a launch token on / authorizes the session and lands on /setup" do
+      {:ok, %{token: launch_token}} = AccessToken.mint_launch_token()
+
+      conn = get(build_conn(), ~p"/?t=#{launch_token}")
+      assert redirected_to(conn) == ~p"/setup"
+
+      assert conn |> recycle() |> get(~p"/") |> html_response(200) =~ "Daily Digest"
+    end
+
+    # The `/live` socket never passes through the router's plugs, so the mount
+    # makes the same check.
+    test "a HomeLive mount without the setup session renders no snapshot", %{conn: conn} do
+      assert {:error, {:redirect, %{to: "/setup"}}} = live_isolated(build_conn(), HomeLive)
+
+      assert {:ok, _view, html} = live_isolated(conn, HomeLive)
+      assert html =~ "Daily Digest"
+    end
+
+    test "a socket that connects after the setup token rotated renders no snapshot", %{
+      conn: conn
+    } do
+      conn = get(conn, ~p"/")
+      assert html_response(conn, 200) =~ "Daily Digest"
+
+      assert {:ok, _token} = AccessToken.rotate_setup_token()
+
+      assert {:error, {:redirect, %{to: "/setup"}}} = live(conn)
+    end
   end
 
   defp restore_env(app, key, nil), do: Application.delete_env(app, key)

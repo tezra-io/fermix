@@ -104,7 +104,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
   end
 
   describe "chat/3 — request shape and response handling" do
-    test "a user image_parts message becomes a multimodal content array" do
+    test "a user message with parts becomes a multimodal content array" do
       png = <<137, 80, 78, 71>>
 
       Req.Test.stub(__MODULE__, fn conn ->
@@ -123,7 +123,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
         %{
           role: "user",
           content: "what is this?",
-          image_parts: [%{type: :image, mime_type: "image/png", data: png}]
+          parts: [%{type: :image, mime_type: "image/png", data: png}]
         }
       ]
 
@@ -135,6 +135,61 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
                  base_url: "https://api.openai.com/v1",
                  req_options: [plug: {Req.Test, __MODULE__}]
                )
+    end
+
+    test "a PDF part becomes a file part with its name and a base64 data URL (M67)" do
+      pdf = "%PDF-1.4 lease 7731"
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        decoded = Jason.decode!(body)
+
+        assert [%{"role" => "user", "content" => [_text_part, file_part]}] = decoded["messages"]
+
+        assert file_part == %{
+                 "type" => "file",
+                 "file" => %{
+                   "filename" => "lease.pdf",
+                   "file_data" => "data:application/pdf;base64," <> Base.encode64(pdf)
+                 }
+               }
+
+        refute Map.has_key?(decoded, "plugins")
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      assert {:ok, _turn} =
+               ChatCompletions.chat(pdf_messages(pdf), [],
+                 api_key: "sk-test",
+                 provider: :venice,
+                 model: "venice-test",
+                 base_url: "https://venice.test/api/v1",
+                 req_options: [plug: {Req.Test, __MODULE__}]
+               )
+    end
+
+    test "OpenRouter pins the model's own PDF reading only when a PDF rides (no paid OCR)" do
+      test_pid = self()
+
+      Req.Test.stub(__MODULE__, fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        send(test_pid, {:plugins, Map.get(Jason.decode!(body), "plugins")})
+        Req.Test.json(conn, text_response_body())
+      end)
+
+      opts = [
+        api_key: "sk-test",
+        provider: :openrouter,
+        model: "anthropic/claude-test",
+        base_url: "https://openrouter.test/api/v1",
+        req_options: [plug: {Req.Test, __MODULE__}]
+      ]
+
+      assert {:ok, _turn} = ChatCompletions.chat(pdf_messages("%PDF-1.4"), [], opts)
+      assert_receive {:plugins, [%{"id" => "file-parser", "pdf" => %{"engine" => "native"}}]}
+
+      assert {:ok, _turn} = ChatCompletions.chat([%{role: "user", content: "hi"}], [], opts)
+      assert_receive {:plugins, nil}
     end
 
     test "posts the standard chat completions body and parses the response" do
@@ -632,7 +687,7 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
 
       # Two screenshot follow-up turns already in history (older), plus a fresh one
       # from this turn's tool result → three total; cap of 1 keeps only the newest.
-      old_shot = %{role: "user", content: @screenshot_label, image_parts: [img_part(png, "old")]}
+      old_shot = %{role: "user", content: @screenshot_label, parts: [img_part(png, "old")]}
 
       provider_state = %{
         messages: [%{role: "user", content: "go"}, old_shot, old_shot],
@@ -675,8 +730,8 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
       end)
 
       # A real user image (no screenshot label) plus an older screenshot carrier.
-      user_image = %{role: "user", content: "look", image_parts: [img_part(png, "user")]}
-      old_shot = %{role: "user", content: @screenshot_label, image_parts: [img_part(png, "old")]}
+      user_image = %{role: "user", content: "look", parts: [img_part(png, "user")]}
+      old_shot = %{role: "user", content: @screenshot_label, parts: [img_part(png, "old")]}
 
       provider_state = %{
         messages: [user_image, old_shot],
@@ -1069,5 +1124,15 @@ defmodule FermixCore.Providers.OpenAI.ChatCompletionsTest do
     test "returns false" do
       refute ChatCompletions.supports_streaming?()
     end
+  end
+
+  defp pdf_messages(pdf) do
+    [
+      %{
+        role: "user",
+        content: "what is the lease number?",
+        parts: [%{type: :document, mime_type: "application/pdf", data: pdf, name: "lease.pdf"}]
+      }
+    ]
   end
 end

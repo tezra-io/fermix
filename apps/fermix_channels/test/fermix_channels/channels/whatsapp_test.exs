@@ -177,15 +177,44 @@ defmodule FermixChannels.Channels.WhatsAppTest do
 
       assert message.content == ""
 
+      # Declared as Meta gave it, its type as the hint (M67).
       assert message.attachments == [
                %{
-                 kind: :audio,
+                 hint: :audio,
                  url: nil,
                  mime_type: "audio/ogg",
                  file_id: "audio-media-id",
-                 size_bytes: nil
+                 size_bytes: nil,
+                 file_name: nil
                }
              ]
+    end
+
+    test "declares a video, a sticker and a document with the type as the hint (M67)" do
+      for {type, hint, media} <- [
+            {"video", :video, %{"id" => "v-1", "mime_type" => "video/mp4"}},
+            {"sticker", :sticker, %{"id" => "s-1", "mime_type" => "image/webp"}},
+            {"document", :document,
+             %{"id" => "d-1", "mime_type" => "application/pdf", "filename" => "lease.pdf"}}
+          ] do
+        inbound =
+          payload("", %{
+            "messages" => [
+              %{
+                "from" => "15551234567",
+                "id" => "wamid.#{type}",
+                "timestamp" => "1714000000",
+                "type" => type,
+                type => media
+              }
+            ]
+          })
+
+        assert {:ok, [message]} = WhatsApp.parse_webhook(inbound)
+        assert [%{hint: ^hint, file_id: file_id} = declared] = message.attachments
+        assert file_id == media["id"]
+        assert declared.file_name == media["filename"]
+      end
     end
   end
 

@@ -246,16 +246,16 @@ defmodule FermixChannels.Channels.Signal do
       not Map.has_key?(data_message, "groupV2")
   end
 
+  # Each attachment is declared as signal-cli gave it, with no kind: the gateway
+  # attachment pipeline names the kind from the bytes (M67).
   defp parse_attachments(attachments) when is_list(attachments) do
     Enum.map(attachments, fn attachment ->
-      mime_type = Map.get(attachment, "contentType")
-
       %{
-        kind: attachment_kind(mime_type),
         url: Map.get(attachment, "storedFilename"),
-        mime_type: mime_type,
+        mime_type: Map.get(attachment, "contentType"),
         file_id: Map.get(attachment, "id"),
-        size_bytes: Map.get(attachment, "size")
+        size_bytes: Map.get(attachment, "size"),
+        file_name: Map.get(attachment, "filename")
       }
     end)
   end
@@ -367,10 +367,6 @@ defmodule FermixChannels.Channels.Signal do
       {:error, reason} -> {:error, {:attachment_unreadable, reason}}
     end
   end
-
-  defp attachment_kind("audio/" <> _rest), do: :audio
-  defp attachment_kind("image/" <> _rest), do: :image
-  defp attachment_kind(_mime_type), do: :file
 
   defp ingress_enabled? do
     case FermixCore.Config.channel(:signal) do

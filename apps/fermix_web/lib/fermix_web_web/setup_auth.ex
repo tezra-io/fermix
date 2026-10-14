@@ -1,6 +1,6 @@
 defmodule FermixWebWeb.SetupAuth do
   @moduledoc """
-  Gates `/setup` behind a local setup session.
+  Gates `/` and `/setup` behind a local setup session.
   """
 
   import Plug.Conn

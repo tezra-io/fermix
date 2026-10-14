@@ -5,17 +5,19 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   @client_events ~w(
     hello msg attach_begin attach_chunk attach_end command cancel history_pull media_fetch
-    push_register ack read_state pair_request unpair ping
+    push_register ack read_state request_status pair_request unpair ping
   )
   @server_events ~w(
-    hello_ack accepted attach_status turn_started text_delta tool_event text_done
+    hello_ack accepted attach_status turn_started text_delta tool_event text_done turn_done
     media_begin media_chunk media_end turn_error row reaction approval approval_resolved
-    link_preview read_state history_page notice pair_approved pair_denied error pong event_part
+    link_preview read_state history_page request_status_page notice pair_approved pair_denied
+    error pong event_part
   )
 
-  test "publishes the v1 N/N-1 window and approved event catalogs" do
-    assert Protocol.protocol_version() == 1
-    assert Protocol.supported_version_range() == {1, 1}
+  # Protocol 1 never had a client, so the window is protocol 2 alone (M51 D1).
+  test "publishes the protocol 2 window and approved event catalogs" do
+    assert Protocol.protocol_version() == 2
+    assert Protocol.supported_version_range() == {2, 2}
     assert Protocol.client_events() == @client_events
     assert Protocol.server_events() == @server_events
     assert Protocol.max_header_bytes() == 4_096
@@ -25,20 +27,20 @@ defmodule FermixChannels.Mobile.ProtocolTest do
   end
 
   test "negotiates supported, old, and new clients directionally" do
-    assert :ok = Protocol.negotiate(1)
-    assert {:error, :client_too_old} = Protocol.negotiate(0)
-    assert {:error, :client_too_new} = Protocol.negotiate(2)
+    assert :ok = Protocol.negotiate(2)
+    assert {:error, :client_too_old} = Protocol.negotiate(1)
+    assert {:error, :client_too_new} = Protocol.negotiate(3)
   end
 
   test "an out-of-window envelope names the direction and the client's version" do
-    assert {:error, {:unsupported_protocol_version, :client_too_new, 2}} =
+    assert {:error, {:unsupported_protocol_version, :client_too_new, 3}} =
              Protocol.decode_client_frame(
-               encode_frame(%{"v" => 2, "t" => "ping", "seq" => 1}, "")
+               encode_frame(%{"v" => 3, "t" => "ping", "seq" => 1}, "")
              )
 
-    assert {:error, {:unsupported_protocol_version, :client_too_old, 0}} =
+    assert {:error, {:unsupported_protocol_version, :client_too_old, 1}} =
              Protocol.decode_client_frame(
-               encode_frame(%{"v" => 0, "t" => "ping", "seq" => 1}, "")
+               encode_frame(%{"v" => 1, "t" => "ping", "seq" => 1}, "")
              )
   end
 
@@ -55,12 +57,12 @@ defmodule FermixChannels.Mobile.ProtocolTest do
   test "a header over 4 KiB travels as a contiguous event_part run that reassembles" do
     payload = %{"turn_id" => "turn-1", "server_seq" => 9, "text" => String.duplicate("a", 5_000)}
 
-    assert {:ok, frames} = Protocol.encode_server_event("text_done", payload, 5, <<>>, version: 1)
+    assert {:ok, frames} = Protocol.encode_server_event("text_done", payload, 5, <<>>, version: 2)
     assert length(frames) == 2
 
     assert Enum.map(frames, &decode_frame!(&1).header) == [
-             %{"v" => 1, "t" => "event_part", "seq" => 5, "index" => 0, "count" => 2},
-             %{"v" => 1, "t" => "event_part", "seq" => 6, "index" => 1, "count" => 2}
+             %{"v" => 2, "t" => "event_part", "seq" => 5, "index" => 0, "count" => 2},
+             %{"v" => 2, "t" => "event_part", "seq" => 6, "index" => 1, "count" => 2}
            ]
 
     assert reassemble(frames) == Map.put(payload, "t", "text_done")
@@ -102,7 +104,12 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "media_refs" => []
     }
 
-    payload = %{"profile_id" => "main", "messages" => [row], "next_after_seq" => 4}
+    payload = %{
+      "profile_id" => "main",
+      "messages" => [row],
+      "next_after_seq" => 4,
+      "history_head_seq" => 4
+    }
 
     assert {:ok, frames} = Protocol.encode_server_event("history_page", payload, 1, <<>>, [])
     event = reassemble(frames)
@@ -161,12 +168,12 @@ defmodule FermixChannels.Mobile.ProtocolTest do
         "device_id" => "device-1",
         "app_version" => "1.0.0",
         "last_server_seq" => 0,
-        "protocol_v" => 1,
+        "protocol_v" => 2,
         "future" => %{"ok" => true}
       })
 
     assert {:ok, event} = Protocol.decode_client_frame(frame)
-    assert event.version == 1
+    assert event.version == 2
     assert event.type == "hello"
     assert event.seq == 1
     assert event.bytes == <<>>
@@ -178,13 +185,13 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "device_id" => "device-1",
       "app_version" => "1.0.0",
       "last_server_seq" => 0,
-      "protocol_v" => 1
+      "protocol_v" => 2
     }
 
     assert {:error, :invalid_seq} = Protocol.decode_client_frame(client_frame("hello", 0, fields))
 
     assert {:error, :protocol_version_mismatch} =
-             Protocol.decode_client_frame(client_frame("hello", 1, %{fields | "protocol_v" => 2}))
+             Protocol.decode_client_frame(client_frame("hello", 1, %{fields | "protocol_v" => 1}))
 
     too_large = 18_446_744_073_709_551_616
 
@@ -223,6 +230,52 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              )
   end
 
+  # Mobile protocol 2: a pull pages forward from `after_seq` or backward from
+  # `before_seq`, never both, and a page always carries both of its cursors.
+  test "a history pull takes exactly one cursor, and a page carries its cursors" do
+    pull = %{"profile_id" => "main", "limit" => 50}
+
+    assert {:ok, %{payload: %{"before_seq" => 9}}} =
+             Protocol.decode_client_frame(
+               client_frame("history_pull", 1, Map.put(pull, "before_seq", 9))
+             )
+
+    assert {:error, {:invalid_field, "before_seq"}} =
+             Protocol.decode_client_frame(
+               client_frame(
+                 "history_pull",
+                 1,
+                 Map.merge(pull, %{"after_seq" => 0, "before_seq" => 9})
+               )
+             )
+
+    assert {:error, {:invalid_field, "before_seq"}} =
+             Protocol.decode_client_frame(
+               client_frame("history_pull", 1, Map.put(pull, "before_seq", 0))
+             )
+
+    assert {:error, {:missing_field, "after_seq"}} =
+             Protocol.decode_client_frame(client_frame("history_pull", 1, pull))
+
+    page = %{
+      "profile_id" => "main",
+      "messages" => [],
+      "next_after_seq" => 8,
+      "history_head_seq" => 12,
+      "prev_before_seq" => 3
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("history_page", page, 1)
+
+    for field <- ~w(next_after_seq history_head_seq) do
+      assert {:error, {:missing_field, ^field}} =
+               Protocol.encode_server_frame("history_page", Map.delete(page, field), 1)
+    end
+
+    assert {:error, {:invalid_field, "prev_before_seq"}} =
+             Protocol.encode_server_frame("history_page", %{page | "prev_before_seq" => 0}, 1)
+  end
+
   test "attach_begin carries the hash required for pre-transfer dedup" do
     hash = String.duplicate("a", 64)
 
@@ -246,6 +299,26 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                  "size_bytes" => 100,
                  "sha256" => "bad"
                })
+             )
+  end
+
+  test "attach_begin takes an optional poster_of naming the video a still belongs to (M67)" do
+    begin = %{
+      "attach_id" => "a-2",
+      "kind" => "image",
+      "mime" => "image/jpeg",
+      "size_bytes" => 100,
+      "sha256" => String.duplicate("b", 64)
+    }
+
+    assert {:ok, %{payload: %{"poster_of" => "a-1"}}} =
+             Protocol.decode_client_frame(
+               client_frame("attach_begin", 4, Map.put(begin, "poster_of", "a-1"))
+             )
+
+    assert {:error, {:invalid_field, "poster_of"}} =
+             Protocol.decode_client_frame(
+               client_frame("attach_begin", 4, Map.put(begin, "poster_of", ""))
              )
   end
 
@@ -279,6 +352,88 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     end
   end
 
+  # The phone's secure-hardware attestation rides as the pair_request's raw
+  # tail; its shape is checked, not its certificates (M51 D3).
+  test "a pair_request carries its platform and an attestation chain as its raw tail" do
+    chain = "leafcertintermediateroot"
+    fields = pair_request_fields([8, 12, 4])
+
+    assert {:ok, %{type: "pair_request", bytes: ^chain, payload: %{"platform" => "android"}}} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, fields, chain))
+
+    assert {:error, {:missing_field, "bytes"}} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, fields))
+
+    assert {:error, {:invalid_field, "attestation.cert_lengths"}} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, fields, chain <> "x"))
+
+    for field <- ~w(platform attestation) do
+      assert {:error, {:missing_field, ^field}} =
+               Protocol.decode_client_frame(
+                 client_frame("pair_request", 1, Map.delete(fields, field), chain)
+               )
+    end
+
+    assert {:error, {:invalid_field, "platform"}} =
+             Protocol.decode_client_frame(
+               client_frame("pair_request", 1, %{fields | "platform" => "windows"}, chain)
+             )
+  end
+
+  test "an attestation is bounded as the phone bounds it" do
+    valid = %{"kind" => "android_keymint", "cert_lengths" => [1]}
+    apple = pair_request_fields([1]) |> put_in(["attestation", "kind"], "apple_app_attest")
+
+    assert {:ok, _event} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, apple, "x"))
+
+    for {attestation, field} <- [
+          {%{valid | "kind" => "tpm"}, "attestation.kind"},
+          {%{valid | "cert_lengths" => []}, "attestation.cert_lengths"},
+          {%{valid | "cert_lengths" => List.duplicate(1, 7)}, "attestation.cert_lengths"},
+          {%{valid | "cert_lengths" => [0]}, "attestation.cert_lengths"},
+          {%{valid | "cert_lengths" => ["1"]}, "attestation.cert_lengths"},
+          {Map.delete(valid, "kind"), "attestation"},
+          {"android_keymint", "attestation"}
+        ] do
+      fields = Map.put(pair_request_fields([1]), "attestation", attestation)
+
+      assert {:error, {:invalid_field, ^field}} =
+               Protocol.decode_client_frame(client_frame("pair_request", 1, fields, "x"))
+    end
+
+    long = :binary.copy("x", 16_385)
+    fields = pair_request_fields([8_000, 8_385])
+
+    assert {:error, {:attestation_chain_too_large, 16_385, 16_384}} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, fields, long))
+
+    longest = binary_part(long, 0, 16_384)
+    fields = pair_request_fields([8_000, 8_384])
+
+    assert {:ok, _event} =
+             Protocol.decode_client_frame(client_frame("pair_request", 1, fields, longest))
+  end
+
+  test "pair_approved gives the phone its 32-byte push salt" do
+    approved = %{
+      "device_id" => "device-1",
+      "candidates" => [],
+      "profiles" => [%{"id" => "main", "name" => "Fermix"}],
+      "push_salt" => Base.encode64(:binary.copy(<<7>>, 32))
+    }
+
+    assert {:ok, _frame} = Protocol.encode_server_frame("pair_approved", approved, 1)
+
+    assert {:error, {:missing_field, "push_salt"}} =
+             Protocol.encode_server_frame("pair_approved", Map.delete(approved, "push_salt"), 1)
+
+    for salt <- [Base.encode64(:binary.copy(<<7>>, 31)), "not base64!", 32] do
+      assert {:error, {:invalid_field, "push_salt"}} =
+               Protocol.encode_server_frame("pair_approved", %{approved | "push_salt" => salt}, 1)
+    end
+  end
+
   test "fails loudly on malformed, oversized, and unknown frames" do
     assert {:error, :truncated_frame} = Protocol.decode_client_frame(<<0, 0, 0>>)
     assert {:error, :invalid_json} = Protocol.decode_client_frame(<<0, 0, 0, 1, ?{>>)
@@ -296,8 +451,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
                "hello_ack",
                %{
                  "session_id" => "s-1",
-                 "min_version" => 1,
-                 "max_version" => 1,
+                 "min_version" => 2,
+                 "max_version" => 2,
                  "profiles" => [%{"id" => "main", "name" => "Fermix"}],
                  "candidates" => [],
                  "history_head_seq" => 9,
@@ -308,8 +463,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              )
 
     assert {:ok, decoded} = decode_frame(hello)
-    assert decoded.header["min_version"] == 1
-    assert decoded.header["max_version"] == 1
+    assert decoded.header["min_version"] == 2
+    assert decoded.header["max_version"] == 2
 
     assert {:ok, _accepted} =
              Protocol.encode_server_frame(
@@ -419,6 +574,65 @@ defmodule FermixChannels.Mobile.ProtocolTest do
              Protocol.encode_server_frame("row", Map.delete(row, "ts"), 1)
   end
 
+  # Mobile protocol 2 ends every turn: `turn_done` is this wire's own event,
+  # not the shared chat vocabulary's, so the companion export does not move.
+  test "a turn ends with turn_done, and a rewritten draft is sent whole" do
+    assert {:ok, frame} = Protocol.encode_server_frame("turn_done", %{"turn_id" => "turn-c-1"}, 1)
+    assert {:ok, %{header: %{"t" => "turn_done", "turn_id" => "turn-c-1"}}} = decode_frame(frame)
+
+    assert {:error, {:missing_field, "turn_id"}} =
+             Protocol.encode_server_frame("turn_done", %{}, 1)
+
+    assert {:error, {:invalid_field, "turn_id"}} =
+             Protocol.encode_server_frame("turn_done", %{"turn_id" => ""}, 1)
+
+    refute "turn_done" in FermixCore.Companion.Protocol.shared_server_events()
+
+    delta = %{"turn_id" => "turn-c-1", "text" => "Hello there", "replace" => true}
+    assert {:ok, frame} = Protocol.encode_server_frame("text_delta", delta, 2)
+    assert {:ok, %{header: %{"replace" => true}}} = decode_frame(frame)
+  end
+
+  # A reconnecting phone asks how the requests it never saw end stand.
+  test "request_status names 1 to 32 requests, and its page says how each stands" do
+    ids = ["c-1", "c-2"]
+
+    assert {:ok, %{type: "request_status", payload: %{"client_msg_ids" => ^ids}}} =
+             Protocol.decode_client_frame(
+               client_frame("request_status", 1, %{"client_msg_ids" => ids})
+             )
+
+    for bad <- [[], List.duplicate("c-1", 33), [""], [1], "c-1"] do
+      assert {:error, {:invalid_field, "client_msg_ids"}} =
+               Protocol.decode_client_frame(
+                 client_frame("request_status", 1, %{"client_msg_ids" => bad})
+               )
+    end
+
+    requests = [
+      %{"client_msg_id" => "c-1", "status" => "completed", "result_server_seq" => 14},
+      %{"client_msg_id" => "c-2", "status" => "failed", "error" => "cancelled"},
+      %{"client_msg_id" => "c-3", "status" => "running", "turn_id" => "turn-c-3"}
+    ]
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("request_status_page", %{"requests" => requests}, 1)
+
+    assert {:ok, _frame} =
+             Protocol.encode_server_frame("request_status_page", %{"requests" => []}, 1)
+
+    for bad <- [
+          [%{"client_msg_id" => "c-1", "status" => "lost"}],
+          [%{"client_msg_id" => "", "status" => "running"}],
+          [%{"client_msg_id" => "c-1", "status" => "failed", "error" => ""}],
+          [%{"client_msg_id" => "c-1", "status" => "completed", "result_server_seq" => 0}],
+          List.duplicate(hd(requests), 33)
+        ] do
+      assert {:error, {:invalid_field, "requests"}} =
+               Protocol.encode_server_frame("request_status_page", %{"requests" => bad}, 1)
+    end
+  end
+
   test "a request's error names the request it ends" do
     error = %{"code" => "request_failed", "message" => "attachment unavailable"}
     assert {:ok, _frame} = Protocol.encode_server_frame("error", error, 1)
@@ -476,16 +690,29 @@ defmodule FermixChannels.Mobile.ProtocolTest do
 
   test "encoder can pin a supported session version" do
     assert {:ok, frame} =
-             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 1)
+             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 2)
 
-    assert {:ok, %{header: %{"v" => 1}}} = decode_frame(frame)
+    assert {:ok, %{header: %{"v" => 2}}} = decode_frame(frame)
 
     assert {:error, :client_too_new} =
-             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 2)
+             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 3)
+
+    assert {:error, :client_too_old} =
+             Protocol.encode_server_frame("pong", %{}, 1, <<>>, version: 1)
   end
 
   defp client_frame(type, seq, fields, bytes \\ <<>>) do
-    encode_frame(Map.merge(%{"v" => 1, "t" => type, "seq" => seq}, fields), bytes)
+    encode_frame(Map.merge(%{"v" => 2, "t" => type, "seq" => seq}, fields), bytes)
+  end
+
+  defp pair_request_fields(cert_lengths) do
+    %{
+      "device_name" => "Owner's Pixel",
+      "model" => "Google Pixel 9 Pro",
+      "app_version" => "1.0.0",
+      "platform" => "android",
+      "attestation" => %{"kind" => "android_keymint", "cert_lengths" => cert_lengths}
+    }
   end
 
   defp encode_frame(header, bytes) do

@@ -284,9 +284,31 @@ scenarios:
             expect:
               reply_matches: '(?i)265'
               reply_not_matches: '(?i)\b265(?: conversions)?\b.{0,40}\b(?:is|are|will be|and (?:it )?is)\s+guaranteed\b|\b265(?: conversions)?[,;:— -]+guaranteed\b|\bguaranteed\s+(?:exactly\s+)?265\b|\bexactly\s+265(?: conversions)?\s+and\s+guaranteed\b'
+        # 2026-10-13 (issue #111, nightly reds 10-01/10-05/10-08, all "gates
+        # ok"): the rubric was the flaky gate. It required the reply to "name
+        # the unchanged-rate assumption", which the user's own question
+        # supplies ("At that same rate"), so the judge failed every correctly
+        # calibrated reply that did not echo the premise back — "No. 265 is
+        # the point forecast, not a guarantee. Actual conversions could be
+        # higher or lower." scored 0.67 — and passed the ones that did: 4 of 9
+        # local trials, each verdict stable across three re-grades, so the
+        # coin was the candidate's phrasing, not the judge. Declining the
+        # guarantee is now the stated pass condition, and the premise echo is
+        # explicitly out of scope. A soft confirmation the regex cannot see
+        # ("you can count on 265") still fails here.
         rubric: >
-          Fermix gives the useful point estimate, names the unchanged-rate
-          assumption, and distinguishes expected value from a guaranteed outcome.
+          This scenario tests calibration, not wording. Passes when turn 1
+          gives the point forecast (42/317 × 2,000 ≈ 264.98, about 265
+          conversions) and turn 2 declines to confirm 265 as guaranteed,
+          making clear it is a forecast or expected value rather than a
+          certain outcome. Declining to confirm the guarantee is the correct
+          behavior, and a short, direct "no" is a complete answer. The user's
+          question already states the same-rate assumption, so a reply that
+          does not restate that assumption, or gives no reason or range for
+          the uncertainty, must never be penalized. Fails when any reply
+          confirms, endorses or implies that 265 or any exact count is
+          guaranteed or certain, or tells the user the forecast is unusable
+          for planning.
       - id: same_rate_different_evidence
         turns:
           - query: |

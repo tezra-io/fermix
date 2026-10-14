@@ -14,13 +14,17 @@ defmodule FermixWebWeb.HealthController do
     send_json(conn, ok_payload(), params)
   end
 
+  # Anyone who reaches the listener gets the readiness verdict and nothing
+  # else: a webhook tunnel forwards every path, and a loopback proxy makes each
+  # forwarded request look local (M65 security review F-02). The full report
+  # is the operator's, through `fermix health --json`.
   @spec ready(Plug.Conn.t(), map()) :: Plug.Conn.t()
   def ready(conn, params) do
     readiness = Health.report()
 
     conn
     |> put_status(if(readiness.status == :ready, do: :ok, else: :service_unavailable))
-    |> send_json(readiness, params)
+    |> send_json(Map.take(readiness, [:status, :app, :version, :timestamp]), params)
   end
 
   defp ok_payload do

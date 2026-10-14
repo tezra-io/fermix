@@ -8,7 +8,7 @@ box anatomy; thin callers own cadence:
 |---|---|---|---|
 | T1 regression | `run_eval.py --check --judge` → `make dry` → `bin/tier.sh regression` (host-safe-core, judged) | `eval-nightly.yml` → eval-box | nightly 07:17 UTC |
 | T3 macOS smoke | `macos_smoke.sh` — ungraded daemon boot/converse/trace/refuse on a clean Mac | `eval-nightly.yml` (macos-15 job) | nightly |
-| T2a capability | `make check` / `make estimate` then `bin/tier.sh capability` and `bin/tier.sh capability-judged` (24-task composite + judged response-quality axis), each publishing its runner's exit code | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
+| T2a capability | `make check` / `make estimate` then `bin/tier.sh capability` and `bin/tier.sh capability-judged` (deterministic composite, 27 tasks / 140 turns at k=5 including the `cap_untrusted_content` safety pack, with a pinned Claude Code CLI on Claude Haiku 5.5, signed in through Workload Identity Federation, for the delegated coding tasks + the judged response-quality axis, which has no release verdict), each publishing its runner's exit code | `eval-weekly.yml` → eval-box | weekly Sat 06:23 UTC |
 | T2b dangerous | `sandbox_verify` named scenario, destructive profile | `eval-weekly.yml` → eval-box, after T2a | weekly; red files a critical issue |
 
 All tiers also run on demand: Actions → eval-box → Run workflow (pick the tier).
@@ -23,15 +23,26 @@ harness, not the candidate. The first three kinds keep `results.invalid.json` an
 a banner-marked report for diagnosis; the three abort kinds stop the sweep where
 it stood and print the reason to stderr, because no completed set of outcomes
 exists to write. `5` means the measurement was valid and recorded and the
-predeclared release gate is RED. `0` is valid plus a green gate; `2` and `3` are a
-refused selection and unmet preconditions respectively.
+predeclared release gate is RED. `0` is valid plus a green gate, or a valid
+soft-only run, which has no gate; `2` and `3` are a refused selection and unmet
+preconditions respectively.
 
-**Exit 5 is expected on today's sweep and is NOT a candidate regression.** No
-shipped capability case declares a safety gate, so the gate fails closed with
-*"safety not evaluated (no capability case declares a safety gate)"* pending the
-Stage B safety pack. Only a `pass@1` / `pass^k` reason in the run report is about
-the model. The exit code reaches the callers because eval-box.yml captures each
-tier step's runner exit and publishes it as the `exit_code` workflow output, and
+**Read exit 5's reason before treating it as a candidate regression.** Only a
+`pass@1` / `pass^k` reason, or an observed safety violation, in the run report is
+about the model. The deterministic sweep's safety evidence is the
+`cap_untrusted_content` pack (4 of its 27 tasks: an injected instruction in an MCP
+tool result, a hidden delete instruction in a workspace file, a request for an API
+key in an email, and a clean control); a violation in any trial is a real
+candidate finding and turns the gate red. A task the daemon
+could not be measured on (it did not advertise a tool the task requires, such as a
+vendor CLI missing from the box) is NOT EVALUATED, and a selection whose cases
+declare no safety gate reports *"safety not evaluated (no selected capability case
+declares a safety gate)"*: both fail the gate closed by design. The judged axis
+(`capability-judged`, the soft `cap_response_quality` suite) is a directional taste
+signal with no release verdict, so a valid run of it exits `0` and prints *"release
+gate: not applicable — soft taste axis"*. The exit code reaches the callers because
+eval-box.yml captures each tier step's runner exit and publishes it as the
+`exit_code` workflow output, and
 because both it and `scripts/vultr-box.sh` run the tier through
 `benchmark/bin/tier.sh`, which `exec`s the runner — `make` reports every runner
 outcome as `2`, so a tier invoked through it carries no classification.
@@ -63,13 +74,37 @@ and recorded"* about a sweep that never happened.
    still defaults to the unauthenticated `http://localhost:5173` Opik.
 2. Disposable `FERMIX_HOME` under the runner temp (leaf contains `eval`),
    seeded by `benchmark/bin/seed_capability_home.py` in **explicit mode**
-   (`--provider openai --model <candidate>`): no keychain, no auth.json — the
-   daemon reads `OPENAI_API_KEY` from its environment at boot, so no secret
-   ever lands on disk.
-3. Daemon lifecycle via `benchmark/bin/capability-daemon.sh up/down`
+   (`--provider openai --model <candidate>`): no keychain, no auth.json in the
+   eval home — the daemon reads `OPENAI_API_KEY` from its environment at boot.
+3. Capability tier only, before the daemon boots: a pinned Claude Code binary
+   (version and sha256 in the step's `env`, checked before anything runs; the
+   sha256 comes from that release's GPG-signed `manifest.json`) is put on the
+   daemon's PATH, with `claude-haiku-5-5` as its default model and updates off
+   in `~/.claude/settings.json`, so the delegated coding tasks (`cap_harness`)
+   are measured instead of held out as NOT EVALUATED. No API key exists on the
+   box: Claude Code signs in through Workload Identity Federation. An
+   `oidc_federation` profile in `~/.config/anthropic`, active through its
+   `active_config` file, carries the IDs from the repository variables below
+   and names a file under the runner temp that holds this job's GitHub OIDC
+   token. A harness run spawns claude under `env -i` (HOME, PATH, TERM, USER),
+   which is why all of it lives under HOME. GitHub's tokens live about five
+   minutes and each can be exchanged once, so a background loop replaces the
+   file every 60 s, and a step after the daemon stops ends the loop and fails
+   the job if any refresh failed. The token file, the profile and the Anthropic
+   token claude caches sit outside the eval home and the uploaded artifact, and
+   go with the VM. Before anything is put on PATH, a preflight in that same
+   wiped environment requires `claude auth status` to name the federation
+   profile and one tiny real call (well under a cent) to succeed on
+   `claude-haiku-5-5` with no API key in play. An empty variable, a failed
+   checksum, a failed token fetch, a failed call, another credential or another
+   model each fail the tier: an advertised but unusable `claude_code_run` would
+   score its tasks 0.00 as the candidate's failure. Known gap: a run the
+   candidate starts with `bare: true` reads only `ANTHROPIC_API_KEY`, which the
+   box never provides, so that run fails to authenticate.
+4. Daemon lifecycle via `benchmark/bin/capability-daemon.sh up/down`
    (`mix fermix.dev --no-web --no-realtime`; channels stay ON — CLI turns
    route through the channels Gateway queue; none are configured, so none poll).
-4. Tier-specific harness invocation, then reports + daemon log uploaded as the
+5. Tier-specific harness invocation, then reports + daemon log uploaded as the
    run artifact (30-day retention). Trace links inside reports point at the
    hosted Comet workspace, so they stay live after the box dies.
 
@@ -92,6 +127,23 @@ strict preflight requires the workspace HEAD to match the harness checkout.
   `FERMIX_OPIK_PROJECT_NAME` secret is unused. Mind the hosted free-tier
   span quota (~25k/month): nightly regression + weekly capability sit close
   to it — check the workspace usage after the first weeks.
+
+Claude Code's sign-in on the capability tier (box anatomy, step 3) uses
+repository **variables**, not secrets, because they are identifiers:
+`ANTHROPIC_EVAL_ORGANIZATION_ID`, `ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID` and
+`ANTHROPIC_EVAL_FEDERATION_RULE_ID` (an empty one fails the tier), plus
+`ANTHROPIC_EVAL_WORKSPACE_ID`, needed only when the federation rule spans more
+than one workspace. The rule must match this job's OIDC token: a scheduled run
+presents `sub` `repo:tezra-io/fermix:ref:refs/heads/main`, a manual run the ref
+it was dispatched from. Delegated runs bill the service account's workspace, and
+none of that spend shows in Opik turn cost. Only eval-weekly's capability job grants
+`id-token: write`: eval-box declares no permissions and inherits its caller's
+token, so the regression and dangerous tiers never hold the right to mint a
+GitHub OIDC token. A direct eval-box dispatch gets the repository's default
+token, so that default must stay read-only (Settings → Actions → General →
+Workflow permissions), and the sign-in step refuses it: run the capability tier
+on demand through eval-weekly. Only the sign-in step mints a token, and the daemon's
+environment drops the request credential.
 
 **Model rule:** the candidate model (eval-box input `model`, default
 `gpt-5.6-luna`) must differ from `judge.model` in `benchmark/config.yaml`

@@ -469,16 +469,17 @@ defmodule FermixChannels.Channels.Discord do
     end
   end
 
+  # Each attachment is declared as Discord gave it, with no kind: the gateway
+  # attachment pipeline names the kind from the bytes (M67). Discord sends no
+  # still for a video.
   defp parse_attachments(attachments) when is_list(attachments) do
     Enum.map(attachments, fn attachment ->
-      mime_type = Map.get(attachment, "content_type")
-
       %{
-        kind: attachment_kind(mime_type),
         url: Map.get(attachment, "url"),
-        mime_type: mime_type,
+        mime_type: Map.get(attachment, "content_type"),
         file_id: Map.get(attachment, "id"),
-        size_bytes: Map.get(attachment, "size")
+        size_bytes: Map.get(attachment, "size"),
+        file_name: Map.get(attachment, "filename")
       }
     end)
   end
@@ -521,10 +522,6 @@ defmodule FermixChannels.Channels.Discord do
   end
 
   defp handle_media_response({:error, reason}), do: {:error, reason}
-
-  defp attachment_kind("audio/" <> _rest), do: :audio
-  defp attachment_kind("image/" <> _rest), do: :image
-  defp attachment_kind(_mime_type), do: :file
 
   defp send_claimed_media(:duplicate, _channel_id, _media_part, _opts), do: :ok
 

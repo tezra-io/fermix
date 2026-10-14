@@ -4,6 +4,14 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
   alias Fermix.CLI.Doctor.Checks
   alias FermixTestSupport.SafeRm
 
+  defmodule StandaloneBuildInfo do
+    def app_engine?, do: false
+  end
+
+  defmodule AppBuildInfo do
+    def app_engine?, do: true
+  end
+
   # A P-256 key with SHA-256 signatures, which any TLS 1.3 client accepts.
   @test_key [key: {:namedCurve, :secp256r1}, digest: :sha256]
 
@@ -31,16 +39,15 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     assert result == %{name: "mobile companion", status: :ok, detail: "disabled"}
   end
 
-  test "enabled but never paired is a dormant warning, not a doctor failure", %{
-    mobile_dir: mobile_dir
-  } do
+  # The channel ships on, so an install with no phone is the normal state, not
+  # a problem, and the row names no CLI verb: on an app-managed Mac pairing
+  # belongs to the app.
+  test "enabled but never paired passes and names no CLI verb", %{mobile_dir: mobile_dir} do
     Application.put_env(:fermix_channels, :mobile, enabled: true)
 
     result = Checks.mobile(mobile_dir: mobile_dir, client: fn _ -> flunk("no RPC") end)
 
-    assert result.status == :warn
-    assert result.detail =~ "never paired"
-    assert result.detail =~ "fermix pair"
+    assert result == %{name: "mobile companion", status: :ok, detail: "on, no phone paired yet"}
   end
 
   test "a half-created identity is refused rather than read as unpaired", %{
@@ -54,6 +61,46 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
 
     assert result.status == :fail
     assert result.detail =~ "tls.key"
+  end
+
+  test "a half-created identity on a CLI-managed host names `fermix pair`", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    SafeRm.rm!(Path.join(mobile_dir, "tls.key"))
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    result =
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        build_info: StandaloneBuildInfo,
+        client: fn _ -> flunk("no RPC") end
+      )
+
+    assert result.status == :fail
+    assert result.detail =~ "run `fermix pair`"
+  end
+
+  # On an app-managed Mac pairing belongs to the app, so the repair names the
+  # app's Phone row, never a CLI verb.
+  test "a half-created identity on an app-managed Mac names the app, not the CLI", %{
+    mobile_dir: mobile_dir
+  } do
+    write_identity_files(mobile_dir)
+    SafeRm.rm!(Path.join(mobile_dir, "tls.key"))
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    result =
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        build_info: AppBuildInfo,
+        client: fn _ -> flunk("no RPC") end
+      )
+
+    assert result.status == :fail
+    assert result.detail =~ "tls.key"
+    assert result.detail =~ "Fermix.app"
+    refute result.detail =~ "fermix pair"
   end
 
   test "enabled mobile refuses identity files that are not 0600", %{mobile_dir: mobile_dir} do
@@ -336,6 +383,33 @@ defmodule Fermix.CLI.Doctor.MobileCheckTest do
     refute result.detail =~ "listener down"
     refute result.detail =~ "mDNS down"
     refute result.detail =~ "no paired devices"
+  end
+
+  # The announcement ships off, so a block that never turns it on reads it
+  # disabled and never fails on it.
+  test "an announcement the config never turned on reads disabled", %{mobile_dir: mobile_dir} do
+    write_identity_files(mobile_dir)
+    Application.put_env(:fermix_channels, :mobile, enabled: true)
+
+    client =
+      live_client(%{
+        "listener" => %{"status" => "ready", "candidates" => ["wss://lan:4031/ws"]},
+        "mdns" => "disabled",
+        "tailnet" => %{"detected" => false, "candidates" => []},
+        "apns" => %{"enabled" => false, "credentials" => "missing"},
+        "paired_devices" => 1
+      })
+
+    result =
+      Checks.mobile(
+        mobile_dir: mobile_dir,
+        client: client,
+        health_probe: fn "https://lan:4031/healthz", 750 -> :ok end
+      )
+
+    assert result.status == :ok
+    assert result.detail =~ "mDNS disabled"
+    refute result.detail =~ "mDNS down"
   end
 
   test "listener, mDNS, APNs, and empty-pairing problems are not hidden", %{

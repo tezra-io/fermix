@@ -5,6 +5,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
   alias FermixChannels.Mobile.EventRouter
+  alias FermixChannels.Mobile.Protocol
   alias FermixChannels.Mobile.RequestCoordinator
   alias FermixCore.Companion.Timeline
   alias FermixCore.Memory.Repo
@@ -51,12 +52,12 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     def complete_client_request(profile, id, attempt, fields, _opts) do
       send(self(), {:completed, profile, id, attempt, fields})
       seq = if id in ["command-output", "deferred-output"], do: 88, else: nil
-      {:ok, %{status: "completed", attempt: attempt, result_server_seq: seq}}
+      {:ok, %{client_msg_id: id, status: "completed", attempt: attempt, result_server_seq: seq}}
     end
 
     def fail_client_request(profile, id, attempt, fields, _opts) do
       send(self(), {:failed, profile, id, attempt, fields})
-      {:ok, %{status: "failed", attempt: attempt, result_server_seq: 88}}
+      {:ok, %{client_msg_id: id, status: "failed", attempt: attempt, result_server_seq: 88}}
     end
 
     def update_client_message(profile, id, attempt, attrs, _opts) do
@@ -181,6 +182,30 @@ defmodule FermixChannels.Mobile.EventRouterTest do
        }}
     end
 
+    def attachment(:media, "clip-1") do
+      {:ok,
+       %{
+         attach_id: "clip-1",
+         ref: String.duplicate("c", 64),
+         kind: "video",
+         mime_type: "video/mp4",
+         size_bytes: 900,
+         file_name: "clip.mp4"
+       }}
+    end
+
+    def attachment(:media, "clip-1-poster") do
+      {:ok,
+       %{
+         attach_id: "clip-1-poster",
+         ref: String.duplicate("d", 64),
+         kind: "image",
+         mime_type: "image/jpeg",
+         size_bytes: 40,
+         poster_of: "clip-1"
+       }}
+    end
+
     def attachment(:media, _id), do: {:error, :unknown_attachment}
   end
 
@@ -196,6 +221,10 @@ defmodule FermixChannels.Mobile.EventRouterTest do
         5_000 -> {:error, :media_gate_timeout}
       end
     end
+  end
+
+  defmodule BrokenRequestStore do
+    def get_client_request("main", _id, _opts), do: {:error, :repo_unavailable}
   end
 
   defmodule CrashingMediaStore do
@@ -323,7 +352,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_received {:gateway_ingest, [message], gateway_opts}
     assert message.channel == "mobile"
     assert message.chat_id == "main"
-    assert [%{file_id: "photo-1", kind: :image}] = message.attachments
+    assert [%{file_id: "photo-1", hint: :photo}] = message.attachments
     assert gateway_opts[:ingress_context] == ctx.context
     assert message.metadata.mobile_attempt == 3
 
@@ -402,6 +431,48 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     refute Enum.any?(row, fn {_field, value} -> is_nil(value) end)
   end
 
+  # M67: a still sent with `poster_of` is its video's poster frame, not an
+  # attachment of its own, and no row shows it.
+  test "a still sent as a video's poster rides with that video, not on its own", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "poster-1",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1-poster", "clip-1"]
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+    assert_received {:gateway_ingest, [message], _gateway_opts}
+
+    assert [
+             %{
+               file_id: "clip-1",
+               hint: :video,
+               file_name: "clip.mp4",
+               poster: %{file_id: "clip-1-poster", mime_type: "image/jpeg", size_bytes: 40}
+             }
+           ] = message.attachments
+
+    assert_received {:appended, "main", %{media_refs: [ref]}}
+    assert ref["ref"] == String.duplicate("c", 64)
+  end
+
+  test "a poster whose video is not in the message is refused, never dropped", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "poster-alone",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1-poster"]
+      })
+
+    assert {:error, {:invalid_field, "poster_of"}} =
+             EventRouter.route(event, ctx.context, ctx.opts)
+
+    refute_received {:gateway_ingest, _messages, _opts}
+  end
+
   # Without a sink of its own (boot recovery), a profile event reaches the
   # Mac's connections as well as the phones.
   test "the default sink announces a profile event on both transports", ctx do
@@ -436,6 +507,11 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     refute_received {:completed, "main", "inline-1", 3, %{}}
     assert :ok = settle.()
     assert_received {:completed, "main", "inline-1", 3, %{}}
+
+    # The phone's `accepted` opened a turn no turn ran to end: every phone is
+    # told it ended, and the Mac, which never saw it, is not.
+    assert_received {:event, {:phones, "main"},
+                     %{"t" => "turn_done", "turn_id" => "turn-inline-1"}}
   end
 
   # R2-1: a `msg` the gateway reads as a deferring command (`/bg` typed in the
@@ -458,6 +534,9 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert :ok = finish.(:completed)
     assert_received {:completed, "main", "deferred-output", 3, %{}}
+
+    assert_received {:event, {:phones, "main"},
+                     %{"t" => "turn_done", "turn_id" => "turn-deferred-output"}}
   end
 
   test "a request that became a turn is left to the turn, its fence on the owner", ctx do
@@ -560,6 +639,122 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert_received {:event, {:device, "device-1"},
                      %{"t" => "history_page", "messages" => [%{"server_seq" => 5}]}}
+  end
+
+  # A reconnecting phone asks how the requests it never saw end stand, and
+  # ends the turns of those that ended while it was away (mobile protocol 2).
+  test "request_status answers each held request from its durable claim, in order", ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+    claim = store_opts ++ [transport: "mobile", authenticated_device_id: "device-1"]
+
+    for id <- ~w(waiting running done failed stopped) do
+      payload = %{"client_msg_id" => id, "profile_id" => "main"}
+
+      assert {:ok, {:claimed, _request}} =
+               Timeline.claim_client_request("main", id, "msg", payload, claim)
+    end
+
+    for id <- ~w(running done failed stopped) do
+      assert {:ok, {:started, %{attempt: 1}}} =
+               Timeline.start_client_request("main", id, "boot-1", store_opts)
+    end
+
+    done = %{result_server_seq: 7, turn_id: "turn-done"}
+    assert {:ok, _done} = Timeline.complete_client_request("main", "done", 1, done, store_opts)
+    failure = %{error: %{type: "msg", reason: ":timeout"}}
+    assert {:ok, _failed} = Timeline.fail_client_request("main", "failed", 1, failure, store_opts)
+
+    assert {:ok, {:marked, _stopped}} =
+             Timeline.cancel_client_request("main", "stopped", store_opts)
+
+    assert {:ok, _stopped} =
+             Timeline.fail_client_request("main", "stopped", 1, failure, store_opts)
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+    ids = ~w(done never waiting running failed stopped)
+    status = decoded("request_status", %{"client_msg_ids" => ids})
+    assert :ok = EventRouter.route(status, ctx.context, opts)
+
+    assert_received {:event, {:device, "device-1"}, %{"t" => "request_status_page"} = page}
+
+    assert page["requests"] == [
+             %{
+               "client_msg_id" => "done",
+               "status" => "completed",
+               "turn_id" => "turn-done",
+               "result_server_seq" => 7
+             },
+             %{"client_msg_id" => "waiting", "status" => "accepted"},
+             %{"client_msg_id" => "running", "status" => "running"},
+             %{"client_msg_id" => "failed", "status" => "failed", "error" => "request_failed"},
+             %{"client_msg_id" => "stopped", "status" => "failed", "error" => "cancelled"}
+           ]
+
+    assert {:ok, _frames} =
+             Protocol.encode_server_event(
+               "request_status_page",
+               Map.delete(page, "t"),
+               1,
+               <<>>,
+               []
+             )
+  end
+
+  test "request_status fails loudly when the store cannot answer", ctx do
+    opts = Keyword.put(ctx.opts, :store, BrokenRequestStore)
+    status = decoded("request_status", %{"client_msg_ids" => ["any"]})
+
+    assert {:error, :repo_unavailable} = EventRouter.route(status, ctx.context, opts)
+    refute_received {:event, _target, %{"t" => "request_status_page"}}
+  end
+
+  # A fresh phone pulls the newest page first, then older ones (mobile protocol
+  # 2): a backward page names its cursor `prev_before_seq`, only while an older
+  # row exists, and carries `next_after_seq` as every page on this wire does.
+  test "a backward pull answers the newest rows before the cursor, in the phone's page shape",
+       ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+
+    for index <- 1..5 do
+      assert {:ok, _row} =
+               Timeline.append("main", %{role: "user", content: "row #{index}"}, store_opts)
+    end
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+
+    newest = backward_page(6, 2, opts, ctx)
+    assert Enum.map(newest["messages"], & &1["server_seq"]) == [4, 5]
+    assert newest["prev_before_seq"] == 4
+    assert newest["next_after_seq"] == 5
+    assert newest["history_head_seq"] == 5
+    refute Map.has_key?(newest, "next_before_seq")
+
+    oldest = backward_page(3, 5, opts, ctx)
+    assert Enum.map(oldest["messages"], & &1["server_seq"]) == [1, 2]
+    refute Map.has_key?(oldest, "prev_before_seq")
+    assert oldest["next_after_seq"] == 2
+
+    empty = backward_page(1, 5, opts, ctx)
+    assert empty["messages"] == []
+    refute Map.has_key?(empty, "prev_before_seq")
+    assert empty["next_after_seq"] == 0
+  end
+
+  test "a backward page cut to the byte budget keeps its newest rows", ctx do
+    store_opts = [repo: start_mobile_repo(), agent_id: "agent-a", owner_id: "owner-a"]
+    long = String.duplicate("x", 100 * 1_024)
+
+    for _row <- 1..4 do
+      assert {:ok, _row} =
+               Timeline.append("main", %{role: "assistant", content: long}, store_opts)
+    end
+
+    opts = Keyword.merge(ctx.opts, store: Timeline, store_opts: store_opts)
+    page = backward_page(5, 10, opts, ctx)
+
+    assert Enum.map(page["messages"], & &1["server_seq"]) == [3, 4]
+    assert page["prev_before_seq"] == 3
+    assert page["next_after_seq"] == 4
   end
 
   # One wire object, one rule: an absent optional field is an absent key, never
@@ -958,6 +1153,19 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     }
   end
 
+  # Every page the router answers is one the phone's codec encodes.
+  defp backward_page(before_seq, limit, opts, ctx) do
+    payload = %{"profile_id" => "main", "before_seq" => before_seq, "limit" => limit}
+    assert :ok = EventRouter.route(decoded("history_pull", payload), ctx.context, opts)
+
+    assert_received {:event, {:device, "device-1"}, %{"t" => "history_page"} = page}
+
+    assert {:ok, _frames} =
+             Protocol.encode_server_event("history_page", Map.delete(page, "t"), 1, <<>>, [])
+
+    page
+  end
+
   defp decoded(type, payload),
-    do: %{type: type, payload: payload, seq: 1, version: 1, bytes: <<>>}
+    do: %{type: type, payload: payload, seq: 2, version: 2, bytes: <<>>}
 end

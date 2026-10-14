@@ -25,7 +25,7 @@ mechanism check.
 **Environment switches** (set per check):
 - `PlatformDedupes`: the platform drops a second message with the same
   `proactive_key`. Only the companion timeline does, for the mobile and
-  companion channels (`output.ex:237-239` → `mobile_sql.ex:356-366`), and
+  companion channels (`output.ex:238-240` → `mobile_sql.ex:356-366`), and
   neither is a reminder platform (see the plan hypotheses).
 - `PlatformCanBeSlow`: the platform can answer after the watchdog fired, and can
   still show a message Fermix gave up on.
@@ -204,7 +204,7 @@ still holds.
   reminder runs in that configuration. Reminder targets are limited to
   `telegram slack discord signal whatsapp` (`registry.ex:48`, enforced at
   `:1458` and `:1503`). The only adapters that read `proactive_key` are mobile
-  and companion, both through `output.ex:237-239`. The `temporal:<id>` key that
+  and companion, both through `output.ex:238-240`. The `temporal:<id>` key that
   `delivery.ex:70` attaches to every send is ignored by every platform a
   reminder can reach.
 - **Never attempt six, never two workers:** both hold (check 01), each covered

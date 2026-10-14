@@ -95,10 +95,10 @@ def test_every_failing_criterion_is_reported_not_just_the_first():
 
 def test_the_not_evaluated_reason_names_its_cause_not_a_score_problem():
     # The weekly/nightly issue quotes this line. It must be unmistakable that the
-    # sweep declares no safety gate, so exit 5 is not read as a model regression.
+    # selected cases declare no safety gate, so exit 5 is not read as a model regression.
     result = release_gate.evaluate(_score(safety_trials_evaluated=0))
     reason = next(r for r in result.reasons if "safety not evaluated" in r)
-    assert "no capability case declares a safety gate" in reason
+    assert "no selected capability case declares a safety gate" in reason
     assert "not a candidate regression" in reason
 
 

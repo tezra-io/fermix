@@ -198,6 +198,47 @@ defmodule FermixChannels.Channels.SlackTest do
 
       assert {:ok, []} = Slack.parse_webhook(payload)
     end
+
+    # M67: Slack's file object, declared as Slack gave it; a video's
+    # `thumb_video` is its poster, fetched with the bot token like `url_private`.
+    test "declares each file, a video with its thumb_video as the poster" do
+      payload =
+        dm_payload("look")
+        |> put_in(["event", "files"], [
+          %{
+            "id" => "F1",
+            "name" => "clip.mp4",
+            "mimetype" => "video/mp4",
+            "size" => 900,
+            "url_private" => "https://files.slack.com/files-pri/T1-F1/clip.mp4",
+            "thumb_video" => "https://files.slack.com/files-tmb/T1-F1/clip_thumb_video.jpg"
+          },
+          %{
+            "id" => "F2",
+            "name" => "notes.txt",
+            "mimetype" => "text/plain",
+            "size" => 12,
+            "url_private" => "https://files.slack.com/files-pri/T1-F2/notes.txt"
+          }
+        ])
+
+      assert {:ok, [message]} = Slack.parse_webhook(payload)
+
+      assert [
+               %{
+                 file_id: "F1",
+                 file_name: "clip.mp4",
+                 mime_type: "video/mp4",
+                 poster: %{
+                   url: "https://files.slack.com/files-tmb/T1-F1/clip_thumb_video.jpg",
+                   mime_type: "image/jpeg"
+                 }
+               },
+               %{file_id: "F2", file_name: "notes.txt", poster: nil}
+             ] = message.attachments
+
+      refute Enum.any?(message.attachments, &Map.has_key?(&1, :kind))
+    end
   end
 
   describe "dispatch and reply" do

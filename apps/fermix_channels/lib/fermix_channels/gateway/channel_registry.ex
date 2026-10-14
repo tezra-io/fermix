@@ -53,7 +53,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
           optional(:ingress_auth) => ingress_auth(),
           optional(:commands?) => boolean(),
           optional(:platform) => platform(),
-          optional(:helper) => module()
+          optional(:helper) => module(),
+          optional(:live_switch) => boolean()
         }
 
   @default_channels [
@@ -166,7 +167,9 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       remote?: true,
       ingress_auth: :paired_device,
       transport: :listener,
-      child: FermixChannels.Mobile.Supervisor
+      child: FermixChannels.Mobile.Supervisor,
+      # The child reads `enabled` itself, so the switch is live (M51 §5.5).
+      live_switch: true
     },
     %{
       name: "cli",
@@ -271,9 +274,11 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   @doc """
   Supervised transport children to start, gated by readiness, the host
   platform, the channel's `enabled` flag, its configured mode matching its
-  transport, and ingress authorization. Replaces the hardcoded per-mode startup
-  branches. `macos?:` injects the host platform (tests); absent, it is read
-  from the OS.
+  transport, and ingress authorization. A channel whose switch is live
+  (`live_switch: true`, the phone) is registered whatever `enabled` says: its
+  child reads the switch at each start and starts nothing while it is off.
+  Replaces the hardcoded per-mode startup branches. `macos?:` injects the host
+  platform (tests); absent, it is read from the OS.
   """
   @spec transport_children(map(), keyword()) :: [{module(), keyword()}]
   def transport_children(readiness, opts \\ [])
@@ -354,7 +359,8 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
        when not is_nil(child) do
     config = channel_config(key)
 
-    enabled?(config) and mode_ok?(key, config, transport) and
+    (enabled?(config) or Map.get(channel, :live_switch, false)) and
+      mode_ok?(key, config, transport) and
       (not needs_ingress?(channel) or ingress_authorized?(key)) and helper_present?(channel)
   end
 

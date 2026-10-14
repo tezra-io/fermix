@@ -13,6 +13,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/client_binary_frames.jsonl`, `fixtures/server_binary_frames.jsonl` | frames with a raw tail, as `{header, bytes_b64}`, including one whole `event_part` run |
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
+| `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
 
 **Optional fields are absent, never null.** Every field marked `?` below is
 optional by omission: a value the daemon does not have is an absent key, never
@@ -76,9 +77,9 @@ bytes because a Noise message is at most 65,535 bytes and ChaChaPoly adds a
 16-byte tag. Therefore a maximum-size raw chunk may carry at most a 4,075-byte
 header including its four-byte length prefix.
 
-Only `attach_chunk` (client to daemon), `media_chunk` and `event_part` (daemon
-to client) carry raw bytes, and theirs is never empty. Every other event must
-have an empty raw tail. Binary golden fixtures represent the actual frame as
+Only `attach_chunk` and `pair_request` (client to daemon), and `media_chunk`
+and `event_part` (daemon to client) carry raw bytes, and theirs is never empty.
+Every other event must have an empty raw tail. Binary golden fixtures represent the actual frame as
 `{header, bytes_b64}` only so JSONL can store it; that wrapper is not sent on
 the wire.
 
@@ -89,7 +90,7 @@ history page, a `hello_ack` with long candidate names, an error with a long
 message) is sent as one run of `event_part` frames instead of one frame:
 
 ```json
-{"v":1,"t":"event_part","seq":S,"index":I,"count":N}
+{"v":2,"t":"event_part","seq":S,"index":I,"count":N}
 ```
 
 - The run is `N` frames, `2 ≤ N ≤ 18`, with `index` `0` to `N-1` in order and
@@ -143,21 +144,26 @@ pairing handshake both sides show a six-digit SAS derived exactly as follows:
 A pairing session runs in this order:
 
 1. The phone sends `pair_request` (`seq` 1) within the handshake deadline, 10 s
-   after the upgrade. A peer that finishes the handshake and sends nothing is
-   closed with `1008`, and that counts as a failed pairing attempt from its
-   address.
-2. The owner compares the SAS and decides. A pairing window lasts at most 120
-   seconds. While the owner decides, the daemon answers `ping` with `pong` and
-   refuses every other event, so a keepalive never has to stop; an idle
-   disconnect while a decision is pending is not a failed pairing handshake.
-3. Approved: `pair_approved{device_id, candidates[], profiles[]}`. The phone
-   then sends `hello` on the same session (its next `seq`) within a fresh 10 s,
-   and the session goes on as a paired one.
+   after the upgrade, with its secure-hardware attestation (see *Attestation*
+   below). A peer that finishes the handshake and sends nothing is closed with
+   `1008`, and that counts as a failed pairing attempt from its address.
+2. The daemon verifies the attestation (see *Attestation*); only a phone it
+   verified reaches the owner. The owner compares the SAS and decides. A
+   pairing window lasts at most 120 seconds. While the owner decides, the
+   daemon answers `ping` with `pong` and refuses every other event, so a
+   keepalive never has to stop; an idle disconnect while a decision is pending
+   is not a failed pairing handshake.
+3. Approved: `pair_approved{device_id, candidates[], profiles[], push_salt}`,
+   where `push_salt` is the device's 32-byte push salt in standard base64 (see
+   *Push notifications*). The phone then sends `hello` on the same session (its
+   next `seq`) within a fresh 10 s, and the session goes on as a paired one.
 4. Not approved: `pair_denied{reason}`, then close `4003` with the text
    `pairing <reason>`. `reason` is one word, the one the management protocol
    uses for the same ending: `denied` (the owner said no), `timeout` (the
-   window ran out), `cancelled` (the owner closed the window) or
-   `device_disconnected` (the phone was gone when the owner approved).
+   window ran out), `cancelled` (the owner closed the window),
+   `device_disconnected` (the phone was gone when the owner approved), or one
+   of the three refusals of *Attestation* below, sent before the owner is asked:
+   `attestation`, `attestation_unavailable` or `platform_unsupported`.
 
 Failed pairing attempts are counted per source address. An address's fifth
 failure refuses that address for the rest of the window: its next handshake is
@@ -166,7 +172,63 @@ window, so nobody but the owner can end one, and nothing is counted while a
 request waits for the owner. A window remembers at most 1,024 addresses; a
 failure from another address is not counted. A `pair_request` from the same
 phone key as the one waiting replaces it, and the older socket is closed with
-`4001`. A phone that was approved but never said `hello` can pair again.
+`4001`. A `pair_request` from another phone key while one waits is closed with
+`1002`, whether its attestation verified or not: it gets no `pair_denied`, and
+the waiting request goes on. A phone that was approved but never said `hello`
+can pair again.
+
+### Attestation
+
+`pair_request` names the phone's `platform` (`ios` or `android`) and carries
+its `attestation{kind, cert_lengths[]}`: `kind` is `android_keymint` or
+`apple_app_attest`, and the frame's raw tail is the attestation's DER
+certificate chain, leaf first. `cert_lengths` holds each certificate's length,
+1 to 6 of them, and they sum to the tail, which is at most 16 KiB. A request
+whose chain breaks these bounds is a failed pairing attempt, closed with
+`1002`.
+
+The daemon verifies the chain before the owner is asked. It pairs only an
+Android phone (`platform` `android`, `kind` `android_keymint`) whose chain:
+
+1. attests the X25519 key the phone made the pairing handshake with;
+2. leads to one of Google's attestation roots in `attestation_roots.json`. A
+   root is trusted by its key, so a phone presenting an older, expired
+   certificate of it still chains; every other certificate must be valid now;
+3. describes a KeyMint key (attestation version 100 or later) generated in the
+   phone's TEE or StrongBox, the attestation and KeyMint levels agreeing, for
+   key agreement only: purpose `AGREE_KEY`, algorithm EC, curve 25519;
+4. carries the challenge `SHA-256("fermix-mobile-attest-v1" || secret)`, where
+   `secret` is the pairing link's 32-byte one-time secret;
+5. reports a locked bootloader and a `Verified` boot;
+6. names the app `io.tezra.fermix`, signed only by certificates listed in
+   `android_signers.json`, all of one role (`development` or `release`);
+7. has no certificate on Google's attestation status list
+   (`https://android.googleapis.com/attestation/status`), `REVOKED` or
+   `SUSPENDED`.
+
+The status list is fetched when a pairing window opens, not when a phone asks,
+and is used for as long as its `cache-control` max-age allows, at most a day.
+A fetch is bounded at 10 s of network silence, 20 s in all and 2 MiB. A
+`pair_request` that arrives while the list is still being fetched waits for it
+at most 10 s.
+
+A phone that fails is sent `pair_denied{reason}` and closed `4003`, and the
+pairing session ends `failed` with the check that refused it; the owner is
+never asked:
+
+| `reason` | When |
+|---|---|
+| `platform_unsupported` | `platform` is not `android` or `kind` is not `android_keymint`; no iPhone app exists |
+| `attestation` | any of the seven checks above fails |
+| `attestation_unavailable` | the status list is missing, past its max-age, or could not be fetched in time |
+
+An emulator cannot pair: its key is attested at the software level under the
+Android software attestation root, not Google's. Neither can a phone with an
+unlocked bootloader or an unverified system, an app signed by any key but the
+pinned ones (a debug keystore included), or a rebuilt app. Development pairs a
+real, locked phone running a build signed with the `development` key.
+Attestation is pairing-time evidence: a reconnect is never verified again, and
+a phone paired before the daemon verified attestation keeps working.
 
 The shared deterministic `noise_vectors.json` pins X25519 keys, both handshake
 messages, handshake hashes, SAS values, and the first transport ciphertext for
@@ -187,7 +249,7 @@ The owner's QR code, and the `uri` of the management protocol's
 `mobile.pair.start`, carry one link:
 
 ```text
-fermix://pair?v=1&candidates=<JSON array>&port=<port>&tls_fp=<hex>&gateway_pk=<base64>&secret=<base64>&name=<name>
+fermix://pair?v=2&candidates=<JSON array>&port=<port>&tls_fp=<hex>&gateway_pk=<base64>&secret=<base64>&name=<name>&profile=<profile>
 ```
 
 The query is `application/x-www-form-urlencoded`: a space is `+`, and a `+`,
@@ -196,13 +258,14 @@ decoder. An unknown parameter is ignored, so the link can gain one.
 
 | Parameter | Value |
 |---|---|
-| `v` | `1`, this link format |
+| `v` | `2`, this link format; a phone refuses a link of format `1`, which a daemon serving protocol 1 wrote |
 | `candidates` | a JSON array of at most 16 hosts to try, best first: tailnet MagicDNS names, then tailnet addresses, then private LAN addresses. Like `hello_ack`'s, it keeps the best 16 of what the host finds; unlike them, these carry no interface or scope. |
 | `port` | the listener's TCP port, in decimal |
 | `tls_fp` | the SHA-256 of the listener's TLS certificate (DER), 64 lowercase hex digits; the phone pins it |
 | `gateway_pk` | the gateway's X25519 static public key, 32 bytes, standard base64 with padding |
 | `secret` | the one-time 32-byte pairing PSK, standard base64 with padding |
 | `name` | the host's name, for the phone to show |
+| `profile` | the daemon's configured profile (`[fermix_core] profile`, `general` unless set), which tells two Fermix homes on one host apart |
 
 The phone connects to `wss://<candidate>:<port>/ws`, trusts the certificate
 whose SHA-256 is `tls_fp`, and runs `IKpsk2` against `gateway_pk` with
@@ -216,12 +279,14 @@ with its decoded fields; its secret and keys are test material only.
 Every JSON header has these required fields:
 
 ```json
-{"v":1,"t":"event_name","seq":1}
+{"v":2,"t":"event_name","seq":1}
 ```
 
 - `v` is the event schema version.
-- `t` is a closed event name. An unknown value receives an `unsupported` error;
-  it is never silently ignored.
+- `t` is a closed event name. An unknown client `t` receives an `unsupported`
+  error; it is never silently ignored. A client ignores a server `t` it does
+  not know: it logs it and reads on, so a daemon can add a server event
+  without a version bump.
 - `seq` is an unsigned 64-bit integer. It starts at 1, increases by exactly one
   per sender within a Noise session, and resets only with a new session. An
   `event_part` frame takes one `seq` like any other frame. The codec validates
@@ -232,16 +297,18 @@ Every JSON header has these required fields:
 The first encrypted event in a paired session is `hello` and its `seq` is 1.
 `hello.protocol_v` must equal the envelope `v`, and every later frame of the
 session carries the same `v`. The daemon replies with `hello_ack` containing
-`min_version` and `max_version`. The supported window is **N/N-1**: the current
-protocol and previous protocol (or just 1 before a second version exists). No
-other event is serviced before hello and a second hello is terminal.
+`min_version` and `max_version`. This daemon serves protocol 2 alone: protocol 1
+shipped in daemons but no phone app ever spoke it, so the window is the current
+version rather than **N/N-1**, the current protocol and the previous one, which
+it becomes from the next version on. No other event is serviced before hello
+and a second hello is terminal.
 
 A `hello` or `pair_request` whose `v` is outside the window is answered with a
 typed refusal, then close `1002` with the text `unsupported mobile protocol
 version`. The refusal is encoded at the daemon's own version, `seq` 1:
 
 ```json
-{"v":1,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_new","client_version":2,"min_version":1,"max_version":1}
+{"v":2,"t":"error","seq":1,"code":"unsupported_protocol_version","message":"…","direction":"client_too_old","client_version":1,"min_version":2,"max_version":2}
 ```
 
 `direction` is `client_too_old` (the app must update) or `client_too_new`
@@ -257,17 +324,18 @@ accepts it.
 |---|---|---|
 | `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v` | first paired-session event |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
-| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?` | SHA-256 is announced before transfer so the host can deduplicate |
+| `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `attach_end` | `attach_id`, `sha256` | host verifies announced size and digest |
 | `command` | `client_msg_id`, `profile_id`, `name`; `args?` | uses the normal command registry; `name` is lowercase letters, digits and `_` |
 | `cancel` | `profile_id`, `client_msg_id` | stops that request's turn, running or waiting, and no other; never answered |
-| `history_pull` | `profile_id`, `after_seq`, `limit` | limit is 1–200; `after_seq` is any unsigned 64-bit value |
+| `history_pull` | `profile_id`, `limit`, and exactly one of `after_seq` or `before_seq` | limit is 1–200; `after_seq` (≥ 0) pages forward and `before_seq` (≥ 1) backward, each any unsigned 64-bit value |
 | `media_fetch` | `ref` | re-download a content-addressed blob |
 | `push_register` | `apns_token`, `environment` | environment is `development` or `production` |
 | `ack` | `server_seq` | cumulative socket-delivery cursor |
 | `read_state` | `profile_id`, `read_up_to_seq` | monotonic read frontier |
-| `pair_request` | `device_name`, `model`, `app_version` | first event inside an IKpsk2 pairing session; each field is ≤128 bytes of valid UTF-8 and must contain no C0/C1/DEL control characters |
+| `request_status` | `client_msg_ids[]` | 1 to 32 ids of requests this phone sent; see *Requests after a reconnect* |
+| `pair_request` | `device_name`, `model`, `app_version`, `platform`, `attestation{kind, cert_lengths[]}` + raw bytes | first event inside an IKpsk2 pairing session; each text field is ≤128 bytes of valid UTF-8 and must contain no C0/C1/DEL control characters; the raw bytes are the attestation chain (see *Attestation*) |
 | `unpair` | — | best-effort self-removal; host CLI remains authoritative |
 | `ping` | — | keepalive |
 
@@ -286,6 +354,7 @@ What each is answered with:
 | `cancel`, `ack`, `push_register` | nothing; a refused one is an `error` |
 | `read_state` | the frontier as `read_state`, to every client of the profile, this one included |
 | `history_pull` | `history_page` |
+| `request_status` | `request_status_page` |
 | `media_fetch` | the blob as `media_begin`, `media_chunk`s and `media_end`, or an `error` naming its `ref` |
 | `unpair` | close `4003` |
 | `ping` | `pong` |
@@ -300,9 +369,10 @@ A client must not upload chunks after `present`.
 | `accepted` | `client_msg_id`, `duplicate`; `server_seq?` | durable receipt for a `msg` or `command`; clears the outbox item |
 | `attach_status` | `attach_id`, `status` | status is `upload` or `present` |
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
-| `text_delta` | `turn_id`, `text` | streamed delta |
+| `text_delta` | `turn_id`, `text`; `replace?` | streamed delta; `replace: true` makes `text` the whole bubble |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | phase is `start` or `stop`; detail ≤512 bytes |
-| `text_done` | `turn_id`, `server_seq`, `text`; `truncated?` | canonical final text at its row |
+| `text_done` | `turn_id`, `server_seq`, `text`; `truncated?` | seals one bubble of a turn: its canonical text at its row |
+| `turn_done` | `turn_id` | a completed turn's ending, once, after its last `text_done` |
 | `media_begin` | `ref`, `server_seq`, `kind`, `mime`, `size_bytes`, `sha256`; `filename?`, `caption?` | starts outbound media |
 | `media_chunk` | `ref`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `media_end` | `ref`, `sha256` | completes outbound media |
@@ -313,9 +383,10 @@ A client must not upload chunks after `present`.
 | `approval_resolved` | `approval_id`, `outcome` | approved, denied, or expired |
 | `link_preview` | `in_reply_to`, `url`, `site`, `title`; `description?`, `image_ref?` | host-resolved preview of the row at `in_reply_to` |
 | `read_state` | `profile_id`, `read_up_to_seq` | the frontier, after any client moved it |
-| `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq` | exact server-sequence cursor page |
+| `history_page` | `profile_id`, `messages[]`, `next_after_seq`, `history_head_seq`; `prev_before_seq?` | exact server-sequence cursor page; see *History pages* |
+| `request_status_page` | `requests[]` | how each request `request_status` named stands |
 | `notice` | `kind`, `text` | reserved: in the catalog, never sent yet |
-| `pair_approved` | `device_id`, `candidates[]`, `profiles[]` | completes pairing |
+| `pair_approved` | `device_id`, `candidates[]`, `profiles[]`, `push_salt` | completes pairing; `push_salt` is the device's push salt, 32 bytes in standard base64 |
 | `pair_denied` | `reason` | terminal pairing refusal |
 | `error` | `code`, `message`; `client_msg_id?`, `ref?`, `direction?`, `client_version?`, `min_version?`, `max_version?` | a refusal; message ≤512 bytes; see *Errors* |
 | `pong` | — | keepalive response |
@@ -327,10 +398,15 @@ a reply row: that reply's seq. A first `accepted` never carries it.
 `hello_ack.candidates[]` and `pair_approved.candidates[]` hold at most 16
 routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
-`lan` or `tailnet`. `profiles[]` is `{id, name}`, the name at most 128 bytes.
+`lan` or `tailnet`. A daemon whose listener is bound to one address lists only
+that address, with its MagicDNS name when it is a tailnet address, here and in
+the pairing link. A daemon that cannot list its addresses sends an empty list,
+and the phone keeps the routes it holds. `profiles[]` is `{id, name}`, the
+name at most 128 bytes.
 `caps` carries `commands[]` (`{name, aliases[], description}`, the command
-palette), `media`, `streaming` and `max_media_bytes`, the largest attachment
-the daemon takes. A `hello_ack` with 16 numeric candidates and the whole
+palette), `media`, `streaming`, `turn_done` (true: every turn a request opened
+ends with `turn_done` or `turn_error`) and `max_media_bytes`, the largest
+attachment the daemon takes. A `hello_ack` with 16 numeric candidates and the whole
 command catalog fits one frame; one whose candidates are long MagicDNS names
 arrives as an `event_part` run.
 
@@ -369,19 +445,23 @@ daemon never renumbers or reorders a row.
 
 Every row is announced live to every connected phone as it is written:
 
-- a reply written on the phone channel, as a `text_done` at its row, to every
-  phone: the reply of a turn a phone started, the answer to a phone's slash
-  command, and what the daemon delivers there on its own (a scheduled job, a
-  reminder, a background command's result). Its `turn_id` may be one no
-  `turn_started` announced. A media reply arrives as `media_begin`…`media_end`;
+- the reply to a phone's request, as a `text_done` at its row, to every
+  phone: the reply of a turn a phone started and the answer to a phone's slash
+  command, under the request's `turn_id`, which `turn_done` then ends (see
+  *Streaming a turn*). A media reply arrives as `media_begin`…`media_end`;
 - every other row as a `row`: a user's message from any phone or the Mac (the
   sender's own included, with its `client_msg_id`, to match its outbox), the
-  reply of a turn the Mac started, and every other row written for the Mac.
+  reply of a turn the Mac started, what the daemon delivers on its own (a
+  scheduled job, a reminder, a background result), and every other row written
+  for the Mac.
 
 A client keeps a cursor, the last `server_seq` it shows, and:
 
 - pulls `history_pull{after_seq: cursor}` after every `hello_ack`, and again
-  while a page's `next_after_seq` is below its `history_head_seq`;
+  while a page's `next_after_seq` is below its `history_head_seq`; a client
+  with no rows yet pulls the newest page instead,
+  `history_pull{before_seq: history_head_seq + 1}`, and older pages as it
+  needs them;
 - applies a live row (a `row`, or a `text_done` at its `server_seq`) when its
   seq is `cursor + 1`, drops one at or below the cursor, and on a gap pulls
   from the cursor instead of showing it;
@@ -403,6 +483,14 @@ largest row number the store holds) is one past every row: the page is empty
 and echoes it. A page over 4,096 bytes arrives as an `event_part` run; a row
 whose own content passes 1 MiB arrives alone, cut and marked `truncated`.
 
+`history_pull{before_seq, limit}` pages backward: it answers the newest rows
+before `before_seq`, oldest first, under the same bounds, keeping the newest
+rows when the byte budget cuts it. `prev_before_seq` is its oldest row, and
+it is present only while an older row exists: pull back from it for the page
+before. `next_after_seq` is its newest row, or `before_seq - 1` on an empty
+page. A pull with both cursors, or neither, is a malformed frame (close
+`1002`).
+
 ### Read state
 
 `read_state{read_up_to_seq}` from any client moves the profile's frontier
@@ -411,20 +499,41 @@ forward and never past the newest row: the daemon stores
 `read_state` to every client of the profile, on both transports. A frontier
 stored past the newest row earlier comes back to it on the next report.
 
+## Requests after a reconnect
+
+A phone that reconnects with a request it never saw end (one still in its
+outbox, or a turn it still shows) asks how it stands:
+`request_status{client_msg_ids: [...]}`, 1 to 32 ids. The answer is
+`request_status_page{requests: [...]}`, one entry for each id the daemon holds,
+in the order asked; an id it does not hold (never claimed, or cleared once its
+24-hour claim ran out) is left out. An entry is `{client_msg_id, status}`, `status` one of
+`accepted`, `running`, `completed` or `failed`, with `turn_id?`,
+`result_server_seq?` (the request's reply row) and, on a failed one, `error`:
+`cancelled` when it was stopped, `request_failed` otherwise. A completed or
+failed request ended while the phone was away, so it ends the turn the phone
+shows for it; an accepted or running one goes on, and its stream and ending
+arrive as usual.
+
 ## Streaming a turn
 
 A `msg` or `command` that becomes a turn streams to every phone of the
 profile. `turn_started{profile_id, turn_id, in_reply_to}` opens it
 (`turn_id` is `turn-` followed by the request's `client_msg_id`), and
 `text_delta` carries the reply as it is written: from its first character, at
-most every 100 ms, with no cap on how many. `tool_event` reports each tool's
+most every 100 ms, with no cap on how many. Each one extends the bubble,
+except one marked `replace: true`, whose `text` is the whole bubble: the draft
+was rewritten rather than grown. `tool_event` reports each tool's
 `start` and `stop`. A route that does not stream sends no `turn_started` or
 `text_delta`, only the ending.
 
-A turn ends on the wire exactly once:
+A reply is one or more bubbles, each sealed by a `text_done` at its row; a
+`text_done` seals a bubble and never ends the turn. A turn ends on the wire
+exactly once:
 
-- it completed: its reply is written to the timeline and sent as `text_done`
-  at its row;
+- it completed: `turn_done{turn_id}`, after its last `text_done`. A request
+  the daemon answers without a turn (a slash command answered at once, an
+  empty message) ends the same way, once it settles, so every request a phone
+  sent ends with `turn_done` or `turn_error`;
 - it was cancelled or failed: one `turn_error` whose `code` is `cancelled`,
   `interrupted` (the daemon lost the turn), a failure's own word, or
   `turn_failed`, and whose message is at most 512 bytes;
@@ -440,7 +549,7 @@ another turn, and the daemon never answers it. It is recorded on the request
 first, so a cancel that arrives after `accepted` but before the request reached
 the turn queue is not lost: the request is never queued, ends with
 `turn_error{code:"cancelled"}`, and is not run again after a restart. A turn
-that had already finished ends with its `text_done`, and a cancel for a request
+that had already finished ends with its `turn_done`, and a cancel for a request
 that already ended changes nothing.
 
 ## Approvals
@@ -495,6 +604,14 @@ An id lasts 48 hours; a blob keeps its 8 newest ids, and the daemon its 4,096
 newest. A `msg` naming an id past that fails as a request
 (`error{code:"attachment_unavailable", client_msg_id}`).
 
+A GIF or video can carry the still the phone made of it: upload that picture
+with `attach_begin.poster_of` set to the video's `attach_id`, and name both in
+the `msg`'s `attach_ids`. The daemon pairs them: the still is the video's
+poster frame, which reaches the model in its place when the host has no
+ffmpeg, and it is neither an attachment of its own nor a `media_refs[]` entry
+of the stored row. A `poster_of` naming no video in the same `msg` leaves the
+still unused.
+
 ## Media downloads
 
 `media_fetch{ref}` downloads a blob a row names: any `ref` of its
@@ -545,7 +662,8 @@ push_key = HKDF-SHA256(salt: apns_key_salt, ikm: shared, info: "fermix-push-v1",
 ```
 
 `apns_key_salt` is the 32-byte per-device salt stored in `devices.toml`, so two
-devices paired to the same gateway never share a key. The device derives the
+devices paired to the same gateway never share a key; `pair_approved` gives it
+to the phone as `push_salt`. The device derives the
 identical key from its own side as `X25519(device_static_private,
 gateway_static_public)`.
 

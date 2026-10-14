@@ -998,7 +998,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp check_mobile_enabled(config, opts) do
     mobile_dir = Keyword.get(opts, :mobile_dir, ConfigStore.workspace_paths().mobile)
 
-    case mobile_identity_files(mobile_dir) do
+    case mobile_identity_files(mobile_dir, opts) do
       :ok ->
         mobile_daemon_result(
           config,
@@ -1007,10 +1007,7 @@ defmodule Fermix.CLI.Doctor.Checks do
         )
 
       :never_paired ->
-        warn(
-          "mobile companion",
-          "enabled but never paired — run `fermix pair` to create the gateway identity"
-        )
+        ok("mobile companion", "on, no phone paired yet")
 
       {:error, detail} ->
         fail("mobile companion", detail)
@@ -1022,7 +1019,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   # enabling the channel creates none of it. Only a
   # partial, insecure, or unreadable identity is a failure, because those are
   # refused rather than regenerated and the operator has to repair them by hand.
-  defp mobile_identity_files(mobile_dir) do
+  defp mobile_identity_files(mobile_dir, opts) do
     reports = Enum.map(~w(gateway_key tls.crt tls.key), &mobile_identity_file(mobile_dir, &1))
     missing = for {:missing, name} <- reports, do: name
     insecure = for {:insecure, name, mode} <- reports, do: "#{name}=#{mode}"
@@ -1035,7 +1032,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       missing != [] ->
         {:error,
          "incomplete mobile identity, missing #{Enum.join(missing, ", ")} — Fermix never " <>
-           "regenerates identity files; remove the rest and run `fermix pair`"}
+           "regenerates identity files; remove the rest and #{pair_again(opts)}"}
 
       insecure != [] ->
         {:error, "mobile identity files must be 0600: #{Enum.join(insecure, ", ")}"}
@@ -1046,6 +1043,13 @@ defmodule Fermix.CLI.Doctor.Checks do
       true ->
         :ok
     end
+  end
+
+  # On an app-managed Mac pairing belongs to the app, never the CLI.
+  defp pair_again(opts) do
+    if app_engine?(opts),
+      do: "pair again from the Phone row in Fermix.app's Channels settings",
+      else: "run `fermix pair`"
   end
 
   defp mobile_identity_file(mobile_dir, name) do
@@ -1212,7 +1216,7 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_mdns(report, config) do
     cond do
-      Keyword.get(config, :advertise_mdns, true) == false -> {:ok, "mDNS disabled"}
+      Keyword.get(config, :advertise_mdns, false) == false -> {:ok, "mDNS disabled"}
       Map.get(report, "mdns") == "advertising" -> {:ok, "mDNS advertising"}
       true -> {:fail, "mDNS down"}
     end

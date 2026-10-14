@@ -6,6 +6,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Agents.TurnRunner
   alias FermixCore.Agents.VoiceCall
+  alias FermixCore.Attachments
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -17,9 +18,11 @@ defmodule FermixCore.Agents.TurnRunnerTest do
   alias FermixCore.Providers.Error, as: ProviderError
   alias FermixCore.Realtime.CallRecord
   alias FermixCore.Realtime.LivePrompt
+  alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Temporal.Access
   alias FermixCore.Tools.HarnessSupport
   alias FermixCore.Tools.SendAttachment
+  alias FermixCore.Tools.ViewImage
   alias FermixTestSupport.ComputerHistoryCanary
 
   defmodule NoopReviewer do
@@ -1436,6 +1439,69 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       refute main_text =~ old_content
     end
 
+    # 0.85 of a 1M Claude window is 850,000; the model's 200,000-token
+    # compaction ceiling is the line whatever the threshold.
+    test "preflight compacts a Claude conversation at its ceiling, under the threshold" do
+      Application.put_env(:fermix_core, :compaction,
+        enabled: true,
+        threshold: 0.85,
+        reasoning_effort: :medium
+      )
+
+      registry_name = :"turn_runner_ceiling_registry_#{System.unique_integer([:positive])}"
+      store_name = :"turn_runner_ceiling_store_#{System.unique_integer([:positive])}"
+
+      start_supervised!({CapabilityRegistry, name: registry_name})
+
+      store =
+        start_supervised!(
+          {ConversationStore, name: store_name, max_messages: :infinity, repo: nil}
+        )
+
+      chat_id = "preflight_ceiling"
+      conversation_key = {"telegram", chat_id, :root}
+      # Over half the ceiling by estimate, so the compactor has work to do.
+      old_content = String.duplicate("old context ", 40_000)
+
+      ConversationStore.add_message(conversation_key, "user", old_content, server: store)
+      ConversationStore.add_message(conversation_key, "assistant", "old answer", server: store)
+
+      msg = %{
+        channel: "telegram",
+        chat_id: chat_id,
+        sender: "user",
+        content: "latest question",
+        source_trust: :operator
+      }
+
+      claude = %{
+        provider: :anthropic,
+        model: "claude-opus-5-5",
+        auth_mode: :api_key,
+        base_url: "mock://"
+      }
+
+      turn_state =
+        turn_state(
+          adapter: nil,
+          ordered_routes: [
+            {claude, [adapter: PreflightAdapter, model: "claude-opus-5-5", test_pid: self()]}
+          ],
+          capability_registry: registry_name,
+          conversation_store: store,
+          last_context_tokens: 210_000
+        )
+
+      deliver = fn {:text, text} -> send(self(), {:reply, text}) end
+
+      assert {:ok, "assistant after preflight", _context_tokens} =
+               TurnRunner.run(msg, turn_state, deliver)
+
+      assert_receive {:preflight_summary_call, _summary_text}, 5_000
+      assert_receive {:preflight_main_call, main_text}, 5_000
+      refute main_text =~ old_content
+    end
+
     test "preflight skips when the carried context_tokens is under threshold, despite large history" do
       Application.put_env(:fermix_core, :compaction,
         enabled: true,
@@ -1759,12 +1825,29 @@ defmodule FermixCore.Agents.TurnRunnerTest do
     end
 
     test "maps unsupported image input to the explicit routing message" do
-      reply = TurnRunner.error_reply({:image_unsupported, :ollama, "qwen3:32b"})
+      reply = TurnRunner.error_reply({:attachment_unsupported, :image, :ollama, "qwen3:32b"})
 
       assert reply =~ "ollama/qwen3:32b"
       assert reply =~ "vision-capable"
       refute reply =~ "HTTP"
       refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    test "names a picture format the route refuses, and a PDF a provider can't take inline" do
+      format =
+        TurnRunner.error_reply(
+          {:attachment_unsupported, {:image_format, "image/webp"}, :xai, "grok-5"}
+        )
+
+      pdf = TurnRunner.error_reply({:attachment_unsupported, :document, :xai, "grok-5"})
+
+      assert format =~ "image/webp picture"
+      assert format =~ "xai/grok-5"
+      assert format =~ "JPEG or PNG"
+      assert pdf =~ "the current model (xai/grok-5) can't take a PDF inline"
+      assert pdf =~ "OpenAI Codex, OpenAI, Anthropic, OpenRouter, Venice"
+      refute pdf =~ "SpaceXAI"
+      assert pdf =~ "send the pages as pictures"
     end
 
     test "maps max iteration exhaustion to an actionable step-limit message" do
@@ -2106,6 +2189,165 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert first == second
       assert first =~ "Discord caps a single message"
     end
+  end
+
+  # M67: the gateway's attachments become the manifest in the persisted user
+  # text and the turn-local parts the encoders read.
+  describe "inbound attachments" do
+    test "a text-only turn keeps the bare user message, with no parts" do
+      user = capture_prompt(%{channel: "telegram", chat_id: "attach_none"}) |> List.last()
+
+      assert user == %{role: "user", content: "how does this render?"}
+    end
+
+    test "the manifest is composed into the user text and the parts ride beside it" do
+      attachments = [
+        %Attachments{
+          kind: :still,
+          mime_type: "image/png",
+          name: "chart.png",
+          size_bytes: 3,
+          bytes: "png"
+        },
+        %Attachments{
+          kind: :document,
+          mime_type: "application/pdf",
+          name: "lease.pdf",
+          size_bytes: 4,
+          bytes: "%PDF"
+        },
+        %Attachments{
+          kind: :unknown,
+          mime_type: "application/zip",
+          name: "bundle.zip",
+          status: {:unusable, {:unknown_type, "application/zip"}}
+        }
+      ]
+
+      user =
+        %{channel: "telegram", chat_id: "attach_parts", inbound_attachments: attachments}
+        |> capture_prompt(sandbox_config: attachment_sandbox())
+        |> List.last()
+
+      assert user.content =~ ~r/\Ahow does this render\?\n\n\[attachments\]\n/
+      assert user.content =~ "1. chart.png · image · 3 bytes · attached as image 1"
+      assert user.content =~ "2. lease.pdf · PDF · 4 bytes · attached as document 1"
+      assert user.content =~ "3. bundle.zip · file · not readable: Fermix can't read"
+
+      assert user.parts == [
+               %{type: :image, mime_type: "image/png", data: "png"},
+               %{type: :document, mime_type: "application/pdf", data: "%PDF", name: "lease.pdf"}
+             ]
+    end
+
+    test "the history keeps the manifest and where each file is, never the bytes" do
+      store = start_voice_store()
+      registry = :"tr_attach_reg_#{System.unique_integer([:positive])}"
+      start_supervised!({CapabilityRegistry, name: registry}, id: registry)
+      sandbox = attachment_sandbox()
+      png = <<0x89, "PNG", 0x0D, 0x0A, 0x1A, 0x0A, "PNG-BYTES">>
+
+      still = %Attachments{
+        kind: :still,
+        mime_type: "image/png",
+        name: "chart.png",
+        size_bytes: byte_size(png),
+        bytes: png
+      }
+
+      msg = %{
+        channel: "telegram",
+        chat_id: "attach_history",
+        sender: "user",
+        content: "",
+        source_trust: :operator,
+        inbound_attachments: [still]
+      }
+
+      turn_state =
+        turn_state(
+          adapter: CapturePromptAdapter,
+          adapter_opts: [model: "mock-model", test_pid: self()],
+          capability_registry: registry,
+          conversation_store: store,
+          sandbox_config: sandbox
+        )
+
+      assert {:ok, "captured", _tokens} = TurnRunner.run(msg, turn_state, fn _part -> :ok end)
+
+      [user | _rest] =
+        ConversationStore.get_history({"telegram", "attach_history", :root}, server: store)
+
+      assert [_whole, path] =
+               Regex.run(
+                 ~r/\A\[attachments\]\n1\. chart\.png · image · 17 bytes · attached as image 1 · saved at (\S+)\z/,
+                 user.content
+               )
+
+      assert path =~ ~r"/workspace/media/inbound/\d{4}-\d{2}-\d{2}/chart-[0-9a-f]{8}\.png\z"
+      refute inspect(user) =~ "PNG-BYTES"
+
+      # A later turn opens it from the path the history names (the second turn
+      # the eval schema cannot drive with an attachment).
+      assert {:ok, %{success: true, images: [%{mime_type: "image/png", data: ^png}]}} =
+               ViewImage.execute(%{"paths" => [path]}, %{
+                 agent_name: "main",
+                 conversation_key: :test,
+                 sandbox_config: sandbox
+               })
+    end
+
+    test "a guest's turn keeps nothing in the workspace" do
+      sandbox = attachment_sandbox()
+      still = %Attachments{kind: :still, mime_type: "image/png", size_bytes: 3, bytes: "png"}
+
+      user =
+        %{
+          channel: "telegram",
+          chat_id: "attach_guest",
+          source_trust: :guest,
+          inbound_attachments: [still]
+        }
+        |> capture_prompt(sandbox_config: sandbox)
+        |> List.last()
+
+      assert user.content =~ "1. image · 3 bytes · attached as image 1"
+      refute user.content =~ "saved"
+      refute File.exists?(Path.join(sandbox.workspace_root, "media"))
+    end
+
+    test "a Live hand-off's screen frame is never kept" do
+      sandbox = attachment_sandbox()
+
+      frame = %Attachments{
+        kind: :still,
+        mime_type: "image/jpeg",
+        name: "screen frame",
+        size_bytes: 3,
+        bytes: "jpg"
+      }
+
+      user =
+        "what is on my screen"
+        |> voice_msg()
+        |> Map.put(:inbound_attachments, [frame])
+        |> capture_prompt(sandbox_config: sandbox)
+        |> List.last()
+
+      assert user.parts == [%{type: :image, mime_type: "image/jpeg", data: "jpg"}]
+      refute user.content =~ "saved"
+      refute File.exists?(Path.join(sandbox.workspace_root, "media"))
+    end
+  end
+
+  # A workspace of the test's own, so an operator turn's saved attachments
+  # never land in a shared home.
+  defp attachment_sandbox do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("tr-attachments")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    workspace = Path.join(dir, "workspace")
+    File.mkdir_p!(workspace)
+    SandboxConfig.normalize(mode: :strict, workspace_root: workspace)
   end
 
   # M56 §4.4: a typed chat turn during a Live call in the chat is told the call
