@@ -55,7 +55,7 @@
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/mobile.ex#schedule_push,launch_push,default_push_launcher,notify_timeline_row,push_notify,maybe_schedule_proactive_push,deliver_persisted_text,delivered_text,deliver_persisted_media,phone_effects,build_turn_result,schedule_request_push,broadcast,emit,emit_after_commit @ e2011201a5c1
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/event_router.ex#after_settle,end_phone_turn,schedule_settled_push @ d42cb71bf67e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/device_registry.ex @ 2947cb567cb4
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/socket_handler.ex#dispatch_event,terminate @ d106e3aa1787
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/session.ex#dispatch_event,terminate @ d106e3aa1787
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/router.ex#socket_options,@idle_grace_ms @ baf5f2adb72c
 EXTENDS Naturals, FiniteSets
 
@@ -344,9 +344,10 @@ Boot ==
 (* A socket, seen from the daemon *)
 
 \* The transport's idle timeout closes a socket nothing was read from for
-\* 150 s (router.ex:20, :61-68); SocketHandler.terminate (socket_handler.ex:
-\* 231-238) and the registry's :DOWN (device_registry.ex:213-215) drop the
-\* entry. Only a frozen app leaves its socket to this timeout.
+\* 150 s (router.ex:20, :61-68); Session.terminate (session.ex:282-289),
+\* which the WebSocket carrier calls, and the registry's :DOWN
+\* (device_registry.ex:213-215) drop the entry. Only a frozen app leaves its
+\* socket to this timeout.
 IdleTimeout(d) ==
     /\ daemon = "up" /\ reg[d] = "open" /\ app[d] = "frozen"
     /\ reg' = [reg EXCEPT ![d] = "none"]
@@ -355,7 +356,7 @@ IdleTimeout(d) ==
     /\ UNCHANGED <<durable, daemon, pushTask, platform, app, have, unannounced,
                    noted, observers, budgets>>
 
-\* dispatch_event "ack" (socket_handler.ex:815-816) and, in the design, the
+\* dispatch_event "ack" (session.ex:866-867) and, in the design, the
 \* registry entry's acked_seq (M51 section 11.4). The app's send and the
 \* daemon's handling are one step: an ack lost on the way is an ack sent
 \* late, and the app may ack at any moment here.
