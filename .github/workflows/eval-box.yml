@@ -26,8 +26,6 @@ on:
     secrets:
       OPENAI_API_KEY:
         required: true
-      EVAL_JUDGE_API_KEY:
-        required: false
       FERMIX_OPIK_API_KEY:
         required: true
       FERMIX_OPIK_WORKSPACE:
@@ -61,12 +59,14 @@ on:
         default: gpt-5.6-luna
 
 # No `permissions` here or on the job: the box inherits its caller's token, so only
-# the job that runs the capability tier (eval-weekly's) grants id-token: write for
-# the Claude Code sign-in, and the regression and dangerous tiers never hold the
-# right to mint GitHub OIDC tokens. A direct dispatch gets the repository's
-# default token, which must stay read-only (Settings > Actions > General >
-# Workflow permissions; read-only as of 2026-10-13), and the sign-in step refuses
-# it with a sentence: run the capability tier on demand through eval-weekly.
+# the jobs that run a JUDGED tier (eval-nightly's regression, eval-weekly's
+# capability) grant id-token: write, for the Anthropic sign-in the Claude judge
+# (and the capability tier's Claude Code) needs. The dangerous tier is never judged
+# (sandbox_verify sets `judge: false`) and never holds the right to mint GitHub
+# OIDC tokens. A direct dispatch gets the repository's default token, which must
+# stay read-only (Settings > Actions > General > Workflow permissions; read-only
+# as of 2026-10-13), and the sign-in step refuses it with a sentence: run a judged
+# tier on demand through its caller.
 
 concurrency:
   group: eval-box
@@ -98,6 +98,9 @@ jobs:
       # the FERMIX_OPIK_* secrets on the steps that need it.
       OPIK_BASE_URL: https://www.comet.com/opik/api/v1/private
       OPIK_UI_BASE: https://www.comet.com/opik
+      # The Workload Identity Federation profile the judged tiers sign in through
+      # (written by the sign-in step, read by the judge and by Claude Code).
+      WIF_PROFILE: fermix-eval
     steps:
       - name: Resolve the disposable eval home
         # Absolute with no '..' (upload-artifact@v4 rejects parent-relative
@@ -140,61 +143,46 @@ jobs:
       - name: Fetch deps
         run: mix deps.get
 
-      # The coding-harness tasks (suites/capability/harness.yaml) delegate to a
-      # vendor CLI, and the daemon advertises `claude_code_run` only when `claude`
-      # is on its PATH at boot, so this finishes before the daemon starts. A GitHub
-      # runner ships no vendor CLI; without this step the runner holds those tasks
-      # out as NOT EVALUATED and the release gate is red for that alone.
-      #
-      # Signed in and on the pinned model, or the tier stops here. A claude that
-      # is installed but cannot authenticate is worse than none: the daemon
-      # advertises `claude_code_run`, every delegated run fails, and the tasks
-      # score 0.00 as the candidate's failure.
-      #
-      # Authentication is Workload Identity Federation and nothing else: no API
-      # key exists on this box. Harness.Run spawns claude under `env -i` with HOME,
-      # PATH, TERM and USER only (the claude adapter passes no env unless a run
-      # sets `bare`), so the federation settings live where claude finds them from
-      # HOME alone: an `oidc_federation` profile in ~/.config/anthropic, the
-      # documented default configuration directory, made active by its
+      # Every JUDGED tier (regression, capability) grades replies with the Claude
+      # judge (benchmark/bin/evallib/judge.py; `judge:` in behavioral_config.yaml and
+      # config.yaml), and the capability tier's delegated coding tasks run Claude
+      # Code. Both authenticate through Workload Identity Federation and nothing
+      # else: no API key exists on this box. Both find the federation settings from
+      # HOME alone (the judge builds its SDK client with no credential argument, and
+      # Harness.Run spawns claude under `env -i` with HOME, PATH, TERM and USER
+      # only), so they live in an `oidc_federation` profile in ~/.config/anthropic,
+      # the documented default configuration directory, made active by its
       # `active_config` file and naming an identity-token file. The IDs are not
-      # secrets and come from repository variables; ANTHROPIC_EVAL_WORKSPACE_ID
-      # may stay empty while the federation rule covers a single workspace.
+      # secrets and come from repository variables; ANTHROPIC_EVAL_WORKSPACE_ID may
+      # stay empty while the federation rule covers a single workspace.
       #
       # The identity token is this job's GitHub OIDC token. GitHub's expire about
-      # five minutes after issue, each can be exchanged only once (its `jti`), and
-      # claude re-reads the file at every exchange, so after the preflight a
-      # background loop replaces it every WIF_REFRESH_SECONDS, atomically, for at
-      # most WIF_REFRESH_MAX rounds (longer than the tier's timeout). The step
-      # "Stop the Claude Code token refresher" ends it and fails the job if any
-      # refresh failed. The token file sits under RUNNER_TEMP, outside the
+      # five minutes after issue and each can be exchanged only once (its `jti`).
+      # Every exchange re-reads the file; the judge's SDK keeps the access token it
+      # gets in ~/.config/anthropic/credentials/ and reuses it until 30 s before it
+      # expires, so the judge exchanges rarely, but each exchange needs an unspent
+      # token. So the file is replaced after every preflight call, and a background
+      # loop replaces it every WIF_REFRESH_SECONDS, atomically, for at most
+      # WIF_REFRESH_MAX rounds (longer than any judged tier's timeout). The step
+      # "Stop the Anthropic identity-token refresher" ends it and fails the job if
+      # any refresh failed. The token file sits under RUNNER_TEMP, outside the
       # checkout, the eval home and the uploaded artifact, and goes with the VM.
       #
-      # Known gap: a run the candidate starts with `bare: true` reads only
-      # ANTHROPIC_API_KEY (bare mode reads no profile and no federation settings),
-      # which this box never provides, so such a run fails to authenticate.
-      #
-      # The model is pinned in ~/.claude/settings.json, with self-updates off; a
-      # `model` the candidate passes to claude_code_run still overrides the pin.
-      #
-      # Pinned: one release's native linux-x64 binary, its sha256 copied from that
-      # release's manifest.json, whose detached signature verifies against the
-      # Claude Code release signing key (31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF
-      # 1A7E CACE). Bump the two together.
-      #
-      # The preflight runs under the same wiped environment a harness run gets, so
-      # it proves what a run will meet: `claude auth status` must name the
-      # federation profile, and one real call must succeed on the pinned model with
-      # no API key in play. That call costs well under a cent per weekly run.
-      - name: Install and sign in Claude Code (capability tier)
-        if: inputs.tier == 'capability'
+      # The preflight is one real verdict on a canned case through the judge's own
+      # code (bin/judge_preflight.py) with the judge settings the tier's runner
+      # loads, in the environment its tier step gets: the SDK must select this
+      # federation profile, not an API key or another profile, and the configured
+      # model must answer. It costs about a cent per run.
+      - name: Sign in to Anthropic through Workload Identity Federation (judged tiers)
+        id: wif_sign_in
+        if: inputs.tier == 'regression' || inputs.tier == 'capability'
+        working-directory: benchmark
         env:
-          CLAUDE_CODE_VERSION: "2.1.296"
-          CLAUDE_CODE_SHA256: 24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de
-          CLAUDE_MODEL: claude-haiku-5-5
-          WIF_PROFILE: fermix-eval
           WIF_REFRESH_SECONDS: "60"
           WIF_REFRESH_MAX: "200"
+          # run_eval.py (regression) loads behavioral_config.yaml; run_capability.py
+          # (capability) loads config.yaml.
+          JUDGE_CONFIG: ${{ inputs.tier == 'regression' && 'behavioral_config.yaml' || 'config.yaml' }}
           ANTHROPIC_EVAL_ORGANIZATION_ID: ${{ vars.ANTHROPIC_EVAL_ORGANIZATION_ID }}
           ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID: ${{ vars.ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID }}
           ANTHROPIC_EVAL_FEDERATION_RULE_ID: ${{ vars.ANTHROPIC_EVAL_FEDERATION_RULE_ID }}
@@ -205,37 +193,12 @@ jobs:
           for name in ANTHROPIC_EVAL_ORGANIZATION_ID ANTHROPIC_EVAL_SERVICE_ACCOUNT_ID \
                       ANTHROPIC_EVAL_FEDERATION_RULE_ID; do
             if [ -z "${!name:-}" ]; then
-              fail "The repository variable $name is empty: the capability tier's delegated coding tasks (cap_harness) need Claude Code signed in through Workload Identity Federation. Set it under Settings > Secrets and variables > Actions > Variables."
+              fail "The repository variable $name is empty: the $TIER tier's Claude judge signs in to Anthropic through Workload Identity Federation. Set it under Settings > Secrets and variables > Actions > Variables."
             fi
           done
           if [ -z "${ACTIONS_ID_TOKEN_REQUEST_URL:-}" ] || [ -z "${ACTIONS_ID_TOKEN_REQUEST_TOKEN:-}" ]; then
-            fail "This job cannot request a GitHub OIDC token: the job that calls eval-box.yml must grant 'id-token: write' (eval-weekly's capability job does; a direct eval-box dispatch cannot, so run the capability tier through eval-weekly)."
+            fail "This job cannot request a GitHub OIDC token: the job that calls eval-box.yml must grant 'id-token: write' (eval-nightly's regression job and eval-weekly's capability job do; a direct eval-box dispatch cannot, so run a judged tier through its caller)."
           fi
-          arch="$(uname -m)"
-          if [ "$arch" != "x86_64" ]; then
-            fail "The pinned Claude Code binary is built for x86_64; this runner is $arch."
-          fi
-
-          install_dir="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION/bin"
-          claude="$install_dir/claude"
-          download="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION.download"
-          curl -fsSL --retry 3 -o "$download" \
-            "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/linux-x64/claude"
-          actual="$(sha256sum "$download" | cut -d' ' -f1)"
-          if [ "$actual" != "$CLAUDE_CODE_SHA256" ]; then
-            rm -f "$download"
-            fail "Claude Code $CLAUDE_CODE_VERSION binary checksum mismatch: expected $CLAUDE_CODE_SHA256, got $actual."
-          fi
-          mkdir -p "$install_dir"
-          install -m 0755 "$download" "$claude"
-          rm -f "$download"
-          "$claude" --version
-
-          # Claude Code's user config: the model under test, and no self-updates.
-          mkdir -p "$HOME/.claude"
-          jq -n --arg model "$CLAUDE_MODEL" \
-            '{model: $model, env: {DISABLE_AUTOUPDATER: "1", DISABLE_UPDATES: "1"}}' \
-            > "$HOME/.claude/settings.json"
 
           wif_dir="$RUNNER_TEMP/anthropic-wif"
           jwt="$wif_dir/github-oidc.jwt"
@@ -263,7 +226,7 @@ jobs:
           oidc_request_url="$ACTIONS_ID_TOKEN_REQUEST_URL"
 
           # A fresh GitHub OIDC token, written beside the target and renamed over it
-          # so claude never reads half a token. Prints nothing it fetched.
+          # so no reader ever sees half a token. Prints nothing it fetched.
           fetch_jwt() {
             local tmp
             tmp="$(mktemp "$wif_dir/github-oidc.XXXXXX")"
@@ -281,6 +244,119 @@ jobs:
           if ! fetch_jwt; then
             fail "Could not fetch a GitHub OIDC token for the audience https://api.anthropic.com."
           fi
+
+          # One real verdict through the profile: the judge must sign in with this
+          # federation profile and answer on the configured model.
+          if ! preflight="$(uv run bin/judge_preflight.py --config "$JUDGE_CONFIG" \
+                              --expect-source "profile $WIF_PROFILE (oidc_federation)" 2>&1)"; then
+            fail "The judge preflight failed: $(printf '%s' "$preflight" | tail -n 3 | tr '\n' ' ')"
+          fi
+          printf '%s\n' "$preflight"
+
+          # The call spent the token in the file: replace it before anything else
+          # can need an exchange, then keep replacing it in the background.
+          if ! fetch_jwt; then
+            fail "Could not fetch a fresh GitHub OIDC token after the judge preflight."
+          fi
+          refresh_loop() {
+            local round
+            for ((round = 1; round <= WIF_REFRESH_MAX; round++)); do
+              sleep "$WIF_REFRESH_SECONDS"
+              if fetch_jwt; then
+                echo "$(date -u +%FT%TZ) refreshed"
+              else
+                echo "$(date -u +%FT%TZ) refresh FAILED"
+              fi
+            done
+            echo "$(date -u +%FT%TZ) stopped at the cap of $WIF_REFRESH_MAX refreshes"
+          }
+          # The loop outlives this step beside every process the candidate drives,
+          # so it starts from a wiped environment holding only what it needs; the
+          # request credential arrives on fd 3 and lives only in a shell variable.
+          env -i PATH="$PATH" HOME="$HOME" wif_dir="$wif_dir" jwt="$jwt" \
+            oidc_request_url="$oidc_request_url" \
+            WIF_REFRESH_SECONDS="$WIF_REFRESH_SECONDS" WIF_REFRESH_MAX="$WIF_REFRESH_MAX" \
+            bash -c "set -uo pipefail; $(declare -f fetch_jwt refresh_loop)
+              IFS= read -r oidc_request_token <&3; exec 3<&-
+              refresh_loop" \
+            3<<< "$oidc_request_token" < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
+          echo "$!" > "$wif_dir/refresher.pid"
+          disown
+          echo "The $TIER tier signs in to Anthropic through the $WIF_PROFILE federation profile."
+
+      # The coding-harness tasks (suites/capability/harness.yaml) delegate to a
+      # vendor CLI, and the daemon advertises `claude_code_run` only when `claude`
+      # is on its PATH at boot, so this finishes before the daemon starts. A GitHub
+      # runner ships no vendor CLI; without this step the runner holds those tasks
+      # out as NOT EVALUATED and the release gate is red for that alone.
+      #
+      # Signed in and on the pinned model, or the tier stops here. A claude that
+      # is installed but cannot authenticate is worse than none: the daemon
+      # advertises `claude_code_run`, every delegated run fails, and the tasks
+      # score 0.00 as the candidate's failure.
+      #
+      # It signs in through the federation profile the step above wrote and the
+      # identity token its refresher keeps fresh.
+      #
+      # Known gap: a run the candidate starts with `bare: true` reads only
+      # ANTHROPIC_API_KEY (bare mode reads no profile and no federation settings),
+      # which this box never provides, so such a run fails to authenticate.
+      #
+      # The model is pinned in ~/.claude/settings.json, with self-updates off; a
+      # `model` the candidate passes to claude_code_run still overrides the pin.
+      #
+      # Pinned: one release's native linux-x64 binary, its sha256 copied from that
+      # release's manifest.json, whose detached signature verifies against the
+      # Claude Code release signing key (31DD DE24 DDFA B679 F42D 7BD2 BAA9 29FF
+      # 1A7E CACE). Bump the two together.
+      #
+      # The preflight runs under the same wiped environment a harness run gets, so
+      # it proves what a run will meet: `claude auth status` must name the
+      # federation profile, and one real call must succeed on the pinned model with
+      # no API key in play. That call costs well under a cent per weekly run, and
+      # it may spend the identity token in the file, so the step then waits (at
+      # most WIF_ROTATION_WAIT_SECONDS) for the refresher's next rotation before
+      # any harness run can need an exchange.
+      - name: Install Claude Code and prove its sign-in (capability tier)
+        id: claude_code
+        if: inputs.tier == 'capability'
+        env:
+          CLAUDE_CODE_VERSION: "2.1.296"
+          CLAUDE_CODE_SHA256: 24972e3bc859fab2b46ed4c1e51f7d6130f06d3bd550811a114640de3370d0de
+          CLAUDE_MODEL: claude-haiku-5-5
+          WIF_ROTATION_WAIT_SECONDS: "150"
+        run: |
+          set -euo pipefail
+          fail() { echo "::error::$*"; exit 1; }
+          wif_dir="$RUNNER_TEMP/anthropic-wif"
+          if [ ! -s "$wif_dir/refresher.pid" ]; then
+            fail "The Anthropic federation sign-in did not finish, so Claude Code has no identity token to exchange."
+          fi
+          arch="$(uname -m)"
+          if [ "$arch" != "x86_64" ]; then
+            fail "The pinned Claude Code binary is built for x86_64; this runner is $arch."
+          fi
+
+          install_dir="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION/bin"
+          claude="$install_dir/claude"
+          download="$RUNNER_TEMP/claude-code-$CLAUDE_CODE_VERSION.download"
+          curl -fsSL --retry 3 -o "$download" \
+            "https://downloads.claude.ai/claude-code-releases/$CLAUDE_CODE_VERSION/linux-x64/claude"
+          actual="$(sha256sum "$download" | cut -d' ' -f1)"
+          if [ "$actual" != "$CLAUDE_CODE_SHA256" ]; then
+            rm -f "$download"
+            fail "Claude Code $CLAUDE_CODE_VERSION binary checksum mismatch: expected $CLAUDE_CODE_SHA256, got $actual."
+          fi
+          mkdir -p "$install_dir"
+          install -m 0755 "$download" "$claude"
+          rm -f "$download"
+          "$claude" --version
+
+          # Claude Code's user config: the model under test, and no self-updates.
+          mkdir -p "$HOME/.claude"
+          jq -n --arg model "$CLAUDE_MODEL" \
+            '{model: $model, env: {DISABLE_AUTOUPDATER: "1", DISABLE_UPDATES: "1"}}' \
+            > "$HOME/.claude/settings.json"
 
           # What a harness run gets: the daemon's HOME and PATH, TERM and USER, nothing else.
           run_env=(env -i HOME="$HOME" PATH="$install_dir:$PATH"
@@ -318,35 +394,18 @@ jobs:
             fail "The preflight call ran on '$used_models' (session model '$session_model'), not the pinned $CLAUDE_MODEL."
           fi
 
-          # The call spent the token in the file: replace it before any harness run
-          # can need an exchange, then keep replacing it in the background.
-          if ! fetch_jwt; then
-            fail "Could not fetch a fresh GitHub OIDC token after the preflight call."
-          fi
-          refresh_loop() {
-            local round
-            for ((round = 1; round <= WIF_REFRESH_MAX; round++)); do
-              sleep "$WIF_REFRESH_SECONDS"
-              if fetch_jwt; then
-                echo "$(date -u +%FT%TZ) refreshed"
-              else
-                echo "$(date -u +%FT%TZ) refresh FAILED"
-              fi
-            done
-            echo "$(date -u +%FT%TZ) stopped at the cap of $WIF_REFRESH_MAX refreshes"
-          }
-          # The loop outlives this step beside every process the candidate drives,
-          # so it starts from a wiped environment holding only what it needs; the
-          # request credential arrives on fd 3 and lives only in a shell variable.
-          env -i PATH="$PATH" HOME="$HOME" wif_dir="$wif_dir" jwt="$jwt" \
-            oidc_request_url="$oidc_request_url" \
-            WIF_REFRESH_SECONDS="$WIF_REFRESH_SECONDS" WIF_REFRESH_MAX="$WIF_REFRESH_MAX" \
-            bash -c "set -uo pipefail; $(declare -f fetch_jwt refresh_loop)
-              IFS= read -r oidc_request_token <&3; exec 3<&-
-              refresh_loop" \
-            3<<< "$oidc_request_token" < /dev/null >> "$wif_dir/refresher.log" 2>&1 &
-          echo "$!" > "$wif_dir/refresher.pid"
-          disown
+          # The call may have spent the token in the file. Wait for one rotation
+          # that starts after the call ended, so the first delegated run finds an
+          # unspent token.
+          refreshes() { grep -c ' refreshed$' "$wif_dir/refresher.log" || true; }
+          spent_at="$(refreshes)"
+          deadline=$((SECONDS + WIF_ROTATION_WAIT_SECONDS))
+          until [ "$(refreshes)" -gt "$spent_at" ]; do
+            if [ "$SECONDS" -ge "$deadline" ]; then
+              fail "The identity-token refresher did not replace the token within ${WIF_ROTATION_WAIT_SECONDS}s of the Claude Code preflight, so the first delegated run could find it spent: read $wif_dir/refresher.log."
+            fi
+            sleep 1
+          done
           echo "Claude Code $CLAUDE_CODE_VERSION signs in through the $WIF_PROFILE federation profile and answers on $CLAUDE_MODEL."
           echo "$install_dir" >> "$GITHUB_PATH"
 
@@ -362,8 +421,8 @@ jobs:
           FERMIX_OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
           set -euo pipefail
-          # The job's OIDC request credential (id-token: write) belongs to the Claude
-          # Code sign-in step; the daemon and every process it spawns go without it.
+          # The job's OIDC request credential (id-token: write) belongs to the Anthropic
+          # sign-in step; the daemon and every process it spawns go without it.
           unset ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL
           # Checker trials may commit inside the eval workspace; give git an identity.
           git config --global user.name "fermix-eval-box"
@@ -394,7 +453,6 @@ jobs:
         working-directory: benchmark
         env:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
@@ -447,7 +505,6 @@ jobs:
         working-directory: benchmark
         env:
           FERMIX_EVAL_HOME: ${{ env.EVAL_HOME }}
-          EVAL_JUDGE_API_KEY: ${{ secrets.EVAL_JUDGE_API_KEY }}
           OPIK_API_KEY: ${{ secrets.FERMIX_OPIK_API_KEY }}
           OPIK_WORKSPACE: ${{ secrets.FERMIX_OPIK_WORKSPACE }}
         run: |
@@ -532,15 +589,16 @@ jobs:
           FERMIX_CAP_HOME: ${{ env.EVAL_HOME }}
         run: benchmark/bin/capability-daemon.sh down
 
-      - name: Stop the Claude Code token refresher
-        # After the daemon is down, so no delegated run can still need a fresh
-        # identity token; `always()` so a failed tier step does not leave it running.
-        if: ${{ always() && inputs.tier == 'capability' }}
+      - name: Stop the Anthropic identity-token refresher
+        # After the daemon is down and every judged step has run, so neither the
+        # judge nor a delegated run can still need a fresh identity token;
+        # `always()` so a failed tier step does not leave it running.
+        if: ${{ always() && (inputs.tier == 'regression' || inputs.tier == 'capability') }}
         run: |
           set -euo pipefail
           wif_dir="$RUNNER_TEMP/anthropic-wif"
           if [ ! -f "$wif_dir/refresher.pid" ]; then
-            echo "No token refresher was started: the Claude Code sign-in step did not finish."
+            echo "No token refresher was started: the Anthropic sign-in step did not finish."
             exit 0
           fi
           pid="$(cat "$wif_dir/refresher.pid")"
@@ -552,7 +610,7 @@ jobs:
           echo "Identity-token refresher: $refreshed refreshed, $failed failed."
           if [ "$failed" -gt 0 ]; then
             grep -v ' refreshed$' "$wif_dir/refresher.log"
-            echo "::error::$failed identity-token refreshes failed during the capability tier, so a delegated claude_code_run may have failed to authenticate: read this run's cap_harness scores as a possible environment failure, not the candidate's."
+            echo "::error::$failed identity-token refreshes failed during the $TIER tier, so a judge verdict or a delegated claude_code_run may have failed to authenticate: read this run's incomplete judged cases and cap_harness scores as a possible environment failure, not the candidate's."
             exit 1
           fi
 

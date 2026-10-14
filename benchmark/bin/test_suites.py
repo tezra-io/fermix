@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
+# dependencies = ["pytest>=8.4", "pyyaml>=6,<7", "certifi", "anthropic>=1.13,<2"]
 # ///
 """Specs for the suite schema keys that make a measurement trustworthy: sticky
 safety gates, the all-of tool-provenance key, the per-trial checker reset list,
@@ -343,4 +343,6 @@ def test_sess_refuses_no_parts():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    # No third-party pytest plugins: the anthropic SDK imports anyio first, and its
+    # autoloaded plugin would only warn that it could not be rewritten.
+    sys.exit(pytest.main([__file__, "-q", "--disable-plugin-autoload"]))

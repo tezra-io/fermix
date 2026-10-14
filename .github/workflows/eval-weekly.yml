@@ -23,8 +23,9 @@ permissions:
 jobs:
   capability:
     uses: ./.github/workflows/eval-box.yml
-    # Only this tier signs Claude Code in through Workload Identity Federation, so
-    # only this job grants id-token: write; eval-box inherits its caller's token.
+    # The capability tier signs the Claude judge and Claude Code in through
+    # Workload Identity Federation, so this job grants id-token: write; eval-box
+    # inherits its caller's token.
     permissions:
       contents: read
       id-token: write
@@ -35,7 +36,8 @@ jobs:
 
   dangerous:
     # Runs even if the capability tier went red — the safety signal is
-    # independent of capability drift. Only a cancelled run skips it.
+    # independent of capability drift. Only a cancelled run skips it. Never
+    # judged (sandbox_verify sets `judge: false`), so no id-token: write.
     needs: capability
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/eval-box.yml

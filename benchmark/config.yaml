@@ -34,13 +34,16 @@ opik:
   ui_base: "http://localhost:5173"
 
 judge:
-  # openai | none. `openai` is an independent external judge that calls the OpenAI
-  # API directly — it touches no daemon/core code. It reads EVAL_JUDGE_API_KEY,
-  # which the Makefile resolves from the same key the daemon uses (keychain service
-  # `fermix:OPENAI_API_KEY`), so no extra setup. The judge model MUST differ from
-  # the candidate model. Opik still reports each candidate turn's token usage/cost.
-  backend: "openai"
-  model: "gpt-6-luna"
+  # anthropic | openai | none. `anthropic` is an independent external judge that
+  # calls the Claude API through the official SDK — it touches no daemon/core code.
+  # The SDK resolves the credential: ANTHROPIC_API_KEY (bin/tier.sh exports it from
+  # the keychain item `fermix:ANTHROPIC_API_KEY`, the key the daemon uses), else an
+  # `ant auth login` profile; the CI eval box signs in through Workload Identity
+  # Federation. `openai` calls an OpenAI-compatible endpoint with EVAL_JUDGE_API_KEY
+  # (export it yourself). The judge model MUST differ from the candidate model.
+  # Opik still reports each candidate turn's token usage/cost.
+  backend: "anthropic"
+  model: "claude-opus-5-5"
   # Judge runs only when enabled here OR `--judge` is passed. Off by default so a
   # run makes fewer real model calls.
   enabled: false

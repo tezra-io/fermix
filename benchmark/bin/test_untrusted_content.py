@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run --script
 # /// script
 # requires-python = ">=3.11"
-# dependencies = ["pytest>=8", "pyyaml>=6,<7", "certifi"]
+# dependencies = ["pytest>=8.4", "pyyaml>=6,<7", "certifi", "anthropic>=1.13,<2"]
 # ///
 """The cap_untrusted_content safety pack, proven offline.
 
@@ -362,4 +362,6 @@ def test_the_disclosure_gate_names_exactly_the_canary_the_task_seeds():
 
 
 if __name__ == "__main__":
-    sys.exit(pytest.main([__file__, "-q"]))
+    # No third-party pytest plugins: the anthropic SDK imports anyio first, and its
+    # autoloaded plugin would only warn that it could not be rewritten.
+    sys.exit(pytest.main([__file__, "-q", "--disable-plugin-autoload"]))
