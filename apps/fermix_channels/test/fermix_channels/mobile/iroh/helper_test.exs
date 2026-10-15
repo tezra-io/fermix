@@ -176,7 +176,11 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     # one-second retry has already failed again.
     assert_receive {:emit, :degraded, 1, _class}, 3_000
     assert %{rail: :failed, failure: failure, retry: %{delay_ms: 2_000}} = :sys.get_state(pid)
-    assert failure =~ "exited with status 3" or failure =~ "did not answer"
+    # Dying right after `hello` can also surface as the daemon's `start` write
+    # failing on the closed pipe, whichever the OS reports first.
+    assert failure =~ "exited with status 3" or failure =~ "did not answer" or
+             failure =~ "pipe closed"
+
     assert Process.alive?(pid)
   end
 
