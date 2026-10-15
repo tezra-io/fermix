@@ -230,8 +230,14 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   def handle_info({:retry, token}, %{retry: %{token: token}} = state),
     do: {:noreply, start_helper(%{state | retry: %{state.retry | token: nil}})}
 
-  def handle_info({:EXIT, port, _reason}, %{port: port} = state) when is_port(port),
-    do: {:noreply, state}
+  # A port that closed with no exit status (a write to a helper that had
+  # stopped reading fails with EPIPE) is a crash like any other. The process
+  # group is killed in case the helper outlived its pipe. A port that exited
+  # normally reported its status first and is no longer the current one.
+  def handle_info({:EXIT, port, reason}, %{port: port} = state) when is_port(port) do
+    _ = ProcessGroup.signal(state.os_pid, :sigkill)
+    {:noreply, fail(%{state | port: nil, os_pid: nil}, {:port_closed, reason}, true)}
+  end
 
   def handle_info(_message, state), do: {:noreply, state}
 
@@ -531,6 +537,7 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   defp describe({:key, reason}), do: key_words(reason)
   defp describe({:protocol_error, reason}), do: "the helper sent #{line_words(reason)}"
   defp describe({:spawn_failed, path}), do: "the helper at #{path} could not be started"
+  defp describe({:port_closed, reason}), do: "the helper's pipe closed (#{inspect(reason)})"
 
   defp describe({:device_store, reason}) when is_atom(reason),
     do: "the paired phones could not be read: #{:file.format_error(reason)}"

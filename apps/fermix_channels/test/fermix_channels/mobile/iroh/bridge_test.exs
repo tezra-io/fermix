@@ -262,6 +262,21 @@ defmodule FermixChannels.Mobile.Iroh.BridgeTest do
     assert {:error, :closed} = :gen_tcp.recv(second, 0, 1_000)
   end
 
+  # The helper opens a bridge connection per stream as the streams arrive; a
+  # burst must wait in the backlog, not be refused while the bridge is busy.
+  test "a burst of connections waits in the backlog while the bridge is busy", ctx do
+    %{bridge: bridge} = start_bridge(ctx, [])
+    :ok = :sys.suspend(bridge)
+
+    results =
+      for _connection <- 1..20 do
+        :gen_tcp.connect({:local, ctx.socket_path}, 0, [:binary, active: false], 1_000)
+      end
+
+    :ok = :sys.resume(bridge)
+    assert Enum.all?(results, &match?({:ok, _socket}, &1)), inspect(results)
+  end
+
   test "a stale socket file is replaced; a live bridge is never stolen", ctx do
     File.write!(ctx.socket_path, "stale")
     %{bridge: pid} = start_bridge(ctx, [])

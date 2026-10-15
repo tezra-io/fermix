@@ -108,8 +108,15 @@ defmodule FermixChannels.Mobile.Iroh.Bridge do
     end
   end
 
+  # The backlog holds a burst of streams the helper opens at once, up to the
+  # bound; the default of 5 would refuse the sixth as unreachable.
   defp listen(path) do
-    :gen_tcp.listen(0, [:binary, {:active, false}, {:ifaddr, {:local, path}}])
+    :gen_tcp.listen(0, [
+      :binary,
+      {:active, false},
+      {:backlog, @max_connections},
+      {:ifaddr, {:local, path}}
+    ])
   end
 
   defp chmod_socket(path, listen_socket) do

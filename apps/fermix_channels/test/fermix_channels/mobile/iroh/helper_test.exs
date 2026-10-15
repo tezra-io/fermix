@@ -44,6 +44,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
     exit_after_hello = Keyword.get(opts, :exit_after_hello)
     exit_after_start = Keyword.get(opts, :exit_after_start)
+    close_stdin_after_hello = Keyword.get(opts, :close_stdin_after_hello, false)
 
     script = """
     #!/usr/bin/perl
@@ -56,6 +57,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     close($env);
     print '#{hello}' . "\\n";
     #{if exit_after_hello, do: "exit #{exit_after_hello};", else: ""}
+    #{if close_stdin_after_hello, do: "close(STDIN); sleep 5; exit 0;", else: ""}
     while (my $line = <STDIN>) {
       print $log $line;
       if ($line =~ /"op":"start"/) {
@@ -219,6 +221,16 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     assert_receive {:emit, :recovered, 0, :none}, 3_000
     assert_receive {:emit, :degraded, 1, :exited}, 3_000
     assert %{retry: %{delay_ms: 4_000}} = :sys.get_state(pid)
+  end
+
+  # A helper that has stopped reading when `start` is written closes the port
+  # with no exit status (the write's EPIPE): that is a crash like any other,
+  # not a wait for the ready timeout.
+  test "a helper whose pipe closed under the daemon's write is a crash", ctx do
+    pid = start(ctx, binary_path: fake(ctx, close_stdin_after_hello: true), test_pid: self())
+
+    assert_receive {:emit, :degraded, 1, :port_closed}, 3_000
+    assert %{rail: :failed, retry: %{delay_ms: 2_000}} = :sys.get_state(pid)
   end
 
   # `bad_request` is the helper refusing the daemon's own `start`: the same
