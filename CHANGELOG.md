@@ -27,6 +27,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   until one does, the phone channel status and `fermix doctor` say the helper
   is missing, and phones connect over the local network or Tailscale exactly
   as before. Relay contact starts only once a phone is paired.
+- **The Mac chat can show a phone's media (groundwork).** The chat socket
+  now hands the Mac app a read-only copy of a voice note, picture or link
+  preview image a row names, kept under `companion/media/` in Fermix's home
+  within 512 MiB and cleared at every start, and says when a row changes
+  after it is written, such as a voice note's transcript or a stored link
+  preview, so the app reads it again. No released Fermix.app has the chat
+  window yet.
 
 ### Fixed
 

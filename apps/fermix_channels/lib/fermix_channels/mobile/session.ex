@@ -1121,7 +1121,7 @@ defmodule FermixChannels.Mobile.Session do
 
   defp open_media(ref, state) do
     with {:ok, descriptor} <- state.media_descriptor.(state.profile_id, ref),
-         {:ok, media} <- normalize_media_descriptor(descriptor, ref),
+         {:ok, media} <- Timeline.normalize_media_descriptor(descriptor, ref),
          {:ok, blob} <- MediaStore.fetch(state.media_store, ref),
          :ok <- matching_blob_size(blob, media),
          {:ok, io} <- File.open(blob.path, [:read, :binary, :raw]) do
@@ -1129,53 +1129,6 @@ defmodule FermixChannels.Mobile.Session do
        %{ref: ref, media: media, io: io, index: 0, sent: 0, hash: :crypto.hash_init(:sha256)}}
     end
   end
-
-  defp normalize_media_descriptor(descriptor, ref) when is_map(descriptor) do
-    server_seq = value(descriptor, :server_seq)
-    media = value(descriptor, :media)
-
-    with true <- is_integer(server_seq) and server_seq > 0,
-         true <- is_map(media),
-         {:ok, fields} <- media_fields(media, ref) do
-      {:ok, Map.put(fields, :server_seq, server_seq)}
-    else
-      false -> {:error, :invalid_media_descriptor}
-      {:error, _reason} = error -> error
-    end
-  end
-
-  defp normalize_media_descriptor(_descriptor, _ref), do: {:error, :invalid_media_descriptor}
-
-  defp media_fields(media, ref) do
-    fields = %{
-      ref: value(media, :ref),
-      sha256: value(media, :sha256) || ref,
-      kind: value(media, :kind),
-      mime: value(media, :mime),
-      size_bytes: value(media, :size_bytes),
-      filename: value(media, :filename),
-      caption: value(media, :caption)
-    }
-
-    with :ok <- validate_media_fields(fields, ref) do
-      {:ok, fields}
-    end
-  end
-
-  defp validate_media_fields(fields, ref) do
-    valid_required =
-      fields.ref == ref and fields.sha256 == ref and nonempty?(fields.kind) and
-        nonempty?(fields.mime) and is_integer(fields.size_bytes) and fields.size_bytes >= 0
-
-    if valid_required and optional_nonempty?(fields.filename) and
-         optional_nonempty?(fields.caption),
-       do: :ok,
-       else: {:error, :invalid_media_descriptor}
-  end
-
-  defp nonempty?(value), do: is_binary(value) and value != ""
-  defp optional_nonempty?(nil), do: true
-  defp optional_nonempty?(value), do: nonempty?(value)
 
   defp matching_blob_size(blob, media) do
     if value(blob, :size_bytes) == media.size_bytes,

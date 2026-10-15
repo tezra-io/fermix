@@ -36,6 +36,18 @@ defmodule FermixCore.Companion.Timeline do
 
   @type request_status :: :running | :completed | :failed
 
+  @typedoc "One media ref a row names, as `normalize_media_descriptor/2` gives it to a client."
+  @type media :: %{
+          server_seq: pos_integer(),
+          ref: String.t(),
+          sha256: String.t(),
+          kind: String.t(),
+          mime: String.t(),
+          size_bytes: non_neg_integer(),
+          filename: String.t() | nil,
+          caption: String.t() | nil
+        }
+
   @typedoc """
   The transport that claimed a request. A `"mobile"` claim names its
   Noise-authenticated device in `:authenticated_device_id`; a `"companion"`
@@ -126,6 +138,33 @@ defmodule FermixCore.Companion.Timeline do
       Repo.get_mobile_media_descriptor(profile_selector(profile_id, opts), ref, repo_opts(opts))
     end
   end
+
+  @doc """
+  The media a `media_descriptor/3` answer describes, as either companion
+  transport hands it to a client: the row's `server_seq`, and the ref's `ref`,
+  `sha256` (the ref itself when the row names none), `kind`, `mime`,
+  `size_bytes`, `filename` and `caption` (`nil` when the row names none), held
+  to `ref`. A descriptor in any other shape is
+  `{:error, :invalid_media_descriptor}`.
+  """
+  @spec normalize_media_descriptor(term(), String.t()) ::
+          {:ok, media()} | {:error, :invalid_media_descriptor}
+  def normalize_media_descriptor(descriptor, ref) when is_map(descriptor) and is_binary(ref) do
+    server_seq = descriptor_value(descriptor, :server_seq)
+    media = descriptor_value(descriptor, :media)
+
+    with true <- is_integer(server_seq) and server_seq > 0,
+         true <- is_map(media),
+         {:ok, fields} <- media_fields(media, ref) do
+      {:ok, Map.put(fields, :server_seq, server_seq)}
+    else
+      false -> {:error, :invalid_media_descriptor}
+      {:error, _reason} = error -> error
+    end
+  end
+
+  def normalize_media_descriptor(_descriptor, ref) when is_binary(ref),
+    do: {:error, :invalid_media_descriptor}
 
   @doc """
   Store one link preview on its row (`url`, `site`, `title`, an optional
@@ -490,6 +529,41 @@ defmodule FermixCore.Companion.Timeline do
   defp validate_media_ref(ref) do
     if Regex.match?(@sha256, ref), do: :ok, else: {:error, {:invalid_media_ref, ref}}
   end
+
+  defp media_fields(media, ref) do
+    fields = %{
+      ref: descriptor_value(media, :ref),
+      sha256: descriptor_value(media, :sha256) || ref,
+      kind: descriptor_value(media, :kind),
+      mime: descriptor_value(media, :mime),
+      size_bytes: descriptor_value(media, :size_bytes),
+      filename: descriptor_value(media, :filename),
+      caption: descriptor_value(media, :caption)
+    }
+
+    with :ok <- validate_media_fields(fields, ref) do
+      {:ok, fields}
+    end
+  end
+
+  defp validate_media_fields(fields, ref) do
+    valid_required =
+      fields.ref == ref and fields.sha256 == ref and nonempty?(fields.kind) and
+        nonempty?(fields.mime) and is_integer(fields.size_bytes) and fields.size_bytes >= 0
+
+    if valid_required and optional_nonempty?(fields.filename) and
+         optional_nonempty?(fields.caption),
+       do: :ok,
+       else: {:error, :invalid_media_descriptor}
+  end
+
+  defp nonempty?(value), do: is_binary(value) and value != ""
+  defp optional_nonempty?(nil), do: true
+  defp optional_nonempty?(value), do: nonempty?(value)
+
+  # A descriptor the store answers is atom-keyed around string-keyed media; a
+  # transport's stand-in may key either way.
+  defp descriptor_value(map, key), do: Map.get(map, key) || Map.get(map, Atom.to_string(key))
 
   defp validate_recovery_limit(value)
        when is_integer(value) and value > 0 and value <= @max_history_limit,

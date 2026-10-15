@@ -385,6 +385,39 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     refute Map.has_key?(preview, "description")
     refute Map.has_key?(preview, "image_ref")
+
+    # The stored preview changed the row, which the Mac hears as `row_updated`.
+    assert_received {:event, {:profile, "main"},
+                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 12}}
+  end
+
+  # M66: a voice note's transcript replaces its row's text through the
+  # gateway's enrichment, and the Mac hears that the row changed; a text the
+  # enrichment leaves as it was announces nothing.
+  test "an enrichment that changes the row's text announces row_updated, and only then", ctx do
+    event =
+      decoded("msg", %{
+        "client_msg_id" => "client-1",
+        "profile_id" => "main",
+        "text" => "",
+        "attach_ids" => ["clip-1"]
+      })
+
+    assert :ok = EventRouter.route(event, ctx.context, ctx.opts)
+    assert_received {:gateway_ingest, [message], gateway_opts}
+    enrich = gateway_opts[:ingest_enriched_fn]
+
+    assert :ok = enrich.(message)
+    assert_received {:enriched, "main", "client-1", 3, %{content: ""}}
+    refute_received {:event, _target, %{"t" => "row_updated"}}
+
+    assert :ok = enrich.(%{message | content: "Pick up milk"})
+    assert_received {:enriched, "main", "client-1", 3, %{content: "Pick up milk"}}
+
+    assert_received {:event, {:profile, "main"},
+                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 12}}
+
+    refute_received {:event, _target, %{"t" => "row_updated"}}
   end
 
   # The Mac's companion connections and every phone share the phone's

@@ -1096,9 +1096,11 @@ defmodule FermixChannels.Companion.TurnsTest do
   # One announcer for everyone watching a profile (STB-9).
   describe "fan-out across the transports" do
     # The Mac's row carries the message's kind and metadata too (M56 §6), and
-    # never a field its wire does not have (media refs, link previews).
+    # its media refs and link previews (companion protocol 3), never a field
+    # its wire does not have.
     test "a phone hears a row as the history message it renders, the Mac its own fields (R1-6)" do
       image = String.duplicate("c", 64)
+      thumbnail = String.duplicate("d", 64)
 
       media = %{
         "ref" => image,
@@ -1117,8 +1119,22 @@ defmodule FermixChannels.Companion.TurnsTest do
         in_reply_to: nil,
         media_refs: [media],
         metadata: %{"turn_id" => nil, "source" => "phone"},
-        link_previews: [],
+        link_previews: [
+          %{
+            "url" => "https://shop.test/lamp",
+            "site" => "Shop",
+            "title" => "Lamp",
+            "image" => %{"ref" => thumbnail, "kind" => "image", "mime" => "image/png"}
+          }
+        ],
         created_at: ~U[2026-09-27 09:00:00Z]
+      }
+
+      card = %{
+        "url" => "https://shop.test/lamp",
+        "site" => "Shop",
+        "title" => "Lamp",
+        "image_ref" => thumbnail
       }
 
       assert :ok = Fanout.announce("main", Output.row("main", row))
@@ -1134,7 +1150,9 @@ defmodule FermixChannels.Companion.TurnsTest do
                "ts" => "2026-09-27T09:00:00Z",
                "client_msg_id" => "phone-1",
                "kind" => "media",
-               "metadata" => %{"source" => "phone"}
+               "metadata" => %{"source" => "phone"},
+               "media_refs" => [media],
+               "link_previews" => [card]
              }
 
       assert_receive {:mobile_event, "main", phone_row}
@@ -1149,7 +1167,8 @@ defmodule FermixChannels.Companion.TurnsTest do
                "client_msg_id" => "phone-1",
                "kind" => "media",
                "media_refs" => [media],
-               "metadata" => %{"source" => "phone"}
+               "metadata" => %{"source" => "phone"},
+               "link_previews" => [card]
              }
 
       assert {:ok, _frames} =
@@ -1196,7 +1215,7 @@ defmodule FermixChannels.Companion.TurnsTest do
              } = mac_row
 
       assert Map.keys(mac_row) |> Enum.sort() ==
-               ~w(client_msg_id kind profile_id role server_seq t text ts)
+               ~w(client_msg_id kind media_refs profile_id role server_seq t text ts)
 
       assert {:ok, _line} = CompanionProtocol.encode_server_event("row", Map.delete(mac_row, "t"))
 

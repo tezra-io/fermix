@@ -751,11 +751,14 @@ defmodule FermixChannels.Channels.Mobile do
     do: log_unfurl_error(:invalid_resolver_result, other)
 
   # The card is stored on its row before anyone hears of it: history rebuilds
-  # it from there, and `media_fetch` serves its image only through it.
+  # it from there, and `media_fetch` serves its image only through it. The
+  # phones hear the card, and the Mac that the row changed (`row_updated`),
+  # each wire only its own event.
   defp publish_link_preview(profile_id, server_seq, preview, opts) do
     with {:ok, card} <- link_preview_card(preview),
          {:ok, _row} <- attach_link_preview(profile_id, server_seq, card, opts),
-         :ok <- emit_unfurl_event(profile_id, link_preview_event(server_seq, card), opts) do
+         :ok <- emit_unfurl_event(profile_id, link_preview_event(server_seq, card), opts),
+         :ok <- emit_unfurl_event(profile_id, Output.row_updated(profile_id, server_seq), opts) do
       :ok
     else
       {:error, reason} -> log_unfurl_error(:preview_failed, reason)
@@ -820,7 +823,7 @@ defmodule FermixChannels.Channels.Mobile do
   defp emit_unfurl_event(profile_id, event, opts) do
     case Keyword.get(opts, :event_sink) do
       sink when is_function(sink, 2) -> sink.({:profile, profile_id}, event)
-      nil -> emit(profile_id, event)
+      nil -> Fanout.announce(profile_id, event)
     end
   end
 

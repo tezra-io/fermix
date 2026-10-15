@@ -29,11 +29,22 @@ defmodule FermixCore.Companion.Protocol do
   next one began, so a server event names the version that brought it
   (`server_event_version/1`) and a connection is never sent one newer than the
   version its hello declared.
+
+  Version 3 brings the phone's media to the Mac's chat (M66): `media_fetch`
+  asks for a managed local file holding the bytes of a ref a row names,
+  answered `media_path` (the grant) or `media_missing`, and `media_release`
+  lets the file go; `row_updated` says a row already written changed (a voice
+  note's transcript, a stored link preview). Those server events reach a
+  version 3 connection only, and a client event names the version that brought
+  it too (`client_event_version/1`), so a connection that sends one newer than
+  its hello declared is refused. A `row` carries its `media_refs` and
+  `link_previews` on every version: an additive field needs no gate. The
+  window is now {2, 3}, so a version 1 client is refused as too old.
   """
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
-  @protocol_version 2
+  @protocol_version 3
   @min_supported_version max(1, @protocol_version - 1)
 
   # The inbound line cap, the same as the Realtime socket's.
@@ -43,15 +54,34 @@ defmodule FermixCore.Companion.Protocol do
   @max_search_limit 50
   @max_query_length 256
   @max_approval_command_length 1_024
+  # The managed media files a `media_path` grants (version 3): kept within this
+  # many bytes once nobody holds them, and each kept at least this long after
+  # its last release, so a reconnect takes back what was playing.
+  @media_budget_bytes 512 * 1_024 * 1_024
+  @media_release_grace_s 60
+  # A media ref is the sha256 of its bytes, in lowercase hex.
+  @media_ref ~r/\A[0-9a-f]{64}\z/
+  # A row holds at most this many link previews, as the timeline stores them.
+  @max_link_previews 4
 
-  @client_events ~w(client_hello msg command cancel history_pull history_search read_state)
+  @client_events ~w(
+    client_hello msg command cancel history_pull history_search read_state media_fetch
+    media_release
+  )
   @server_events ~w(
     server_hello accepted turn_started text_delta tool_event text_done turn_error turn_done row
-    approval approval_resolved read_state history_page search_results error
+    row_updated approval approval_resolved read_state history_page search_results media_path
+    media_missing error
   )
 
-  # The server events a version after 1 brought; every other one is version 1.
-  @server_event_versions %{"turn_done" => 2}
+  # The events a version after 1 brought; every other one is version 1.
+  @client_event_versions %{"media_fetch" => 3, "media_release" => 3}
+  @server_event_versions %{
+    "turn_done" => 2,
+    "row_updated" => 3,
+    "media_path" => 3,
+    "media_missing" => 3
+  }
 
   # A row a Live call writes carries `metadata.call` (M56 §6): what happened
   # on the call, and which task it was about.
@@ -83,7 +113,9 @@ defmodule FermixCore.Companion.Protocol do
     "cancel" => ~w(profile_id client_msg_id),
     "history_pull" => ~w(profile_id limit),
     "history_search" => ~w(profile_id query limit),
-    "read_state" => ~w(profile_id read_up_to_seq)
+    "read_state" => ~w(profile_id read_up_to_seq),
+    "media_fetch" => ~w(profile_id ref),
+    "media_release" => ~w(profile_id ref)
   }
 
   @server_required %{
@@ -95,12 +127,15 @@ defmodule FermixCore.Companion.Protocol do
     "text_done" => ~w(turn_id server_seq text),
     "turn_error" => ~w(turn_id code message),
     "turn_done" => ~w(turn_id),
-    "row" => ~w(profile_id server_seq role text ts),
+    "row" => ~w(profile_id server_seq role text ts media_refs),
+    "row_updated" => ~w(profile_id server_seq),
     "approval" => ~w(approval_id kind text token ttl_s approve_command deny_command),
     "approval_resolved" => ~w(approval_id outcome),
     "read_state" => ~w(profile_id read_up_to_seq),
     "history_page" => ~w(profile_id messages history_head_seq),
     "search_results" => ~w(profile_id query hits),
+    "media_path" => ~w(ref path kind mime size_bytes sha256),
+    "media_missing" => ~w(ref),
     "error" => ~w(reason)
   }
 
@@ -121,6 +156,17 @@ defmodule FermixCore.Companion.Protocol do
   @doc "Ordered server event catalog."
   @spec server_events() :: [String.t()]
   def server_events, do: @server_events
+
+  @doc """
+  The protocol version that brought client event `type`: a connection whose
+  hello declared an older one is refused it.
+  """
+  @spec client_event_version(String.t()) :: pos_integer()
+  def client_event_version(type) when is_binary(type) do
+    if type in @client_events,
+      do: Map.get(@client_event_versions, type, 1),
+      else: raise(ArgumentError, "unknown companion client event #{inspect(type)}")
+  end
 
   @doc """
   The protocol version that brought server event `type`: a connection whose
@@ -156,6 +202,17 @@ defmodule FermixCore.Companion.Protocol do
   @doc "Longest `history_search` query, in Unicode scalar values."
   @spec max_query_length() :: pos_integer()
   def max_query_length, do: @max_query_length
+
+  @doc """
+  The disk budget, in bytes, the daemon keeps its granted media files within
+  once no connection holds them.
+  """
+  @spec media_budget_bytes() :: pos_integer()
+  def media_budget_bytes, do: @media_budget_bytes
+
+  @doc "How long, in seconds, a released media file is kept before it may be removed."
+  @spec media_release_grace_s() :: pos_integer()
+  def media_release_grace_s, do: @media_release_grace_s
 
   @doc """
   Negotiate a client's `protocol_version` against the daemon's supported range.
@@ -353,6 +410,12 @@ defmodule FermixCore.Companion.Protocol do
 
   defp validate_client("read_state", payload), do: validate_read_state(payload)
 
+  defp validate_client(type, payload) when type in ["media_fetch", "media_release"] do
+    with :ok <- nonempty(payload, "profile_id") do
+      media_ref(payload, "ref")
+    end
+  end
+
   # Version 2 (M56 §4.6): a cancel may name a task that outlived its call by
   # exactly its three ids, the ones its `task_running` row carries.
   defp optional_task_ref(%{"task_ref" => task_ref}) do
@@ -422,9 +485,17 @@ defmodule FermixCore.Companion.Protocol do
     with :ok <- strings(payload, ~w(profile_id role ts)),
          :ok <- positive_u64(payload, "server_seq"),
          :ok <- binary_field(payload, "text"),
+         :ok <- list_field(payload, "media_refs"),
+         :ok <- optional_link_previews(payload),
          :ok <- optional_nonempty(payload, "kind"),
          :ok <- optional_map(payload, "metadata") do
       optional_nonempty(payload, "client_msg_id")
+    end
+  end
+
+  defp validate_server("row_updated", payload) do
+    with :ok <- nonempty(payload, "profile_id") do
+      positive_u64(payload, "server_seq")
     end
   end
 
@@ -462,7 +533,22 @@ defmodule FermixCore.Companion.Protocol do
     end
   end
 
-  defp validate_server("error", payload), do: nonempty(payload, "reason")
+  defp validate_server("media_path", payload) do
+    with :ok <- media_ref(payload, "ref"),
+         :ok <- absolute_path(payload, "path"),
+         :ok <- strings(payload, ~w(kind mime)),
+         :ok <- nonnegative_u64(payload, "size_bytes") do
+      same_digest(payload)
+    end
+  end
+
+  defp validate_server("media_missing", payload), do: media_ref(payload, "ref")
+
+  defp validate_server("error", payload) do
+    with :ok <- nonempty(payload, "reason") do
+      if Map.has_key?(payload, "ref"), do: media_ref(payload, "ref"), else: :ok
+    end
+  end
 
   defp validate_read_state(payload) do
     with :ok <- nonempty(payload, "profile_id") do
@@ -603,6 +689,37 @@ defmodule FermixCore.Companion.Protocol do
         {:error, {:invalid_field, field}}
     end
   end
+
+  defp media_ref(payload, field) do
+    value = Map.get(payload, field)
+
+    if is_binary(value) and Regex.match?(@media_ref, value),
+      do: :ok,
+      else: {:error, {:invalid_field, field}}
+  end
+
+  # The file's bytes were checked against the ref when it was made, so the
+  # digest a grant names is its ref.
+  defp same_digest(%{"sha256" => ref, "ref" => ref}), do: :ok
+  defp same_digest(_payload), do: {:error, {:invalid_field, "sha256"}}
+
+  defp absolute_path(payload, field) do
+    with :ok <- nonempty(payload, field) do
+      if Path.type(payload[field]) == :absolute, do: :ok, else: {:error, {:invalid_field, field}}
+    end
+  end
+
+  # A row has the key only when it has a preview, and holds at most four.
+  defp optional_link_previews(%{"link_previews" => previews}) do
+    if link_previews?(previews), do: :ok, else: {:error, {:invalid_field, "link_previews"}}
+  end
+
+  defp optional_link_previews(_payload), do: :ok
+
+  defp link_previews?(previews) when is_list(previews) and previews != [],
+    do: length(previews) <= @max_link_previews and Enum.all?(previews, &is_map/1)
+
+  defp link_previews?(_previews), do: false
 
   defp list_field(payload, field) do
     if is_list(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}

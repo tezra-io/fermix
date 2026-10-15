@@ -125,7 +125,8 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "server_seq" => 11,
       "role" => "assistant",
       "text" => String.duplicate("x", 1_100_000),
-      "ts" => "2026-09-27T12:00:00Z"
+      "ts" => "2026-09-27T12:00:00Z",
+      "media_refs" => []
     }
 
     assert {:ok, frames} = Protocol.encode_server_event("row", payload, 1, <<>>, [])
@@ -585,13 +586,16 @@ defmodule FermixChannels.Mobile.ProtocolTest do
       "server_seq" => 7,
       "role" => "user",
       "text" => "from the Mac",
-      "ts" => "2026-09-27T09:00:00Z"
+      "ts" => "2026-09-27T09:00:00Z",
+      "media_refs" => []
     }
 
     assert {:ok, _frame} = Protocol.encode_server_frame("row", row, 1)
 
-    assert {:error, {:missing_field, "ts"}} =
-             Protocol.encode_server_frame("row", Map.delete(row, "ts"), 1)
+    for field <- ~w(ts media_refs) do
+      assert {:error, {:missing_field, ^field}} =
+               Protocol.encode_server_frame("row", Map.delete(row, field), 1)
+    end
   end
 
   # Mobile protocol 2 ends every turn: `turn_done` is this wire's own event,

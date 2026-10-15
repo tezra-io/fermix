@@ -19,9 +19,12 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   @server_fixtures Path.join(@priv_dir, "fixtures/server_events.jsonl")
   @mobile_schema_path Application.app_dir(:fermix_core, "priv/mobile/protocol.schema.json")
   @inert_keywords ~w($schema $id $defs title description)
-  # The phone's `row` is this wire's `row` carrying the whole history message,
-  # whose `media_refs` it always has.
-  @phone_only_required %{"row" => ["media_refs"]}
+  # The fields the phone's wire requires of a shared event beyond this wire's.
+  # None since version 3, when this wire's `row` came to require `media_refs`.
+  @phone_only_required %{}
+  # The events version 3 brought (M66): the media grant and the changed row.
+  @version_3_client_events ~w(media_fetch media_release)
+  @version_3_server_events ~w(row_updated media_path media_missing)
 
   setup_all do
     %{
@@ -54,6 +57,52 @@ defmodule FermixCore.Companion.ProtocolContractTest do
                Protocol.server_event_version(type),
              "#{type} names a different version than the protocol module"
     end
+  end
+
+  # A connection that sends an event newer than its hello declared is
+  # refused, so the export names that version as the module does.
+  test "each client event def names the version that brought it", %{schema: schema} do
+    for type <- Protocol.client_events() do
+      assert Map.get(schema["$defs"][type], "x-since-version", 1) ==
+               Protocol.client_event_version(type),
+             "#{type} names a different version than the protocol module"
+    end
+  end
+
+  # M66: the grant and the changed row are version 3's, on this wire alone:
+  # the phone's own `media_fetch` streams bytes rather than granting a file.
+  test "the media grant and row_updated are version 3 events this wire does not share", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert Protocol.protocol_version() == 3
+
+    for type <- @version_3_client_events do
+      assert Protocol.client_event_version(type) == 3, "#{type} is not a version 3 event"
+      assert schema["$defs"][type]["x-since-version"] == 3
+      refute type in Protocol.shared_client_events()
+    end
+
+    for type <- @version_3_server_events do
+      assert Protocol.server_event_version(type) == 3, "#{type} is not a version 3 event"
+      assert schema["$defs"][type]["x-since-version"] == 3
+      refute type in Protocol.shared_server_events()
+    end
+
+    assert protocol =~ "### Version 3: phone-side media and rows that change"
+    assert protocol =~ "streams the bytes"
+  end
+
+  test "the schema publishes the managed media files' budget and grace", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    assert schema["x-media-budget-bytes"] == Protocol.media_budget_bytes()
+    assert schema["x-media-release-grace-s"] == Protocol.media_release_grace_s()
+
+    [_before, files] = String.split(protocol, "## Managed media files", parts: 2)
+    assert files =~ "#{div(Protocol.media_budget_bytes(), 1_024 * 1_024)} MiB"
+    assert files =~ "#{Protocol.media_release_grace_s()} s"
   end
 
   test "every per-event def is reachable from a discriminator" do
@@ -168,6 +217,34 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     end
 
     refute protocol =~ "This wire's `row` is unchanged"
+  end
+
+  # M66: a row carries the history message's media refs, always, and its link
+  # previews when it has one, on every version, so a new row needs no read.
+  test "every golden row carries its media refs, one a voice note, one a picture and a preview",
+       %{schema: schema} do
+    rows = @server_fixtures |> jsonl() |> Enum.filter(&(&1["type"] == "row"))
+
+    assert Enum.all?(rows, &is_list(&1["media_refs"]))
+
+    assert Enum.any?(
+             rows,
+             &match?([%{"kind" => "audio", "mime" => "audio/ogg"}], &1["media_refs"])
+           )
+
+    assert Enum.any?(rows, fn row ->
+             row["media_refs"] != [] and match?([%{"image_ref" => _ref}], row["link_previews"])
+           end)
+
+    row = schema["$defs"]["row"]
+    message = schema["$defs"]["historyMessage"]["properties"]
+
+    for field <- ~w(media_refs link_previews) do
+      assert row["properties"][field] == message[field], "row #{field} is not the message's"
+    end
+
+    assert "media_refs" in row["required"]
+    refute "link_previews" in row["required"]
   end
 
   # M56 §4.2: the call's one row when it ends, as the Mac hears it and as a
@@ -369,7 +446,9 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       "cancel" => %{"profile_id" => "main", "client_msg_id" => "c"},
       "history_pull" => %{"profile_id" => "main", "limit" => 5},
       "history_search" => %{"profile_id" => "main", "query" => "q", "limit" => 5},
-      "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0}
+      "read_state" => %{"profile_id" => "main", "read_up_to_seq" => 0},
+      "media_fetch" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)},
+      "media_release" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)}
     }
   end
 

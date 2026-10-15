@@ -142,6 +142,16 @@ defmodule FermixChannels.Companion.Output do
   end
 
   @doc """
+  A row already written changed: its text (a voice note's transcript replaced
+  it), its media refs, or its link previews (companion protocol 3). It carries
+  none of it; a client that holds the row reads it again.
+  """
+  @spec row_updated(String.t(), pos_integer()) :: event()
+  def row_updated(profile_id, server_seq)
+      when is_binary(profile_id) and is_integer(server_seq) and server_seq > 0,
+      do: %{"t" => "row_updated", "profile_id" => profile_id, "server_seq" => server_seq}
+
+  @doc """
   The exported shape of one timeline row, a history page's message. Internal
   columns never ship, so a column added later can never leak to a client, and
   `ts` is always there. A row's link previews ship as the cards `link_preview`

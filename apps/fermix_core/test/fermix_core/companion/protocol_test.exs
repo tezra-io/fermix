@@ -4,29 +4,42 @@ defmodule FermixCore.Companion.ProtocolTest do
   alias FermixCore.Companion.Protocol
 
   test "publishes the version window, the line cap and the ordered catalogs" do
-    assert Protocol.protocol_version() == 2
-    assert Protocol.supported_version_range() == {1, 2}
+    assert Protocol.protocol_version() == 3
+    assert Protocol.supported_version_range() == {2, 3}
     assert Protocol.max_line_bytes() == 65_536
 
     assert Protocol.client_events() ==
-             ~w(client_hello msg command cancel history_pull history_search read_state)
+             ~w(client_hello msg command cancel history_pull history_search read_state
+                media_fetch media_release)
 
     assert Protocol.server_events() ==
              ~w(server_hello accepted turn_started text_delta tool_event text_done turn_error
-                turn_done row approval approval_resolved read_state history_page search_results
-                error)
+                turn_done row row_updated approval approval_resolved read_state history_page
+                search_results media_path media_missing error)
   end
 
   # M56 §6: a turn that ends with no reply needs a frame an older client would
-  # not survive, so it goes only to a connection that declared version 2.
-  test "every server event names the version that brought it, turn_done version 2" do
-    assert Protocol.server_event_version("turn_done") == 2
+  # not survive, so it goes only to a connection that declared version 2; the
+  # media grant and the changed row (M66) only to one that declared 3.
+  test "every server event names the version that brought it" do
+    later = %{"turn_done" => 2, "row_updated" => 3, "media_path" => 3, "media_missing" => 3}
 
-    for type <- Protocol.server_events() -- ["turn_done"] do
-      assert Protocol.server_event_version(type) == 1, "#{type} is not a version 1 event"
+    for type <- Protocol.server_events() do
+      assert Protocol.server_event_version(type) == Map.get(later, type, 1),
+             "#{type} names the wrong version"
     end
 
-    refute "turn_done" in Protocol.shared_server_events()
+    for type <- Map.keys(later), do: refute(type in Protocol.shared_server_events())
+  end
+
+  test "every client event names the version that brought it, the media grant's version 3" do
+    for type <- Protocol.client_events() do
+      expected = if type in ~w(media_fetch media_release), do: 3, else: 1
+      assert Protocol.client_event_version(type) == expected, "#{type} names the wrong version"
+    end
+
+    refute "media_fetch" in Protocol.shared_client_events()
+    assert_raise ArgumentError, fn -> Protocol.client_event_version("ping") end
   end
 
   test "turn_done names the turn it ends and nothing else" do
@@ -49,11 +62,11 @@ defmodule FermixCore.Companion.ProtocolTest do
     assert "row" in Protocol.shared_server_events()
   end
 
-  test "negotiates directionally, version 1 and version 2 both accepted" do
-    assert :ok = Protocol.negotiate(1)
+  test "negotiates directionally, version 2 and version 3 both accepted, version 1 too old" do
     assert :ok = Protocol.negotiate(2)
-    assert {:error, :client_too_old} = Protocol.negotiate(0)
-    assert {:error, :client_too_new} = Protocol.negotiate(3)
+    assert :ok = Protocol.negotiate(3)
+    assert {:error, :client_too_old} = Protocol.negotiate(1)
+    assert {:error, :client_too_new} = Protocol.negotiate(4)
   end
 
   test "client_hello refuses a missing or malformed version with the Realtime reasons" do
@@ -165,18 +178,18 @@ defmodule FermixCore.Companion.ProtocolTest do
 
   test "the encoder writes one newline-terminated object with its type" do
     assert {:ok, line} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 2})
+             Protocol.encode_server_event("server_hello", %{min_version: 2, max_version: 3})
 
     assert String.ends_with?(line, "\n")
 
     assert Jason.decode!(line) == %{
              "type" => "server_hello",
-             "min_version" => 1,
-             "max_version" => 2
+             "min_version" => 2,
+             "max_version" => 3
            }
 
     assert {:error, {:invalid_field, "version_range"}} =
-             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 1})
+             Protocol.encode_server_event("server_hello", %{min_version: 1, max_version: 3})
   end
 
   test "the encoder refuses explicit nulls, a written type and unknown events" do
@@ -232,7 +245,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "server_seq" => 12,
       "role" => "user",
       "text" => "What is on my calendar today?",
-      "ts" => "2026-09-25T09:00:00Z"
+      "ts" => "2026-09-25T09:00:00Z",
+      "media_refs" => []
     }
 
     assert {:ok, _line} = Protocol.encode_server_event("row", row)
@@ -262,7 +276,8 @@ defmodule FermixCore.Companion.ProtocolTest do
       "text" => "It is at https://x.test/form.",
       "ts" => "2026-10-03T10:00:00Z",
       "kind" => "text",
-      "metadata" => %{"call" => shared_call()}
+      "metadata" => %{"call" => shared_call()},
+      "media_refs" => []
     }
 
     assert {:ok, _line} = Protocol.encode_server_event("row", row)
@@ -272,6 +287,109 @@ defmodule FermixCore.Companion.ProtocolTest do
 
     assert {:error, {:invalid_field, "metadata"}} =
              Protocol.encode_server_event("row", %{row | "metadata" => "call"})
+  end
+
+  # M66: a row carries the history message's media refs, always, and its link
+  # previews only when it has one, at most four.
+  test "a row always carries its media refs, and its link previews only when it has one" do
+    preview = %{"url" => "https://shop.test/lamp", "site" => "Shop", "title" => "Lamp"}
+
+    row = %{
+      "profile_id" => "main",
+      "server_seq" => 21,
+      "role" => "user",
+      "text" => "",
+      "ts" => "2026-10-03T10:00:00Z",
+      "kind" => "media",
+      "media_refs" => [
+        %{"ref" => ref(), "kind" => "audio", "mime" => "audio/ogg", "size_bytes" => 48_213}
+      ]
+    }
+
+    assert {:ok, _line} = Protocol.encode_server_event("row", row)
+
+    assert {:ok, _line} =
+             Protocol.encode_server_event("row", Map.put(row, "link_previews", [preview]))
+
+    assert {:error, {:missing_field, "media_refs"}} =
+             Protocol.encode_server_event("row", Map.delete(row, "media_refs"))
+
+    assert {:error, {:invalid_field, "media_refs"}} =
+             Protocol.encode_server_event("row", %{row | "media_refs" => %{}})
+
+    for bad <- [[], List.duplicate(preview, 5), ["https://shop.test/lamp"], preview] do
+      assert {:error, {:invalid_field, "link_previews"}} =
+               Protocol.encode_server_event("row", Map.put(row, "link_previews", bad)),
+             "accepted link_previews #{inspect(bad)}"
+    end
+  end
+
+  test "media_fetch and media_release name a profile and a ref of 64 lowercase hex digits" do
+    for type <- ~w(media_fetch media_release) do
+      event = %{"type" => type, "profile_id" => "main", "ref" => ref()}
+
+      assert {:ok, %{type: ^type, payload: %{"ref" => _ref}}} = decode(event)
+      assert {:error, {:missing_field, "ref"}} = decode(Map.delete(event, "ref"))
+      assert {:error, {:missing_field, "profile_id"}} = decode(Map.delete(event, "profile_id"))
+
+      for bad <- [String.upcase(ref()), String.slice(ref(), 1..63), "../etc/passwd", 7] do
+        assert {:error, {:invalid_field, "ref"}} = decode(%{event | "ref" => bad}),
+               "#{type} accepted ref #{inspect(bad)}"
+      end
+    end
+  end
+
+  test "media_path grants an absolute file whose digest is its ref" do
+    grant = %{
+      "ref" => ref(),
+      "path" => "/Users/me/.fermix/companion/media/#{ref()}.ogg",
+      "kind" => "audio",
+      "mime" => "audio/ogg",
+      "size_bytes" => 48_213,
+      "sha256" => ref()
+    }
+
+    assert {:ok, _line} = Protocol.encode_server_event("media_path", grant)
+
+    assert {:error, {:invalid_field, "path"}} =
+             Protocol.encode_server_event("media_path", %{grant | "path" => "media/x.ogg"})
+
+    assert {:error, {:invalid_field, "sha256"}} =
+             Protocol.encode_server_event("media_path", %{
+               grant
+               | "sha256" => String.duplicate("b", 64)
+             })
+
+    assert {:error, {:invalid_field, "size_bytes"}} =
+             Protocol.encode_server_event("media_path", %{grant | "size_bytes" => -1})
+
+    assert {:error, {:missing_field, "mime"}} =
+             Protocol.encode_server_event("media_path", Map.delete(grant, "mime"))
+  end
+
+  test "media_missing names its ref, row_updated its row, and an error may name a ref" do
+    assert {:ok, _line} = Protocol.encode_server_event("media_missing", %{"ref" => ref()})
+
+    assert {:error, {:invalid_field, "ref"}} =
+             Protocol.encode_server_event("media_missing", %{"ref" => "photo"})
+
+    assert {:ok, line} =
+             Protocol.encode_server_event("row_updated", %{profile_id: "main", server_seq: 21})
+
+    assert Jason.decode!(line) == %{
+             "type" => "row_updated",
+             "profile_id" => "main",
+             "server_seq" => 21
+           }
+
+    assert {:error, {:invalid_field, "server_seq"}} =
+             Protocol.encode_server_event("row_updated", %{profile_id: "main", server_seq: 0})
+
+    failed = %{"reason" => "request_failed", "message" => ":enospc", "ref" => ref()}
+    assert {:ok, _line} = Protocol.encode_server_event("error", failed)
+
+    assert {:error, {:invalid_field, "ref"}} =
+             Protocol.encode_server_event("error", %{failed | "ref" => ""})
   end
 
   describe "validate_call_metadata/1" do
@@ -390,4 +508,6 @@ defmodule FermixCore.Companion.ProtocolTest do
   end
 
   defp decode(map), do: map |> Jason.encode!() |> Protocol.decode_client_event()
+
+  defp ref, do: "9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"
 end

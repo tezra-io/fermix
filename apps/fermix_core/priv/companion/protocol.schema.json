@@ -3,9 +3,11 @@
   "$id": "https://fermix.sh/companion/protocol.schema.json",
   "title": "Fermix companion chat socket protocol",
   "description": "Newline-delimited JSON wire contract between the Fermix daemon and a native companion's chat. Source of truth: FermixCore.Companion.Protocol. See PROTOCOL.md.",
-  "x-protocol-version": 2,
-  "x-supported-version-range": { "min": 1, "max": 2 },
+  "x-protocol-version": 3,
+  "x-supported-version-range": { "min": 2, "max": 3 },
   "x-max-line-bytes": 65536,
+  "x-media-budget-bytes": 536870912,
+  "x-media-release-grace-s": 60,
   "$defs": {
     "clientEvent": {
       "type": "object",
@@ -19,7 +21,9 @@
             "cancel",
             "history_pull",
             "history_search",
-            "read_state"
+            "read_state",
+            "media_fetch",
+            "media_release"
           ]
         }
       },
@@ -51,6 +55,14 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "read_state" } } },
           "then": { "$ref": "#/$defs/read_state" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "media_fetch" } } },
+          "then": { "$ref": "#/$defs/media_fetch" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "media_release" } } },
+          "then": { "$ref": "#/$defs/media_release" }
         }
       ]
     },
@@ -69,11 +81,14 @@
             "turn_error",
             "turn_done",
             "row",
+            "row_updated",
             "approval",
             "approval_resolved",
             "read_state",
             "history_page",
             "search_results",
+            "media_path",
+            "media_missing",
             "error"
           ]
         }
@@ -116,6 +131,10 @@
           "then": { "$ref": "#/$defs/row" }
         },
         {
+          "if": { "required": ["type"], "properties": { "type": { "const": "row_updated" } } },
+          "then": { "$ref": "#/$defs/row_updated" }
+        },
+        {
           "if": { "required": ["type"], "properties": { "type": { "const": "approval" } } },
           "then": { "$ref": "#/$defs/approval" }
         },
@@ -137,6 +156,14 @@
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "search_results" } } },
           "then": { "$ref": "#/$defs/search_results" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "media_path" } } },
+          "then": { "$ref": "#/$defs/media_path" }
+        },
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "media_missing" } } },
+          "then": { "$ref": "#/$defs/media_missing" }
         },
         {
           "if": { "required": ["type"], "properties": { "type": { "const": "error" } } },
@@ -235,6 +262,28 @@
         "read_up_to_seq": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 }
       }
     },
+    "media_fetch": {
+      "type": "object",
+      "description": "Version 3. Asks for a managed local file holding the bytes of ref, a media ref a row of the profile names (in its media_refs, or as a link preview's image_ref). Answered by media_path, media_missing, or error request_failed naming the ref. Not the phone's media_fetch, which streams the bytes.",
+      "x-since-version": 3,
+      "required": ["type", "profile_id", "ref"],
+      "properties": {
+        "type": { "const": "media_fetch" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "media_release": {
+      "type": "object",
+      "description": "Version 3. The client has finished with the file media_path granted for ref. Never answered; releasing a ref this connection does not hold changes nothing.",
+      "x-since-version": 3,
+      "required": ["type", "profile_id", "ref"],
+      "properties": {
+        "type": { "const": "media_release" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "server_hello": {
       "type": "object",
       "required": ["type", "min_version", "max_version"],
@@ -320,8 +369,8 @@
     },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind and metadata are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
-      "required": ["type", "profile_id", "server_seq", "role", "text", "ts"],
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs and link_previews are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
+      "required": ["type", "profile_id", "server_seq", "role", "text", "ts", "media_refs"],
       "properties": {
         "type": { "const": "row" },
         "profile_id": { "type": "string", "minLength": 1 },
@@ -331,7 +380,25 @@
         "ts": { "type": "string", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}" },
         "client_msg_id": { "type": "string", "minLength": 1 },
         "kind": { "type": "string", "minLength": 1 },
-        "metadata": { "type": "object" }
+        "metadata": { "type": "object" },
+        "media_refs": { "type": "array", "items": { "$ref": "#/$defs/mediaRef" } },
+        "link_previews": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "items": { "$ref": "#/$defs/linkPreviewCard" }
+        }
+      }
+    },
+    "row_updated": {
+      "type": "object",
+      "description": "Version 3. A row already written changed: its text (a voice note's transcript replaced it), its media refs, or its link previews (one was stored). Carries no content: a client that holds the row reads it again from history. Sent only to a connection on version 3.",
+      "x-since-version": 3,
+      "required": ["type", "profile_id", "server_seq"],
+      "properties": {
+        "type": { "const": "row_updated" },
+        "profile_id": { "type": "string", "minLength": 1 },
+        "server_seq": { "type": "integer", "minimum": 1 }
       }
     },
     "approval": {
@@ -394,9 +461,34 @@
         "next_before_seq": { "type": "integer", "minimum": 1 }
       }
     },
+    "media_path": {
+      "type": "object",
+      "description": "Version 3. The grant answering media_fetch: path is an absolute managed file, $FERMIX_HOME/companion/media/<ref><ext>, held for this connection until it sends media_release for the ref or closes. kind, mime and size_bytes are the ones the row names for the ref; sha256 equals ref, and the file's bytes were checked against it when it was made. Sent only to a connection on version 3.",
+      "x-since-version": 3,
+      "required": ["type", "ref", "path", "kind", "mime", "size_bytes", "sha256"],
+      "properties": {
+        "type": { "const": "media_path" },
+        "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
+        "path": { "type": "string", "pattern": "^/" },
+        "kind": { "type": "string", "minLength": 1 },
+        "mime": { "type": "string", "minLength": 1 },
+        "size_bytes": { "type": "integer", "minimum": 0, "maximum": 18446744073709551615 },
+        "sha256": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
+    "media_missing": {
+      "type": "object",
+      "description": "Version 3. Nothing to grant for ref: no row of the profile names it, the media store no longer holds its bytes, its bytes no longer match the row, or the phone channel whose store keeps them is off. Sent only to a connection on version 3.",
+      "x-since-version": 3,
+      "required": ["type", "ref"],
+      "properties": {
+        "type": { "const": "media_missing" },
+        "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" }
+      }
+    },
     "error": {
       "type": "object",
-      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not.",
+      "description": "A refusal. reason is the code; the other fields are context. Protocol violations close the connection; request failures do not. ref is set only on the request_failed answering a media_fetch the daemon could not serve.",
       "required": ["type", "reason"],
       "properties": {
         "type": { "const": "error" },
@@ -405,6 +497,7 @@
         "field": { "type": "string" },
         "event": { "type": "string" },
         "client_msg_id": { "type": "string", "minLength": 1 },
+        "ref": { "type": "string", "pattern": "^[0-9a-f]{64}$" },
         "direction": { "enum": ["client_too_old", "client_too_new"] },
         "client_version": { "type": "integer" },
         "min_version": { "type": "integer" },

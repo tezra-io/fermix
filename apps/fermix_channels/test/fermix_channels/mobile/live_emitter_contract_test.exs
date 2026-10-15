@@ -124,6 +124,13 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     assert length(previews) == 2
     for preview <- previews, do: assert_on_the_wire!(preview, schema)
 
+    # Each stored preview also tells the Mac its row changed, an event this
+    # wire does not carry (`Companion.Fanout` sends it to the Mac alone).
+    seq = photo.server_seq
+
+    assert [%{"server_seq" => ^seq}, %{"server_seq" => ^seq}] =
+             received_sink_events("row_updated")
+
     for row <- rows, do: assert_on_the_wire!(Output.row("main", row), schema)
 
     [page] = route!(%{type: "history_pull", payload: history_pull(0)}, ctx)

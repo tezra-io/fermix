@@ -735,6 +735,27 @@ defmodule FermixChannels.Channels.MobileTest do
                <<>>,
                []
              )
+
+    # Then that its row changed, which only the Mac's wire carries.
+    assert_received {:preview_event, {:profile, "main"},
+                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 73}}
+  end
+
+  # M66: with no sink of a caller's own, each wire hears its own event: the
+  # phones the card, and the Mac's connections that the row changed.
+  test "a stored link preview reaches the phones as its card and the Mac as row_updated" do
+    {:ok, _owner} = Registry.register(Companion.registry(), "main", 3)
+
+    assert :ok = Mobile.schedule_unfurl("main", 73, "see https://example.com")
+
+    assert_receive {:preview_attached, "main", 73, %{"url" => "https://example.com"}}
+    assert_receive {:mobile_event, "main", %{"t" => "link_preview", "in_reply_to" => 73}}
+
+    assert_receive {:companion_event,
+                    %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 73}}
+
+    refute_received {:mobile_event, "main", %{"t" => "row_updated"}}
+    refute_received {:companion_event, %{"t" => "link_preview"}}
   end
 
   # D7: the preview card's text is cut to its bounds on a UTF-8 boundary; a

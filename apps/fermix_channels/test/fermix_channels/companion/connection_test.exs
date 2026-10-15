@@ -17,6 +17,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
   alias FermixCore.Memory.Repo
   alias FermixTestSupport.ParentProcess
 
+  @voice_ref "9879f6d3c9efefe8c4f4aabe9d3269762264be52794e96f62ab8ffa53b7fadec"
+
   defmodule GatewayStub do
     def ingest([message], opts) do
       send(Keyword.fetch!(opts, :agent_server), {:gateway_ingest, message, opts})
@@ -49,6 +51,30 @@ defmodule FermixChannels.Companion.ConnectionTest do
         ) do
       if String.starts_with?(id, "inline-"), do: send(test_pid, {:settled_inline, id, settle.()})
       {:noreply, test_pid}
+    end
+  end
+
+  # Stands in for `Companion.MediaGrants` through the same three functions:
+  # each grant and release is reported to the test, and a grant answers what
+  # the test scripted.
+  defmodule GrantsDouble do
+    use Agent
+
+    def start_link({test_pid, answer}), do: Agent.start_link(fn -> {test_pid, answer} end)
+
+    def answer(server, answer),
+      do: Agent.update(server, fn {test_pid, _answer} -> {test_pid, answer} end)
+
+    def grant(server, media, holder) do
+      {test_pid, answer} = Agent.get(server, & &1)
+      send(test_pid, {:granted, media, holder})
+      answer.(media)
+    end
+
+    def release(server, ref, holder) do
+      {test_pid, _answer} = Agent.get(server, & &1)
+      send(test_pid, {:released, ref, holder})
+      :ok
     end
   end
 
@@ -99,6 +125,11 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
     turns = start_supervised!({TurnsStub, self()})
 
+    grants =
+      start_supervised!(
+        {GrantsDouble, {test_pid, fn media -> {:ok, "/granted/#{media.ref}.ogg"} end}}
+      )
+
     start_supervised!(
       Supervisor.child_spec({DynamicSupervisor, name: connections, strategy: :one_for_one},
         id: connections
@@ -118,7 +149,12 @@ defmodule FermixChannels.Companion.ConnectionTest do
       socket_path: socket_path,
       max_clients: 2,
       connection_supervisor: connections,
-      connection_opts: [registry: registry, request_opts: request_opts]
+      connection_opts: [
+        registry: registry,
+        request_opts: request_opts,
+        media_grants: grants,
+        media_grants_module: GrantsDouble
+      ]
     ]
 
     start_supervised!({Endpoint, endpoint_opts})
@@ -131,7 +167,8 @@ defmodule FermixChannels.Companion.ConnectionTest do
       store_opts: store_opts,
       coordinator: coordinator,
       queue_owner: queue_owner,
-      turns: turns
+      turns: turns,
+      grants: grants
     }
   end
 
@@ -147,20 +184,19 @@ defmodule FermixChannels.Companion.ConnectionTest do
     assert closed?(early)
 
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
-    assert recv(client) == %{"type" => "server_hello", "min_version" => 1, "max_version" => 2}
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
+    assert recv(client) == %{"type" => "server_hello", "min_version" => 2, "max_version" => 3}
 
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
     assert %{"type" => "error", "reason" => "unexpected_client_hello"} = recv(client)
     assert closed?(client)
   end
 
-  # M56 §6: version 2 adds `turn_done`, and version 1 is still served. Each
-  # connection is known by the version its hello declared, so the daemon can
-  # tell whether any client attached would hang on a turn with no reply.
-  test "a version 1 and a version 2 client are both served, each known by its version", ctx do
-    old = hello(ctx.socket_path, 1)
-    new = hello(ctx.socket_path, 2)
+  # M66: version 3 adds the media grant and `row_updated`, and version 2 is
+  # still served. Each connection is known by the version its hello declared.
+  test "a version 2 and a version 3 client are both served, each known by its version", ctx do
+    old = hello(ctx.socket_path, 2)
+    new = hello(ctx.socket_path, 3)
 
     versions =
       ctx.registry
@@ -168,7 +204,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
       |> Enum.map(fn {_connection, version} -> version end)
       |> Enum.sort()
 
-    assert versions == [1, 2]
+    assert versions == [2, 3]
 
     for client <- [old, new] do
       send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
@@ -176,18 +212,40 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
-  test "turn_done reaches a version 2 client only; a version 1 client never sees it", ctx do
-    old = hello(ctx.socket_path, 1)
-    new = hello(ctx.socket_path, 2)
+  # Every client now reads `turn_done` (version 2); `row_updated` is version
+  # 3's, so a version 2 client never sees it.
+  test "row_updated reaches a version 3 client only; turn_done reaches both", ctx do
+    old = hello(ctx.socket_path, 2)
+    new = hello(ctx.socket_path, 3)
 
     :ok = Companion.broadcast("main", Output.turn_done("turn-quiet"), ctx.registry)
+    :ok = Companion.broadcast("main", Output.row_updated("main", 21), ctx.registry)
 
     done = %{"t" => "text_done", "turn_id" => "turn-next", "server_seq" => 3, "text" => "Hi"}
     :ok = Companion.broadcast("main", done, ctx.registry)
 
     assert recv(new) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
+    assert recv(new) == %{"type" => "row_updated", "profile_id" => "main", "server_seq" => 21}
     assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(new)
+
+    assert recv(old) == %{"type" => "turn_done", "turn_id" => "turn-quiet"}
     assert %{"type" => "text_done", "turn_id" => "turn-next"} = recv(old)
+  end
+
+  test "a version 1 client is refused as too old", %{socket_path: path} do
+    client = connect(path)
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+
+    assert recv(client) == %{
+             "type" => "error",
+             "reason" => "unsupported_protocol_version",
+             "direction" => "client_too_old",
+             "client_version" => 1,
+             "min_version" => 2,
+             "max_version" => 3
+           }
+
+    assert closed?(client)
   end
 
   # FEAT-2: a client that was not connected when an approval went out gets it
@@ -208,7 +266,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     restart_endpoint(ctx, approvals: approvals)
 
     client = connect(ctx.socket_path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 1})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
     assert %{"type" => "server_hello"} = recv(client)
 
     assert %{"type" => "approval", "approval_id" => id, "ttl_s" => ttl} = recv(client)
@@ -269,15 +327,15 @@ defmodule FermixChannels.Companion.ConnectionTest do
 
   test "a client outside the window learns which side must update", %{socket_path: path} do
     client = connect(path)
-    send_line(client, %{"type" => "client_hello", "protocol_version" => 3})
+    send_line(client, %{"type" => "client_hello", "protocol_version" => 4})
 
     assert recv(client) == %{
              "type" => "error",
              "reason" => "unsupported_protocol_version",
              "direction" => "client_too_new",
-             "client_version" => 3,
-             "min_version" => 1,
-             "max_version" => 2
+             "client_version" => 4,
+             "min_version" => 2,
+             "max_version" => 3
            }
 
     assert closed?(client)
@@ -622,7 +680,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   # error builder, as a failed worker is; at boot recovery nobody is waiting.
   test "a request's late failure is told in this socket's own error", ctx do
     client = hello(ctx.socket_path)
-    [{connection, 1}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 3}] = Registry.lookup(ctx.registry, "main")
 
     assert :ok = Connection.transport(connection).report_failure.("mac-late", {:exit, :timeout})
 
@@ -639,7 +697,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
   test "turn events reach the socket, and each stream snapshot is sent as its unsent suffix",
        ctx do
     client = hello(ctx.socket_path)
-    [{connection, 1}] = Registry.lookup(ctx.registry, "main")
+    [{connection, 3}] = Registry.lookup(ctx.registry, "main")
 
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hel"}})
     send(connection, {:companion_stream, "turn-1", {:snapshot, "Hello"}})
@@ -860,6 +918,152 @@ defmodule FermixChannels.Companion.ConnectionTest do
     end
   end
 
+  describe "the media grant (version 3)" do
+    test "a ref a row names is granted as a managed file, with the row's fields", ctx do
+      append_voice_note(ctx)
+      client = hello(ctx.socket_path)
+
+      send_line(client, media_event("media_fetch", @voice_ref))
+
+      assert recv(client) == %{
+               "type" => "media_path",
+               "ref" => @voice_ref,
+               "path" => "/granted/#{@voice_ref}.ogg",
+               "kind" => "audio",
+               "mime" => "audio/ogg",
+               "size_bytes" => 48_213,
+               "sha256" => @voice_ref
+             }
+
+      assert_receive {:granted, media, holder}
+      assert media == %{ref: @voice_ref, kind: "audio", mime: "audio/ogg", size_bytes: 48_213}
+      assert [{^holder, 3}] = Registry.lookup(ctx.registry, "main")
+    end
+
+    test "a ref no row names is missing, and nothing is granted for it", ctx do
+      client = hello(ctx.socket_path)
+
+      send_line(client, media_event("media_fetch", @voice_ref))
+
+      assert recv(client) == %{"type" => "media_missing", "ref" => @voice_ref}
+      refute_received {:granted, _media, _holder}
+    end
+
+    test "a ref whose bytes the grant cannot find is missing", ctx do
+      append_voice_note(ctx)
+      GrantsDouble.answer(ctx.grants, fn _media -> {:error, :media_missing} end)
+      client = hello(ctx.socket_path)
+
+      send_line(client, media_event("media_fetch", @voice_ref))
+
+      assert recv(client) == %{"type" => "media_missing", "ref" => @voice_ref}
+    end
+
+    test "a grant that fails is a request failure naming the ref, the connection kept", ctx do
+      append_voice_note(ctx)
+      GrantsDouble.answer(ctx.grants, fn _media -> {:error, {:media_copy_failed, :enospc}} end)
+      client = hello(ctx.socket_path)
+
+      log =
+        capture_log(fn ->
+          send_line(client, media_event("media_fetch", @voice_ref))
+
+          assert recv(client) == %{
+                   "type" => "error",
+                   "reason" => "request_failed",
+                   "message" => "{:media_copy_failed, :enospc}",
+                   "ref" => @voice_ref
+                 }
+        end)
+
+      assert log =~ "could not grant media #{@voice_ref}"
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+
+    test "a release reaches the grants for this connection and is never answered", ctx do
+      client = hello(ctx.socket_path)
+      [{connection, 3}] = Registry.lookup(ctx.registry, "main")
+
+      send_line(client, media_event("media_release", @voice_ref))
+      assert_receive {:released, @voice_ref, ^connection}
+
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+
+    test "a ref that is not a sha256 in lowercase hex closes the connection", ctx do
+      client = hello(ctx.socket_path)
+
+      send_line(client, media_event("media_fetch", "../" <> String.slice(@voice_ref, 0, 61)))
+
+      assert recv(client) == %{"type" => "error", "reason" => "invalid_field", "field" => "ref"}
+      assert closed?(client)
+      refute_received {:granted, _media, _holder}
+    end
+
+    test "another profile is refused and the connection kept", ctx do
+      append_voice_note(ctx)
+      client = hello(ctx.socket_path)
+
+      for type <- ~w(media_fetch media_release) do
+        send_line(client, %{media_event(type, @voice_ref) | "profile_id" => "work"})
+        assert recv(client) == %{"type" => "error", "reason" => "unsupported_profile"}
+      end
+
+      refute_received {:granted, _media, _holder}
+      refute_received {:released, _ref, _holder}
+      send_line(client, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+      assert %{"type" => "read_state"} = recv(client)
+    end
+
+    # A version 2 client has no media events: one it sends is unknown to it,
+    # so it is never granted a file whose answer it could not be sent.
+    test "a version 2 connection is refused the grant and closed", ctx do
+      append_voice_note(ctx)
+      client = hello(ctx.socket_path, 2)
+
+      send_line(client, media_event("media_fetch", @voice_ref))
+
+      assert recv(client) == %{
+               "type" => "error",
+               "reason" => "unknown_event",
+               "event" => "media_fetch"
+             }
+
+      assert closed?(client)
+      refute_received {:granted, _media, _holder}
+    end
+  end
+
+  # M66: the gateway's enrichment writes a message's text to its row; a Mac
+  # message has nothing to transcribe, so its row is unchanged and nothing is
+  # announced, and a text that did change is announced to version 3 alone.
+  test "an enrichment announces row_updated only when it changed the row's text", ctx do
+    old = hello(ctx.socket_path, 2)
+    new = hello(ctx.socket_path, 3)
+
+    send_line(new, message("mac-enrich", "pick up milk"))
+    assert %{"type" => "accepted", "client_msg_id" => "mac-enrich"} = recv(new)
+    assert %{"type" => "row", "server_seq" => seq} = recv(new)
+    assert %{"type" => "row", "server_seq" => ^seq} = recv(old)
+    assert_receive {:gateway_ingest, message, gateway_opts}, 2_000
+
+    # Whatever the enrichment announces reaches each connection before the
+    # read state a client asks for after it.
+    enrich = gateway_opts[:ingest_enriched_fn]
+    assert :ok = enrich.(message)
+    send_line(old, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+    assert %{"type" => "read_state"} = recv(new)
+    assert %{"type" => "read_state"} = recv(old)
+
+    assert :ok = enrich.(%{message | content: "Pick up milk and eggs"})
+    send_line(old, %{"type" => "read_state", "profile_id" => "main", "read_up_to_seq" => 0})
+    assert recv(new) == %{"type" => "row_updated", "profile_id" => "main", "server_seq" => seq}
+    assert %{"type" => "read_state"} = recv(new)
+    assert %{"type" => "read_state"} = recv(old)
+  end
+
   test "the exported protocol documents every error reason the socket sends" do
     protocol = File.read!(Application.app_dir(:fermix_core, "priv/companion/PROTOCOL.md"))
 
@@ -867,6 +1071,25 @@ defmodule FermixChannels.Companion.ConnectionTest do
       assert protocol =~ "`#{reason}`", "PROTOCOL.md does not document error #{reason}"
     end
   end
+
+  defp append_voice_note(ctx) do
+    ref = %{
+      "ref" => @voice_ref,
+      "sha256" => @voice_ref,
+      "kind" => "audio",
+      "mime" => "audio/ogg",
+      "size_bytes" => 48_213
+    }
+
+    assert {:ok, _row} =
+             Timeline.append(
+               "main",
+               %{role: "user", content: "", kind: "media", media_refs: [ref]},
+               ctx.store_opts
+             )
+  end
+
+  defp media_event(type, ref), do: %{"type" => type, "profile_id" => "main", "ref" => ref}
 
   defp append_rows(ctx, count) do
     Enum.each(1..count, fn index ->
@@ -887,7 +1110,7 @@ defmodule FermixChannels.Companion.ConnectionTest do
     forward(test_pid)
   end
 
-  defp hello(path, version \\ 1) do
+  defp hello(path, version \\ 3) do
     client = connect(path)
     send_line(client, %{"type" => "client_hello", "protocol_version" => version})
     assert %{"type" => "server_hello"} = recv(client)

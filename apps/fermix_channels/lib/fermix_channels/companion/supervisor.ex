@@ -21,8 +21,13 @@ defmodule FermixChannels.Companion.Supervisor do
 
   1. the request coordinator for this transport, on the boot's shared epoch, so
      a companion request that a crash left unfinished is rerun at boot,
-  2. a `DynamicSupervisor` for the connections, one `temporary` child each,
-  3. the `Endpoint`, which binds `companion.sock` and accepts.
+  2. `Companion.MediaGrants`, the managed media files a connection's
+     `media_fetch` is granted (companion protocol 3), which starts with none:
+     before the connections, so a restart that forgets every hold takes the
+     connections that held them down with it, and its fresh directory never
+     outlives the holds it forgot,
+  3. a `DynamicSupervisor` for the connections, one `temporary` child each,
+  4. the `Endpoint`, which binds `companion.sock` and accepts.
 
   `:rest_for_one`: a registry restart would leave every connection unregistered
   and deaf, so it takes the later children down with it and clients reconnect.
@@ -37,6 +42,7 @@ defmodule FermixChannels.Companion.Supervisor do
   alias FermixChannels.Companion.Connection
   alias FermixChannels.Companion.Endpoint
   alias FermixChannels.Companion.Fanout
+  alias FermixChannels.Companion.MediaGrants
   alias FermixChannels.Companion.Turns
   alias FermixChannels.Mobile.RequestCoordinator
 
@@ -92,10 +98,17 @@ defmodule FermixChannels.Companion.Supervisor do
   defp serving(true, opts, registry, approvals), do: socket_children(opts, registry, approvals)
   defp serving(false, _opts, _registry, _approvals), do: []
 
+  # `:media_grants_opts` are `MediaGrants.start_link/1`'s: a test tree names
+  # its own server and a temporary root, never the home's.
   defp socket_children(opts, registry, approvals) do
     coordinator = Keyword.get(opts, :request_coordinator, @request_coordinator)
     connection_supervisor = Keyword.get(opts, :connection_supervisor, @connection_supervisor)
     store_opts = Keyword.get(opts, :store_opts, [])
+
+    media_grants_opts =
+      Keyword.put_new(Keyword.get(opts, :media_grants_opts, []), :name, MediaGrants)
+
+    media_grants = Keyword.fetch!(media_grants_opts, :name)
 
     request_opts = [
       request_coordinator: coordinator,
@@ -114,12 +127,18 @@ defmodule FermixChannels.Companion.Supervisor do
          recover_request: &Connection.recover_request/3},
         id: coordinator
       ),
+      Supervisor.child_spec({MediaGrants, media_grants_opts}, id: media_grants),
       {DynamicSupervisor, name: connection_supervisor, strategy: :one_for_one},
       {Endpoint,
        Keyword.take(opts, [:socket_path, :max_clients]) ++
          [
            connection_supervisor: connection_supervisor,
-           connection_opts: [registry: registry, request_opts: request_opts, approvals: approvals]
+           connection_opts: [
+             registry: registry,
+             request_opts: request_opts,
+             approvals: approvals,
+             media_grants: media_grants
+           ]
          ]}
     ]
   end
