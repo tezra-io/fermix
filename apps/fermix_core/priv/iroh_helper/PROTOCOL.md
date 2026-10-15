@@ -127,10 +127,14 @@ helper                                   daemon
   address-discovery port. These are the only relays the endpoint uses. The
   endpoint uses no address lookup service, so it never publishes to or resolves
   through a third party.
-- **`limits.max_connections`:** concurrent iroh connections, 1 to 1,024. A
-  connection over the bound is refused before its handshake (iroh's
-  `Incoming::refuse`), so it costs no key exchange, and reported as `refused`
-  `busy`.
+- **`limits.max_connections`:** concurrent iroh connections, 1 to 1,024,
+  handshaking ones included. A connection over the bound is refused before its
+  handshake (iroh's `Incoming::refuse`), so it costs no key exchange, and
+  reported as `refused` `busy`. No connection holds a place for nothing: a
+  handshake not finished within **10 s** is dropped, a connection that has had
+  no stream for **30 s** is closed with code `0`, reason `idle`, and once half
+  the places are taken a new peer whose address QUIC has not validated is sent
+  a Retry first, so forged packets never take one.
 - **`limits.max_streams_per_connection`:** concurrent bidirectional streams on one
   connection, 1 to 16, applied as the connection's QUIC bidirectional stream
   credit: a peer past it waits for a stream to close; the helper neither sees
@@ -184,8 +188,9 @@ bounds WebSocket connections: the helper may open up to
 `max_connections × max_streams_per_connection` of them.
 
 Ending a stream never closes the iroh connection: a phone renews its session on a
-new stream of the same connection, and an idle connection ends on iroh's own idle
-timeout.
+new stream of the same connection, opened as the last one ends. A connection with
+no stream for 30 s is closed (`idle`, above); iroh's keep-alive would otherwise
+hold it for as long as the peer answers.
 
 ## Fixtures
 

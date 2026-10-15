@@ -98,6 +98,10 @@ uint32be length | type | payload
   phone that ends a session sends a type `2` frame, or none, and then finishes
   or resets its sending half. A stream whose sending half the phone leaves open
   holds one of the connection's four stream slots until the connection closes.
+- A phone may keep its iroh connection between sessions and open the next
+  session's stream on it, as the last one ends. A connection with no stream for
+  30 s is closed (code `0`, reason `idle`); the phone dials again when it next
+  needs one.
 - The bounds of *Transport* hold per stream: the handshake deadline, the
   150 s idle bound (close `1002`, `no inbound frame`), the one-hour session,
   and the two memory bounds. The daemon takes at most 64
