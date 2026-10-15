@@ -61,7 +61,10 @@
 (* it, its channel writing a reply as it comes, with none held to drop.    *)
 (* Each client's version is fixed here                                     *)
 (* (V1Clients); turn_done itself is read by no client rule, so it is not   *)
-(* put on the wire.                                                        *)
+(* put on the wire. Since companion protocol 3 the daemon's window is      *)
+(* {2, 3} and a version 1 hello is refused, so no version 1 client joins   *)
+(* any more: the checks that name one (34, 35) prove the gate the code     *)
+(* still keeps (every_client_reads?), not a client the daemon admits.      *)
 (*                                                                         *)
 (* Not modelled:                                                           *)
 (* - text_delta, tool_event, turn_started, read_state: live-only, never in *)
@@ -126,17 +129,22 @@
 (* Turns, and stops that task's own turn through Voice.Detached, a named   *)
 (* stop as turn_queue proves it; that task's running and done rows are     *)
 (* call rows, which the job's row stands for, written after the call ends; *)
+(* - protocol 3's row_updated and media grants (M66): row_updated names a  *)
+(* row already written whose text or previews changed, assigns no seq and  *)
+(* moves no cursor, and a client reads that row again below its cursor; a  *)
+(* media_fetch or media_release holds or lets go a file                    *)
+(* (Companion.MediaGrants), with no request, turn or timeline state;       *)
 (* - other conversations (the Queue keys all state by conversation).       *)
 (*                                                                         *)
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 18aad614adcd
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ dd99cb050c33
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 90aff2a813e9
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 682bdb005ef6
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 6da22657cacf
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ e53c2a581752
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ c76eab50921a
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 78fdfd1faa04
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ bac4baea8aa7
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ bfbb1b3bcbc5

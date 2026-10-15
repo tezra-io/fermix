@@ -172,7 +172,9 @@ answers however busy it is, so the model folds the Queue's stop into that
 - `SilentTurns`: a GPT-Live call in the chat is up, so a turn whose snapshot
   lets it end with no reply may answer exactly `[SILENT]`. With it off the
   silence decision is never taken and the state space is the one before.
-  `V1Clients` names the clients on companion protocol 1.
+  `V1Clients` names the clients on companion protocol 1. Since protocol 3 the
+  daemon refuses a version 1 hello, so only checks 34 and 35, which prove the
+  silence gate the code keeps, name one.
 
 **Mechanism switches** (`TRUE` is the real code; each is switched off only by
 the checks that show a rule needs it):
