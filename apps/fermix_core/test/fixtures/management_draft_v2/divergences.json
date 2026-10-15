@@ -565,6 +565,156 @@
       "why": "ADDED to every settings row: the longer explanation a surface keeps behind an info control rather than showing inline, while `footer` stays the one short line under the control. It is null on every row with nothing more to say, which is every row the draft draws. The one row that carries a string today is the Venice model row, where each option's label ends in the model's privacy tier and the two words mean materially different things: a private model's prompt is not kept, an anonymized model's prompt is read by the model's own maker. Saying that inline under the picker is three sentences of footer nobody asked for. E5: draw an (i) beside a row that carries one and reveal the text on demand; an absent key, null and an empty string all mean the row has none."
     },
     {
+      "method": "settings.get",
+      "field": "channels.discord:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.signal:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.slack:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.telegram:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "channels.whatsapp:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_history:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "computer_use:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "editors:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "generate_image:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "harness:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "meetings:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "memory:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "personalization:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.anthropic:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.mistral:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.ollama:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openai_codex:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.openrouter:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "providers.xai:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "realtime:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "routing:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "sandbox:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "transcription:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
+      "method": "settings.get",
+      "field": "web_search:rows[].advanced",
+      "kind": "engine_only",
+      "why": "ADDED to every settings row: whether the row is one most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. It says nothing about how the row applies; `restart` does. False on every row the draft draws. The rows that carry true today are the phone channel's port, listen address and local-network announcement, so the Phone sheet shows its phones and its reach-from-anywhere switch and fits its window. E5: draw a section's advanced rows last, under one closed disclosure; an absent key means false."
+    },
+    {
       "method": "settings.get:computer_use",
       "field": "rows:computer_use_background",
       "kind": "engine_only",

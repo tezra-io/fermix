@@ -49,33 +49,41 @@ defmodule FermixCore.Management.Settings.Mobile do
       ),
       Row.new("mobile_iroh", :toggle, "Reach from anywhere",
         # What the switch does, not whether it works today: the phone channel's
-        # status says that (`remote`), and two lines fit the Phone sheet.
-        footer:
-          "Lets a paired phone reach this Fermix from any network through Fermix's relays, " <>
-            "which never see your messages.",
+        # status says that (`remote`). One line, so the Phone sheet fits its
+        # window; `info` says what off does, because Listen on and the
+        # announcement do not confine this route.
+        footer: "Uses Fermix's relays, which never see your messages.",
+        info:
+          "When your phone can't reach this Mac over your home network or Tailscale, " <>
+            "it goes through Fermix's relays. They pass on encrypted traffic and never " <>
+            "see your messages. Off keeps your phone to your home network and Tailscale.",
         value: Source.boolean(block, :iroh, true),
         restart: reach_restart
       ),
+      # The network rows: rarely changed, so `advanced`. Neither the address
+      # nor the announcement reaches the relay route, so neither footer may
+      # promise a Tailscale-only phone.
       Row.new("mobile_port", :number, "Port",
-        footer: "The phone reaches this port. Change it only if something else uses it.",
+        footer: "Change it only if something else uses it.",
         value: Source.number(block, :port, @default_port),
         min: 1_024,
         max: 65_535,
         step: 1,
         format: :integer,
-        restart: restart
+        restart: restart,
+        advanced: true
       ),
       Row.new("mobile_bind", :text, "Listen on",
-        footer:
-          "Every network by default, or one address, such as your Tailscale IP, " <>
-            "to listen only there.",
+        footer: "Every network, or only the one address you enter.",
         value: Source.string(block, :bind, @default_bind),
-        restart: restart
+        restart: restart,
+        advanced: true
       ),
       Row.new("mobile_advertise_mdns", :toggle, "Announce on the local network",
-        footer: "Off when you want the phone to reach this machine only over Tailscale.",
+        footer: "Lets devices on this network find this Fermix.",
         value: Source.boolean(block, :advertise_mdns, false),
-        restart: restart
+        restart: restart,
+        advanced: true
       )
     ]
   end

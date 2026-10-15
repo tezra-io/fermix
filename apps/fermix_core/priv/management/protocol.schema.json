@@ -1460,6 +1460,7 @@
         "label",
         "footer",
         "info",
+        "advanced",
         "value",
         "present",
         "options",
@@ -1481,6 +1482,10 @@
         "info": {
           "description": "A longer explanation a surface keeps behind an info control rather than showing inline; the footer stays the short inline line. Null on every row with nothing more to say.",
           "type": ["string", "null"]
+        },
+        "advanced": {
+          "description": "A row most people never need to change, which a surface draws after the section's other rows under one disclosure that starts closed. False on every other row.",
+          "type": "boolean"
         },
         "value": { "$ref": "#/$defs/settingValue" },
         "present": {

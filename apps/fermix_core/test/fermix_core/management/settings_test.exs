@@ -55,8 +55,8 @@ defmodule FermixCore.Management.SettingsTest do
   @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
 
   @row_fields ~w(
-    key kind label footer info value present options min max step restart read_only suggestions
-    unit format
+    key kind label footer info advanced value present options min max step restart read_only
+    suggestions unit format
   )
 
   setup do
@@ -168,6 +168,17 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert_raise ArgumentError, ~r/row k declared/, fn ->
         Row.new("k", :text, "Label", restart: false, info: :venice)
+      end
+    end
+
+    test "a row is not advanced unless its call site says so" do
+      assert Row.new("k", :text, "Label", restart: false)["advanced"] == false
+      assert Row.new("k", :text, "Label", restart: false, advanced: true)["advanced"] == true
+    end
+
+    test "a non-boolean advanced flag fails at build time" do
+      assert_raise ArgumentError, ~r/row k declared a non-boolean advanced/, fn ->
+        Row.new("k", :text, "Label", restart: false, advanced: "yes")
       end
     end
 
@@ -1189,6 +1200,25 @@ defmodule FermixCore.Management.SettingsTest do
              ]
 
       refute Enum.any?(rows, & &1["read_only"])
+
+      # The network rows are for the few who need them; the switches are not.
+      assert Enum.map(rows, &{&1["key"], &1["advanced"]}) == [
+               {"mobile_enabled", false},
+               {"mobile_iroh", false},
+               {"mobile_port", true},
+               {"mobile_bind", true},
+               {"mobile_advertise_mdns", true}
+             ]
+
+      # Each footer the Mac's Phone sheet draws is one line there, in a column
+      # of about 55 characters; the longer story is the switch's `info`. The
+      # channel's own switch is drawn on the Channels row, not in the sheet.
+      for %{"key" => key, "footer" => footer} <- rows,
+          key != "mobile_enabled",
+          do: assert(String.length(footer) <= 55, "#{key}'s footer wraps: #{footer}")
+
+      assert row("channels.mobile", "mobile_iroh")["info"] =~
+               "Off keeps your phone to your home network and Tailscale."
 
       assert %{"min" => 1024, "max" => 65_535, "step" => 1, "format" => "integer", "unit" => nil} =
                row("channels.mobile", "mobile_port")

@@ -385,7 +385,9 @@ Notes that the shapes alone do not carry:
   switch and the remote-reach switch `mobile_iroh` (on by default), each
   applied the moment it is written (their rows' `restart` is false), and the
   port, the address it listens on and the local-network announcement, which
-  are read when the channel starts and are boot-bound. Remote reach is
+  are read when the channel starts, are boot-bound and are `advanced`. Neither
+  the address nor the announcement reaches remote reach: only its own switch
+  keeps a phone to the home network and Tailscale. Remote reach is
   switched within a running channel: with the channel off it is read when the
   channel starts, and a write says in `side_effects` when the rail did not
   follow it. It is a section of its own rather than a
@@ -539,10 +541,16 @@ Notes that the shapes alone do not carry:
   the one short line under the control and is always shown; `info` is a
   paragraph a client puts behind an `(i)` beside the row and reveals on demand.
   It is `null` on every row with nothing more to say, which is most of them.
-  Today two rows carry it: the Venice model row, where the privacy tier in each
-  model's label is two words that mean materially different things, and the
+  Today three rows carry it: the Venice model row, where the privacy tier in
+  each model's label is two words that mean materially different things; the
   secrets section's store row, where the choice trades a keyring password for
-  a file that is not encrypted.
+  a file that is not encrypted; and the phone channel's reach-from-anywhere
+  switch, which says what turning it off keeps the phone to.
+- **`advanced` marks a row most people never need to change.** A client draws
+  a section's advanced rows after its other rows, under one disclosure that
+  starts closed; a section with none draws no disclosure. It says nothing about
+  how the row applies, which is `restart`'s job. Today the phone channel's
+  port, listen address and local-network announcement carry it.
 - **The secrets section chooses where a new secret is kept.** Section
   `secrets`, pane `secrets`, publishes one closed choice row, `secret_store`:
   `keyring` (the default, and what a home that never chose reads as) or `file`,

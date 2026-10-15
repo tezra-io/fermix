@@ -26,7 +26,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   messages. It needs the `fermix-iroh` helper, which no build carries yet:
   until one does, the phone channel status and `fermix doctor` say the helper
   is missing, and phones connect over the local network or Tailscale exactly
-  as before. Relay contact starts only once a phone is paired.
+  as before. Relay contact starts only once a phone is paired. The listen
+  address and the local-network announcement do not limit it: an install
+  that listens only on its Tailscale address to keep phones on Tailscale is
+  reachable through the relays too once the helper ships, unless "Reach from
+  anywhere" is turned off. The phone settings now keep the port, the listen
+  address and the announcement under Advanced, through a new `advanced` flag
+  on every settings row.
 - **The Mac chat can show a phone's media (groundwork).** The chat socket
   now hands the Mac app a read-only copy of a voice note, picture or link
   preview image a row names, kept under `companion/media/` in Fermix's home
