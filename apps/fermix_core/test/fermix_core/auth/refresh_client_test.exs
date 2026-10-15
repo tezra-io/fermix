@@ -227,7 +227,7 @@ defmodule FermixCore.Auth.RefreshClientTest do
 
       for options <- [builtin, plugin] do
         assert Map.get(options, :pool_timeout) == 5_000
-        assert Map.get(options, :connect_options) == [timeout: 10_000]
+        assert Map.get(options, :connect_options)[:timeout] == 10_000
         assert Map.get(options, :receive_timeout) == 15_000
       end
     end

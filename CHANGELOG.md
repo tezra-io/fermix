@@ -30,6 +30,15 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Fermix reaches a provider over IPv6 when its IPv4 path fails.** Outbound
+  connections now try IPv6 first and fall back to IPv4, the order curl and
+  browsers use. Since 14 October 2026 OpenAI has answered Sign in with ChatGPT
+  requests with HTTP 520 over IPv4 while the same requests work over IPv6
+  (#139), which left OpenAI Codex with no model list and every message failing.
+  On a machine with IPv6 they go through again. A machine without IPv6
+  connects as before. On a network that silently drops IPv6, a new connection
+  waits out its connect timeout before it tries IPv4. Connections through a
+  configured proxy are unchanged.
 - **"What changed" matches what was said before.** Asked to redo an answer
   against an earlier one, the assistant could report a move that never
   happened, such as calling an item "no longer the top priority" when its own

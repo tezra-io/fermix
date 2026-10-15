@@ -209,7 +209,8 @@ listener; `AnthropicLogin`, `XAILogin`, and plugin providers through
 retrying once on a stale socket and never on a timeout. `Net.Egress` decides how
 each connection leaves: direct, or through the HTTP proxy `[fermix_core.network]`
 names, in which case pooled requests use the `FermixCore.Finch.Proxied` twin and
-HTTPS is tunnelled with `CONNECT`. `Net.TimeoutPolicy`
+HTTPS is tunnelled with `CONNECT`. A direct dial tries IPv6 first and falls back
+to IPv4 (`Net.Egress.prefer_ipv6/1`). `Net.TimeoutPolicy`
 holds the receive timeout for each request kind, `Net.Tls` the verified TLS
 options for WebSockets, and `Net.Guard` the public-URL checks.
 `FermixCore.Timeouts` names the non-HTTP deadlines.

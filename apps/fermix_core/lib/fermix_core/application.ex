@@ -309,12 +309,19 @@ defmodule FermixCore.Application do
 
   # Public (@doc false) because Finch has no API to read pool config back,
   # so tests pin these literals here — a regression to the :infinity / count:1
-  # defaults would otherwise be invisible to the suite.
+  # defaults would otherwise be invisible to the suite. Every pool dials IPv6
+  # first and falls back to IPv4 (`Egress.prefer_ipv6/1`).
   @doc false
   @spec finch_pools() :: %{(atom() | String.t()) => keyword()}
   def finch_pools do
     Map.merge(
-      %{:default => [conn_max_idle_time: @http_conn_max_idle_ms, count: @http_pool_count]},
+      %{
+        :default => [
+          conn_max_idle_time: @http_conn_max_idle_ms,
+          count: @http_pool_count,
+          conn_opts: Egress.prefer_ipv6([])
+        ]
+      },
       Map.new(@web_search_hosts, &{&1, web_search_pool()})
     )
   end
@@ -323,7 +330,7 @@ defmodule FermixCore.Application do
     [
       conn_max_idle_time: @http_conn_max_idle_ms,
       count: @http_pool_count,
-      conn_opts: [transport_opts: [timeout: @web_search_connect_timeout_ms]]
+      conn_opts: Egress.prefer_ipv6(transport_opts: [timeout: @web_search_connect_timeout_ms])
     ]
   end
 

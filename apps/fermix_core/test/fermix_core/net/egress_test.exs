@@ -12,6 +12,9 @@ defmodule FermixCore.Net.EgressTest do
            )
   @direct Egress.new([])
 
+  # A request's arrival at a loopback listener this test owns, on a loaded runner.
+  @arrival_ms 10_000
+
   describe "normalize/1" do
     test "an absent or empty section is no proxy" do
       assert Egress.normalize(nil) == []
@@ -189,11 +192,18 @@ defmodule FermixCore.Net.EgressTest do
   end
 
   describe "connect_options/3" do
-    test "a direct route keeps the caller's options byte for byte" do
+    test "a direct route keeps the caller's options and dials IPv6 first" do
       base = [timeout: 3_000, transport_opts: [server_name_indication: ~c"example.test"]]
 
-      assert Egress.connect_options(@direct, "https://example.test", base) == base
-      assert Egress.connect_options(@proxied, "http://localhost:11434", base) == base
+      for options <- [
+            Egress.connect_options(@direct, "https://example.test", base),
+            Egress.connect_options(@proxied, "http://localhost:11434", base)
+          ] do
+        assert Keyword.delete(options, :transport_opts) == [timeout: 3_000]
+
+        assert Enum.sort(options[:transport_opts]) ==
+                 [inet6: true, server_name_indication: ~c"example.test"]
+      end
     end
 
     test "an HTTPS route shares the caller's connect budget across the three proxy phases" do
@@ -254,12 +264,15 @@ defmodule FermixCore.Net.EgressTest do
 
         assert proxy_opts[:transport_opts][:timeout] + proxy_opts[:tunnel_timeout] +
                  proxied[origin][:conn_opts][:transport_opts][:timeout] <= budget
+
+        # The hop dials the proxy, as before; the proxy picks the origin's family.
+        refute proxied[origin][:conn_opts][:transport_opts][:inet6]
       end
     end
   end
 
   describe "attach/3 on a site-owned request" do
-    test "adds the proxy for a proxied hop and leaves a bypassed hop as the caller built it" do
+    test "adds the proxy for a proxied hop; a bypassed hop keeps the caller's options" do
       parent = self()
 
       adapter = fn request ->
@@ -274,6 +287,8 @@ defmodule FermixCore.Net.EgressTest do
       assert {:ok, %{status: 200}} = Req.request(remote)
       assert_receive {:hop, "remote.test", options}
       assert {:http, "proxy.test", 3128, _proxy_opts} = options[:proxy]
+      # The hop dials the proxy, as before; the proxy picks the origin's family.
+      refute options[:transport_opts][:inet6]
 
       local =
         Req.new(
@@ -284,21 +299,23 @@ defmodule FermixCore.Net.EgressTest do
         |> Egress.attach(:direct, @proxied)
 
       assert {:ok, %{status: 200}} = Req.request(local)
-      assert_receive {:hop, "git.corp.test", [timeout: 10_000]}
+      assert_receive {:hop, "git.corp.test", options}
+      assert Keyword.delete(options, :transport_opts) == [timeout: 10_000]
+      assert options[:transport_opts] == [inet6: true]
     end
 
-    test "a request that set no connect options still has none on a direct hop" do
+    test "a request that set no connect options gets only the IPv6-first dial" do
       parent = self()
 
       adapter = fn request ->
-        send(parent, {:hop, Map.has_key?(request.options, :connect_options)})
+        send(parent, {:hop, request.options[:connect_options]})
         {request, Req.Response.new(status: 200)}
       end
 
       request = Req.new(url: "https://example.test", adapter: adapter)
 
       assert {:ok, _response} = request |> Egress.attach(:direct, @direct) |> Req.request()
-      assert_receive {:hop, false}
+      assert_receive {:hop, [transport_opts: [inet6: true]]}
     end
 
     test "a redirect is routed again, so a bypassed target does not inherit the proxy" do
@@ -322,7 +339,9 @@ defmodule FermixCore.Net.EgressTest do
       assert {:ok, %{status: 200}} = Req.request(request)
       assert_receive {:hop, "remote.test", first}
       assert {:http, "proxy.test", 3128, _proxy_opts} = first[:proxy]
-      assert_receive {:hop, "git.corp.test", [timeout: 10_000]}
+      assert_receive {:hop, "git.corp.test", bypassed}
+      assert Keyword.delete(bypassed, :transport_opts) == [timeout: 10_000]
+      assert bypassed[:transport_opts] == [inet6: true]
     end
 
     test "and the other way: a redirect out of a bypassed host picks the proxy up" do
@@ -344,7 +363,7 @@ defmodule FermixCore.Net.EgressTest do
         |> Egress.attach(:direct, @proxied)
 
       assert {:ok, %{status: 200}} = Req.request(request)
-      assert_receive {:hop, "git.corp.test", nil}
+      assert_receive {:hop, "git.corp.test", [transport_opts: [inet6: true]]}
       assert_receive {:hop, "remote.test", options}
       assert {:http, "proxy.test", 3128, _proxy_opts} = options[:proxy]
     end
@@ -456,6 +475,40 @@ defmodule FermixCore.Net.EgressTest do
 
       assert {:ok, _response} = request |> Egress.attach(:pooled, @direct) |> Req.request()
       assert_receive {:pool, FermixCore.Finch}
+    end
+  end
+
+  # `localhost` names both loopbacks and the listener holds only `::1`, so an
+  # IPv4-only dial reaches 127.0.0.1 and is refused: a 200 proves the hop tried
+  # IPv6 first. A name, because Req turns IPv6 on by itself for an IPv6 literal.
+  describe "a name whose IPv6 address alone answers" do
+    setup do
+      assert {:ok, {0, 0, 0, 0, 0, 0, 0, 1}} = :inet.getaddr(~c"localhost", :inet6),
+             "this host does not resolve localhost to ::1"
+
+      {:ok, listener} =
+        :gen_tcp.listen(0, [:binary, :inet6, active: false, ip: {0, 0, 0, 0, 0, 0, 0, 1}])
+
+      on_exit(fn -> :gen_tcp.close(listener) end)
+      {:ok, {_address, port}} = :inet.sockname(listener)
+
+      %{listener: listener, url: "http://localhost:#{port}/"}
+    end
+
+    test "is reached by a site-owned direct hop", context do
+      task = answer_once(context.listener)
+      request = Req.new(url: context.url, retry: false) |> Egress.attach(:direct, @direct)
+
+      assert {:ok, %{status: 200, body: "ok"}} = Req.request(request)
+      Task.await(task, @arrival_ms)
+    end
+
+    test "is reached by a pooled hop on the shared pool", context do
+      task = answer_once(context.listener)
+      request = Req.new(url: context.url, retry: false) |> Egress.attach(:pooled, @direct)
+
+      assert {:ok, %{status: 200, body: "ok"}} = Req.request(request)
+      Task.await(task, @arrival_ms)
     end
   end
 
@@ -637,5 +690,23 @@ defmodule FermixCore.Net.EgressTest do
 
       assert result == {:error, %Req.TransportError{reason: :proxy_unreachable}}
     end
+  end
+
+  defp answer_once(listener) do
+    Task.async(fn ->
+      {:ok, socket} = :gen_tcp.accept(listener, @arrival_ms)
+
+      try do
+        {:ok, _request} = :gen_tcp.recv(socket, 0, @arrival_ms)
+
+        :ok =
+          :gen_tcp.send(
+            socket,
+            "HTTP/1.1 200 OK\r\ncontent-length: 2\r\nconnection: close\r\n\r\nok"
+          )
+      after
+        :gen_tcp.close(socket)
+      end
+    end)
   end
 end
