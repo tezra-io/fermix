@@ -52,10 +52,15 @@ mix test                                              # full umbrella (hermetic 
 mix test apps/fermix_core/test/fermix_core/management # one area
 mix compile --warnings-as-errors && mix credo --strict && mix format --check-formatted
 python3 -m pytest scripts/release/ -q                 # release-script suite
+python3 -m unittest discover -s scripts/ci -p 'test_*.py'  # CI-script suite
+python3 scripts/ci/stress_changed_tests.py --base origin/dev --log-dir /tmp/stress  # CI's stress step
+python3 scripts/ci/flaky_report.py                    # tests CI flagged flaky, most often first
 ```
 
 All four Elixir gates plus the release-script suite must be green before calling any
-change done.
+change done. CI reruns up to five failed tests once and flags the ones that then pass
+("Flaky test"); fix anything flagged twice, and never by raising a bound. Write tests for a
+loaded runner from the start: AGENTS.md, *Tests under load*.
 
 ## The packaged app engine (occasional — not the dev loop)
 

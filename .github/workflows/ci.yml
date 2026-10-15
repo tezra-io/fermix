@@ -28,16 +28,20 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { os: ubuntu-24.04, leg: linux-x64, timeout: 30 }
-          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30 }
-          - { os: macos-15, leg: macos-arm64, timeout: 45 }
-          - { os: macos-15-intel, leg: macos-x64, timeout: 45 }
+          # linux-x64 also stresses the change's test files, so it needs the
+          # history to diff against and the time to repeat them.
+          - { os: ubuntu-24.04, leg: linux-x64, timeout: 45, fetch_depth: 0 }
+          - { os: ubuntu-24.04-arm, leg: linux-arm64, timeout: 30, fetch_depth: 1 }
+          - { os: macos-15, leg: macos-arm64, timeout: 45, fetch_depth: 1 }
+          - { os: macos-15-intel, leg: macos-x64, timeout: 45, fetch_depth: 1 }
     env:
       MIX_ENV: test
       ELIXIR_VERSION: "1.19.5"
       OTP_VERSION: "28"
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          fetch-depth: ${{ matrix.fetch_depth }}
 
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
@@ -67,15 +71,46 @@ jobs:
         run: mix credo --strict
 
       - name: Test
+        id: test
         # `mix compile --warnings-as-errors` above covers lib/ only; warnings
         # raised while loading the .exs suite (a drifted test double, an
         # unimplemented behaviour callback) reach no gate without the flag here.
-        # tee keeps the ExUnit banner — seed and max_cases are the two facts
-        # every ordering investigation starts from, and a red run whose seed
-        # lives only in scrolled Actions output cannot be replayed at all.
-        run: |
-          set -euo pipefail
-          mix test --warnings-as-errors 2>&1 | tee "${RUNNER_TEMP}/mix-test.log"
+        # The script tees the output to mix-test.log, which keeps the ExUnit
+        # banner: seed and max_cases are the two facts every ordering
+        # investigation starts from. When at most five tests fail and nothing
+        # else is wrong, it reruns only those tests once, per app; tests that
+        # pass then are flagged "Flaky test" (annotation, job summary,
+        # flaky-tests.json) and the leg passes. `scripts/ci/flaky_report.py`
+        # counts the flags across runs: fix anything flagged twice.
+        run: >-
+          python3 scripts/ci/mix_test_retry.py
+          --log "${RUNNER_TEMP}/mix-test.log"
+          --flaky-json "${RUNNER_TEMP}/flaky-tests.json"
+
+      - name: Stress the change's test files under load
+        # A flaky test usually passes the change that wrote it and fails an
+        # unrelated PR a month later. Repeating the change's own test files
+        # with every core busy makes the change that wrote it the one that
+        # sees it. See AGENTS.md, Tests under load.
+        if: matrix.leg == 'linux-x64'
+        timeout-minutes: 15
+        env:
+          STRESS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: >-
+          python3 scripts/ci/stress_changed_tests.py
+          --base "${STRESS_BASE}"
+          --log-dir "${RUNNER_TEMP}/stress"
+
+      - name: Upload flaky-test evidence
+        if: success() && steps.test.outputs.flaky == 'true'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: flaky-tests-${{ matrix.leg }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/flaky-tests.json
+            ${{ runner.temp }}/mix-test*.log
+          retention-days: 30
+          if-no-files-found: error
 
       - name: Record failure evidence
         if: failure()
@@ -102,7 +137,8 @@ jobs:
           name: ci-evidence-${{ matrix.leg }}-${{ github.run_attempt }}
           path: |
             ${{ runner.temp }}/ci-evidence.txt
-            ${{ runner.temp }}/mix-test.log
+            ${{ runner.temp }}/mix-test*.log
+            ${{ runner.temp }}/stress/*.log
           retention-days: 14
           if-no-files-found: warn
 
@@ -202,6 +238,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run hermetic release tests
         run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
+      - name: Run hermetic CI script tests
+        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled

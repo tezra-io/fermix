@@ -9,8 +9,10 @@ defmodule FermixCore.TestSafetyTest do
   """
   use ExUnit.Case, async: true
 
+  alias FermixTestSupport.TestSourceScan
+
   test "tests do not call destructive file cleanup APIs directly" do
-    files = test_files()
+    files = TestSourceScan.test_files()
 
     # The glob is anchored on __DIR__, not on the cwd: `mix test` is a recursive
     # umbrella task and runs this from apps/fermix_core, where a cwd-relative
@@ -21,13 +23,6 @@ defmodule FermixCore.TestSafetyTest do
     offenders = Enum.flat_map(files, &direct_cleanup_calls/1)
 
     assert offenders == []
-  end
-
-  defp test_files do
-    "../../../../apps/*/test/**/*_test.exs"
-    |> Path.expand(__DIR__)
-    |> Path.wildcard()
-    |> Enum.reject(&String.ends_with?(&1, "test_safety_test.exs"))
   end
 
   # A file is split into lines only when its text spells a prefix at all. No
@@ -63,7 +58,7 @@ defmodule FermixCore.TestSafetyTest do
   # name), so a blanket rule would only buy an allowlist. Add that half here if
   # an async module ever writes a variable lib/ reads, FERMIX_HOME above all.
   test "async test modules do not write global application configuration" do
-    files = test_files()
+    files = TestSourceScan.test_files()
 
     refute files == [], "test-file glob matched nothing — the gate would pass vacuously"
 
@@ -97,49 +92,13 @@ defmodule FermixCore.TestSafetyTest do
   end
 
   defp app_env_writers_in(file, source) do
-    source
-    |> Code.string_to_quoted!(file: file, unescape: false)
-    |> modules()
-    |> Enum.filter(fn {_name, body} -> async_module?(body) and writes_app_env?(body) end)
-    |> Enum.map(fn {name, _body} -> "#{Path.relative_to(file, umbrella_root())} (#{name})" end)
-  end
-
-  defp modules(ast) do
-    {_ast, found} =
-      Macro.prewalk(ast, [], fn
-        {:defmodule, _meta, [name, [{{:__block__, _, [:do]}, body}]]} = node, acc ->
-          {node, [{module_name(name), body} | acc]}
-
-        {:defmodule, _meta, [name, [do: body]]} = node, acc ->
-          {node, [{module_name(name), body} | acc]}
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    found
-  end
-
-  defp module_name({:__aliases__, _meta, parts}) when is_list(parts) do
-    Enum.map_join(parts, ".", &to_string/1)
-  end
-
-  defp module_name(other), do: Macro.to_string(other)
-
-  # `use ExUnit.Case` defaults to async: false, so only an explicit `async: true`
-  # makes a module concurrent — and the case template may be a wrapper such as
-  # ConnCase, so key on the option rather than on the module being used.
-  defp async_module?(body) do
-    {_ast, async?} =
-      Macro.prewalk(body, false, fn
-        {:use, _meta, [_case, opts]} = node, acc when is_list(opts) ->
-          {node, acc or Keyword.get(opts, :async) == true}
-
-        node, acc ->
-          {node, acc}
-      end)
-
-    async?
+    file
+    |> TestSourceScan.parse!(source)
+    |> TestSourceScan.modules()
+    |> Enum.filter(fn {_name, body} ->
+      TestSourceScan.async_module?(body) and writes_app_env?(body)
+    end)
+    |> Enum.map(fn {name, _body} -> "#{TestSourceScan.relative_path(file)} (#{name})" end)
   end
 
   defp writes_app_env?(body) do
@@ -157,8 +116,6 @@ defmodule FermixCore.TestSafetyTest do
 
     found
   end
-
-  defp umbrella_root, do: Path.expand("../../../..", __DIR__)
 
   defp cleanup_prefixes do
     file = "File."
