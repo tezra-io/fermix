@@ -49,6 +49,7 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Noise
   alias FermixChannels.Mobile.PairManager
@@ -58,6 +59,17 @@ defmodule FermixChannels.Mobile.Session do
   alias FermixCore.Companion.Timeline
 
   @max_wire_bytes 65_535
+  # The upgrade or bridge connection comes before the prelude picks paired or
+  # pairing mode, so one idle bound covers both. It must outlive the
+  # owner-approval window, or the carrier closes a pairing socket while the
+  # owner is still deciding.
+  @idle_grace_ms 30_000
+  # A connection that has not said `hello` needs only a handshake's memory; one
+  # that outgrows it is killed instead of the VM.
+  @unauthenticated_heap_bytes 4 * 1_024 * 1_024
+  # A paired device's connection carries media: a fetched blob with its frames
+  # and their ciphertext, and fan-out events queued in its mailbox.
+  @authenticated_heap_floor_bytes 64 * 1_024 * 1_024
   @default_max_media_bytes 20 * 1_024 * 1_024
   @rekey_after_frames 1_048_576
   @session_lifetime_ms 3_600_000
@@ -70,6 +82,9 @@ defmodule FermixChannels.Mobile.Session do
   @max_pending_requests 32
   @max_media_fetch_queue 8
   @max_candidates 16
+  # The rail's candidate comes last, after this many host candidates, so the
+  # list stays within `@max_candidates`.
+  @max_host_candidates_with_iroh 15
   # The refusals a phone can act on keep their own word as `error.code`; every
   # other failure is only the daemon's to explain, and is `request_failed`.
   @typed_refusals ~w(
@@ -112,6 +127,35 @@ defmodule FermixChannels.Mobile.Session do
   """
   @spec typed_refusals() :: [String.t()]
   def typed_refusals, do: Enum.map(@typed_refusals, &Atom.to_string/1)
+
+  @doc """
+  How long every carrier keeps a connection nothing was read from: past the
+  longest owner-approval window, so a pairing never times out under the owner.
+  """
+  @spec idle_timeout_ms() :: pos_integer()
+  def idle_timeout_ms, do: PairManager.max_ttl_ms() + @idle_grace_ms
+
+  @doc "The carrier process's memory bound before the phone has said `hello`."
+  @spec unauthenticated_heap_cap() :: map()
+  def unauthenticated_heap_cap, do: heap_cap(@unauthenticated_heap_bytes)
+
+  @doc """
+  The memory bound the session raises the carrier process to once a paired phone
+  has said `hello`: room for one fetched blob, its frames and their ciphertext.
+  """
+  @spec authenticated_heap_cap(pos_integer()) :: map()
+  def authenticated_heap_cap(max_media_bytes)
+      when is_integer(max_media_bytes) and max_media_bytes > 0,
+      do: heap_cap(@authenticated_heap_floor_bytes + 4 * max_media_bytes)
+
+  defp heap_cap(bytes) do
+    %{
+      size: div(bytes, :erlang.system_info(:wordsize)),
+      kill: true,
+      error_logger: true,
+      include_shared_binaries: true
+    }
+  end
 
   @doc """
   Starts a session on an established carrier. `opts` must name the connection's
@@ -290,6 +334,7 @@ defmodule FermixChannels.Mobile.Session do
 
   defp put_default_dependencies(state) do
     discovery = state.discovery
+    iroh_helper = Map.get(state, :iroh_helper, Helper)
 
     state
     |> Map.put_new(:noise_initialize, &Noise.initialize/3)
@@ -315,6 +360,8 @@ defmodule FermixChannels.Mobile.Session do
     |> Map.put_new(:send_device_event, &DeviceRegistry.send_device_event/3)
     |> Map.put_new(:authorize_socket, &DeviceRegistry.authorized?/3)
     |> Map.put_new(:discover, fn -> Discovery.candidates(discovery) end)
+    |> Map.put_new(:iroh_candidate, fn -> Helper.candidate(iroh_helper) end)
+    |> Map.put_new(:relay_list_acknowledged, fn -> Helper.relays_acknowledged(iroh_helper) end)
     |> Map.put_new(:pending_approvals, &Approvals.pending(Approvals.server(), &1, :mobile))
     |> Map.put_new(:media_descriptor, &Timeline.media_descriptor/2)
     |> Map.put_new(:event_router, &EventRouter.route/3)
@@ -592,7 +639,7 @@ defmodule FermixChannels.Mobile.Session do
     authenticated_id = value(state.authenticated_device, :device_id)
 
     if payload["device_id"] == authenticated_id do
-      with {:ok, state} <- persist_last_seen(state, authenticated_id) do
+      with {:ok, state} <- persist_hello(state, authenticated_id, payload["relay_list_rev"]) do
         attach_authenticated(event, state, authenticated_id)
       end
     else
@@ -628,22 +675,40 @@ defmodule FermixChannels.Mobile.Session do
 
   defp raise_heap_cap(_state), do: :ok
 
-  defp persist_last_seen(state, device_id) do
+  # Every hello records when the phone was last seen, and the relay list
+  # revision it names (M62 §3.1); the store writes only what changed. A newly
+  # acknowledged revision can widen the relays the daemon's endpoint may use.
+  defp persist_hello(state, device_id, relay_list_rev) do
     wall_clock = Map.get(state, :wall_clock, &DateTime.utc_now/0)
 
     case wall_clock.() do
-      %DateTime{} = seen_at -> update_last_seen(state, device_id, seen_at)
-      other -> {:error, {:invalid_wall_clock, other}, state}
+      %DateTime{} = seen_at ->
+        attrs = maybe_put(%{last_seen: seen_at}, :relay_list_rev, relay_list_rev)
+        update_hello(state, device_id, attrs)
+
+      other ->
+        {:error, {:invalid_wall_clock, other}, state}
     end
   end
 
-  defp update_last_seen(state, device_id, seen_at) do
-    case state.update_device.(state.device_store, device_id, %{last_seen: seen_at}) do
-      {:ok, device} -> {:ok, %{state | authenticated_device: device}}
-      {:error, reason} -> {:error, {:last_seen_update_failed, reason}, state}
-      other -> {:error, {:invalid_last_seen_update_reply, other}, state}
+  defp update_hello(state, device_id, attrs) do
+    previous = value(state.authenticated_device, :relay_list_rev)
+
+    case state.update_device.(state.device_store, device_id, attrs) do
+      {:ok, device} ->
+        :ok = acknowledge_relays(previous, value(device, :relay_list_rev), state)
+        {:ok, %{state | authenticated_device: device}}
+
+      {:error, reason} ->
+        {:error, {:last_seen_update_failed, reason}, state}
+
+      other ->
+        {:error, {:invalid_last_seen_update_reply, other}, state}
     end
   end
+
+  defp acknowledge_relays(same, same, _state), do: :ok
+  defp acknowledge_relays(_previous, _current, state), do: state.relay_list_acknowledged.()
 
   defp hello_ack(state, _event) do
     with {:ok, payload} <- build_hello_ack(state),
@@ -1548,12 +1613,20 @@ defmodule FermixChannels.Mobile.Session do
 
   # Candidates are routes for later reconnects; the phone already holds the
   # QR's and the last hello_ack's. A failed enumeration must not undo an
-  # approved pairing or close a reconnect, so it ships none and says so where
-  # the operator reads.
+  # approved pairing or close a reconnect, so it ships no host candidates and
+  # says so where the operator reads. The rail's candidate, when it is ready,
+  # comes last (M62 §2).
   defp current_candidates(state) do
+    case state.iroh_candidate.() do
+      {:ok, iroh} -> host_candidates(state, @max_host_candidates_with_iroh) ++ [iroh]
+      :none -> host_candidates(state, @max_candidates)
+    end
+  end
+
+  defp host_candidates(state, limit) do
     case state.discover.() do
       {:ok, candidates} ->
-        encode_candidates(candidates)
+        encode_candidates(candidates, limit)
 
       {:error, reason} ->
         Logger.warning("mobile candidate discovery failed: #{inspect(reason)}")
@@ -1562,9 +1635,9 @@ defmodule FermixChannels.Mobile.Session do
   end
 
   # Discovery orders candidates best first, so the cap keeps the likeliest routes.
-  defp encode_candidates(candidates) do
+  defp encode_candidates(candidates, limit) do
     candidates
-    |> Enum.take(@max_candidates)
+    |> Enum.take(limit)
     |> Enum.map(fn candidate ->
       %{
         "host" => candidate.address,

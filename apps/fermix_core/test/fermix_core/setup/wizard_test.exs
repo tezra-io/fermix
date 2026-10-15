@@ -132,8 +132,8 @@ defmodule FermixCore.Setup.WizardTest do
 
   # The mobile channel has no setup prompt: setup never asks, and a hand-written
   # section survives a save that knows nothing about it. Since M51 the
-  # management `channels.mobile` section writes its four rows through this
-  # pipeline, so those four answers land and every other mobile answer (the
+  # management `channels.mobile` section writes its five rows through this
+  # pipeline, so those five answers land and every other mobile answer (the
   # push credentials above all) is still ignored.
   describe "mobile has no wizard surface" do
     test "no setup or reconfigure prompt mentions mobile, on a fresh or enabled install" do
@@ -176,10 +176,11 @@ defmodule FermixCore.Setup.WizardTest do
       assert Keyword.get(mobile, :push) |> Keyword.get(:team_id) == nil
     end
 
-    test "the four channels.mobile answers are written, merged into the block" do
+    test "the five channels.mobile answers are written, merged into the block" do
       assert {:ok, _report} =
                Wizard.save_answers(Wizard.report().wizard,
                  mobile_enabled: "true",
+                 mobile_iroh: false,
                  mobile_port: 4040,
                  mobile_bind: "127.0.0.1",
                  mobile_advertise_mdns: false,
@@ -192,6 +193,7 @@ defmodule FermixCore.Setup.WizardTest do
       assert {:ok, snapshot} = ConfigStore.load_runtime_config()
       mobile = snapshot.fermix_channels |> Keyword.fetch!(:mobile)
       assert Keyword.get(mobile, :enabled) == true
+      assert Keyword.get(mobile, :iroh) == false
       assert Keyword.get(mobile, :port) == 4040
       assert Keyword.get(mobile, :bind) == "127.0.0.1"
       assert Keyword.get(mobile, :advertise_mdns) == false

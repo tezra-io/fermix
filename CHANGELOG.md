@@ -18,9 +18,26 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   the latest failed it warns, since one failure can be a blip. A refusal of
   one request, such as a conversation too long for the model, does not count
   against the provider.
+- **The phone channel can reach Fermix from any network (groundwork).** A
+  new "Reach from anywhere" switch in the phone channel's settings, on by
+  default and applied at once, lets a paired phone reach this Fermix through
+  Fermix's own relays, with no Tailscale and no account; the phone's session
+  stays end-to-end encrypted, so a relay sees addresses and timing, never
+  messages. It needs the `fermix-iroh` helper, which no build carries yet:
+  until one does, the phone channel status and `fermix doctor` say the helper
+  is missing, and phones connect over the local network or Tailscale exactly
+  as before. Relay contact starts only once a phone is paired.
 
 ### Fixed
 
+- **"What changed" matches what was said before.** Asked to redo an answer
+  against an earlier one, the assistant could report a move that never
+  happened, such as calling an item "no longer the top priority" when its own
+  first answer had ranked it second, though that answer was in front of it.
+  Its operating rules now say to read the earlier state off the conversation,
+  its own replies included, and to check every earlier position, time or
+  status and every move it describes against it. New installs and untouched
+  FERMIX.md files get the new text; an edited file keeps the operator's copy.
 - **A provider's HTML error page is no longer the error.** When something in
   front of a provider, such as Cloudflare, answered with an HTML error page,
   the whole page became the error: the daemon log line and the trace carried

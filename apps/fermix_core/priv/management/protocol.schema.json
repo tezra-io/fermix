@@ -2341,6 +2341,7 @@
         "mdns",
         "tailnet",
         "identity",
+        "remote",
         "apns",
         "paired_devices",
         "protocol_version",
@@ -2383,6 +2384,30 @@
           "properties": {
             "present": { "type": "boolean" },
             "fingerprint": { "type": ["string", "null"] }
+          }
+        },
+        "remote": {
+          "type": "object",
+          "description": "Reach from anywhere (M62): the rail that lets a paired phone reach this daemon from any network through Fermix's relays. `state` is `off` (switched off, or the channel is not running), `dormant` (no phone paired yet; the first pairing window starts it), `helper_missing` (this build carries no fermix-iroh), `starting`, `ready` or `failed`. While `ready`, `endpoint_id` is the daemon's iroh endpoint id and `relay` the relay it is connected through, with `connected` and the relay's last error in `relay_error`; while `failed`, `failure` is the reason in the helper's or the daemon's words. `refused` counts the connections the helper refused, by reason, since it started.",
+          "required": ["state", "endpoint_id", "relay", "connected", "relay_error", "failure", "refused"],
+          "additionalProperties": false,
+          "properties": {
+            "state": { "enum": ["off", "dormant", "helper_missing", "starting", "ready", "failed"] },
+            "endpoint_id": { "type": ["string", "null"], "pattern": "^[0-9a-f]{64}$" },
+            "relay": { "type": ["string", "null"], "maxLength": 2048 },
+            "connected": { "type": "boolean" },
+            "relay_error": { "type": ["string", "null"], "maxLength": 512 },
+            "failure": { "type": ["string", "null"], "maxLength": 2048 },
+            "refused": {
+              "type": "object",
+              "required": ["busy", "alpn", "bridge_unreachable"],
+              "additionalProperties": false,
+              "properties": {
+                "busy": { "type": "integer", "minimum": 0 },
+                "alpn": { "type": "integer", "minimum": 0 },
+                "bridge_unreachable": { "type": "integer", "minimum": 0 }
+              }
+            }
           }
         },
         "apns": {

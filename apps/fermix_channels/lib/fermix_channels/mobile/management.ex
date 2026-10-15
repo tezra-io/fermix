@@ -31,6 +31,7 @@ defmodule FermixChannels.Mobile.Management do
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.MdnsAdvertiser
   alias FermixChannels.Mobile.PairManager
@@ -101,6 +102,7 @@ defmodule FermixChannels.Mobile.Management do
           mdns: :advertising | :disabled | :down,
           tailnet: %{detected: boolean(), candidates: [String.t()]},
           identity: %{present: boolean(), fingerprint: String.t() | nil},
+          remote: Helper.status() | %{state: :off},
           apns: %{
             enabled: boolean(),
             credentials: :ready | :missing,
@@ -376,6 +378,7 @@ defmodule FermixChannels.Mobile.Management do
          refused: refusal != :none,
          refusal: refusal_fact(refusal),
          identity: identity_fact(opts),
+         remote: remote_fact(started?, opts),
          apns: apns_status(Keyword.get(config, :push, enabled: false), started?, opts),
          protocol_version: Protocol.protocol_version()
        })}
@@ -391,6 +394,16 @@ defmodule FermixChannels.Mobile.Management do
           {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
   def apply_enabled(enabled?, opts \\ []) when is_boolean(enabled?) and is_list(opts),
     do: MobileSupervisor.switch(enabled?, Keyword.take(opts, [:parent, :device_store]))
+
+  @doc """
+  Turns the phone channel's reach from anywhere on or off while the daemon
+  runs, after core has written the switch. Answers what the rail did: see
+  `FermixChannels.Mobile.Supervisor.switch_iroh/2`.
+  """
+  @spec apply_iroh(boolean(), keyword()) ::
+          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
+  def apply_iroh(on?, opts \\ []) when is_boolean(on?) and is_list(opts),
+    do: MobileSupervisor.switch_iroh(on?, Keyword.take(opts, [:parent]))
 
   @doc "Fail-closed health for the runtime mobile channel adapter."
   @spec health() :: {:ok, map()} | {:error, term()}
@@ -688,6 +701,13 @@ defmodule FermixChannels.Mobile.Management do
     end
   end
 
+  defp remote_fact(false, _opts), do: %{state: :off}
+
+  defp remote_fact(true, opts) do
+    helper = Keyword.get(opts, :iroh_helper, Helper)
+    invoke(opts, :iroh_status, &Helper.status/1, [helper])
+  end
+
   defp idle_mdns(config) do
     if enabled?(config) and Keyword.get(config, :advertise_mdns, false),
       do: :down,
@@ -755,10 +775,33 @@ defmodule FermixChannels.Mobile.Management do
           {"secret", Base.encode64(secret)},
           {"name", name},
           {"profile", profile}
+          | remote_params(opts)
         ])
 
       {:ok, "fermix://pair?" <> query}
     end
+  end
+
+  # Reach from anywhere, when the rail is ready (M62 §2): the endpoint id, the
+  # relays in a compact `host:port` list (the relay source fixes https and the
+  # path), and that list's revision. A rail still starting adds nothing; the
+  # phone learns the route from `pair_approved` once it is ready.
+  defp remote_params(opts) do
+    helper = Keyword.get(opts, :iroh_helper, Helper)
+
+    case invoke(opts, :iroh_candidate, &Helper.candidate/1, [helper]) do
+      {:ok, %{"node_id" => node_id, "relays" => relays, "relays_rev" => rev}} ->
+        [{"iroh", node_id}, {"relays", compact_relays(relays)}, {"relays_rev", rev}]
+
+      :none ->
+        []
+    end
+  end
+
+  defp compact_relays(relays) do
+    Enum.map_join(relays, ",", fn %{"url" => url, "quic_port" => port} ->
+      "#{URI.parse(url).host}:#{port}"
+    end)
   end
 
   # Status and the pairing verbs run only while the subtree does, so they read

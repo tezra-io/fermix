@@ -497,8 +497,24 @@ defmodule FermixChannels.Mobile.Protocol do
          :ok <- nonempty(payload, "app_version"),
          :ok <- nonnegative_u64(payload, "last_server_seq"),
          :ok <- positive_integer(payload, "protocol_v") do
-      :ok
+      optional_relay_list_rev(payload)
     end
+  end
+
+  # The relay list revision the phone has stored (M62 §3.1): 16 lowercase hex
+  # digits. A well-formed revision this daemon does not know is still recorded.
+  defp optional_relay_list_rev(payload) do
+    case Map.get(payload, "relay_list_rev") do
+      nil -> :ok
+      rev when is_binary(rev) -> relay_list_rev(rev)
+      _other -> {:error, {:invalid_field, "relay_list_rev"}}
+    end
+  end
+
+  defp relay_list_rev(rev) do
+    if Regex.match?(~r/\A[0-9a-f]{16}\z/, rev),
+      do: :ok,
+      else: {:error, {:invalid_field, "relay_list_rev"}}
   end
 
   defp validate_transfer_begin(payload, max) do

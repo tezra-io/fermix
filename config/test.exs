@@ -152,10 +152,12 @@ config :fermix_channels,
     enabled: false,
     bot_token: "test-token"
   ],
-  # Never bind a mobile listener or advertise mDNS from the suite. Tests that
-  # exercise mobile start isolated instances on ephemeral ports.
+  # Never bind a mobile listener, advertise mDNS or reach a relay from the
+  # suite. Tests that exercise mobile start isolated instances on ephemeral
+  # ports, and the ones that exercise remote reach turn it on themselves.
   mobile: [
     enabled: false,
+    iroh: false,
     mode: :listener,
     port: 4_031,
     bind: "127.0.0.1",

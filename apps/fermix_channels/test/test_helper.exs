@@ -10,4 +10,6 @@
 Code.require_file("support/imessage_fake_helper.exs", __DIR__)
 Code.require_file("support/attestation_chain_helper.exs", __DIR__)
 
-ExUnit.start(capture_log: true, assert_receive_timeout: 2_000)
+# `iroh_end_to_end` runs the real fermix-iroh helper and needs it built: opt in
+# with `--only iroh_end_to_end` (see `Mobile.Iroh.EndToEndTest`).
+ExUnit.start(capture_log: true, assert_receive_timeout: 2_000, exclude: [:iroh_end_to_end])

@@ -1,0 +1,1 @@
+{"op":"set_relays","relays":[{"url":"https://us1.relay.fermix.ai/","quic_port":7842},{"url":"https://eu1.relay.fermix.ai/","quic_port":7842}]}

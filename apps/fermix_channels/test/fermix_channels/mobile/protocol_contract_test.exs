@@ -2,6 +2,7 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixChannels.Mobile.Attestation
+  alias FermixChannels.Mobile.Iroh.Relays
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
@@ -341,6 +342,43 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
     refute server_errors(hello_ack, schema) == []
   end
 
+  # M62 §4.3: the rail's candidate is a second candidate shape, told apart by
+  # `kind`; a host candidate has none.
+  test "the schema refuses an iroh candidate that drifts from the format", %{schema: schema} do
+    [ack] = Enum.filter(server_headers(), &iroh_candidate?/1)
+    iroh = List.last(ack["candidates"])
+    relay = %{"url" => "https://us1.relay.fermix.ai/", "quic_port" => 7842}
+
+    for drifted <- [
+          Map.put(iroh, "kind", "quic"),
+          Map.put(iroh, "node_id", String.upcase(iroh["node_id"])),
+          Map.put(iroh, "relays_rev", "374b4c8f"),
+          Map.put(iroh, "relays", []),
+          Map.put(iroh, "relays", List.duplicate(relay, 9)),
+          Map.put(iroh, "relays", [Map.put(relay, "url", "http://us1.relay.fermix.ai/")]),
+          Map.put(iroh, "relays", [Map.put(relay, "quic_port", 0)]),
+          Map.delete(iroh, "relays_rev"),
+          Map.delete(iroh, "kind")
+        ] do
+      candidates = List.replace_at(ack["candidates"], -1, drifted)
+
+      refute server_errors(Map.put(ack, "candidates", candidates), schema) == [],
+             "an iroh candidate #{inspect(drifted)} was accepted"
+    end
+  end
+
+  test "the schema refuses a relay list revision that is not 16 hex digits", %{schema: schema} do
+    [hello] = Enum.filter(client_headers(), &Map.has_key?(&1, "relay_list_rev"))
+
+    for rev <- ["374B4C8F103627F7", "374b4c8f", ""] do
+      refute WireSchema.errors(
+               Map.put(hello, "relay_list_rev", rev),
+               WireSchema.ref("clientEvent"),
+               schema
+             ) == []
+    end
+  end
+
   test "the schema refuses what the daemon's bounds rule out", %{schema: schema} do
     candidate = %{"host" => "192.168.1.8", "interface" => "en0", "scope" => "lan"}
     crowded = Map.put(hello_ack_payload(), "candidates", List.duplicate(candidate, 17))
@@ -371,30 +409,73 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
   # FEAT-5: the pairing link is the one thing a phone reads before it has a
   # session, so its format is exported, and pinned to what the daemon builds.
   describe "the pairing link" do
-    test "the golden link decodes to its fields, which the schema accepts", %{schema: schema} do
-      [%{"uri" => uri, "query" => query}] = jsonl(@pairing_links)
+    # M62 §4.2: one golden link from a daemon whose remote reach is not ready,
+    # one from a daemon whose reach is, carrying its route.
+    test "the golden links decode to their fields, which the schema accepts", %{schema: schema} do
+      links = jsonl(@pairing_links)
+      assert Enum.map(links, &Map.has_key?(&1["query"], "iroh")) == [false, true]
 
-      assert String.starts_with?(uri, schema["$defs"]["pairingLink"]["x-uri-prefix"])
-      assert %URI{scheme: "fermix", host: "pair", query: raw} = URI.parse(uri)
-      assert URI.decode_query(raw) == query
-      assert WireSchema.errors(query, WireSchema.ref("pairingLink"), schema) == []
-      assert byte_size(Base.decode64!(query["gateway_pk"])) == 32
-      assert byte_size(Base.decode64!(query["secret"])) == 32
-      assert byte_size(Base.decode16!(query["tls_fp"], case: :lower)) == 32
+      for %{"uri" => uri, "query" => query} <- links do
+        assert String.starts_with?(uri, schema["$defs"]["pairingLink"]["x-uri-prefix"])
+        assert %URI{scheme: "fermix", host: "pair", query: raw} = URI.parse(uri)
+        assert URI.decode_query(raw) == query
+        assert WireSchema.errors(query, WireSchema.ref("pairingLink"), schema) == []
+        assert byte_size(Base.decode64!(query["gateway_pk"])) == 32
+        assert byte_size(Base.decode64!(query["secret"])) == 32
+        assert byte_size(Base.decode16!(query["tls_fp"], case: :lower)) == 32
+      end
     end
 
-    test "the daemon builds exactly the golden link from its fields", %{schema: schema} do
-      [%{"uri" => golden, "query" => query}] = jsonl(@pairing_links)
+    test "the daemon builds exactly the golden links from their fields", %{schema: schema} do
+      for %{"uri" => golden, "query" => query} <- jsonl(@pairing_links) do
+        assert {:ok, %{uri: uri}} = Management.begin_pairing(pairing_opts(query))
+        assert uri == golden
 
-      assert {:ok, %{uri: uri}} = Management.begin_pairing(pairing_opts(query))
-      assert uri == golden
+        live = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
+        assert WireSchema.errors(live, WireSchema.ref("pairingLink"), schema) == []
+      end
+    end
 
-      live = uri |> URI.parse() |> Map.fetch!(:query) |> URI.decode_query()
-      assert WireSchema.errors(live, WireSchema.ref("pairingLink"), schema) == []
+    test "the route a link carries is the shipped relay list, at most eight relays" do
+      [_lan_only, %{"query" => query}] = jsonl(@pairing_links)
+      current = Relays.current()
+
+      assert query["relays_rev"] == current.id
+      assert query["relays"] == compact_relays(Relays.to_wire(current.relays))
+    end
+
+    test "the schema refuses a route that drifts from the format", %{schema: schema} do
+      [_lan_only, %{"query" => query}] = jsonl(@pairing_links)
+      nine = Enum.map_join(1..9, ",", &"r#{&1}.relay.fermix.ai:7842")
+
+      for {field, value} <- [
+            {"iroh", String.upcase(query["iroh"])},
+            {"iroh", "abc"},
+            {"relays", ""},
+            {"relays", "https://us1.relay.fermix.ai/"},
+            {"relays", "us1.relay.fermix.ai"},
+            {"relays", nine},
+            {"relays_rev", "374b4c8f"}
+          ] do
+        refute WireSchema.errors(
+                 Map.put(query, field, value),
+                 WireSchema.ref("pairingLink"),
+                 schema
+               ) ==
+                 [],
+               "a pairing link with #{field}=#{value} was accepted"
+      end
+
+      # The three come together or not at all.
+      for field <- ~w(iroh relays relays_rev) do
+        refute WireSchema.errors(Map.delete(query, field), WireSchema.ref("pairingLink"), schema) ==
+                 [],
+               "a pairing link without #{field} was accepted"
+      end
     end
 
     test "the schema refuses a link that drifts from the format", %{schema: schema} do
-      [%{"query" => query}] = jsonl(@pairing_links)
+      [%{"query" => query}, _with_route] = jsonl(@pairing_links)
 
       for {field, value} <- [
             {"v", "1"},
@@ -565,7 +646,23 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       |> Jason.decode!()
       |> Enum.map(&%{address: &1, interface: "en0", scope: :lan})
 
+    route =
+      if Map.has_key?(query, "iroh") do
+        candidate = %{
+          "kind" => "iroh",
+          "node_id" => query["iroh"],
+          "relays" => Relays.to_wire(Relays.current().relays),
+          "relays_rev" => query["relays_rev"]
+        }
+
+        fn :rail -> {:ok, candidate} end
+      else
+        fn :rail -> :none end
+      end
+
     [
+      iroh_helper: :rail,
+      iroh_candidate: route,
       config: [enabled: true],
       pair_manager: :pair,
       whereis: fn FermixChannels.Mobile.Supervisor -> self() end,
@@ -578,6 +675,13 @@ defmodule FermixChannels.Mobile.ProtocolContractTest do
       host_label: fn -> query["name"] end,
       profile: query["profile"]
     ]
+  end
+
+  defp iroh_candidate?(header),
+    do: Enum.any?(Map.get(header, "candidates", []), &(&1["kind"] == "iroh"))
+
+  defp compact_relays(relays) do
+    Enum.map_join(relays, ",", &"#{URI.parse(&1["url"]).host}:#{&1["quic_port"]}")
   end
 
   defp frame(header, bytes \\ <<>>) do

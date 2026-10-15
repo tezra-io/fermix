@@ -98,7 +98,8 @@
         "t": {"const": "hello"}, "device_id": {"type": "string", "minLength": 1},
         "app_version": {"type": "string", "minLength": 1},
         "last_server_seq": {"type": "integer", "minimum": 0, "maximum": 18446744073709551615},
-        "protocol_v": {"type": "integer", "minimum": 1}
+        "protocol_v": {"type": "integer", "minimum": 1},
+        "relay_list_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$", "description": "The revision of the relay list this phone has stored (M62); absent means none."}
       }
     },
     "msg": {
@@ -204,8 +205,25 @@
       "properties": {"id": {"type": "string", "minLength": 1}, "name": {"type": "string", "minLength": 1, "maxLength": 128, "x-max-bytes": 128}}
     },
     "candidate": {
+      "description": "A route to this daemon: a host to dial, or (with kind iroh) this daemon's iroh endpoint and the relays to reach it through. A client skips a kind it does not know.",
+      "oneOf": [{"$ref": "#/$defs/hostCandidate"}, {"$ref": "#/$defs/irohCandidate"}]
+    },
+    "hostCandidate": {
       "type": "object", "required": ["host", "interface", "scope"],
       "properties": {"host": {"type": "string", "minLength": 1, "maxLength": 253}, "interface": {"type": "string", "minLength": 1}, "scope": {"enum": ["lan", "tailnet"]}}
+    },
+    "irohCandidate": {
+      "type": "object", "required": ["kind", "node_id", "relays", "relays_rev"],
+      "properties": {
+        "kind": {"const": "iroh"},
+        "node_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "relays": {"type": "array", "minItems": 1, "maxItems": 8, "items": {"$ref": "#/$defs/relay"}},
+        "relays_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$"}
+      }
+    },
+    "relay": {
+      "type": "object", "required": ["url", "quic_port"],
+      "properties": {"url": {"type": "string", "pattern": "^https://[a-z0-9]([a-z0-9.-]*[a-z0-9])?/$"}, "quic_port": {"type": "integer", "minimum": 1, "maximum": 65535}}
     },
     "caps": {
       "type": "object", "required": ["commands", "max_media_bytes"],
@@ -407,8 +425,13 @@
     "pairingLink": {
       "type": "object",
       "x-uri-prefix": "fermix://pair?",
-      "description": "The query of a fermix://pair link, decoded as application/x-www-form-urlencoded. Not a frame: the owner's QR code carries it. An unknown parameter is ignored.",
+      "description": "The query of a fermix://pair link, decoded as application/x-www-form-urlencoded. Not a frame: the owner's QR code carries it. An unknown parameter is ignored. iroh, relays and relays_rev come together, only from a daemon whose remote reach is ready.",
       "required": ["v", "candidates", "port", "tls_fp", "gateway_pk", "secret", "name", "profile"],
+      "allOf": [
+        {"if": {"required": ["iroh"]}, "then": {"required": ["relays", "relays_rev"]}},
+        {"if": {"required": ["relays"]}, "then": {"required": ["iroh", "relays_rev"]}},
+        {"if": {"required": ["relays_rev"]}, "then": {"required": ["iroh", "relays"]}}
+      ],
       "properties": {
         "v": {"const": "2"},
         "candidates": {
@@ -420,7 +443,10 @@
         "gateway_pk": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
         "secret": {"type": "string", "pattern": "^[A-Za-z0-9+/]{43}=$"},
         "name": {"type": "string", "minLength": 1},
-        "profile": {"type": "string", "minLength": 1}
+        "profile": {"type": "string", "minLength": 1},
+        "iroh": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "relays": {"type": "string", "pattern": "^[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[1-9][0-9]{0,4}(,[a-z0-9]([a-z0-9.-]*[a-z0-9])?:[1-9][0-9]{0,4}){0,7}$"},
+        "relays_rev": {"type": "string", "pattern": "^[0-9a-f]{16}$"}
       }
     }
   },

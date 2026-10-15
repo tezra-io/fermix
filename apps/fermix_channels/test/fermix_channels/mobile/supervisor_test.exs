@@ -5,6 +5,8 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
   alias FermixChannels.Channels.Mobile, as: MobileChannel
   alias FermixChannels.Mobile.DeviceStore
+  alias FermixChannels.Mobile.Iroh
+  alias FermixChannels.Mobile.Iroh.Helper
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.RequestCoordinator
@@ -71,6 +73,13 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       assert child_opts(children, FermixChannels.Mobile.Discovery)[:bind] == bind
       assert child_opts(children, Listener)[:bind] == bind
     end
+  end
+
+  # A session loads the gateway identity from its subtree's home on either
+  # carrier: the WebSocket's from the listener, the bridge's from here.
+  test "the rail's sessions read the identity of the subtree's own home" do
+    session = child_opts(init_children([]), Iroh)[:session_opts]
+    assert session[:identity_root] == "/tmp/fermix-mobile-supervisor-children-test"
   end
 
   test "the local-network announcement starts only when the config turns it on" do
@@ -177,6 +186,49 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
       assert {:error, :not_ready} = MobileSupervisor.switch(true, parent: parent)
       assert {:ok, :stopped} = MobileSupervisor.switch(false, parent: parent)
+    end
+  end
+
+  # Remote reach (M62 D4) is the phone subtree's last child, with a live switch
+  # of its own: off stops the rail and nothing else, on starts it again, and
+  # neither restarts the phone channel.
+  describe "the reach switch" do
+    test "turning reach off and on touches only the rail" do
+      instance_names = names()
+      reach = start_supervised!({Agent, fn -> true end}, id: :reach)
+
+      parent =
+        start_parent!(instance_names, fn -> true end,
+          iroh_switch: fn -> Agent.get(reach, & &1) end,
+          iroh_helper_opts: [binary_path: "/nonexistent/fermix-iroh"]
+        )
+
+      phone = child_pid(parent, MobileSupervisor)
+      coordinator = Process.whereis(instance_names.request_coordinator)
+      assert is_pid(child_pid(phone, Iroh))
+      refute Helper.status(instance_names.iroh_helper) == %{state: :off}
+
+      Agent.update(reach, fn _ -> false end)
+      assert {:ok, :stopped} = MobileSupervisor.switch_iroh(false, parent: phone)
+      assert child_pid(phone, Iroh) == :undefined
+      assert Helper.status(instance_names.iroh_helper) == %{state: :off}
+
+      # The switch still reads off, so a start comes back empty.
+      assert {:ok, :not_started} = MobileSupervisor.switch_iroh(true, parent: phone)
+
+      Agent.update(reach, fn _ -> true end)
+      assert {:ok, :started} = MobileSupervisor.switch_iroh(true, parent: phone)
+      assert is_pid(child_pid(phone, Iroh))
+      assert Process.whereis(instance_names.request_coordinator) == coordinator
+    end
+
+    test "a rail whose switch is off starts nothing" do
+      assert :ignore = Iroh.start_link(switch: fn -> false end)
+    end
+
+    test "with no phone subtree running there is no rail to switch" do
+      assert {:error, :not_ready} = MobileSupervisor.switch_iroh(true, parent: :no_phone_here)
+      assert {:ok, :stopped} = MobileSupervisor.switch_iroh(false, parent: :no_phone_here)
     end
   end
 
@@ -572,8 +624,9 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     ]
   end
 
-  defp start_parent!(instance_names, switch) do
-    child = Supervisor.child_spec({MobileSupervisor, switch_opts(instance_names, switch)}, [])
+  defp start_parent!(instance_names, switch, extra \\ []) do
+    opts = switch_opts(instance_names, switch) ++ extra
+    child = Supervisor.child_spec({MobileSupervisor, opts}, [])
 
     start_supervised!(%{
       id: :live_switch_parent,
@@ -595,7 +648,15 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       request_coordinator: Module.concat(__MODULE__, "Coordinator#{suffix}"),
       listener: Module.concat(__MODULE__, "Listener#{suffix}"),
       mdns_advertiser: Module.concat(__MODULE__, "Mdns#{suffix}"),
-      push_dispatcher: Module.concat(__MODULE__, "Push#{suffix}")
+      push_dispatcher: Module.concat(__MODULE__, "Push#{suffix}"),
+      iroh_helper: Module.concat(__MODULE__, "IrohHelper#{suffix}"),
+      bridge: Module.concat(__MODULE__, "Bridge#{suffix}"),
+      bridge_connections: Module.concat(__MODULE__, "BridgeConnections#{suffix}")
     }
+  end
+
+  defp child_pid(supervisor, id) do
+    {^id, pid, _type, _modules} = List.keyfind(Supervisor.which_children(supervisor), id, 0)
+    pid
   end
 end

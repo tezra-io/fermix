@@ -59,6 +59,23 @@ defmodule FermixChannels.Mobile.DeviceStoreTest do
     assert {:ok, ^updated} = DeviceStore.fetch(original.device_id, root: root)
   end
 
+  test "a device's acknowledged relay list revision is stored, and a malformed one refused",
+       %{root: root} do
+    assert {:ok, device} = DeviceStore.add(device_attrs(), root: root)
+    assert device.relay_list_rev == nil
+
+    assert {:ok, %{relay_list_rev: "0123456789abcdef"}} =
+             DeviceStore.update(device.device_id, %{relay_list_rev: "0123456789abcdef"},
+               root: root
+             )
+
+    assert {:ok, %{relay_list_rev: "0123456789abcdef"}} =
+             DeviceStore.fetch(device.device_id, root: root)
+
+    assert {:error, {:invalid_device, :relay_list_rev, :invalid_relay_list_rev}} =
+             DeviceStore.update(device.device_id, %{relay_list_rev: "NOT-HEX"}, root: root)
+  end
+
   test "last_seen updates are monotonic and equal timestamps are idempotent", %{root: root} do
     attrs = device_attrs()
     assert {:ok, original} = DeviceStore.add(attrs, root: root)

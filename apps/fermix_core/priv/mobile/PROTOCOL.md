@@ -14,6 +14,7 @@ vendors this directory pinned by checksum; it does not hand-copy event shapes.
 | `fixtures/pairing_links.jsonl` | a pairing link and its decoded fields, as the daemon builds it |
 | `noise_vectors.json`, `push_vectors.json` | the Noise handshakes and the push encryption, byte for byte |
 | `attestation_roots.json`, `android_signers.json` | the Google attestation roots and the app's signing certificates a pairing is verified against (see *Attestation*); both are built into the daemon when it is compiled, so a change to either takes a new build |
+| `relays.json` | every list of Fermix relays a release has shipped, built into the daemon; a phone takes its relays from the route it is given, never from this file (see *Remote reach*) |
 
 **Optional fields are absent, never null.** Every field marked `?` below is
 optional by omission: a value the daemon does not have is an absent key, never
@@ -56,11 +57,69 @@ message closes the connection with `1003`. What the listener bounds:
 
 A client pings well inside the 150 s idle bound, during a long download too.
 
+## Remote reach
+
+A daemon whose remote reach is on (`[fermix_channels.mobile] iroh`, on unless
+the owner turns it off) can also be reached from any network, through
+Fermix's relays and with no Tailscale. The daemon runs `fermix-iroh`, an iroh
+endpoint (`../iroh_helper/PROTOCOL.md`), and gives a phone its route: the
+pairing link's `iroh`, `relays` and `relays_rev` (see *Pairing link*) and an
+`iroh` candidate, last, in `hello_ack` and `pair_approved` (see *Server
+events*). Neither appears until the daemon's endpoint is ready, so a route a
+phone holds always worked once.
+
+The phone dials the route's `node_id` with ALPN `fermix/mobile/1`, through the
+route's relays, and opens one bidirectional stream per session. iroh's TLS 1.3
+handshake proves the daemon holds the key behind `node_id`; the session inside
+the stream is exactly the one a WebSocket carries, the same prelude, Noise
+handshake, frames and bounds, so a relay sees addresses, sizes and timing,
+never content. The daemon knows a phone by its Noise key, never by its iroh
+endpoint id, which a phone may change at any time (the reference app keeps its
+iroh key in memory only).
+
+The stream carries frames where a WebSocket carries messages:
+
+```text
+uint32be length | type | payload
+```
+
+`length` counts the type byte and the payload, and is at most 65,536.
+
+| `type` | Payload | Carries |
+|---|---|---|
+| `1` | one Noise message, 1 to 65,535 bytes; the prelude and the handshake messages included | what one binary WebSocket message carries |
+| `2` | `uint16be` close code, then a UTF-8 reason of at most 123 bytes | a close, with the codes of *Close codes* |
+
+- A length over 65,536 ends the stream with no close frame, before the frame is
+  read. Any other frame that breaks these rules (an empty message, a close
+  shorter than its code or with a reason that is not UTF-8, a `type` other
+  than `1` or `2`) is closed `1002` (`mobile protocol error`).
+- The daemon ends a session with a type `2` frame and then ends the stream. A
+  phone that ends a session sends a type `2` frame, or none, and then finishes
+  or resets its sending half. A stream whose sending half the phone leaves open
+  holds one of the connection's four stream slots until the connection closes.
+- The bounds of *Transport* hold per stream: the handshake deadline, the
+  150 s idle bound (close `1002`, `no inbound frame`), the one-hour session,
+  and the two memory bounds. The daemon takes at most 64
+  remote connections at once, refusing one past that before it reaches a
+  session, and a phone can open at most four streams at once on one
+  connection.
+- A pairing over the route is counted like any other. Past 64 failed pairing
+  attempts from remote endpoints, a pairing window refuses every further
+  remote attempt; the owner's own network and Tailscale are untouched.
+
+The phone keeps the relays and the revision of the last route it was given and
+names that revision in `hello.relay_list_rev`. The daemon's endpoint uses only
+the relays every paired phone has named, so when a release adds a relay a phone
+that has not reconnected since still reaches the daemon at one it knows. A
+relay is never removed from the list, only repointed.
+
 ## Stack and bounds
 
 For an established connection the layers are:
 
-1. one WSS binary message (WSS carries the session; it is not the trust anchor);
+1. one WSS binary message, or one type `1` frame of a remote stream (see
+   *Remote reach*); neither is the trust anchor;
 2. one Noise transport message (`Noise_IK_25519_ChaChaPoly_SHA256` after pairing);
 3. one mobile plaintext frame.
 
@@ -266,13 +325,18 @@ decoder. An unknown parameter is ignored, so the link can gain one.
 | `secret` | the one-time 32-byte pairing PSK, standard base64 with padding |
 | `name` | the host's name, for the phone to show |
 | `profile` | the daemon's configured profile (`[fermix_core] profile`, `general` unless set), which tells two Fermix homes on one host apart |
+| `iroh` | only while remote reach is ready: the daemon's iroh endpoint id, 64 lowercase hex digits |
+| `relays` | with `iroh`: the relays to reach it through, at most 8, as `host:quic_port` joined by `,`; each is the relay `https://<host>/` with QUIC address discovery on `quic_port` |
+| `relays_rev` | with `iroh`: that list's revision, 16 lowercase hex digits |
 
 The phone connects to `wss://<candidate>:<port>/ws`, trusts the certificate
 whose SHA-256 is `tls_fp`, and runs `IKpsk2` against `gateway_pk` with
 `secret`. The link is good while its window is open, at most 120 s, and only
 once. It is shown on the call that opens the window and never logged,
-traced or kept. `fixtures/pairing_links.jsonl` pins a link the daemon built,
-with its decoded fields; its secret and keys are test material only.
+traced or kept. A link with a route lets the phone pair from any network: it
+tries the candidates and the route together. `fixtures/pairing_links.jsonl`
+pins two links the daemon built, without and with a route, with their decoded
+fields; their secrets and keys are test material only.
 
 ## Envelope, ordering, and version negotiation
 
@@ -322,7 +386,7 @@ accepts it.
 
 | `t` | Required payload | Rules |
 |---|---|---|
-| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v` | first paired-session event |
+| `hello` | `device_id`, `app_version`, `last_server_seq`, `protocol_v`; `relay_list_rev?` | first paired-session event; `relay_list_rev` is the revision of the relay list the phone holds (see *Remote reach*), 16 lowercase hex digits |
 | `msg` | `client_msg_id`, `profile_id`, `text`, `attach_ids[]` | text or at least one attachment is required |
 | `attach_begin` | `attach_id`, `kind`, `mime`, `size_bytes`, `sha256`; `name?`, `poster_of?` | SHA-256 is announced before transfer so the host can deduplicate. `kind` is one of `image`, `animation`, `video`, `audio`, `document`, `file`; the daemon names the kind from the bytes itself and reads `kind` as a hint. A still sent with `poster_of` set to a video's `attach_id` is that video's poster frame, not an attachment of its own |
 | `attach_chunk` | `attach_id`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
@@ -398,7 +462,10 @@ a reply row: that reply's seq. A first `accepted` never carries it.
 `hello_ack.candidates[]` and `pair_approved.candidates[]` hold at most 16
 routes for later reconnects, best first: `{host, interface, scope}`, where
 `host` is an address or a MagicDNS name of at most 253 bytes and `scope` is
-`lan` or `tailnet`. A daemon whose listener is bound to one address lists only
+`lan` or `tailnet`. While remote reach is ready the last of them is the route
+`{kind: "iroh", node_id, relays[], relays_rev}`, each relay `{url,
+quic_port}`, and the host routes are cut to 15. A host route has no `kind`;
+a phone skips a candidate whose `kind` it does not know. A daemon whose listener is bound to one address lists only
 that address, with its MagicDNS name when it is a tailnet address, here and in
 the pairing link. A daemon that cannot list its addresses sends an empty list,
 and the phone keeps the routes it holds. `profiles[]` is `{id, name}`, the

@@ -75,7 +75,7 @@ defmodule FermixCore.Setup.RestartState do
   # §4.5); the rest of the sandbox section is read at boot. The phone channel's
   # switch, `channels.mobile.enabled`, starts or stops its subtree when it is
   # written (M51 §5.5); the rest of the phone block is read when it starts.
-  @live_parts [sandbox: [[:env]], channels: [[:mobile, :enabled]]]
+  @live_parts [sandbox: [[:env]], channels: [[:mobile, :enabled], [:mobile, :iroh]]]
   @wrong_shape_sentence "The settings file could not be read: a value in it is not the shape Fermix expects."
   @external_change_section "settings_file"
   @external_change_sentence "The settings file changed outside Fermix."

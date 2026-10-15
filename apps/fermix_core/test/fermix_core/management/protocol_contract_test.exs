@@ -732,6 +732,14 @@ defmodule FermixCore.Management.ProtocolContractTest do
          mdns: :advertising,
          tailnet: %{detected: true, candidates: ["100.101.102.103"]},
          identity: %{present: true, fingerprint: "3f9a 1c2e 7b4d 05a8"},
+         remote: %{
+           state: :ready,
+           endpoint_id: "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664",
+           relay: "https://us1.relay.fermix.ai/",
+           connected: true,
+           relay_error: nil,
+           refused: %{busy: 0, alpn: 0, bridge_unreachable: 0}
+         },
          apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
          paired_devices: 1,
          protocol_version: 1,

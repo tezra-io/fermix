@@ -1165,7 +1165,7 @@ defmodule FermixCore.Management.SettingsTest do
   # no credential, and its rows are a switch, a port and an address. The switch
   # is applied the moment it is written (M51 §5.5); the rest is read at boot.
   describe "the phone section" do
-    test "publishes the live switch and three boot-bound rows with the shipped defaults" do
+    test "publishes the live switches and three boot-bound rows with the shipped defaults" do
       Application.delete_env(:fermix_channels, :mobile)
 
       assert %{id: "channels.mobile", pane: "channels", title: "Phone"} in Settings.sections()
@@ -1174,6 +1174,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.map(rows, &{&1["key"], &1["kind"], &1["value"]}) == [
                {"mobile_enabled", "toggle", false},
+               {"mobile_iroh", "toggle", true},
                {"mobile_port", "number", 4031},
                {"mobile_bind", "text", "0.0.0.0"},
                {"mobile_advertise_mdns", "toggle", false}
@@ -1181,6 +1182,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.map(rows, &{&1["key"], &1["restart"]}) == [
                {"mobile_enabled", false},
+               {"mobile_iroh", false},
                {"mobile_port", true},
                {"mobile_bind", true},
                {"mobile_advertise_mdns", true}
@@ -1195,6 +1197,7 @@ defmodule FermixCore.Management.SettingsTest do
     test "each row reads its own key of the block" do
       Application.put_env(:fermix_channels, :mobile,
         enabled: true,
+        iroh: false,
         port: 4040,
         bind: "127.0.0.1",
         advertise_mdns: false
@@ -1204,6 +1207,7 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert values == [
                {"mobile_enabled", true},
+               {"mobile_iroh", false},
                {"mobile_port", 4040},
                {"mobile_bind", "127.0.0.1"},
                {"mobile_advertise_mdns", false}
@@ -1213,6 +1217,7 @@ defmodule FermixCore.Management.SettingsTest do
     test "each key is written and reads back" do
       writes = [
         {"mobile_enabled", true, :enabled},
+        {"mobile_iroh", false, :iroh},
         {"mobile_port", 4040, :port},
         {"mobile_bind", "127.0.0.1", :bind},
         {"mobile_advertise_mdns", false, :advertise_mdns}
@@ -1220,7 +1225,10 @@ defmodule FermixCore.Management.SettingsTest do
 
       for {key, value, config_key} <- writes do
         assert {:ok, result} =
-                 Settings.apply("channels.mobile", %{key => value}, mobile_switch: &switched/1)
+                 Settings.apply("channels.mobile", %{key => value},
+                   mobile_switch: &switched/1,
+                   mobile_reach_switch: &reach_switched/1
+                 )
 
         assert result["applied"] == [key]
 
@@ -1306,6 +1314,61 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert result["side_effects"] == [sentence]
       assert Application.get_env(:fermix_channels, :mobile)[:enabled] == true
+    end
+
+    # Reach from anywhere is live within a running phone channel (M62 D4).
+    test "moving reach while the phone channel is on applies it at once" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+
+      assert {:ok, off} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:reach_switch, false}
+      assert off["side_effects"] == []
+
+      assert {:ok, _on} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => true},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:reach_switch, true}
+    end
+
+    # A channel that is off has no reach to switch, and turning the channel on
+    # or off carries its reach with it: only the phone switch is called.
+    test "reach is not switched on its own while the channel is off or moving" do
+      Application.put_env(:fermix_channels, :mobile, enabled: false, port: 4031)
+
+      assert {:ok, _result} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert {:ok, _result} =
+               Settings.apply(
+                 "channels.mobile",
+                 %{"mobile_enabled" => true, "mobile_iroh" => true},
+                 mobile_switch: &switched/1,
+                 mobile_reach_switch: &reach_switched/1
+               )
+
+      assert_received {:mobile_switch, true}
+      refute_received {:reach_switch, _on?}
+    end
+
+    test "a reach switch the rail did not follow is said as a side effect" do
+      Application.put_env(:fermix_channels, :mobile, enabled: true, port: 4031)
+      sentence = "Reach from anywhere is on but could not start. See the daemon log."
+
+      assert {:ok, result} =
+               Settings.apply("channels.mobile", %{"mobile_iroh" => false},
+                 mobile_reach_switch: fn false -> {:error, sentence} end
+               )
+
+      assert result["side_effects"] == [sentence]
+      assert Application.get_env(:fermix_channels, :mobile)[:iroh] == false
     end
 
     # A reload is the other way the switch reaches the running config, and it
@@ -1908,6 +1971,11 @@ defmodule FermixCore.Management.SettingsTest do
   # The phone channel's switch as settings call it, without starting anything.
   defp switched(on?) do
     send(self(), {:mobile_switch, on?})
+    :ok
+  end
+
+  defp reach_switched(on?) do
+    send(self(), {:reach_switch, on?})
     :ok
   end
 

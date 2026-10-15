@@ -24,6 +24,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
   alias FermixChannels.Mobile.Identity
+  alias FermixChannels.Mobile.Iroh
   alias FermixChannels.Mobile.Listener
   alias FermixChannels.Mobile.MdnsAdvertiser
   alias FermixChannels.Mobile.MediaStore
@@ -31,6 +32,7 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixChannels.Mobile.Push.Config, as: PushConfig
   alias FermixChannels.Mobile.Push.PigeonDispatcher
   alias FermixChannels.Mobile.RequestCoordinator
+  alias FermixChannels.Mobile.Session
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Memory.Repo, as: MemoryRepo
 
@@ -137,6 +139,44 @@ defmodule FermixChannels.Mobile.Supervisor do
   end
 
   defp parent(opts), do: Keyword.get(opts, :parent, FermixChannels.Supervisor)
+
+  @doc """
+  Starts or stops remote reach (`Mobile.Iroh`) while the daemon runs, as
+  `switch/2` does the whole subtree: on, the registered child starts again and
+  reads its switch; off, it stops (helper shut down, every remote stream ended,
+  no relay contact) and stays registered. `:not_started` is a start that came
+  back empty because the switch still reads off; `{:error, :not_ready}` is a
+  phone subtree that is not running, so there is no rail to switch. `:parent`
+  replaces this supervisor in a test.
+  """
+  @spec switch_iroh(boolean(), keyword()) ::
+          {:ok, :started | :not_started | :stopped} | {:error, :not_ready | term()}
+  def switch_iroh(on?, opts \\ [])
+
+  def switch_iroh(true, opts) when is_list(opts) do
+    case safe_child_call(opts, &Supervisor.restart_child(&1, Iroh)) do
+      {:ok, pid} when is_pid(pid) -> {:ok, :started}
+      {:ok, :undefined} -> {:ok, :not_started}
+      {:error, :running} -> {:ok, :started}
+      {:error, :not_found} -> {:error, :not_ready}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  def switch_iroh(false, opts) when is_list(opts) do
+    case safe_child_call(opts, &Supervisor.terminate_child(&1, Iroh)) do
+      :ok -> {:ok, :stopped}
+      {:error, :not_found} -> {:ok, :stopped}
+      {:error, :not_ready} -> {:ok, :stopped}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  # The phone subtree may be switched off itself, and so absent.
+  defp safe_child_call(opts, call) do
+    supervisor = Keyword.get(opts, :parent, __MODULE__)
+    if GenServer.whereis(supervisor), do: call.(supervisor), else: {:error, :not_ready}
+  end
 
   defp admission_check(opts, root) do
     with {:ok, _devices} <- DeviceStore.list(root: root),
@@ -253,12 +293,16 @@ defmodule FermixChannels.Mobile.Supervisor do
 
     base_children = [
       {DeviceStore, root: root, name: names.device_store},
-      {DeviceRegistry, name: names.device_registry, device_store: names.device_store},
+      {DeviceRegistry,
+       name: names.device_registry,
+       device_store: names.device_store,
+       relays_changed: fn -> Iroh.Helper.relays_acknowledged(names.iroh_helper) end},
       {PairManager,
        root: root,
        name: names.pair_manager,
        device_store: names.device_store,
-       listener: names.listener},
+       listener: names.listener,
+       rail: names.iroh_helper},
       {MediaStore, media_opts(opts, root, names.media_store)},
       MobileChannel.unfurl_supervisor_spec(
         names.unfurl_supervisor,
@@ -282,7 +326,9 @@ defmodule FermixChannels.Mobile.Supervisor do
             ),
             {Discovery, name: names.discovery, bind: listener_bind(opts)},
             {Listener, listener_opts(opts, root, names)},
-            {MdnsAdvertiser, mdns_opts(opts, names)}
+            {MdnsAdvertiser, mdns_opts(opts, names)},
+            # Last, so its restart, and its live switch, touch nothing else.
+            {Iroh, iroh_opts(opts, root, names)}
           ]
 
       Supervisor.init(children, strategy: :rest_for_one)
@@ -331,7 +377,10 @@ defmodule FermixChannels.Mobile.Supervisor do
       listener: Listener,
       mdns_advertiser: MdnsAdvertiser,
       push_dispatcher: PigeonDispatcher,
-      request_coordinator: RequestCoordinator
+      request_coordinator: RequestCoordinator,
+      iroh_helper: Iroh.Helper,
+      bridge: Iroh.Bridge,
+      bridge_connections: FermixChannels.Mobile.Iroh.Connections
     }
 
     Map.merge(defaults, Keyword.get(opts, :names, %{}))
@@ -402,16 +451,42 @@ defmodule FermixChannels.Mobile.Supervisor do
       bind: listener_bind(opts),
       port: Keyword.get(explicit, :port, Keyword.get(config, :port, 4_031)),
       start_listener?: Keyword.get(opts, :start_listener?, true),
-      router_opts: [
-        device_store: names.device_store,
-        device_registry: names.device_registry,
-        pair_manager: names.pair_manager,
-        media_store: names.media_store,
-        request_coordinator: names.request_coordinator,
-        discovery: names.discovery,
-        max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
-        push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment)
-      ]
+      router_opts: session_opts(config, names)
+    ]
+  end
+
+  # What every carrier's sessions are started with: the WebSocket's through the
+  # router, the bridge's directly.
+  defp session_opts(config, names) do
+    [
+      device_store: names.device_store,
+      device_registry: names.device_registry,
+      pair_manager: names.pair_manager,
+      media_store: names.media_store,
+      request_coordinator: names.request_coordinator,
+      discovery: names.discovery,
+      iroh_helper: names.iroh_helper,
+      max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
+      push_environment: config |> Keyword.get(:push, []) |> Keyword.get(:environment)
+    ]
+  end
+
+  defp iroh_opts(opts, root, names) do
+    config = Keyword.get(opts, :config, [])
+    session = session_opts(config, names)
+    max_media_bytes = Keyword.fetch!(session, :max_media_bytes)
+
+    [
+      root: root,
+      names: names,
+      switch: Keyword.get(opts, :iroh_switch, &Iroh.switch_on?/0),
+      helper_opts: Keyword.get(opts, :iroh_helper_opts, []),
+      # The listener gives its sessions the identity's home the same way.
+      session_opts:
+        Keyword.merge(session,
+          identity_root: root,
+          authenticated_max_heap_size: Session.authenticated_heap_cap(max_media_bytes)
+        )
     ]
   end
 

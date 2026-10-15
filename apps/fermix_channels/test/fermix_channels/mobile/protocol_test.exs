@@ -180,6 +180,26 @@ defmodule FermixChannels.Mobile.ProtocolTest do
     assert event.payload["future"] == %{"ok" => true}
   end
 
+  test "a hello's relay list revision is 16 lowercase hex digits, or absent" do
+    hello = fn rev ->
+      client_frame("hello", 1, %{
+        "device_id" => "device-1",
+        "app_version" => "1.0.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 2,
+        "relay_list_rev" => rev
+      })
+    end
+
+    assert {:ok, %{payload: %{"relay_list_rev" => "0123456789abcdef"}}} =
+             Protocol.decode_client_frame(hello.("0123456789abcdef"))
+
+    for bad <- ["0123456789ABCDEF", "0123", 42] do
+      assert {:error, {:invalid_field, "relay_list_rev"}} =
+               Protocol.decode_client_frame(hello.(bad))
+    end
+  end
+
   test "requires a positive u64 session sequence and matching protocol version" do
     fields = %{
       "device_id" => "device-1",

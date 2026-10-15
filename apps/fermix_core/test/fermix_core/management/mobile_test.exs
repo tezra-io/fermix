@@ -34,6 +34,7 @@ defmodule FermixCore.Management.MobileTest do
     end
   end
 
+  @endpoint_id "79b5562e8fe654f94078b112e8a98ba7901f853ae695bed7e0e3910bad049664"
   @session_id "5b0c7d2e-8f41-4a6b-9c3d-2e7f1a8b4c60"
   @device_id "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"
   @session_keys ~w(failure outcome request session_id state ttl_ms)
@@ -402,10 +403,48 @@ defmodule FermixCore.Management.MobileTest do
                  "delivery" => "down",
                  "reason" => nil
                },
+               "remote" => %{
+                 "state" => "ready",
+                 "endpoint_id" => @endpoint_id,
+                 "relay" => "https://us1.relay.fermix.ai/",
+                 "connected" => true,
+                 "relay_error" => nil,
+                 "failure" => nil,
+                 "refused" => %{"busy" => 0, "alpn" => 0, "bridge_unreachable" => 0}
+               },
                "paired_devices" => 1,
                "protocol_version" => 1,
                "pairing" => %{"session_id" => @session_id, "state" => "awaiting_decision"}
              }
+    end
+
+    # Reach from anywhere (M62) is said as the rail reports it: switched off it
+    # is `off` with nothing else, and a failed rail carries the helper's words.
+    test "reach from anywhere is published off, or failed in the helper's words" do
+      off = Map.put(status(), :remote, %{state: :off})
+      assert {:ok, %{"remote" => remote}} = Mobile.status(fake({:ok, off}))
+
+      assert remote == %{
+               "state" => "off",
+               "endpoint_id" => nil,
+               "relay" => nil,
+               "connected" => false,
+               "relay_error" => nil,
+               "failure" => nil,
+               "refused" => %{"busy" => 0, "alpn" => 0, "bridge_unreachable" => 0}
+             }
+
+      failed =
+        Map.put(status(), :remote, %{
+          state: :failed,
+          failure: "fermix-iroh speaks protocol 2; this Fermix speaks 1",
+          refused: %{busy: 2, alpn: 1, bridge_unreachable: 0}
+        })
+
+      assert {:ok, %{"remote" => remote}} = Mobile.status(fake({:ok, failed}))
+      assert remote["state"] == "failed"
+      assert remote["failure"] == "fermix-iroh speaks protocol 2; this Fermix speaks 1"
+      assert remote["refused"] == %{"busy" => 2, "alpn" => 1, "bridge_unreachable" => 0}
     end
 
     test "a channel that is off still answers, with no pairing and no identity" do
@@ -537,7 +576,9 @@ defmodule FermixCore.Management.MobileTest do
              "Only the owner can pair or forget a phone; run this from your own terminal.",
              "The phone channel is on but could not start. See the daemon log.",
              "The phone channel starts the next time Fermix starts.",
-             "The phone channel's switch could not be applied. See the daemon log."
+             "The phone channel's switch could not be applied. See the daemon log.",
+             "Reach from anywhere is on but could not start. See the daemon log.",
+             "Reach from anywhere could not be switched. See the daemon log."
            ]
   end
 
@@ -613,6 +654,14 @@ defmodule FermixCore.Management.MobileTest do
       tailnet: %{detected: false, candidates: []},
       identity: %{present: true, fingerprint: "3f9a 1c2e"},
       apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+      remote: %{
+        state: :ready,
+        endpoint_id: @endpoint_id,
+        relay: "https://us1.relay.fermix.ai/",
+        connected: true,
+        relay_error: nil,
+        refused: %{busy: 0, alpn: 0, bridge_unreachable: 0}
+      },
       paired_devices: 1,
       protocol_version: 1,
       pairing: %{session_id: @session_id, state: :awaiting_decision}

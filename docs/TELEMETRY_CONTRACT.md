@@ -647,6 +647,16 @@ database becoming unavailable, a missing grant or unconfirmed recipients at
 boot, a suspected reply loop) and never per failure, and a message body the
 helper could not decode is the `emit_parse(:imessage, :decode_error, …)` parse
 status, not a new event name.
+The phone channel's remote reach (M62) is another: `emit_transport(:mobile_iroh,
+:degraded | :recovered, …)` fires when the `fermix-iroh` helper first fails
+(it exited, did not answer in time, reported an `error`, spoke another
+protocol or iroh version, or the bridge socket was not listening) and when it
+is ready again, never per retry. `error_class` is the failure's kind
+(`exited`, `timeout`, `helper_error`, `protocol_version`, `iroh_version`,
+`endpoint_id`, `bridge_unavailable`, …). A build with no helper is a state,
+not a transition, and emits nothing; `mobile.status` and `fermix doctor` say
+it. A phone's session over the iroh carrier emits exactly the events a
+WebSocket session does.
 
 ## Inbound attachments (a pre-turn point per attachment)
 

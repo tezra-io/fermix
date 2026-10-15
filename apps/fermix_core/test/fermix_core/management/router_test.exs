@@ -1003,7 +1003,7 @@ defmodule FermixCore.Management.RouterTest do
 
       assert Enum.sort(Map.keys(view)) ==
                ~w(apns enabled identity listener mdns paired_devices pairing protocol_version
-                  refusal refused started tailnet)
+                  refusal refused remote started tailnet)
     end
 
     test "the no-parameter methods refuse parameters rather than ignoring them" do
@@ -1171,6 +1171,7 @@ defmodule FermixCore.Management.RouterTest do
       tailnet: %{detected: false, candidates: []},
       identity: %{present: false, fingerprint: nil},
       apns: %{enabled: false, credentials: :missing, delivery: :down, reason: nil},
+      remote: %{state: :off},
       paired_devices: 0,
       protocol_version: 1,
       pairing: nil

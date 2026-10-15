@@ -103,6 +103,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:signal_enabled, boolean() | String.t()}
           | {:acp_enabled, boolean() | String.t()}
           | {:mobile_enabled, boolean() | String.t()}
+          | {:mobile_iroh, boolean() | String.t()}
           | {:mobile_port, pos_integer()}
           | {:mobile_bind, String.t()}
           | {:mobile_advertise_mdns, boolean() | String.t()}
@@ -2477,14 +2478,15 @@ defmodule FermixCore.Setup.Wizard do
     value |> String.split(",") |> Enum.map(&String.trim/1) |> Enum.reject(&(&1 == ""))
   end
 
-  # The phone channel's four operator settings (M51 management pairing §6). Each
-  # answer is one key merged into `[fermix_channels.mobile]`, so the keys no
-  # pane writes (`push`, `streaming`, the media bounds) survive the write, and
-  # an absent answer changes nothing. The two refusals are the sentences a pane
+  # The phone channel's five operator settings (M51 management pairing §6, and
+  # M62's reach from anywhere). Each answer is one key merged into
+  # `[fermix_channels.mobile]`, so the keys no pane writes (`push`, `streaming`,
+  # the media bounds) survive the write, and an absent answer changes nothing. The two refusals are the sentences a pane
   # shows under the control, so they are written for the operator.
   defp put_mobile_config(snapshot, answers) do
     [
       enabled: normalize_realtime_bool(Keyword.get(answers, :mobile_enabled), :mobile_enabled),
+      iroh: normalize_realtime_bool(Keyword.get(answers, :mobile_iroh), :mobile_iroh),
       port: normalize_mobile_port(Keyword.get(answers, :mobile_port)),
       bind: normalize_mobile_bind(Keyword.get(answers, :mobile_bind)),
       advertise_mdns:

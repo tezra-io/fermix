@@ -60,7 +60,7 @@ defmodule FermixCore.Setup.ConfigStore do
     "unsupported" => :unsupported
   }
 
-  @mobile_keys ~w(enabled mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
+  @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
 
   @type runtime_config :: %{
@@ -2708,6 +2708,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
     []
     |> put_if_present(:enabled, normalize_mobile_boolean(config, :enabled))
+    |> put_if_present(:iroh, normalize_mobile_boolean(config, :iroh))
     |> put_if_present(:mode, normalize_mobile_mode(lookup(config, "mode", :mode)))
     |> put_if_present(:port, normalize_mobile_port(lookup(config, "port", :port)))
     |> put_if_present(:bind, normalize_mobile_bind(config))

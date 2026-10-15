@@ -10,26 +10,14 @@ defmodule FermixChannels.Mobile.Router do
 
   import Plug.Conn
 
-  alias FermixChannels.Mobile.PairManager
   alias FermixChannels.Mobile.Protocol
+  alias FermixChannels.Mobile.Session
   alias FermixChannels.Mobile.SocketHandler
 
-  # The upgrade happens before the prelude picks paired or pairing mode, so one
-  # idle timeout covers both. It must outlive the owner-approval window, or the
-  # transport closes a pairing socket while the owner is still deciding.
-  @idle_grace_ms 30_000
   # A Noise message is at most 65,535 bytes, and Bandit counts the frame header
   # against its cap: 14 bytes is the largest masked client header (2, an 8-byte
   # extended length, and the 4-byte mask).
   @max_frame_size 65_535 + 14
-  # Bandit buffers every FIN=0 fragment of a message with no bound on the total,
-  # before the prelude is even read. Counting shared binaries against the heap
-  # makes that buffer count too, so an unauthenticated connection that outgrows
-  # a handshake's needs is killed instead of the VM.
-  @unauthenticated_heap_bytes 4 * 1_024 * 1_024
-  # A paired device's socket carries media: a fetched blob with its frames and
-  # their ciphertext, and fan-out events queued in its mailbox.
-  @authenticated_heap_floor_bytes 64 * 1_024 * 1_024
   @default_max_media_bytes 20 * 1_024 * 1_024
 
   @doc "The WebSocket frame cap: the largest Noise message plus its largest header."
@@ -58,12 +46,16 @@ defmodule FermixChannels.Mobile.Router do
 
   def call(%Plug.Conn{} = conn, _opts), do: send_resp(conn, 404, "not found")
 
+  # The idle bound and the memory bound before `hello` are the session's, so
+  # every carrier keeps the same ones. Bandit buffers every FIN=0 fragment of a
+  # message with no bound on the total, before the prelude is even read;
+  # counting shared binaries against the heap makes that buffer count too.
   defp socket_options do
     [
       compress: false,
       max_frame_size: @max_frame_size,
-      timeout: PairManager.max_ttl_ms() + @idle_grace_ms,
-      max_heap_size: heap_cap(@unauthenticated_heap_bytes)
+      timeout: Session.idle_timeout_ms(),
+      max_heap_size: Session.unauthenticated_heap_cap()
     ]
   end
 
@@ -74,21 +66,8 @@ defmodule FermixChannels.Mobile.Router do
 
     opts
     |> Map.new()
-    |> Map.put(:authenticated_max_heap_size, authenticated_heap_cap(max_media_bytes))
+    |> Map.put(:authenticated_max_heap_size, Session.authenticated_heap_cap(max_media_bytes))
     |> Map.put(:peer, conn.remote_ip)
-  end
-
-  defp authenticated_heap_cap(max_media_bytes) when is_integer(max_media_bytes) do
-    heap_cap(@authenticated_heap_floor_bytes + 4 * max_media_bytes)
-  end
-
-  defp heap_cap(bytes) do
-    %{
-      size: div(bytes, :erlang.system_info(:wordsize)),
-      kill: true,
-      error_logger: true,
-      include_shared_binaries: true
-    }
   end
 
   defp websocket_upgrade?(conn) do

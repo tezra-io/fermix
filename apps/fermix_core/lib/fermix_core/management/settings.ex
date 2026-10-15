@@ -146,7 +146,9 @@ defmodule FermixCore.Management.Settings do
     :ok = ConfigStore.apply_snapshot(persisted, Keyword.take(opts, [:supervised]))
     :ok = RestartState.record_persisted_baseline()
 
-    for sentence <- phone_switch(before, ConfigStore.current_snapshot(), opts),
+    current = ConfigStore.current_snapshot()
+
+    for sentence <- phone_switch(before, current, opts) ++ reach_switch(before, current, opts),
         do: Logger.warning("settings reload: #{sentence}")
 
     {:ok,
@@ -269,7 +271,8 @@ defmodule FermixCore.Management.Settings do
       "applied" => keys ++ derived_keys(keys, switch),
       "restart" => restart(),
       "readiness" => readiness(),
-      "side_effects" => side_effects(before, current, switch) ++ phone
+      "side_effects" =>
+        side_effects(before, current, switch) ++ phone ++ reach_switch(before, current, opts)
     }
   end
 
@@ -291,6 +294,25 @@ defmodule FermixCore.Management.Settings do
 
   defp phone_on?(snapshot),
     do: snapshot |> Source.channel(:mobile) |> Keyword.get(:enabled, false) == true
+
+  # Reach from anywhere is live too (M62 D4), within a phone channel that runs:
+  # a channel that is off has no reach to switch and reads it when it starts,
+  # and turning the channel itself on or off carries its reach with it.
+  defp reach_switch(before, current, opts) do
+    now = reach_on?(current)
+
+    if phone_on?(before) and phone_on?(current) and reach_on?(before) != now do
+      case Keyword.get(opts, :mobile_reach_switch, &PhoneChannel.apply_iroh/1).(now) do
+        :ok -> []
+        {:error, sentence} when is_binary(sentence) -> [sentence]
+      end
+    else
+      []
+    end
+  end
+
+  defp reach_on?(snapshot),
+    do: snapshot |> Source.channel(:mobile) |> Keyword.get(:iroh, true) == true
 
   # The voice engine before and after the write, or `nil` when it did not move.
   # It is the one write in this daemon that rewrites keys of its own section, so

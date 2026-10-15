@@ -1038,6 +1038,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
 
+  @no_helper "this build carries no fermix-iroh helper"
+
   @doc "Reports mobile identity permissions and daemon-owned listener state."
   @spec mobile(keyword()) :: result()
   def mobile(opts \\ []) when is_list(opts) do
@@ -1162,6 +1164,7 @@ defmodule Fermix.CLI.Doctor.Checks do
       mobile_listener(report, opts),
       mobile_mdns(report, config),
       mobile_tailnet(report),
+      mobile_remote(report),
       mobile_apns(report, config),
       mobile_device_count(report)
     ]
@@ -1279,6 +1282,33 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   defp mobile_tailnet(%{"tailnet" => %{"detected" => true}}), do: {:ok, "tailnet detected"}
   defp mobile_tailnet(_report), do: {:ok, "tailnet not detected (LAN still available)"}
+
+  # Reach from anywhere (M62 §8), as the daemon's rail reports it. A missing
+  # helper is a warning while builds carry none; a failed rail is a failure in
+  # the helper's own words, which the rail has already stripped of control
+  # characters.
+  defp mobile_remote(%{"remote" => %{"state" => state} = remote}) do
+    case state do
+      "off" -> {:ok, "reach from anywhere off"}
+      "dormant" -> {:ok, "reach from anywhere waits for the first pairing"}
+      "starting" -> {:ok, "reach from anywhere starting"}
+      "helper_missing" -> {:warn, "reach from anywhere unavailable: " <> @no_helper}
+      "ready" -> mobile_relay(remote)
+      "failed" -> {:fail, "reach from anywhere failed: #{remote["failure"]}"}
+      other -> {:warn, "reach from anywhere reports a state this CLI does not know: #{other}"}
+    end
+  end
+
+  defp mobile_remote(_report),
+    do: {:warn, "reach from anywhere not reported: the running daemon predates it"}
+
+  defp mobile_relay(%{"connected" => true, "relay" => relay}) when is_binary(relay),
+    do: {:ok, "reach from anywhere ready via #{URI.parse(relay).host}"}
+
+  defp mobile_relay(%{"relay_error" => error}) when is_binary(error),
+    do: {:warn, "reach from anywhere not connected to a relay (#{error})"}
+
+  defp mobile_relay(_remote), do: {:warn, "reach from anywhere not connected to a relay yet"}
 
   # Push connects lazily and stays up when Apple is unreachable, so credentials
   # that resolve are not yet delivery: the daemon says which it is.

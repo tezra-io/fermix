@@ -938,6 +938,12 @@
     },
     {
       "method": "settings.get:channels.mobile",
+      "field": "rows:mobile_iroh",
+      "kind": "engine_only",
+      "why": "M62 adds the phone channel's reach from anywhere to its section: a switch, on by default and applied the moment it is written, that lets a paired phone reach this daemon from any network through Fermix's relays. The draft predates it; the row is the ordinary toggle shape."
+    },
+    {
+      "method": "settings.get:channels.mobile",
       "field": "rows:mobile_port",
       "kind": "engine_only",
       "why": "M51 gives the phone channel its own settings section, channels.mobile: the enable switch, applied the moment it is written, and three boot-bound rows: the port, the address it listens on and the local-network announcement. The draft predates it and draws no such section; the rows are the ordinary row shape."

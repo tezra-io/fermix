@@ -2927,6 +2927,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       fermix_channels: [
         mobile: [
           enabled: true,
+          iroh: false,
           mode: :listener,
           port: 4_031,
           bind: "0.0.0.0",
@@ -2950,6 +2951,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     assert :ok = ConfigStore.save_snapshot(snapshot)
     contents = File.read!(Path.join(tmp_home, "config.toml"))
     assert contents =~ "[fermix_channels.mobile]"
+    assert contents =~ "iroh = false"
     assert contents =~ "mode = \"listener\""
     assert contents =~ "port = 4031"
     assert contents =~ "streaming = \"draft\""
@@ -2960,6 +2962,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
 
     assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
     mobile = Keyword.fetch!(loaded.fermix_channels, :mobile)
+    assert Keyword.get(mobile, :iroh) == false
     assert Keyword.get(mobile, :mode) == :listener
     assert Keyword.get(mobile, :port) == 4_031
     assert Keyword.get(mobile, :max_media_bytes) == 20_971_520
@@ -2972,6 +2975,7 @@ defmodule FermixCore.Setup.ConfigStoreTest do
     invalid_configs = [
       {[port: 0], ~r/mobile.port/},
       {[mode: :gateway], ~r/mobile.mode/},
+      {[iroh: "yes"], ~r/mobile.iroh/},
       {[bind: "0.0.0"], ~r/mobile.bind/},
       {[bind: "localhost"], ~r/mobile.bind/},
       {[max_media_bytes: -1], ~r/mobile.max_media_bytes/},

@@ -2046,6 +2046,75 @@ defmodule FermixChannels.Mobile.SocketHandlerTest do
              SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
   end
 
+  # M62 §2: the rail's candidate comes last, and the host candidates give up
+  # one place so the list stays within 16.
+  test "hello_ack ends with the rail's candidate when remote reach is ready" do
+    candidates =
+      for last <- 1..20, do: %{address: "10.0.0.#{last}", interface: "en0", scope: :lan}
+
+    iroh = %{"kind" => "iroh", "node_id" => String.duplicate("a", 64)}
+
+    {:ok, state} =
+      init_socket(
+        hello_state(%{
+          discover: fn -> {:ok, candidates} end,
+          iroh_candidate: fn -> {:ok, iroh} end,
+          encode_server: fn "hello_ack", payload, 1 ->
+            assert length(payload["candidates"]) == 16
+            assert List.last(payload["candidates"]) == iroh
+            assert Enum.at(payload["candidates"], 14)["host"] == "10.0.0.15"
+            {:ok, "encoded"}
+          end
+        })
+      )
+
+    assert {:push, {:binary, "ciphertext-out"}, _next} =
+             SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+  end
+
+  # M62 §3.1: a hello names the relay list the phone stored; the device row
+  # records it, and a change tells the rail to recompute its relays.
+  test "a hello's relay list revision is recorded, and a new one reaches the rail" do
+    test_pid = self()
+
+    hello = %{
+      version: 2,
+      type: "hello",
+      seq: 1,
+      payload: %{
+        "device_id" => "paired-device",
+        "app_version" => "1.0",
+        "last_server_seq" => 0,
+        "protocol_v" => 2,
+        "relay_list_rev" => "0123456789abcdef"
+      },
+      bytes: <<>>
+    }
+
+    {:ok, state} =
+      init_socket(
+        hello_state(%{
+          decode_client: fn "plaintext", _opts -> {:ok, hello} end,
+          update_device: fn _store, "paired-device", attrs ->
+            send(test_pid, {:updated, attrs})
+            {:ok, %{device_id: "paired-device", relay_list_rev: attrs[:relay_list_rev]}}
+          end,
+          relay_list_acknowledged: fn ->
+            send(test_pid, :relays_acknowledged)
+            :ok
+          end,
+          discover: fn -> {:ok, []} end,
+          encode_server: fn "hello_ack", _payload, 1 -> {:ok, "encoded"} end
+        })
+      )
+
+    assert {:push, _frames, _next} =
+             SocketHandler.handle_in({"ciphertext", opcode: :binary}, state)
+
+    assert_receive {:updated, %{relay_list_rev: "0123456789abcdef", last_seen: %DateTime{}}}
+    assert_receive :relays_acknowledged
+  end
+
   # FEAT-2: a phone that was away when an approval went out gets it right
   # after its hello_ack, in the same push.
   test "an approval still waiting follows the hello_ack" do

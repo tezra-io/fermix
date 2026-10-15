@@ -42,6 +42,12 @@ defmodule FermixChannels.Mobile.PairManager do
   # counted, since a peer with that many addresses gains nothing from one more.
   @max_failures 5
   @max_tracked_sources 1_024
+  # An iroh peer is its endpoint key, which costs nothing to replace, so a
+  # per-peer count alone bounds nothing: past this many failures summed over
+  # every iroh peer, the window refuses iroh peers until it closes. Peers on the
+  # home network or Tailscale, and a phone already waiting, are untouched, and
+  # the window itself never closes over it (M62 §7, M65).
+  @max_iroh_failures 64
   @max_wait_ms 120_000
   @max_text_bytes 128
   @max_retained 8
@@ -95,8 +101,11 @@ defmodule FermixChannels.Mobile.PairManager do
           :approved | :denied | :timeout | :cancelled | :device_disconnected | refusal_reason()
   @type status_list_error ::
           :status_list_missing | :status_list_stale | :status_list_wait_timeout
-  @typedoc "Where a handshake came from; `:unknown` when the caller cannot say."
-  @type source :: :inet.ip_address() | :unknown
+  @typedoc """
+  Where a handshake came from: an address for a WebSocket, an iroh endpoint id
+  for a bridged stream, `:unknown` when the caller cannot say.
+  """
+  @type source :: :inet.ip_address() | {:iroh, String.t()} | :unknown
   @type record :: %{
           session_id: session_id(),
           status: :awaiting_scan | :awaiting_decision | terminal_status(),
@@ -467,6 +476,8 @@ defmodule FermixChannels.Mobile.PairManager do
         ),
       activate_listener:
         Keyword.get(opts, :activate_listener, default_activate_listener(listener)),
+      activate_rail:
+        Keyword.get(opts, :activate_rail, default_activate_rail(Keyword.get(opts, :rail))),
       persist_device:
         Keyword.get(opts, :persist_device, default_persist_device(device_store, root)),
       emit_pair: Keyword.get(opts, :emit_pair, &default_emit_pair/3),
@@ -485,6 +496,7 @@ defmodule FermixChannels.Mobile.PairManager do
     with :ok <- step(:identity, state.identity_guard.()),
          {:ok, identity} <- step(:identity, state.ensure_identity.()),
          :ok <- step(:listener, activate_listener(state.activate_listener, identity)),
+         :ok <- state.activate_rail.(),
          {:ok, session_id} <- generated_id(state.session_id_generator),
          {:ok, secret} <- generated_bytes(state.secret_generator, 32) do
       now = state.clock.()
@@ -500,6 +512,7 @@ defmodule FermixChannels.Mobile.PairManager do
         timer_ref: timer_ref,
         timer_token: timer_token,
         failures_by_source: %{},
+        iroh_failures: 0,
         request: nil,
         refusal: nil,
         request_waiter: nil,
@@ -617,14 +630,21 @@ defmodule FermixChannels.Mobile.PairManager do
   defp failure_reply(state, window, source) do
     counts = window.failures_by_source
 
+    window = count_iroh_failure(window, source)
+
     if Map.has_key?(counts, source) or map_size(counts) < @max_tracked_sources do
       count = min(source_failures(window, source) + 1, @max_failures)
       window = %{window | failures_by_source: Map.put(counts, source, count)}
       {:reply, counted_failure(count), %{state | window: window}}
     else
-      {:reply, {:ok, 0}, state}
+      {:reply, {:ok, 0}, %{state | window: window}}
     end
   end
+
+  defp count_iroh_failure(window, {:iroh, _endpoint_id}),
+    do: %{window | iroh_failures: min(window.iroh_failures + 1, @max_iroh_failures)}
+
+  defp count_iroh_failure(window, _source), do: window
 
   defp counted_failure(count) when count >= @max_failures, do: {:error, :rate_limited}
   defp counted_failure(count), do: {:ok, count}
@@ -634,10 +654,15 @@ defmodule FermixChannels.Mobile.PairManager do
   defp current_for(nil, _source), do: :none
 
   defp current_for(window, source) do
-    if source_failures(window, source) >= @max_failures,
+    if source_failures(window, source) >= @max_failures or iroh_refused?(window, source),
       do: :none,
       else: {:ok, public_window(window)}
   end
+
+  defp iroh_refused?(window, {:iroh, _endpoint_id}),
+    do: window.iroh_failures >= @max_iroh_failures
+
+  defp iroh_refused?(_window, _source), do: false
 
   defp close_window(state, status, socket_result \\ nil) do
     window = state.window
@@ -1063,6 +1088,15 @@ defmodule FermixChannels.Mobile.PairManager do
       gateway_public_key: Map.get(identity, :gateway_public_key),
       tls_fingerprint: Map.get(identity, :tls_fingerprint)
     }
+  end
+
+  # The rail starts with the first window, as the listener does, and can never
+  # fail it: a missing helper or a helper fault is the rail's to report, and
+  # pairing over the home network and Tailscale goes on.
+  defp default_activate_rail(nil), do: fn -> :ok end
+
+  defp default_activate_rail(rail) do
+    fn -> apply(FermixChannels.Mobile.Iroh.Helper, :activate, [rail]) end
   end
 
   defp default_activate_listener(listener) do

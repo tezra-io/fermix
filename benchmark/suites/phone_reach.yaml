@@ -1,0 +1,73 @@
+# The phone channel's reach (M51, M62), graded through the real agent path.
+#
+# WHAT ROTS HERE. Where a paired phone can reach Fermix from is written in the
+# `self-knowledge` skill: over the home network or Tailscale today, and from any
+# network through Fermix's relays once a build carries the `fermix-iroh` helper,
+# which none does yet. ExUnit proves the sentences are in the file; this suite
+# proves an owner who asks in their own words gets that answer, and never a
+# claim that remote reach already works or a third-party tunnel in its place.
+#
+# WHY BEHAVIORAL. There is no end state to check: the answer is advice. The
+# failure that silently rots is a model that reads "on by default" and promises
+# reach from anywhere today, or invents a tunnel.
+#
+# GATES. The floor is `tailscale`: every correct answer names it as the way a
+# phone reaches Fermix away from home today, and both questions leave room to
+# answer without it only by being wrong. `reply_not_matches` names tunnels a
+# correct answer has no reason to mention in any polarity. Correctness of
+# wording is the rubric's job. No route assertion: the model may read the skill
+# or answer from what it already loaded.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant (these are `host_readonly`).
+suite: phone_reach
+risk: host_readonly
+title: "Phone channel reach — home network, Tailscale, and reach from anywhere"
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: reach_away_from_home
+    title: "Reaching Fermix from a phone away from home"
+    severity: normal
+    tags: [phone, mobile, self-knowledge]
+    cases:
+      - id: away_for_a_week
+        query: >
+          I'm travelling for a week. Will the Fermix phone app still reach my
+          Fermix at home over mobile data, or do I need to set something up
+          first?
+        expect:
+          reply_matches: '(?i)tailscale'
+          reply_not_matches: '(?i)\b(ngrok|cloudflared|cloudflare\s+tunnel|tailscale\s+funnel|port[- ]forward(ing)?)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says that today a phone reaches Fermix on the same home network or
+          over Tailscale, so away from home it needs Tailscale on both the phone
+          and the computer. May mention that Fermix has a "Reach from anywhere"
+          setting for reaching it through Fermix's own relays, but says it does
+          not work yet because no released build carries the helper it needs.
+          Does not claim remote reach works today, and does not suggest a
+          tunnel, port forwarding or another third-party relay.
+      - id: reach_from_anywhere_setting
+        query: >
+          There's a "Reach from anywhere" switch in Fermix's phone settings and
+          it's on. Does that mean I can uninstall Tailscale and still use the
+          phone app from anywhere?
+        expect:
+          reply_matches: '(?i)tailscale'
+          reply_not_matches: '(?i)\b(ngrok|cloudflared|cloudflare\s+tunnel|tailscale\s+funnel|port[- ]forward(ing)?)\b'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says not yet: the switch is on by default, but reaching Fermix through
+          its relays needs a helper that no released build carries, so the
+          phone channel's status and `fermix doctor` report it missing and the
+          phone still connects over the home network or Tailscale. Advises
+          keeping Tailscale for now. Does not claim the relays work today, and
+          does not suggest a tunnel or port forwarding instead.
