@@ -46,7 +46,7 @@ shows up as a broken `ChatAccounted` instead.
 
 | Switch | When `TRUE` |
 |---|---|
-| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`router.ex:20`, `:61-68`). |
+| `SocketsCanFreeze` | The OS suspends an app with no clean close. The daemon keeps its socket registered until the 150 s idle timeout (`Session.idle_timeout_ms`, `session.ex:136`), which the WebSocket (`router.ex:53-60`) and the iroh bridge connection (`bridge_connection.ex:199-206`) both apply. |
 | `DispatchCanFail` | A dispatcher call returns a transient error. |
 | `AnswerCanBeLost` | The platform accepted a push and the daemon saw a timeout instead. |
 | `DaemonCanCrash` | The daemon dies with push tasks in flight, and boots again. |
