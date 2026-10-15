@@ -362,9 +362,10 @@ Notes that the shapes alone do not carry:
   `starting`, `ready` or `failed`. While `ready`, `endpoint_id` is the
   daemon's iroh endpoint id, `relay` the URL of the relay it is reached
   through, `connected` whether it is connected to that relay right now, and
-  `relay_error` the relay connection's last error; while `failed`, `failure`
-  is the helper's own words with control characters removed. Each is null,
-  and `connected` false, in every other state. `refused` counts the remote
+  `relay_error` the relay connection's last error, at most 512 bytes; while
+  `failed`, `failure` is why, in the helper's own words where it gave them.
+  Both have control characters removed, so a client shows them as written.
+  Each is null, and `connected` false, in every other state. `refused` counts the remote
   connections the helper turned away by reason: `busy` (64 already
   connected), `alpn` (not a Fermix phone) and `bridge_unreachable` (the
   daemon was not taking them). A rail that fails is retried on its own, from

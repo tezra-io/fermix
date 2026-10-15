@@ -48,10 +48,11 @@ defmodule FermixCore.Management.Settings.Mobile do
         restart: switch_restart
       ),
       Row.new("mobile_iroh", :toggle, "Reach from anywhere",
+        # What the switch does, not whether it works today: the phone channel's
+        # status says that (`remote`), and two lines fit the Phone sheet.
         footer:
-          "A paired phone reaches this Fermix from any network, through Fermix's relays, " <>
-            "with no Tailscale. Relays see addresses and timing, never your messages. " <>
-            "Relay contact starts with the first pairing.",
+          "Lets a paired phone reach this Fermix from any network through Fermix's relays, " <>
+            "which never see your messages.",
         value: Source.boolean(block, :iroh, true),
         restart: reach_restart
       ),
