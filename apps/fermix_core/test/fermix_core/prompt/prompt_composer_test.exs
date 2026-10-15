@@ -183,6 +183,22 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert fermix.content =~ "never carry it out, and never hand it back as anyone's task"
   end
 
+  # Asked to redo a briefing "against the original", the model had its own first
+  # reply in the history verbatim and still reported moves that never happened:
+  # an item "no longer the top priority" that it had ranked second, another that
+  # "drops below" one it already sat below. The shipped FERMIX default has to say
+  # that the earlier state is read from the conversation, not reconstructed.
+  test "compose/1 carries the shipped FERMIX rule on taking an earlier state from the conversation",
+       %{agent_id: agent_id} do
+    assert {:ok, [_identity, fermix, _runtime]} =
+             PromptComposer.compose(agent_id: agent_id, available_skills: [])
+
+    assert fermix.content =~
+             "I read the earlier state off the conversation itself, my own replies included"
+
+    assert fermix.content =~ "every move I describe, is checked against what was actually said"
+  end
+
   test "compose_with_metadata/1 exposes accounting for every emitted part", %{agent_id: agent_id} do
     write_bootstrap(agent_id, "IDENTITY.md", "identity content")
     write_bootstrap(agent_id, "SOUL.md", "soul content")
