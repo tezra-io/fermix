@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Send one management v1 request to a running Fermix daemon and print the reply.
 
 Dev tool for exercising the app-facing management plane without the macOS app.
@@ -6,16 +10,16 @@ Speaks the packet-4 framing (4-byte big-endian length prefix + JSON) documented
 in apps/fermix_core/priv/management/PROTOCOL.md.
 
 Usage:
-    python3 scripts/dev/management_request.py <method> [params-json]
+    uv run scripts/dev/management_request.py <method> [params-json]
 
 The socket is resolved from $FERMIX_HOME/daemon.sock (FERMIX_HOME required).
 
 Examples:
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/management_request.py hello
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/management_request.py overview.get
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/management_request.py setup.session.create
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/management_request.py doctor.start '{"scope":"local"}'
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/management_request.py logs.query '{"limit":20}'
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/management_request.py hello
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/management_request.py overview.get
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/management_request.py setup.session.create
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/management_request.py doctor.start '{"scope":"local"}'
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/management_request.py logs.query '{"limit":20}'
 """
 
 import json

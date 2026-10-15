@@ -43,6 +43,8 @@ jobs:
         with:
           fetch-depth: ${{ matrix.fetch_depth }}
 
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
+
       - uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
         with:
           otp-version: ${{ env.OTP_VERSION }}
@@ -83,7 +85,7 @@ jobs:
         # flaky-tests.json) and the leg passes. `scripts/ci/flaky_report.py`
         # counts the flags across runs: fix anything flagged twice.
         run: >-
-          python3 scripts/ci/mix_test_retry.py
+          uv run scripts/ci/mix_test_retry.py
           --log "${RUNNER_TEMP}/mix-test.log"
           --flaky-json "${RUNNER_TEMP}/flaky-tests.json"
 
@@ -97,7 +99,7 @@ jobs:
         env:
           STRESS_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
         run: >-
-          python3 scripts/ci/stress_changed_tests.py
+          uv run scripts/ci/stress_changed_tests.py
           --base "${STRESS_BASE}"
           --log-dir "${RUNNER_TEMP}/stress"
 
@@ -236,10 +238,11 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5.4.2
       - name: Run hermetic release tests
-        run: python3 -m unittest discover -s scripts/release -p 'test_*.py'
+        run: for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
       - name: Run hermetic CI script tests
-        run: python3 -m unittest discover -s scripts/ci -p 'test_*.py'
+        run: for t in scripts/ci/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done
 
   disclaim-shim:
     # The macOS disclaim exec shim ships inside release payloads, cross-compiled

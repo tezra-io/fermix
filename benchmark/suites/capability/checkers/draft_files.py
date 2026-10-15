@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must leave a set of drafts, one file per recipient, in a
 folder of the trial workspace. Gold (`checker.expect`):
 

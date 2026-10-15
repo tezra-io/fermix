@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must file three receipts the way the eval home's
 `receipt-filing` skill says, which it can only know by opening that skill: the
 prompt carries only a one-line description of it.

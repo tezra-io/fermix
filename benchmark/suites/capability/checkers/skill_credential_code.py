@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent ran the seeded desk script, which reads an allowed sandbox
 credential from its environment, and reported the code it printed.
 

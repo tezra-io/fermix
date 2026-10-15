@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must reach the deferred `shipment_status` tool of the
 halden_ops fixture MCP server and report what it returned for THIS trial's
 tracking number.

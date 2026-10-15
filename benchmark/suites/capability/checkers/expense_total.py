@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json) for the seeded-file expense task. The agent must READ expenses.csv,
 handle the traps (refund parentheses = negative, quoted thousands-separator, a duplicate
 header row, case/space-insensitive "Groceries" match) and write the groceries total to

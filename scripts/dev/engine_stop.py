@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Stop a running Fermix app engine over its management socket.
 
 The app-engine release runs with Erlang distribution off (no epmd), so the
@@ -8,7 +12,7 @@ app uses: lifecycle.prepare mints the single drain lease, lifecycle.commit
 runs the daemon's shutdown path.
 
 Usage:
-    FERMIX_HOME=~/.fermix-apptest python3 scripts/dev/engine_stop.py
+    FERMIX_HOME=~/.fermix-apptest uv run scripts/dev/engine_stop.py
 """
 
 import json

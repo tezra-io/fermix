@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must record ONE expense through the deferred
 `ledger_add_entry` tool of the halden_ops fixture MCP server, with the fields the
 tool's schema demands.

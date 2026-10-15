@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json mode) for the multi-constraint email task.
 
 Scores 8 constraints, each SENTENCE-LEVEL rather than token-level: an instruction like

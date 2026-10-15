@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Repeat the test files a change adds or edits, with every core busy, until one fails.
 
 A flaky test is usually written with its feature and passes that change's CI,

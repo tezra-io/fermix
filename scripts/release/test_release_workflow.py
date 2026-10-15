@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Structural tests for native app-engine release automation."""
 
 import re
@@ -79,7 +83,7 @@ class ReleaseWorkflowTest(unittest.TestCase):
 
     def test_ci_runs_intel_and_release_script_tests_as_required_gates(self):
         self.assertIn("macos-15-intel", self.ci)
-        self.assertIn("python3 -m unittest discover -s scripts/release", self.ci)
+        self.assertIn('for t in scripts/release/test_*.py; do echo "== $t =="; uv run "$t" || exit 1; done', self.ci)
         self.assertRegex(self.ci, r"needs:\s*\[[^\]]*release-scripts[^\]]*\]")
         self.assertIn("${{ needs.release-scripts.result }}", self.ci)
 

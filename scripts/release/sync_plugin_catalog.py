@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Sync the bundled plugin catalog seed from fermix-plugins releases (M8.1 §3.4).
 
 The catalog (`apps/fermix_core/priv/plugins/index.json`) is DERIVED state —

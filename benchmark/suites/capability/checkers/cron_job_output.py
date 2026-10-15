@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the agent must SCHEDULE a job whose isolated run writes this trial's
 token to job_out.txt, get it run, and WAIT for the run to finish before ending its turn.
 

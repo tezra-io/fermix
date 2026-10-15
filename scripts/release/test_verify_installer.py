@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Hermetic tests for the post-publication installer check."""
 
 import json
@@ -71,7 +75,16 @@ class VerifyInstallerTest(unittest.TestCase):
             path = shutil.which(tool)
             self.assertIsNotNone(path, f"{tool} is required to run the check")
             (self.bin / tool).symlink_to(path)
-        self._fake("python3", f'#!/bin/sh\nexec "{sys.executable}" "$@"\n')
+        # uv run [--options] python -c ...: drop uv's own words, keep Python's.
+        self._fake(
+            "uv",
+            "#!/bin/sh\n"
+            '[ "$1" = run ] || exit 64\n'
+            "shift\n"
+            'while [ "${1#--}" != "$1" ]; do shift; done\n'
+            '[ "$1" = python ] && shift\n'
+            f'exec "{sys.executable}" "$@"\n',
+        )
 
         # The script finds the installer beside itself, so it runs from a tree
         # whose installer is this test's.

@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """List the tests CI flagged as flaky, most often first.
 
 `mix_test_retry.py` lets a leg pass when a few failed tests pass on their one

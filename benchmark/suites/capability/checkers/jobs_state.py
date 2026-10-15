@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json): the scheduled jobs in the eval home after the turn.
 
 Reads memory.db read-only and compares it with what `checker.state` seeded (the job

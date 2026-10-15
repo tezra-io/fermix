@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Run the umbrella suite; rerun a few failed tests once and flag them as flaky.
 
 The first run is the ordinary `mix test --warnings-as-errors`. When it fails

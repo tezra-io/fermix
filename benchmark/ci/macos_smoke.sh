@@ -29,7 +29,7 @@ trap cleanup EXIT
 ask() {
   local out
   out=$(shim ask --json --session "$1" --timeout 120000 "$2") || fail "turn '$1' errored: $out"
-  python3 -c 'import json,sys
+  uv run --no-project python -c 'import json,sys
 d = json.load(sys.stdin)
 assert d.get("status") == "ok" and (d.get("response") or "").strip(), d
 print(d["response"])' <<<"$out" || fail "turn '$1' returned no usable reply: $out"

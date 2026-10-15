@@ -1,4 +1,8 @@
-#!/usr/bin/env python3
+#!/usr/bin/env -S uv run --script
+# /// script
+# requires-python = ">=3.11"
+# dependencies = []
+# ///
 """Checker (json) for the seeded-file order-extraction task. The agent must READ
 order.txt and write EXACTLY one line to answer.txt as
 <order_id>|<total>|<item_count>|<date>.
