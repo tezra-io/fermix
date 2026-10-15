@@ -30,6 +30,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Audio and video sent under an alias type keep a name their readers know.**
+  An attachment's copy was named after its mime type's subtype, so an M4A or
+  WAV sent as `audio/x-m4a` or `audio/x-wav` became `.x_m4a` or `.x_wav`, a
+  QuickTime video `.quicktime` and an MP3 `.mpeg`, names transcription and the
+  Mac's players do not read. They are now `.m4a`, `.wav`, `.mov` and `.mp3`,
+  as are Word, Excel, PowerPoint, plain text and SVG files by their own
+  extensions.
 - **Fermix reaches a provider over IPv6 when its IPv4 path fails.** Outbound
   connections now try IPv6 first and fall back to IPv4, the order curl and
   browsers use. Since 14 October 2026 OpenAI has answered Sign in with ChatGPT

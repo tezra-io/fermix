@@ -134,6 +134,35 @@ defmodule FermixChannels.Gateway.MediaDownloadTest do
     end
   end
 
+  describe "extension/1" do
+    test "names a type by its subtype" do
+      assert MediaDownload.extension(%{mime_type: "audio/ogg; codecs=opus"}) == ".ogg"
+      assert MediaDownload.extension(%{mime_type: "video/mp4"}) == ".mp4"
+      assert MediaDownload.extension(%{"mime_type" => "Image/PNG"}) == ".png"
+    end
+
+    # macOS refuses to play `.x_m4a`, `.x_wav` and `.quicktime`, and reads
+    # `.mpeg` as a video, so these are named as their readers know them.
+    test "names a type whose subtype is no extension by its file's own" do
+      assert MediaDownload.extension(%{mime_type: "audio/x-m4a"}) == ".m4a"
+      assert MediaDownload.extension(%{mime_type: "audio/mpeg"}) == ".mp3"
+      assert MediaDownload.extension(%{mime_type: "audio/x-wav"}) == ".wav"
+      assert MediaDownload.extension(%{mime_type: "video/quicktime"}) == ".mov"
+      assert MediaDownload.extension(%{mime_type: "image/svg+xml"}) == ".svg"
+      assert MediaDownload.extension(%{mime_type: "text/plain; charset=utf-8"}) == ".txt"
+
+      assert MediaDownload.extension(%{
+               mime_type:
+                 "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+             }) == ".docx"
+    end
+
+    test "is .bin without a usable mime" do
+      assert MediaDownload.extension(%{}) == ".bin"
+      assert MediaDownload.extension(%{mime_type: "audio"}) == ".bin"
+    end
+  end
+
   describe "write_temp_bytes/3" do
     test "uses the caller's extension and stays owner-only" do
       assert {:ok, path} = MediaDownload.write_temp_bytes("ID3", "telegram", ".mp3")
