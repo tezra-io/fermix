@@ -259,10 +259,11 @@ def sdk(monkeypatch):
     monkeypatch.setattr(judge.anthropic, "Anthropic",
                         lambda *args, **kwargs: _FakeAnthropic(state, *args, **kwargs))
 
-    def run(*outcomes, cfg=None, candidates=CANDIDATES, rubric="Judge this."):
+    def run(*outcomes, cfg=None, candidates=CANDIDATES, rubric="Judge this.",
+            watched=frozenset()):
         state.outcomes = list(outcomes)
         return judge.judge_case(cfg or _anthropic_cfg(), "q", "r", rubric, "case",
-                                candidate_routes=candidates)
+                                candidate_routes=candidates, watched=watched)
 
     state.run = run
     return state
@@ -508,6 +509,36 @@ def test_every_requirement_met_is_a_pass_at_full_score(sdk):
     result = sdk.run(_message(text=_numbered(_req(1), _req(2), _req(3))),
                      rubric=NUMBERED_RUBRIC)
     assert (result.passed, result.score) == (True, 1.0)
+
+
+def test_a_watched_requirement_left_unmet_does_not_decide_pass(sdk):
+    result = sdk.run(_message(text=_numbered(_req(1), _req(2, met=False), _req(3))),
+                     rubric=NUMBERED_RUBRIC, watched=frozenset({2}))
+    assert result.passed is True
+    # The score still counts it, so a watched miss stays visible in the number.
+    assert result.score == pytest.approx(2 / 3)
+    assert [(item["n"], item["watched"]) for item in result.requirements] == \
+        [(1, False), (2, True), (3, False)]
+
+
+def test_an_unwatched_requirement_left_unmet_still_fails(sdk):
+    result = sdk.run(_message(text=_numbered(_req(1), _req(2, met=False), _req(3, met=False))),
+                     rubric=NUMBERED_RUBRIC, watched=frozenset({2}))
+    assert result.passed is False
+
+
+@pytest.mark.parametrize("rubric_text, watched, defect", [
+    ("Judge this.", frozenset({1}), "only a numbered rubric"),
+    (NUMBERED_RUBRIC, frozenset({4}), "are not numbered 1..3"),
+    (NUMBERED_RUBRIC, frozenset({0}), "are not numbered 1..3"),
+    (NUMBERED_RUBRIC, frozenset({1, 2, 3}), "none would decide the verdict"),
+])
+def test_an_impossible_watch_is_refused_before_the_judge_is_called(sdk, rubric_text,
+                                                                   watched, defect):
+    result = sdk.run(rubric=rubric_text, watched=watched)
+    assert result.evaluated is False and result.passed is None
+    assert defect in result.error
+    assert sdk.requests == []
 
 
 def test_requirement_verdicts_are_recorded_in_rubric_order(sdk):

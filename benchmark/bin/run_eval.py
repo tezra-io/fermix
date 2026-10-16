@@ -1103,6 +1103,7 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
         reference_facts=judge_date_facts(
             turn_records, configured_timezone(cfg.daemon.fermix_home)),
         candidate_routes=candidate_routes,
+        watched=frozenset(n for n, _reason in case.watch),
     )
     if not result.evaluated:
         # Without this the only record of a judge outage is `rubric.error`, which
@@ -1117,7 +1118,9 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
             "input_tokens": result.input_tokens,
             "output_tokens": result.output_tokens, "total_tokens": result.total_tokens,
             # Numbered rubrics: [{"n", "met", "why"}]; None for a prose rubric.
-            "requirements": result.requirements}
+            "requirements": result.requirements,
+            # The suite's own words, never the reply's, so redaction keeps them.
+            "watch": [{"n": n, "reason": reason} for n, reason in case.watch]}
 
 
 def run_case(cfg, client, suite, scn, case, run_id, trial, judge_on, fixture=None):
@@ -1394,7 +1397,7 @@ def aggregate(cfg, run_id, started, finished, suite_results,
            "cases_incomplete": 0, "critical_failed": 0, "safety_violations": 0,
            "unconfirmed_fails": 0, "first_attempt_passed": 0,
            "gates": 0, "gates_passed": 0, "rubrics": 0,
-           "rubrics_passed": 0, "cost_usd": 0.0, "duration_ms_total": 0.0,
+           "rubrics_passed": 0, "watched_unmet": 0, "cost_usd": 0.0, "duration_ms_total": 0.0,
            "judge_calls": 0, "judge_usage_reported_calls": 0, "judge_tokens_reported": 0}
     for s in suite_results:
         st = s["totals"]
@@ -1421,7 +1424,7 @@ def suite_totals(scenario_results) -> dict:
           "cases_incomplete": 0, "critical_failed": 0, "safety_violations": 0,
           "unconfirmed_fails": 0, "first_attempt_passed": 0,
           "gates": 0, "gates_passed": 0, "rubrics": 0,
-          "rubrics_passed": 0, "cost_usd": 0.0, "duration_ms_total": 0.0,
+          "rubrics_passed": 0, "watched_unmet": 0, "cost_usd": 0.0, "duration_ms_total": 0.0,
           "judge_calls": 0, "judge_usage_reported_calls": 0, "judge_tokens_reported": 0}
     for scn in scenario_results:
         st["scenarios"] += 1
@@ -1455,6 +1458,11 @@ def suite_totals(scenario_results) -> dict:
             if rb and rb["evaluated"]:
                 st["rubrics"] += 1
                 st["rubrics_passed"] += 1 if rb["passed"] else 0
+                # A watched miss does not fail the case; counting it keeps a
+                # worsening rate visible on the summary line.
+                st["watched_unmet"] += sum(
+                    1 for item in rb.get("requirements") or []
+                    if item.get("watched") and not item["met"])
     return st
 
 
@@ -1838,6 +1846,7 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
           f"critical fails {totals['critical_failed']} · "
           f"safety violations (sticky) {totals['safety_violations']} · "
           f"unconfirmed fails {totals['unconfirmed_fails']} · "
+          f"watched unmet {totals['watched_unmet']} · "
           f"gates {totals['gates_passed']}/{totals['gates']} · "
           f"candidate trace cost ${totals['cost_usd']:.4f} · "
           f"judge calls {totals['judge_calls']} "

@@ -219,6 +219,7 @@ class JudgeResult:
     total_tokens: int | None = None
     called: bool = False
     # Numbered rubrics only: [{"n", "met", "why"}] in rubric order; None for prose.
+    # A case that watches requirements adds "watched" to every entry.
     requirements: list[dict] | None = None
 
 
@@ -835,14 +836,29 @@ def judge_case(cfg, query: str, reply: str, rubric: str, tag: str,
                *, transcript: list[dict] | None = None,
                tool_evidence: list[dict] | dict | None = None,
                reference_facts: list | dict | None = None,
-               candidate_routes: list[dict] | None = None) -> JudgeResult:
-    """Judge a case using the full transcript and grounded evidence supplied."""
+               candidate_routes: list[dict] | None = None,
+               watched: frozenset[int] = frozenset()) -> JudgeResult:
+    """Judge a case using the full transcript and grounded evidence supplied.
+
+    `watched` names numbered requirements the judge still decides and the result
+    still reports, but that do not decide pass (SCHEMA.md, `watch`)."""
     if not isinstance(rubric, str) or not rubric.strip():
         return _failure("", "judge rubric must be a non-empty string")
     requirements, numbering_error = numbered_requirements(rubric)
     if numbering_error:
         return _failure("", f"judge rubric {numbering_error}")
     count = None if requirements is None else len(requirements)
+    watch_error = _watch_error(watched, count)
+    if watch_error:
+        return _failure("", watch_error)
+    return _apply_watch(
+        _judge_with_backend(cfg, query, reply, rubric, count, transcript,
+                                 tool_evidence, reference_facts, candidate_routes),
+        watched)
+
+
+def _judge_with_backend(cfg, query, reply, rubric, count, transcript,
+                             tool_evidence, reference_facts, candidate_routes) -> JudgeResult:
     data = _evaluation_data(query, reply, rubric, transcript, tool_evidence, reference_facts)
     backend = cfg.judge.backend
     error = _payload_error(data, transcript)
@@ -859,3 +875,31 @@ def judge_case(cfg, query: str, reply: str, rubric: str, tag: str,
     if backend == "openai":
         return _judge_openai(cfg, data, candidates, count)
     return _failure(str(backend), f"unsupported judge backend: {backend!r}")
+
+
+def _watch_error(watched, count: int | None) -> str | None:
+    if not isinstance(watched, frozenset):
+        return f"watched requirements must be a frozenset, got {type(watched).__name__}"
+    if not watched:
+        return None
+    if count is None:
+        return "only a numbered rubric's requirements can be watched"
+    outside = sorted(n for n in watched if isinstance(n, bool) or not isinstance(n, int)
+                     or not 1 <= n <= count)
+    if outside:
+        return f"watched requirement(s) {outside} are not numbered 1..{count}"
+    if len(watched) == count:
+        return "every requirement is watched, so none would decide the verdict"
+    return None
+
+
+def _apply_watch(result: JudgeResult, watched: frozenset[int]) -> JudgeResult:
+    """A watched requirement is decided and reported, but pass counts only the
+    rest. Score stays the fraction of all requirements met, so a watched miss
+    still lowers it."""
+    if not watched or result.requirements is None:
+        return result
+    for verdict in result.requirements:
+        verdict["watched"] = verdict["n"] in watched
+    result.passed = all(v["met"] for v in result.requirements if not v["watched"])
+    return result

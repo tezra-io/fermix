@@ -422,6 +422,45 @@ def test_a_malformed_numbering_is_a_suite_validation_error(tmp_path):
     assert "numbers its requirements 1, 3" in problems[0]
 
 
+def test_a_watch_on_a_numbered_rubric_loads(tmp_path):
+    watch = [{"n": 2, "reason": " The candidate misses it 2 of 12. "}]
+    scn = _load_one_scenario(tmp_path, cases=[dict(BASE_CASE, rubric=NUMBERED, watch=watch),
+                                              dict(FILLER_CASE)])
+    assert scn.cases[0].watch == ((2, "The candidate misses it 2 of 12."),)
+    assert scn.cases[1].watch == ()
+
+
+@pytest.mark.parametrize("rubric_text, watch, defect", [
+    ("Prose.", [{"n": 1, "reason": "r"}], "only a numbered rubric"),
+    (None, [{"n": 1, "reason": "r"}], "only a numbered rubric"),
+    (NUMBERED, [], "non-empty list"),
+    (NUMBERED, [{"n": 4, "reason": "r"}], "n must be a requirement number 1..3"),
+    (NUMBERED, [{"n": True, "reason": "r"}], "n must be a requirement number 1..3"),
+    (NUMBERED, [{"n": 2, "reason": "  "}], "reason must say why requirement 2"),
+    (NUMBERED, [{"n": 2}], "exactly the keys n and reason"),
+    (NUMBERED, [{"n": 2, "reason": "r", "until": "x"}], "exactly the keys n and reason"),
+    (NUMBERED, [{"n": 2, "reason": "r"}, {"n": 2, "reason": "s"}], "watched more than once"),
+    (NUMBERED, [{"n": n, "reason": "r"} for n in (1, 2, 3)], "none would decide the verdict"),
+])
+def test_an_impossible_watch_is_a_suite_validation_error(tmp_path, rubric_text, watch, defect):
+    case = dict(BASE_CASE, watch=watch)
+    if rubric_text is not None:
+        case["rubric"] = rubric_text
+    problems = _problems(tmp_path, cases=[case, dict(FILLER_CASE)])
+    assert any("case_a" in problem and "watch" in problem and defect in problem
+               for problem in problems), problems
+
+
+def test_the_shipped_watches_each_name_one_requirement_and_a_reason():
+    watches = {case.id: case.watch
+               for suite in suites.load_all(SUITES_DIR, include_dangerous=True)
+               for scenario in suite.scenarios for case in scenario.cases if case.watch}
+    assert {case_id: [n for n, _reason in watch] for case_id, watch in watches.items()} == \
+        {"people_and_customer_update": [4], "hiring_decision": [2]}
+    assert all("Revisit when the candidate model changes." in reason
+               for watch in watches.values() for _n, reason in watch)
+
+
 def test_the_shipped_numbered_rubrics_parse():
     counts = {}
     for suite in suites.load_all(SUITES_DIR, include_dangerous=True):

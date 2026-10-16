@@ -140,3 +140,10 @@ scenarios:
              decision.
           Not required: a final hire or no-hire, a particular set of unknowns,
           restating the request, or any particular wording, length or format.
+        watch:
+          - n: 2
+            reason: >-
+              gpt-6-luna, the nightly candidate, reopens the settled Staff level
+              in about half its replies: 4 of 7 nightly attempts on 2026-10-14/15.
+              Whether the judge misreads some of them is unverified, because CI
+              redacts the replies. Revisit when the candidate model changes.

@@ -260,6 +260,18 @@ the `query` shorthand; multi-turn uses `turns`.
   demand. The numbering must run 1..N in order, each once, with nothing but
   indented continuation or blank lines between items, or the suite fails to
   load. Any other rubric is prose and gets one whole verdict.
+- `watch` (list, optional; numbered rubric only) — requirements the judge still
+  decides and the report still shows, but that do not decide pass:
+  `watch: [{n: 4, reason: "…"}]`. Watch a requirement only when the nightly
+  candidate model is shown to miss it with nothing broken, and say so in
+  `reason` with the measurement and `Revisit when the candidate model changes.`
+  The score still counts a watched requirement, the report gives a watched miss
+  its own line with the reason ("judge: watched, not met requirement 4 of 4"),
+  and the run's summary line counts them as `watched unmet`. At least one
+  requirement must stay unwatched, each `n` must be one of the rubric's numbers
+  and appear once, and every entry needs a reason, or the suite fails to load.
+  A watch is not a mute: the requirement still runs every night, and a rising
+  `watched unmet` is the signal to fix the product or the case.
 - `timeout_ms` (int, optional) — overrides `defaults.timeout_ms` for this case.
   The value bounds `fermix ask`; trace discovery and a bounded settlement window
   follow. The measured duration gate uses the driver's end-to-end wall clock,

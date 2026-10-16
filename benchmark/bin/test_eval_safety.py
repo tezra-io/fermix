@@ -218,7 +218,7 @@ def test_multi_turn_rubric_passes_every_observed_candidate_route(monkeypatch, tm
     (tmp_path / "config.toml").write_text("")
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="openai", model="gpt-5.4-mini"),
                           daemon=SimpleNamespace(fermix_home=str(tmp_path)))
-    case = SimpleNamespace(id="case", rubric="Judge.", judge=True)
+    case = SimpleNamespace(id="case", rubric="Judge.", judge=True, watch=())
     scn = SimpleNamespace(id="multi")
     candidates = [
         {"provider": "openai_codex", "model": "candidate-a", "reasoning_effort": "high"},
@@ -287,7 +287,7 @@ def test_rubric_record_sends_the_candidates_date_to_the_judge(monkeypatch, tmp_p
         '[fermix_core.personalization]\ntimezone = "America/New_York"\n')
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
                           daemon=SimpleNamespace(fermix_home=str(tmp_path)))
-    case = SimpleNamespace(id="case", rubric="Judge.", judge=True)
+    case = SimpleNamespace(id="case", rubric="Judge.", judge=True, watch=())
     records = [{"started_at": "2026-10-14T03:17:47.261Z"}]
     run_eval._rubric_record(
         cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
@@ -319,7 +319,7 @@ def test_rubric_record_carries_each_requirement_verdict(monkeypatch, tmp_path):
     (tmp_path / "config.toml").write_text("")
     cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
                           daemon=SimpleNamespace(fermix_home=str(tmp_path)))
-    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True)
+    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True, watch=())
     record = run_eval._rubric_record(
         cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
         [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
@@ -2675,6 +2675,84 @@ def test_a_report_lists_every_failed_requirement(tmp_path):
     raw["config"]["content_retained"] = True
     paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
     assert "\n    - judge: failed requirements 1, 2 of 3\n" in pathlib.Path(paths["md"]).read_text()
+
+
+def _watched_rubric_case() -> dict:
+    """Requirement 2 watched and unmet, the rest met: the case passes."""
+    case = _numbered_rubric_case("pass")
+    rubric = case["rubric"]
+    for item in rubric["requirements"]:
+        item["watched"] = item["n"] == 2
+    rubric["watch"] = [{"n": 2, "reason": "REASON-TWO: the candidate misses it 2 of 12"}]
+    return case
+
+
+def test_rubric_record_sends_the_watch_and_records_its_reasons(monkeypatch, tmp_path):
+    seen = {}
+
+    def fake_judge(*_args, **kwargs):
+        seen.update(kwargs)
+        return judge.JudgeResult(
+            evaluated=True, passed=True, score=2 / 3, rationale="R", backend="anthropic",
+            called=True,
+            requirements=[dict(item, watched=item["n"] == 2) for item in _REQUIREMENT_VERDICTS])
+
+    monkeypatch.setattr(judge, "judge_case", fake_judge)
+    (tmp_path / "config.toml").write_text("")
+    cfg = SimpleNamespace(judge=SimpleNamespace(backend="anthropic", model="claude-opus-5-5"),
+                          daemon=SimpleNamespace(fermix_home=str(tmp_path)))
+    case = SimpleNamespace(id="case", rubric=_NUMBERED_RUBRIC, judge=True,
+                           watch=((2, "REASON-TWO"),))
+    record = run_eval._rubric_record(
+        cfg, case, SimpleNamespace(id="scn"), "run", 1, True,
+        [{"role": "user", "content": "q"}, {"role": "assistant", "content": "a"}], [],
+        [{"provider": "openai", "model": "candidate"}],
+        turn_records=[{"started_at": "2026-10-14T03:17:47Z"}])
+    assert seen["watched"] == frozenset({2})
+    assert record["watch"] == [{"n": 2, "reason": "REASON-TWO"}]
+    assert record["passed"] is True
+
+
+def test_suite_totals_count_a_watched_miss_without_failing_the_case():
+    totals = run_eval.suite_totals([{"severity": "critical", "cases": [_watched_rubric_case()]}])
+    assert totals["watched_unmet"] == 1
+    assert (totals["cases_passed"], totals["cases_failed"], totals["rubrics_passed"]) == (1, 0, 1)
+
+
+def test_redaction_keeps_the_watch_and_its_reason():
+    raw = _report_results([_watched_rubric_case()])
+    raw["config"]["content_retained"] = True
+    rubric = run_eval.redact_content(raw)["suites"][0]["scenarios"][0]["cases"][0]["rubric"]
+    assert [(item["n"], item["met"], item["watched"]) for item in rubric["requirements"]] == \
+        [(1, True, False), (2, False, True), (3, True, False)]
+    assert rubric["watch"] == [{"n": 2, "reason": "REASON-TWO: the candidate misses it 2 of 12"}]
+
+
+def test_a_redacted_report_shows_a_watched_miss_apart_from_failures(tmp_path):
+    raw = _report_results([_watched_rubric_case()])
+    raw["config"]["content_retained"] = True
+    paths = report.write(run_eval.redact_content(raw), str(tmp_path / "out"))
+    md = pathlib.Path(paths["md"]).read_text()
+    html = pathlib.Path(paths["html"]).read_text()
+    line = ("judge: watched, not met requirement 2 of 3 "
+            "(watched: REASON-TWO: the candidate misses it 2 of 12)")
+    assert f"\n    - {line}\n" in md
+    assert f"<div class='gate skip'>{report._e(line)}</div>" in html
+    assert "failed requirement" not in md and "failed requirement" not in html
+    assert "watched unmet: 1" in md
+
+
+def test_an_unredacted_report_spells_a_watched_miss_beside_a_failure(tmp_path):
+    case = _watched_rubric_case()
+    case["rubric"]["requirements"][2]["met"] = False
+    raw = _report_results([case])
+    raw["config"]["content_retained"] = True
+    md = pathlib.Path(report.write(raw, str(tmp_path / "out"))["md"]).read_text()
+    assert ("judge: failed requirement 3 of 3: It invents nothing. "
+            "Why: WHY-THREE quotes the reply") in md
+    assert ("judge: watched, not met requirement 2 of 3: It keeps the level settled. "
+            "It fails if it reopens the level in any form. Why: WHY-TWO quotes the reply "
+            "(watched: REASON-TWO: the candidate misses it 2 of 12)") in md
 
 
 def test_a_prose_rubric_report_line_is_unchanged(tmp_path):

@@ -30,7 +30,7 @@ _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "ca
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion",
+    "cross_session", "companion", "watch",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -132,6 +132,9 @@ class Case:
     #   have fired without error. `requires_tools` is the any-of form; a task whose completion
     #   genuinely needs two steps (create AND register) states both here, so half the work
     #   cannot score. A span carrying error_info satisfies neither key.
+    # Numbered-rubric requirements the judge decides and the report shows but that
+    # do not decide pass: ((n, reason), ...). SCHEMA.md, `watch`.
+    watch: tuple[tuple[int, str], ...] = ()
     companion: dict = field(default_factory=dict)  # drive: companion — the choreography
     #   around the message (cancel, reads, an offline wait); evallib/companion.py.
 
@@ -494,6 +497,46 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], 
     return spec
 
 
+def _validate_watch(raw, rubric: str | None, cloc: str, problems: list[str]
+                    ) -> tuple[tuple[int, str], ...]:
+    """`watch: [{n, reason}]` on a numbered rubric. A watched requirement is still
+    judged and reported, but does not decide pass. Each needs a reason, and at
+    least one requirement must still decide, so a watch cannot mute a case."""
+    if raw is None:
+        return ()
+    loc = f"{cloc}.watch"
+    texts, _error = numbered_requirements(rubric) if isinstance(rubric, str) else (None, None)
+    if texts is None:
+        problems.append(f"{loc}: only a numbered rubric's requirements can be watched")
+        return ()
+    if not isinstance(raw, list) or not raw:
+        problems.append(f"{loc}: must be a non-empty list of {{n, reason}} maps")
+        return ()
+    watch = [item for index, item in enumerate(raw)
+             if _watch_item_ok(item, f"{loc}[{index}]", len(texts), problems)]
+    numbers = [item["n"] for item in watch]
+    repeated = sorted({n for n in numbers if numbers.count(n) > 1})
+    if repeated:
+        problems.append(f"{loc}: requirement {repeated[0]} is watched more than once")
+    if len(set(numbers)) == len(texts):
+        problems.append(f"{loc}: every requirement is watched, so none would decide the verdict")
+    return tuple((item["n"], item["reason"].strip()) for item in watch)
+
+
+def _watch_item_ok(item, loc: str, count: int, problems: list[str]) -> bool:
+    if not isinstance(item, dict) or set(item) != {"n", "reason"}:
+        problems.append(f"{loc}: must be a map with exactly the keys n and reason")
+        return False
+    number, reason = item["n"], item["reason"]
+    if isinstance(number, bool) or not isinstance(number, int) or not 1 <= number <= count:
+        problems.append(f"{loc}: n must be a requirement number 1..{count}, got {number!r}")
+        return False
+    if not isinstance(reason, str) or not reason.strip():
+        problems.append(f"{loc}: reason must say why requirement {number} is watched")
+        return False
+    return True
+
+
 def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None:
     fname = os.path.basename(path)
     try:
@@ -664,6 +707,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                 _texts, numbering_error = numbered_requirements(rubric)
                 if numbering_error:
                     problems.append(f"{cloc}: `rubric` {numbering_error}")
+            watch = _validate_watch(cs.get("watch"), rubric, cloc, problems)
             score_spec = cs.get("score")
             if score_spec is not None:
                 _validate_score(score_spec, f"{cloc}.score", problems)
@@ -744,7 +788,8 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         judge=judge, timeout_ms=ctimeout, drive=drive, images=images,
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
-                        requires_tools_all=tuple(requires_all), companion=companion_spec)
+                        requires_tools_all=tuple(requires_all), companion=companion_spec,
+                        watch=watch)
             _refuse_misplaced_fixture_state(case, cloc, problems)
             cases.append(case)
 
