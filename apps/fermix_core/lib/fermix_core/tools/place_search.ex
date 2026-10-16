@@ -30,6 +30,13 @@ defmodule FermixCore.Tools.PlaceSearch do
   SOURCE; telemetry records `location_mode` (`query_only` / `named` /
   `explicit_coordinates`), never a location value (§13.2).
 
+  ## The places a reply is drawn with
+
+  On success, the places handed to the model are also kept under the turn's
+  conversation key in `FermixCore.ReplyBlocks` (M72 §8.4), so the companion
+  turn writer can draw the ones the reply links. The context names the holder
+  as `:reply_blocks` only when it is not the application's.
+
   ## Credential gating
 
   This is the first credential-gated built-in (§14.1). `advertise?/1` hides the
@@ -40,6 +47,7 @@ defmodule FermixCore.Tools.PlaceSearch do
   @behaviour FermixCore.Capabilities.Builtin.Tool
 
   alias FermixCore.Capabilities.Builtin.Tool
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Tools.PlaceSearch.Brave
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.Support
@@ -244,19 +252,27 @@ defmodule FermixCore.Tools.PlaceSearch do
     request = request(fields, anchor)
 
     case Brave.search(request, brave_api_key: api_key, context: context) do
-      {:ok, places, trace} -> success(fields, anchor, places, trace)
+      {:ok, places, trace} -> success(fields, anchor, places, trace, context)
       {:error, reason, trace} -> error_result(reason, Map.put(trace, :location_mode, anchor.mode))
     end
   end
 
   # Truncated to `count` BEFORE encoding: the provider may return more than it
   # was asked for, and the model must never be handed rows the caller capped out.
-  defp success(fields, anchor, places, trace) do
+  # Exactly the places it is handed are kept for a reply to be drawn with.
+  defp success(fields, anchor, places, trace, context) do
     kept = Enum.take(places, fields.count)
+    :ok = remember_places(context, kept)
 
     output = %{query: fields.query, search_anchor: anchor.search_anchor, places: kept}
 
     Support.success_json(output, metadata(anchor.mode, kept, trace))
+  end
+
+  defp remember_places(context, places) do
+    context
+    |> Map.get(:reply_blocks, ReplyBlocks)
+    |> ReplyBlocks.put_places(Map.fetch!(context, :conversation_key), places)
   end
 
   defp metadata(location_mode, places, trace) do

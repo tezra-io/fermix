@@ -7,9 +7,11 @@ defmodule FermixCore.Tools.PlaceSearchTest do
   alias FermixCore.Capabilities.Registry
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Prompt.RuntimeSections
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Tools.PlaceSearch
 
   @key "brave-secret"
+  @conversation {"test", "place-search", :root}
 
   # This suite drives the one global config section `place_search` reads — the
   # Brave credential — so it establishes it in `setup` and restores the prior
@@ -435,6 +437,45 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       assert length(Jason.decode!(output)["places"]) == 5
     end
 
+    # M72 §8.4: exactly the places handed to the model are kept under the
+    # turn's conversation, for the reply that links them to be drawn with.
+    test "keeps the places it hands the model under the turn's conversation" do
+      holder = reply_blocks()
+      results = Enum.map(1..8, &%{"title" => "Cafe #{&1}", "url" => "https://cafe#{&1}.example/"})
+
+      {:ok, %{success: true, output: output}} =
+        execute(
+          %{"query" => "coffee", "count" => 3},
+          fn conn -> json(conn, %{"results" => results}) end,
+          %{reply_blocks: holder}
+        )
+
+      handed = Jason.decode!(output)["places"]
+      kept = ReplyBlocks.take(holder, @conversation)
+
+      assert Enum.map(kept, & &1.name) == ["Cafe 1", "Cafe 2", "Cafe 3"]
+      assert Enum.map(kept, & &1.canonical_url) == Enum.map(handed, & &1["canonical_url"])
+      assert ReplyBlocks.take(holder, {"test", "another", :root}) == []
+    end
+
+    test "a failed or refused search keeps nothing" do
+      holder = reply_blocks()
+
+      {:ok, %{success: false}} =
+        execute(
+          %{"query" => "coffee"},
+          fn conn -> Plug.Conn.resp(conn, 500, "upstream down") end,
+          %{reply_blocks: holder}
+        )
+
+      {:ok, %{success: false}} =
+        execute(%{"query" => "best coffee near me"}, fn conn -> json(conn, %{}) end, %{
+          reply_blocks: holder
+        })
+
+      assert ReplyBlocks.take(holder, @conversation) == []
+    end
+
     test "output is external content: the :network class keeps the untrusted frame" do
       capability = Builtin.from_tool_module(PlaceSearch)
 
@@ -679,11 +720,17 @@ defmodule FermixCore.Tools.PlaceSearchTest do
   defp context(test_id, overrides) do
     %{
       agent_name: "test_agent",
-      conversation_key: :test,
+      conversation_key: @conversation,
+      reply_blocks: Map.get_lazy(overrides, :reply_blocks, &reply_blocks/0),
       req_options: [plug: {Req.Test, test_id}],
       net_resolver: public_resolver()
     }
     |> Map.merge(overrides)
+  end
+
+  # Each call keeps its places in a holder of its own, never the application's.
+  defp reply_blocks do
+    start_supervised!(Supervisor.child_spec({ReplyBlocks, name: nil}, id: make_ref()))
   end
 
   defp attended, do: %{source_trust: :operator, computer_use_origin: :interactive}

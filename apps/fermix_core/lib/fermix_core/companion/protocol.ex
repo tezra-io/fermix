@@ -40,7 +40,13 @@ defmodule FermixCore.Companion.Protocol do
   its hello declared is refused. A `row` carries its `media_refs` and
   `link_previews` on every version: an additive field needs no gate. The
   window is now {2, 3}, so a version 1 client is refused as too old.
+
+  A reply's `text_done`, its `row` and its history message carry `blocks`
+  when the reply has one (M72): records its text links, drawn beside it
+  (`FermixCore.ReplyBlocks`). Additive and optional, so on every version.
   """
+
+  alias FermixCore.ReplyBlocks
 
   # Bumped in lockstep with any wire-shape change. The supported range is an
   # N/N-1 window derived from this single constant.
@@ -472,8 +478,9 @@ defmodule FermixCore.Companion.Protocol do
   end
 
   defp validate_server("text_done", payload) do
-    with :ok <- text_event(payload) do
-      positive_u64(payload, "server_seq")
+    with :ok <- text_event(payload),
+         :ok <- positive_u64(payload, "server_seq") do
+      optional_blocks(payload)
     end
   end
 
@@ -487,6 +494,7 @@ defmodule FermixCore.Companion.Protocol do
          :ok <- binary_field(payload, "text"),
          :ok <- list_field(payload, "media_refs"),
          :ok <- optional_link_previews(payload),
+         :ok <- optional_blocks(payload),
          :ok <- optional_nonempty(payload, "kind"),
          :ok <- optional_map(payload, "metadata") do
       optional_nonempty(payload, "client_msg_id")
@@ -720,6 +728,30 @@ defmodule FermixCore.Companion.Protocol do
     do: length(previews) <= @max_link_previews and Enum.all?(previews, &is_map/1)
 
   defp link_previews?(_previews), do: false
+
+  # A reply has the key only when it carries a block, at most one of each
+  # type, and a `places` block holds one to ten places.
+  defp optional_blocks(%{"blocks" => blocks}) do
+    if blocks?(blocks), do: :ok, else: {:error, {:invalid_field, "blocks"}}
+  end
+
+  defp optional_blocks(_payload), do: :ok
+
+  defp blocks?(blocks) when is_list(blocks) and blocks != [] do
+    types = Enum.map(blocks, &block_type/1)
+    Enum.all?(blocks, &block?/1) and Enum.uniq(types) == types
+  end
+
+  defp blocks?(_blocks), do: false
+
+  defp block_type(%{"type" => type}), do: type
+  defp block_type(_block), do: nil
+
+  defp block?(%{"type" => "places", "places" => places}) when is_list(places) do
+    places != [] and length(places) <= ReplyBlocks.max_places() and Enum.all?(places, &is_map/1)
+  end
+
+  defp block?(_block), do: false
 
   defp list_field(payload, field) do
     if is_list(Map.get(payload, field)), do: :ok, else: {:error, {:invalid_field, field}}

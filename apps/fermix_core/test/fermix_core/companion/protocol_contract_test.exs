@@ -11,6 +11,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Companion.Protocol
+  alias FermixCore.ReplyBlocks
 
   @priv_dir Application.app_dir(:fermix_core, "priv/companion")
   @schema_path Path.join(@priv_dir, "protocol.schema.json")
@@ -168,7 +169,7 @@ defmodule FermixCore.Companion.ProtocolContractTest do
   test "a timeline row has one exported shape on both wires", %{schema: schema} do
     mobile = @mobile_schema_path |> File.read!() |> Jason.decode!()
 
-    for def <- ~w(mediaRef linkPreviewCard) do
+    for def <- ~w(mediaRef linkPreviewCard replyBlock placesBlock place) do
       assert schema["$defs"][def] == mobile["$defs"][def], "#{def} differs between the wires"
     end
 
@@ -245,6 +246,73 @@ defmodule FermixCore.Companion.ProtocolContractTest do
 
     assert "media_refs" in row["required"]
     refute "link_previews" in row["required"]
+  end
+
+  # M72 §8.3: a reply's blocks have one shape wherever the reply is carried, the
+  # caps are the ones the builder keeps, and a golden of each is exactly what
+  # the builder makes of its places for its text.
+  test "a reply's blocks have one shape on text_done, row and history, with goldens", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    defs = schema["$defs"]
+    blocks = defs["historyMessage"]["properties"]["blocks"]
+
+    for type <- ~w(text_done row) do
+      assert defs[type]["properties"]["blocks"] == blocks, "#{type} blocks differ from history"
+      refute "blocks" in defs[type]["required"]
+    end
+
+    assert blocks["maxItems"] == length(ReplyBlocks.types())
+    assert defs["replyBlock"]["properties"]["type"]["enum"] == ReplyBlocks.types()
+    assert defs["placesBlock"]["properties"]["places"]["maxItems"] == ReplyBlocks.max_places()
+    assert defs["place"]["properties"]["categories"]["maxItems"] == ReplyBlocks.max_categories()
+
+    server = jsonl(@server_fixtures)
+    done = Enum.find(server, &(&1["type"] == "text_done" and Map.has_key?(&1, "blocks")))
+
+    paged =
+      server
+      |> Enum.filter(&(&1["type"] == "history_page"))
+      |> Enum.flat_map(& &1["messages"])
+      |> Enum.find(&Map.has_key?(&1, "blocks"))
+
+    assert %{"blocks" => [%{"type" => "places", "places" => [_ | _] = places}]} = done
+    assert paged["blocks"] == done["blocks"]
+    assert paged["content"] == done["text"]
+    assert ReplyBlocks.build(done["text"], Enum.map(places, &record/1)) == done["blocks"]
+
+    [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert section =~ "skips a block `type` it does not know"
+    assert section =~ "no version bump"
+  end
+
+  test "the codec refuses blocks the export rules out" do
+    place = %{"name" => "Example Coffee", "location" => %{"latitude" => 1, "longitude" => 2}}
+    places = %{"type" => "places", "places" => [place]}
+    done = %{"turn_id" => "t", "server_seq" => 1, "text" => "x"}
+
+    assert :ok = Protocol.validate_server_payload("text_done", Map.put(done, "blocks", [places]))
+
+    for blocks <- [
+          [],
+          [places, places],
+          [%{"type" => "events", "events" => [place]}],
+          [%{places | "places" => []}],
+          [%{places | "places" => List.duplicate(place, ReplyBlocks.max_places() + 1)}],
+          %{"type" => "places"}
+        ] do
+      for type <- ~w(text_done row) do
+        payload =
+          if type == "row",
+            do: row_payload() |> Map.put("blocks", blocks),
+            else: Map.put(done, "blocks", blocks)
+
+        assert {:error, {:invalid_field, "blocks"}} =
+                 Protocol.validate_server_payload(type, payload),
+               "#{type} accepted blocks #{inspect(blocks)}"
+      end
+    end
   end
 
   # M56 §4.2: the call's one row when it ends, as the Mac hears it and as a
@@ -451,6 +519,23 @@ defmodule FermixCore.Companion.ProtocolContractTest do
       "media_release" => %{"profile_id" => "main", "ref" => String.duplicate("a", 64)}
     }
   end
+
+  defp row_payload do
+    %{
+      "profile_id" => "main",
+      "server_seq" => 1,
+      "role" => "assistant",
+      "text" => "x",
+      "ts" => "2026-09-25T09:00:00Z",
+      "media_refs" => []
+    }
+  end
+
+  # A golden place back as the search's record: the same names, atom keyed.
+  defp record(place) when is_map(place),
+    do: Map.new(place, fn {key, value} -> {String.to_existing_atom(key), record(value)} end)
+
+  defp record(value), do: value
 
   defp fixture_payloads(path) do
     path

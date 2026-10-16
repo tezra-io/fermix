@@ -3029,6 +3029,30 @@ defmodule FermixCore.Agents.TurnRunnerTest do
       assert row.metadata == %{"client_msg_id" => "c-1", "mobile_request_type" => "msg"}
     end
 
+    # M72 §8.4: `place_search` keeps the places it returns under its tool
+    # context's key, and the companion turn writer takes them under
+    # `ConversationKey.from/1` of the message it handed the queue, so the two
+    # are one key, on a Mac turn and on a phone turn alike.
+    test "a Mac turn's tools run under the key its replies take places under" do
+      Process.put(:record_cwd_step, 0)
+      msg = mac_msg("any quiet coffee nearby?")
+
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-mac-places", msg)
+
+      assert context.conversation_key == ConversationKey.from(msg)
+      assert context.conversation_key == @chat_key
+    end
+
+    test "a phone turn's tools run under the chat's key, the one its places are taken under" do
+      Process.put(:record_cwd_step, 0)
+      msg = phone_msg("any quiet coffee nearby?")
+
+      %{context: context} = run_record_cwd_turn(:operator, "/tmp/fermix-phone-places", msg)
+
+      assert context.conversation_key == ConversationKey.from(msg)
+      assert context.conversation_key == @chat_key
+    end
+
     # One conversation, one review: the reviewer keys its state on the key
     # each commit hands it, and both transports hand it the chat's.
     test "a phone turn's commit and a Mac turn's ask for the one review of the chat" do

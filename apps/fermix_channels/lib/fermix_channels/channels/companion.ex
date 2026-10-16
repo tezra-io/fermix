@@ -258,7 +258,8 @@ defmodule FermixChannels.Channels.Companion do
   key, and anything else (a scheduled job's result) is a plain row; whether or
   not a client is connected, the row is the delivery. A delivery, one that
   answers no request, is pushed to the phones as well while their channel
-  runs (M56 D9), as one through the phone's own channel is.
+  runs (M56 D9), as one through the phone's own channel is. A reply's
+  `:blocks` (M72) are stored and announced with its row.
   """
   @impl true
   @spec send_message(String.t(), String.t()) :: :ok | {:error, term()}

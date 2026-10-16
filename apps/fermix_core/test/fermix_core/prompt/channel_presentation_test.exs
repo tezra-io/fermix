@@ -61,6 +61,23 @@ defmodule FermixCore.Prompt.ChannelPresentationTest do
       refute note =~ "Telegram"
     end
 
+    # M72 decision 5: the Mac chat draws the places a reply links as cards and
+    # a map beside it. It is a window, not a phone-width bubble, so it earns
+    # that one line and none of the shared core.
+    test "the Mac chat gets one line of its own about place cards" do
+      for chat_type <- [nil, "private", "group"] do
+        note = ChannelPresentation.note("companion", chat_type)
+
+        assert is_binary(note)
+        assert [_one_line] = String.split(note, "\n")
+        assert note =~ "place_search"
+        assert note =~ "card"
+        assert note =~ "map"
+        assert note =~ "link every place by name"
+        refute note =~ "phone-width chat surface"
+      end
+    end
+
     test "a shared chat appends the addressing line and a DM does not" do
       for group_type <- ["group", "supergroup", "channel", "guild", "mpim"] do
         assert ChannelPresentation.note("telegram", group_type) =~ "This is a shared chat"

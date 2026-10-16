@@ -80,7 +80,8 @@ defmodule FermixCore.Memory.RepoTest do
               36,
               37,
               38,
-              39
+              39,
+              41
             ]} =
              Repo.migration_versions(server: repo)
   end
@@ -136,7 +137,8 @@ defmodule FermixCore.Memory.RepoTest do
               36,
               37,
               38,
-              39
+              39,
+              41
             ]} =
              Repo.migration_versions(server: repo)
 
@@ -182,7 +184,8 @@ defmodule FermixCore.Memory.RepoTest do
               36,
               37,
               38,
-              39
+              39,
+              41
             ]} =
              Repo.migration_versions(server: repo)
   end

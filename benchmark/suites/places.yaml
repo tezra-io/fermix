@@ -197,6 +197,73 @@ scenarios:
           "named", never "query_only", and each place keeps the exact URL the
           tool returned for it.
 
+  # M72: the Mac chat draws the places a reply links as cards and a map beside
+  # the text, and a place gets its card only when the reply links it by the
+  # URL `place_search` returned for it (the link is the reference). So in that
+  # chat the routing proof above is also the card proof: every recommended
+  # place linked by its returned URL. Its presentation note asks for a line on
+  # why each place fits rather than the rating and hours the card shows, so the
+  # rubric holds the text to standing alone: a name and a link per place, never
+  # a reply that leans on cards it cannot see.
+  #
+  # Driven over the companion socket as the Mac app drives it, so it writes the
+  # eval home's companion timeline: `isolated_mutation`, as `companion.yaml`.
+  # The cards themselves (the reply's `blocks`) are not graded here: the wire
+  # gates read event types, and ExUnit holds the block to the links.
+  - id: mac_chat_links_each_place
+    title: "In the Mac chat, every recommended place is linked so its card can attach"
+    severity: critical
+    risk: isolated_mutation
+    tags: [places, place-search, companion, cards]
+    cases:
+      - id: marais_bakeries_in_the_mac_chat
+        drive: companion
+        query: >
+          I'm wandering around Le Marais in Paris this afternoon. Which bakeries
+          there are worth a detour?
+        expect:
+          status: ok
+          no_tool_errors: true
+          tools_any: [place_search]
+          reply_matches: '(?is)(?=.*(?:marais|paris))(?=.*https?://)'
+          reply_urls_in_evidence: true
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: >
+          Recommends bakeries in Le Marais, Paris, the area the user named, and
+          links every place it recommends to the exact URL the place_search
+          result returned for it, on the place's name or right beside it, so a
+          reader can tell which link belongs to which place. No recommended
+          place is left without its link, and no URL appears that is absent
+          from the tool evidence. Each place gets its own reason it is worth
+          the detour, and the answer reads complete as text on its own.
+      - id: shimokitazawa_records_in_the_mac_chat
+        drive: companion
+        query: >
+          I'll be in Shimokitazawa in Tokyo on Saturday. Where should I dig for
+          secondhand records?
+        expect:
+          status: ok
+          no_tool_errors: true
+          tools_any: [place_search]
+          reply_matches: '(?is)(?=.*(?:shimokitazawa|tokyo))(?=.*https?://)'
+          reply_urls_in_evidence: true
+          max_cost_usd: 1.5
+          max_duration_ms: 150000
+          wire:
+            events_all: [accepted, turn_started, text_done]
+            events_none: [turn_error]
+        rubric: >
+          Recommends record shops in Shimokitazawa, Tokyo, and links every shop
+          it recommends to the exact URL the place_search result returned for
+          it, on the shop's name or right beside it. No recommended shop is
+          left without its link, and none of the links is invented or rebuilt
+          from a name. Each shop gets its own reason to visit, and the answer
+          reads complete as text on its own.
+
   - id: general_knowledge_needs_no_place_lookup
     title: "A pure knowledge question triggers no place lookup"
     severity: critical

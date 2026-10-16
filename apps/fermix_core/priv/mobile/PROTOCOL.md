@@ -439,13 +439,13 @@ A client must not upload chunks after `present`.
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | begins streamed draft |
 | `text_delta` | `turn_id`, `text`; `replace?` | streamed delta; `replace: true` makes `text` the whole bubble |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | phase is `start` or `stop`; detail ≤512 bytes |
-| `text_done` | `turn_id`, `server_seq`, `text`; `truncated?` | seals one bubble of a turn: its canonical text at its row |
+| `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?`, `truncated?` | seals one bubble of a turn: its canonical text at its row |
 | `turn_done` | `turn_id` | a completed turn's ending, once, after its last `text_done` |
 | `media_begin` | `ref`, `server_seq`, `kind`, `mime`, `size_bytes`, `sha256`; `filename?`, `caption?` | starts outbound media |
 | `media_chunk` | `ref`, `index` + raw bytes | contiguous zero-based indexes; raw bytes ≤60 KiB |
 | `media_end` | `ref`, `sha256` | completes outbound media |
 | `turn_error` | `turn_id`, `code`, `message` | terminal turn failure; message ≤512 bytes |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `kind?`, `client_msg_id?`, `in_reply_to?`, `metadata?`, `link_previews[]?`, `truncated?` | a timeline row this client did not stream |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `kind?`, `client_msg_id?`, `in_reply_to?`, `metadata?`, `link_previews[]?`, `blocks[]?`, `truncated?` | a timeline row this client did not stream |
 | `reaction` | `in_reply_to`, `emoji` | reacts to a client message id |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | command routes are nonempty and at most 1,024 characters; token is submitted but never rendered |
 | `approval_resolved` | `approval_id`, `outcome` | approved, denied, or expired |
@@ -489,8 +489,8 @@ it.
 A `history_page` message is the exported timeline shape and nothing else:
 `server_seq`, `role`, `content`, `ts` (RFC 3339, UTC), `media_refs[]`, plus
 optional `kind` (`text` or `media`), `client_msg_id`, `in_reply_to`,
-`metadata`, `link_previews[]` and `truncated`. Internal storage columns are
-never shipped, and `metadata` never holds a null.
+`metadata`, `link_previews[]`, `blocks[]` and `truncated`. Internal storage
+columns are never shipped, and `metadata` never holds a null.
 
 A `media_refs[]` entry carries `ref`, `kind`, `mime`, and `size_bytes`, plus
 optional `sha256`, `filename`, and `caption`.
@@ -498,6 +498,12 @@ optional `sha256`, `filename`, and `caption`.
 A `link_previews[]` entry is a preview stored on its row, as `link_preview`
 sent it: `url`, `site`, `title`, and optional `description` and `image_ref`. A
 row carries at most 4, and has the key only when it has one.
+
+`blocks[]` are records a reply's text links, such as the places a search found
+that it recommends, which the Mac's chat draws beside the text: the shape and
+rules are the companion socket's (`priv/companion/PROTOCOL.md`, *Blocks under
+a reply*). A row has the key only when it has one. The text stands alone, so a
+phone may ignore them, and skips a block `type` it does not know.
 
 A `row` is the same message with `text` in place of `content`, plus
 `profile_id`. It is the companion socket's `row` event, which on that wire

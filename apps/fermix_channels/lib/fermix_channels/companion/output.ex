@@ -65,10 +65,15 @@ defmodule FermixChannels.Companion.Output do
   @spec text_delta(String.t(), String.t()) :: event()
   def text_delta(turn_id, text), do: %{"t" => "text_delta", "turn_id" => turn_id, "text" => text}
 
-  @doc "A reply's canonical text, at its timeline row."
-  @spec text_done(String.t(), pos_integer(), String.t()) :: event()
-  def text_done(turn_id, server_seq, text),
-    do: %{"t" => "text_done", "turn_id" => turn_id, "server_seq" => server_seq, "text" => text}
+  @doc """
+  A reply's canonical text, at its timeline row, with the row's `blocks`
+  (M72) when it has any.
+  """
+  @spec text_done(String.t(), pos_integer(), String.t(), [map()]) :: event()
+  def text_done(turn_id, server_seq, text, blocks \\ []) when is_list(blocks) do
+    %{"t" => "text_done", "turn_id" => turn_id, "server_seq" => server_seq, "text" => text}
+    |> maybe_put("blocks", present_list(blocks))
+  end
 
   @doc "One tool-lifecycle event of a turn's activity feed."
   @spec tool_event(String.t(), term()) :: event()
@@ -155,7 +160,8 @@ defmodule FermixChannels.Companion.Output do
   The exported shape of one timeline row, a history page's message. Internal
   columns never ship, so a column added later can never leak to a client, and
   `ts` is always there. A row's link previews ship as the cards `link_preview`
-  sent, the image as its ref. Nothing ships as an explicit null.
+  sent, the image as its ref, and its blocks (M72) as they were stored.
+  Nothing ships as an explicit null.
   """
   @spec timeline_message(map()) :: {:ok, map()} | {:error, term()}
   def timeline_message(
@@ -176,6 +182,7 @@ defmodule FermixChannels.Companion.Output do
       |> maybe_put("in_reply_to", Map.get(row, :in_reply_to))
       |> maybe_put("metadata", present_metadata(Map.get(row, :metadata)))
       |> maybe_put("link_previews", preview_cards(Map.get(row, :link_previews)))
+      |> maybe_put("blocks", present_list(Map.get(row, :blocks)))
 
     {:ok, message}
   end
@@ -221,7 +228,9 @@ defmodule FermixChannels.Companion.Output do
   text's digest; a `:proactive_key` (with an optional `:proactive_part_id`)
   makes it a deduplicated proactive delivery; neither makes it a plain row.
   The row's metadata carries the `:turn_id` that wrote it and a Live call's
-  `:call` map (M56 §6), already validated by its writer, each when given.
+  `:call` map (M56 §6), already validated by its writer, each when given; a
+  non-empty `:blocks` (M72, `FermixCore.ReplyBlocks.build/2`) is stored with
+  the row in the same write.
   """
   @spec persist_text(store(), String.t(), String.t(), map()) :: persisted()
   def persist_text(store, profile_id, text, attrs) when is_binary(text) and is_map(attrs) do
@@ -310,6 +319,7 @@ defmodule FermixChannels.Companion.Output do
       in_reply_to: value(attrs, :in_reply_to),
       metadata: text_metadata(value(attrs, :turn_id), value(attrs, :call))
     }
+    |> maybe_put(:blocks, present_list(value(attrs, :blocks)))
   end
 
   # A reply outside any turn (a delivery) has no turn to name, and only a Live
@@ -370,6 +380,9 @@ defmodule FermixChannels.Companion.Output do
   end
 
   defp preview_cards(_previews), do: nil
+
+  defp present_list([_ | _] = list), do: list
+  defp present_list(_empty), do: nil
 
   defp value(map, key) when is_map(map),
     do: Map.get(map, key) || Map.get(map, Atom.to_string(key))

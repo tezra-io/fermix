@@ -13,7 +13,7 @@ defmodule FermixChannels.Companion.Fanout do
   announced in the phone's shape (`Companion.Output.row/2`), and the Mac hears
   only the fields its own `row` carries: its own, and the message's `kind` and
   `metadata` (M56 §6), its `media_refs` and its `link_previews` (companion
-  protocol 3), never the phone's `in_reply_to`. The sender is not left out,
+  protocol 3), its `blocks` (M72), never the phone's `in_reply_to`. The sender is not left out,
   since every client deduplicates by `server_seq`.
 
   What is announced to everyone: every timeline row as a `row` (a user's
@@ -38,6 +38,7 @@ defmodule FermixChannels.Companion.Fanout do
 
   @companion_row_fields ~w(
     t profile_id server_seq role text ts client_msg_id kind metadata media_refs link_previews
+    blocks
   )
 
   @doc """

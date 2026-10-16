@@ -337,13 +337,19 @@
     },
     "text_done": {
       "type": "object",
-      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft.",
+      "description": "A reply's canonical text at its timeline row, sent once the turn has completed; it replaces the turn's draft. blocks, present only when the reply has one, are the row's, as a history page carries them (PROTOCOL.md, Blocks under a reply).",
       "required": ["type", "turn_id", "server_seq", "text"],
       "properties": {
         "type": { "const": "text_done" },
         "turn_id": { "type": "string", "minLength": 1 },
         "server_seq": { "type": "integer", "minimum": 1 },
-        "text": { "type": "string" }
+        "text": { "type": "string" },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/replyBlock" }
+        }
       }
     },
     "turn_error": {
@@ -369,7 +375,7 @@
     },
     "row": {
       "type": "object",
-      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs and link_previews are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
+      "description": "A timeline row this socket did not stream (the sender's own message, a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, a Live call's row), announced to every connection watching the profile as it is written. client_msg_id is on a user's row, for the sender to match its outbox. kind, metadata, media_refs, link_previews and blocks are the history message's, as a history_page carries them; a Live call's row carries metadata.call (PROTOCOL.md, A Live call's rows).",
       "required": ["type", "profile_id", "server_seq", "role", "text", "ts", "media_refs"],
       "properties": {
         "type": { "const": "row" },
@@ -387,6 +393,12 @@
           "minItems": 1,
           "maxItems": 4,
           "items": { "$ref": "#/$defs/linkPreviewCard" }
+        },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/replyBlock" }
         }
       }
     },
@@ -525,6 +537,86 @@
           "minItems": 1,
           "maxItems": 4,
           "items": { "$ref": "#/$defs/linkPreviewCard" }
+        },
+        "blocks": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": { "$ref": "#/$defs/replyBlock" }
+        }
+      }
+    },
+    "replyBlock": {
+      "type": "object",
+      "description": "Records a reply's text links, drawn beside it (the companion PROTOCOL.md, Blocks under a reply). type says what the block holds, and a client skips a type it does not know; places is the only type so far.",
+      "required": ["type"],
+      "properties": { "type": { "enum": ["places"] } },
+      "allOf": [
+        {
+          "if": { "required": ["type"], "properties": { "type": { "const": "places" } } },
+          "then": { "$ref": "#/$defs/placesBlock" }
+        }
+      ]
+    },
+    "placesBlock": {
+      "type": "object",
+      "description": "The places place_search found that the reply links, in the order it first links them.",
+      "required": ["type", "places"],
+      "properties": {
+        "type": { "const": "places" },
+        "places": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "items": { "$ref": "#/$defs/place" }
+        }
+      }
+    },
+    "place": {
+      "type": "object",
+      "description": "One place as the search returned it, a subset of its record under the record's own names. A field the source did not give is absent. canonical_url and source_url are HTTPS addresses exactly as returned, at least one of them present. opening_hours.current_day is today's hours as the source wrote them.",
+      "required": ["name", "location"],
+      "anyOf": [{ "required": ["canonical_url"] }, { "required": ["source_url"] }],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "canonical_url": { "type": "string", "minLength": 1 },
+        "source_url": { "type": "string", "minLength": 1 },
+        "location": {
+          "type": "object",
+          "required": ["latitude", "longitude"],
+          "properties": {
+            "latitude": { "type": "number", "minimum": -90, "maximum": 90 },
+            "longitude": { "type": "number", "minimum": -180, "maximum": 180 }
+          }
+        },
+        "address": { "type": "string", "minLength": 1 },
+        "rating": {
+          "type": "object",
+          "properties": {
+            "value": { "type": "number" },
+            "best": { "type": "number" },
+            "count": { "type": "number" }
+          }
+        },
+        "price_range": { "type": "string", "minLength": 1 },
+        "categories": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 5,
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "opening_hours": {
+          "type": "object",
+          "required": ["current_day"],
+          "properties": { "current_day": { "type": "string", "minLength": 1 } }
+        },
+        "distance": {
+          "type": "object",
+          "required": ["value", "units"],
+          "properties": {
+            "value": { "type": "number" },
+            "units": { "type": "string", "minLength": 1 }
+          }
         }
       }
     },

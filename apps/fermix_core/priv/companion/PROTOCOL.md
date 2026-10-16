@@ -17,7 +17,7 @@ the ones it shares (`msg`, `command`, `cancel`, `read_state`, `accepted`,
 `history_search`, `search_results`, and a backward cursor on `history_pull`
 and `history_page`. The phone's `row` carries more than this wire's: the whole
 history message. This wire's `row` carries the message's `kind`, `metadata`,
-`media_refs` and `link_previews` beside its own fields. This wire's
+`media_refs`, `link_previews` and `blocks` beside its own fields. This wire's
 `media_fetch` (version 3) is not the phone's: the phone's streams the bytes in
 chunks inside its envelope, and this one grants a managed file on the same
 machine, so neither it nor its answers are shared.
@@ -191,10 +191,10 @@ in a fixed order:
 | `turn_started` | `profile_id`, `turn_id`, `in_reply_to` | A turn began answering `in_reply_to`. |
 | `text_delta` | `turn_id`, `text` | Text to append to the turn's draft, exactly as sent. |
 | `tool_event` | `turn_id`, `tool`, `phase`; `detail?` | `phase` is `start` or `stop`. `detail` is at most 512 bytes. |
-| `text_done` | `turn_id`, `server_seq`, `text` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. |
+| `text_done` | `turn_id`, `server_seq`, `text`; `blocks[]?` | A reply's canonical text at its timeline row, sent once the turn has completed; replaces the draft. A turn may send more than one. `blocks` are the row's, present only when it has one; see *Blocks under a reply*. |
 | `turn_error` | `turn_id`, `code`, `message` | The turn's terminal failure: `code` is `cancelled` after a `cancel`, `interrupted` when the daemon lost the turn. `message` is at most 512 bytes. |
 | `turn_done` | `turn_id` | Version 2. The turn completed and wrote no reply: it ends the turn, and nothing of its draft is kept. Sent only to a connection on version 2; see *Version 2*. |
-| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs` and `link_previews` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
+| `row` | `profile_id`, `server_seq`, `role`, `text`, `ts`, `media_refs[]`; `client_msg_id?`, `kind?`, `metadata?`, `link_previews[]?`, `blocks[]?` | A timeline row this socket did not stream, announced to every connection as it is written: the sender's own message (with its `client_msg_id`, to match the outbox), a slash command's answer, a scheduled delivery, a message from a phone, the reply to a phone's turn, and a Live call's row. `kind`, `metadata`, `media_refs`, `link_previews` and `blocks` are the history message's, as a `history_page` carries them (see *Timeline shapes*); a Live call's row carries `metadata.call` (see *A Live call's rows*). |
 | `row_updated` | `profile_id`, `server_seq` | Version 3. A row already written changed: its text, its media refs or its link previews. Carries no content; see *When a row changes*. Sent only to a connection on version 3. |
 | `approval` | `approval_id`, `kind`, `text`, `token`, `ttl_s`, `approve_command`, `deny_command`; `detail?` | An owner-approval card raised by a turn on this socket. The token is submitted, never rendered. Routes are nonempty and at most 1,024 characters. Sent again after `server_hello` while it waits; see *Approvals*. |
 | `approval_resolved` | `approval_id`, `outcome` | `approved` or `denied` when the owner answered, `expired` when its `ttl_s` ran out. |
@@ -209,8 +209,9 @@ in a fixed order:
 
 A `history_page` message is the exported timeline row and nothing else:
 `server_seq`, `role`, `content`, `ts` (RFC 3339, UTC), `media_refs[]`, plus
-optional `kind`, `client_msg_id`, `in_reply_to`, `metadata` and
-`link_previews[]`. A `media_refs[]` entry carries `ref`, `kind`, `mime`, and
+optional `kind`, `client_msg_id`, `in_reply_to`, `metadata`,
+`link_previews[]` and `blocks[]` (see *Blocks under a reply*). A
+`media_refs[]` entry carries `ref`, `kind`, `mime`, and
 `size_bytes`, plus optional `sha256`, `filename`, and `caption`. A
 `link_previews[]` entry is a link preview the phone channel stored on the row:
 `url` (at most 2,048 bytes), `site` (120), `title` (300), and optional
@@ -344,6 +345,46 @@ watching the profile:
 The phones are not sent it: their wire has `link_preview`, which reaches them
 as before. A notice sent while a client was disconnected is lost, so a client
 that reconnects reads again the rows it shows.
+
+## Blocks under a reply
+
+A reply can carry `blocks[]`: records its text links, which a client draws
+beside the text. Its `text_done`, its `row` and its history message carry the
+same `blocks`, and have the key only when the reply has one. The rules:
+
+- **The text stands alone.** Every reply is complete as text, each place it
+  recommends linked by name. A block adds to the text and never replaces it,
+  so a client that draws no blocks, every other channel and the transcript
+  search lose nothing.
+- **A client skips a block `type` it does not know.** `places` is the only
+  type so far, and `blocks` holds at most one block of each type.
+- **Additive, so no version bump.** An older client ignores the key (*Absent
+  is absent*, under *Transport*).
+- **Places, in first-link order.** A `places` block holds the places a
+  `place_search` in the same conversation found in the last 30 minutes that
+  the reply's text links, one to ten, in the order the text first links them,
+  each once. A link names a place when it is the place's `canonical_url` or
+  `source_url`, compared with the scheme and host in lower case, without the
+  fragment and without a trailing slash on the path. A place found but not
+  linked is not in it, and a reply that links none has no block.
+- **A place is the search's own record**, cut to these fields under the
+  record's own names: `name` and `location {latitude, longitude}`, always (a
+  place without coordinates stays a link in the text); at least one of
+  `canonical_url` and `source_url`, HTTPS addresses exactly as returned; and,
+  each only when the source gave it, `address`, `rating {value?, best?,
+  count?}`, `price_range`, `categories[]` (at most 5), `opening_hours
+  {current_day}` and `distance {value, units}`. The description, contact
+  details, cuisines, the other days' hours and the picture are left out. The
+  coordinates are the place's, never the person's.
+- **Hours as given.** `opening_hours.current_day` is today's hours as the
+  source wrote them (`Thursday 07:00-19:00`); a client shows it as it is and
+  never works out whether the place is open now.
+- **Bounds.** The counts are the search's own: at most 10 places and 5
+  categories a place. Strings are as the source gave them, inside its 1 MiB
+  response.
+
+The phones' `row` carries the history message whole, so it carries `blocks`
+too, and a phone app may ignore them.
 
 ## One timeline with the phone
 

@@ -222,6 +222,10 @@ defmodule FermixCore.Application do
         # (`Capabilities.AccessGate`). Before every process that dispatches a
         # tool; a restart forgets them, which asks the owner again.
         FermixCore.Capabilities.AccessGate.Pending,
+        # The place records a conversation's searches returned, kept for the
+        # reply that links them (M72). Before every process that dispatches a
+        # tool; a restart forgets them, and a reply then carries its text alone.
+        FermixCore.ReplyBlocks,
         AgentSupervisor,
         MainAgent,
         JobRunnerSupervisor,

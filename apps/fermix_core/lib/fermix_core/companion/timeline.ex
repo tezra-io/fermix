@@ -30,6 +30,7 @@ defmodule FermixCore.Companion.Timeline do
           optional(:client_msg_id) => String.t() | nil,
           optional(:in_reply_to) => String.t() | nil,
           optional(:media_refs) => [map()],
+          optional(:blocks) => [map()],
           optional(:metadata) => map() | nil,
           optional(:created_at) => DateTime.t()
         }
