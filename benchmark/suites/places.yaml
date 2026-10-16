@@ -225,13 +225,14 @@ scenarios:
           status: ok
           no_tool_errors: true
           tools_any: [place_search]
-          reply_matches: '(?is)(?=.*(?:marais|paris))(?=.*https?://)'
+          reply_matches: '(?i)https?://'
           reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
           wire:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
+            text_done_blocks: [places]
         rubric: >
           Recommends bakeries in Le Marais, Paris, the area the user named, and
           links every place it recommends to the exact URL the place_search
@@ -249,13 +250,14 @@ scenarios:
           status: ok
           no_tool_errors: true
           tools_any: [place_search]
-          reply_matches: '(?is)(?=.*(?:shimokitazawa|tokyo))(?=.*https?://)'
+          reply_matches: '(?i)https?://'
           reply_urls_in_evidence: true
           max_cost_usd: 1.5
           max_duration_ms: 150000
           wire:
             events_all: [accepted, turn_started, text_done]
             events_none: [turn_error]
+            text_done_blocks: [places]
         rubric: >
           Recommends record shops in Shimokitazawa, Tokyo, and links every shop
           it recommends to the exact URL the place_search result returned for

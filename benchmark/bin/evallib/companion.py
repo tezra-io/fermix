@@ -43,17 +43,17 @@ from datetime import datetime, timezone
 
 from .grade import GateResult
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 3
 PROFILE = "main"
 SOCKET_NAME = "companion.sock"
 
 EVENT_TYPES = ("accepted", "row", "turn_started", "text_delta", "tool_event", "text_done",
-               "turn_error")
+               "turn_done", "turn_error")
 READS = ("history_after", "history_before", "search")
 CANCEL_MODES = ("running", "waiting")
 SPEC_KEYS = {"cancel", "blocker", "reads", "offline_wait_s"}
 WIRE_KEYS = {"events_all", "events_none", "error_code", "blocker_events_all",
-             "reads_find_marker", "offline_row_matches"}
+             "reads_find_marker", "offline_row_matches", "text_done_blocks"}
 MAX_OFFLINE_WAIT_S = 900
 
 # How long to keep reading after a turn's first `text_done`: a turn's replies
@@ -111,6 +111,12 @@ def wire_problems(wire, spec: dict, where: str) -> list[str]:
                             f"{list(EVENT_TYPES)}")
     if "error_code" in wire and not (isinstance(wire["error_code"], str) and wire["error_code"]):
         problems.append(f"{where}: `wire.error_code` must be a non-empty string")
+    if "text_done_blocks" in wire:
+        value = wire["text_done_blocks"]
+        if (not isinstance(value, list) or not value
+                or any(not isinstance(kind, str) or not kind for kind in value)):
+            problems.append(f"{where}: `wire.text_done_blocks` must be a non-empty list of "
+                            "block types")
     if "blocker_events_all" in wire and spec.get("cancel") != "waiting":
         problems.append(f"{where}: `wire.blocker_events_all` needs `companion.cancel: waiting`")
     if "reads_find_marker" in wire:
@@ -147,12 +153,17 @@ class TurnWire:
         return {event["type"] for event in self.events}
 
     def ended(self) -> bool:
-        return bool(self.types() & {"text_done", "turn_error"}) or self.answered()
+        return bool(self.types() & {"text_done", "turn_done", "turn_error"}) or self.answered()
 
     def answered(self) -> bool:
         """A slash command ends with its answer's `row`: it is no turn."""
         return self.command and any(e["type"] == "row" and e.get("role") == "assistant"
                                     for e in self.events)
+
+    def block_types(self) -> set[str]:
+        """The type of every block the turn's replies carried (M72)."""
+        return {block.get("type") for e in self.events if e["type"] == "text_done"
+                for block in e.get("blocks", [])}
 
     def error_code(self) -> str | None:
         return next((e.get("code") for e in self.events if e["type"] == "turn_error"), None)
@@ -207,6 +218,12 @@ def wire_gates(evidence: Evidence, wire: dict) -> list[GateResult]:
         missed = [read for read, found in evidence.reads.items() if not found]
         add("reads_find_marker", bool(evidence.reads) and not missed,
             f"reads={evidence.reads}: missed={missed or 'none'}")
+    if "text_done_blocks" in wire:
+        carried = sorted(evidence.target.block_types())
+        missing = [kind for kind in wire["text_done_blocks"] if kind not in carried]
+        add("text_done_blocks", not missing,
+            f"blocks all{wire['text_done_blocks']}: missing={missing or 'none'} "
+            f"(carried={carried})")
     if "offline_row_matches" in wire:
         pattern = re.compile(wire["offline_row_matches"])
         hit = any(pattern.search(row) for row in evidence.offline_rows)

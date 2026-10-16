@@ -105,7 +105,10 @@ class FakeDaemon:
     def _on(self, event, send):
         kind = event["type"]
         if kind == "client_hello":
-            send({"type": "server_hello", "min_version": 1, "max_version": 1})
+            if event["protocol_version"] not in (2, 3):
+                send({"type": "error", "reason": "unsupported_protocol_version"})
+                return
+            send({"type": "server_hello", "min_version": 2, "max_version": 3})
         elif kind == "command":
             send({"type": "accepted", "client_msg_id": event["client_msg_id"],
                   "duplicate": False})
@@ -154,12 +157,15 @@ class FakeDaemon:
             return
         send({"type": "tool_event", "turn_id": f"turn-{cid}", "tool": "shell",
               "phase": "start"})
+        if "SILENT" in event["text"]:
+            send({"type": "turn_done", "turn_id": f"turn-{cid}"})
+            return
         self._complete(cid, send)
 
     def _complete(self, cid, send):
         row = self._append("assistant", f"answer to {cid}")
         send({"type": "text_done", "turn_id": f"turn-{cid}", "server_seq": row["server_seq"],
-              "text": row["content"]})
+              "text": row["content"], "blocks": [{"type": "places", "places": []}]})
 
     def _cancel(self, cid, send):
         if cid in self.waiting:
@@ -228,6 +234,19 @@ def test_a_waiting_cancel_names_the_turn_it_never_saw_start(daemon):
     assert {"turn_started", "text_done"} <= evidence.blocker.types()
 
 
+def test_a_turn_that_writes_no_reply_ends_on_its_turn_done(daemon):
+    evidence = _drive(daemon(), {}, text="SILENT please")
+
+    assert evidence.ok, evidence.error
+    assert "turn_done" in evidence.target.types()
+
+
+def test_a_replys_blocks_are_kept_with_its_text_done(daemon):
+    evidence = _drive(daemon(), {})
+
+    assert evidence.target.block_types() == {"places"}
+
+
 def test_a_stray_announcement_never_ends_a_watched_request(daemon):
     spec = {"cancel": "waiting", "blocker": "BLOCK story"}
     evidence = _drive(daemon(stray=True), spec, text="quick question")
@@ -260,9 +279,10 @@ def test_a_missing_socket_is_evidence_not_an_exception():
 
 # --- the wire gates -----------------------------------------------------------
 
-def _evidence(types, code=None, blocker=None, reads=None, rows=None):
+def _evidence(types, code=None, blocker=None, reads=None, rows=None, blocks=None):
     target = companion.TurnWire("m")
-    target.events = [{"type": t, **({"code": code} if t == "turn_error" else {})}
+    target.events = [{"type": t, **({"code": code} if t == "turn_error" else {}),
+                      **({"blocks": blocks} if t == "text_done" and blocks else {})}
                      for t in types]
     blocker_wire = None
     if blocker is not None:
@@ -279,6 +299,9 @@ def test_wire_gates_pass_on_the_evidence_they_describe():
     wire = {"events_all": ["accepted", "turn_error"], "events_none": ["text_done"],
             "error_code": "cancelled", "blocker_events_all": ["text_done"],
             "reads_find_marker": True, "offline_row_matches": "(?i)BREAD-run1-1"}
+    placed = _evidence(["text_done"], blocks=[{"type": "places", "places": []}])
+
+    assert all(g.passed for g in companion.wire_gates(placed, {"text_done_blocks": ["places"]}))
 
     gates = companion.wire_gates(evidence, wire)
 
@@ -291,7 +314,7 @@ def test_wire_gates_fail_on_what_the_wire_did_not_say():
                          reads={"history_after": True, "search": False})
     wire = {"events_all": ["turn_error"], "events_none": ["text_done"],
             "error_code": "cancelled", "reads_find_marker": True,
-            "offline_row_matches": "fern"}
+            "offline_row_matches": "fern", "text_done_blocks": ["places"]}
 
     gates = {g.key: g for g in companion.wire_gates(evidence, wire)}
 
@@ -384,6 +407,7 @@ def test_a_malformed_companion_spec_is_named(tmp_path, spec, fragment):
     ({"offline_row_matches": "fern"}, "needs `companion.offline_wait_s`"),
     ({"offline_row_matches": "("}, "not a valid regex"),
     ({"blocker_events_all": ["text_done"]}, "needs `companion.cancel: waiting`"),
+    ({"text_done_blocks": []}, "`wire.text_done_blocks` must be a non-empty list"),
     ({"latency": 1}, "unknown `wire` key `latency`"),
 ])
 def test_a_malformed_wire_map_is_named(tmp_path, wire, fragment):
