@@ -44,7 +44,7 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
     exit_after_hello = Keyword.get(opts, :exit_after_hello)
     exit_after_start = Keyword.get(opts, :exit_after_start)
-    close_stdin_after_hello = Keyword.get(opts, :close_stdin_after_hello, false)
+    close_stdin_before_hello = Keyword.get(opts, :close_stdin_before_hello, false)
 
     script = """
     #!/usr/bin/perl
@@ -55,9 +55,10 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
     open(my $env, '>', q{#{ctx.root}/env.txt}) or die;
     print $env join(",", sort keys %ENV);
     close($env);
+    #{if close_stdin_before_hello, do: "close(STDIN);", else: ""}
     print '#{hello}' . "\\n";
     #{if exit_after_hello, do: "exit #{exit_after_hello};", else: ""}
-    #{if close_stdin_after_hello, do: "close(STDIN); sleep 5; exit 0;", else: ""}
+    #{if close_stdin_before_hello, do: "sleep 5; exit 0;", else: ""}
     while (my $line = <STDIN>) {
       print $log $line;
       if ($line =~ /"op":"start"/) {
@@ -229,12 +230,19 @@ defmodule FermixChannels.Mobile.Iroh.HelperTest do
 
   # A helper that has stopped reading when `start` is written closes the port
   # with no exit status (the write's EPIPE): that is a crash like any other,
-  # not a wait for the ready timeout.
+  # not a wait for the ready timeout. The fake closes its input before `hello`,
+  # and the daemon writes `start` only after reading `hello`, so the write
+  # always meets a closed pipe.
   test "a helper whose pipe closed under the daemon's write is a crash", ctx do
-    pid = start(ctx, binary_path: fake(ctx, close_stdin_after_hello: true), test_pid: self())
+    pid = start(ctx, binary_path: fake(ctx, close_stdin_before_hello: true), test_pid: self())
 
     assert_receive {:emit, :degraded, 1, :port_closed}, 3_000
-    assert %{rail: :failed, retry: %{delay_ms: 2_000}} = :sys.get_state(pid)
+
+    assert %{
+             rail: :failed,
+             failure: "the helper's pipe closed: broken pipe",
+             retry: %{delay_ms: 2_000}
+           } = :sys.get_state(pid)
   end
 
   # `bad_request` is the helper refusing the daemon's own `start`: the same

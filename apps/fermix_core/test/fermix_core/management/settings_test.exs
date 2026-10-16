@@ -1220,6 +1220,12 @@ defmodule FermixCore.Management.SettingsTest do
       assert row("channels.mobile", "mobile_iroh")["info"] =~
                "Off keeps your phone to your home network and Tailscale."
 
+      # The phone channel runs on Linux too, so none of its rows names the Mac.
+      for %{"key" => key} = row <- rows,
+          text <- [row["footer"], row["info"]],
+          is_binary(text),
+          do: refute(text =~ "Mac", "#{key} names the Mac: #{text}")
+
       assert %{"min" => 1024, "max" => 65_535, "step" => 1, "format" => "integer", "unit" => nil} =
                row("channels.mobile", "mobile_port")
     end

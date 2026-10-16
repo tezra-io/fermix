@@ -537,7 +537,9 @@ defmodule FermixChannels.Mobile.Iroh.Helper do
   defp describe({:key, reason}), do: key_words(reason)
   defp describe({:protocol_error, reason}), do: "the helper sent #{line_words(reason)}"
   defp describe({:spawn_failed, path}), do: "the helper at #{path} could not be started"
-  defp describe({:port_closed, reason}), do: "the helper's pipe closed (#{inspect(reason)})"
+
+  defp describe({:port_closed, reason}) when is_atom(reason),
+    do: "the helper's pipe closed: #{:file.format_error(reason)}"
 
   defp describe({:device_store, reason}) when is_atom(reason),
     do: "the paired phones could not be read: #{:file.format_error(reason)}"

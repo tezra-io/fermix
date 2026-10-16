@@ -541,11 +541,12 @@ Notes that the shapes alone do not carry:
   the one short line under the control and is always shown; `info` is a
   paragraph a client puts behind an `(i)` beside the row and reveals on demand.
   It is `null` on every row with nothing more to say, which is most of them.
-  Today three rows carry it: the Venice model row, where the privacy tier in
-  each model's label is two words that mean materially different things; the
-  secrets section's store row, where the choice trades a keyring password for
-  a file that is not encrypted; and the phone channel's reach-from-anywhere
-  switch, which says what turning it off keeps the phone to.
+  A row carries one when its choice has a consequence its label cannot say,
+  such as the Venice model row, where the privacy tier in each model's label is two
+  words that mean materially different things; the secrets section's store
+  row, where the choice trades a keyring password for a file that is not
+  encrypted; and the phone channel's reach-from-anywhere switch, which says
+  what turning it off keeps the phone to.
 - **`advanced` marks a row most people never need to change.** A client draws
   a section's advanced rows after its other rows, under one disclosure that
   starts closed; a section with none draws no disclosure. It says nothing about

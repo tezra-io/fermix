@@ -5,7 +5,7 @@ defmodule FermixCore.Management.Settings.Mobile do
 
   A section of its own rather than a channels-inventory entry, because the
   inventory expresses credential rows and the phone channel has none: it needs
-  a toggle, a port and an address. Every row is a projection of the one
+  two switches, a port, an address and an announcement. Every row is a projection of the one
   `[fermix_channels.mobile]` block. The two toggles are live: a write starts or
   stops the phone channel (M51 §5.5), or its reach from anywhere (M62), at once
   (`FermixCore.Management.Settings`). The port, the address and the
@@ -43,7 +43,7 @@ defmodule FermixCore.Management.Settings.Mobile do
 
     [
       Row.new("mobile_enabled", :toggle, "Phone companion",
-        footer: "Lets a paired phone chat with this Fermix over your network.",
+        footer: "Lets a paired phone chat with this Fermix.",
         value: Source.boolean(block, :enabled, false),
         restart: switch_restart
       ),
@@ -54,9 +54,10 @@ defmodule FermixCore.Management.Settings.Mobile do
         # announcement do not confine this route.
         footer: "Uses Fermix's relays, which never see your messages.",
         info:
-          "When your phone can't reach this Mac over your home network or Tailscale, " <>
-            "it goes through Fermix's relays. They pass on encrypted traffic and never " <>
-            "see your messages. Off keeps your phone to your home network and Tailscale.",
+          "Lets your phone reach this Fermix from any network through Fermix's relays, " <>
+            "besides your home network and Tailscale. The relays pass on encrypted traffic " <>
+            "and never see your messages. Off keeps your phone to your home network and " <>
+            "Tailscale.",
         value: Source.boolean(block, :iroh, true),
         restart: reach_restart
       ),
