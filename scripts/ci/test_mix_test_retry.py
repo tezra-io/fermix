@@ -101,10 +101,45 @@ class ParseRunTest(unittest.TestCase):
 
 
 class PlanRetryTest(unittest.TestCase):
-    def test_one_failure_is_retried_in_its_own_app(self):
-        failed, refusal = retry.plan_retry(retry.parse_run(ONE_CORE_FAILURE), max_flaky=5)
+    def test_one_failure_is_retried_in_its_own_app_by_its_location(self):
+        targets, refusal = retry.plan_retry(retry.parse_run(ONE_CORE_FAILURE), max_flaky=5)
 
-        self.assertEqual((failed, refusal), ({"fermix_core": 1}, ""))
+        self.assertEqual(
+            (targets, refusal),
+            ({"fermix_core": ["apps/fermix_core/test/fermix_core/setup/doctor_test.exs:1332"]}, ""),
+        )
+
+    def test_a_later_apps_failure_is_retried_in_that_app(self):
+        log = "==> fermix_core\nRunning ExUnit with seed: 5\n9 tests, 0 failures\n" + channels_failures(2)
+
+        targets, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
+
+        self.assertEqual(refusal, "")
+        self.assertEqual(
+            targets,
+            {
+                "fermix_channels": [
+                    "apps/fermix_channels/test/fermix_channels/some_test.exs:10",
+                    "apps/fermix_channels/test/fermix_channels/some_test.exs:20",
+                ]
+            },
+        )
+
+    def test_a_failure_with_no_test_location_stays_red(self):
+        log = "Running ExUnit with seed: 3\n  1) test x (A.BTest)\n     ** (RuntimeError) boom\n1 test, 1 failure\n"
+
+        targets, refusal = retry.plan_retry(retry.parse_run(log, app="fermix_core"), max_flaky=5)
+
+        self.assertEqual(targets, {})
+        self.assertIn("no test location for A.BTest x", refusal)
+
+    def test_failures_exunit_did_not_name_stay_red(self):
+        log = channels_failures(1).replace("1283 tests, 1 failures", "1283 tests, 1 failure, 3 invalid")
+
+        targets, refusal = retry.plan_retry(retry.parse_run(log), max_flaky=5)
+
+        self.assertEqual(targets, {})
+        self.assertIn("named 1 of 4 failures", refusal)
 
     def test_more_failures_than_the_cap_stay_red(self):
         failed, refusal = retry.plan_retry(retry.parse_run(channels_failures(6)), max_flaky=5)
@@ -181,10 +216,6 @@ class MainTest(unittest.TestCase):
         self.log = self.base / "mix-test.log"
         self.flaky = self.base / "flaky.json"
         self.calls = []
-        manifest = self.base / "_build/test/lib/fermix_core/.mix/.mix_test_failures"
-        manifest.parent.mkdir(parents=True)
-        manifest.write_bytes(b"stale")
-        self.manifest = manifest
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -192,7 +223,6 @@ class MainTest(unittest.TestCase):
     def fake_runner(self, outputs):
         def run(command, log):
             self.calls.append(command)
-            self.assertFalse(self.manifest.exists(), "stale failure manifests must be cleared first")
             code, text = outputs[len(self.calls) - 1]
             log.write_text(text)
             return code
@@ -202,7 +232,7 @@ class MainTest(unittest.TestCase):
     def main(self, outputs, *extra):
         argv = ["--log", str(self.log), "--flaky-json", str(self.flaky), *extra]
         with contextlib.redirect_stdout(io.StringIO()) as out:
-            code = retry.main(argv, runner=self.fake_runner(outputs), root=self.base)
+            code = retry.main(argv, runner=self.fake_runner(outputs))
         return code, out.getvalue()
 
     def test_a_green_suite_runs_once(self):
@@ -216,7 +246,10 @@ class MainTest(unittest.TestCase):
         code, out = self.main([(2, ONE_CORE_FAILURE), (0, CORE_RERUN_PASSES)])
 
         self.assertEqual(code, 0)
-        self.assertEqual(self.calls[1], ["mix", "do", "--app", "fermix_core", "test", "--warnings-as-errors", "--failed"])
+        self.assertEqual(
+            self.calls[1],
+            ["mix", "test", "--warnings-as-errors", "apps/fermix_core/test/fermix_core/setup/doctor_test.exs:1332"],
+        )
         self.assertIn("::warning file=apps/fermix_core/test/fermix_core/setup/doctor_test.exs,line=1332", out)
         flaky = json.loads(self.flaky.read_text())
         self.assertEqual(flaky["seed"], "100913")

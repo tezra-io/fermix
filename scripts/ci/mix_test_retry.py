@@ -7,22 +7,26 @@
 
 The first run is the ordinary `mix test --warnings-as-errors`. When it fails
 with at most `--max-flaky` failed tests and nothing else wrong, each app that
-had failures reruns only those tests (`mix do --app <app> test --failed`). If
-every rerun passes and ran at least as many tests as failed, the failures are
-flaky: each one becomes a `::warning` annotation titled "Flaky test", a row in
-the job summary and an entry in the flaky JSON, and the step passes.
+had failures reruns only those tests, named by the `path:line` ExUnit printed
+for each. If every rerun passes and ran at least as many tests as failed, the
+failures are flaky: each one becomes a `::warning` annotation titled "Flaky
+test", a row in the job summary and an entry in the flaky JSON, and the step
+passes.
 
 Everything else stays red: a suite that aborted (warnings, compile errors), an
-app whose suite never printed its summary, more failures than the cap, a rerun
-that fails again, and a rerun that ran fewer tests than failed. `mix test
---failed` from the umbrella root runs zero tests and exits 0 whatever its
-apps' manifests hold, so the rerun is per app and its test count is checked.
+app whose suite never printed its summary, more failures than the cap, a
+failure ExUnit did not name with a test location, a rerun that fails again,
+and a rerun that ran fewer tests than failed.
+
+`mix test --failed` cannot do the rerun. From the umbrella root it runs zero
+tests and exits 0, and one umbrella run records every app's failures in the
+first app's manifest, so `mix do --app <app> test --failed` finds nothing for
+any later app.
 """
 
 from __future__ import annotations
 
 import argparse
-import glob
 import json
 import os
 import re
@@ -139,8 +143,8 @@ def _read_failure(run: Run, line: str, current: str, pending: Failure | None):
     return pending
 
 
-def plan_retry(run: Run, max_flaky: int) -> tuple[dict[str, int], str]:
-    """Apps to rerun with their failed counts, or a reason the failure stays red."""
+def plan_retry(run: Run, max_flaky: int) -> tuple[dict[str, list[str]], str]:
+    """Each app's failed tests as `path:line`, or a reason the failure stays red."""
     if run.aborted:
         return {}, f"the suite aborted: {run.aborted}"
     unfinished = sorted(app for app, a in run.apps.items() if a.started and a.ran is None)
@@ -152,9 +156,15 @@ def plan_retry(run: Run, max_flaky: int) -> tuple[dict[str, int], str]:
         return {}, "mix test failed with no failed tests, so there is nothing to rerun"
     if total > max_flaky:
         return {}, f"{total} tests failed; more than {max_flaky} is not treated as flaky"
-    if not run.failures:
-        return {}, "tests failed but no failure was named in the log"
-    return failed, ""
+    if len(run.failures) != total:
+        return {}, f"ExUnit named {len(run.failures)} of {total} failures; only a named test can be rerun"
+    unplaced = [f"{f.module} {f.name}" for f in run.failures if not f.path]
+    if unplaced:
+        return {}, f"no test location for {', '.join(unplaced)}"
+    targets: dict[str, list[str]] = {}
+    for failure in run.failures:
+        targets.setdefault(failure.app, []).append(f"{failure.path}:{failure.line}")
+    return targets, ""
 
 
 def check_rerun(app: str, expected: int, rerun: Run, code: int) -> str:
@@ -217,18 +227,12 @@ def run_teed(command: list[str], log: Path) -> int:
         return proc.wait()
 
 
-def clear_failure_manifests(root: Path) -> None:
-    """A restored `_build` cache carries old manifests; `--failed` must see this run only."""
-    for manifest in glob.glob(str(root / "_build/test/lib/*/.mix/.mix_test_failures")):
-        os.remove(manifest)
-
-
-def retry_failures(failed: dict[str, int], log: Path, runner: Runner) -> str:
-    for app, expected in sorted(failed.items()):
+def retry_failures(targets: dict[str, list[str]], log: Path, runner: Runner) -> str:
+    for app, locations in sorted(targets.items()):
         rerun_log = log.with_name(f"{log.stem}-rerun-{app}{log.suffix}")
-        print(f"\n== Rerunning the {expected} failed test(s) in {app} once ==", flush=True)
-        code = runner(["mix", "do", "--app", app, "test", "--warnings-as-errors", "--failed"], rerun_log)
-        reason = check_rerun(app, expected, parse_run(rerun_log.read_text(errors="replace"), app), code)
+        print(f"\n== Rerunning the {len(locations)} failed test(s) in {app} once ==", flush=True)
+        code = runner(["mix", "test", "--warnings-as-errors", *locations], rerun_log)
+        reason = check_rerun(app, len(locations), parse_run(rerun_log.read_text(errors="replace"), app), code)
         if reason:
             return reason
     return ""
@@ -250,18 +254,17 @@ def report_flaky(run: Run, flaky_json: Path | None) -> None:
         flaky_json.write_text(json.dumps({"seed": run.seed, "flaky": entries}, indent=2) + "\n")
 
 
-def main(argv: list[str], runner: Runner = run_teed, root: Path = Path(".")) -> int:
+def main(argv: list[str], runner: Runner = run_teed) -> int:
     args = parse_args(argv)
-    clear_failure_manifests(root)
     code = runner(["mix", "test", "--warnings-as-errors", *args.mix_args], args.log)
     if code == 0:
         return 0
     first = parse_run(args.log.read_text(errors="replace"))
-    failed, refusal = plan_retry(first, args.max_flaky)
+    targets, refusal = plan_retry(first, args.max_flaky)
     if refusal:
         print(f"\nNot retried: {refusal}.", flush=True)
         return code
-    reason = retry_failures(failed, args.log, runner)
+    reason = retry_failures(targets, args.log, runner)
     if reason:
         print(f"\nNot flaky: {reason}.", flush=True)
         return 1
