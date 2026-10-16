@@ -89,7 +89,7 @@
 (* rule here reads it. A phone's revocation is not modelled either: Turns  *)
 (* runs it in its own mailbox as a cancel of every unsettled request the   *)
 (* device claimed, one step that marks them all and stops each turn it     *)
-(* handed off (handle_cast {:revoke_device}, turns.ex:298-310);            *)
+(* handed off (handle_cast {:revoke_device}, turns.ex:303-315);            *)
 (* - a cancel that arrives before its request is claimed: there is no      *)
 (* request to mark (cancel_request answers not_found), as PROTOCOL.md      *)
 (* scopes the guarantee to a cancel after accepted;                        *)
@@ -139,17 +139,17 @@
 (* One step = one callback of one process, one Memory.Repo call, or one    *)
 (* thing a client or the environment does.                                 *)
 (***************************************************************************)
-\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ 90aff2a813e9
+\* SOURCE: apps/fermix_core/priv/companion/PROTOCOL.md @ c0176978a02e
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/requests.ex#request,cancel,claim_and_run,acquire_and_run,run_started,ingest_span,settle_after_ingest,settle_unless_handed_off,handoff_settlement,fail_attempt,report_failure,settle_failed,append_user,after_user_append,settle_inline,ingest_gateway,approval_resolution_fn,history,fit_page,cut_page,take_within,accepted_event,history_event,emit,best_effort_emit @ 682bdb005ef6
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 6da22657cacf
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ 77ac7d889c3e
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/turns.ex @ 6a817708c38c
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/output.ex#text_done,turn_error,row,timeline_message,approval,approval_resolved,persist_text,persist_output,complete_request,fail_request @ ba55e94f8827
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/connection.ex#handle_info,dispatch,hello,join,send_pending_approvals,write_pending_approval,write_event,send_event,transport,request_failure_reporter,announce_user_row,request_opts,read_opts,sink @ 78fdfd1faa04
-\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ bac4baea8aa7
+\* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/fanout.ex @ abddae4baafe
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/approvals.ex @ 59c135c36360
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/companion/endpoint.ex#@max_clients,accept_connection,start_connection,hand_over @ 61148c849930
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/channels/companion.ex#broadcast,dispatch,build_text_reply,build_turn_result,send_approval,send_message,write_call_row,announce_written,message,build_raw_stream_callback,every_client_reads? @ bfbb1b3bcbc5
 \* SOURCE: apps/fermix_core/lib/fermix_core/companion/timeline.ex#append_client_message,append_proactive,history_page,claim_client_request,get_client_request,cancel_client_request,start_client_request,append_client_output,complete_client_request,fail_client_request @ d0a1ca7c444e
-\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 2dadf7da73c8
+\* SOURCE: apps/fermix_core/lib/fermix_core/memory/repo/mobile_sql.ex#history,cancel_request,cancelled_request,append_in_tx,next_server_seq,increment_server_seq,claim_request_in_tx,classify_claim,complete_request,settle_request_in_tx,request_transition,append_client_output_in_tx,ensure_running_attempt @ 574a636c3a65
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/mobile/request_coordinator.ex#handle_call @ b9579b8e9e13
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/queue.ex#stop_turn,stop_named_turn,stop_named_in,maybe_start_next_request,claim_active_turn,stop_conversation_runtime,stop_active_turn,cancel_pending @ 0dc22aada1ac
 \* SOURCE: apps/fermix_channels/lib/fermix_channels/gateway/commands/sandbox.ex#store_pending_grant,confirm,deny,notify_approval,take_pending,validate_pending @ f399896eeb20
@@ -230,14 +230,14 @@ CONSTANTS
                          \* queue.ex:185, stop_named_in :1035-1072); FALSE is the
                          \* conversation stop (stop_conversation_runtime :1020-1024)
     CancelMarksRequest,  \* a cancel is recorded on its request first (Requests.cancel,
-                         \* requests.ex:157-173; cancel_request, mobile_sql.ex:546-565);
+                         \* requests.ex:157-173; cancel_request, mobile_sql.ex:567-586);
                          \* Turns reads the mark and enqueues in one step (hand_off,
-                         \* turns.ex:330-345) and sends every stop itself, after its
-                         \* enqueue (turns.ex:244-248, stop_in_queue :451-462). FALSE is
+                         \* turns.ex:335-350) and sends every stop itself, after its
+                         \* enqueue (turns.ex:249-253, stop_in_queue :451-462). FALSE is
                          \* the old code: the Connection calls Queue.stop_turn directly
     OutcomeEndsTurn,     \* a turn ends on the wire only from the Queue's outcome, in
                          \* Turns; the cancel writes nothing (Requests.cancel,
-                         \* requests.ex:157-173; finish, fail, turns.ex:467-499)
+                         \* requests.ex:157-173; finish, fail, turns.ex:472-505)
     SettleAfterIngest,   \* once ingest returned, the request worker casts the request's
                          \* settlement to Turns (settle_after_ingest,
                          \* requests.ex:303-307); FALSE is the code before: a message the
@@ -245,12 +245,12 @@ CONSTANTS
                          \* boot ran it again
     SettleUnlessHandedOff, \* Turns settles that request only if no turn was handed off
                          \* for it (handle_cast {:settle_unless_handed_off},
-                         \* turns.ex:290-296); FALSE completes it regardless, as the code
+                         \* turns.ex:295-301); FALSE completes it regardless, as the code
                          \* before did for every command, so a command that became a turn
                          \* (/ultra) had its reply refused
     FailsUnsettled,      \* a settlement that fails fails the request once for its attempt
                          \* and tells its client error{request_failed, client_msg_id}
-                         \* (settle_inline, run_settle, turns.ex:363-398; fail_attempt,
+                         \* (settle_inline, run_settle, turns.ex:368-403; fail_attempt,
                          \* report_failure, requests.ex:340-360, through the
                          \* transport's report_failure, which the Connection writes as
                          \* a failed worker's error, connection.ex:510-517,
@@ -259,7 +259,7 @@ CONSTANTS
                          \* runs the command again
     SeqAssignedOnInsert, \* server_seq comes from the per-profile counter inside the one
                          \* transactional Repo call that inserts the row (append_in_tx,
-                         \* mobile_sql.ex:737-743); FALSE: a writer reads the counter,
+                         \* mobile_sql.ex:758-765); FALSE: a writer reads the counter,
                          \* then inserts in a second call
     SilenceGate          \* a turn may end with no reply only if every client joined when
                          \* it started declared version 2 (MainAgent.live_call ->
@@ -392,10 +392,10 @@ MaxOf(S) == IF S = {} THEN 0 ELSE CHOOSE x \in S : \A y \in S : y <= x
 Cursor(c) == IF view[c] = <<>> THEN 0 ELSE view[c][Len(view[c])]
 
 \* The per-profile counter, read and bumped inside the insert's transaction
-\* (next_server_seq, increment_server_seq, mobile_sql.ex:758, :786-795).
+\* (next_server_seq, increment_server_seq, mobile_sql.ex:780, :786-795).
 NextSeq == MaxOf(Range(tl)) + 1
 
-\* Companion.Fanout.announce (fanout.ex:46-66) -> Channels.Companion.broadcast
+\* Companion.Fanout.announce (fanout.ex:47-67) -> Channels.Companion.broadcast
 \* (channels/companion.ex:150-153, dispatch :364-368): one send to every
 \* Connection registered under the profile, each event the companion wire
 \* carries, a row (built once, by Output.row) projected to the fields this
@@ -403,8 +403,8 @@ NextSeq == MaxOf(Range(tl)) + 1
 FanoutTo(w, ev) == [c \in Clients |-> IF sub[c] = "yes" THEN Append(w[c], ev) ELSE w[c]]
 Fanout(ev) == FanoutTo(wire, ev)
 
-\* Timeline.history_page -> mobile_sql history (timeline.ex:83-90,
-\* mobile_sql.ex:370), then Requests.history's byte budget (fit_page, cut_page,
+\* Timeline.history_page -> mobile_sql history (timeline.ex:84-91,
+\* mobile_sql.ex:391), then Requests.history's byte budget (fit_page, cut_page,
 \* requests.ex:127-139, :698-726): one Repo call reads the rows after a,
 \* oldest first, at most PageLimit of them, and the head. A page cut to fit
 \* keeps its oldest rows, at least one, and its next_after_seq names the last
@@ -500,7 +500,7 @@ Casts(m) ==
 \* msg{client_msg_id} (Requests.request -> claim_and_run -> acquire_and_run
 \* -> run_started -> ingest_span, requests.ex:104-111, :210-295):
 \*  - claim_client_request claims the id durably (claim_request_in_tx,
-\*    mobile_sql.ex:963-972), and accepted{duplicate} goes to this client's
+\*    mobile_sql.ex:999-1008), and accepted{duplicate} goes to this client's
 \*    Connection (accepted_event, requests.ex:599-602) before anything runs;
 \*  - the coordinator's acquire starts an attempt, or none for a request
 \*    running, completed or failed (request_coordinator.ex:125-132);
@@ -509,13 +509,13 @@ Casts(m) ==
 \*    row it created is announced to every connection (after_user_append ->
 \*    announce_user_row, requests.ex:418-422, connection.ex:522-523);
 \*  - Gateway.ingest calls Companion.Turns.handle_message, which casts the
-\*    hand-off into Turns' mailbox and returns (turns.ex:133-138). A slash
+\*    hand-off into Turns' mailbox and returns (turns.ex:137-142). A slash
 \*    command the gateway answers inline hands nothing off;
 \*  - once ingest returned, the worker moves the coordinator's fence onto
 \*    Turns (handoff_settlement, requests.ex:321-338; not modelled) and casts
 \*    the settlement to Turns, with how to complete the request, fail it and
 \*    tell its client (settle_after_ingest, settle_unless_handed_off,
-\*    requests.ex:303-317 -> Turns.settle_unless_handed_off, turns.ex:161-175).
+\*    requests.ex:303-317 -> Turns.settle_unless_handed_off, turns.ex:165-179).
 OnMsg(c, m) ==
     /\ dupWhileRunning' = (dupWhileRunning \/ (m \in accepted /\ turn[m] \in Live))
     /\ IF AcceptedDedupe /\ m \in accepted
@@ -535,9 +535,9 @@ OnMsg(c, m) ==
 \* cancel{client_msg_id} (dispatch, connection.ex:235-236 -> Requests.cancel,
 \* requests.ex:157-173), in the Connection's own step.
 \*  - CancelMarksRequest: the mark is recorded on a request that has not
-\*    settled, in one Repo call (cancel_request, mobile_sql.ex:546-565;
+\*    settled, in one Repo call (cancel_request, mobile_sql.ex:567-586;
 \*    settled for one that has, not_found for one never claimed), then Turns
-\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:183-186).
+\*    is asked (Turns.cancel, a call into its mailbox, turns.ex:187-190).
 \*  - Otherwise the old code: the Connection calls Queue.stop_turn itself,
 \*    which finds nothing for a request not yet handed off.
 \*  - Without OutcomeEndsTurn the Connection also writes turn_error{cancelled}
@@ -753,7 +753,7 @@ Join(c) ==
 (* Companion.Turns: one process, one mailbox                                *)
 
 \* Turns handles its next message:
-\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:275-280 -> hand_off
+\*  - a hand-off (handle_cast {:hand_off, ...}, turns.ex:280-285 -> hand_off
 \*    :330-345): with CancelMarksRequest it reads the request's mark
 \*    (cancel_recorded, get_client_request, :347-355) and, in the same step,
 \*    ends a marked request with one turn_error{cancelled} and settles it
@@ -775,7 +775,7 @@ Join(c) ==
 \*    and no client rule reads it, so it is only observed here (told).
 \*    Without FailsUnsettled the failure is only logged and the request
 \*    stays running;
-\*  - a cancel (handle_call {:cancel, ...}, turns.ex:244-248 -> stop :438-443,
+\*  - a cancel (handle_call {:cancel, ...}, turns.ex:249-253 -> stop :438-443,
 \*    stop_in_queue :451-462): Queue.stop_turn for a turn it handed off,
 \*    sent after its own enqueue, so it cannot overtake it. Turns waits for
 \*    the answer with no timeout and the Queue answers however busy it is, so
@@ -789,7 +789,7 @@ Join(c) ==
 \*    then the request is completed (settle_completed, :530-542); one reply
 \*    here. A request already settled refuses the write as a stale attempt
 \*    (append_client_output_in_tx, ensure_running_attempt,
-\*    mobile_sql.ex:1142-1152): no row and no text_done;
+\*    mobile_sql.ex:1178-1188): no row and no text_done;
 \*  - {:completed} of a turn its runner said ends with no reply (handle_cast
 \*    {:silent, ...}, its [SILENT] reply dropped, silent_ending?): no row,
 \*    the request completed, and turn_done to the version 2 clients
@@ -891,7 +891,7 @@ Claim(m) ==
                    obs>>
 
 \* The turn invokes {:completed} (Turns.outcome, a call into Turns' mailbox,
-\* turns.ex:227-229, through build_turn_result, channels/companion.ex:216-220)
+\* turns.ex:231-233, through build_turn_result, channels/companion.ex:216-220)
 \* and exits; the Queue's :DOWN frees the slot and starts the next waiting
 \* turn (folded in: nothing else can act on the dead turn in between). A turn
 \* its snapshot let end with no reply may have answered exactly [SILENT]: its
