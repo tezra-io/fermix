@@ -17,6 +17,8 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
 
     @usage 64
     @live_bound_ms 30_000
+    @suwanee {34.0550, -84.0657}
+    @soho {40.7234, -74.0004}
 
     test "the build made the helper, and it self-checks with no network" do
       assert {"fermix-maps: ok\n", 0} = System.cmd(helper!(), ["--check"])
@@ -72,13 +74,39 @@ defmodule FermixCore.Tools.PlaceSearch.HelperTest do
         assert place.source_url ==
                  "https://maps.apple.com/place?place-id=" <> place.apple_place_id
 
-        assert %{latitude: lat, longitude: lng} = place.location
-        assert lat > 33 and lat < 35 and lng > -85 and lng < -83
+        assert within_km?(place, @suwanee, 10), "#{place.name} is not in Suwanee"
         assert [category] = place.categories
         assert category =~ ~r/\A[a-z]+(_[a-z]+)*\z/
         refute Map.has_key?(place, :distance)
         assert place |> Map.get(:canonical_url, "https://") |> String.starts_with?("https://")
       end
+    end
+
+    # The named area bounds the search: MapKit treats a hinted region as
+    # optional and, for some sizes, answers from around this Mac instead, which
+    # put a search for coffee in SoHo among the cafes of wherever the Mac is.
+    @tag :mapkit_live
+    test "a live search stays inside the named area, wherever this Mac is" do
+      request = %{query: "coffee", anchor: {:location, "SoHo, New York"}, count: 10}
+
+      assert {:ok, [_ | _] = places, %{}} = AppleMaps.search(request, timeout_ms: @live_bound_ms)
+
+      for place <- places do
+        assert within_km?(place, @soho, 3), "#{place.name} is not in SoHo"
+      end
+    end
+
+    defp within_km?(%{location: %{latitude: lat, longitude: lng}}, {center_lat, center_lng}, km) do
+      radians = &(&1 * :math.pi() / 180)
+      dlat = radians.(lat - center_lat)
+      dlng = radians.(lng - center_lng)
+
+      a =
+        :math.pow(:math.sin(dlat / 2), 2) +
+          :math.cos(radians.(center_lat)) * :math.cos(radians.(lat)) *
+            :math.pow(:math.sin(dlng / 2), 2)
+
+      2 * 6_371.0088 * :math.asin(:math.sqrt(a)) <= km
     end
 
     defp helper! do

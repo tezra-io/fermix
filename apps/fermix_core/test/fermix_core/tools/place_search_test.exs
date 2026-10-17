@@ -647,9 +647,11 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
       assert guidance =~ "`location`"
       assert guidance =~ "`query`"
-      # §10.1: radius is a ranking bias, and the description has to say so.
-      assert PlaceSearch.description() =~ "ranking"
-      assert PlaceSearch.description() =~ "geofence"
+      # §10.1, M72 §14: radius sets the area searched, which Brave ranks by and
+      # Apple Maps searches within, and the description says a result can
+      # still fall outside it.
+      assert PlaceSearch.description() =~ "`radius_meters` sets how far"
+      assert PlaceSearch.description() =~ "outside it"
     end
 
     # Rev 4: the tool's own guidance carries the same near-me ordering as the

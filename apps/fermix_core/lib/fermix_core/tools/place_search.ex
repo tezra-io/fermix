@@ -121,7 +121,8 @@ defmodule FermixCore.Tools.PlaceSearch do
       "details its source holds: address, phone and kind, plus hours, ratings and distance " <>
       "where the source gives them. Pass a place the user names as " <>
       "`location` (or as `latitude`/`longitude`); do NOT leave it inside `query`. " <>
-      "`radius_meters` biases ranking around explicit coordinates — it is not a hard geofence."
+      "`radius_meters` sets how far around explicit coordinates to search, and a result may " <>
+      "still fall outside it."
   end
 
   @doc "The schema for the backend in force on this host (`dynamic_parameters/1`)."
@@ -191,7 +192,7 @@ defmodule FermixCore.Tools.PlaceSearch do
           "longitude" => 139.7671,
           "radius_meters" => 1500
         },
-        note: "coordinates the user supplied; radius biases ranking around them"
+        note: "coordinates the user supplied; radius sets how far around them to search"
       },
       %{
         args: %{"query" => "ramen", "location" => "Kreuzberg, Berlin"},

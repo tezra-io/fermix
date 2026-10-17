@@ -13,8 +13,12 @@
 //                                  "longitude": -74.0, "radius_meters": 5000}}
 //
 // A named location is geocoded once with CLGeocoder and its placemark's region
-// sizes the search; coordinates are a region of `radius_meters`, a hint and not
-// a geofence. Nothing here creates a CLLocationManager or reads where this Mac
+// sizes the search; coordinates are a region `radius_meters` either side of
+// them. Either region is required, not a hint: MapKit treats a hinted region as
+// optional and, for some sizes, answers from around this Mac instead, so a
+// search for coffee in SoHo returned the cafes near the Mac. A query with no
+// anchor goes to MapKit as written, which ranks it around this Mac's own rough
+// position. Nothing here creates a CLLocationManager or reads where this Mac
 // is: that would raise a Location prompt under this helper's own name, and the
 // person's position is never an input (M31 §13.2).
 //
@@ -233,7 +237,10 @@ func run(_ query: String, region: MKCoordinateRegion?) {
   let request = MKLocalSearch.Request()
   request.naturalLanguageQuery = query
   request.resultTypes = .pointOfInterest
-  if let region { request.region = region }
+  if let region {
+    request.region = region
+    request.regionPriority = .required
+  }
 
   MKLocalSearch(request: request).start { response, error in
     if let error { searchFailed(error) }
