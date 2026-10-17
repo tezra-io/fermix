@@ -75,6 +75,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   app refused for either reason says the same. A plugin whose own manifest
   names a minimum version that is not a version is now refused when it is
   installed.
+- **A retired plugin left installed can no longer stop Fermix from starting.**
+  A plugin this build no longer offers was dropped from the config, but its
+  installed copy was still loaded, and a hosted one's signature re-checked, on
+  every plugin listing; when that check failed, the plugin list failed with
+  it, and so did startup. An installed retired plugin is now left unread; its
+  files stay where they are.
 - **Changing a setting no longer deletes the MCP servers you added by hand.**
   Every settings save, from the Mac app, `fermix setup`, a plugin's settings or
   the agent's model routing tool, rewrote `config.toml` without its

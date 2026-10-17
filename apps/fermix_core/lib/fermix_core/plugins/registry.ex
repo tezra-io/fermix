@@ -51,6 +51,7 @@ defmodule FermixCore.Plugins.Registry do
   alias FermixCore.Plugins.Dist.Store, as: DistStore
   alias FermixCore.Plugins.Http.Template
   alias FermixCore.Plugins.Plugin
+  alias FermixCore.Plugins.Retired
   alias FermixCore.Setup.ConfigStore
 
   @manifest_fields ~w(
@@ -302,12 +303,14 @@ defmodule FermixCore.Plugins.Registry do
   # Installed plugins read through `installed/<name>/current/plugin.json`.
   # Incompatible entries (plugin_api window / min_core_version, §13) are
   # excluded, not fatal — an upgrade that moved the support window must not
-  # take the whole registry down. A `:ready` entry whose manifest is missing
-  # or invalid IS fatal: the store is corrupt, fail loud.
+  # take the whole registry down. A retired name (`Plugins.Retired`) is
+  # excluded too: this build no longer offers it, so its manifest is never
+  # read and a remote one is never re-verified. A `:ready` entry whose manifest
+  # is missing or invalid IS fatal: the store is corrupt, fail loud.
   defp load_installed_plugins(root) do
     root
     |> DistStore.list()
-    |> Enum.filter(&(&1.status == :ready))
+    |> Enum.filter(&(&1.status == :ready and not Retired.retired?(&1.name)))
     |> Enum.reduce_while({:ok, []}, fn entry, {:ok, acc} ->
       case load_installed_plugin(root, entry.name) do
         {:ok, plugin} -> {:cont, {:ok, [plugin | acc]}}
