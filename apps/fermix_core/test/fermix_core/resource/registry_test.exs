@@ -347,6 +347,34 @@ defmodule FermixCore.Resource.RegistryTest do
     assert File.read!(path) == "live v1\n"
   end
 
+  test "grok_md is a file-backed type defaulting to bootstrap/<agent>/GROK.md", %{repo: repo} do
+    dir = temp_bootstrap_dir("commit-and-write-grok")
+    path = Path.join([dir, "main", "GROK.md"])
+
+    assert {:ok, %Revision{revision: 1}} =
+             Registry.commit_and_write("main", "grok_md", "global", "grok v1\n",
+               mutation_source: :seed,
+               provenance: %{"trigger" => "setup_seed"},
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert File.read!(path) == "grok v1\n"
+
+    assert {:ok, %Revision{revision: 2}} =
+             Registry.commit_and_write("main", :grok_md, "global", "grok v2\n",
+               mutation_source: :manual_edit,
+               provenance: %{"trigger" => "manual_edit"},
+               bootstrap_dir: dir,
+               repo: repo
+             )
+
+    assert {:ok, _reverted} =
+             Registry.rollback("main", :grok_md, "global", 1, bootstrap_dir: dir, repo: repo)
+
+    assert File.read!(path) == "grok v1\n"
+  end
+
   test "commit_and_write restores prior bytes and leaves the registry unchanged on commit failure",
        %{repo: repo} do
     dir = temp_bootstrap_dir("commit-and-write-restore")

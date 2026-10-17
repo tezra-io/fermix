@@ -806,6 +806,8 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
   test "every voice_live phase reaches the JSONL trace stream", %{dir: dir, server: server} do
     meta = %{
       session_id: "voice_live:1",
+      engine: "openai_live",
+      provider: "openai",
       parent_session: "main-4",
       device_id: "dev-1",
       model: "gpt-live-1",
@@ -852,6 +854,7 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert Enum.all?(rows, &(&1["session_id"] == "voice_live:1"))
     assert Enum.all?(rows, &(&1["parent_session"] == "main-4"))
     assert Enum.all?(rows, &(&1["engine"] == "openai_live"))
+    assert Enum.all?(rows, &(&1["provider"] == "openai"))
 
     start_row = find_entry!(rows, &(&1["event"] == "voice_live_call_start"))
     assert start_row["max_duration_ms"] == 900_000
@@ -870,6 +873,54 @@ defmodule FermixCore.Trace.TelemetryHandlerTest do
     assert call_stop["backend_turns"] == 2
     assert call_stop["accounting_complete"] == 1
     assert call_stop["reason"] == "call_stop"
+  end
+
+  # M70 §09: a Grok call rides the same rows, told apart by the engine and
+  # provider it names, and its ledger adds the billable text items, with no
+  # vendor terminal usage to settle against.
+  test "a Grok call's row names its engine and keeps its text items", %{
+    dir: dir,
+    server: server
+  } do
+    meta = %{
+      session_id: "voice_live:2",
+      engine: "xai_realtime",
+      provider: "xai",
+      model: "grok-voice-3.0",
+      voice: "eve"
+    }
+
+    LiveTelemetry.call_stop(
+      meta,
+      %{
+        voice_seconds: 60.0,
+        voice_cost_millicents: 9_200,
+        voice_text_items: 3,
+        backend_turns: 1,
+        accounting_complete: 0,
+        user_turns: 2,
+        generation_latency_ms_median: 640,
+        generation_latency_ms_max: 900
+      },
+      :call_stop
+    )
+
+    sync(server)
+
+    row =
+      dir
+      |> read_entries(:agent_event)
+      |> entries_for_session("voice_live:2")
+      |> find_entry!(&(&1["event"] == "voice_live_call_stop"))
+
+    assert row["engine"] == "xai_realtime"
+    assert row["provider"] == "xai"
+    assert row["model"] == "grok-voice-3.0"
+    assert row["voice_text_items"] == 3
+    assert row["accounting_complete"] == 0
+    assert row["user_turns"] == 2
+    assert row["generation_latency_ms_median"] == 640
+    assert row["generation_latency_ms_max"] == 900
   end
 
   # A call's gist (M56 §7) is a run of its own, and these three rows are its

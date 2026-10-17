@@ -86,6 +86,43 @@ defmodule Fermix.CLI.QueryCommandsTest do
     assert human =~ "model: gpt-live-1"
   end
 
+  # Grok reads the SpaceXAI provider's key (M70 §06), so both outputs report
+  # that key under its own name, and an OpenAI key does not count for it.
+  test "voice status reports the Grok engine's SpaceXAI key" do
+    realtime = Application.get_env(:fermix_core, :realtime)
+    providers = Application.get_env(:fermix_core, :providers)
+
+    on_exit(fn ->
+      restore_core(:realtime, realtime)
+      restore_core(:providers, providers)
+    end)
+
+    Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+    Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+
+    {json_status, json} = run_command(fn -> VoiceCommand.run(["status", "--json"]) end)
+    missing = Jason.decode!(json)["realtime"]
+
+    assert json_status == 0
+    assert missing["provider"] == "xai"
+    assert missing["xai_api_key_present?"] == false
+    refute Map.has_key?(missing, "openai_api_key_present?")
+
+    {_status, human} = run_command(fn -> VoiceCommand.run(["status"]) end)
+
+    assert human =~
+             "realtime key: MISSING — Grok voice needs a SpaceXAI API key " <>
+               "(a SpaceXAI sign-in won't authorize it)"
+
+    Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
+
+    {_status, json} = run_command(fn -> VoiceCommand.run(["status", "--json"]) end)
+    assert Jason.decode!(json)["realtime"]["xai_api_key_present?"] == true
+
+    {_status, human} = run_command(fn -> VoiceCommand.run(["status"]) end)
+    assert human =~ "realtime key: present"
+  end
+
   test "agents --json returns main-agent and worker status" do
     {exit_status, output} = run_command(fn -> AgentsCommand.run(["--json"]) end)
 
@@ -189,4 +226,7 @@ defmodule Fermix.CLI.QueryCommandsTest do
 
   defp restore_env(key, nil), do: System.delete_env(key)
   defp restore_env(key, value), do: System.put_env(key, value)
+
+  defp restore_core(key, nil), do: Application.delete_env(:fermix_core, key)
+  defp restore_core(key, value), do: Application.put_env(:fermix_core, key, value)
 end

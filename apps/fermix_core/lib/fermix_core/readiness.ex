@@ -146,10 +146,8 @@ defmodule FermixCore.Readiness do
           unknown_provider_action(:not_a_provider),
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
-          imessage_helper_row(),
-          realtime_provider_row(),
-          realtime_key_row()
-        ],
+          imessage_helper_row()
+        ] ++ Enum.map(realtime_providers(), &realtime_key_row/1),
       &{&1.detail_key, &1.action}
     )
   end
@@ -161,9 +159,9 @@ defmodule FermixCore.Readiness do
   the machine on the first boot (`Setup.HomeSeeder`), so a missing one is a
   nudge to tell Fermix about you, never a reason to call setup unfinished; the
   same goes for an enabled but half-configured channel and for realtime
-  without an OpenAI key: the shipped `telegram: [enabled: true]` default fires
-  on every fresh install, and realtime-without-a-key on every companion
-  install.
+  without its voice provider's key: the shipped `telegram: [enabled: true]`
+  default fires on every fresh install, and realtime-without-a-key on every
+  companion install.
   """
   @spec gating_failures([failure()]) :: [failure()]
   def gating_failures(failures) when is_list(failures),
@@ -471,30 +469,39 @@ defmodule FermixCore.Readiness do
     end
   end
 
+  # The provider follows from the engine (`RealtimeConfig.normalize/1` refuses
+  # one that disagrees), so the one voice failure left is the provider's missing
+  # key, read through the same resolver a call dials with.
   defp realtime_failure do
     config = RealtimeConfig.current()
 
     cond do
-      not config.enabled? ->
-        nil
-
-      config.provider != "openai" ->
-        realtime_provider_row()
-
-      regular_openai_api_key?() ->
-        nil
-
-      true ->
-        realtime_key_row()
+      not config.enabled? -> nil
+      RealtimeConfig.api_key_present?(config) -> nil
+      true -> realtime_key_row(config.provider)
     end
   end
 
-  defp realtime_provider_row do
-    realtime_failure_row("Set the voice provider to `openai` in config.toml, or turn voice off.")
+  # Every provider an engine dials, so a provider that joins the engine table
+  # joins the published sentences with it.
+  defp realtime_providers do
+    RealtimeConfig.valid_engines()
+    |> Enum.map(&RealtimeConfig.provider_for_engine/1)
+    |> Enum.uniq()
   end
 
-  defp realtime_key_row do
-    realtime_failure_row("Add the OpenAI API key in Providers settings, or turn voice off.")
+  defp realtime_key_row("openai" = provider) do
+    realtime_failure_row(
+      provider,
+      "Add the OpenAI API key in Providers settings, or turn voice off."
+    )
+  end
+
+  defp realtime_key_row("xai" = provider) do
+    realtime_failure_row(
+      provider,
+      "Add the SpaceXAI API key in Voice settings, or turn voice off."
+    )
   end
 
   defp channel_block(channel) do
@@ -502,10 +509,6 @@ defmodule FermixCore.Readiness do
       {:ok, config} when is_list(config) -> config
       _not_configured -> []
     end
-  end
-
-  defp regular_openai_api_key? do
-    Selection.configured?(:openai, provider_block(:openai))
   end
 
   defp present?(value) when is_binary(value), do: value != ""
@@ -598,8 +601,9 @@ defmodule FermixCore.Readiness do
     advisory(%{component: "channel:#{channel}", action: action}, "channels", "channel:#{channel}")
   end
 
-  defp realtime_failure_row(action) do
-    advisory(%{component: "realtime:openai", action: action}, "voice", "realtime:openai")
+  defp realtime_failure_row(provider, action) do
+    component = "realtime:#{provider}"
+    advisory(%{component: component, action: action}, "voice", component)
   end
 
   # Ready is "no gating failure remains", never "no failure at all". Advisory

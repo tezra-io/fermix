@@ -25,9 +25,9 @@ defmodule FermixCore.Realtime.LiveChatTest do
 
   # M56 §9: one rule for what the voice may carry, read by the input, the
   # mirror and a hand-off's reply alike.
-  describe "history_permitted?/0" do
+  describe "history_permitted?/1" do
     test "is false while OpenAI is not granted history, true once it is" do
-      refute LiveChat.history_permitted?()
+      refute LiveChat.history_permitted?(:openai)
 
       Application.put_env(:fermix_core, :computer_history,
         enabled: true,
@@ -35,7 +35,62 @@ defmodule FermixCore.Realtime.LiveChatTest do
         remote_summaries: [:openai]
       )
 
-      assert LiveChat.history_permitted?()
+      assert LiveChat.history_permitted?(:openai)
+    end
+
+    # M70 §07: the backend provider and the voice provider are separate
+    # recipients, and permission for one says nothing about the other.
+    test "an OpenAI grant does not permit a SpaceXAI voice, nor the reverse" do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      refute LiveChat.history_permitted?(:xai)
+
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:xai]
+      )
+
+      assert LiveChat.history_permitted?(:xai)
+      refute LiveChat.history_permitted?(:openai)
+    end
+  end
+
+  describe "context/2" do
+    test "is the input's lines before any wire shapes them" do
+      window = %{messages: [user("use the lease link"), assistant("Saved.")], gists: []}
+
+      assert [
+               %{role: :user, text: "use the lease link"},
+               %{role: :assistant, text: "Saved."},
+               %{role: :context, text: closing}
+             ] = LiveChat.context(window, :xai)
+
+      assert closing =~ "not a request"
+      assert LiveChat.context_size(LiveChat.context(window, :xai)).input_items == 3
+    end
+
+    test "masks a stamped message for a SpaceXAI voice that OpenAI's grant does not cover" do
+      Application.put_env(:fermix_core, :computer_history,
+        enabled: true,
+        summarizer: :local,
+        remote_summaries: [:openai]
+      )
+
+      tainted = Map.put(assistant("You were editing the Q3 report."), :history_tainted, true)
+      window = %{messages: [user("what was I doing"), tainted], gists: [gist("Read.", true)]}
+
+      texts = window |> LiveChat.context(:xai) |> Enum.map(& &1.text)
+      refute Enum.any?(texts, &(&1 =~ "Q3 report"))
+      refute Enum.any?(texts, &(&1 =~ "Read."))
+      refute LiveChat.carries_taint?(window, :xai)
+
+      assert window |> LiveChat.context(:openai) |> Enum.any?(&(&1.text =~ "Q3 report"))
+      assert LiveChat.carries_taint?(window, :openai)
     end
   end
 
@@ -241,11 +296,14 @@ defmodule FermixCore.Realtime.LiveChatTest do
 
   # M56 §9: a call that started knowing something drawn from Computer History
   # passes the mark to its gist; only what the voice may carry ever reaches it.
-  describe "carries_taint?/1" do
+  describe "carries_taint?/2" do
     test "is false while OpenAI may not carry history, whatever the window holds" do
       tainted = Map.put(assistant("You were reading the Q3 report."), :history_tainted, true)
 
-      refute LiveChat.carries_taint?(%{messages: [tainted], gists: [gist("Read.", true)]})
+      refute LiveChat.carries_taint?(
+               %{messages: [tainted], gists: [gist("Read.", true)]},
+               :openai
+             )
     end
 
     test "with OpenAI granted, a stamped message or gist the input uses carries it" do
@@ -257,34 +315,34 @@ defmodule FermixCore.Realtime.LiveChatTest do
 
       tainted = Map.put(assistant("You were reading the Q3 report."), :history_tainted, true)
 
-      assert LiveChat.carries_taint?(%{messages: [user("hi"), tainted], gists: []})
-      assert LiveChat.carries_taint?(%{messages: [], gists: [gist("Read.", true)]})
-      refute LiveChat.carries_taint?(%{messages: [user("hi")], gists: [gist("Read.")]})
+      assert LiveChat.carries_taint?(%{messages: [user("hi"), tainted], gists: []}, :openai)
+      assert LiveChat.carries_taint?(%{messages: [], gists: [gist("Read.", true)]}, :openai)
+      refute LiveChat.carries_taint?(%{messages: [user("hi")], gists: [gist("Read.")]}, :openai)
 
       # Only what the input uses: a stamped message older than the six newest is not.
       older = [tainted | Enum.map(1..6, &user("message #{&1}"))]
-      refute LiveChat.carries_taint?(%{messages: older, gists: []})
+      refute LiveChat.carries_taint?(%{messages: older, gists: []}, :openai)
     end
   end
 
   # M56 §4.3: what is typed in the chat during a call reaches the voice model
   # as a quiet line; the content itself is read by a hand-off, from the chat.
-  describe "mirror_line/1" do
+  describe "mirror_line/2" do
     test "a typed message is named as typed in the chat, cut to 300 characters" do
-      assert LiveChat.mirror_line({:typed, "use https://x.test/lease"}) ==
+      assert LiveChat.mirror_line({:typed, "use https://x.test/lease"}, :openai) ==
                {:ok, "The owner typed in the chat: use https://x.test/lease"}
 
-      {:ok, line} = LiveChat.mirror_line({:typed, String.duplicate("a", 900)})
+      {:ok, line} = LiveChat.mirror_line({:typed, String.duplicate("a", 900)}, :openai)
       assert String.length(line) == String.length("The owner typed in the chat: ") + 300
       assert String.ends_with?(line, "…")
     end
 
     test "a typed message with no text is not mirrored" do
-      assert LiveChat.mirror_line({:typed, "  \n "}) == :drop
+      assert LiveChat.mirror_line({:typed, "  \n "}, :openai) == :drop
     end
 
     test "the chat's answer is named as answered in the chat" do
-      assert LiveChat.mirror_line({:answered, assistant("Saved the lease.")}) ==
+      assert LiveChat.mirror_line({:answered, assistant("Saved the lease.")}, :openai) ==
                {:ok, "Fermix answered in the chat: Saved the lease."}
     end
 
@@ -293,7 +351,7 @@ defmodule FermixCore.Realtime.LiveChatTest do
     test "an answer stamped as Computer History content is dropped for OpenAI" do
       tainted = Map.put(assistant("You were reading the Q3 report."), :history_tainted, true)
 
-      assert LiveChat.mirror_line({:answered, tainted}) == :drop
+      assert LiveChat.mirror_line({:answered, tainted}, :openai) == :drop
 
       Application.put_env(:fermix_core, :computer_history,
         enabled: true,
@@ -302,7 +360,7 @@ defmodule FermixCore.Realtime.LiveChatTest do
       )
 
       assert {:ok, "Fermix answered in the chat: You were reading the Q3 report."} =
-               LiveChat.mirror_line({:answered, tainted})
+               LiveChat.mirror_line({:answered, tainted}, :openai)
     end
   end
 

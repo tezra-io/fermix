@@ -452,6 +452,34 @@ defmodule FermixCore.Management.ProtocolContractTest do
              Enum.find(live["rows"], &(&1["key"] == "realtime_conversation"))
   end
 
+  # Grok (M70 §06) publishes the task-engine rows Live does, its own voices, and
+  # the SpaceXAI provider's key row where the other engines publish OpenAI's, so
+  # its section has a golden of its own: the same rows in the same order, and
+  # the rows only Grok words its own way exactly.
+  test "the golden Grok voice section is the one the daemon publishes under Grok" do
+    realtime = [enabled: false, engine: "xai_realtime", model: "grok-voice-3.0", voice: "eve"]
+    providers = [openai: [primary: true, default_model: "gpt-5.4"], xai: [api_key: "xai-test"]]
+
+    snapshot =
+      Map.update(ConfigStore.current_snapshot(), :fermix_core, [], fn core ->
+        core
+        |> Keyword.put(:realtime, realtime)
+        |> Keyword.put(:providers, providers)
+        |> Keyword.put(:agent, [])
+      end)
+
+    {:ok, grok} = Settings.get("realtime", snapshot: snapshot)
+    golden = named_fixture_result("settings_get_realtime_grok")
+
+    assert Enum.map(golden["rows"], & &1["key"]) == Enum.map(grok["rows"], & &1["key"])
+
+    for key <- ~w(realtime_model realtime_voice realtime_backend xai_api_key) do
+      assert Enum.find(golden["rows"], &(&1["key"] == key)) ==
+               Enum.find(grok["rows"], &(&1["key"] == key)),
+             key
+    end
+  end
+
   # A provider whose models are discovered live (OpenAI Codex) ships no catalog,
   # so its section offers nothing and holds the empty value until one is chosen.
   defp assert_holds_offered_model(%{"options" => [], "value" => value}, id),

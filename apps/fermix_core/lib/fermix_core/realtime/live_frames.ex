@@ -1,8 +1,9 @@
 defmodule FermixCore.Realtime.LiveFrames do
   @moduledoc """
-  The companion frames a Live call sends, built in one place.
+  The companion frames a call on a task engine sends, GPT Live's and Grok's,
+  built in one place.
 
-  These payloads ARE the local wire contract (`Protocol` v2, exported in
+  These payloads ARE the local wire contract (`Protocol` v3, exported in
   `priv/realtime/`), and `fermix-macos` vendors that contract by checksum. So
   every vocabulary word a Live call can emit — a `state` value, a `task` status,
   an `error` kind — is enumerated here and guarded: an undocumented word fails
@@ -27,6 +28,10 @@ defmodule FermixCore.Realtime.LiveFrames do
   # The wire's own bound on `task.summary`.
   @summary_max_chars 240
 
+  # The wire's own bound on `audio_delta.playback_id`, the one `Protocol` holds
+  # a companion's `playback_progress` to.
+  @playback_id_max_bytes 64
+
   @doc "Turn or session state."
   @spec state(String.t()) :: map()
   def state(value) when value in @states, do: %{type: "state", state: value}
@@ -34,6 +39,18 @@ defmodule FermixCore.Realtime.LiveFrames do
   @doc "One chunk of generated speech, base64 as the provider sent it."
   @spec audio_delta(String.t()) :: map()
   def audio_delta(audio) when is_binary(audio), do: %{type: "audio_delta", audio: audio}
+
+  @doc """
+  One chunk of generated speech under its call-local playback id (v3, Grok):
+  the id the companion reports `playback_progress` against. Bounded as the
+  daemon bounds the id a companion echoes back, so it can never mint one it
+  would then refuse.
+  """
+  @spec audio_delta(String.t(), String.t()) :: map()
+  def audio_delta(audio, playback_id)
+      when is_binary(audio) and is_binary(playback_id) and playback_id != "" and
+             byte_size(playback_id) <= @playback_id_max_bytes,
+      do: %{type: "audio_delta", audio: audio, playback_id: playback_id}
 
   @doc "Drop whatever is queued for playback right now."
   @spec playback_stop() :: map()

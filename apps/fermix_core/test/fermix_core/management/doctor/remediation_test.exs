@@ -104,6 +104,17 @@ defmodule FermixCore.Management.Doctor.RemediationTest do
              Remediation.fetch("realtime_key", "failed")
   end
 
+  # The check asks whichever vendor the engine dials (M70), so the remedy names
+  # the voice key rather than one vendor's.
+  test "a refused voice key's remedy names no single vendor" do
+    %{"title" => title, "body" => body} = Remediation.fetch("realtime_key", "failed")
+
+    assert title == "Replace the voice API key"
+
+    assert body ==
+             "The voice provider does not accept the saved key, so a voice call cannot start."
+  end
+
   test "a none action still names a kind so a surface never guesses" do
     assert %{"action" => %{"kind" => "none", "target" => nil}} =
              Remediation.fetch("engine_path_baseline", "warning")

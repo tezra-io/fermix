@@ -57,10 +57,31 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     def mute(pid, enabled?), do: Agent.update(pid, &Map.put(&1, :muted?, enabled?))
 
-    def cancel_task(pid, delegation_id),
-      do: Agent.update(pid, &Map.put(&1, :cancelled_task, delegation_id))
+    def cancel_task(pid, delegation_id) do
+      Agent.update(pid, &Map.put(&1, :cancelled_task, delegation_id))
+      tell_observer(pid, {:cancelled_task, delegation_id})
+    end
+
+    # Refuses the one id it never sent, as a Grok session does.
+    def playback_progress(_pid, "p404", _played_ms, _drained?), do: {:error, :unknown_playback}
+
+    def playback_progress(pid, playback_id, played_ms, drained?),
+      do: tell_observer(pid, {:playback_progress, playback_id, played_ms, drained?})
 
     def call_stop(pid), do: Agent.update(pid, &Map.put(&1, :stopped?, true))
+
+    # A test that waits on what this double was told puts itself in the
+    # session's state as `observer`.
+    defp tell_observer(pid, message) do
+      case Agent.get(pid, &Map.get(&1, :observer)) do
+        nil ->
+          :ok
+
+        observer ->
+          send(observer, message)
+          :ok
+      end
+    end
   end
 
   defmodule SilentSession do
@@ -210,7 +231,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     assert Jason.decode!(String.trim(line)) == %{
              "type" => "server_hello",
              "min_version" => 1,
-             "max_version" => 2
+             "max_version" => 3
            }
 
     :gen_tcp.close(conn)
@@ -244,7 +265,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_new",
              "client_version" => 99,
              "min_version" => 1,
-             "max_version" => 2
+             "max_version" => 3
            } = Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
@@ -362,6 +383,36 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              Jason.decode!(String.trim(line))
 
     assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  # The key resolver names the provider whose key is missing (M70); the wire
+  # keeps the one word it always carried for it, never an inspected term.
+  test "a missing voice key refuses call_start with the stable not_configured word" do
+    unique = System.unique_integer([:positive])
+    socket_path = Path.join(System.tmp_dir!(), "fermix-realtime-nokey-#{unique}.sock")
+    {:ok, task_sup} = Task.Supervisor.start_link(name: :"rt_socket_nokey_tasks_#{unique}")
+
+    {:ok, socket} =
+      LocalVoiceSocket.start_link(
+        socket_path: socket_path,
+        task_supervisor: task_sup,
+        session_starter: fn _opts -> {:error, {:missing_api_key, "xai"}} end,
+        session_module: FakeSession,
+        name: :"rt_socket_nokey_#{unique}"
+      )
+
+    on_exit(fn ->
+      stop_socket(socket)
+      FermixTestSupport.SafeRm.rm(socket_path)
+    end)
+
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 3)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "error", "reason" => "not_configured"} = Jason.decode!(String.trim(line))
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 2_000)
   end
 
   # The defect this pins: the session's rich error was queued in the handler's
@@ -787,7 +838,7 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
              "direction" => "client_too_old",
              "client_version" => 1,
              "min_version" => 2,
-             "max_version" => 2,
+             "max_version" => 3,
              "required_for" => "openai_live"
            }
 
@@ -880,6 +931,139 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :gen_tcp.close(conn)
   end
 
+  # M70: Grok is a task engine, so its delegations are cancellable the same way.
+  test "task_cancel reaches the session under the Grok engine", %{socket_path: socket_path} do
+    put_realtime_env(engine: "xai_realtime")
+    {conn, session} = start_grok_call(socket_path)
+    :ok = observe(session)
+
+    :ok = :gen_tcp.send(conn, ~s({"type":"task_cancel","delegation_id":"dg_1"}\n))
+    assert_receive {:cancelled_task, "dg_1"}
+
+    # Cancelling a task does not end the call: the next frame still lands.
+    :ok = :gen_tcp.send(conn, progress_frame("p1", 0, true))
+    assert_receive {:playback_progress, "p1", 0, true}
+
+    :gen_tcp.close(conn)
+  end
+
+  # M70, wire v3: Grok's playback feedback is v3, so an older companion is
+  # refused at call_start with the GROK minimum, before a paid session opens.
+  test "a v1 or v2 companion on a Grok-configured daemon is refused before any session starts",
+       %{socket_path: socket_path} do
+    put_realtime_env(engine: "xai_realtime")
+
+    for version <- [1, 2] do
+      {:ok, conn} = connect(socket_path)
+      :ok = handshake(conn, version)
+      :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+      assert {:ok, line} = recv_line(conn)
+
+      assert Jason.decode!(String.trim(line)) == %{
+               "type" => "error",
+               "reason" => "unsupported_protocol_version",
+               "kind" => "update_required",
+               "direction" => "client_too_old",
+               "client_version" => version,
+               "min_version" => 3,
+               "max_version" => 3,
+               "required_for" => "xai_realtime"
+             }
+
+      assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+    end
+
+    # A started session announces itself before the handler writes anything,
+    # so by the refusal it would already be here.
+    refute_received {:session_started, _session, _opts}
+  end
+
+  test "a v3 companion runs a Grok call", %{socket_path: socket_path} do
+    put_realtime_env(engine: "xai_realtime")
+    {conn, _session} = start_grok_call(socket_path)
+
+    :gen_tcp.close(conn)
+  end
+
+  test "a v3 companion still runs both OpenAI engines", %{socket_path: socket_path} do
+    for engine <- ~w(openai_realtime openai_live) do
+      put_realtime_env(engine: engine)
+
+      {:ok, conn} = connect(socket_path)
+      :ok = handshake(conn, 3)
+      :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+      assert_receive {:session_started, _session, _opts}
+      assert {:ok, line} = recv_line(conn)
+      assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+      :gen_tcp.close(conn)
+    end
+  end
+
+  test "playback_progress reaches the session under the Grok engine", %{
+    socket_path: socket_path
+  } do
+    put_realtime_env(engine: "xai_realtime")
+    {conn, session} = start_grok_call(socket_path)
+    :ok = observe(session)
+
+    :ok = :gen_tcp.send(conn, progress_frame("p1", 420, false))
+    assert_receive {:playback_progress, "p1", 420, false}
+
+    # Reporting progress does not end the call: the next report still lands.
+    :ok = :gen_tcp.send(conn, progress_frame("p1", 870, true))
+    assert_receive {:playback_progress, "p1", 870, true}
+
+    :gen_tcp.close(conn)
+  end
+
+  test "a playback_progress the session refuses closes the connection with its reason", %{
+    socket_path: socket_path
+  } do
+    put_realtime_env(engine: "xai_realtime")
+    {conn, _session} = start_grok_call(socket_path)
+
+    :ok = :gen_tcp.send(conn, progress_frame("p404", 10, false))
+
+    assert {:ok, line} = recv_line(conn)
+
+    assert Jason.decode!(String.trim(line)) == %{
+             "type" => "error",
+             "reason" => "unknown_playback"
+           }
+
+    assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+  end
+
+  test "playback_progress is refused under both OpenAI engines", %{socket_path: socket_path} do
+    for engine <- ~w(openai_realtime openai_live) do
+      put_realtime_env(engine: engine)
+
+      {:ok, conn} = connect(socket_path)
+      :ok = handshake(conn, 3)
+      :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+      assert_receive {:session_started, session, _opts}
+      assert {:ok, _listening} = recv_line(conn)
+      :ok = observe(session)
+
+      :ok = :gen_tcp.send(conn, progress_frame("p1", 420, false))
+
+      assert {:ok, line} = recv_line(conn)
+
+      assert Jason.decode!(String.trim(line)) == %{
+               "type" => "error",
+               "reason" => "unsupported_by_engine"
+             }
+
+      assert {:error, :closed} = :gen_tcp.recv(conn, 0, 1_000)
+      # The OpenAI sessions have no playback ids to report against.
+      refute_received {:playback_progress, _id, _played_ms, _drained?}
+    end
+  end
+
   # One call per daemon (M56 §4.8): the second connection's session is refused
   # before it exists, and the refusal is terminal like every error on this wire.
   @tag :capture_log
@@ -945,6 +1129,34 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
 
     assert {:ok, opts} = LocalVoiceSocket.session_opts(session_scope: "voice_live:pinned")
     assert Keyword.fetch!(opts, :session_scope) == "voice_live:pinned"
+  end
+
+  # M70 §06: a call dials with the key `Realtime.Config.api_key/1` resolves for
+  # the engine in force, so a Grok call carries the SpaceXAI key and never the
+  # OpenAI one, and a missing key stops the start before any session exists.
+  test "the default starter carries the Grok engine's SpaceXAI key" do
+    put_openai_key()
+    providers = Application.get_env(:fermix_core, :providers, [])
+
+    Application.put_env(
+      :fermix_core,
+      :providers,
+      Keyword.put(providers, :xai, api_key: "xai-test-voice")
+    )
+
+    put_realtime_env(engine: "xai_realtime")
+
+    assert {:ok, opts} = LocalVoiceSocket.session_opts([])
+    assert Keyword.fetch!(opts, :api_key) == "xai-test-voice"
+    assert Keyword.fetch!(opts, :config).provider == "xai"
+    assert "voice_live:" <> _minted = Keyword.fetch!(opts, :session_scope)
+  end
+
+  test "the default starter refuses a Grok call with no SpaceXAI key, naming the provider" do
+    put_openai_key()
+    put_realtime_env(engine: "xai_realtime")
+
+    assert LocalVoiceSocket.session_opts([]) == {:error, {:missing_api_key, "xai"}}
   end
 
   # Starts a socket whose sessions are UNLINKED from their handler (Agent.start,
@@ -1077,10 +1289,39 @@ defmodule FermixCore.Realtime.LocalVoiceSocketTest do
     :ok = :gen_tcp.send(conn, ~s({"type":"client_hello","protocol_version":#{version}}\n))
     assert {:ok, line} = recv_line(conn)
 
-    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 2} =
+    assert %{"type" => "server_hello", "min_version" => 1, "max_version" => 3} =
              Jason.decode!(String.trim(line))
 
     :ok
+  end
+
+  # A v3 companion's call on the module-wide listener, up to its `listening`.
+  defp start_grok_call(socket_path) do
+    {:ok, conn} = connect(socket_path)
+    :ok = handshake(conn, 3)
+    :ok = :gen_tcp.send(conn, ~s({"type":"call_start"}\n))
+
+    assert_receive {:session_started, session, _opts}
+    assert {:ok, line} = recv_line(conn)
+    assert %{"type" => "state", "state" => "listening"} = Jason.decode!(String.trim(line))
+
+    {conn, session}
+  end
+
+  # Puts this test in the session double's state, so what the double is told
+  # arrives here as a message.
+  defp observe(session) do
+    test_pid = self()
+    Agent.update(session, &Map.put(&1, :observer, test_pid))
+  end
+
+  defp progress_frame(playback_id, played_ms, drained?) do
+    Jason.encode!(%{
+      type: "playback_progress",
+      playback_id: playback_id,
+      played_ms: played_ms,
+      drained: drained?
+    }) <> "\n"
   end
 
   defp put_realtime_env(config) do

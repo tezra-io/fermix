@@ -1,6 +1,11 @@
 defmodule FermixCore.Realtime.LiveTelemetry do
   @moduledoc """
-  Single emitter for `[:fermix, :voice_live, ...]` — the GPT-Live call lifecycle.
+  Single emitter for `[:fermix, :voice_live, ...]` — the lifecycle of a voice
+  call that hands its tasks to Fermix, on either task engine: GPT Live
+  (`openai_live`) and Grok (`xai_realtime`, M70 §09). The events and the run
+  kind are the same because the contract is; `engine`, `provider` and `model`
+  are passed by the caller on every event, never assumed, so a trace reader
+  tells the two apart.
 
   A Live call is its own run kind. The provider session holds the microphone,
   the voice and the clock, while every tool, memory lookup and model answer runs
@@ -27,7 +32,6 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   alias FermixCore.Telemetry
 
   @agent "voice_live"
-  @engine "openai_live"
 
   @call_start_event [:fermix, :voice_live, :call_start]
   @session_started_event [:fermix, :voice_live, :session_started]
@@ -81,14 +85,17 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   ]
 
   @typedoc """
-  The call's correlation fields. `session_id` is the call id and is required;
-  everything else is dropped from the metadata when absent rather than emitted
-  as nil. `provider_session_id` is unknown until `session.started` arrives.
+  The call's correlation fields. `session_id` is the call id, and `engine` and
+  `provider` the engine and voice provider the call runs on; all three are
+  required. Everything else is dropped from the metadata when absent rather
+  than emitted as nil. `provider_session_id` is unknown until `session.started` arrives.
   `call_uuid` is the key of the call's durable record: the call id is a counter
   that restarts with the VM, so the UUID is what ties a trace to that record.
   """
   @type meta :: %{
           required(:session_id) => String.t(),
+          required(:engine) => String.t(),
+          required(:provider) => String.t(),
           optional(:call_uuid) => String.t(),
           optional(:parent_session) => String.t(),
           optional(:device_id) => String.t(),
@@ -258,7 +265,8 @@ defmodule FermixCore.Realtime.LiveTelemetry do
   defp base(meta) do
     %{
       agent: @agent,
-      engine: @engine,
+      engine: Map.fetch!(meta, :engine),
+      provider: Map.fetch!(meta, :provider),
       session_id: Map.fetch!(meta, :session_id),
       call_uuid: Map.get(meta, :call_uuid),
       parent_session: Map.get(meta, :parent_session),

@@ -36,6 +36,13 @@ providers need the dev-home derivation. `--allow-root` appends absolute paths
 to the sandbox `allowed_roots` (e.g. the repo checkout for behavioral
 repo-read cases); omit it for capability runs, whose preconditions refuse any
 root outside the home (the always-present `<home>/skills` root is in-home).
+
+`--voice` turns Grok voice on for the `drive: voice` suite (grok_voice.yaml):
+`[fermix_core.realtime]` enabled, engine `xai_realtime`, model `grok-voice-3.0`.
+The voice key is the xAI provider's api_key slot, filled at daemon boot from
+`XAI_API_KEY` (config/runtime.exs) and never written here; the realtime socket
+starts only in a daemon run with realtime on (`mix fermix.dev`, not
+`--no-realtime`) and that key present.
 """
 
 from __future__ import annotations
@@ -114,6 +121,15 @@ _OAUTH_PROFILE_KEY = {
 }
 # Providers whose api_key the daemon reads from an environment variable at boot
 # (config/runtime.exs); the explicit/CI mode supports exactly these + ollama.
+# Grok voice (M70) for `--voice`: the engine's one shipped model. The parser
+# refuses a Grok model under the default `openai_realtime` engine, so the engine
+# is written beside the model; the provider follows from the engine.
+VOICE_ENGINE = "xai_realtime"
+VOICE_MODEL = "grok-voice-3.0"
+VOICE_KEY_ENV = "XAI_API_KEY"
+# A spend bound for a disposable home: a voice case's call lasts a few minutes
+# at most, and the daemon ends one that outlives this whatever its client does.
+VOICE_MAX_SESSION_MINUTES = 5
 _ENV_KEY_PROVIDERS = {
     "openai": "OPENAI_API_KEY",
     "anthropic": "ANTHROPIC_API_KEY",
@@ -158,7 +174,7 @@ def dev_provider(dev: dict, pid: str) -> tuple[str, dict, str | None]:
 
 def render_config(
     home: str, pid: str, blk: dict, profile: str | None,
-    allowed_roots: tuple[str, ...] = (), explicit: bool = False,
+    allowed_roots: tuple[str, ...] = (), explicit: bool = False, voice: bool = False,
 ) -> str:
     workspace = os.path.join(home, "workspace")
     uses_key = "api_key" in blk
@@ -273,7 +289,22 @@ def render_config(
               'platform = "telegram"', 'chat_id = "100001"', ""]
     lines += ["[fermix_core.personalization]", 'user_name = "Eval Operator"',
               'timezone = "America/New_York"', 'communication_style = "concise"', ""]
+    if voice:
+        lines += voice_lines()
     return "\n".join(lines)
+
+
+def voice_lines() -> list[str]:
+    """Grok voice on, for the `drive: voice` suite. Turning voice on is the one
+    human decision a voice case needs; the call's conversation stays the
+    product default (the chat), so the cases see what an owner's call does. No
+    other gate is granted: computer history stays off (above), so nothing it
+    guards can reach the voice provider."""
+    return ["# Grok voice for drive: voice (grok_voice.yaml). The key is XAI_API_KEY on the",
+            "# daemon process, read at boot; the socket needs a daemon run with realtime on.",
+            "[fermix_core.realtime]", "enabled = true", f'engine = "{VOICE_ENGINE}"',
+            f'model = "{VOICE_MODEL}"', f"max_session_minutes = {VOICE_MAX_SESSION_MINUTES}",
+            ""]
 
 
 _TABLE_HEADER_RE = re.compile(r"^\s*\[\[?\s*([^\[\]]+?)\s*\]\]?\s*$")
@@ -506,6 +537,9 @@ def parse_args() -> argparse.Namespace:
                              "(its model, effort and auth) instead of the dev primary")
     parser.add_argument("--allow-root", dest="allow_roots", action="append", default=[],
                         help="absolute path appended to sandbox allowed_roots (repeatable)")
+    parser.add_argument("--voice", action="store_true",
+                        help="turn Grok voice on for the drive: voice suite (the daemon needs "
+                             f"{VOICE_KEY_ENV} in its environment and realtime on)")
     parser.add_argument("--extra-config", dest="extra_config",
                         help="TOML fragment appended to the rendered config (one "
                              "configuration ARM's difference); refused when it "
@@ -561,7 +595,7 @@ def main() -> None:
     write_skill_token(home)
 
     config = render_config(home, pid, blk, profile, allowed_roots,
-                           explicit=bool(args.provider))
+                           explicit=bool(args.provider), voice=args.voice)
     if args.extra_config:
         config += read_extra_config(config, args.extra_config)
     with open(os.path.join(home, "config.toml"), "w", encoding="utf-8") as fh:
@@ -576,6 +610,9 @@ def main() -> None:
         copy_oauth_token(home, pid)
         auth = "oauth (token copied from dev store)"
     print(f"seeded {home}: scoring {pid}/{blk['default_model']} (auth={auth})")
+    if args.voice:
+        print(f"voice: {VOICE_MODEL} on; {VOICE_KEY_ENV} must be set on the daemon process, "
+              "started with realtime on (mix fermix.dev, not --no-realtime)")
 
 
 if __name__ == "__main__":

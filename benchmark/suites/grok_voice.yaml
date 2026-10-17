@@ -1,0 +1,293 @@
+# Grok voice (M70 §11): a request said aloud reaches Fermix through the call.
+#
+# `voice_in_chat` drives what a hand-off persists, typed, because no driver
+# spoke the voice wire. `drive: voice` does (bin/evallib/voice.py): the runner
+# is the Mac app's call on `<FERMIX_HOME>/realtime.sock`, protocol v3. It
+# streams fixture audio (suites/fixtures/voice/, made by
+# bin/make_voice_fixtures.py) as the microphone at real-time pace, silence
+# included, plays the voice's audio on a simulated speaker that sends
+# `playback_progress` for every playback id, records every frame, and ends the
+# call once every task ended and the voice has gone quiet. So each case proves
+# the half no ExUnit suite can: Grok, the real provider model, hears the
+# request, decides to hand it to Fermix with `fermix_task`, and Fermix's task
+# runs through the real VoiceBridge and agent loop to an answer the voice says.
+# The `wire.*` gates read the socket; the ordinary gates read the call's Opik
+# trace, whose root is the call and into which every backend task turn nests;
+# the reply both read is what the voice said aloud (its captions).
+#
+# The scenarios are the design's: a read-only request answered through a task;
+# a question asked while a deliberately slow task runs, answered while it runs,
+# with the task still completing once (M70 qualification gate 1); a spoken
+# cancellation; and a spoken correction that supersedes the running revision
+# and completes the corrected one. The slow task is a fixture script that
+# sleeps 25 s before printing a stocktake, so "while that runs", "cancel that"
+# and "I meant the twentieth" land while the task is in flight, every time.
+#
+# What ExUnit holds instead, because a live provider cannot be made to do it on
+# demand: malformed, duplicate and out-of-order provider events, interrupt and
+# drain ordering, the silence budget and disconnects (GrokSessionServer,
+# GrokTurn, XaiRealtimeClient); playback pacing and the unknown, regressed,
+# beyond-sent and stalled reports (GrokPlayback, LocalVoiceSocket); the
+# function's argument bounds and refusals (GrokTaskCall); one active and one
+# waiting task, revision fencing and exactly-once detached delivery (the voice
+# Bridge, Detached and Live end-to-end suites); the v1/v2 refusal at
+# call_start (Protocol, ProtocolContract); key selection and the xAI-only
+# fresh install (Config, ConfigCredentials); the history grant per provider
+# (LiveChat); and the text-item and minute accounting (GrokLedger). Physical
+# playback latency belongs to the native app: a simulated speaker proves the
+# protocol logic only.
+#
+# Running it: every case opens one paid Grok voice call, so `--voice` is
+# required, and a bare `--all` leaves these cases out. Each case runs only
+# against the disposable voice eval daemon, whatever its risk: an eval home
+# seeded with `bin/seed_capability_home.py --voice`, its workspace a copy of
+# this checkout (the rota, stocktake script and data live in
+# suites/fixtures/voice/), started with realtime on and XAI_API_KEY in its
+# environment (benchmark/README.md, *Grok voice*). The host_readonly scenarios
+# only read those fixtures; the cancellation and correction scenarios assert
+# the cancelled and superseded task state a call writes into the eval home's
+# chat, so they are isolated_mutation.
+suite: grok_voice
+risk: host_readonly
+title: "Grok voice: a request said aloud reaches Fermix through the call"
+description: >
+  Real calls on the voice socket with the Grok engine: fixture audio is the
+  microphone, a simulated speaker acknowledges the voice's audio, and each case
+  grades what the socket said (engine, task outcomes, what the voice said
+  aloud) and the call's Opik trace. A read-only question is answered through a
+  Fermix task; a question asked while a slow task runs is answered while it
+  runs; a spoken cancel cancels the task and its result is never said; a spoken
+  correction supersedes the running revision and the corrected one completes.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+
+scenarios:
+  - id: spoken_request_answered_through_task
+    # host_readonly, stated rather than inherited: the task reads one fixture
+    # file in the eval workspace.
+    risk: host_readonly
+    title: "A question said aloud is handed to Fermix and its answer is said back"
+    severity: critical
+    tags: [voice, grok]
+    cases:
+      - id: intake_on_the_thirteenth
+        drive: voice
+        voice:
+          clips:
+            - say: rota_intake_13
+        expect:
+          # Floor: the name the rota file holds for that shift, and nothing
+          # else in the eval home does.
+          reply_matches: "(?i)penhallow"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (access|open|read|reach) (your|the) (files?|workspace|rota)"
+          # SANITY (route): the one route assertion this suite makes, labelled:
+          # the voice handed the request over with `fermix_task`, the call's
+          # bridge function, on the call's own session.
+          tools_any: [fermix_task]
+          wire:
+            engine: xai_realtime
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+        rubric: |
+          1. The voice tells the owner that Ilse Penhallow is on intake at the pantry on
+             Saturday 13 March 2027.
+          2. The voice names the intake volunteer only after the task's completed frame
+             in the timeline, not before it.
+          Not required: mentioning the other roles or the other Saturdays.
+      - id: van_on_the_twentieth
+        drive: voice
+        voice:
+          clips:
+            - say: rota_van_20
+        expect:
+          reply_matches: "(?i)arnaud"
+          reply_not_matches: "(?i)(can'?t|cannot|unable to) (access|open|read|reach) (your|the) (files?|workspace|rota)"
+          wire:
+            engine: xai_realtime
+            events_all: [call_ready, caption, audio_delta, task]
+            events_none: [error]
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+        rubric: |
+          1. The voice tells the owner that Kemal Arnaud is driving the van on Saturday
+             20 March 2027.
+          2. The voice names the van driver only after the task's completed frame in the
+             timeline, not before it.
+          Not required: mentioning the other roles or the other Saturdays.
+
+  # M70 §12, qualification gate 1: can Grok converse while a function remains
+  # pending? The slow stocktake runs for 25 s; the second clip is said 2.5 s
+  # after its task frame says running.
+  - id: conversation_while_task_runs
+    # host_readonly: the task runs a read-only fixture script; the second
+    # question needs no tool at all.
+    risk: host_readonly
+    title: "A question asked while a slow task runs is answered, and the task still completes once"
+    severity: critical
+    tags: [voice, grok, pending-task]
+    cases:
+      - id: curry_question_while_stocktake_runs
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_13_chickpeas
+            - say: followup_curry
+              after: task_running
+              gap_ms: 2500
+        expect:
+          reply_matches: "(?i)kestrel"
+          wire:
+            engine: xai_realtime
+            spoke_while_task_running: true
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            task_terminal_once: true
+        rubric: |
+          1. Before the stocktake task's completed frame in the timeline, the voice answers
+             the curry question by naming at least one ingredient that can stand in for
+             chickpeas in a curry.
+          2. After the stocktake task's completed frame, the voice tells the owner the
+             chickpeas are on shelf Kestrel.
+          3. The voice reports the stocktake's result once, and does not ask the owner to
+             repeat either request.
+      - id: rice_question_while_stocktake_runs
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_20_rice
+            - say: followup_brown_rice
+              after: task_running
+              gap_ms: 2500
+        expect:
+          reply_matches: "(?i)lapwing"
+          wire:
+            engine: xai_realtime
+            spoke_while_task_running: true
+            task_statuses_all: [completed]
+            task_statuses_none: [failed, cancelled, superseded]
+            task_terminal_once: true
+        rubric: |
+          1. Before the stocktake task's completed frame in the timeline, the voice answers
+             how long uncooked brown rice keeps in a cupboard with a length of time.
+          2. After the stocktake task's completed frame, the voice tells the owner the rice
+             is on shelf Lapwing.
+          3. The voice reports the stocktake's result once, and does not ask the owner to
+             repeat either request.
+
+  - id: spoken_cancellation
+    # isolated_mutation: what the case asserts is the cancelled task the call
+    # records in the eval home's chat.
+    risk: isolated_mutation
+    title: "A spoken cancel cancels the running task, and its result is never said"
+    severity: critical
+    tags: [voice, grok, cancel]
+    cases:
+      - id: never_mind_cancel
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_13_chickpeas
+            - say: cancel_never_mind
+              after: task_running
+              gap_ms: 3000
+        expect:
+          wire:
+            engine: xai_realtime
+            task_statuses_all: [cancelled]
+            task_statuses_none: [completed, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+            # Material only: every shelf the 13 March stocktake would have
+            # printed. A cancelled result never speaks.
+            caption_not_matches: "(?i)kestrel|heron|plover"
+        rubric: |
+          1. After the owner asks to cancel, the voice confirms that the stocktake was
+             stopped or cancelled.
+          2. The voice never tells the owner a shelf name or an item count from the
+             stocktake.
+      - id: stop_the_stocktake
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_20_rice
+            - say: cancel_stop
+              after: task_running
+              gap_ms: 3000
+        expect:
+          wire:
+            engine: xai_realtime
+            task_statuses_all: [cancelled]
+            task_statuses_none: [completed, superseded]
+            max_tasks: 1
+            task_terminal_once: true
+            caption_not_matches: "(?i)osprey|lapwing|curlew"
+        rubric: |
+          1. After the owner asks to stop, the voice confirms that the stocktake was
+             stopped or cancelled.
+          2. The voice never tells the owner a shelf name or an item count from the
+             stocktake.
+
+  - id: spoken_correction
+    # isolated_mutation: the case asserts the superseded revision and the
+    # corrected task the call records in the eval home's chat.
+    risk: isolated_mutation
+    title: "A spoken correction supersedes the running revision and the corrected one completes"
+    severity: critical
+    tags: [voice, grok, correction]
+    cases:
+      - id: thirteenth_corrected_to_twentieth
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_13_chickpeas
+            - say: correct_to_20
+              after: task_running
+              gap_ms: 3000
+        expect:
+          # Floor: the corrected date's chickpea shelf.
+          reply_matches: "(?i)osprey"
+          wire:
+            engine: xai_realtime
+            task_statuses_all: [superseded, completed]
+            task_statuses_none: [failed]
+            max_tasks: 1
+            task_terminal_once: true
+            # The superseded date's shelves: its run was cancelled mid-count,
+            # so nothing the voice heard could carry them.
+            caption_not_matches: "(?i)kestrel|heron|plover"
+        rubric: |
+          1. The voice tells the owner that in the 20 March 2027 stocktake the chickpeas are
+             on shelf Osprey.
+          2. The voice never gives a shelf from the 13 March 2027 stocktake.
+          3. The voice reports the corrected result once.
+      - id: twentieth_corrected_to_thirteenth
+        drive: voice
+        voice:
+          clips:
+            - say: stocktake_20_rice
+            - say: correct_to_13
+              after: task_running
+              gap_ms: 3000
+        expect:
+          reply_matches: "(?i)heron"
+          wire:
+            engine: xai_realtime
+            task_statuses_all: [superseded, completed]
+            task_statuses_none: [failed]
+            max_tasks: 1
+            task_terminal_once: true
+            caption_not_matches: "(?i)osprey|lapwing|curlew"
+        rubric: |
+          1. The voice tells the owner that in the 13 March 2027 stocktake the rice is on
+             shelf Heron.
+          2. The voice never gives a shelf from the 20 March 2027 stocktake.
+          3. The voice reports the corrected result once.

@@ -8,6 +8,23 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Grok Voice as a voice model, beside GPT-Live (opt-in, engine side).**
+  Settings > Voice now offers `grok-voice-3.0`, SpaceXAI's voice model. Like
+  GPT-Live it listens and speaks while your Fermix agent does the work, with
+  the same tools, permissions, chat and private calls, results shown in the
+  chat and tasks that finish into the chat after a call ends. Grok hands each
+  task over through one function and keeps talking with you while it runs; a
+  correction replaces the running task and a spoken "stop that" cancels it.
+  It needs a SpaceXAI API key (a SpaceXAI sign-in covers chat only), which
+  Settings > Voice asks for when Grok is picked; picking it also sets its own
+  voice (Eve by default) and turns screen sharing off, which Grok does not
+  have. Grok bills by connected time plus each line of chat context Fermix
+  sends it, so a call's cost is Fermix's own estimate, marked incomplete, and
+  a call lasts at most two hours. Computer history reaches Grok only when
+  SpaceXAI is granted it; granting OpenAI says nothing about SpaceXAI. Calls
+  need a Fermix app that speaks the newer voice wire; an older app is told to
+  update before anything is billed, and keeps its OpenAI calls as before.
+
 - **Place search works in the Mac app with no key, through Apple Maps.** In
   the Fermix Mac app, `place_search` now searches Apple Maps through a small
   helper the app's engine carries, so "quiet coffee shops in SoHo" finds real

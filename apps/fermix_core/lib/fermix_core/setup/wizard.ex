@@ -124,6 +124,9 @@ defmodule FermixCore.Setup.Wizard do
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
+  # The settings only the Realtime engine takes; a move onto a task engine
+  # drops them (`RealtimeConfig.normalize/1` refuses them there).
+  @realtime_only_keys [:reasoning_effort, :transcription_model, :max_response_output_tokens]
   @realtime_followup_prompt_keys [
     :realtime_api_key,
     :realtime_voice,
@@ -1851,11 +1854,13 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   # The one seam every door reaches: an explicit engine switch carries the keys
-  # the engine owns with it. Live refuses the Realtime-only settings at the
-  # configuration boundary and a Realtime engine refuses a Live model, so
-  # answering the operator's switch with a validation error is the defect this
-  # exists to prevent. It rewrites what they did NOT type: an answer naming one
-  # of these keys is merged on top and is refused by name if it disagrees.
+  # the engine owns with it. A task engine refuses the Realtime-only settings at
+  # the configuration boundary, a Realtime engine refuses a Live model, and each
+  # engine refuses a provider other than its own, so answering the operator's
+  # switch with a validation error is the defect this exists to prevent. It
+  # rewrites what they did NOT type: an answer naming one of these keys is
+  # merged on top and is refused by name if it disagrees. Conversation, budget
+  # and transcript choices are the owner's and survive every move.
   defp switch_realtime_engine(existing, nil), do: existing
 
   defp switch_realtime_engine(existing, engine) do
@@ -1868,15 +1873,28 @@ defmodule FermixCore.Setup.Wizard do
 
   defp move_realtime_engine(existing, "openai_live") do
     existing
-    |> Keyword.drop([:reasoning_effort, :transcription_model, :max_response_output_tokens])
+    |> Keyword.drop(@realtime_only_keys)
+    |> put_realtime_provider("openai_live")
     |> put_realtime_model("openai_live")
     |> put_realtime_voice("openai_live")
+  end
+
+  # Grok has no continuous screen perception (M70 §07), so the move turns it off
+  # rather than leaving a value the configuration refuses.
+  defp move_realtime_engine(existing, "xai_realtime") do
+    existing
+    |> Keyword.drop(@realtime_only_keys)
+    |> Keyword.put(:screen_share, false)
+    |> put_realtime_provider("xai_realtime")
+    |> put_realtime_model("xai_realtime")
+    |> put_realtime_voice("xai_realtime")
   end
 
   defp move_realtime_engine(existing, "openai_realtime") do
     existing
     |> Keyword.drop([:conversation])
     |> Keyword.put_new(:reasoning_effort, "low")
+    |> put_realtime_provider("openai_realtime")
     |> put_realtime_model("openai_realtime")
     |> put_realtime_voice("openai_realtime")
   end
@@ -1894,14 +1912,19 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  # Live ships every Realtime voice plus twelve of its own, so only the return
-  # journey can strand one. The struct default is the voice both catalogs open
-  # with, which is what makes it the one value a switch can always land on.
+  # The provider follows from the engine, so a move writes the new engine's.
+  defp put_realtime_provider(existing, engine),
+    do: Keyword.put(existing, :provider, RealtimeConfig.provider_for_engine(engine))
+
+  # Live ships every Realtime voice plus twelve of its own, so between the OpenAI
+  # engines only the return journey can strand one; Grok shares none of them.
+  # A stranded voice lands on the default voice of the engine it moved to, the
+  # one value that engine's catalog always opens with.
   defp put_realtime_voice(existing, engine) do
     if Keyword.get(existing, :voice) in RealtimeConfig.valid_voices(engine) do
       existing
     else
-      Keyword.put(existing, :voice, %RealtimeConfig{}.voice)
+      Keyword.put(existing, :voice, RealtimeConfig.default_voice(engine))
     end
   end
 

@@ -55,6 +55,11 @@ defmodule FermixCore.Prompt.BootstrapPaths do
     Path.join(agent_dir(agent_id, opts), "LIVE.md")
   end
 
+  @spec grok_path(String.t(), keyword()) :: String.t()
+  def grok_path(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    Path.join(agent_dir(agent_id, opts), "GROK.md")
+  end
+
   @spec validate_agent_id(String.t()) :: :ok | {:error, {:invalid_agent_id, String.t()}}
   def validate_agent_id(agent_id) when is_binary(agent_id) do
     if Regex.match?(@agent_id_pattern, agent_id) do

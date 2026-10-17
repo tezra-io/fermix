@@ -169,13 +169,14 @@ defmodule FermixCore.Realtime.ConfigTest do
       refute Config.live?(Config.normalize([]))
     end
 
-    test "valid_engines names both engines, realtime first" do
-      assert Config.valid_engines() == ["openai_realtime", "openai_live"]
+    test "valid_engines names every engine, realtime first" do
+      assert Config.valid_engines() == ["openai_realtime", "openai_live", "xai_realtime"]
     end
 
     test "rejects an unknown engine and names the accepted ones" do
       assert_raise ArgumentError,
-                   ~s(realtime.engine must be one of openai_realtime, openai_live, got: "gpt_live"),
+                   "realtime.engine must be one of openai_realtime, openai_live, xai_realtime, " <>
+                     ~s(got: "gpt_live"),
                    fn -> Config.normalize(engine: "gpt_live") end
     end
 
@@ -187,12 +188,13 @@ defmodule FermixCore.Realtime.ConfigTest do
     # The model is the one operator-facing choice, so the combined list and the
     # derivation are two halves of it: every slug the list offers has to resolve
     # to an engine, and the order is the order of the dropdown.
-    test "all_models/0 is both catalogs, Realtime first, and every slug derives an engine" do
+    test "all_models/0 is every catalog, Realtime first, and every slug derives an engine" do
       assert Config.all_models() ==
-               Config.valid_models("openai_realtime") ++ Config.valid_models("openai_live")
+               Config.valid_models("openai_realtime") ++
+                 Config.valid_models("openai_live") ++ Config.valid_models("xai_realtime")
 
       assert Config.all_models() == ~w(gpt-realtime-2.1-mini gpt-realtime-2.1 gpt-realtime-2
-               gpt-live-1)
+               gpt-live-1 grok-voice-3.0)
 
       for model <- Config.all_models() do
         assert {:ok, engine} = Config.engine_for_model(model)
@@ -204,6 +206,7 @@ defmodule FermixCore.Realtime.ConfigTest do
       assert Config.engine_for_model("gpt-realtime-2") == {:ok, "openai_realtime"}
       assert Config.engine_for_model("gpt-realtime-2.1-mini") == {:ok, "openai_realtime"}
       assert Config.engine_for_model("gpt-live-1") == {:ok, "openai_live"}
+      assert Config.engine_for_model("grok-voice-3.0") == {:ok, "xai_realtime"}
       assert Config.engine_for_model("gpt-realtime-9") == :error
       assert Config.engine_for_model("") == :error
     end
@@ -351,6 +354,176 @@ defmodule FermixCore.Realtime.ConfigTest do
       config = Config.normalize(engine: "openai_realtime")
       assert config.conversation == nil
       refute Keyword.has_key?(Config.to_keyword(config), :conversation)
+    end
+  end
+
+  # M70: Grok Voice is the third engine, on its own provider. The engine still
+  # derives everything else: the provider follows from it, its voices are its
+  # own, and every setting it has no use for is refused rather than ignored.
+  describe "the Grok engine (M70)" do
+    test "takes SpaceXAI's provider, model and default voice, and no screen sharing" do
+      config = Config.normalize(engine: "xai_realtime")
+
+      assert config.provider == "xai"
+      assert config.model == "grok-voice-3.0"
+      assert config.voice == "eve"
+      assert config.screen_share? == false
+      assert config.reasoning_effort == nil
+      assert config.transcription_model == nil
+      assert config.max_response_output_tokens == nil
+      assert config.conversation == nil
+      assert Config.conversation(config) == "chat"
+    end
+
+    test "the engine scopes the model and voice catalogs" do
+      assert Config.valid_models("xai_realtime") == ["grok-voice-3.0"]
+      assert Config.default_model("xai_realtime") == "grok-voice-3.0"
+      assert Config.valid_voices("xai_realtime") == ~w(eve ara rex sal leo)
+
+      for voice <- Config.valid_voices("xai_realtime") do
+        assert Config.normalize(engine: "xai_realtime", voice: voice).voice == voice
+      end
+
+      assert_raise ArgumentError, ~r/realtime\.voice must be one of eve, ara/, fn ->
+        Config.normalize(engine: "xai_realtime", voice: "marin")
+      end
+
+      assert_raise ArgumentError, ~r/realtime\.voice must be one of marin/, fn ->
+        Config.normalize(voice: "eve")
+      end
+    end
+
+    test "default_voice/1 is marin for both OpenAI engines and eve for Grok" do
+      assert Config.default_voice("openai_realtime") == "marin"
+      assert Config.default_voice("openai_live") == "marin"
+      assert Config.default_voice("xai_realtime") == "eve"
+      assert Config.normalize(engine: "openai_live").voice == "marin"
+    end
+
+    test "provider_for_engine/1 names the provider each engine bills" do
+      assert Config.provider_for_engine("openai_realtime") == "openai"
+      assert Config.provider_for_engine("openai_live") == "openai"
+      assert Config.provider_for_engine("xai_realtime") == "xai"
+    end
+
+    test "an absent provider is derived, a matching one is kept as a string or an atom" do
+      assert Config.normalize(engine: "openai_live").provider == "openai"
+      assert Config.normalize(engine: "xai_realtime", provider: "xai").provider == "xai"
+      assert Config.normalize(engine: "xai_realtime", provider: :xai).provider == "xai"
+      assert Config.normalize(provider: :openai).provider == "openai"
+    end
+
+    # A provider that disagrees with the engine is two choices that cannot both
+    # hold, so neither wins: the sentence names all three values.
+    test "a provider that contradicts the engine is refused naming provider, engine and model" do
+      for {seed, provider, engine, model} <- [
+            {[engine: "xai_realtime", provider: "openai"], "openai", "xai_realtime",
+             "grok-voice-3.0"},
+            {[engine: "openai_live", provider: "xai"], "xai", "openai_live", "gpt-live-1"},
+            {[provider: "anthropic"], "anthropic", "openai_realtime", "gpt-realtime-2"}
+          ] do
+        error = assert_raise ArgumentError, fn -> Config.normalize(seed) end
+
+        assert error.message =~ ~s(realtime.provider "#{provider}")
+        assert error.message =~ "engine #{engine}"
+        assert error.message =~ "model #{model}"
+      end
+    end
+
+    test "a Realtime model under Grok, and Grok's model under Realtime, name the fix" do
+      assert_raise ArgumentError,
+                   ~s(realtime.model must be grok-voice-3.0 when engine = "xai_realtime", ) <>
+                     ~s(got: "gpt-realtime-2"),
+                   fn -> Config.normalize(engine: "xai_realtime", model: "gpt-realtime-2") end
+
+      assert_raise ArgumentError,
+                   ~s(realtime.model grok-voice-3.0 requires engine = "xai_realtime"; ) <>
+                     ~s(set [fermix_core.realtime] engine = "xai_realtime" or pick a Realtime model),
+                   fn -> Config.normalize(model: "grok-voice-3.0") end
+    end
+
+    test "a Realtime-only setting under Grok is refused naming the engine" do
+      for {key, value} <- [
+            reasoning_effort: "low",
+            transcription_model: "whisper-1",
+            max_response_output_tokens: 2_048
+          ] do
+        assert_raise ArgumentError,
+                     "realtime.#{key} is a Realtime-only setting, not supported by engine " <>
+                       "xai_realtime; remove it from [fermix_core.realtime] or set " <>
+                       ~s(engine = "openai_realtime"),
+                     fn -> Config.normalize([{:engine, "xai_realtime"}, {key, value}]) end
+      end
+    end
+
+    test "the conversation setting holds under Grok exactly as under Live" do
+      for value <- ~w(chat private) do
+        config = Config.normalize(engine: "xai_realtime", conversation: value)
+
+        assert Config.conversation(config) == value
+        assert Keyword.get(Config.to_keyword(config), :conversation) == value
+      end
+
+      assert_raise ArgumentError, ~r/realtime\.conversation must be one of chat, private/, fn ->
+        Config.normalize(engine: "xai_realtime", conversation: "shared")
+      end
+    end
+
+    test "hands_off_tasks?/1 is true for both task engines and live?/1 stays Live's" do
+      assert Config.hands_off_tasks?(Config.normalize(engine: "openai_live"))
+      assert Config.hands_off_tasks?(Config.normalize(engine: "xai_realtime"))
+      refute Config.hands_off_tasks?(Config.normalize(engine: "openai_realtime"))
+
+      refute Config.live?(Config.normalize(engine: "xai_realtime"))
+    end
+
+    # Grok v1 receives audio and permitted text only (M70 §07), so continuous
+    # screen sharing is off, and turning it on by hand is refused by name.
+    test "screen sharing is off under Grok, and turning it on is refused" do
+      assert Config.normalize(engine: "xai_realtime", screen_share: false).screen_share? == false
+
+      assert_raise ArgumentError,
+                   "realtime.screen_share is not supported by engine xai_realtime; " <>
+                     "set it to false or pick another model",
+                   fn -> Config.normalize(engine: "xai_realtime", screen_share: true) end
+
+      assert Config.normalize(engine: "openai_live").screen_share? == true
+    end
+
+    test "to_keyword writes the provider, no Realtime-only keys and screen sharing off" do
+      config = Config.normalize(engine: "xai_realtime", enabled: true, voice: "rex")
+
+      assert Config.to_keyword(config) == [
+               enabled: true,
+               provider: "xai",
+               engine: "xai_realtime",
+               model: "grok-voice-3.0",
+               voice: "rex",
+               max_session_minutes: 15,
+               max_estimated_cost_cents_per_session: 100,
+               screen_share: false,
+               persist_transcripts: false
+             ]
+    end
+
+    # AGENTS "Config round-trips": the persist path writes `to_keyword/1`, and
+    # the app environment holds what an earlier normalize left there, strings
+    # from the settings file or atoms from a hand-set environment.
+    test "normalize accepts its own to_keyword output for every engine and app-env shape" do
+      for seed <- [
+            [engine: "xai_realtime"],
+            [engine: "xai_realtime", provider: "xai", voice: "sal", conversation: "private"],
+            [engine: :xai_realtime, provider: :xai, voice: :leo, conversation: :chat],
+            [engine: "xai_realtime", screen_share: false, persist_transcripts: true],
+            %{"engine" => "xai_realtime", "provider" => "xai", "voice" => "ara"},
+            [engine: :openai_live, provider: :openai, voice: :beacon],
+            [engine: :openai_realtime, provider: :openai, reasoning_effort: :high],
+            [{"engine", "openai_live"}, {"conversation", "chat"}]
+          ] do
+        normalized = Config.normalize(seed)
+
+        assert normalized |> Config.to_keyword() |> Config.normalize() == normalized
+      end
     end
   end
 end

@@ -932,6 +932,65 @@ section is what the measurement has to say before the change is worth making.
 
 ---
 
+## 5g. Grok voice calls (`drive: voice`, `suites/grok_voice.yaml`)
+
+`drive: voice` makes the runner the Mac app's voice call on
+`<FERMIX_HOME>/realtime.sock` (contract and keys: `suites/SCHEMA.md`, *`drive:
+voice`*). Each case says fixture audio into a real Grok Voice call, so the voice
+model itself has to hear the request and hand it to Fermix; every case opens one
+paid call (Grok bills by the connected minute, about $0.08, plus text items), so
+nothing runs without `--voice`, and a bare `--all` leaves voice cases out.
+
+The realtime socket exists only in a daemon run with realtime on and a voice key:
+`mix fermix.dev` enables it (never `--no-realtime`, which `capability-daemon.sh`
+passes, so that daemon cannot serve these cases), and the supervisor starts only
+when `[fermix_core.realtime]` is enabled and the voice key resolves. Grok's key is
+the xAI provider's `api_key` slot, filled at boot from `XAI_API_KEY` in the
+daemon's environment, the same variable the seeder's explicit mode uses; it is
+never written into a home or the repo. A voice case runs in a disposable eval home
+whatever its risk.
+
+```sh
+# from benchmark/, the voice eval daemon DOWN
+export VOICE_HOME=~/.fermix-voice-eval
+# 1. the workspace: a copy of this checkout at the harness HEAD (the rota, the
+#    stocktake script and its data are in suites/fixtures/voice/)
+mkdir -p "$VOICE_HOME" && rsync -a --exclude _build --exclude deps ../ "$VOICE_HOME/workspace/"
+# 2. the home: strict sandbox, Grok voice on (engine xai_realtime, grok-voice-3.0)
+uv run bin/seed_capability_home.py "$VOICE_HOME" --voice
+#    (scores the dev home's primary chat model; or --provider <id> --model <slug>)
+# 3. its daemon, with realtime on and the voice key, from the repo root
+(cd .. && FERMIX_HOME="$VOICE_HOME" XAI_API_KEY="$XAI_API_KEY" FERMIX_OPIK_ENABLED=1 \
+  FERMIX_OPIK_PROJECT=fermix-voice-eval FERMIX_BROWSER_HEADLESS=1 mix fermix.dev --no-web)
+# 4. in another shell: validate and plan, spending nothing
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite grok_voice --profile host_readonly --profile isolated_mutation --judge \
+  --voice --dry-run
+# 5. one call first, then the suite
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite grok_voice --case intake_on_the_thirteenth --judge --voice \
+  --confirm-daemon-isolated --confirm-isolated-env
+FERMIX_EVAL_HOME="$VOICE_HOME" OPIK_PROJECT=fermix-voice-eval uv run bin/run_eval.py \
+  --suite grok_voice --profile host_readonly --profile isolated_mutation --judge \
+  --voice --confirm-daemon-isolated --confirm-isolated-env
+```
+
+`--judge` needs the judge's credential as in §1 (`ANTHROPIC_API_KEY`, or an `ant
+auth login` profile). Before a run, the runner checks the home is a disposable
+eval home with a strict sandbox and an eval Opik project, that its config turns
+realtime on, and that something answers on `realtime.sock`; it refuses with exit 3
+otherwise. A voice case that cannot reach the socket, is refused at `call_start`
+(another call up, an `update_required` refusal) or does not settle within its
+`timeout_ms` is INCOMPLETE, and the runner hangs up on every path. Read the
+daemon's traces for a refusal before believing a zero.
+
+The fixture audio is regenerated, and checked for reproducibility, with
+`uv run bin/make_voice_fixtures.py [--check]` (macOS only: `say` +
+`afconvert -f WAVE -d LEI16@24000 -c 1`); the clips' texts live in that script and
+`suites/fixtures/voice/manifest.json` records each WAV's text and sha256.
+
+---
+
 ## 6. Where results land / housekeeping
 
 - **Leaderboard:** `reports/capability/leaderboard.json` (+ per-run `reports/capability/<ts>/`).

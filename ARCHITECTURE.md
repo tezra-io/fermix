@@ -338,8 +338,8 @@ spoken, and no review reads it either.
 
 Bootstrap files live in `FERMIX_HOME/bootstrap/<agent_id>/`: `IDENTITY.md`,
 optional `SOUL.md`, `FERMIX.md` (operating rules; `BootstrapRename` renames a
-legacy `AGENTS.md` at boot), `REALTIME.md` for realtime voice sessions, and
-`LIVE.md` for the Live voice frontend.
+legacy `AGENTS.md` at boot), `REALTIME.md` for realtime voice sessions,
+`LIVE.md` for the Live voice frontend, and `GROK.md` for the Grok one.
 
 `PromptComposer` exports prompt parts by cache tier, stable first: identity,
 soul, operating rules, realtime rules when relevant, the generated runtime
@@ -568,15 +568,26 @@ fixtures).
 
 `Realtime` serves local full-duplex voice on `FERMIX_HOME/realtime.sock`
 (newline-delimited JSON defined by `Realtime.Protocol`, exported in
-`priv/realtime/`). `SessionServer` runs OpenAI Realtime with tools through
-`ToolBridge` and optional screen perception; `LiveSessionServer` runs OpenAI
-Live, which executes no tools and delegates every task to an agent turn through
-the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`. A Live
-call's instructions are `LIVE.md` with what `LivePrompt` generates around it
+`priv/realtime/`). The configured model picks the engine, and
+`SessionControl` the session that owns the call. `SessionServer` runs OpenAI
+Realtime with tools through `ToolBridge` and optional screen perception. The
+two task engines execute no tools and hand every task to an agent turn through
+the `VoiceBridge` behaviour, implemented in channels by `Voice.Bridge`:
+`LiveSessionServer` runs OpenAI Live, and `GrokSessionServer` runs SpaceXAI's
+Grok Voice behind its one `fermix_task` function (`GrokTaskCall`), with
+`GrokTurn` the one arbiter of a continuation, client-reported playback
+(`GrokPlayback`, wire v3) and its own ledger (`GrokLedger`). Each speaks its
+own provider wire (`OpenAILiveClient`, `XAIRealtimeClient`); what their tasks
+share, admission, the request built from the call's transcript, results said
+and shown, hand-over at the end, the call's record and gist, is one
+`CallTasks`, which answers what the voice must be told and never names a
+wire. A Live call's instructions are `LIVE.md` (Grok's `GROK.md`) with what
+`LivePrompt` generates around it
 (the assistant's name, the owner's details, the date, the memory files in the
 `<memory-context>` frame `PromptComposer` owns), and a call in the chat starts
 with the chat's newest messages as provider input, read through the bridge
-before the call has a handle and shaped by `LiveChat`. A call in the chat
+before the call has a handle and shaped by `LiveChat`, which masks Computer
+History content against the call's own voice provider. A call in the chat
 leaves a gist: its settle closes the `voice_calls` record (`CallRecord`) with
 the settled cost and what the call owes the chat, then `CallGist` makes the
 gist in a task the session never waits on and writes the call's one chat row

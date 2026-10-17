@@ -574,12 +574,13 @@ defmodule FermixOpik.Aggregation do
     })
   end
 
-  # A GPT-Live voice call (M41 §7) is its own run kind, and always a ROOT: the
-  # provider session owns the microphone while every tool, memory lookup and
-  # model answer runs in a SEPARATE Fermix turn the call delegated to. Those
-  # turns mint `voice_delegation_<n>` with `parent_session` = the call id, which
-  # is the only link between the two — so they nest here through the ordinary
-  # `resolve_trace` path and need no clause of their own.
+  # A voice call on a task engine, GPT Live (M41 §7) or Grok (M70 §09), is its
+  # own run kind, and always a ROOT: the provider session owns the microphone
+  # while every tool, memory lookup and model answer runs in a SEPARATE Fermix
+  # turn the call delegated to. Those turns mint `voice_delegation_<n>` with
+  # `parent_session` = the call id, which is the only link between the two — so
+  # they nest here through the ordinary `resolve_trace` path and need no clause
+  # of their own.
   def apply_event(state, [:fermix, :voice_live, :call_start], _meas, meta, at) do
     case Map.get(meta, :session_id) do
       nil ->
@@ -598,12 +599,15 @@ defmodule FermixOpik.Aggregation do
           # idle TTL would force-close it mid-call and the ledger-bearing
           # call_stop would then mint a second, empty root.
           max_duration_ms: Map.get(meta, :max_duration_ms),
+          # GPT Live and Grok share this run kind (M70 §09): the engine and
+          # the voice provider are what tell the two apart.
           trace_metadata:
             compact(%{
               device_id: Map.get(meta, :device_id),
               model: Map.get(meta, :model),
               voice: Map.get(meta, :voice),
-              engine: Map.get(meta, :engine)
+              engine: Map.get(meta, :engine),
+              provider: Map.get(meta, :provider)
             }),
           at: at.at,
           mono: at.mono
@@ -660,16 +664,29 @@ defmodule FermixOpik.Aggregation do
           model: Map.get(meta, :model),
           voice: Map.get(meta, :voice),
           engine: Map.get(meta, :engine),
+          provider: Map.get(meta, :provider),
           provider_session_id: Map.get(meta, :provider_session_id),
           # WHY the call ended (call_stop / cost_limit / max_session_duration /
           # provider_disconnected / session_expired).
           reason: Map.get(meta, :reason),
           voice_seconds: Map.get(meas, :voice_seconds),
           voice_cost_millicents: Map.get(meas, :voice_cost_millicents),
+          # Grok also bills each text item it was sent; a GPT Live call has no
+          # such charge and sends no count, so the key is absent, never 0.
+          voice_text_items: Map.get(meas, :voice_text_items),
           backend_turns: Map.get(meas, :backend_turns),
           # 0/1: an incomplete finalization must stay visible rather than read
           # as a measured zero-cost call.
-          accounting_complete: Map.get(meas, :accounting_complete)
+          accounting_complete: Map.get(meas, :accounting_complete),
+          # How long the owner waited on a Grok call, kept apart from the
+          # backend task's own time (its delegation span): the provider's
+          # generation and the audible end-to-end latency. A latency with no
+          # sample is absent, never 0.
+          user_turns: Map.get(meas, :user_turns),
+          generation_latency_ms_median: Map.get(meas, :generation_latency_ms_median),
+          generation_latency_ms_max: Map.get(meas, :generation_latency_ms_max),
+          audible_latency_ms_median: Map.get(meas, :audible_latency_ms_median),
+          audible_latency_ms_max: Map.get(meas, :audible_latency_ms_max)
         })
     })
   end

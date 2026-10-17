@@ -415,10 +415,14 @@ inside the meeting session. Ingress voice-note transcription stays sessionless
 
 ## Live voice runs
 
-A GPT-Live call is a **run kind**, and it is always a **root**. The local voice
-socket mints `session_id = "voice_live:<n>"` for the call; the Live session
-mints a *separate* `"voice_delegation_<n>"` for every backend turn it delegates
-to, with `parent_session` = the call id. That parent link is the **only**
+A call on a **task engine**, one that hands every task to Fermix through the
+voice bridge, is a **run kind**, and it is always a **root**. There are two
+task engines, GPT Live (`openai_live`) and Grok (`xai_realtime`, M70), and they
+share this run kind, its six events and its id prefixes: `engine` and
+`provider` on every event are what tell them apart. The local voice socket
+mints `session_id = "voice_live:<n>"` for the call on either engine; the call's
+session mints a *separate* `"voice_delegation_<n>"` for every backend turn it
+delegates to, with `parent_session` = the call id. That parent link is the **only**
 correlation between a call and its turns — a delegation shares no other field
 with the call it came from — so it is what nests the turn's `llm`/`tool` spans
 under the call's trace. A call opened from a turn may carry its own
@@ -481,9 +485,17 @@ Every emission goes through `FermixCore.Realtime.LiveTelemetry` (the
 detached task's owner included) — never hand-rolled. The six events are `[:fermix, :voice_live, :call_start |
 :session_started | :delegation_start | :delegation_stop | :provider_error |
 :call_stop]`. Shared metadata: `agent: "voice_live"`, `session_id` (the call
-id), `call_uuid`, `engine: "openai_live"`, `device_id`, `model`, `voice`, and
-`provider_session_id` once `session.started` arrives — that last one is the only
-handle a vendor-side investigation has, and it exists nowhere else in the trace.
+id), `call_uuid`, `engine`, `provider`, `device_id`, `model`, `voice`, and
+`provider_session_id` once the vendor has named its session — that last one is
+the only handle a vendor-side investigation has, and it exists nowhere else in
+the trace. `engine` and `provider` are **required on every event**, passed by
+the caller and never defaulted: `openai_live` with `openai` on a GPT Live call,
+`xai_realtime` with `xai` and Grok's one pinned model on a Grok call. A caller
+that leaves either out raises at the emitter rather than being filed under
+GPT Live, and the detached task's owner passes the engine and provider
+of the call the task came from. On Grok, `session_started` marks the session
+configured and ready (its configuration applied and its starting context
+acknowledged), not the vendor's first event.
 `call_uuid` is the call's durable identity, minted with the session and the key
 of its `voice_calls` record; the `voice_live:<n>` counter restarts with the VM,
 so the UUID is what ties a trace to that record. The counter stays the trace's
@@ -527,11 +539,27 @@ logged.
 
 `call_stop` is the run's whole cost record, and every value is a number:
 `voice_seconds`, `voice_cost_millicents`, `backend_turns`, and
-`accounting_complete` as `0`/`1`. Metadata carries `reason` — `call_stop`,
-`cost_limit`, `max_session_duration`, `provider_disconnected`,
-`session_expired` — because a ceiling kill that read as a hang-up is exactly
-what makes a torn-down call undiagnosable. A non-numeric measurement raises at
-the emitter rather than reaching a trace as an unpriceable field.
+`accounting_complete` as `0`/`1`. A Grok call adds `voice_text_items`, the
+billable text items it sent (the starting context and messages mirrored from
+the chat, counted at send; a function output is not one), because Grok bills
+the session clock and each text item; its `voice_seconds` is the connected
+time, silence and mute included, and its `voice_cost_millicents` the local
+estimate from those two. A GPT Live call sends no `voice_text_items`: the key
+is absent, never `0`. A Grok call's `accounting_complete` is **always `0`**:
+there is no vendor terminal usage to settle against, so it settles on the
+local estimate and says so. A Grok call also says how long its owner waited
+(`GrokLatency`): `user_turns` always, and, once there is a sample,
+`generation_latency_ms_median`/`_max` (from the end of the owner's speech to
+the first audio Grok generated for it) and `audible_latency_ms_median`/`_max`
+(to the first of it the client reported playing), integer milliseconds. Only
+the first reply after each turn counts, a latency with no sample is absent
+rather than `0`, and a task's own time stays on its `delegation_stop`, so a
+slow provider, a slow client and a slow backend remain three findings.
+Metadata carries `reason` — `call_stop`, `cost_limit`, `max_session_duration`,
+`provider_disconnected`, `session_expired`, and on Grok also `playback_stalled`, `playback_overflow`
+and `call_ids_exhausted` — because a ceiling kill that read as a hang-up is
+exactly what makes a torn-down call undiagnosable. A non-numeric measurement
+raises at the emitter rather than reaching a trace as an unpriceable field.
 
 **Voice is duration-priced and is never expressed as tokens.** A Live minute is
 billed by the clock, so the ledger is seconds plus **integer millicents**
@@ -547,11 +575,42 @@ any of these events.
 Backend work inside a delegation rides the shared emitters as usual
 (`Providers.Telemetry.emit_call/3`, `Tools.Telemetry.exec/5`) with the
 delegation's own `session_id`, so a Live turn is priced and rendered exactly like
-any other turn. `Trace.TelemetryHandler` registers all six events as
-`agent_event` rows; `FermixOpik` binds them (`infer_kind("voice_live:" <> _)` →
-`:voice_live`, `infer_kind("voice_delegation_" <> _)` → `:voice_delegation`,
-root open and close in `Aggregation`, phase spans via `Mapper.voice_live_span/3`,
-replay in `TraceFile`). Both id prefixes are minted outside `fermix_opik`; keep
+any other turn.
+
+A Grok call's own work rides the same shared emitters on the **call's**
+`session_id`, with `agent: "voice_live"`, so it nests under the call's root
+beside the phase spans. Every function call the Grok model makes (one per
+call id) is one `[:fermix, :tool, :exec]` through `Tools.Telemetry.exec/5`
+under the one name the session advertises, `fermix_task`, **rejected and
+cancelled calls included**: metadata `action` (`submit`, `cancel`, or
+`invalid` for arguments that did not parse), `status` (the terminal word of
+its one output: `completed`, `failed`, `cancelled`, `superseded`, `busy`,
+`rejected`) and `task_id` when it names a Fermix task; `success` is true for
+`completed`, `cancelled` and `superseded`, and `duration_ms` runs from the call
+to its output. It passes no input or output: the request the model sent and
+the line it was answered with reach no field. Every Grok response that ends
+is one `Providers.Telemetry.emit_call/3` with `provider: :xai`, the pinned
+model, `status` `ok` for a completed response and `error` otherwise, a
+`duration_ms` from `response.created` to `response.done`, and the vendor's own
+token counts as `:tokens` (empty when the vendor sent none, never a
+fabricated count). It passes no `:input`/`:output` whatever the capture
+switch. That span is the vendor's account of one response, not the voice
+bill, which is the `call_stop` ledger. A vendor failure reaches
+`provider_error`, with the vendor's bounded sentence, before the session acts
+on it. No field of any Grok event carries raw audio, a transcript, a caption,
+memory text, an API key or an unsanitized provider payload.
+
+`Trace.TelemetryHandler` registers all six events as `agent_event` rows,
+flattening every metadata key and measurement, `engine`, `provider`,
+`voice_text_items` and the latency summary included; `FermixOpik` binds them
+(`infer_kind("voice_live:" <> _)` → `:voice_live`,
+`infer_kind("voice_delegation_" <> _)` → `:voice_delegation`, root open and
+close in `Aggregation`, which carries `engine`, `provider`, `model`, the
+ledger (`voice_text_items` included) and the latency summary into the root's
+metadata; phase spans via `Mapper.voice_live_span/3`, each naming `engine` and
+`provider`; replay in `TraceFile`). `Mapper.tool_span/3` and the `tool_exec` replay keep a
+`fermix_task` span's `status` and `task_id`, so a refused call stays told apart
+from one that ran. Both id prefixes are minted outside `fermix_opik`; keep
 them in lockstep with the exporter's clauses, or a `call_stop` arriving without
 its opener reads as a `:subagent` phantom root.
 

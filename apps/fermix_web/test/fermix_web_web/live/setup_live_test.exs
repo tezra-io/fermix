@@ -2885,9 +2885,7 @@ defmodule FermixWebWeb.SetupLiveTest do
       # catalog order, each option naming the engine that model speaks through.
       # The engine is a property of the model, never a second control the
       # operator has to keep in agreement with the first.
-      assert option_values(view, "model") ==
-               FermixCore.Realtime.Config.valid_models("openai_realtime") ++
-                 FermixCore.Realtime.Config.valid_models("openai_live")
+      assert option_values(view, "model") == FermixCore.Realtime.Config.all_models()
 
       assert option_labels(view, "model") ==
                Enum.map(
@@ -2897,6 +2895,10 @@ defmodule FermixWebWeb.SetupLiveTest do
                  Enum.map(
                    FermixCore.Realtime.Config.valid_models("openai_live"),
                    &(&1 <> " · Live, with your Fermix agent")
+                 ) ++
+                 Enum.map(
+                   FermixCore.Realtime.Config.valid_models("xai_realtime"),
+                   &(&1 <> " · Grok, with your Fermix agent")
                  )
 
       view
@@ -3048,6 +3050,106 @@ defmodule FermixWebWeb.SetupLiveTest do
 
       refute live_html =~ ~s(name="realtime_form[reasoning_effort]")
       assert live_html =~ "beacon"
+    end
+
+    # M70 §06: Grok is a task engine on SpaceXAI, so picking it re-scopes the
+    # voices, withdraws reasoning effort as Live does, and points the key field
+    # at the SpaceXAI provider's slot.
+    test "choosing the Grok model re-scopes the pane to Grok without saving", %{conn: conn} do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      openai_html =
+        view
+        |> element("button[phx-value-tab=\"realtime\"]")
+        |> render_click()
+
+      assert openai_html =~ "OpenAI API key for Realtime"
+
+      grok_html =
+        view
+        |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+        |> render_change()
+
+      assert selected_options(view, "model") == ["grok-voice-3.0"]
+      assert option_values(view, "voice") == ~w(eve ara rex sal leo)
+      assert selected_options(view, "voice") == ["eve"]
+      refute grok_html =~ ~s(name="realtime_form[reasoning_effort]")
+      assert grok_html =~ "SpaceXAI API key for Grok voice"
+      refute grok_html =~ "OpenAI API key for Realtime"
+      assert Application.get_env(:fermix_core, :realtime) == []
+    end
+
+    # A field's hint is one short line: anything longer runs out of the
+    # pane, so the explanation sits behind the label's info icon.
+    test "the voice pane's explanations sit behind info icons, not under the fields", %{
+      conn: conn
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"realtime\"]")
+      |> render_click()
+
+      grok_html =
+        view
+        |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+        |> render_change()
+
+      assert has_element?(view, ~s(span.tooltip[data-tip*="bill by the minute"]))
+      assert has_element?(view, ~s(span.tooltip[data-tip*="SpaceXAI sign-in does not"]))
+
+      hints =
+        grok_html
+        |> Floki.parse_fragment!()
+        |> Floki.find("form[phx-submit=\"save_realtime\"] span.label.text-xs")
+        |> Enum.map(&Floki.text/1)
+
+      assert hints != []
+      assert Enum.all?(hints, &(String.length(String.trim(&1)) <= 48))
+    end
+
+    test "submitting the Grok model persists SpaceXAI's engine and stores the key in its slot", %{
+      conn: conn,
+      tmp_home: tmp_home
+    } do
+      {:ok, view, _html} = live(conn, "/setup")
+
+      view
+      |> element("button[phx-value-tab=\"realtime\"]")
+      |> render_click()
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]", realtime_form: %{model: "grok-voice-3.0"})
+      |> render_change()
+
+      view
+      |> form("form[phx-submit=\"save_realtime\"]",
+        realtime_form: %{
+          enabled: "true",
+          model: "grok-voice-3.0",
+          voice: "rex",
+          api_key: "xai-voice-key"
+        }
+      )
+      |> render_submit()
+
+      assert render(view) =~ "Realtime saved."
+
+      realtime = Application.get_env(:fermix_core, :realtime, [])
+      assert Keyword.get(realtime, :provider) == "xai"
+      assert Keyword.get(realtime, :engine) == "xai_realtime"
+      assert Keyword.get(realtime, :model) == "grok-voice-3.0"
+      assert Keyword.get(realtime, :voice) == "rex"
+      assert Keyword.get(realtime, :screen_share) == false
+      refute Keyword.has_key?(realtime, :reasoning_effort)
+
+      contents = File.read!(Path.join(tmp_home, "config.toml"))
+      assert contents =~ ~s(engine = "xai_realtime")
+      assert contents =~ "[fermix_core.providers.xai]"
+      refute contents =~ "[fermix_core.providers.openai]"
+      refute contents =~ "xai-voice-key"
+
+      assert {:ok, "xai-voice-key"} = FermixTestSupport.SecretWriterStub.get(:xai_api_key)
     end
   end
 

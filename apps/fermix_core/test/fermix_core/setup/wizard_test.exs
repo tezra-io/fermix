@@ -1668,6 +1668,130 @@ defmodule FermixCore.Setup.WizardTest do
     end
   end
 
+  # M70 §06: Grok is on SpaceXAI, so the journey onto it moves the provider with
+  # the engine, drops what only the Realtime engine takes, lands on Grok's own
+  # model and default voice, and turns off the screen sharing Grok cannot do.
+  # Budget and transcript choices are the owner's and survive every move.
+  test "save_answers moving to Grok carries the provider, model, voice and screen sharing" do
+    tmp_home = realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_voice: "cedar",
+        realtime_reasoning_effort: "high",
+        realtime_max_session_minutes: "20",
+        realtime_max_cost_cents: "250",
+        realtime_persist_transcripts: "true"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "grok-voice-3.0")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "xai"
+    assert Keyword.get(realtime, :engine) == "xai_realtime"
+    assert Keyword.get(realtime, :model) == "grok-voice-3.0"
+    assert Keyword.get(realtime, :voice) == "eve"
+    assert Keyword.get(realtime, :screen_share) == false
+    refute Keyword.has_key?(realtime, :reasoning_effort)
+    assert Keyword.get(realtime, :max_session_minutes) == 20
+    assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 250
+    assert Keyword.get(realtime, :persist_transcripts) == true
+
+    contents = File.read!(Path.join(tmp_home, "config.toml"))
+    assert contents =~ ~s(provider = "xai")
+    assert contents =~ "screen_share = false"
+    refute contents =~ "reasoning_effort"
+
+    assert RealtimeConfig.normalize(realtime) == RealtimeConfig.current()
+    assert %{provider: "xai", engine: "xai_realtime", voice: "eve"} = RealtimeConfig.current()
+  end
+
+  test "save_answers takes an explicit Grok voice while moving onto Grok" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_enabled: "yes", realtime_engine: "openai_live")
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "grok-voice-3.0", realtime_voice: "rex")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    assert persisted.fermix_core |> Keyword.get(:realtime, []) |> Keyword.get(:voice) == "rex"
+  end
+
+  test "save_answers moving from Grok to Live puts OpenAI back and keeps the conversation" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_model: "grok-voice-3.0",
+        realtime_conversation: "private"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_model: "gpt-live-1")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "openai"
+    assert Keyword.get(realtime, :engine) == "openai_live"
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :conversation) == "private"
+    assert Keyword.get(realtime, :screen_share) == false
+  end
+
+  test "save_answers moving from Grok to Realtime drops the conversation and restores effort" do
+    realtime_engine_home!()
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(
+        realtime_enabled: "yes",
+        realtime_model: "grok-voice-3.0",
+        realtime_conversation: "chat"
+      )
+
+    {:ok, _report} =
+      Wizard.report().wizard
+      |> Wizard.save_answers(realtime_engine: "openai_realtime")
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    realtime = Keyword.get(persisted.fermix_core, :realtime, [])
+
+    assert Keyword.get(realtime, :provider) == "openai"
+    assert Keyword.get(realtime, :engine) == "openai_realtime"
+    assert Keyword.get(realtime, :model) == RealtimeConfig.default_model("openai_realtime")
+    assert Keyword.get(realtime, :voice) == "marin"
+    assert Keyword.get(realtime, :reasoning_effort) == "low"
+    refute Keyword.has_key?(realtime, :conversation)
+  end
+
+  test "save_answers refuses Grok's model with an OpenAI engine, naming both" do
+    realtime_engine_home!()
+
+    assert_raise ArgumentError,
+                 ~r/grok-voice-3.0 requires engine "xai_realtime", got "openai_live"/,
+                 fn ->
+                   Wizard.report().wizard
+                   |> Wizard.save_answers(
+                     realtime_engine: "openai_live",
+                     realtime_model: "grok-voice-3.0"
+                   )
+                 end
+  end
+
   defp realtime_engine_home! do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-realtime-engine-#{System.unique_integer([:positive])}")
@@ -2122,6 +2246,7 @@ defmodule FermixCore.Setup.WizardTest do
              :soul,
              :realtime,
              :live,
+             :grok,
              :user,
              :memory
            ]
@@ -2133,6 +2258,7 @@ defmodule FermixCore.Setup.WizardTest do
     assert File.exists?(Path.join([bootstrap_dir, "main", "FERMIX.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "SOUL.md"]))
     assert File.exists?(Path.join([bootstrap_dir, "main", "LIVE.md"]))
+    assert File.exists?(Path.join([bootstrap_dir, "main", "GROK.md"]))
   end
 
   # The prompt files depend on the personalization alone, and the first boot

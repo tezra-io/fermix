@@ -2,22 +2,31 @@ defmodule FermixCore.Realtime.SessionControl do
   @moduledoc """
   The one client API for a voice session process, whichever engine owns it.
 
-  `SessionServer` (Realtime) and `LiveSessionServer` (Live) are two different
-  processes with two different provider wires, but the listener and the session
-  supervisor drive both through exactly the messages below. Keeping the client
-  side in one module is what lets `LocalVoiceSocket` stay engine-agnostic: it
-  holds `session_module: SessionControl` and never branches on the engine except
-  where the WIRE differs (the Live-requires-v2 refusal and `task_cancel`).
+  `SessionServer` (Realtime), `LiveSessionServer` (Live) and `GrokSessionServer`
+  (Grok) are different processes with different provider wires, but the
+  listener, the session supervisor and the chat drive them all through exactly
+  the messages below. Keeping the client side in one module is what lets
+  `LocalVoiceSocket` stay engine-agnostic: it holds `session_module:
+  SessionControl` and never branches on the engine except where the WIRE differs
+  (each engine's minimum protocol version, `task_cancel` and
+  `playback_progress`).
 
-  Both engines must therefore handle every message here. `SessionServer`'s own
-  public functions already send exactly these, so it needs no change; a new
-  engine is written against this list.
+  Every engine handles the call verbs (`call_start` through `reload_runtime`).
+  The task engines, Live and Grok, which hand every task to the Fermix agent,
+  also handle `cancel_task` and the chat's verbs (`chat_typed`, `chat_answered`,
+  `call_context`); only Grok handles `playback_progress`. A caller that could
+  reach the wrong engine is refused before it sends: the listener by engine,
+  the chat through `CallRegistry`, which only a task-engine call claims.
+  `SessionServer`'s own public functions already send exactly these, so it
+  needs no change; a new engine is written against this list.
 
   `engine_module/1` and `session_scope/1` are the two engine-derived facts the
   socket needs before a session exists. `engine_module/1` returns the module
   ATOM only — it never calls into it.
   """
 
+  alias FermixCore.Realtime.CallRecord
+  alias FermixCore.Realtime.CallSpeech
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.SessionServer
 
@@ -78,13 +87,72 @@ defmodule FermixCore.Realtime.SessionControl do
   @doc """
   Cancels one backend delegation.
 
-  Only the Live engine has delegations; the LISTENER refuses `task_cancel` on a
-  Realtime connection before any session call, so `SessionServer` never sees it.
+  Only the task engines have delegations; the LISTENER refuses `task_cancel` on
+  a Realtime connection before any session call, so `SessionServer` never sees
+  it.
   """
   @spec cancel_task(GenServer.server(), String.t()) :: :ok | {:error, term()}
   def cancel_task(server, delegation_id)
       when is_session(server) and is_binary(delegation_id) and delegation_id != "",
       do: GenServer.call(server, {:cancel_task, delegation_id}, :infinity)
+
+  @doc """
+  What the companion has played of one stretch of assistant audio (v3, Grok
+  only; the listener refuses it under the other engines). `played_ms` is that
+  playback's rendered milliseconds so far, `drained?` whether all of it sent so
+  far has played. The session answers `{:error, reason}` for an id it never
+  sent, an offset that went backwards or one beyond the audio sent, and the
+  listener closes the connection on it.
+  """
+  @spec playback_progress(GenServer.server(), String.t(), non_neg_integer(), boolean()) ::
+          :ok | {:error, term()}
+  def playback_progress(server, playback_id, played_ms, drained?)
+      when is_session(server) and is_binary(playback_id) and playback_id != "" and
+             is_integer(played_ms) and played_ms >= 0 and is_boolean(drained?),
+      do: GenServer.call(server, {:playback_progress, playback_id, played_ms, drained?})
+
+  @doc """
+  The owner typed `text` in the chat (M56 §4.3). Sent, never awaited: a
+  task-engine session tells the voice model as quiet context while a call in
+  the chat is up, and drops it otherwise. Channels finds the session
+  (`CallRegistry`).
+  """
+  @spec chat_typed(GenServer.server(), String.t()) :: :ok
+  def chat_typed(session, text) when is_session(session) and is_binary(text),
+    do: GenServer.cast(session, {:chat, {:typed, text}})
+
+  @doc """
+  The chat answered the owner's typed message: `message` is that answer as the
+  chat's store holds it, its Computer History marker included. Sent, never
+  awaited, and told or dropped as `chat_typed/2` is.
+  """
+  @spec chat_answered(GenServer.server(), map()) :: :ok
+  def chat_answered(session, %{role: "assistant", content: content} = message)
+      when is_session(session) and is_binary(content),
+      do: GenServer.cast(session, {:chat, {:answered, message}})
+
+  @typedoc """
+  What a typed chat turn may read of the call in progress (M56 §4.4): when it
+  started and how long it has run, its tasks as its record holds them, and what
+  was said, the whole call (`CallSpeech`), never written anywhere.
+  """
+  @type context :: %{
+          call_uuid: String.t(),
+          started_at: DateTime.t(),
+          elapsed_ms: non_neg_integer(),
+          tasks: [CallRecord.task()],
+          speech: CallSpeech.t()
+        }
+
+  @doc """
+  The call's context, for `voice_call_context`. The caller bounds the wait:
+  a session settling its call answers nothing until it is done.
+  """
+  @spec call_context(GenServer.server(), timeout()) :: {:ok, context()}
+  def call_context(session, timeout)
+      when is_session(session) and
+             (timeout == :infinity or (is_integer(timeout) and timeout >= 0)),
+      do: GenServer.call(session, :call_context, timeout)
 
   @doc "Ends the call and settles the provider session."
   @spec call_stop(GenServer.server()) :: :ok
@@ -100,12 +168,15 @@ defmodule FermixCore.Realtime.SessionControl do
   @spec engine_module(Config.t()) :: module()
   def engine_module(%Config{engine: "openai_realtime"}), do: SessionServer
   def engine_module(%Config{engine: "openai_live"}), do: FermixCore.Realtime.LiveSessionServer
+  def engine_module(%Config{engine: "xai_realtime"}), do: FermixCore.Realtime.GrokSessionServer
 
   @doc """
   Mints the scope a new session runs under.
 
-  The prefix is the run kind a trace reader searches for, so the two engines are
-  never confused in Opik: `session:<n>` for Realtime, `voice_live:<n>` for Live.
+  The prefix is the run kind a trace reader searches for, so a Realtime call is
+  never confused with a task-engine call in Opik: `session:<n>` for Realtime,
+  `voice_live:<n>` for Live and Grok, whose trace `engine` metadata tells them
+  apart.
   """
   @spec session_scope(Config.t()) :: String.t()
   def session_scope(%Config{} = config) do
@@ -114,4 +185,5 @@ defmodule FermixCore.Realtime.SessionControl do
 
   defp scope_prefix(%Config{engine: "openai_realtime"}), do: "session:"
   defp scope_prefix(%Config{engine: "openai_live"}), do: "voice_live:"
+  defp scope_prefix(%Config{engine: "xai_realtime"}), do: "voice_live:"
 end

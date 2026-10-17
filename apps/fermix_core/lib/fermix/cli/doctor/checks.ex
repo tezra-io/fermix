@@ -1016,30 +1016,42 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  # Realtime uses the plain `openai` provider key, not the Codex provider. A
-  # Codex subscription / OAuth login configures `openai_codex` and does NOT
-  # authorize the Realtime API, so an enabled companion with only Codex auth
-  # fails at call time with no obvious cause. Surface it here.
+  # Voice uses the voice provider's plain API key, read through the one
+  # resolver: OpenAI's engines the `openai` provider key, not the Codex
+  # provider, and Grok the `xai` provider key, not a SpaceXAI sign-in. Neither
+  # sign-in authorizes a voice call, so an enabled companion with only one fails
+  # at call time with no obvious cause. Surface it here.
   defp realtime_key_status(config) do
-    case FermixCore.Config.provider_api_key(:openai) do
+    case RealtimeConfig.api_key(config) do
       {:ok, _key} ->
         ok(
           "realtime voice",
-          "enabled; OpenAI voice key saved " <>
+          "enabled; #{voice_vendor(config.provider)} voice key saved " <>
             "(engine #{config.engine}, model #{config.model}); the network checks test it"
         )
 
-      {:error, _reason} ->
-        warn(
-          "realtime voice",
-          "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
-            "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
-        )
+      {:error, {:missing_api_key, provider}} ->
+        warn("realtime voice", missing_voice_key(provider))
     end
   end
 
+  defp missing_voice_key("openai") do
+    "enabled but no OpenAI API key — the Realtime API needs an OpenAI Platform key (sk-...); " <>
+      "a Codex subscription/OAuth login does not authorize it. Set the OpenAI provider key via `fermix setup`."
+  end
+
+  # Production voice is set up in the app, so the fix names its pane.
+  defp missing_voice_key("xai") do
+    "enabled but no SpaceXAI API key; Grok voice needs the SpaceXAI provider's API key, " <>
+      "and a SpaceXAI sign-in does not authorize it. Add the key in Voice settings."
+  end
+
+  defp voice_vendor("openai"), do: "OpenAI"
+  defp voice_vendor("xai"), do: "SpaceXAI"
+
   @doc """
-  Whether OpenAI accepts the voice key, asked of OpenAI (network scope).
+  Whether the voice provider accepts the voice key, asked of that provider
+  (network scope): OpenAI for both OpenAI engines, SpaceXAI for Grok.
 
   `realtime/0` can only say a key is saved; a wrong or revoked one reads as
   present there and fails only when a call starts. Only a refused key fails: a
@@ -1048,19 +1060,21 @@ defmodule Fermix.CLI.Doctor.Checks do
   """
   @spec realtime_key(keyword()) :: result() | nil
   def realtime_key(opts \\ []) when is_list(opts) do
-    if RealtimeConfig.current().enabled? do
-      opts |> ProviderProbe.probe_openai_key() |> format_realtime_key()
+    config = RealtimeConfig.current()
+
+    if config.enabled? do
+      config |> ProviderProbe.probe_voice_key(opts) |> format_realtime_key(config.provider)
     end
   end
 
   # The refused-key sentence is the one a refused call shows, word for word.
-  defp format_realtime_key({:ok, %{latency_ms: ms}}),
-    do: ok("realtime voice key", "OpenAI accepted the API key (#{ms}ms)")
+  defp format_realtime_key({:ok, %{latency_ms: ms}}, provider),
+    do: ok("realtime voice key", "#{voice_vendor(provider)} accepted the API key (#{ms}ms)")
 
-  defp format_realtime_key({:error, {:refused, _status, "invalid_api_key"}}),
+  defp format_realtime_key({:error, {:refused, _status, "invalid_api_key"}}, "openai"),
     do: fail("realtime voice key", "OpenAI did not accept the API key (invalid_api_key).")
 
-  defp format_realtime_key({:error, {:refused, status, code}}) do
+  defp format_realtime_key({:error, {:refused, status, code}}, "openai") do
     warn(
       "realtime voice key",
       "OpenAI refused this check (#{refusal_label(status, code)}); " <>
@@ -1068,14 +1082,33 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
-  defp format_realtime_key({:error, {:server_error, status}}),
-    do: warn("realtime voice key", "OpenAI answered HTTP #{status}; try again later")
+  # SpaceXAI refuses a key it does not accept with 400 or 401; a 403 is the key
+  # or its team being refused this request, which a call may still pass.
+  defp format_realtime_key({:error, {:refused, status, _code}}, "xai") when status in [400, 401],
+    do: fail("realtime voice key", "SpaceXAI did not accept the API key (HTTP #{status}).")
 
-  defp format_realtime_key({:error, {:network, reason}}),
-    do: warn("realtime voice key", "could not reach OpenAI: #{inspect(reason)}")
+  defp format_realtime_key({:error, {:refused, status, code}}, "xai") do
+    warn(
+      "realtime voice key",
+      "SpaceXAI refused this check (#{refusal_label(status, code)}); " <>
+        "check the key's permissions and the team's credits in the SpaceXAI console"
+    )
+  end
 
-  defp format_realtime_key({:error, :no_key}),
-    do: warn("realtime voice key", "no OpenAI API key is saved, so a voice call cannot start")
+  defp format_realtime_key({:error, {:server_error, status}}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "#{vendor} answered HTTP #{status}; try again later")
+  end
+
+  defp format_realtime_key({:error, {:network, reason}}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "could not reach #{vendor}: #{inspect(reason)}")
+  end
+
+  defp format_realtime_key({:error, :no_key}, provider) do
+    vendor = voice_vendor(provider)
+    warn("realtime voice key", "no #{vendor} API key is saved, so a voice call cannot start")
+  end
 
   defp refusal_label(status, nil), do: "HTTP #{status}"
   defp refusal_label(status, code), do: "HTTP #{status}, #{code}"
@@ -3304,8 +3337,10 @@ defmodule Fermix.CLI.Doctor.Checks do
   # (`Egress.ensure_direct/2`), asked of the route itself, so a host listed in
   # `proxy_bypass` clears the warning.
   defp features_refused_by_proxy(egress) do
+    realtime = RealtimeConfig.current()
+
     [
-      {"voice", "wss://api.openai.com", RealtimeConfig.enabled?()},
+      {"voice", voice_wire(realtime.provider), realtime.enabled?},
       {"Discord", "wss://gateway.discord.gg", channel_enabled?(:discord)},
       {"Zoom capture", "wss://ws.zoom.us", MeetingsConfig.enabled?()}
     ]
@@ -3314,6 +3349,10 @@ defmodule Fermix.CLI.Doctor.Checks do
     end)
     |> Enum.map(fn {name, _url, _enabled?} -> name end)
   end
+
+  # The host the voice engines of each provider dial.
+  defp voice_wire("openai"), do: "wss://api.openai.com"
+  defp voice_wire("xai"), do: "wss://api.x.ai"
 
   defp channel_enabled?(channel) do
     case CoreConfig.channel(channel) do

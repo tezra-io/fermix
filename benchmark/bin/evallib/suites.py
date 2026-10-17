@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 
 import yaml
 
-from . import companion
+from . import companion, voice
 from .fixture_server import (FIXTURE_URL_PLACEHOLDER, case_uses_fixture,
                              clause_problems)
 from .rubric import numbered_requirements
@@ -30,7 +30,7 @@ _SCENARIO_KEYS = {"id", "title", "severity", "risk", "confirm_cost", "tags", "ca
 _CASE_KEYS = {
     "id", "query", "turns", "expect", "rubric", "judge", "timeout_ms", "drive",
     "image", "images", "score", "checker", "requires_tools", "requires_tools_all",
-    "cross_session", "companion", "watch",
+    "cross_session", "companion", "watch", "voice",
 }
 _TURN_KEYS = {"query", "expect"}
 
@@ -72,16 +72,19 @@ EXPECT_SPEC: dict[str, tuple] = {
     "max_cost_usd": (int, float),
     "max_duration_ms": (int,),
     "max_tokens": (int,),
-    # What the companion socket said about the case's message, read by the
-    # runner off the wire instead of from the trace (evallib/companion.py owns
-    # the vocabulary). A case-level `drive: companion` gate only.
+    # What the companion socket said about the case's message, or what the
+    # voice socket said during the case's call, read by the runner off the wire
+    # instead of from the trace (evallib/companion.py and evallib/voice.py own
+    # the two vocabularies). A case-level `drive: companion | voice` gate only.
     "wire": (dict,),
 }
 
 # `ask` and `companion` run unattended; `telegram_operator` needs a human to
-# send the message, so it runs only with --operator.
-DRIVES = ("ask", "companion", "telegram_operator")
+# send the message, so it runs only with --operator; `voice` spends a paid voice
+# minute against a Grok-enabled eval daemon, so it runs only with --voice.
+DRIVES = ("ask", "companion", "telegram_operator", "voice")
 OPERATOR_DRIVES = ("telegram_operator",)
+VOICE_DRIVES = ("voice",)
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_\-]*$")
 
@@ -119,7 +122,7 @@ class Case:
     rubric: str | None
     judge: bool                     # rubric graded when --judge is on
     timeout_ms: int | None          # per-turn drive timeout (None => cfg default)
-    drive: str = "ask"              # ask | companion | telegram_operator (operator-assisted)
+    drive: str = "ask"              # ask | companion | telegram_operator | voice
     images: list[str] = field(default_factory=list)  # ask: --attach; operator: known fixture to send
     score_spec: dict | None = None  # capability tier: ground-truth answer scoring (scoring.py)
     checker_spec: dict | None = None  # capability tier: end-state checker scoring (checker.py)
@@ -137,10 +140,16 @@ class Case:
     watch: tuple[tuple[int, str], ...] = ()
     companion: dict = field(default_factory=dict)  # drive: companion — the choreography
     #   around the message (cancel, reads, an offline wait); evallib/companion.py.
+    voice: dict = field(default_factory=dict)  # drive: voice — the clips the call says
+    #   and when; evallib/voice.py.
 
     @property
     def needs_operator(self) -> bool:
         return self.drive in OPERATOR_DRIVES
+
+    @property
+    def needs_voice(self) -> bool:
+        return self.drive in VOICE_DRIVES
 
 
 @dataclass
@@ -474,8 +483,8 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], 
     if drive != "companion":
         if "companion" in cs:
             problems.append(f"{cloc}: `companion` needs `drive: companion`")
-        if "wire" in case_expect:
-            problems.append(f"{cloc}: expect `wire` needs `drive: companion`")
+        if "wire" in case_expect and drive != "voice":
+            problems.append(f"{cloc}: expect `wire` needs `drive: companion` or `drive: voice`")
         return {}
     problems.extend(companion.spec_problems(spec, cloc))
     if not isinstance(spec, dict):
@@ -495,6 +504,33 @@ def _companion_spec(cs: dict, drive: str, case_expect: dict, turns: list[Turn], 
     if cs.get("image") is not None or cs.get("images") is not None:
         problems.append(f"{cloc}: attachments do not travel on the companion socket")
     return spec
+
+
+def _voice_spec(cs: dict, drive: str, case_expect: dict, cloc: str, fixtures_dir: str,
+                problems: list[str]) -> tuple[dict, str | None]:
+    """Validate a case's `voice:` map and its `expect.wire`; return the map and
+    what the owner says in it (the clips' fixture texts), which becomes the
+    case's one turn. A voice case's words are its clips, so it carries no
+    `query` or `turns` of its own."""
+    if drive != "voice":
+        if "voice" in cs:
+            problems.append(f"{cloc}: `voice` needs `drive: voice`")
+        return {}, None
+    if "voice" not in cs:
+        problems.append(f"{cloc}: `drive: voice` needs a `voice` map with its `clips`")
+        return {}, None
+    spec = cs["voice"]
+    found = voice.spec_problems(spec, cloc, fixtures_dir)
+    problems.extend(found)
+    if "wire" not in case_expect:
+        problems.append(f"{cloc}: `drive: voice` needs an expect `wire` map")
+    else:
+        problems.extend(voice.wire_problems(case_expect["wire"], f"{cloc}.expect"))
+    if cs.get("image") is not None or cs.get("images") is not None:
+        problems.append(f"{cloc}: attachments do not travel on the voice socket")
+    if found:
+        return {}, None
+    return spec, voice.spoken_text(spec, fixtures_dir)
 
 
 def _validate_watch(raw, rubric: str | None, cloc: str, problems: list[str]
@@ -661,9 +697,17 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
             seen_case.add(cid)
             cloc = f"{loc}/{cid}"
 
+            drive = cs.get("drive", "ask")
+            if drive not in DRIVES:
+                problems.append(f"{cloc}: `drive` must be one of {list(DRIVES)}, got {drive!r}")
+                drive = "ask"
             has_query = "query" in cs
             has_turns = "turns" in cs
-            if has_query == has_turns:
+            if drive == "voice":
+                if has_query or has_turns:
+                    problems.append(f"{cloc}: a `drive: voice` case says its `voice.clips`; "
+                                    "drop `query` and `turns`")
+            elif has_query == has_turns:
                 problems.append(f"{cloc}: provide exactly one of `query` or `turns`")
             case_expect_raw = cs.get("expect", {})
             _validate_expect(case_expect_raw, f"{cloc}.expect", problems)
@@ -733,13 +777,12 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                              default_judge)
             ctimeout = _timeout(cs["timeout_ms"], cloc) if "timeout_ms" in cs else default_timeout
 
-            drive = cs.get("drive", "ask")
-            if drive not in DRIVES:
-                problems.append(f"{cloc}: `drive` must be one of {list(DRIVES)}, got {drive!r}")
-                drive = "ask"
             if drive in ("telegram_operator", "companion") and has_turns:
                 problems.append(f"{cloc}: `drive: {drive}` supports only single-turn `query` cases")
             companion_spec = _companion_spec(cs, drive, case_expect, turns, cloc, problems)
+            voice_spec, spoken = _voice_spec(cs, drive, case_expect, cloc, fixtures_dir, problems)
+            if spoken is not None:
+                turns = [Turn(query=spoken, expect={})]
 
             # `image: <path>` (single) or `images: [<path>...]` (multi-image /
             # album) names known local fixtures. `drive: ask` passes each one to
@@ -789,7 +832,7 @@ def _load_one(path: str, fixtures_dir: str, problems: list[str]) -> Suite | None
                         score_spec=score_spec, checker_spec=checker_spec,
                         requires_tools=requires_tools, cross_session=cross_session,
                         requires_tools_all=tuple(requires_all), companion=companion_spec,
-                        watch=watch)
+                        watch=watch, voice=voice_spec)
             _refuse_misplaced_fixture_state(case, cloc, problems)
             cases.append(case)
 

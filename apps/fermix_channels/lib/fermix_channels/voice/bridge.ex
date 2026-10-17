@@ -324,6 +324,8 @@ defmodule FermixChannels.Voice.Bridge do
       turn_session_id: task.turn_session_id,
       elapsed_ms: task.elapsed_ms,
       record_opts: task.record_opts,
+      engine: task.engine,
+      provider: task.provider,
       conversation_key: handle.conversation_key,
       message_id: message_id,
       queue: handle.queue,

@@ -90,8 +90,8 @@ defmodule FermixCore.Management.Doctor.Remediation do
       action: %{kind: "none", target: nil}
     },
     "realtime_key.failed" => %{
-      title: "Replace the OpenAI API key",
-      body: "OpenAI does not accept the saved key, so a voice call cannot start.",
+      title: "Replace the voice API key",
+      body: "The voice provider does not accept the saved key, so a voice call cannot start.",
       action: %{kind: "settings_pane", target: "voice"}
     },
     "engine_alignment.warning" => %{

@@ -3,8 +3,8 @@ defmodule FermixCore.Prompt.SetupSeeder do
   Setup-time seeder for bootstrap and prompt-memory files.
 
   Called from `Setup.Wizard` finalization. The only path that writes
-  `IDENTITY.md`, `FERMIX.md`, `SOUL.md`, `REALTIME.md`, `LIVE.md`, `USER.md`,
-  and `MEMORY.md`. Read-side fallbacks (`Prompt.Defaults`) never write to disk.
+  `IDENTITY.md`, `FERMIX.md`, `SOUL.md`, `REALTIME.md`, `LIVE.md`, `GROK.md`,
+  `USER.md`, and `MEMORY.md`. Read-side fallbacks (`Prompt.Defaults`) never write to disk.
 
   Per-file rule: if the target file already exists, skip writing — operator
   edits and prior seeds are preserved. Otherwise render the template, write
@@ -28,7 +28,7 @@ defmodule FermixCore.Prompt.SetupSeeder do
   require Logger
 
   @type seeded_file :: %{
-          name: :identity | :fermix | :soul | :realtime | :live | :user | :memory,
+          name: :identity | :fermix | :soul | :realtime | :live | :grok | :user | :memory,
           path: String.t(),
           outcome: :seeded | :skipped_exists | :seeded_uncommitted,
           revision_id: integer() | nil
@@ -131,6 +131,13 @@ defmodule FermixCore.Prompt.SetupSeeder do
         name: :live,
         resource_type: :live_md,
         path: BootstrapPaths.live_path(agent_id, opts),
+        assigns: %{},
+        wizard_inputs: []
+      },
+      %{
+        name: :grok,
+        resource_type: :grok_md,
+        path: BootstrapPaths.grok_path(agent_id, opts),
         assigns: %{},
         wizard_inputs: []
       },

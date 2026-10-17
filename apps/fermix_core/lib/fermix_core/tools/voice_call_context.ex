@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.VoiceCallContext do
   @moduledoc """
-  Read the GPT-Live call in progress in the chat (M56 §4.4, D7).
+  Read the task-engine call in progress in the chat (M56 §4.4, D7): a GPT Live
+  or a Grok call.
 
   A message typed during a call may refer to it ("what did I ask you to do on
   the call?"). This is how the turn reads it: when the call started and how
@@ -26,7 +27,7 @@ defmodule FermixCore.Tools.VoiceCallContext do
   alias FermixCore.Capabilities.UntrustedContent
   alias FermixCore.Realtime.CallRegistry
   alias FermixCore.Realtime.CallSpeech
-  alias FermixCore.Realtime.LiveSessionServer
+  alias FermixCore.Realtime.SessionControl
   alias FermixCore.Realtime.VoiceBridge
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
@@ -110,7 +111,7 @@ defmodule FermixCore.Tools.VoiceCallContext do
   # The session gone between the lookup and the call is no call; one busy
   # past the bound (settling, closing its provider session) did not answer.
   defp ask(session) do
-    LiveSessionServer.call_context(session, @answer_timeout_ms)
+    SessionControl.call_context(session, @answer_timeout_ms)
   catch
     :exit, {:timeout, _call} -> {:error, "no_answer", @no_answer}
     :exit, _gone -> {:error, "no_call", @no_call}

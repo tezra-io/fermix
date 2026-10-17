@@ -3,15 +3,15 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   Local Unix-domain socket listener for the native voice companion.
 
   Engine-agnostic by construction: a connection's session is driven through
-  `SessionControl`, so the same listener serves the Realtime and the Live
-  engines. It branches on the engine in exactly the two places where the WIRE
-  differs — the Live-requires-v2 refusal at `call_start`, and `task_cancel`,
-  which only Live has delegations for.
+  `SessionControl`, so the same listener serves the Realtime, Live and Grok
+  engines. It branches on the engine in exactly the three places where the WIRE
+  differs — each engine's minimum protocol version, refused at `call_start`;
+  `task_cancel`, which only the task engines have delegations for; and
+  `playback_progress`, which only Grok has playback ids for.
   """
 
   use GenServer
 
-  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Realtime.Config
   alias FermixCore.Realtime.DeviceIdentity
@@ -26,10 +26,10 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   @accept_idle_ms 50
   @max_wire_line_bytes 65_536
   @default_max_clients 4
-  # The wire version the Live engine requires. The handshake window still admits
-  # a v1 companion (it may run the Realtime engine); this is the floor for a
-  # Live CALL, and the number the refusal reports as `min_version`.
-  @live_min_protocol_version 2
+  # The wire version each engine's CALL requires. The handshake window still
+  # admits an older companion (it may run an engine it can render); this is the
+  # floor for a call, and the number the refusal reports as `min_version`.
+  @engine_min_protocol_version %{"openai_realtime" => 1, "openai_live" => 2, "xai_realtime" => 3}
   # How many queued companion frames the handler writes ahead of its own last
   # word on a call (a refusal, a session-down error, a hang-up's `idle`) before
   # it gives up and writes that word. A session queues a handful.
@@ -60,10 +60,11 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   """
   @spec session_opts(keyword()) :: {:ok, keyword()} | {:error, term()}
   def session_opts(opts) when is_list(opts) do
-    with {:ok, api_key} <- CoreConfig.provider_api_key(:openai),
+    config = Config.current()
+
+    with {:ok, api_key} <- Config.api_key(config),
          {:ok, device_id} <-
            DeviceIdentity.ensure_device_id(ConfigStore.workspace_paths().realtime) do
-      config = Config.current()
       owner_id = MemoryConfig.owner_id()
 
       {:ok,
@@ -475,22 +476,34 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   end
 
   # `call_start` is the first moment both the negotiated version and the
-  # configured engine are known, so the Live-requires-v2 rule lands here — and
-  # BEFORE a session exists, because a Live session bills by the minute from the
-  # moment it opens and a v1 companion could not render the call anyway.
+  # configured engine are known, so the per-engine minimum lands here — and
+  # BEFORE a session exists, because a task-engine session bills by the minute
+  # from the moment it opens and an older companion could not render the call
+  # anyway.
   defp dispatch_event(%{type: "call_start"}, state) do
-    if live_call_needs_upgrade?(state) do
+    if call_needs_upgrade?(state) do
       send_update_required_and_stop(state)
     else
       start_call(state)
     end
   end
 
-  # Only the Live engine has delegations to cancel. A Realtime connection is
+  # Only the task engines have delegations to cancel. A Realtime connection is
   # refused here rather than forwarded to a session with no clause for it.
   defp dispatch_event(%{type: "task_cancel", payload: payload}, state) do
-    if Config.live?(state.config) do
+    if Config.hands_off_tasks?(state.config) do
       cancel_task(Map.fetch!(payload, "delegation_id"), state)
+    else
+      send_error_and_stop(:unsupported_by_engine, state)
+    end
+  end
+
+  # Only Grok sends audio under playback ids, so only a Grok session has a
+  # clause for the report. A refused report (an id never sent, an offset that
+  # went backwards or past the audio sent) ends the connection with its reason.
+  defp dispatch_event(%{type: "playback_progress", payload: payload}, state) do
+    if state.config.engine == "xai_realtime" do
+      playback_progress(payload, state)
     else
       send_error_and_stop(:unsupported_by_engine, state)
     end
@@ -553,6 +566,24 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     _error_sent? = flush_queued_frames(state, false, @max_flushed_frames)
     _ = send_event(state.conn, %{type: "state", state: "idle"})
     {:cont, state}
+  end
+
+  defp playback_progress(
+         %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?},
+         state
+       ) do
+    case require_session(state) do
+      {:ok, session, state} ->
+        with :ok <-
+               state.session_module.playback_progress(session, playback_id, played_ms, drained?) do
+          {:cont, state}
+        else
+          {:error, reason} -> send_error_and_stop(reason, state)
+        end
+
+      {:error, reason} ->
+        send_error_and_stop(reason, state)
+    end
   end
 
   defp start_call(state) do
@@ -628,11 +659,14 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
   # A non-integer client_version cannot reach this: every event but
   # `client_hello` is gated behind a completed handshake. Match on the integer
   # so a future path that broke that gate fails loud instead of reading an atom
-  # as "new enough".
-  defp live_call_needs_upgrade?(%{client_version: version, config: config})
+  # as "new enough". An engine missing from the table fails loud too.
+  defp call_needs_upgrade?(%{client_version: version, config: config})
        when is_integer(version) do
-    Config.live?(config) and version < @live_min_protocol_version
+    version < engine_min_protocol_version(config)
   end
+
+  defp engine_min_protocol_version(%Config{engine: engine}),
+    do: Map.fetch!(@engine_min_protocol_version, engine)
 
   # `min_version` here is the version the ENGINE requires, not the handshake
   # floor in `server_hello` — `required_for` names which engine raised it.
@@ -644,9 +678,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
         kind: "update_required",
         direction: "client_too_old",
         client_version: state.client_version,
-        min_version: @live_min_protocol_version,
+        min_version: engine_min_protocol_version(state.config),
         max_version: Protocol.protocol_version(),
-        required_for: "openai_live"
+        required_for: state.config.engine
       })
 
     {:stop, state}
@@ -789,6 +823,9 @@ defmodule FermixCore.Realtime.LocalVoiceSocket do
     end
   end
 
+  # A voice key that is not saved keeps the word the wire always carried for
+  # it; which provider's key is missing is readiness's to say, by name.
+  defp reason_to_string({:missing_api_key, _provider}), do: "not_configured"
   defp reason_to_string(reason) when is_atom(reason), do: Atom.to_string(reason)
   defp reason_to_string(reason) when is_binary(reason), do: reason
   defp reason_to_string(reason), do: inspect(reason)

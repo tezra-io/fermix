@@ -87,8 +87,9 @@ defmodule FermixChannels.Voice.Detached do
   @typedoc """
   A task handed over as its call ends: its call (trace id and UUID), its ids,
   the request it ran with, its turn's session id, how long it had run, the
-  record's Repo options, the queue turn it runs as (`conversation_key`,
-  `message_id`, `queue`), and the session that handed it over.
+  record's Repo options, the engine and voice provider its call ran on, the
+  queue turn it runs as (`conversation_key`, `message_id`, `queue`), and the
+  session that handed it over.
   """
   @type task :: %{
           call_id: String.t(),
@@ -99,6 +100,8 @@ defmodule FermixChannels.Voice.Detached do
           turn_session_id: String.t(),
           elapsed_ms: non_neg_integer(),
           record_opts: keyword(),
+          engine: String.t(),
+          provider: String.t(),
           conversation_key: FermixCore.Agents.ConversationKey.t(),
           message_id: String.t(),
           queue: GenServer.server(),
@@ -415,7 +418,12 @@ defmodule FermixChannels.Voice.Detached do
 
   defp emit_stop(task, task_state, shown) do
     LiveTelemetry.detached_delegation_stop(
-      %{session_id: task.call_id, call_uuid: task.call_uuid},
+      %{
+        session_id: task.call_id,
+        call_uuid: task.call_uuid,
+        engine: task.engine,
+        provider: task.provider
+      },
       %{
         delegation_id: task.task_id,
         revision: task.revision,

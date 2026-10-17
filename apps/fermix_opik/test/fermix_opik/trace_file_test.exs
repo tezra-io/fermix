@@ -239,6 +239,7 @@ defmodule FermixOpik.TraceFileTest do
           "parent_session" => "main-4",
           "agent" => "voice_live",
           "engine" => "openai_live",
+          "provider" => "openai",
           "device_id" => "dev-1",
           "model" => "gpt-live-1",
           "voice" => "marin",
@@ -256,8 +257,162 @@ defmodule FermixOpik.TraceFileTest do
       assert meta.session_id == "voice_live:1"
       assert meta.parent_session == "main-4"
       assert meta.engine == "openai_live"
+      assert meta.provider == "openai"
       assert meta.turn_session_id == "voice_delegation_7"
     end
+  end
+
+  # M70 §09: a Grok call's whole record, as the daemon writes it — the six
+  # voice_live rows naming their engine and provider, the `fermix_task` tool
+  # rows and the per-response llm_call row on the call's session, and the
+  # backend turn under its own `voice_delegation_<n>` session. Replay must
+  # rebuild one root that still says which engine ran it and what it cost.
+  @tag :tmp_dir
+  test "a Grok call's rows replay into one root with its engine and ledger", %{tmp_dir: dir} do
+    day = Path.join(dir, "2026-10-17")
+    File.mkdir_p!(day)
+
+    call = %{
+      type: "agent_event",
+      agent: "voice_live",
+      session_id: "voice_live:3",
+      engine: "xai_realtime",
+      provider: "xai",
+      model: "grok-voice-3.0",
+      voice: "eve",
+      device_id: "dev-1"
+    }
+
+    task = %{delegation_id: "task_1", revision: 1, turn_session_id: "voice_delegation_9"}
+
+    write(day, "agent_event.jsonl", [
+      Map.merge(call, %{
+        ts: "2026-10-17T09:00:00.000Z",
+        event: "voice_live_call_start",
+        max_duration_ms: 900_000
+      }),
+      Map.merge(call, %{
+        ts: "2026-10-17T09:00:01.000Z",
+        event: "voice_live_session_started",
+        provider_session_id: "sess_grok_1"
+      }),
+      call
+      |> Map.merge(task)
+      |> Map.merge(%{ts: "2026-10-17T09:00:02.000Z", event: "voice_live_delegation_start"}),
+      call
+      |> Map.merge(task)
+      |> Map.merge(%{
+        ts: "2026-10-17T09:00:04.000Z",
+        event: "voice_live_delegation_stop",
+        status: "completed",
+        duration_ms: 1_800
+      }),
+      Map.merge(call, %{
+        ts: "2026-10-17T09:01:00.000Z",
+        event: "voice_live_call_stop",
+        reason: "call_stop",
+        voice_seconds: 60.0,
+        voice_cost_millicents: 9_200,
+        voice_text_items: 3,
+        backend_turns: 1,
+        accounting_complete: 0,
+        user_turns: 2,
+        generation_latency_ms_median: 640,
+        generation_latency_ms_max: 900,
+        audible_latency_ms_median: 820,
+        audible_latency_ms_max: 1_100
+      })
+    ])
+
+    write(day, "llm_call.jsonl", [
+      %{
+        ts: "2026-10-17T09:00:03.000Z",
+        type: "llm_call",
+        agent: "main",
+        session_id: "voice_delegation_9",
+        parent_session: "voice_live:3",
+        duration_ms: 900,
+        provider: "anthropic",
+        model: "claude-opus-4-8",
+        status: "ok",
+        tokens: %{prompt: 120, completion: 40, total: 160}
+      },
+      %{
+        ts: "2026-10-17T09:00:05.000Z",
+        type: "llm_call",
+        agent: "voice_live",
+        session_id: "voice_live:3",
+        duration_ms: 700,
+        provider: "xai",
+        model: "grok-voice-3.0",
+        status: "ok",
+        tokens: %{prompt: 310, completion: 52, total: 362}
+      }
+    ])
+
+    write(day, "tool_exec.jsonl", [
+      %{
+        ts: "2026-10-17T09:00:04.500Z",
+        type: "tool_exec",
+        tool: "fermix_task",
+        agent: "voice_live",
+        session_id: "voice_live:3",
+        success: true,
+        duration_ms: 2_400,
+        status: "completed",
+        task_id: "task_1",
+        action: "submit"
+      }
+    ])
+
+    events = TraceFile.read_events(dir)
+
+    assert {_event, stop_meas, stop_meta, _at} =
+             Enum.find(events, &match?({[:fermix, :voice_live, :call_stop], _, _, _}, &1))
+
+    assert stop_meas == %{
+             voice_seconds: 60.0,
+             voice_cost_millicents: 9_200,
+             voice_text_items: 3,
+             backend_turns: 1,
+             accounting_complete: 0,
+             user_turns: 2,
+             generation_latency_ms_median: 640,
+             generation_latency_ms_max: 900,
+             audible_latency_ms_median: 820,
+             audible_latency_ms_max: 1_100
+           }
+
+    assert stop_meta.engine == "xai_realtime"
+    assert stop_meta.provider == "xai"
+
+    {_agg, closed} = replay(events)
+
+    assert [%{trace: trace, spans: spans}] = closed
+    assert trace.name == "voice_live:3"
+    assert trace.metadata.engine == "xai_realtime"
+    assert trace.metadata.provider == "xai"
+    assert trace.metadata.model == "grok-voice-3.0"
+    assert trace.metadata.voice_text_items == 3
+    assert trace.metadata.accounting_complete == 0
+    assert trace.metadata.user_turns == 2
+    assert trace.metadata.audible_latency_ms_max == 1_100
+
+    root = Enum.find(spans, &(&1.name == "voice_live:3"))
+    started = Enum.find(spans, &(&1.name == "voice_live:session_started"))
+    assert started.metadata.engine == "xai_realtime"
+    assert started.metadata.provider == "xai"
+
+    delegation = Enum.find(spans, &(&1.name == "voice_delegation_9"))
+    assert delegation.parent_span_id == root.id
+
+    grok = Enum.find(spans, &(&1.name == "llm:grok-voice-3.0"))
+    assert grok.parent_span_id == root.id
+    assert grok.provider == "xai"
+
+    tool = Enum.find(spans, &(&1.name == "fermix_task"))
+    assert tool.parent_span_id == root.id
+    assert tool.metadata == %{status: "completed", task_id: "task_1", action: "submit"}
   end
 
   test "voice_live_call_stop normalize reconstructs the numeric ledger" do
@@ -496,6 +651,20 @@ defmodule FermixOpik.TraceFileTest do
 
     assert meta.cu_session == "cua_ab12"
     assert meta.outcome == "performed"
+  end
+
+  defp replay(events) do
+    agg = Aggregation.new(project: "fermix", ttl_ms: 1_000_000)
+
+    Enum.reduce(events, {agg, []}, fn {event, meas, meta, at}, {state, acc} ->
+      {state, new} =
+        Aggregation.apply_event(state, event, meas, meta, %{
+          at: at,
+          mono: DateTime.to_unix(at, :microsecond)
+        })
+
+      {state, acc ++ new}
+    end)
   end
 
   defp write(dir, file, rows) do

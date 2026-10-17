@@ -3,6 +3,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Setup.Doctor
   alias FermixCore.Transcription.Local.ModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: SttInstaller
@@ -210,9 +211,10 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # The voice call's key is the `openai` provider key whatever the primary is,
-  # so an install that chats through Codex has a key no provider probe reaches.
-  describe "probe_openai_key/1" do
+  # The voice call's key is the voice provider's own whatever the primary is, so
+  # an install that chats through Codex or a SpaceXAI sign-in has a key no
+  # provider probe reaches. The probe asks the vendor the engine dials.
+  describe "probe_voice_key/2" do
     test "reads the model list with the key and sends no prompt" do
       put_provider(:openai, api_key: "sk-test")
 
@@ -226,7 +228,9 @@ defmodule FermixCore.Setup.DoctorTest do
         Plug.Conn.send_resp(conn, 200, ~s({"object":"list","data":[]}))
       end
 
-      assert {:ok, %{latency_ms: ms}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:ok, %{latency_ms: ms}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
+
       assert is_integer(ms) and ms >= 0
     end
 
@@ -243,7 +247,7 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> json(conn, 401, Jason.encode!(%{"error" => error})) end
 
-      result = Doctor.probe_openai_key(req_options: [plug: plug])
+      result = Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
 
       assert result == {:error, {:refused, 401, "invalid_api_key"}}
       refute inspect(result) =~ "abcd"
@@ -260,7 +264,8 @@ defmodule FermixCore.Setup.DoctorTest do
         )
       end
 
-      assert {:error, {:refused, 403, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 403, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a code that is not an identifier is dropped" do
@@ -270,7 +275,8 @@ defmodule FermixCore.Setup.DoctorTest do
         json(conn, 401, ~s({"error":{"code":"key sk-test is wrong"}}))
       end
 
-      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 401, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a body that is not an OpenAI error is a refusal without a code" do
@@ -278,7 +284,8 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> Plug.Conn.send_resp(conn, 401, "Unauthorized") end
 
-      assert {:error, {:refused, 401, nil}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:refused, 401, nil}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "any other status is a server error carrying no body" do
@@ -286,7 +293,8 @@ defmodule FermixCore.Setup.DoctorTest do
 
       plug = fn conn -> Plug.Conn.send_resp(conn, 503, ~s({"error":"busy"})) end
 
-      assert {:error, {:server_error, 503}} = Doctor.probe_openai_key(req_options: [plug: plug])
+      assert {:error, {:server_error, 503}} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [plug: plug])
     end
 
     test "a transport failure is a network error" do
@@ -294,15 +302,93 @@ defmodule FermixCore.Setup.DoctorTest do
       adapter = fn req -> {req, %Req.TransportError{reason: :econnrefused}} end
 
       assert {:error, {:network, %Req.TransportError{reason: :econnrefused}}} =
-               Doctor.probe_openai_key(req_options: [adapter: adapter])
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
     end
 
     test "no saved key makes no request" do
       Application.put_env(:fermix_core, :providers, openai: [])
       adapter = fn _req -> flunk("a probe with no key reached the network") end
 
-      assert {:error, :no_key} = Doctor.probe_openai_key(req_options: [adapter: adapter])
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
     end
+
+    test "an unresolved secret reference makes no request" do
+      put_provider(:openai, api_key: "@keyring")
+      adapter = fn _req -> flunk("an unresolved reference reached the network") end
+
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(openai_voice(), req_options: [adapter: adapter])
+    end
+
+    test "Grok reads the SpaceXAI model list with the SpaceXAI key, never OpenAI's" do
+      put_provider(:openai, api_key: "sk-other")
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn ->
+        {:ok, body, conn} = Plug.Conn.read_body(conn)
+        assert conn.method == "GET"
+        assert conn.host == "api.x.ai"
+        assert conn.request_path == "/v1/models"
+        assert body == ""
+        assert ["Bearer xai-test"] = Plug.Conn.get_req_header(conn, "authorization")
+        json(conn, 200, ~s({"object":"list","data":[]}))
+      end
+
+      assert {:ok, %{latency_ms: ms}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+
+      assert is_integer(ms) and ms >= 0
+    end
+
+    # SpaceXAI answers a key it does not accept with 400 and a message that
+    # quotes the key, so only the status crosses.
+    test "a refused SpaceXAI key answers its status, never SpaceXAI's message" do
+      put_provider(:xai, api_key: "xai-bad-wxyz")
+
+      body =
+        Jason.encode!(%{
+          "code" => "Client specified an invalid argument",
+          "error" => "Incorrect API key provided: xa***yz."
+        })
+
+      for status <- [400, 401, 403] do
+        plug = fn conn -> json(conn, status, body) end
+        result = Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+
+        assert result == {:error, {:refused, status, nil}}
+        refute inspect(result) =~ "Incorrect"
+      end
+    end
+
+    test "a SpaceXAI refusal keeps a code that is an identifier" do
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn -> json(conn, 403, ~s({"code":"permission_denied","error":"no"})) end
+
+      assert {:error, {:refused, 403, "permission_denied"}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+    end
+
+    test "any other SpaceXAI status is a server error carrying no body" do
+      put_provider(:xai, api_key: "xai-test")
+
+      plug = fn conn -> Plug.Conn.send_resp(conn, 503, ~s({"error":"busy"})) end
+
+      assert {:error, {:server_error, 503}} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [plug: plug])
+    end
+
+    test "a SpaceXAI sign-in with no API key makes no request" do
+      Application.put_env(:fermix_core, :providers, xai: [auth_mode: :oauth])
+      adapter = fn _req -> flunk("a sign-in reached the voice key probe") end
+
+      assert {:error, :no_key} =
+               Doctor.probe_voice_key(grok_voice(), req_options: [adapter: adapter])
+    end
+
+    defp openai_voice, do: RealtimeConfig.normalize(enabled: true)
+    defp grok_voice, do: RealtimeConfig.normalize(enabled: true, engine: "xai_realtime")
 
     # OpenAI answers errors as JSON, which is what lets Req decode the code.
     defp json(conn, status, body) do

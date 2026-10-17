@@ -3,17 +3,18 @@ defmodule FermixCore.Management.Settings.Voice do
   The `realtime`, `transcription` and `meetings` sections (M34 native setup
   §5.3, §5.4).
 
-  The shared OpenAI key is named on the voice section rather than hidden: it is
-  the same slot the OpenAI provider uses, and a pane that showed a second,
-  unrelated-looking key row is what made operators store it twice.
+  The voice provider's key is named on the voice section rather than hidden: it
+  is the same slot that provider uses (OpenAI's for both OpenAI engines,
+  SpaceXAI's for Grok), and a pane that showed a second, unrelated-looking key
+  row is what made operators store it twice.
 
   The voice engine is not a row: it is derived from the model, which is the one
   choice an operator makes. The rows below the model are still scoped to the
   engine in force — each engine ships its own voices, reasoning effort is a
-  Realtime-only setting, and under Live the provider that answers is worth
-  naming because it is not the one that speaks. Publishing the other engine's
-  voices would offer a value `settings.apply` refuses at the configuration
-  boundary.
+  Realtime-only setting, and under a task engine (Live, Grok) the provider that
+  answers is worth naming because it is not the one that speaks. Publishing
+  another engine's voices would offer a value `settings.apply` refuses at the
+  configuration boundary.
   """
 
   alias FermixCore.Management.Settings.Row
@@ -47,12 +48,16 @@ defmodule FermixCore.Management.Settings.Voice do
     "deepgram" => :deepgram_api_key
   }
 
-  # The two engines in the order the configuration publishes them, each named by
+  # The engines in the order the configuration publishes them, each named by
   # what it does for the operator rather than by its wire word.
   @engine_labels %{
     "openai_realtime" => "Realtime, integrated tools",
-    "openai_live" => "Live, with your Fermix agent"
+    "openai_live" => "Live, with your Fermix agent",
+    "xai_realtime" => "Grok, with your Fermix agent"
   }
+
+  # The name a task engine's backend row gives the voice that speaks.
+  @speaking_engines %{"openai_live" => "Live", "xai_realtime" => "Grok"}
 
   @conversation_labels %{
     "chat" => "Yes",
@@ -100,7 +105,7 @@ defmodule FermixCore.Management.Settings.Voice do
 
     realtime_switch_rows(config, restart) ++
       realtime_engine_rows(config, snapshot, restart) ++
-      realtime_key_row(snapshot) ++ realtime_budget_rows(config, restart)
+      realtime_key_row(config, snapshot) ++ realtime_budget_rows(config, restart)
   end
 
   def rows("transcription", snapshot, opts) do
@@ -128,14 +133,14 @@ defmodule FermixCore.Management.Settings.Voice do
   defp realtime_switch_rows(config, restart) do
     [
       Row.new("realtime_enabled", :toggle, "Talk to Fermix",
-        footer: "Lets the companion talk with you using OpenAI voice models.",
+        footer: "Lets the companion talk with you using OpenAI or SpaceXAI voice models.",
         value: config.enabled?,
         restart: restart
       ),
       Row.new("realtime_model", :choice, "Model",
         footer:
-          "Live delegates tools, memory and reasoning to your Fermix agent " <>
-            "and bills by the minute.",
+          "Live and Grok hand tools, memory and reasoning to your Fermix agent " <>
+            "and bill by the minute.",
         value: config.model,
         options: Enum.map(RealtimeConfig.all_models(), &model_option/1),
         restart: restart
@@ -148,8 +153,9 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  # Reasoning effort is a Realtime session setting with no Live equivalent, so
-  # under Live it is not a row with a disabled control: it is not a setting.
+  # Reasoning effort is a Realtime session setting with no task-engine
+  # equivalent, so under Live or Grok it is not a row with a disabled control:
+  # it is not a setting.
   defp realtime_engine_rows(%{engine: "openai_realtime"} = config, _snapshot, restart) do
     [
       Row.new("realtime_reasoning_effort", :choice, "Reasoning effort",
@@ -160,18 +166,20 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  # Live speaks; the operator's own primary provider answers. That split is the
-  # one thing about this engine an operator cannot infer from the pane, and it
-  # is changed in Providers, so the row is read-only rather than a control whose
-  # save always refuses.
+  # A task engine speaks; the operator's own primary provider answers. That split
+  # is the one thing about these engines an operator cannot infer from the pane,
+  # and it is changed in Providers, so the row is read-only rather than a
+  # control whose save always refuses.
   #
-  # Whether a call's hand-offs run in the chat's own conversation is a Live
-  # question too (M56 §5): the Realtime engine hands nothing off. The row shows
-  # the value in force, so an unset key reads as the chat it means.
-  defp realtime_engine_rows(%{engine: "openai_live"} = config, snapshot, restart) do
+  # Whether a call's hand-offs run in the chat's own conversation is a task
+  # engine question too (M56 §5): the Realtime engine hands nothing off. The row
+  # shows the value in force, so an unset key reads as the chat it means.
+  defp realtime_engine_rows(config, snapshot, restart) do
+    speaker = Map.fetch!(@speaking_engines, config.engine)
+
     [
       Row.new("realtime_backend", :text, "Backend",
-        footer: "Live speaks; your primary provider answers. Change it in Providers.",
+        footer: "#{speaker} speaks; your primary provider answers. Change it in Providers.",
         value: realtime_backend(snapshot),
         read_only: true,
         restart: restart
@@ -188,13 +196,25 @@ defmodule FermixCore.Management.Settings.Voice do
     ]
   end
 
-  # Named, not hidden: this is the OpenAI provider's own slot, and `secret.set`
-  # writes it under that id from either pane.
-  defp realtime_key_row(snapshot) do
+  # Named, not hidden: this is the voice provider's own slot, and `secret.set`
+  # writes it under that id from either pane. Grok's realtime endpoint takes an
+  # API key only, which is why its footer says a sign-in is not enough.
+  defp realtime_key_row(%{provider: "openai"}, snapshot) do
     [
       Row.new("openai_api_key", :secret, "OpenAI key",
         footer: "The same key the OpenAI provider uses.",
         present: Source.secret_present?(snapshot, :openai_api_key),
+        restart: Row.restart?(:providers)
+      )
+    ]
+  end
+
+  defp realtime_key_row(%{provider: "xai"}, snapshot) do
+    [
+      Row.new("xai_api_key", :secret, "SpaceXAI key",
+        footer:
+          "The same key the SpaceXAI provider uses. A SpaceXAI sign-in does not authorize voice.",
+        present: Source.secret_present?(snapshot, :xai_api_key),
         restart: Row.restart?(:providers)
       )
     ]
@@ -321,7 +341,7 @@ defmodule FermixCore.Management.Settings.Voice do
     )
   end
 
-  # One list, both catalogs, each slug carrying the engine it selects. The
+  # One list, every catalog, each slug carrying the engine it selects. The
   # engine is a consequence of the model rather than a control of its own, so
   # the label is what tells an operator which wire they are choosing.
   defp model_option(model) do

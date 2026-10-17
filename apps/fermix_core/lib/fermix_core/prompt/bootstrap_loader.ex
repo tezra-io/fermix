@@ -79,6 +79,38 @@ defmodule FermixCore.Prompt.BootstrapLoader do
     end
   end
 
+  @doc """
+  Load `GROK.md`, the Grok voice frontend's own prompt (M70 §07).
+
+  Outside `load/2`'s map for the reason `load_live/2` is: it instructs the voice
+  frontend that hands tasks to Core, never Core itself. Missing or empty falls
+  back to the shipped template (in memory only — the seeder is still the only
+  writer).
+  """
+  @spec load_grok(String.t(), keyword()) :: {:ok, bootstrap_file()} | {:error, term()}
+  def load_grok(agent_id, opts \\ []) when is_binary(agent_id) and is_list(opts) do
+    with :ok <- BootstrapPaths.validate_agent_id(agent_id) do
+      do_load_grok(agent_id, opts)
+    end
+  end
+
+  defp do_load_grok(agent_id, opts) do
+    path = BootstrapPaths.grok_path(agent_id, opts)
+
+    case BootstrapFile.read_present(path) do
+      {:ok, content} ->
+        file = BootstrapFile.metadata(:grok, path, content, :present)
+        capture_bootstrap_revision(agent_id, :grok_md, file, opts)
+        {:ok, file}
+
+      {:missing, _reason} ->
+        {:ok, BootstrapFile.metadata(:grok, path, Defaults.grok_md(), :fallback)}
+
+      {:error, reason} ->
+        {:error, reason}
+    end
+  end
+
   defp load_identity(agent_id, opts) do
     path = BootstrapPaths.identity_path(agent_id, opts)
 

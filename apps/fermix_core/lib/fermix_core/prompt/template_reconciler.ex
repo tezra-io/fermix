@@ -3,16 +3,17 @@ defmodule FermixCore.Prompt.TemplateReconciler do
   Deterministic reconciliation of installed bootstrap prompts against the
   templates the running binary ships (M43 §9.3).
 
-  `Prompt.SetupSeeder` writes `bootstrap/<agent>/{SOUL,FERMIX,REALTIME,LIVE}.md`
+  `Prompt.SetupSeeder` writes `bootstrap/<agent>/{SOUL,FERMIX,REALTIME,LIVE,GROK}.md`
   once and skips anything that already exists, and `Prompt.BootstrapLoader`
   always prefers the installed file — so a `brew upgrade` or a macOS app update
   ships new template text that an install which never touched its defaults would
   otherwise never run. This module closes that gap without ever overwriting an
   operator's own words.
 
-  Exactly four resources are reconciled: `soul_md`, `fermix_md`, `realtime_md`
-  and `live_md`. `identity_md`, `user_md` and `memory_md` are **never** touched
-  here — IDENTITY keeps its own name reconciliation (`Prompt.IdentityName`) and
+  Exactly five resources are reconciled: `soul_md`, `fermix_md`, `realtime_md`,
+  `live_md` and `grok_md`. `identity_md`, `user_md` and `memory_md` are
+  **never** touched here — IDENTITY keeps its own name reconciliation
+  (`Prompt.IdentityName`) and
   USER/MEMORY are rebuilt from durable memory (`Memory.PromptFiles`). That
   exclusion is the §9.4 hard invariant.
 
@@ -71,7 +72,13 @@ defmodule FermixCore.Prompt.TemplateReconciler do
   @scope_id "global"
 
   # Rendered in this order; the doctor row lists files in it too.
-  @resources [fermix: :fermix_md, soul: :soul_md, realtime: :realtime_md, live: :live_md]
+  @resources [
+    fermix: :fermix_md,
+    soul: :soul_md,
+    realtime: :realtime_md,
+    live: :live_md,
+    grok: :grok_md
+  ]
 
   @baseline_sources ["seed", "template_adopt"]
 
@@ -81,8 +88,8 @@ defmodule FermixCore.Prompt.TemplateReconciler do
   # the reconciler more conservative, never more destructive.
   @revision_scan_limit 500
 
-  @type name :: :fermix | :soul | :realtime | :live
-  @type resource_type :: :fermix_md | :soul_md | :realtime_md | :live_md
+  @type name :: :fermix | :soul | :realtime | :live | :grok
+  @type resource_type :: :fermix_md | :soul_md | :realtime_md | :live_md | :grok_md
 
   @type state ::
           :current | :untouched | :customized | :unknown | :absent | :empty | :skipped
@@ -426,6 +433,7 @@ defmodule FermixCore.Prompt.TemplateReconciler do
   defp resource_path(:soul, agent_id, opts), do: BootstrapPaths.soul_path(agent_id, opts)
   defp resource_path(:realtime, agent_id, opts), do: BootstrapPaths.realtime_path(agent_id, opts)
   defp resource_path(:live, agent_id, opts), do: BootstrapPaths.live_path(agent_id, opts)
+  defp resource_path(:grok, agent_id, opts), do: BootstrapPaths.grok_path(agent_id, opts)
 
   defp same?(left, right), do: String.trim_trailing(left) == String.trim_trailing(right)
 

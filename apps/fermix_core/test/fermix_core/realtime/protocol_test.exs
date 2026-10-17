@@ -65,8 +65,8 @@ defmodule FermixCore.Realtime.ProtocolTest do
   end
 
   test "exposes the version and event catalog as the source of truth" do
-    assert Protocol.protocol_version() == 2
-    assert Protocol.supported_version_range() == {1, 2}
+    assert Protocol.protocol_version() == 3
+    assert Protocol.supported_version_range() == {1, 3}
     assert "client_hello" in Protocol.client_events()
     assert "server_hello" in Protocol.server_events()
   end
@@ -91,10 +91,77 @@ defmodule FermixCore.Realtime.ProtocolTest do
     end
   end
 
-  test "negotiate serves the whole v1/v2 window" do
+  # The floor stays at 1 while the ceiling rises: a v1 companion still runs the
+  # Realtime engine, and an N/N-1 window would have dropped it at v3.
+  test "negotiate serves every version from 1 to 3" do
     assert :ok = Protocol.negotiate(1)
     assert :ok = Protocol.negotiate(2)
-    assert {:error, :client_too_new} = Protocol.negotiate(3)
+    assert :ok = Protocol.negotiate(3)
+    assert {:error, :client_too_new} = Protocol.negotiate(4)
+  end
+
+  test "v3 adds playback_progress without dropping a v1 or v2 event" do
+    assert "playback_progress" in Protocol.client_events()
+
+    for type <- ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel) do
+      assert type in Protocol.client_events()
+    end
+  end
+
+  test "decodes playback_progress with an id, the played milliseconds and the drain flag" do
+    config = Config.normalize([])
+
+    assert {:ok,
+            %{
+              type: "playback_progress",
+              payload: %{"playback_id" => "p17", "played_ms" => 420, "drained" => false}
+            }} =
+             Protocol.decode_client_event(
+               ~s({"type":"playback_progress","playback_id":"p17","played_ms":420,"drained":false}),
+               config
+             )
+
+    assert {:ok, %{payload: %{"played_ms" => 0, "drained" => true}}} =
+             Protocol.decode_client_event(
+               ~s({"type":"playback_progress","playback_id":"p17","played_ms":0,"drained":true}),
+               config
+             )
+  end
+
+  test "a playback_id is a non-empty string of at most 64 bytes" do
+    config = Config.normalize([])
+    longest = String.duplicate("p", 64)
+
+    assert {:ok, %{payload: %{"playback_id" => ^longest}}} =
+             Protocol.decode_client_event(progress(~s("#{longest}"), "1", "false"), config)
+
+    for id <- [nil, ~s(""), "7", "null", ~s("#{String.duplicate("p", 65)}")] do
+      assert {:error, :missing_playback_id} =
+               Protocol.decode_client_event(progress(id, "1", "false"), config),
+             "expected playback_id #{inspect(id)} to be refused"
+    end
+  end
+
+  test "rejects a playback_progress whose played_ms is not a non-negative integer" do
+    config = Config.normalize([])
+
+    for played_ms <- [nil, "-1", ~s("420"), "1.5", "null"] do
+      assert {:error, :invalid_played_ms} =
+               Protocol.decode_client_event(progress(~s("p1"), played_ms, "true"), config),
+             "expected played_ms #{inspect(played_ms)} to be refused"
+    end
+  end
+
+  # Required, not defaulted: a pet that leaves it out has not said whether the
+  # id drained, and the daemon paces audio on exactly that.
+  test "rejects a playback_progress without a boolean drained flag" do
+    config = Config.normalize([])
+
+    for drained <- [nil, ~s("true"), "1", "null"] do
+      assert {:error, :invalid_drained} =
+               Protocol.decode_client_event(progress(~s("p1"), "10", drained), config),
+             "expected drained #{inspect(drained)} to be refused"
+    end
   end
 
   test "decodes task_cancel with a non-empty delegation_id" do
@@ -225,5 +292,14 @@ defmodule FermixCore.Realtime.ProtocolTest do
 
     assert {:ok, line} = Protocol.encode_server_event("playback_stop", %{})
     assert Jason.decode!(String.trim_trailing(line)) == %{"type" => "playback_stop"}
+  end
+
+  # One `playback_progress` frame, each field spelled as raw JSON; `nil` leaves
+  # the field out.
+  defp progress(playback_id, played_ms, drained) do
+    [{"playback_id", playback_id}, {"played_ms", played_ms}, {"drained", drained}]
+    |> Enum.reject(fn {_key, raw} -> is_nil(raw) end)
+    |> Enum.map_join(fn {key, raw} -> ~s(,"#{key}":#{raw}) end)
+    |> then(&~s({"type":"playback_progress"#{&1}}))
   end
 end

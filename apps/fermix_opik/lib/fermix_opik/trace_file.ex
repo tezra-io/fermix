@@ -128,7 +128,12 @@ defmodule FermixOpik.TraceFile do
        # reached the screen. Two closed words — never a window title and never an
        # application name.
        :target_kind,
-       :cu_mode
+       :cu_mode,
+       # A voice call's task function (M70 §09): the terminal word and the
+       # Fermix-minted task id that tell a refused or cancelled call from one
+       # that ran. Never the request the model sent.
+       :status,
+       :task_id
      ])}
   end
 
@@ -243,7 +248,8 @@ defmodule FermixOpik.TraceFile do
     {[:fermix, :realtime, :call_stop], realtime_usage_measurements(row), realtime_meta(row)}
   end
 
-  # A GPT-Live voice call (M41 §7). Every row replays through one allowlist that
+  # A voice call on a task engine, GPT Live (M41 §7) or Grok (M70 §09), told
+  # apart by `engine` and `provider`. Every row replays through one allowlist that
   # INCLUDES `parent_session`: a delegation's turn is linked to its call by that
   # field alone, so dropping it would replay a call and its backend turns as
   # unrelated roots.
@@ -374,6 +380,7 @@ defmodule FermixOpik.TraceFile do
       :parent_session,
       :agent,
       :engine,
+      :provider,
       :device_id,
       :model,
       :voice,
@@ -391,11 +398,25 @@ defmodule FermixOpik.TraceFile do
   end
 
   # Rebuild a voice_live row's numeric measurements. Voice is duration-priced,
-  # so the ledger is seconds plus integer millicents — never tokens. Only keys
-  # actually present are carried: a call whose finalization never completed must
-  # replay with no cost rather than a fabricated zero.
+  # so the ledger is seconds plus integer millicents — never tokens — and, on a
+  # Grok call, the billable text items it was sent, its user turns and how long
+  # the owner waited. Only keys actually present are carried: a call whose
+  # finalization never completed must replay with no cost rather than a
+  # fabricated zero, and a latency with no sample stays unknown.
   defp voice_live_usage_measurements(row) do
-    [:voice_seconds, :voice_cost_millicents, :backend_turns, :accounting_complete, :duration_ms]
+    [
+      :voice_seconds,
+      :voice_cost_millicents,
+      :voice_text_items,
+      :backend_turns,
+      :accounting_complete,
+      :user_turns,
+      :generation_latency_ms_median,
+      :generation_latency_ms_max,
+      :audible_latency_ms_median,
+      :audible_latency_ms_max,
+      :duration_ms
+    ]
     |> Enum.reduce(%{}, fn key, acc ->
       case Map.fetch(row, Atom.to_string(key)) do
         {:ok, value} when is_number(value) -> Map.put(acc, key, value)

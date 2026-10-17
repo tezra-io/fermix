@@ -156,6 +156,27 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     end
   end
 
+  # GROK.md is the Grok voice frontend's prompt (M70 §07), loaded through
+  # `BootstrapLoader.load_grok/2` for that frontend alone, for LIVE.md's reason.
+  test "compose_with_metadata/1 never carries GROK.md, realtime sessions included", %{
+    agent_id: agent_id
+  } do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    write_bootstrap(agent_id, "FERMIX.md", "agents content")
+    write_bootstrap(agent_id, "REALTIME.md", "realtime voice rules")
+    write_bootstrap(agent_id, "GROK.md", "## Role & Persona\n\ngrok frontend rules")
+
+    for opts <- [[], [realtime?: true]] do
+      assert {:ok, composition} =
+               PromptComposer.compose_with_metadata(
+                 [agent_id: agent_id, available_skills: []] ++ opts
+               )
+
+      refute Enum.any?(composition.parts, &(&1.name == :grok))
+      refute Enum.any?(composition.messages, &(&1.content =~ "grok frontend rules"))
+    end
+  end
+
   test "compose/1 falls back to defaults for IDENTITY/FERMIX when bootstrap is missing", %{
     agent_id: agent_id
   } do

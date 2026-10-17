@@ -36,6 +36,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.OpenAI.ChatGPTPlan
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.RouteResolver
+  alias FermixCore.Realtime.Config, as: RealtimeConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.PlaceSearch.AppleMaps, as: PlaceAppleMaps
@@ -141,13 +142,17 @@ defmodule FermixCore.Setup.Doctor do
           | {:network, reason :: term()}
   @type key_probe_error ::
           :no_key
-          | {:refused, status :: 401 | 403, code :: String.t() | nil}
+          | {:refused, status :: 400 | 401 | 403, code :: String.t() | nil}
           | {:server_error, status :: pos_integer()}
           | {:network, reason :: term()}
 
   @openai_default_url "https://api.openai.com/v1/responses"
-  # The host both voice engines dial. Listing models is free and sends no prompt.
-  @openai_models_url "https://api.openai.com/v1/models"
+  # The host each voice provider's engines dial. Listing models is free and
+  # sends no prompt.
+  @voice_models_urls %{
+    "openai" => "https://api.openai.com/v1/models",
+    "xai" => "https://api.x.ai/v1/models"
+  }
   @anthropic_default_url "https://api.anthropic.com/v1/messages"
   # xAI base_url is a ROOT (the adapter appends /responses); the probe must
   # do the same so a configured/overlaid root base_url hits the same URL the
@@ -228,51 +233,69 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   @doc """
-  Whether OpenAI accepts the `openai` provider key, the one a voice call dials
-  with whatever the primary provider is. One GET of the model list: free, no
-  prompt, and no model named, so any key OpenAI would accept passes.
+  Whether the voice provider accepts the key a voice call dials with, whatever
+  the primary provider is: the `openai` provider key for both OpenAI engines,
+  the `xai` provider key for Grok, read through `RealtimeConfig.api_key/1`. One
+  GET of the model list: free, no prompt, and no model named, so any key the
+  vendor would accept passes.
 
-  A refusal carries its status and OpenAI's error code, never the message or the
-  body: for a refused key OpenAI's message quotes the key's tail.
+  A refusal carries its status and the vendor's error code, never the message or
+  the body: for a refused key both vendors' messages quote the key's tail.
+  SpaceXAI refuses a key it does not accept with 400 as well as 401.
   """
-  @spec probe_openai_key(keyword()) ::
+  @spec probe_voice_key(RealtimeConfig.t(), keyword()) ::
           {:ok, %{latency_ms: non_neg_integer()}} | {:error, key_probe_error()}
-  def probe_openai_key(opts \\ []) when is_list(opts) do
-    case FermixCore.Config.provider_api_key(:openai) do
-      {:ok, key} -> request_openai_models(key, opts)
-      {:error, :not_configured} -> {:error, :no_key}
+  def probe_voice_key(%RealtimeConfig{} = config, opts \\ []) when is_list(opts) do
+    case RealtimeConfig.api_key(config) do
+      {:ok, key} -> request_voice_models(config.provider, key, opts)
+      {:error, {:missing_api_key, _provider}} -> {:error, :no_key}
     end
   end
 
-  defp request_openai_models(key, opts) do
+  defp request_voice_models(provider, key, opts) do
     start = System.monotonic_time(:millisecond)
+    url = Map.fetch!(@voice_models_urls, provider)
 
-    Req.new(url: @openai_models_url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
+    Req.new(url: url, method: :get, headers: [{"authorization", "Bearer #{key}"}])
     |> Req.merge(probe_req_options(opts))
     |> Egress.attach(:direct)
     |> Req.request()
-    |> classify_key_probe(start)
+    |> classify_key_probe(provider, start)
   end
 
-  defp classify_key_probe({:ok, %Req.Response{status: status}}, start) when status in 200..299,
-    do: {:ok, %{latency_ms: elapsed_ms(start)}}
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _provider, start)
+       when status in 200..299,
+       do: {:ok, %{latency_ms: elapsed_ms(start)}}
 
-  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, _start)
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, "openai", _start)
        when status in [401, 403],
        do: {:error, {:refused, status, openai_error_code(body)}}
 
-  defp classify_key_probe({:ok, %Req.Response{status: status}}, _start),
+  defp classify_key_probe({:ok, %Req.Response{status: status, body: body}}, "xai", _start)
+       when status in [400, 401, 403],
+       do: {:error, {:refused, status, xai_error_code(body)}}
+
+  defp classify_key_probe({:ok, %Req.Response{status: status}}, _provider, _start),
     do: {:error, {:server_error, status}}
 
-  defp classify_key_probe({:error, reason}, _start), do: {:error, {:network, reason}}
+  defp classify_key_probe({:error, reason}, _provider, _start), do: {:error, {:network, reason}}
 
   # OpenAI's `code` is a fixed identifier such as `invalid_api_key`; anything
   # else in that field is dropped rather than repeated.
-  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code) do
-    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
-  end
+  defp openai_error_code(%{"error" => %{"code" => code}}) when is_binary(code),
+    do: error_identifier(code)
 
   defp openai_error_code(_body), do: nil
+
+  # SpaceXAI answers at the top level, and its `code` is usually a sentence
+  # (`Client specified an invalid argument`), which is dropped like any other
+  # non-identifier: the status says enough.
+  defp xai_error_code(%{"code" => code}) when is_binary(code), do: error_identifier(code)
+  defp xai_error_code(body), do: openai_error_code(body)
+
+  defp error_identifier(code) do
+    if Regex.match?(~r/\A[a-z0-9_.]{1,64}\z/, code), do: code
+  end
 
   @doc """
   Offline freshness sweep over the auth store: the sorted profile names whose

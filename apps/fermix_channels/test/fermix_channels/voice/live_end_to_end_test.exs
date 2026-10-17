@@ -978,7 +978,7 @@ defmodule FermixChannels.Voice.LiveEndToEndTest do
 
   defp delegation_event_queued?(session) do
     {:messages, messages} = Process.info(session, :messages)
-    Enum.any?(messages, &match?({:delegation_event, "dg_1", {:result, _result}}, &1))
+    Enum.any?(messages, &match?({:delegation_event, "dg_1", _revision, {:result, _result}}, &1))
   end
 
   # The chat's timeline on a throwaway repo, a companion connection's place in

@@ -351,8 +351,8 @@ defmodule FermixCore.Management.Settings do
   # both are real: choosing a transcription backend snaps the shared model key to
   # that backend's default (the key is shared across backends and an
   # OpenAI-shaped model on Deepgram fails at the provider), and choosing a voice
-  # model of the other engine moves the engine, the voice and the reasoning
-  # effort with it.
+  # model of another engine moves the engine, the voice, the reasoning effort
+  # and, onto Grok, screen sharing with it.
   defp side_effects(before, current, switch) do
     transcription_side_effects(before, current) ++ engine_side_effects(switch)
   end
@@ -380,7 +380,8 @@ defmodule FermixCore.Management.Settings do
       conversation_sentence(
         Keyword.has_key?(previous, :conversation),
         Keyword.has_key?(now, :conversation)
-      )
+      ) ++
+      screen_share_sentence(screen_share?(previous), screen_share?(now))
   end
 
   # The model is what the operator picked, so naming it back would only repeat
@@ -388,8 +389,9 @@ defmodule FermixCore.Management.Settings do
   # rows below the model changed.
   defp engine_sentence(engine), do: ["The engine changed to #{Voice.engine_label(engine)}."]
 
-  # Unlike the model, a voice usually survives a switch: only a Live-only voice
-  # has to move, so the sentence fires on the change rather than on the switch.
+  # Unlike the model, a voice usually survives a switch between the OpenAI
+  # engines: only a Live-only voice has to move, so the sentence fires on the
+  # change rather than on the switch.
   defp voice_sentence(same, same), do: []
   defp voice_sentence(_previous, voice), do: ["The voice changed to #{voice}."]
 
@@ -401,12 +403,24 @@ defmodule FermixCore.Management.Settings do
   defp effort_sentence(false, true),
     do: ["Reasoning effort was restored because this engine uses it."]
 
-  # Live-only, so only the journey to Realtime moves it, and only a value the
-  # owner chose is there to lose: back on Live an unset key means the chat.
+  # A task-engine setting, so only the journey to Realtime moves it, and only a
+  # value the owner chose is there to lose: back on a task engine an unset key
+  # means the chat.
   defp conversation_sentence(true, false),
     do: ["Whether voice calls join the chat was reset because this engine does not use it."]
 
   defp conversation_sentence(_previous, _now), do: []
+
+  # Grok has no continuous screen perception, so the journey onto it turns the
+  # switch off; the return journey leaves it off for the owner to turn back on.
+  defp screen_share_sentence(true, false),
+    do: ["Screen sharing during calls was turned off because this engine does not support it."]
+
+  defp screen_share_sentence(_previous, _now), do: []
+
+  # An absent key is the struct default, which is on.
+  defp screen_share?(block),
+    do: Keyword.get(block, :screen_share, %RealtimeConfig{}.screen_share?) == true
 
   defp transcription_model(snapshot) do
     snapshot

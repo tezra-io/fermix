@@ -14,32 +14,39 @@ defmodule FermixCore.Realtime.Protocol do
 
   A connection opens with a mandatory handshake: the client sends `client_hello`
   carrying its `protocol_version`; the daemon replies `server_hello` with the
-  inclusive `{min_version, max_version}` range it supports (an N/N-1 window — the
-  current version and the previous one). Each side connects only if its version
+  inclusive `{min_version, max_version}` range it supports (every version a
+  released companion may still speak). Each side connects only if its version
   falls inside the other's range; otherwise it refuses and reports which side
   must update. See `PROTOCOL.md` for the state machine and the rollout order.
 
   Version 2 adds the Live engine's frames (`task_cancel`, `call_ready`,
-  `caption`, `task`). A version-1 companion is still served for the Realtime
-  engine; a Live-configured call refuses it at `call_start` with
-  `update_required` (the rule lives in `LocalVoiceSocket`, which is the only
-  place that knows both the negotiated version and the configured engine).
+  `caption`, `task`). Version 3 adds the Grok engine's playback feedback
+  (`playback_id` on `audio_delta`, `playback_progress`). An older companion is
+  still served for the engines it can render; a call whose engine needs a newer
+  version refuses it at `call_start` with `update_required` (the rule lives in
+  `LocalVoiceSocket`, which is the only place that knows both the negotiated
+  version and the configured engine).
   """
 
   alias FermixCore.Realtime.Config
 
-  # Bumped in lockstep with any wire-shape change. The supported range is an
-  # N/N-1 window derived from this single constant, so a bump automatically
-  # keeps accepting the previous version for one release.
-  @protocol_version 2
-  @min_supported_version max(1, @protocol_version - 1)
+  # Bumped in lockstep with any wire-shape change.
+  @protocol_version 3
+  # A literal, not derived from the version: a v1 companion still runs the
+  # Realtime engine, and the N/N-1 window this once was would have dropped it
+  # silently at v3. Raising the floor is a release decision of its own.
+  @min_supported_version 1
 
-  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel)
+  @client_events ~w(client_hello call_start audio_chunk interrupt mute call_stop task_cancel playback_progress)
   @server_events ~w(server_hello state audio_delta transcript_delta assistant_text_delta assistant_text_done tool_event usage error playback_stop call_ready caption task)
 
-  # One call per daemon: a `call_start` while another Live call is up or still
-  # settling is refused with this `error.reason`.
+  # One call per daemon: a `call_start` while another task-engine call is up or
+  # still settling is refused with this `error.reason`.
   @call_in_progress "call_in_progress"
+
+  # The wire's bound on a `playback_id`. The daemon mints the id and the
+  # companion echoes it back in `playback_progress`.
+  @playback_id_max_bytes 64
 
   @type event :: %{type: String.t(), payload: map()}
 
@@ -48,13 +55,13 @@ defmodule FermixCore.Realtime.Protocol do
   def protocol_version, do: @protocol_version
 
   @doc """
-  The `error.reason` that refuses a `call_start` while another Live call is up
-  or still settling. Terminal: the connection closes after it.
+  The `error.reason` that refuses a `call_start` while another task-engine call
+  is up or still settling. Terminal: the connection closes after it.
   """
   @spec call_in_progress() :: String.t()
   def call_in_progress, do: @call_in_progress
 
-  @doc "Inclusive `{min, max}` protocol versions the daemon accepts (an N/N-1 window)."
+  @doc "Inclusive `{min, max}` protocol versions the daemon accepts."
   @spec supported_version_range() :: {pos_integer(), pos_integer()}
   def supported_version_range, do: {@min_supported_version, @protocol_version}
 
@@ -149,6 +156,14 @@ defmodule FermixCore.Realtime.Protocol do
     end
   end
 
+  defp payload_for("playback_progress", decoded, _config) do
+    with {:ok, playback_id} <- fetch_playback_id(decoded),
+         {:ok, played_ms} <- fetch_played_ms(decoded),
+         {:ok, drained?} <- fetch_drained(decoded) do
+      {:ok, %{"playback_id" => playback_id, "played_ms" => played_ms, "drained" => drained?}}
+    end
+  end
+
   defp payload_for("interrupt", decoded, _config) do
     case Map.get(decoded, "audio_end_ms") do
       nil -> {:ok, Map.delete(decoded, "type")}
@@ -158,6 +173,18 @@ defmodule FermixCore.Realtime.Protocol do
   end
 
   defp payload_for(_type, decoded, _config), do: {:ok, Map.delete(decoded, "type")}
+
+  defp fetch_playback_id(%{"playback_id" => id})
+       when is_binary(id) and id != "" and byte_size(id) <= @playback_id_max_bytes,
+       do: {:ok, id}
+
+  defp fetch_playback_id(_decoded), do: {:error, :missing_playback_id}
+
+  defp fetch_played_ms(%{"played_ms" => ms}) when is_integer(ms) and ms >= 0, do: {:ok, ms}
+  defp fetch_played_ms(_decoded), do: {:error, :invalid_played_ms}
+
+  defp fetch_drained(%{"drained" => drained?}) when is_boolean(drained?), do: {:ok, drained?}
+  defp fetch_drained(_decoded), do: {:error, :invalid_drained}
 
   defp fetch_audio(%{"audio" => audio}) when is_binary(audio) and audio != "", do: {:ok, audio}
   defp fetch_audio(_decoded), do: {:error, :missing_audio}

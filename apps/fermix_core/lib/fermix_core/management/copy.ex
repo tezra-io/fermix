@@ -76,6 +76,7 @@ defmodule FermixCore.Management.Copy do
     "Realtime",
     "Providers",
     "Channels",
+    "Voice",
     "Telegram",
     "WhatsApp",
     "Discord",

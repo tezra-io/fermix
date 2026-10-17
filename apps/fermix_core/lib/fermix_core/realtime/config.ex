@@ -2,19 +2,35 @@ defmodule FermixCore.Realtime.Config do
   @moduledoc """
   Runtime configuration for the local Realtime voice subsystem.
 
-  Two engines share this section and the one OpenAI Platform key:
-  `openai_realtime` (the Realtime API, integrated tools) and `openai_live`
-  (the Live API, which delegates every tool call back to the Fermix agent).
-  The engine is the first axis — model, voice and the Realtime-only settings
-  are all validated against it, so a cross-engine config is refused at the
-  boundary instead of reaching a provider that cannot honor it.
+  Three engines share this section: `openai_realtime` (the Realtime API,
+  integrated tools), `openai_live` (the Live API, which delegates every tool
+  call back to the Fermix agent) and `xai_realtime` (Grok Voice, which does the
+  same through SpaceXAI). The engine is the first axis — provider, model, voice
+  and the Realtime-only settings are all validated against it, so a
+  cross-engine config is refused at the boundary instead of reaching a
+  provider that cannot honor it.
+
+  `api_key/1` is the one voice credential resolver: startup, readiness,
+  health, doctor and call construction all read the key through it.
   """
 
+  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Setup.ConfigStore
 
-  # The engine axis. `provider` stays `"openai"` for both: the same Platform key
-  # authenticates the Realtime and the Live wire.
-  @valid_engines ~w(openai_realtime openai_live)
+  # The engine axis. Each engine names the provider it bills (`@engine_providers`):
+  # the same OpenAI Platform key authenticates the Realtime and the Live wire, and
+  # Grok takes the SpaceXAI provider's own key.
+  @valid_engines ~w(openai_realtime openai_live xai_realtime)
+  @engine_providers %{
+    "openai_realtime" => "openai",
+    "openai_live" => "openai",
+    "xai_realtime" => "xai"
+  }
+  # The providers block each voice provider's key lives in.
+  @provider_atoms %{"openai" => :openai, "xai" => :xai}
+
+  # The engines that hand every task to the Fermix agent through `VoiceBridge`.
+  @task_engines ~w(openai_live xai_realtime)
 
   # The one source of truth for realtime model slugs: the API validation
   # (`validate!/1`) and the setup dropdown (`RealtimeConfig.valid_models/0`)
@@ -28,6 +44,9 @@ defmodule FermixCore.Realtime.Config do
   # silent substitution.
   @live_models ~w(gpt-live-1)
 
+  # Grok Voice is pinned to one model (M70 §06).
+  @grok_models ~w(grok-voice-3.0)
+
   # The full official OpenAI Realtime voice set, ordered for the setup dropdown
   # with the recommended voices first (`marin`/`cedar` are OpenAI's picks).
   # Validation accepts ALL of them: a config upgraded from an earlier Fermix
@@ -40,6 +59,10 @@ defmodule FermixCore.Realtime.Config do
   @live_voices ~w(marin cedar sage verse alloy ash ballad coral echo shimmer beacon bossa
                   cinder delta gleam meridian quartz ripple stone tempo vesper willow)
 
+  # Grok's documented built-ins, the first one its default. Custom voices are
+  # a separate, reviewed extension (M70 §06).
+  @grok_voices ~w(eve ara rex sal leo)
+
   # Realtime reasoning-effort levels, exactly as the Realtime `session.update`
   # accepts them (note: `minimal`, no `none`/`max` — this differs from the main
   # agent's `ReasoningEffort` vocabulary, so it is validated separately here).
@@ -47,19 +70,23 @@ defmodule FermixCore.Realtime.Config do
   # a voice agent (responsiveness plus basic reasoning).
   @valid_reasoning_efforts ~w(minimal low medium high xhigh)
 
-  # Settings the Live wire has no equivalent for. Present under `openai_live`
-  # they are refused (Rule 12 — no silently-ignored settings); absent, they
-  # normalize to nil so nothing downstream can read a Realtime default and put
-  # it on a Live payload.
+  # Settings neither task engine's wire has an equivalent for. Present under
+  # `openai_live` or `xai_realtime` they are refused (Rule 12 — no
+  # silently-ignored settings); absent, they normalize to nil so nothing
+  # downstream can read a Realtime default and put it on a task engine's payload.
   @realtime_only_keys [:reasoning_effort, :transcription_model, :max_response_output_tokens]
 
   # The mirror image: settings the Realtime wire has no use for, refused under
   # `openai_realtime` the same way (M56 §5).
   @live_only_keys [:conversation]
 
-  # Where a Live call's hand-offs run (M56 §5): in the chat's own conversation,
-  # or, `private`, in one of the call's own as before.
+  # Where a task engine's hand-offs run (M56 §5): in the chat's own
+  # conversation, or, `private`, in one of the call's own as before.
   @conversations ~w(chat private)
+
+  # A secret reference that never resolved out of the keychain or the secrets
+  # directory is a marker, not a key, and an empty value is no key at all.
+  @unresolved_keys ["", "@keyring", "@file"]
 
   @type t :: %__MODULE__{
           enabled?: boolean(),
@@ -129,16 +156,17 @@ defmodule FermixCore.Realtime.Config do
   @spec valid_models(String.t()) :: [String.t()]
   def valid_models("openai_realtime"), do: @realtime_models
   def valid_models("openai_live"), do: @live_models
+  def valid_models("xai_realtime"), do: @grok_models
 
   @doc """
-  Every model slug both engines ship, Realtime first, then Live.
+  Every model slug the engines ship, Realtime first, then Live, then Grok.
 
   The order of the one combined dropdown: the operator picks a model and the
   engine follows from it, so this list and `engine_for_model/1` are the two
   halves of that single choice.
   """
   @spec all_models() :: [String.t()]
-  def all_models, do: @realtime_models ++ @live_models
+  def all_models, do: @realtime_models ++ @live_models ++ @grok_models
 
   @doc """
   The engine a model slug belongs to, or `:error` for a slug no engine ships.
@@ -152,6 +180,7 @@ defmodule FermixCore.Realtime.Config do
     cond do
       model in @realtime_models -> {:ok, "openai_realtime"}
       model in @live_models -> {:ok, "openai_live"}
+      model in @grok_models -> {:ok, "xai_realtime"}
       true -> :error
     end
   end
@@ -164,6 +193,7 @@ defmodule FermixCore.Realtime.Config do
   @spec valid_voices(String.t()) :: [String.t()]
   def valid_voices("openai_realtime"), do: @realtime_voices
   def valid_voices("openai_live"), do: @live_voices
+  def valid_voices("xai_realtime"), do: @grok_voices
 
   @doc "Realtime reasoning-effort levels, ordered low→high for the setup dropdown."
   @spec valid_reasoning_efforts() :: [String.t()]
@@ -173,25 +203,71 @@ defmodule FermixCore.Realtime.Config do
   @spec default_model(String.t()) :: String.t()
   def default_model("openai_realtime"), do: "gpt-realtime-2"
   def default_model("openai_live"), do: "gpt-live-1"
+  def default_model("xai_realtime"), do: "grok-voice-3.0"
 
-  @doc "True when this config selects the OpenAI Live engine."
+  @doc """
+  The voice a fresh config, and an engine switch that strands a voice, lands on.
+
+  `marin` opens both OpenAI catalogs; Grok's catalog opens with `eve`.
+  """
+  @spec default_voice(String.t()) :: String.t()
+  def default_voice(engine) when engine in ["openai_realtime", "openai_live"], do: "marin"
+  def default_voice("xai_realtime"), do: "eve"
+
+  @doc ~S(The provider an engine dials and bills: `"openai"` or `"xai"`.)
+  @spec provider_for_engine(String.t()) :: String.t()
+  def provider_for_engine(engine) when is_map_key(@engine_providers, engine),
+    do: Map.fetch!(@engine_providers, engine)
+
+  @doc "True when this config selects the OpenAI Live engine (its wire, not Grok's)."
   @spec live?(t()) :: boolean()
   def live?(%__MODULE__{engine: engine}), do: engine == "openai_live"
+
+  @doc """
+  True when this config selects a task engine: one that hands every task to
+  the Fermix agent through `VoiceBridge` (`openai_live` and `xai_realtime`).
+  """
+  @spec hands_off_tasks?(t()) :: boolean()
+  def hands_off_tasks?(%__MODULE__{engine: engine}), do: engine in @task_engines
+
+  @doc """
+  The voice provider's API key, or the provider that has none.
+
+  The one resolver every reader of the voice key goes through. OpenAI's engines
+  read the `openai` provider key; Grok reads the `xai` provider's `api_key`
+  slot, never a SpaceXAI sign-in and never the voice-notes override, because
+  the realtime endpoint documents API-key authentication only. An empty value
+  and an unresolved secret reference are no key.
+  """
+  @spec api_key(t()) :: {:ok, String.t()} | {:error, {:missing_api_key, String.t()}}
+  def api_key(%__MODULE__{provider: provider}) when is_map_key(@provider_atoms, provider) do
+    case CoreConfig.provider_api_key(Map.fetch!(@provider_atoms, provider)) do
+      {:ok, key} when key in @unresolved_keys -> {:error, {:missing_api_key, provider}}
+      {:ok, key} -> {:ok, key}
+      {:error, :not_configured} -> {:error, {:missing_api_key, provider}}
+    end
+  end
+
+  @doc "Whether `api_key/1` resolves a key for this config."
+  @spec api_key_present?(t()) :: boolean()
+  def api_key_present?(%__MODULE__{} = config), do: match?({:ok, _key}, api_key(config))
 
   @doc "The values `conversation` takes, in the order a pane offers them."
   @spec conversations() :: [String.t()]
   def conversations, do: @conversations
 
   @doc """
-  Where a Live call's hand-offs run (M56 §5): `"chat"`, the chat's own
-  conversation, unless the owner chose `"private"`. Live only: the Realtime
-  engine has no hand-offs, and asking it is a defect.
+  Where a task engine's hand-offs run (M56 §5): `"chat"`, the chat's own
+  conversation, unless the owner chose `"private"`. Task engines only: the
+  Realtime engine has no hand-offs, and asking it is a defect.
   """
   @spec conversation(t()) :: String.t()
-  def conversation(%__MODULE__{engine: "openai_live", conversation: nil}), do: "chat"
+  def conversation(%__MODULE__{engine: engine, conversation: nil}) when engine in @task_engines,
+    do: "chat"
 
-  def conversation(%__MODULE__{engine: "openai_live", conversation: conversation}),
-    do: conversation
+  def conversation(%__MODULE__{engine: engine, conversation: conversation})
+      when engine in @task_engines,
+      do: conversation
 
   @spec normalize(keyword() | map() | nil) :: t()
   def normalize(nil), do: normalize([])
@@ -221,11 +297,11 @@ defmodule FermixCore.Realtime.Config do
 
     realtime = %__MODULE__{
       enabled?: bool(config, :enabled, false),
-      provider: string(config, :provider, "openai"),
+      provider: string(config, :provider, provider_for_engine(engine)),
       engine: engine,
       model: string(config, :model, default_model(engine)),
       reasoning_effort: reasoning_effort(config, engine),
-      voice: string(config, :voice, "marin"),
+      voice: string(config, :voice, default_voice(engine)),
       input_audio_format: string(config, :input_audio_format, "pcm16"),
       output_audio_format: string(config, :output_audio_format, "pcm16"),
       transcription_model: transcription_model(config, engine),
@@ -234,7 +310,7 @@ defmodule FermixCore.Realtime.Config do
       max_session_minutes: positive_int(config, :max_session_minutes, 15),
       max_estimated_cost_cents_per_session:
         positive_int(config, :max_estimated_cost_cents_per_session, 100),
-      screen_share?: bool(config, :screen_share, true),
+      screen_share?: screen_share(config, engine),
       persist_transcripts?: bool(config, :persist_transcripts, false),
       persist_audio?: bool(config, :persist_audio, false),
       conversation: conversation_setting(config, engine)
@@ -273,12 +349,12 @@ defmodule FermixCore.Realtime.Config do
   end
 
   # `to_keyword/1` is the inverse of `normalize/1` on the persist path, so it
-  # must never render a key the parser refuses: under Live, `reasoning_effort`
-  # is exactly such a key.
-  defp reasoning_effort_keyword(%__MODULE__{engine: "openai_live"}), do: []
-
-  defp reasoning_effort_keyword(%__MODULE__{reasoning_effort: effort}),
+  # must never render a key the parser refuses: under a task engine,
+  # `reasoning_effort` is exactly such a key.
+  defp reasoning_effort_keyword(%__MODULE__{engine: "openai_realtime", reasoning_effort: effort}),
     do: [reasoning_effort: effort]
+
+  defp reasoning_effort_keyword(%__MODULE__{}), do: []
 
   # Written only once someone set it, so the file keeps "never chosen" apart
   # from a chosen default (M56 D2).
@@ -295,17 +371,25 @@ defmodule FermixCore.Realtime.Config do
 
   defp reject_realtime_only_keys!(_config, "openai_realtime"), do: :ok
 
-  defp reject_realtime_only_keys!(config, "openai_live") do
+  defp reject_realtime_only_keys!(config, engine) do
     Enum.each(@realtime_only_keys, fn key ->
       unless is_nil(lookup(config, key)) do
-        raise ArgumentError,
-              "realtime.#{key} is a Realtime-only setting; remove it from " <>
-                ~s([fermix_core.realtime] or set engine = "openai_realtime")
+        raise ArgumentError, realtime_only_message(key, engine)
       end
     end)
   end
 
-  defp reject_live_only_keys!(_config, "openai_live"), do: :ok
+  defp realtime_only_message(key, "openai_live") do
+    "realtime.#{key} is a Realtime-only setting; remove it from " <>
+      ~s([fermix_core.realtime] or set engine = "openai_realtime")
+  end
+
+  defp realtime_only_message(key, engine) do
+    "realtime.#{key} is a Realtime-only setting, not supported by engine #{engine}; " <>
+      ~s(remove it from [fermix_core.realtime] or set engine = "openai_realtime")
+  end
+
+  defp reject_live_only_keys!(_config, engine) when engine in @task_engines, do: :ok
 
   defp reject_live_only_keys!(config, "openai_realtime") do
     Enum.each(@live_only_keys, fn key ->
@@ -319,31 +403,46 @@ defmodule FermixCore.Realtime.Config do
 
   defp conversation_setting(_config, "openai_realtime"), do: nil
 
-  defp conversation_setting(config, "openai_live") do
+  defp conversation_setting(config, _task_engine) do
     case string(config, :conversation, nil) do
       nil -> nil
       conversation -> one_of!(conversation, @conversations, :conversation)
     end
   end
 
-  defp reasoning_effort(_config, "openai_live"), do: nil
+  # Grok receives audio and permitted text only (M70 §07), so continuous screen
+  # perception is off under it, and a hand-set `true` is refused rather than
+  # silently ignored.
+  defp screen_share(config, "xai_realtime") do
+    if bool(config, :screen_share, false) do
+      raise ArgumentError,
+            "realtime.screen_share is not supported by engine xai_realtime; " <>
+              "set it to false or pick another model"
+    end
+
+    false
+  end
+
+  defp screen_share(config, _openai_engine), do: bool(config, :screen_share, true)
 
   defp reasoning_effort(config, "openai_realtime"),
     do: string(config, :reasoning_effort, "low")
 
-  defp transcription_model(_config, "openai_live"), do: nil
+  defp reasoning_effort(_config, _task_engine), do: nil
 
   defp transcription_model(config, "openai_realtime"),
     do: string(config, :transcription_model, "whisper-1")
 
-  defp max_response_output_tokens(_config, "openai_live"), do: nil
+  defp transcription_model(_config, _task_engine), do: nil
 
   defp max_response_output_tokens(config, "openai_realtime"),
     do: positive_int(config, :max_response_output_tokens, 4_096)
 
+  defp max_response_output_tokens(_config, _task_engine), do: nil
+
   defp validate!(%__MODULE__{} = config) do
-    assert_equal!(config.provider, "openai", :provider)
     assert_model!(config.model, config.engine)
+    assert_provider!(config)
     assert_reasoning_effort!(config.reasoning_effort, config.engine)
     assert_one_of!(config.voice, valid_voices(config.engine), :voice)
     assert_equal!(config.input_audio_format, "pcm16", :input_audio_format)
@@ -356,28 +455,48 @@ defmodule FermixCore.Realtime.Config do
     config
   end
 
-  defp assert_model!(model, "openai_live") do
-    unless model in @live_models do
-      raise ArgumentError,
-            "realtime.model must be #{Enum.join(@live_models, ", ")} " <>
-              ~s(when engine = "openai_live", got: #{inspect(model)})
-    end
-  end
-
   defp assert_model!(model, "openai_realtime") do
-    if model in @live_models do
-      raise ArgumentError,
-            ~s(realtime.model #{model} requires engine = "openai_live"; set ) <>
-              ~s([fermix_core.realtime] engine = "openai_live" or pick a Realtime model)
-    end
+    case engine_for_model(model) do
+      {:ok, "openai_realtime"} ->
+        :ok
 
-    assert_one_of!(model, @realtime_models, :model)
+      {:ok, engine} ->
+        raise ArgumentError,
+              ~s(realtime.model #{model} requires engine = "#{engine}"; set ) <>
+                ~s([fermix_core.realtime] engine = "#{engine}" or pick a Realtime model)
+
+      :error ->
+        assert_one_of!(model, @realtime_models, :model)
+    end
   end
 
-  defp assert_reasoning_effort!(nil, "openai_live"), do: :ok
+  defp assert_model!(model, engine) do
+    models = valid_models(engine)
+
+    unless model in models do
+      raise ArgumentError,
+            "realtime.model must be #{Enum.join(models, ", ")} " <>
+              ~s(when engine = "#{engine}", got: #{inspect(model)})
+    end
+  end
+
+  # The provider follows from the engine, so a hand-written one that disagrees
+  # is two choices that cannot both hold: neither wins, and all three are named.
+  defp assert_provider!(%__MODULE__{provider: provider, engine: engine, model: model}) do
+    expected = provider_for_engine(engine)
+
+    if provider != expected do
+      raise ArgumentError,
+            ~s(realtime.provider "#{provider}" contradicts engine #{engine} and model #{model}, ) <>
+              ~s(which take provider "#{expected}"; remove provider from [fermix_core.realtime] ) <>
+              "or pick a model that provider ships"
+    end
+  end
 
   defp assert_reasoning_effort!(effort, "openai_realtime"),
     do: assert_one_of!(effort, @valid_reasoning_efforts, :reasoning_effort)
+
+  defp assert_reasoning_effort!(nil, _task_engine), do: :ok
 
   defp reject_removed_key!(config, key, message \\ nil) do
     unless is_nil(lookup(config, key)) do

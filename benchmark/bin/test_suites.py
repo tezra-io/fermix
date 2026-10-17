@@ -471,7 +471,14 @@ def test_the_shipped_numbered_rubrics_parse():
                 if texts:
                     counts[case.id] = len(texts)
     assert counts == {"launch_day_update": 5, "people_and_customer_update": 4,
-                      "hiring_decision": 5}
+                      "hiring_decision": 5,
+                      # grok_voice.yaml
+                      "intake_on_the_thirteenth": 2, "van_on_the_twentieth": 2,
+                      "curry_question_while_stocktake_runs": 3,
+                      "rice_question_while_stocktake_runs": 3,
+                      "never_mind_cancel": 2, "stop_the_stocktake": 2,
+                      "thirteenth_corrected_to_twentieth": 3,
+                      "twentieth_corrected_to_thirteenth": 3}
 
 
 if __name__ == "__main__":

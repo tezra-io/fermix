@@ -22,6 +22,7 @@ import json
 import os
 import re
 import secrets
+import socket
 import subprocess
 import sys
 import time
@@ -34,7 +35,7 @@ SKILL_DIR = os.path.dirname(HERE)
 REPO_ROOT = os.path.dirname(SKILL_DIR)
 sys.path.insert(0, HERE)
 
-from evallib import companion
+from evallib import companion, voice
 from evallib import config as cfgmod
 from evallib import driver, grade, judge, report
 from evallib.fixture_server import (FIXTURE_URL_PLACEHOLDER, FixtureServer,
@@ -51,6 +52,7 @@ _PROVIDER_LIMIT_RE = re.compile(
 _DEFAULT_PROFILES = {"host_readonly"}
 _ISOLATED_PROFILES = {"isolated_mutation", "external_write", "desktop_input", "destructive"}
 FIXTURE_PAGES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures", "browser")
+SUITE_FIXTURES_DIR = os.path.join(SKILL_DIR, "suites", "fixtures")
 _EVIDENCE_TOOL_LIMIT = 12
 _EVIDENCE_TOOL_MAX_BYTES = 2_000
 _EVIDENCE_RECORD_MAX_BYTES = 30_000
@@ -219,6 +221,26 @@ def _graded_against_a_limit_reply(turn: dict, gate: dict) -> bool:
 
 # --- selection --------------------------------------------------------------
 
+def _sweeps_past_voice(args) -> bool:
+    """A bare `--all` sweep without `--voice` leaves `drive: voice` cases out.
+
+    A voice case spends a paid voice minute and runs only against an eval daemon
+    with Grok voice on, which no other tier starts (`make behavioral-isolated`
+    sweeps `--all` against a daemon started without realtime). Named with
+    --suite, --scenario, --case or --tag, it is selected and, without `--voice`,
+    skipped with a notice that leaves the run incomplete."""
+    named = (args.suite or args.scenario or getattr(args, "case", None) or args.tag)
+    return bool(getattr(args, "all", False) and not named and not getattr(args, "voice", False))
+
+
+def voice_cases_left_out(suites, args, profiles) -> int:
+    """How many voice cases a bare `--all` sweep left out, for its notice."""
+    if not _sweeps_past_voice(args):
+        return 0
+    return sum(1 for suite in suites for scenario in suite.scenarios
+               if scenario.risk in profiles for case in scenario.cases if case.needs_voice)
+
+
 def select(suites, args, profiles):
     if not profiles:
         raise ValueError("at least one execution profile is required")
@@ -226,6 +248,7 @@ def select(suites, args, profiles):
     want_scen = set(args.scenario or [])
     want_cases = set(getattr(args, "case", None) or [])
     want_tags = set(args.tag or [])
+    past_voice = _sweeps_past_voice(args)
     chosen = []
     for s in suites:
         if want_suites and s.name not in want_suites:
@@ -238,7 +261,9 @@ def select(suites, args, profiles):
                 continue
             if want_tags and not (want_tags & set(scn.tags)):
                 continue
-            cases = [case for case in scn.cases if not want_cases or case.id in want_cases]
+            cases = [case for case in scn.cases
+                     if (not want_cases or case.id in want_cases)
+                     and not (past_voice and case.needs_voice)]
             if cases:
                 scns.append(replace(scn, cases=cases))
         if scns:
@@ -398,12 +423,18 @@ def behavioral_schema_errors(chosen) -> list[str]:
     return problems
 
 
-def required_judge_cases(jobs, operator: bool) -> list[str]:
+def runnable(case, operator: bool, voice_on: bool) -> bool:
+    """Whether a selected case is driven: an operator case needs --operator, a
+    voice case --voice; without the flag it is skipped with a notice."""
+    return (not case.needs_operator or operator) and (not case.needs_voice or voice_on)
+
+
+def required_judge_cases(jobs, operator: bool, voice_on: bool = True) -> list[str]:
     required = []
     for suite, scenario, case, _trial in jobs:
-        runnable = not case.needs_operator or operator
+        runnable_case = runnable(case, operator, voice_on)
         label = f"{suite.name}/{scenario.id}/{case.id}"
-        if runnable and case.judge and case.rubric and label not in required:
+        if runnable_case and case.judge and case.rubric and label not in required:
             required.append(label)
     return required
 
@@ -421,6 +452,53 @@ def judge_precondition_error(cfg, judge_on: bool) -> str | None:
     if not judge_on:
         return None
     return judge.precondition_error(cfg)
+
+
+def voice_jobs_driven(jobs, args) -> bool:
+    return bool(getattr(args, "voice", False)) and any(
+        case.needs_voice for _suite, _scenario, case, _trial in jobs)
+
+
+def voice_policy_error(jobs, args) -> str | None:
+    """A voice case runs only against a disposable eval home, whatever its risk:
+    its call writes the eval home's chat, and its daemon has Grok voice on."""
+    if not voice_jobs_driven(jobs, args):
+        return None
+    if not (getattr(args, "confirm_daemon_isolated", False) and args.confirm_isolated_env):
+        return ("drive: voice cases run only against the disposable Grok-voice eval daemon: "
+                "pass --confirm-daemon-isolated and --confirm-isolated-env")
+    return None
+
+
+def voice_precondition_error(fermix_home: str) -> str | None:
+    """The eval home has Grok voice on and its daemon answers on the voice socket.
+
+    Read before anything is driven, so a daemon started with --no-realtime, or
+    without XAI_API_KEY (the realtime supervisor then never starts), fails the
+    run once instead of every voice case as an unreachable socket."""
+    home = os.path.realpath(os.path.expanduser(fermix_home))
+    path = os.path.join(home, "config.toml")
+    try:
+        with open(path, "rb") as handle:
+            raw = tomllib.load(handle)
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        return f"cannot read the voice eval daemon's config at {path}: {exc}"
+    realtime = raw.get("fermix_core", {}).get("realtime", {})
+    if not isinstance(realtime, dict) or realtime.get("enabled") is not True:
+        return (f"{path} has no [fermix_core.realtime] enabled = true: seed the home with "
+                "`bin/seed_capability_home.py --voice` and restart its daemon")
+    sock = voice.socket_path(home)
+    probe = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+    probe.settimeout(2.0)
+    try:
+        probe.connect(sock)
+    except OSError as exc:
+        return (f"no voice socket answers at {sock} ({exc}): start the eval daemon with "
+                "realtime on (`mix fermix.dev`, never --no-realtime) and XAI_API_KEY in its "
+                "environment")
+    finally:
+        probe.close()
+    return None
 
 
 def eval_home_error(fermix_home: str, require_isolated: bool = False) -> str | None:
@@ -563,7 +641,7 @@ def workspace_revision_error(workspace: str, harness_repo: str) -> str | None:
 
 
 def case_jobs(chosen, repeat: int, max_cases: int = 0,
-              operator: bool = True) -> list[tuple]:
+              operator: bool = True, voice_on: bool = True) -> list[tuple]:
     jobs = []
     driven = 0
     for suite, scenarios in chosen:
@@ -573,21 +651,22 @@ def case_jobs(chosen, repeat: int, max_cases: int = 0,
                     if max_cases and driven >= max_cases:
                         return jobs
                     jobs.append((suite, scenario, case, trial))
-                    if not case.needs_operator or operator:
+                    if runnable(case, operator, voice_on):
                         driven += 1
     return jobs
 
 
 def plan_counts(chosen, judge_on: bool, repeat: int = 1,
-                max_cases: int = 0, operator: bool = True) -> tuple[int, int, int, int]:
-    jobs = case_jobs(chosen, repeat, max_cases, operator)
+                max_cases: int = 0, operator: bool = True,
+                voice_on: bool = True) -> tuple[int, int, int, int]:
+    jobs = case_jobs(chosen, repeat, max_cases, operator, voice_on)
     scenarios = len({(suite.name, scenario.id)
                      for suite, scenario, _case, _trial in jobs})
     turns = sum(len(case.turns) for _suite, _scenario, case, _trial in jobs
-                if not case.needs_operator or operator)
+                if runnable(case, operator, voice_on))
     judge_turns = sum(
         1 for _suite, _scenario, case, _trial in jobs
-        if (not case.needs_operator or operator) and judge_on and case.judge and case.rubric
+        if runnable(case, operator, voice_on) and judge_on and case.judge and case.rubric
     )
     return scenarios, len(jobs), turns, judge_turns
 
@@ -968,6 +1047,100 @@ def run_companion_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
             "turns": [rec], "rubric": rubric}
 
 
+def run_voice_case(cfg, client, suite, scn, case, run_id, trial, judge_on):
+    """Drive one case as a voice call over the local voice socket.
+
+    The runner is the call's client (evallib/voice.py): it streams the case's
+    clips as microphone audio at real-time pace, plays the voice's audio on a
+    simulated speaker that acknowledges it, and ends the call once it settled.
+    What the socket said becomes the `wire.*` gates. The call's Opik trace, its
+    root named for the call id and every backend task turn nested in it, is
+    graded by the ordinary gates; a call carries no reply text of its own, so
+    the reply those gates and the judge read is what the voice said aloud, its
+    captions as received.
+
+    A failed `wire.*` gate fails the case even when the trace is missing or
+    incomplete: it is what the socket itself said during a call that settled,
+    so no trace can unprove it. Positive trace gates keep the incomplete
+    downgrade. A socket that cannot be reached, refuses, closes, or does not
+    settle within `timeout_ms` is INCOMPLETE.
+    """
+    spoken_request = case.turns[0].query
+    eff = _render_expect(case.expect, run_id, trial)
+    wire = eff.pop("wire")
+    timeout_s = (case.timeout_ms or cfg.daemon.default_timeout_ms) / 1000.0
+    rec = {"index": 0, "query": spoken_request, "session": "voice:unstarted", "status": "error",
+           "drive_error": None, "note": None, "correlation": "n/a", "gates": [],
+           "tools": [], "reply": "", "cost_usd": 0.0, "duration_ms": 0.0, "tokens": 0,
+           "iterations": None, "subagent_spawns": 0, "trace_id": None, "trace_url": "",
+           "main_models": [], "main_providers": [], "main_efforts": []}
+
+    def finish(outcome: str, gate_ok: bool = False, rubric: dict | None = None) -> dict:
+        return {"id": case.id, "trial": trial, "outcome": outcome, "passed": outcome == "pass",
+                "incomplete": outcome == "incomplete", "gate_passed": gate_ok,
+                "turns": [rec], "rubric": rubric}
+
+    plan = voice.plan_for(case.voice, SUITE_FIXTURES_DIR)
+    evidence = voice.drive(cfg.daemon.fermix_home, plan, timeout_s)
+    rec.update({"duration_ms": evidence.elapsed_ms, "reply": evidence.spoken(),
+                "session": evidence.call_id() or rec["session"], "voice": evidence.summary()})
+    if not evidence.ok:
+        rec["drive_error"] = f"voice socket: {evidence.error}"
+        return finish("incomplete")
+    wire_gates = voice.wire_gates(evidence, wire)
+    wire_failed = any(not gate.passed for gate in wire_gates)
+
+    def wire_only(note: str) -> dict:
+        # A settled call's failed wire gate needs no trace to stand.
+        rec.update({"status": "ok", "note": note, "gates": _gate_records(wire_gates)})
+        return finish("fail")
+
+    poll_s = max(cfg.opik.poll_timeout_s, 60)
+    try:
+        found = voice.poll_call_trace(client, evidence.call_id(), evidence.provider_session_id(),
+                                      voice.trace_window_start(evidence), poll_s,
+                                      cfg.opik.poll_interval_s)
+        if found is None:
+            if wire_failed:
+                return wire_only(f"no trace named {evidence.call_id()!r}; graded on the wire")
+            rec.update({"correlation": "missing", "drive_error":
+                        f"no voice call trace named {evidence.call_id()!r} appeared within "
+                        f"{int(poll_s)}s"})
+            return finish("incomplete")
+        trace, spans = client.await_complete(found)
+    except OpikError as exc:
+        if wire_failed:
+            return wire_only(f"Opik unavailable ({exc}); graded on the wire")
+        _record_opik_error(rec, exc)
+        return finish("incomplete")
+    trace = dict(trace, output={"text": evidence.spoken()})
+    budget = {"max_cost_usd": cfg.budgets.max_cost_usd,
+              "max_duration_ms": cfg.budgets.max_duration_ms}
+    gates = grade.grade(trace, spans, dict(budget, **eff),
+                        elapsed_ms=evidence.elapsed_ms) + wire_gates
+    view = grade.TurnView.build(trace, spans, elapsed_ms=evidence.elapsed_ms)
+    _record_graded_turn(rec, cfg, trace, gates, view, None)
+    evidence_incomplete = _view_incomplete(view)
+    said = spoken_request.split("\n")           # one clip's fixture text per line
+    facts = ("The owner's audio said, in order: "
+             + " ".join(f"({n}) \"{text}\"" for n, text in enumerate(said, start=1)),
+             "This was a voice call. The assistant turns are what the voice said aloud "
+             "(its captions); `voice_call.timeline` orders the owner's clips, the captions "
+             "and Fermix's task frames by milliseconds since the call started. A task "
+             "revision that ended `superseded` was replaced by a newer revision of the "
+             "same task.")
+    rubric = None if evidence_incomplete else _rubric_record(
+        cfg, case, scn, run_id, trial, judge_on, voice.transcript(evidence, said),
+        [_tool_evidence(view, 0), voice.judge_evidence(evidence)],
+        _candidate_routes_from_turns([rec]), turn_records=[rec],
+        candidate_session=evidence.call_id(), extra_facts=facts)
+    negative_failed = bool(failed_gates([rec], NEGATIVE_GATES))
+    gate_ok = all(gate.passed for gate in gates) and not negative_failed
+    outcome = operator_outcome(gate_ok, evidence_incomplete, rubric, cfg.rubric_failures,
+                               negative_failed or wire_failed)
+    return finish(outcome, gate_ok, rubric)
+
+
 def _gate_records(gates) -> list[dict]:
     return [{"key": gate.key, "passed": gate.passed, "detail": gate.detail,
              "conclusive": gate.conclusive} for gate in gates]
@@ -1086,7 +1259,8 @@ def _candidate_routes_from_turns(records: list[dict]) -> list[dict]:
 
 
 def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence,
-                   candidate_routes, *, turn_records, candidate_session=None):
+                   candidate_routes, *, turn_records, candidate_session=None,
+                   extra_facts: tuple[str, ...] = ()):
     if not case.rubric:
         return None
     if not judge_on or not case.judge:
@@ -1101,7 +1275,7 @@ def _rubric_record(cfg, case, scn, run_id, trial, judge_on, transcript, evidence
         tag=candidate_session or sess(run_id, "judge", scn.id, case.id, str(trial)),
         transcript=transcript, tool_evidence=evidence,
         reference_facts=judge_date_facts(
-            turn_records, configured_timezone(cfg.daemon.fermix_home)),
+            turn_records, configured_timezone(cfg.daemon.fermix_home)) + list(extra_facts),
         candidate_routes=candidate_routes,
         watched=frozenset(n for n, _reason in case.watch),
     )
@@ -1495,6 +1669,10 @@ def _build_parser() -> argparse.ArgumentParser:
     ap.add_argument("--operator", action="store_true",
                     help="include operator-assisted cases (you send a Telegram message when prompted); "
                          "without this flag such cases are skipped with a notice")
+    ap.add_argument("--voice", action="store_true",
+                    help="include drive: voice cases: each opens one paid Grok voice call on the "
+                         "eval daemon's realtime.sock; without this flag a named voice case is "
+                         "skipped with a notice and a bare --all leaves voice cases out")
     ap.add_argument("--dangerous", action="store_true",
                     help="include suites from suites/dangerous/ — these exercise the sandbox by "
                          "issuing commands that cause real harm if the sandbox fails; only run in "
@@ -1556,17 +1734,35 @@ def _selection_error(args, suites, chosen, profiles) -> str | None:
     return None
 
 
+def _skip_reason(case, args) -> str | None:
+    if case.needs_operator and not args.operator:
+        return "skip: needs --operator"
+    if case.needs_voice and not getattr(args, "voice", False):
+        return "skip: needs --voice"
+    return None
+
+
 def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
-    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator)
+    voice_on = getattr(args, "voice", False)
+    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator, voice_on)
     nsc, nc, nt, _judge_turns = plan_counts(
-        chosen, judge_on, args.repeat, args.max_cases, args.operator)
+        chosen, judge_on, args.repeat, args.max_cases, args.operator, voice_on)
     suites_planned = len({suite.name for suite, _scenario, _case, _trial in jobs})
     driven = sum(1 for _suite, _scenario, case, _trial in jobs
-                 if not case.needs_operator or args.operator)
-    skipped = nc - driven
+                 if runnable(case, args.operator, voice_on))
+    operator_skips = sum(1 for _suite, _scenario, case, _trial in jobs
+                         if case.needs_operator and not args.operator)
+    voice_skips = nc - driven - operator_skips
     print(f"dry-run OK — profiles={sorted(profiles)} · {suites_planned} suite(s), "
           f"{nsc} scenario(s), {driven} case trial(s) would run, "
-          f"{skipped} operator trial(s) would skip, {nt} real turn(s).")
+          f"{operator_skips} operator trial(s) would skip, "
+          f"{voice_skips} voice trial(s) would skip, {nt} real turn(s).")
+    voice_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
+                     if case.needs_voice and voice_on)
+    if voice_jobs:
+        # Validated, not started: a dry run opens no call and spends nothing.
+        print(f"  voice: {voice_jobs} case trial(s) would each open one paid Grok voice call "
+              f"on <FERMIX_HOME>/{voice.SOCKET_NAME}")
     fixture_jobs = sum(1 for _suite, _scenario, case, _trial in jobs
                        if case_uses_fixture(case))
     if fixture_jobs:
@@ -1574,7 +1770,7 @@ def _print_dry_run(chosen, profiles, judge_on: bool, args) -> int:
         print(f"  fixture server: {fixture_jobs} case trial(s) address "
               f"{FIXTURE_URL_PLACEHOLDER}; the run would start one on 127.0.0.1")
     for suite, scenario, case, trial in jobs:
-        action = "run" if not case.needs_operator or args.operator else "skip: needs --operator"
+        action = _skip_reason(case, args) or "run"
         print(f"  - {suite.name}/{scenario.id}/{case.id}#{trial} "
               f"[{scenario.risk}; {action}]")
     return 0 if driven > 0 else 4
@@ -1632,6 +1828,8 @@ def _drive_case(cfg, client, suite, scenario, case, run_id: str, trial: int,
         if case.drive == "companion":
             return run_companion_case(cfg, client, suite, scenario, case, run_id, trial,
                                       judge_on)
+        if case.drive == "voice":
+            return run_voice_case(cfg, client, suite, scenario, case, run_id, trial, judge_on)
         return run_case(cfg, client, suite, scenario, case, run_id, trial, judge_on,
                         fixture)
     except OpikError as exc:
@@ -1765,7 +1963,8 @@ def _drive_with_retries(cfg, client, suite, scenario, case, run_id, trial,
 
 
 def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool,
-                  fail_retries: int = 0, repeat: int = 1, fixtures=None):
+                  fail_retries: int = 0, repeat: int = 1, fixtures=None,
+                  voice_on: bool = False):
     tree: dict = {}
     skipped_required = 0
     aborted = None
@@ -1774,6 +1973,11 @@ def _execute_jobs(cfg, client, jobs, run_id: str, judge_on: bool, operator: bool
         if case.needs_operator and not operator:
             print(f"  · {label} — SKIPPED "
                   "(operator-assisted; rerun with --operator)", flush=True)
+            skipped_required += 1
+            continue
+        if case.needs_voice and not voice_on:
+            print(f"  · {label} — SKIPPED "
+                  "(drive: voice spends a paid voice minute; rerun with --voice)", flush=True)
             skipped_required += 1
             continue
         print(f"  · {label} …", flush=True)
@@ -1862,27 +2066,37 @@ def _write_run_reports(cfg, args, chosen, profiles, run_id: str, started,
 
 def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
     print("preconditions:")
-    require_isolated = requires_isolated_home(profiles)
-    require_strict = requires_strict_sandbox(profiles)
+    voice_on = getattr(args, "voice", False)
+    voice_run = voice_jobs_driven(
+        case_jobs(chosen, args.repeat, args.max_cases, args.operator, voice_on), args)
+    # A voice call runs only in a disposable eval home, whatever the case's risk.
+    require_isolated = requires_isolated_home(profiles) or voice_run
+    require_strict = requires_strict_sandbox(profiles) or voice_run
     if check(cfg, require_isolated=require_isolated, require_strict=require_strict) != 0:
         return 3
+    if voice_run:
+        voice_error = voice_precondition_error(cfg.daemon.fermix_home)
+        if voice_error:
+            print(f"  [FAIL] {voice_error}")
+            return 3
+        print(f"  [ok] voice socket answers at {voice.socket_path(cfg.daemon.fermix_home)}")
     if require_isolated:
         print("  [operator-attested] disposable daemon isolation and launch flags")
     else:
         print(f"  [dev] using local development daemon at {cfg.daemon.fermix_home}")
     _all_scenarios, all_cases, _all_turns, _all_judges = plan_counts(
-        chosen, judge_on, args.repeat, operator=args.operator)
+        chosen, judge_on, args.repeat, operator=args.operator, voice_on=voice_on)
     nsc, nc, nt, njudge = plan_counts(
-        chosen, judge_on, args.repeat, args.max_cases, args.operator)
-    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator)
+        chosen, judge_on, args.repeat, args.max_cases, args.operator, voice_on)
+    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator, voice_on)
     driven = sum(1 for _suite, _scenario, case, _trial in jobs
-                 if not case.needs_operator or args.operator)
+                 if runnable(case, args.operator, voice_on))
     skipped = nc - driven
     if args.max_cases:
         print(f"note: --max-cases {args.max_cases} "
               f"(will drive {driven}; {all_cases} uncapped selection entries)")
     print(f"\nplan: {nsc} scenario(s), {driven} driven case(s), "
-          f"{skipped} operator skip(s), ~{nt + njudge} real turns "
+          f"{skipped} operator/voice skip(s), ~{nt + njudge} real turns "
           f"({nt} eval + {njudge} judge). These are real model calls and may be billed. "
           "Driving now...\n")
     client = OpikClient(cfg.opik.base_url, cfg.opik.project,
@@ -1899,7 +2113,8 @@ def _run_selected(cfg, args, chosen, profiles, judge_on: bool) -> int:
     try:
         suite_results, skipped_required, aborted = _execute_jobs(
             cfg, client, jobs, run_id, judge_on, args.operator,
-            fail_retries=args.fail_retries, repeat=args.repeat, fixtures=fixtures)
+            fail_retries=args.fail_retries, repeat=args.repeat, fixtures=fixtures,
+            voice_on=voice_on)
     finally:
         if fixtures is not None:
             fixtures.stop()
@@ -1986,6 +2201,11 @@ def main(argv=None) -> int:
             print(f"  - {problem}", file=sys.stderr)
         return 2
 
+    left_out = voice_cases_left_out(suites, args, profiles)
+    if left_out:
+        print(f"note: --all leaves out {left_out} drive: voice case(s) (each spends a paid "
+              "voice minute against the Grok-voice eval daemon); name them with --suite and "
+              "pass --voice")
     selection_error = _selection_error(args, suites, chosen, profiles)
     if selection_error:
         print(selection_error, file=sys.stderr)
@@ -2001,8 +2221,12 @@ def main(argv=None) -> int:
         print(f"profile policy refused selection: {high_impact_error}", file=sys.stderr)
         return 2
 
-    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator)
-    required_judging = required_judge_cases(jobs, args.operator)
+    jobs = case_jobs(chosen, args.repeat, args.max_cases, args.operator, args.voice)
+    voice_error = None if args.dry_run else voice_policy_error(jobs, args)
+    if voice_error:
+        print(f"profile policy refused selection: {voice_error}", file=sys.stderr)
+        return 2
+    required_judging = required_judge_cases(jobs, args.operator, args.voice)
     requirement_error = judge_requirement_error(required_judging) if not judge_on else None
     if requirement_error:
         print(requirement_error, file=sys.stderr)

@@ -538,8 +538,27 @@ defmodule FermixCore.Management.SettingsTest do
                "gpt-realtime-2.1-mini · Realtime, integrated tools",
                "gpt-realtime-2.1 · Realtime, integrated tools",
                "gpt-realtime-2 · Realtime, integrated tools",
-               "gpt-live-1 · Live, with your Fermix agent"
+               "gpt-live-1 · Live, with your Fermix agent",
+               "grok-voice-3.0 · Grok, with your Fermix agent"
              ]
+    end
+
+    # Two vendors now speak, so the switch rows name both, and the model footer
+    # names both task engines (M70 §06).
+    test "the switch rows name both voice vendors and both task engines" do
+      Application.put_env(:fermix_core, :realtime, enabled: true)
+
+      assert %{
+               "footer" =>
+                 "Lets the companion talk with you using OpenAI or SpaceXAI voice models."
+             } =
+               row("realtime", "realtime_enabled")
+
+      assert %{
+               "footer" =>
+                 "Live and Grok hand tools, memory and reasoning to your Fermix agent " <>
+                   "and bill by the minute."
+             } = row("realtime", "realtime_model")
     end
 
     test "the Live engine publishes Live's voices and no reasoning effort row" do
@@ -649,6 +668,61 @@ defmodule FermixCore.Management.SettingsTest do
       Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
 
       refute "realtime_conversation" in Enum.map(rows("realtime"), & &1["key"])
+    end
+
+    # M70 §06: Grok is a task engine like Live, so it publishes the same backend
+    # and conversation rows, its own voices, and the SpaceXAI provider's key slot
+    # in place of OpenAI's.
+    test "the Grok engine publishes the task-engine rows and the SpaceXAI key" do
+      Application.put_env(:fermix_core, :providers,
+        openai: [primary: true, default_model: "gpt-5.4", api_key: "sk-test"]
+      )
+
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      assert Enum.map(rows("realtime"), & &1["key"]) == [
+               "realtime_enabled",
+               "realtime_model",
+               "realtime_voice",
+               "realtime_backend",
+               "realtime_conversation",
+               "xai_api_key",
+               "realtime_max_session_minutes",
+               "realtime_max_cost_cents",
+               "realtime_persist_transcripts"
+             ]
+
+      assert %{"value" => "grok-voice-3.0"} = row("realtime", "realtime_model")
+      assert option_values("realtime", "realtime_voice") == ~w(eve ara rex sal leo)
+      assert %{"value" => "eve"} = row("realtime", "realtime_voice")
+
+      assert %{
+               "read_only" => true,
+               "value" => "OpenAI · gpt-5.4",
+               "footer" => "Grok speaks; your primary provider answers. Change it in Providers."
+             } = row("realtime", "realtime_backend")
+
+      assert %{"value" => "chat"} = row("realtime", "realtime_conversation")
+
+      assert %{
+               "kind" => "secret",
+               "label" => "SpaceXAI key",
+               "footer" =>
+                 "The same key the SpaceXAI provider uses. " <>
+                   "A SpaceXAI sign-in does not authorize voice.",
+               "present" => false
+             } = row("realtime", "xai_api_key")
+
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
+
+      assert %{"present" => true} = row("realtime", "xai_api_key")
+    end
+
+    test "the Live backend row keeps naming Live as the engine that speaks" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_live")
+
+      assert %{"footer" => "Live speaks; your primary provider answers. Change it in Providers."} =
+               row("realtime", "realtime_backend")
     end
   end
 
@@ -801,6 +875,90 @@ defmodule FermixCore.Management.SettingsTest do
       assert Keyword.get(Application.get_env(:fermix_core, :realtime), :voice) == "cedar"
       refute "realtime_voice" in result["applied"]
       refute Enum.any?(result["side_effects"], &(&1 =~ "The voice changed"))
+    end
+
+    # M70 §06: a model of another provider moves the provider with the engine,
+    # resets a voice the new engine does not ship, turns off the screen sharing
+    # Grok cannot do, and keeps the conversation, budget and transcript choices.
+    # Each change the operator did not type is named.
+    test "Live to Grok to Realtime moves provider, voice and screen sharing, and says so",
+         %{home: home} do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "openai_live",
+        model: "gpt-live-1",
+        voice: "beacon",
+        conversation: "private",
+        max_session_minutes: 30,
+        max_estimated_cost_cents_per_session: 250,
+        persist_transcripts: true
+      )
+
+      assert {:ok, grok} = Settings.apply("realtime", %{"realtime_model" => "grok-voice-3.0"})
+
+      realtime = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.take(realtime, [:provider, :engine, :model, :voice, :screen_share]) == [
+               provider: "xai",
+               engine: "xai_realtime",
+               model: "grok-voice-3.0",
+               voice: "eve",
+               screen_share: false
+             ]
+
+      assert Keyword.get(realtime, :conversation) == "private"
+      assert Keyword.get(realtime, :max_session_minutes) == 30
+      assert Keyword.get(realtime, :max_estimated_cost_cents_per_session) == 250
+      assert Keyword.get(realtime, :persist_transcripts) == true
+
+      assert Enum.sort(grok["applied"]) == ["realtime_engine", "realtime_model", "realtime_voice"]
+
+      assert grok["side_effects"] == [
+               "The engine changed to Grok, with your Fermix agent.",
+               "The voice changed to eve.",
+               "Screen sharing during calls was turned off because this engine does not support it."
+             ]
+
+      assert {:ok, persisted} = ConfigStore.load_runtime_config()
+
+      assert persisted.fermix_core |> Keyword.get(:realtime) |> RealtimeConfig.normalize() ==
+               RealtimeConfig.current()
+
+      assert File.read!(Path.join(home, "config.toml")) =~ ~s(provider = "xai")
+
+      assert {:ok, realtime_result} =
+               Settings.apply("realtime", %{"realtime_model" => "gpt-realtime-2"})
+
+      back = Application.get_env(:fermix_core, :realtime)
+
+      assert Keyword.get(back, :provider) == "openai"
+      assert Keyword.get(back, :engine) == "openai_realtime"
+      assert Keyword.get(back, :voice) == "marin"
+      assert Keyword.get(back, :reasoning_effort) == "low"
+      assert Keyword.get(back, :screen_share) == false
+      refute Keyword.has_key?(back, :conversation)
+      assert Keyword.get(back, :max_session_minutes) == 30
+      assert Keyword.get(back, :persist_transcripts) == true
+
+      assert Enum.sort(realtime_result["applied"]) == [
+               "realtime_conversation",
+               "realtime_engine",
+               "realtime_model",
+               "realtime_reasoning_effort",
+               "realtime_voice"
+             ]
+
+      assert realtime_result["side_effects"] == [
+               "The engine changed to Realtime, integrated tools.",
+               "The voice changed to marin.",
+               "Reasoning effort was restored because this engine uses it.",
+               "Whether voice calls join the chat was reset because this engine does not use it."
+             ]
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+
+      assert reloaded.fermix_core |> Keyword.get(:realtime) |> RealtimeConfig.normalize() ==
+               RealtimeConfig.current()
     end
 
     # The combined menu is the whole value space, so a slug no engine ships is

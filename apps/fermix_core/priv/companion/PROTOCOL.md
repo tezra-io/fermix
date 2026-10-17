@@ -270,7 +270,7 @@ row's `metadata.call` says what it is about:
 | `task_id` | string | The task, the realtime wire's `delegation_id`. Present on `shared`, `task_running` and `task_done`. |
 | `revision` | int ≥ 1 | The task's revision, beside `task_id`. |
 | `state` | `completed` \| `failed` \| `cancelled` \| `timed_out` | A task's terminal state. Present on `task_done`. |
-| `engine` | string | The call's voice engine, `openai_live`. Present on `ended`. |
+| `engine` | string | The call's voice engine, `openai_live` or `xai_realtime`. Present on `ended`. |
 | `duration_s` | int ≥ 0 | The call's length. Present on `ended`. |
 | `voice_cost_cents` | number ≥ 0 | The call's settled voice cost. On `ended` when it is known. |
 | `accounting` | `complete` \| `incomplete` | Whether that cost is settled. Present on `ended`. |

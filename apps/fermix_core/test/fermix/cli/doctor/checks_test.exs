@@ -743,6 +743,25 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert Checks.network_proxy(env: %{}).detail =~ "read when Fermix starts"
     end
 
+    # Grok dials SpaceXAI, so the host a bypass has to name follows the engine.
+    test "the voice warning follows the host the engine dials" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["api.openai.com"]
+      )
+
+      assert Checks.network_proxy(env: %{}).detail =~ "voice"
+
+      Application.put_env(:fermix_core, :network,
+        proxy: "http://proxy.corp.test:3128",
+        proxy_bypass: ["api.x.ai"]
+      )
+
+      refute Checks.network_proxy(env: %{}).detail =~ "voice"
+    end
+
     test "says a bypass list with no proxy has no effect" do
       Application.put_env(:fermix_core, :network, proxy_bypass: ["ollama.internal"])
 
@@ -1132,6 +1151,40 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "Codex"
     end
 
+    # Grok reads the SpaceXAI provider's key, so the row names that vendor and
+    # Grok's own engine and model.
+    test "names SpaceXAI's key, Grok's engine and its model when Grok is selected" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
+
+      result = Checks.realtime()
+
+      assert result.status == :ok
+
+      assert result.detail ==
+               "enabled; SpaceXAI voice key saved (engine xai_realtime, model grok-voice-3.0); " <>
+                 "the network checks test it"
+    end
+
+    # A SpaceXAI sign-in carries chat, not voice; an OpenAI key carries neither.
+    # Production is set up in the app, so the fix names the pane, not a command.
+    test "warns when Grok is on with only a SpaceXAI sign-in and an OpenAI key" do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+
+      Application.put_env(:fermix_core, :providers,
+        xai: [auth_mode: :oauth],
+        openai: [api_key: "sk-test"]
+      )
+
+      result = Checks.realtime()
+
+      assert result.status == :warn
+      assert result.detail =~ "no SpaceXAI API key"
+      assert result.detail =~ "sign-in does not authorize it"
+      assert result.detail =~ "Voice settings"
+      refute result.detail =~ "fermix setup"
+    end
+
     test "reports :ok and disabled when realtime is off" do
       Application.put_env(:fermix_core, :realtime, enabled: false)
 
@@ -1228,6 +1281,62 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
       assert result.status == :warn
       assert result.detail =~ "no OpenAI API key"
+    end
+
+    # Grok's key is asked of SpaceXAI. SpaceXAI refuses a bad key with 400 or
+    # 401, which fails; a 403 can be a team without credits, which warns.
+    test "asks SpaceXAI about Grok's key and passes when it is accepted" do
+      grok_with_key()
+
+      result = Checks.realtime_key(req_options: [plug: answer(200, ~s({"data":[]}))])
+
+      assert result.status == :ok
+      assert result.detail =~ "SpaceXAI accepted the API key"
+    end
+
+    test "fails when SpaceXAI refuses Grok's key" do
+      grok_with_key()
+      body = ~s({"code":"Client specified an invalid argument","error":"Incorrect API key"})
+
+      for status <- [400, 401] do
+        result = Checks.realtime_key(req_options: [plug: answer(status, body)])
+
+        assert result.status == :fail
+        assert result.detail == "SpaceXAI did not accept the API key (HTTP #{status})."
+      end
+    end
+
+    test "warns when SpaceXAI refuses this check for another reason" do
+      grok_with_key()
+
+      result = Checks.realtime_key(req_options: [plug: answer(403, ~s({"code":"x y"}))])
+
+      assert result.status == :warn
+      assert result.detail =~ "SpaceXAI refused this check (HTTP 403)"
+    end
+
+    test "warns when SpaceXAI is down or unreachable, or no key is saved" do
+      grok_with_key()
+
+      assert Checks.realtime_key(req_options: [plug: answer(503, "{}")]).detail ==
+               "SpaceXAI answered HTTP 503; try again later"
+
+      adapter = fn req -> {req, %Req.TransportError{reason: :nxdomain}} end
+
+      assert Checks.realtime_key(req_options: [adapter: adapter]).detail =~
+               "could not reach SpaceXAI"
+
+      Application.put_env(:fermix_core, :providers, openai: [api_key: "sk-test"])
+      offline = fn _req -> flunk("a probe with no key reached the network") end
+      result = Checks.realtime_key(req_options: [adapter: offline])
+
+      assert result.status == :warn
+      assert result.detail == "no SpaceXAI API key is saved, so a voice call cannot start"
+    end
+
+    defp grok_with_key do
+      Application.put_env(:fermix_core, :realtime, enabled: true, engine: "xai_realtime")
+      Application.put_env(:fermix_core, :providers, xai: [api_key: "xai-test"])
     end
 
     defp answer(status, body) do

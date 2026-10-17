@@ -25,7 +25,6 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerHistory.Supervisor, as: ComputerHistorySupervisor
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
-  alias FermixCore.Config, as: CoreConfig
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
@@ -499,8 +498,7 @@ defmodule FermixCore.Application do
   defp realtime_ready? do
     config = RealtimeConfig.current()
 
-    config.enabled? and config.provider == "openai" and
-      match?({:ok, _api_key}, CoreConfig.provider_api_key(:openai))
+    config.enabled? and RealtimeConfig.api_key_present?(config)
   end
 
   defp trace_opts, do: [base_dir: trace_dir()]
