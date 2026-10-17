@@ -213,17 +213,21 @@ Runner = Callable[[list[str], Path], int]
 
 
 def run_teed(command: list[str], log: Path) -> int:
-    """Run `command` with MIX_ENV=test, streaming its output to stdout and `log`."""
+    """Run `command` with MIX_ENV=test, streaming its output to stdout and `log`.
+
+    Each line is flushed to both as it arrives: under Actions both are block
+    buffered, and a step killed by its timeout would lose every line still held.
+    """
     env = {**os.environ, "MIX_ENV": "test"}
-    with log.open("w", encoding="utf-8") as sink:
+    with log.open("w", encoding="utf-8", buffering=1) as sink:
         proc = subprocess.Popen(
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, errors="replace"
         )
         assert proc.stdout is not None
         for line in proc.stdout:
             sys.stdout.write(line)
+            sys.stdout.flush()
             sink.write(line)
-        sys.stdout.flush()
         return proc.wait()
 
 

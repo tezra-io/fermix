@@ -27,10 +27,14 @@ Running ExUnit with seed: 12, max_cases: 8
 3 tests, 0 failures
 """
 
-FAILED_ON_REPEAT = """\
+GREEN_RUN = """\
 ==> fermix_core
 Running ExUnit with seed: 11, max_cases: 8
 3 tests, 0 failures
+"""
+
+FAILED_RUN = """\
+==> fermix_core
 Running ExUnit with seed: 12, max_cases: 8
 
   1) test flushes after the debounce (FermixCore.FooTest)
@@ -39,9 +43,26 @@ Running ExUnit with seed: 12, max_cases: 8
 3 tests, 1 failure
 """
 
+NO_TESTS_RUN = "==> fermix_core\nThere are no tests to run\n"
+
+# The linux-x64 runner's seconds per run under load for the change that first
+# outran the step timeout (1935ffae): fermix_core's 35 files at 5 repeats
+# needed about 12 minutes on their own.
+CI_RUN_SECONDS = {"fermix_channels": 56, "fermix_core": 145, "fermix_opik": 2, "fermix_web": 100}
+
 
 def git(cwd, *args):
     subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True)
+
+
+class Clock:
+    """A clock only the fake runs move; no test reads the real one."""
+
+    def __init__(self):
+        self.now = 1000.0
+
+    def __call__(self):
+        return self.now
 
 
 class ChangedTestFilesTest(unittest.TestCase):
@@ -132,91 +153,255 @@ class PlanTest(unittest.TestCase):
         self.assertEqual(stress.tests_ran("==> fermix_core\nThere are no tests to run\n"), 0)
 
 
-class StressAppTest(unittest.TestCase):
+class FitsTest(unittest.TestCase):
+    def test_a_first_run_starts_while_any_budget_is_left(self):
+        self.assertTrue(stress.fits(None, 719.9, 720))
+        self.assertFalse(stress.fits(None, 720, 720))
+
+    def test_a_later_run_starts_only_when_its_previous_run_would_end_inside_the_budget(self):
+        self.assertTrue(stress.fits(145, 575, 720))
+        self.assertFalse(stress.fits(145, 575.1, 720))
+
+
+def simulate(seconds, repeats, budget_s, outcomes=None):
+    """Round-robin over fake runs that take `seconds[app]` each; returns states, run order, seconds used."""
+    clock = Clock()
+    order = []
+
+    def run_once(state):
+        order.append(state.app)
+        clock.now += seconds[state.app]
+        return (outcomes or {}).get((state.app, state.runs + 1), stress.PASSED)
+
+    apps = {app: [f"apps/{app}/test/x_test.exs"] for app in seconds}
+    states = stress.round_robin(apps, repeats, budget_s, run_once, clock)
+    return {s.app: s for s in states}, order, clock.now - 1000.0
+
+
+class RoundRobinTest(unittest.TestCase):
+    def test_every_app_runs_once_before_any_app_runs_twice(self):
+        states, order, _ = simulate({"a": 1, "b": 1, "c": 1}, 3, 100)
+
+        self.assertEqual(order, ["a", "b", "c"] * 3)
+        self.assertEqual([(s.runs, s.stopped) for s in states.values()], [(3, "")] * 3)
+
+    def test_a_slow_first_app_does_not_starve_the_rest(self):
+        # App by app, fermix_channels would take three runs and the whole budget
+        # before fermix_web's first run.
+        states, _, _ = simulate({"fermix_channels": 200, "fermix_web": 10}, 5, 600)
+
+        self.assertEqual((states["fermix_channels"].runs, states["fermix_channels"].stopped), (2, stress.BUDGET))
+        self.assertEqual((states["fermix_web"].runs, states["fermix_web"].stopped), (5, ""))
+
+    def test_the_change_that_outran_the_step_timeout_now_stops_inside_the_budget(self):
+        states, _, used = simulate(CI_RUN_SECONDS, stress.REPEATS_WHEN_MANY, 720)
+
+        self.assertEqual(
+            {app: (s.runs, s.stopped) for app, s in states.items()},
+            {
+                "fermix_channels": (4, stress.BUDGET),
+                "fermix_core": (2, stress.BUDGET),
+                "fermix_opik": (3, stress.BUDGET),
+                "fermix_web": (2, stress.BUDGET),
+            },
+        )
+        self.assertLessEqual(used, 720)
+
+    def test_an_app_whose_turn_comes_after_the_budget_is_spent_never_runs(self):
+        states, order, _ = simulate({"a": 800, "b": 10}, 5, 720)
+
+        self.assertEqual(order, ["a"])
+        self.assertEqual((states["b"].runs, states["b"].stopped), (0, stress.BUDGET))
+
+    def test_a_failed_run_stops_only_its_own_app(self):
+        states, order, _ = simulate({"a": 1, "b": 1}, 3, 100, {("a", 2): stress.FAILED})
+
+        self.assertEqual(order, ["a", "b", "a", "b", "b"])
+        self.assertEqual((states["a"].runs, states["a"].stopped), (2, stress.FAILED))
+        self.assertEqual((states["b"].runs, states["b"].stopped), (3, ""))
+
+    def test_an_app_that_ran_no_tests_is_not_repeated(self):
+        states, order, _ = simulate({"a": 1}, 5, 100, {("a", 1): stress.NO_TESTS})
+
+        self.assertEqual(order, ["a"])
+        self.assertEqual(states["a"].stopped, stress.NO_TESTS)
+
+
+def app_state(runs, stopped, last_s=145.0):
+    return stress.AppStress("fermix_core", ["apps/fermix_core/test/x_test.exs"], runs, last_s, stopped)
+
+
+class ReportTest(unittest.TestCase):
+    def test_a_budget_stop_after_a_run_is_a_notice_naming_the_count(self):
+        annotation = stress.budget_annotation(app_state(2, stress.BUDGET), 5, 720)
+
+        self.assertTrue(annotation.startswith("::notice title=Stress budget reached::fermix_core: 2 of 5 runs"))
+        self.assertIn("last run took 145 s", annotation)
+
+    def test_an_app_that_never_ran_is_an_error(self):
+        annotation = stress.budget_annotation(app_state(0, stress.BUDGET, None), 5, 720)
+
+        self.assertTrue(annotation.startswith("::error title=Stress budget spent::fermix_core never ran under load"))
+
+    def test_an_app_the_budget_did_not_stop_has_no_budget_annotation(self):
+        for state in (app_state(5, ""), app_state(2, stress.FAILED), app_state(1, stress.NO_TESTS)):
+            self.assertEqual(stress.budget_annotation(state, 5, 720), "")
+
+    def test_a_budget_stop_passes_but_a_failure_or_an_app_that_never_ran_fails(self):
+        self.assertEqual(stress.exit_status([app_state(5, ""), app_state(2, stress.BUDGET)]), 0)
+        self.assertEqual(stress.exit_status([app_state(1, stress.NO_TESTS)]), 0)
+        self.assertEqual(stress.exit_status([app_state(5, ""), app_state(2, stress.FAILED)]), 1)
+        self.assertEqual(stress.exit_status([app_state(5, ""), app_state(0, stress.BUDGET, None)]), 1)
+
+    def test_the_summary_says_how_many_runs_each_app_had_and_why_it_stopped(self):
+        self.assertEqual(stress.describe(app_state(5, ""), 5), "fermix_core: 5 of 5 runs passed")
+        self.assertEqual(
+            stress.describe(app_state(2, stress.BUDGET), 5),
+            "fermix_core: 2 of 5 runs passed, then the budget stopped it",
+        )
+        self.assertEqual(stress.describe(app_state(3, stress.FAILED), 5), "fermix_core: failed on run 3 of 5")
+        self.assertEqual(stress.describe(app_state(1, stress.NO_TESTS), 5), "fermix_core: ran no tests")
+        self.assertEqual(
+            stress.describe(app_state(0, stress.BUDGET, None), 5),
+            "fermix_core: never ran; the budget was spent before its first run",
+        )
+
+
+class RunOnceTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fermix-stress-app-")
-        self.log = Path(self.tmp.name) / "stress.log"
+        self.log_dir = Path(self.tmp.name)
         self.commands = []
+        self.logs = []
 
     def tearDown(self):
         self.tmp.cleanup()
 
-    def run_app(self, code, text):
+    def run_app(self, code, text, runs_before=0):
         def fake(command, log):
             self.commands.append(command)
+            self.logs.append(log)
             log.write_text(text)
             return code
 
+        state = stress.AppStress("fermix_core", ["apps/fermix_core/test/x_test.exs"], runs_before)
         with mock.patch.object(stress, "run_teed", fake), contextlib.redirect_stdout(io.StringIO()) as out:
-            ok = stress.stress_app("fermix_core", ["apps/fermix_core/test/x_test.exs"], 20, self.log)
-        return ok, out.getvalue()
+            outcome = stress.run_once(state, 20, self.log_dir)
+        return outcome, out.getvalue()
 
-    def test_repeats_the_files_until_the_first_failure(self):
-        self.run_app(0, REPEATED_GREEN)
+    def test_runs_the_files_once_into_a_log_of_their_own(self):
+        outcome, _ = self.run_app(0, GREEN_RUN, runs_before=2)
 
+        self.assertEqual(outcome, stress.PASSED)
         self.assertEqual(
             self.commands[0],
-            [
-                "mix", "test", "--warnings-as-errors", "--max-failures", "1",
-                "--repeat-until-failure", "20", "apps/fermix_core/test/x_test.exs",
-            ],
+            ["mix", "test", "--warnings-as-errors", "--max-failures", "1", "apps/fermix_core/test/x_test.exs"],
         )
+        self.assertEqual(self.logs[0], self.log_dir / "stress-fermix_core-3.log")
 
-    def test_a_failure_on_any_repeat_fails_and_points_at_the_test(self):
-        ok, out = self.run_app(2, FAILED_ON_REPEAT)
+    def test_a_failure_points_at_the_test_and_the_seed_of_the_run_that_failed(self):
+        outcome, out = self.run_app(2, FAILED_RUN, runs_before=1)
 
-        self.assertFalse(ok)
+        self.assertEqual(outcome, stress.FAILED)
         self.assertIn(
             "::error file=apps/fermix_core/test/fermix_core/foo_test.exs,line=42,title=Flaky under load::", out
         )
-        self.assertIn("(seed 11)", out)
+        self.assertIn("(run 2, seed 12)", out)
 
     def test_a_failure_with_no_named_test_still_fails_and_says_so(self):
-        ok, out = self.run_app(1, "==> fermix_core\n** (Mix) could not compile\n")
+        outcome, out = self.run_app(1, "==> fermix_core\n** (Mix) could not compile\n")
 
-        self.assertFalse(ok)
+        self.assertEqual(outcome, stress.FAILED)
         self.assertIn("title=Stress run failed", out)
 
     def test_a_green_run_that_ran_nothing_warns(self):
-        ok, out = self.run_app(0, "==> fermix_core\nThere are no tests to run\n")
+        outcome, out = self.run_app(0, NO_TESTS_RUN)
 
-        self.assertTrue(ok)
+        self.assertEqual(outcome, stress.NO_TESTS)
         self.assertIn("title=Stress ran no tests", out)
 
 
 class MainTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory(prefix="fermix-stress-main-")
+        self.log_dir = Path(self.tmp.name)
+        self.clock = Clock()
+        self.burner = mock.Mock()
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def run_main(self, files, seconds, results=None, budget="720"):
+        """main() over fake runs: `seconds[app]` per run, `results[app]` the (exit code, log) of each."""
+
+        def fake(command, log):
+            app = command[-1].split("/")[1]
+            self.clock.now += seconds[app]
+            code, text = (results or {}).get(app, (0, GREEN_RUN))
+            log.write_text(text)
+            return code
+
+        argv = ["--base", "abc", "--budget-s", budget, "--log-dir", str(self.log_dir)]
+        with mock.patch.object(stress, "changed_test_files", return_value=(files, "")), mock.patch.object(
+            stress, "start_burners", return_value=[self.burner]
+        ), mock.patch.object(stress, "run_teed", fake), contextlib.redirect_stdout(io.StringIO()) as out:
+            code = stress.main(argv, clock=self.clock)
+        return code, out.getvalue()
+
     def test_no_changed_test_files_passes_without_running_mix(self):
         with mock.patch.object(stress, "changed_test_files", return_value=([], "")), mock.patch.object(
-            stress, "stress_app"
-        ) as stress_app, contextlib.redirect_stdout(io.StringIO()):
-            code = stress.main(["--base", "abc", "--log-dir", tempfile.gettempdir()])
+            stress, "run_teed"
+        ) as run_teed, contextlib.redirect_stdout(io.StringIO()):
+            code = stress.main(["--base", "abc", "--budget-s", "720", "--log-dir", str(self.log_dir)])
 
         self.assertEqual(code, 0)
-        stress_app.assert_not_called()
+        run_teed.assert_not_called()
 
-    def test_one_failing_app_fails_the_step_and_the_burners_are_stopped(self):
-        burner = mock.Mock()
+    def test_a_budget_stop_passes_with_a_notice_and_leaves_one_log_per_run(self):
         files = ["apps/fermix_core/test/a_test.exs", "apps/fermix_web/test/b_test.exs"]
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
-            stress, "changed_test_files", return_value=(files, "")
-        ), mock.patch.object(stress, "start_burners", return_value=[burner]), mock.patch.object(
-            stress, "stress_app", side_effect=[True, False]
-        ):
-            code = stress.main(["--base", "abc", "--log-dir", tmp])
+
+        code, out = self.run_main(files, {"fermix_core": 300, "fermix_web": 100})
+
+        self.assertEqual(code, 0)
+        self.assertIn("::notice title=Stress budget reached::fermix_core: 2 of 20 runs", out)
+        self.assertIn("::notice title=Stress budget reached::fermix_web: 1 of 20 runs", out)
+        self.assertIn("fermix_core: 2 of 20 runs passed, then the budget stopped it", out)
+        self.assertEqual(
+            sorted(p.name for p in self.log_dir.iterdir()),
+            ["stress-fermix_core-1.log", "stress-fermix_core-2.log", "stress-fermix_web-1.log"],
+        )
+        self.burner.kill.assert_called_once()
+
+    def test_an_app_the_budget_never_reached_fails_the_step(self):
+        files = ["apps/fermix_core/test/a_test.exs", "apps/fermix_web/test/b_test.exs"]
+
+        code, out = self.run_main(files, {"fermix_core": 800, "fermix_web": 10})
 
         self.assertEqual(code, 1)
-        burner.kill.assert_called_once()
+        self.assertIn("::error title=Stress budget spent::fermix_web never ran under load", out)
+
+    def test_one_failing_app_fails_the_step_and_the_burners_are_stopped(self):
+        files = ["apps/fermix_core/test/a_test.exs", "apps/fermix_web/test/b_test.exs"]
+
+        code, _ = self.run_main(files, {"fermix_core": 1, "fermix_web": 1}, {"fermix_web": (2, FAILED_RUN)})
+
+        self.assertEqual(code, 1)
+        self.burner.kill.assert_called_once()
 
     def test_the_burners_are_stopped_when_a_run_raises(self):
-        burner = mock.Mock()
-        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+        with mock.patch.object(
             stress, "changed_test_files", return_value=(["apps/fermix_core/test/a_test.exs"], "")
-        ), mock.patch.object(stress, "start_burners", return_value=[burner]), mock.patch.object(
-            stress, "stress_app", side_effect=RuntimeError("boom")
-        ), self.assertRaises(RuntimeError):
-            stress.main(["--base", "abc", "--log-dir", tmp])
+        ), mock.patch.object(stress, "start_burners", return_value=[self.burner]), mock.patch.object(
+            stress, "run_teed", side_effect=RuntimeError("boom")
+        ), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
+            stress.main(["--base", "abc", "--budget-s", "720", "--log-dir", str(self.log_dir)], clock=self.clock)
 
-        burner.kill.assert_called_once()
+        self.burner.kill.assert_called_once()
+
+    def test_the_budget_is_required_and_positive(self):
+        for argv in (["--log-dir", "x"], ["--log-dir", "x", "--budget-s", "0"]):
+            with self.subTest(argv=argv), contextlib.redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                stress.parse_args(argv)
 
 
 if __name__ == "__main__":

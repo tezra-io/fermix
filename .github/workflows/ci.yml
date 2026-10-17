@@ -117,6 +117,11 @@ jobs:
         # unrelated PR a month later. Repeating the change's own test files
         # with every core busy makes the change that wrote it the one that
         # sees it. See AGENTS.md, Tests under load.
+        # No run starts after --budget-s, and a later run starts only when its
+        # app's previous run would still end inside it. 720 s of the 15-minute
+        # timeout leaves 3 minutes for uv's start, the burners' stop and the
+        # overrun of the last run started, which the budget never cuts short.
+        # Raise the two together.
         if: matrix.leg == 'linux-x64'
         timeout-minutes: 15
         env:
@@ -124,6 +129,7 @@ jobs:
         run: >-
           uv run scripts/ci/stress_changed_tests.py
           --base "${STRESS_BASE}"
+          --budget-s 720
           --log-dir "${RUNNER_TEMP}/stress"
 
       - name: Upload flaky-test evidence

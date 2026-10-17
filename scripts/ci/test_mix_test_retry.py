@@ -209,6 +209,34 @@ class AnnotationTest(unittest.TestCase):
         self.assertIn('"50%25%0Anext"', retry.annotation(failure))
 
 
+# The child prints one line, then waits for it to reach the log while it is still
+# running: a step killed by its timeout keeps only what was written by then.
+CHILD_WAITS_FOR_ITS_LINE = """\
+import pathlib, sys, time
+print("first line", flush=True)
+log = pathlib.Path(sys.argv[1])
+deadline = time.monotonic() + 10  # an arrival wait, never a measurement
+while "first line" not in log.read_text():
+    if time.monotonic() > deadline:
+        print("the line never reached the log")
+        sys.exit(3)
+    time.sleep(0.05)
+print("seen in the log")
+"""
+
+
+class RunTeedTest(unittest.TestCase):
+    def test_each_line_reaches_the_log_and_stdout_as_it_is_printed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run.log"
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                code = retry.run_teed([sys.executable, "-c", CHILD_WAITS_FOR_ITS_LINE, str(log)], log)
+            self.assertEqual(code, 0, out.getvalue())
+            self.assertEqual(log.read_text(), "first line\nseen in the log\n")
+            self.assertEqual(out.getvalue(), "first line\nseen in the log\n")
+
+
 class MainTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory(prefix="fermix-mix-test-retry-")
