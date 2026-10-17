@@ -60,7 +60,11 @@ bounded call whose exit is caught as a store call's is), each reply's blocks
 are inserted in the transaction that inserts its row (`append_in_tx`) and ride
 its `text_done`, and the Mac's `row` carries them, as `PROTOCOL.md`'s new
 *Blocks under a reply* says. No client rule reads them, and every row, seq,
-ending and settlement is as before, so nothing the spec models changed.
+ending and settlement is as before, so nothing the spec models changed. The
+re-read after M72 section 14 found a place in a block carrying an optional
+`apple_place_id` when Apple Maps found it, and the section saying which
+backend searched and what a place from each one has. A block's contents are
+read by no client rule either, so nothing the spec models changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
