@@ -9,7 +9,7 @@ defmodule FermixCore.MixProject do
       config_path: "../../config/config.exs",
       deps_path: "../../deps",
       lockfile: "../../mix.lock",
-      elixir: "~> 1.17",
+      elixir: "~> 1.18",
       elixirc_paths: elixirc_paths(Mix.env()),
       elixirc_options: [warnings_as_errors: true],
       start_permanent: Mix.env() == :prod,
@@ -36,7 +36,7 @@ defmodule FermixCore.MixProject do
     [
       {:burrito, "~> 1.5"},
       {:exqlite, "~> 0.36.0"},
-      {:anubis_mcp, "~> 1.6"},
+      {:anubis_mcp, "~> 2.0.0"},
       {:floki, "~> 0.36"},
       {:jason, "~> 1.4"},
       {:compux, github: "tezra-io/compux", ref: "d043c66569d8c3480712146dcfa6ccf4b781d6d2"},
