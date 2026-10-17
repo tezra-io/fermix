@@ -103,8 +103,5 @@ packaging/linux/out/
 # package build refuses a checkout that is not exactly the commit.
 /.zig-cache/
 packaging/*
-# The Docker Sandboxes kit is tracked; the packages and Caddy binaries
-# fetch_packages.sh puts beside it are not.
+# The Docker Sandboxes kit is tracked.
 !packaging/sbx/
-packaging/sbx/*.deb
-packaging/sbx/caddy_*

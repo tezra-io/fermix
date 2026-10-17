@@ -5,7 +5,7 @@
 # sets Fermix up headless, the daemon comes up, the provider key the cloud
 # injects works for one real turn, and the file store holds the settings.
 #
-#   scripts/release/verify_sbx_headless.sh docker.io/tezraio/fermix-kit:0.15.0
+#   scripts/release/verify_sbx_headless.sh docker.io/sbx/fermix:0.16.0
 #
 # Needs `sbx login` and `sbx --cloud secret set anthropic` on this machine. The
 # sandbox is the smallest size with a one-hour TTL that deletes it, and this

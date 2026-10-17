@@ -1,41 +1,55 @@
 # syntax=docker/sandbox-kit:3
-# Fermix in Docker Sandboxes (M64): a workload kit that sets Fermix up headless
+# Fermix, a personal AI daemon, as a workload kit: it sets Fermix up headless
 # on first boot and keeps `fermix run` up. Provider keys stay with Docker:
 # Fermix sends provider requests to the kit's relay on loopback, and the
-# sandbox's credential proxy behind it writes the key into each request.
-#
-#   packaging/sbx/fetch_packages.sh <version>
-#   docker buildx build packaging/sbx -f packaging/sbx/fermix-kit.yaml \
-#     --platform linux/amd64,linux/arm64 -t docker.io/<namespace>/fermix-kit:<version> --push
-#   sbx --cloud run -d --name fermix --cpus 1 --memory 2g --ttl 24h --on-timeout stop \
-#     docker.io/<namespace>/fermix-kit:<version>
+# sandbox's credential proxy behind it writes the stored key into each
+# request. Usage and design notes: README.md beside this file.
 schemaVersion: "3"
 kind: workload
 displayName: Fermix
-description: Fermix, a personal AI daemon, set up headless with its provider keys kept outside the sandbox
-sourceUrl: https://fermix.ai
-dockerfile: ./fermix-kit.dockerfile
+description: >-
+  Fermix, a personal AI daemon with chat channels, tools and memory, set up
+  headless on first boot with its provider keys kept outside the sandbox.
+sourceUrl: https://github.com/tezra-io/fermix
+# The Fermix pet, from the Fermix repository at a pinned commit.
+iconUrl: https://raw.githubusercontent.com/tezra-io/fermix/147c2e92714d74926338ca7374c6839ddbe54c7b/apps/fermix_web/priv/static/images/fermix-mascot.png
+# Fermix is MIT; the Caddy binary the relay runs is Apache-2.0.
+licenses: [MIT, Apache-2.0]
+
+# One value drives the install, the provide and the published tag. Fermix
+# publishes a release package per tag, and the recipe takes only a package
+# whose signature names that tag.
+version: "${{ kit.args.version }}"
 
 args:
+  version:
+    default: "0.16.0"
+    pattern: '^[0-9]+\.[0-9]+\.[0-9]+$'
+    description: Fermix release to install
+    buildArg: FERMIX_VERSION
   provider:
     default: anthropic
     enum: [openai, anthropic, xai]
     description: The provider Fermix uses first. Store its key with `sbx secret set <provider>`.
 
+provides: ["fermix@${{ kit.args.version }}"]
+
 capabilities:
   - type: com.docker.sandbox/sbx@1
 
-  # A local sandbox stays up after its terminal closes (sbx 0.47 and later).
-  # Optional on purpose: the cloud refuses a kit that requires it.
+  # A local sandbox stays up after its terminal closes. Optional on purpose:
+  # the cloud refuses a kit that requires it.
   - type: com.docker.sandbox/long-running@1
     optional: true
 
   - type: com.docker.sandbox/network-policy@1
     config:
+      # Nothing runs in the install phase: the recipe installs everything at
+      # build time, and both hooks below are startup hooks.
       runtime:
         # The three providers, web search's default backend, the chat channels
         # with their attachment hosts, and GitHub for release and plugin
-        # downloads. Nothing else (D2).
+        # downloads. Nothing else.
         allow:
           - api.openai.com
           - api.anthropic.com
@@ -52,8 +66,9 @@ capabilities:
           - github.com
           - "*.githubusercontent.com"
 
-  # Optional: a cloud sandbox injects by destination host from
-  # `sbx --cloud secret set <provider>` and may skip kit credential bindings.
+  # Optional: Fermix starts without a key and reports the missing one at the
+  # first turn, and a cloud sandbox injects by destination host from
+  # `sbx --cloud secret set <provider>`.
   - type: com.docker.sandbox/credential@1
     optional: true
     description: OpenAI API access for Fermix
@@ -107,3 +122,10 @@ capabilities:
           env: [OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY]
           description: Set Fermix up on first boot, then keep fermix run up
       interactive: [--shell]
+
+  # No agent-sessions@1: `fermix ask` is the non-interactive form, but a
+  # prompt subtest reaches a hosted provider, and this kit has not been run
+  # where one is stored. Add it with that run, not before it.
+  #
+  # No agent-context@1: Fermix keeps its own instructions in its home and
+  # reads no profile file from the workspace.

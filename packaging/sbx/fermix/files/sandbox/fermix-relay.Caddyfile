@@ -1,4 +1,4 @@
-# The provider relay (M64), run by fermix-sandbox-relay. Fermix speaks plain
+# The provider relay, run by fermix-sandbox-relay. Fermix speaks plain
 # HTTP to one loopback port per provider; Caddy speaks TLS to the provider
 # through the sandbox's credential proxy, which writes the stored key into the
 # request, so the key stays with Docker and out of this VM. Fermix cannot use

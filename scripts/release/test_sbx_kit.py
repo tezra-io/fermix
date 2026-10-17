@@ -3,7 +3,7 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Hermetic tests for the Docker Sandboxes kit scripts in packaging/sbx (M64).
+"""Hermetic tests for the Docker Sandboxes kit in packaging/sbx/fermix (M64).
 
 Every command the scripts run is a stand-in on PATH that logs its argv, so
 nothing here starts Fermix, sleeps or opens a shell.
@@ -17,7 +17,11 @@ import tempfile
 import unittest
 from pathlib import Path
 
-KIT = Path(__file__).resolve().parents[2] / "packaging" / "sbx"
+KIT = Path(__file__).resolve().parents[2] / "packaging" / "sbx" / "fermix"
+# The scripts the kit installs in /usr/lib/fermix/sandbox, and the build-time
+# helper its recipe runs in the fetch stage.
+SCRIPTS = KIT / "files" / "sandbox"
+FETCH = KIT / "files" / "build" / "fetch-verified.sh"
 BASH = shutil.which("bash")
 
 # `fermix`: logs its argv; FAKE_FERMIX_EXIT sets its status. `fermix status`
@@ -71,7 +75,7 @@ exit 0
 
 def relay_routes() -> dict:
     """The relay's loopback port for each provider host, read off the Caddyfile."""
-    text = (KIT / "fermix-relay.Caddyfile").read_text()
+    text = (SCRIPTS / "fermix-relay.Caddyfile").read_text()
     sites = re.findall(r"^http://127\.0\.0\.1:(\d+) \{\n\timport provider (\S+)\n\}", text, re.M)
     return {host: int(port) for port, host in sites}
 
@@ -133,7 +137,7 @@ class KitCase(unittest.TestCase):
 
 class LoopTest(KitCase):
     def test_restarts_after_every_exit_and_stops_after_the_fifth(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="3")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="3")
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(
@@ -142,18 +146,18 @@ class LoopTest(KitCase):
         )
         self.assertIn("exited with status 3 (start 5 of 5)", result.stderr)
         self.assertIn("fermix run exited 5 times, so it stays stopped", result.stderr)
-        self.assertIn(f"setsid {KIT / 'fermix-sandbox-loop'} &", result.stderr)
+        self.assertIn(f"setsid {SCRIPTS / 'fermix-sandbox-loop'} &", result.stderr)
 
     def test_drops_the_console_log_and_keeps_what_fermix_run_says_on_stderr(self) -> None:
         # The daemon writes its log to stdout and to ~/.fermix/logs; only a
         # crash before the logger starts is worth keeping beside the boot log.
-        result = self.run_script(KIT / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="1")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="1")
 
         self.assertNotIn("console line", result.stdout + result.stderr)
         self.assertEqual(result.stderr.count("fermix stderr line"), 5)
 
     def test_a_clean_exit_also_counts_as_a_start(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="0")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-loop", FAKE_FERMIX_EXIT="0")
 
         self.assertEqual(result.returncode, 1)
         self.assertEqual(self.calls().count("fermix run"), 5)
@@ -162,7 +166,7 @@ class LoopTest(KitCase):
 class BootTest(KitCase):
     def setUp(self) -> None:
         super().setUp()
-        shutil.copy(KIT / "fermix-sandbox-boot", self.kit / "fermix-sandbox-boot")
+        shutil.copy(SCRIPTS / "fermix-sandbox-boot", self.kit / "fermix-sandbox-boot")
         write_tool(self.kit, "fermix-sandbox-loop", FAKE_LOOP)
         self.boot = self.kit / "fermix-sandbox-boot"
         self.boot_log = self.home / ".fermix-sandbox-boot.log"
@@ -334,7 +338,7 @@ class BootTest(KitCase):
 class RelayTest(KitCase):
     def setUp(self) -> None:
         super().setUp()
-        shutil.copy(KIT / "fermix-sandbox-relay", self.kit / "fermix-sandbox-relay")
+        shutil.copy(SCRIPTS / "fermix-sandbox-relay", self.kit / "fermix-sandbox-relay")
         write_tool(self.kit, "caddy", FAKE_CADDY)
         write_tool(self.bin, "flock", FAKE_FLOCK)
         self.relay = self.kit / "fermix-sandbox-relay"
@@ -374,7 +378,7 @@ class RelayTest(KitCase):
 
 class CaddyfileTest(unittest.TestCase):
     def test_each_site_listens_on_loopback_and_dials_through_the_sandbox_proxy(self) -> None:
-        text = (KIT / "fermix-relay.Caddyfile").read_text()
+        text = (SCRIPTS / "fermix-relay.Caddyfile").read_text()
         snippet = re.search(r"^\(provider\) \{\n(.*?)^\}", text, re.M | re.S).group(1)
 
         self.assertIn("\tbind 127.0.0.1\n", snippet)
@@ -387,8 +391,8 @@ class CaddyfileTest(unittest.TestCase):
 class ImageTest(unittest.TestCase):
     def test_the_image_installs_every_file_the_kit_runs(self) -> None:
         # The kit and the scripts name files under /usr/lib/fermix/sandbox; a
-        # file the Dockerfile never copies fails only in a sandbox.
-        dockerfile = (KIT / "fermix-kit.dockerfile").read_text()
+        # file the recipe never copies fails only in a sandbox.
+        dockerfile = (KIT / "fermix.dockerfile").read_text()
         copied = set()
         for line in dockerfile.splitlines():
             if line.startswith("COPY "):
@@ -400,17 +404,39 @@ class ImageTest(unittest.TestCase):
                     copied.add(destination)
 
         named = set()
-        for name in ("fermix-kit.yaml", "fermix-sandbox-boot", "fermix-sandbox-relay"):
-            named.update(re.findall(r"/usr/lib/fermix/sandbox/[\w.-]+", (KIT / name).read_text()))
-        relay = (KIT / "fermix-sandbox-relay").read_text()
+        for path in (KIT / "fermix.yaml", SCRIPTS / "fermix-sandbox-boot", SCRIPTS / "fermix-sandbox-relay"):
+            named.update(re.findall(r"/usr/lib/fermix/sandbox/[\w.-]+", path.read_text()))
+        relay = (SCRIPTS / "fermix-sandbox-relay").read_text()
         for local in re.findall(r'"\$sandbox_dir/([\w.-]+)"', relay):
             named.add(f"/usr/lib/fermix/sandbox/{local}")
 
         self.assertTrue(named)
         self.assertEqual(named - copied, set())
 
+    def test_every_file_the_recipe_copies_from_the_kit_exists(self) -> None:
+        # The build context is the kit directory alone, so a mistyped source
+        # fails only when Docker's CI builds the kit.
+        sources = re.findall(r"\b(files/[\w./-]+)", (KIT / "fermix.dockerfile").read_text())
+
+        self.assertTrue(sources)
+        self.assertEqual([source for source in sources if not (KIT / source).is_file()], [])
+
+    def test_the_kit_version_reaches_the_build_that_installs_and_checks_it(self) -> None:
+        # One version drives the install, the provide and the published tag;
+        # a buildArg the recipe never declares would build with no version.
+        kit = (KIT / "fermix.yaml").read_text()
+        build_arg = re.search(r"^  version:\n(?:    .*\n)*?    buildArg: (\w+)$", kit, re.M).group(1)
+        stages = (KIT / "fermix.dockerfile").read_text().split("\nFROM ")[1:]
+
+        self.assertIn('version: "${{ kit.args.version }}"', kit)
+        self.assertIn('provides: ["fermix@${{ kit.args.version }}"]', kit)
+        for stage in stages[1:]:
+            self.assertIn(f"ARG {build_arg}\n", stage)
+        self.assertIn(f'fetch-verified.sh "${{{build_arg}}}"', stages[1])
+        self.assertIn(f'"$installed" != "${{{build_arg}}}"', stages[2])
+
     def test_the_relay_gets_the_sandbox_proxy_and_the_boot_hook_does_not(self) -> None:
-        kit = (KIT / "fermix-kit.yaml").read_text()
+        kit = (KIT / "fermix.yaml").read_text()
         startups = re.findall(
             r"- command: \[/usr/lib/fermix/sandbox/([\w-]+)\]\n\s+background: true\n\s+env: \[([^\]]*)\]",
             kit,
@@ -420,20 +446,21 @@ class ImageTest(unittest.TestCase):
         self.assertEqual(env["fermix-sandbox-relay"], ["HTTPS_PROXY"])
         self.assertNotIn("HTTPS_PROXY", env["fermix-sandbox-boot"])
 
+
 class SessionTest(KitCase):
     def setUp(self) -> None:
         super().setUp()
         write_tool(self.bin, "bash", FAKE_BASH)
 
     def test_a_tty_session_shows_the_status_then_opens_a_login_shell(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-session", "--shell", FAKE_STATUS_UP_AT="1")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", "--shell", FAKE_STATUS_UP_AT="1")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls(), ["fermix status", "bash -l"])
         self.assertIn("fermix: running (pid 7)", result.stdout)
 
     def test_waits_until_the_daemon_answers_not_until_its_socket_exists(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-session", "--shell", FAKE_STATUS_UP_AT="3")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", "--shell", FAKE_STATUS_UP_AT="3")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(
@@ -442,7 +469,7 @@ class SessionTest(KitCase):
         )
 
     def test_a_headless_run_shows_the_status_then_follows_the_log(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-session", FAKE_STATUS_UP_AT="1")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", FAKE_STATUS_UP_AT="1")
 
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.calls(), ["fermix status", "fermix logs -f"])
@@ -450,7 +477,7 @@ class SessionTest(KitCase):
     def test_a_tty_session_waits_sixty_seconds_then_shows_the_boot_log_and_a_shell(self) -> None:
         (self.home / ".fermix-sandbox-boot.log").write_text("fermix-sandbox-boot: fermix setup failed\n")
 
-        result = self.run_script(KIT / "fermix-sandbox-session", "--shell")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", "--shell")
 
         self.assertEqual(result.returncode, 0)
         self.assertEqual(self.calls(), ["fermix status", "sleep 1"] * 60 + ["fermix status", "bash -l"])
@@ -460,20 +487,20 @@ class SessionTest(KitCase):
     def test_a_headless_run_without_a_daemon_fails_after_the_boot_log(self) -> None:
         (self.home / ".fermix-sandbox-boot.log").write_text("fermix-sandbox-boot: fermix setup failed\n")
 
-        result = self.run_script(KIT / "fermix-sandbox-session")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session")
 
         self.assertEqual(result.returncode, 1)
         self.assertNotIn("fermix logs -f", self.calls())
         self.assertIn("fermix setup failed", result.stderr)
 
     def test_says_when_the_boot_hook_never_ran(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-session", "--shell")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", "--shell")
 
         self.assertIn("the boot hook never ran", result.stderr)
         self.assertEqual(self.calls()[-1], "bash -l")
 
     def test_refuses_an_unknown_argument(self) -> None:
-        result = self.run_script(KIT / "fermix-sandbox-session", "--shel")
+        result = self.run_script(SCRIPTS / "fermix-sandbox-session", "--shel")
 
         self.assertEqual(result.returncode, 2)
         self.assertEqual(self.calls(), [])
@@ -494,29 +521,51 @@ printf 'cosign %s\\n' "$*" >> "$FAKE_LOG"
 case "$last" in *"${FAKE_COSIGN_REFUSE:-no blob}"*) echo "invalid signature" >&2; exit 1 ;; esac
 """
 
+# The build stage has GNU coreutils; macOS keeps them off the test's PATH, and
+# shasum prints the same line.
+FAKE_SHA256SUM = """#!/bin/sh
+exec shasum -a 256 "$@"
+"""
+FAKE_SHA512SUM = """#!/bin/sh
+exec shasum -a 512 "$@"
+"""
+
 VERSION = "9.8.7"
 IDENTITY = f"https://github.com/tezra-io/fermix/.github/workflows/release.yml@refs/tags/v{VERSION}"
-CADDY_VERSION = re.search(
-    r"^readonly caddy_version=(\S+)$", (KIT / "fetch_packages.sh").read_text(), re.M
-).group(1)
+CADDY_VERSION = re.search(r"^readonly caddy_version=(\S+)$", FETCH.read_text(), re.M).group(1)
 CADDY_IDENTITY = (
     f"https://github.com/caddyserver/caddy/.github/workflows/release.yml@refs/tags/v{CADDY_VERSION}"
 )
 CADDY_SUMS = f"caddy_{CADDY_VERSION}_checksums.txt"
 
 
-class FetchPackagesTest(KitCase):
+class FetchVerifiedTest(KitCase):
     def setUp(self) -> None:
         super().setUp()
-        shutil.copy(KIT / "fetch_packages.sh", self.kit / "fetch_packages.sh")
-        self.fetch = self.kit / "fetch_packages.sh"
         self.release = self.root / "r"
         self.release.mkdir()
-        write_tool(self.bin, "curl", FAKE_CURL)
-        write_tool(self.bin, "cosign", FAKE_COSIGN)
+        self.out = self.root / "o"
+        for name, body in (
+            ("curl", FAKE_CURL),
+            ("cosign", FAKE_COSIGN),
+            ("sha256sum", FAKE_SHA256SUM),
+            ("sha512sum", FAKE_SHA512SUM),
+        ):
+            write_tool(self.bin, name, body)
         for arch in ("amd64", "arm64"):
             self.publish(arch, f"package {arch}".encode())
         self.publish_caddy()
+
+    # The recipe runs the helper with sh, as the build stage does.
+    def fetch(self, *args: str, **extra: str) -> subprocess.CompletedProcess:
+        return subprocess.run(
+            ["/bin/sh", str(FETCH), *args],
+            env=self.env(FAKE_RELEASE=str(self.release), **extra),
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
 
     # Caddy's release: one tarball per arch holding the `caddy` binary, and a
     # sha512 checksums file signed by Caddy's release workflow.
@@ -546,93 +595,94 @@ class FetchPackagesTest(KitCase):
         (self.release / f"{name}.sig").write_text("sig")
         (self.release / f"{name}.pem").write_text("pem")
 
-    def placed(self, arch: str) -> Path:
-        return self.kit / f"fermix_{arch}.deb"
+    def assert_nothing_placed(self) -> None:
+        self.assertEqual(sorted(self.out.iterdir()) if self.out.exists() else [], [])
 
-    def test_places_both_packages_after_both_verify(self) -> None:
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+    def test_places_the_package_and_caddy_after_both_verify(self) -> None:
+        result = self.fetch(VERSION, "arm64", str(self.out))
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual(self.placed("amd64").read_bytes(), b"package amd64")
-        self.assertEqual(self.placed("arm64").read_bytes(), b"package arm64")
+        self.assertEqual((self.out / "fermix.deb").read_bytes(), b"package arm64")
+        self.assertEqual((self.out / "caddy").read_text(), "caddy arm64")
         origin = f"https://github.com/tezra-io/fermix/releases/download/v{VERSION}"
         self.assertIn(f"curl {origin}/fermix_{VERSION}_arm64.deb.sig", self.calls())
         cosign = [line for line in self.calls() if line.startswith("cosign ")]
-        self.assertEqual(len(cosign), 3)
+        self.assertEqual(len(cosign), 2)
         for line in cosign:
             identity = CADDY_IDENTITY if line.endswith(CADDY_SUMS) else IDENTITY
             self.assertIn(f"--certificate-identity {identity} ", line)
             self.assertIn("--certificate-oidc-issuer https://token.actions.githubusercontent.com ", line)
 
-    def test_places_the_caddy_binary_for_each_arch_after_its_checksum_verifies(self) -> None:
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+    def test_downloads_only_the_architecture_being_built(self) -> None:
+        result = self.fetch(VERSION, "amd64", str(self.out))
 
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.kit / "caddy_amd64").read_text(), "caddy amd64")
-        self.assertEqual((self.kit / "caddy_arm64").read_text(), "caddy arm64")
-        self.assertTrue(any(line.endswith(CADDY_SUMS) for line in self.calls() if line.startswith("cosign ")))
+        downloads = [line for line in self.calls() if line.startswith("curl ")]
+        self.assertTrue(downloads)
+        self.assertEqual([line for line in downloads if "arm64" in line], [])
+        self.assertEqual((self.out / "caddy").read_text(), "caddy amd64")
 
-    def test_a_caddy_checksum_mismatch_leaves_the_kit_as_it_was(self) -> None:
+    def test_a_caddy_checksum_mismatch_places_nothing(self) -> None:
         self.publish_caddy(digests={"arm64": "0" * 128})
 
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+        result = self.fetch(VERSION, "arm64", str(self.out))
 
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"caddy_{CADDY_VERSION}_linux_arm64.tar.gz: sha512", result.stderr)
-        for placed in ("fermix_amd64.deb", "fermix_arm64.deb", "caddy_amd64", "caddy_arm64"):
-            self.assertFalse((self.kit / placed).exists(), placed)
+        self.assert_nothing_placed()
 
-    def test_a_refused_caddy_signature_leaves_the_kit_as_it_was(self) -> None:
-        result = self.run_script(
-            self.fetch, VERSION, FAKE_RELEASE=str(self.release), FAKE_COSIGN_REFUSE=CADDY_SUMS
-        )
+    def test_a_refused_caddy_signature_places_nothing(self) -> None:
+        result = self.fetch(VERSION, "arm64", str(self.out), FAKE_COSIGN_REFUSE=CADDY_SUMS)
 
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"{CADDY_SUMS}: cosign verify-blob failed: invalid signature", result.stderr)
-        self.assertFalse((self.kit / "caddy_amd64").exists())
-        self.assertFalse(self.placed("amd64").exists())
+        self.assert_nothing_placed()
 
-    def test_a_checksum_mismatch_leaves_the_kit_as_it_was(self) -> None:
-        self.placed("amd64").write_bytes(b"older amd64")
+    def test_a_package_checksum_mismatch_places_nothing(self) -> None:
         self.publish("arm64", b"package arm64", digest="0" * 64)
 
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+        result = self.fetch(VERSION, "arm64", str(self.out))
 
         self.assertEqual(result.returncode, 1)
         self.assertIn(f"fermix_{VERSION}_arm64.deb: sha256", result.stderr)
-        self.assertEqual(self.placed("amd64").read_bytes(), b"older amd64")
-        self.assertFalse(self.placed("arm64").exists())
+        self.assert_nothing_placed()
 
-    def test_a_refused_signature_leaves_the_kit_as_it_was(self) -> None:
-        result = self.run_script(
-            self.fetch, VERSION, FAKE_RELEASE=str(self.release), FAKE_COSIGN_REFUSE="amd64"
-        )
+    def test_a_refused_package_signature_places_nothing(self) -> None:
+        result = self.fetch(VERSION, "arm64", str(self.out), FAKE_COSIGN_REFUSE=f"fermix_{VERSION}_arm64.deb")
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("cosign verify-blob failed: invalid signature", result.stderr)
-        self.assertFalse(self.placed("amd64").exists())
-        self.assertFalse(self.placed("arm64").exists())
+        self.assert_nothing_placed()
 
     def test_a_release_without_the_package_is_refused(self) -> None:
         (self.release / f"fermix_{VERSION}_arm64.deb.pem").unlink()
 
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+        result = self.fetch(VERSION, "arm64", str(self.out))
 
         self.assertEqual(result.returncode, 1)
-        self.assertIn(f"cannot download https://github.com/tezra-io/fermix/releases/download/v{VERSION}/fermix_{VERSION}_arm64.deb.pem", result.stderr)
-        self.assertFalse(self.placed("amd64").exists())
+        self.assertIn(
+            f"cannot download https://github.com/tezra-io/fermix/releases/download/v{VERSION}/fermix_{VERSION}_arm64.deb.pem",
+            result.stderr,
+        )
+        self.assert_nothing_placed()
 
     def test_refuses_to_run_without_cosign(self) -> None:
         (self.bin / "cosign").unlink()
 
-        result = self.run_script(self.fetch, VERSION, FAKE_RELEASE=str(self.release))
+        result = self.fetch(VERSION, "arm64", str(self.out))
 
         self.assertEqual(result.returncode, 1)
         self.assertIn("cosign is required", result.stderr)
         self.assertEqual(self.calls(), [])
 
     def test_refuses_a_version_with_a_leading_v(self) -> None:
-        result = self.run_script(self.fetch, f"v{VERSION}", FAKE_RELEASE=str(self.release))
+        result = self.fetch(f"v{VERSION}", "arm64", str(self.out))
+
+        self.assertEqual(result.returncode, 2)
+        self.assertEqual(self.calls(), [])
+
+    def test_refuses_an_architecture_the_kit_does_not_build(self) -> None:
+        result = self.fetch(VERSION, "riscv64", str(self.out))
 
         self.assertEqual(result.returncode, 2)
         self.assertEqual(self.calls(), [])
