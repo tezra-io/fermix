@@ -14,7 +14,8 @@ defmodule FermixChannels.Channels.Mobile do
   A phone turn runs in the Mac's chat (`joined_conversation/1`, M56 D9): one
   agent history and one queue lane for the one timeline both draw. The
   channel stays `mobile`, so the phone's authorization, approval cards,
-  stream, push and link previews stay its own.
+  stream and push stay its own. A row it writes is previewed as every row of
+  the timeline is (`FermixChannels.LinkPreviews`).
   """
 
   @behaviour FermixChannels.Gateway.Channel
@@ -29,34 +30,23 @@ defmodule FermixChannels.Channels.Mobile do
   alias FermixChannels.Gateway.Channel
   alias FermixChannels.Gateway.Commands.Registry, as: CommandRegistry
   alias FermixChannels.Gateway.Message
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.Management
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.Push
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
-  alias FermixChannels.Mobile.Unfurl
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixCore.Companion.Timeline
   alias FermixCore.Reply
+  alias FermixCore.ReplyBlocks
   alias FermixCore.Telemetry
-  alias FermixCore.Text
 
   @channel "mobile"
   @profile "main"
   @media_chunk_bytes 60 * 1_024
   @max_media_bytes 20 * 1_024 * 1_024
-  # One resolution fetches up to two pages, their redirects and thumbnails,
-  # each read chunk by chunk: the whole of it has one deadline, and only so
-  # many run at once (SEC-11).
-  @unfurl_deadline_ms 20_000
-  @max_concurrent_unfurls 4
-  @unfurl_supervisor FermixChannels.Mobile.UnfurlSupervisor
-  # A link preview card's bounds, in bytes (D7).
-  @max_preview_url_bytes 2_048
-  @max_preview_site_bytes 120
-  @max_preview_title_bytes 300
-  @max_preview_description_bytes 600
 
   @type event :: %{required(:type) => String.t(), required(:payload) => map()}
   @type draft_handle :: %{turn_id: String.t(), state: pid()}
@@ -175,7 +165,12 @@ defmodule FermixChannels.Channels.Mobile do
     with {:ok, {status, row}} <- persist_final_text(message, text) do
       _ = emit_after_commit(message.chat_id, Output.text_done(turn_id, row.server_seq, text))
       _ = announce_to_companion(status, message.chat_id, row)
-      _ = schedule_unfurl(message.chat_id, row.server_seq, text)
+
+      _ =
+        LinkPreviews.schedule(message.chat_id, row.server_seq, ReplyBlocks.links(text),
+          store: store()
+        )
+
       {:ok, nil}
     end
   after
@@ -331,44 +326,6 @@ defmodule FermixChannels.Channels.Mobile do
     emit_outbound(result, duration_us)
   end
 
-  @doc """
-  Resolve link previews asynchronously after a durable timeline commit, store
-  each on its row, then fan it out.
-
-  The resolution runs under the bounded unfurl supervisor (a launch past its
-  bound is refused and logged, never queued) and is killed at a hard deadline.
-  An injected `:unfurl` resolver is called as `resolver.(text, store_thumbnail)`,
-  the same shape `Unfurl.resolve/2` receives. A stored thumbnail is only a blob
-  until its preview is on the row: `media_fetch` serves it through that preview.
-  """
-  @spec schedule_unfurl(String.t(), pos_integer(), String.t(), keyword()) :: :ok
-  def schedule_unfurl(profile_id, server_seq, text, opts \\ [])
-      when is_binary(profile_id) and is_integer(server_seq) and server_seq > 0 and
-             is_binary(text) and is_list(opts) do
-    if text == "" do
-      :ok
-    else
-      launch_unfurl(fn -> resolve_unfurls(profile_id, server_seq, text, opts) end, opts)
-    end
-  end
-
-  @doc "How many link-preview resolutions run at once."
-  @spec max_concurrent_unfurls() :: pos_integer()
-  def max_concurrent_unfurls, do: @max_concurrent_unfurls
-
-  @doc """
-  The bounded task supervisor link previews resolve under, which the mobile
-  subtree starts: past `max_children` a launch is refused.
-  """
-  @spec unfurl_supervisor_spec(atom(), pos_integer()) :: Supervisor.child_spec()
-  def unfurl_supervisor_spec(
-        name \\ @unfurl_supervisor,
-        max_children \\ @max_concurrent_unfurls
-      )
-      when is_atom(name) and is_integer(max_children) and max_children > 0 do
-    Supervisor.child_spec({Task.Supervisor, name: name, max_children: max_children}, id: name)
-  end
-
   @impl true
   def download_attachment(_message, attachment) when is_map(attachment) do
     case value(attachment, :path) do
@@ -495,7 +452,7 @@ defmodule FermixChannels.Channels.Mobile do
   defp deliver_persisted_text(:created, profile, text, row, opts) do
     _ = emit_after_commit(profile, delivered_text(profile, text, row, opts))
     _ = announce_to_companion(:created, profile, row)
-    phone_effects(profile, row.server_seq, text, opts)
+    delivered_effects(profile, row.server_seq, text, opts)
   end
 
   # A request's reply seals a bubble of its turn, which the request's own
@@ -514,21 +471,19 @@ defmodule FermixChannels.Channels.Mobile do
   defp deliver_persisted_media(:created, profile, media, ref, row, opts) do
     _ = emit_media_after_commit(profile, row.server_seq, media, ref)
     _ = announce_to_companion(:created, profile, row)
-    phone_effects(profile, row.server_seq, value(media, :caption) || "", opts)
+    delivered_effects(profile, row.server_seq, value(media, :caption) || "", opts)
   end
 
-  # A delivered row's push and link previews are for phones, so they are
-  # launched only while the phone subtree runs (`Mobile.Supervisor.running?/1`).
-  # A job or reminder delivered here while it does not is still a row of the
-  # shared timeline, which the Mac has heard; nothing is fetched or pushed for
-  # nobody.
-  defp phone_effects(profile, server_seq, text, opts) do
-    if MobileSupervisor.running?() do
-      _ = maybe_schedule_proactive_push(profile, server_seq, opts)
-      _ = schedule_unfurl(profile, server_seq, text)
-    end
+  # A delivered row's push is for phones, so it is launched only while the
+  # phone subtree runs (`Mobile.Supervisor.running?/1`): a job or reminder
+  # delivered here while it does not is still a row of the shared timeline,
+  # which the Mac has heard, and nobody is pushed. Its links are previewed
+  # either way, as every row's are.
+  defp delivered_effects(profile, server_seq, text, opts) do
+    _ =
+      if MobileSupervisor.running?(), do: maybe_schedule_proactive_push(profile, server_seq, opts)
 
-    :ok
+    LinkPreviews.schedule(profile, server_seq, ReplyBlocks.links(text), store: store())
   end
 
   # One durable timeline row is one delivered outbound message. A row the store
@@ -671,185 +626,6 @@ defmodule FermixChannels.Channels.Mobile do
 
   defp log_post_commit_error(effect, reason) do
     Logger.error("mobile post-commit #{effect} failed: #{inspect(reason)}")
-    :ok
-  end
-
-  defp launch_unfurl(task, opts) do
-    supervisor = Keyword.get(opts, :unfurl_supervisor, @unfurl_supervisor)
-
-    launcher =
-      Keyword.get(opts, :unfurl_launcher) ||
-        Application.get_env(:fermix_channels, :mobile_unfurl_launcher) ||
-        (&default_unfurl_launcher(&1, supervisor))
-
-    case launcher.(task) do
-      :ok -> :ok
-      {:ok, _pid} -> :ok
-      {:error, reason} -> log_unfurl_error(:launch_failed, reason)
-      other -> log_unfurl_error(:invalid_launcher_result, other)
-    end
-  end
-
-  # The mobile subtree runs the bounded supervisor. While it does not run no
-  # phone is there to see a preview, and past the bound a launch is refused
-  # (`:max_children`), never queued.
-  defp default_unfurl_launcher(task, supervisor) do
-    case GenServer.whereis(supervisor) do
-      nil -> {:error, {:unfurl_supervisor_not_running, supervisor}}
-      pid -> Task.Supervisor.start_child(pid, task)
-    end
-  end
-
-  defp resolve_unfurls(profile_id, server_seq, text, opts) do
-    deadline_ms = Keyword.get(opts, :unfurl_deadline_ms, @unfurl_deadline_ms)
-
-    text
-    |> unfurl_resolution(opts)
-    |> within_deadline(deadline_ms)
-    |> handle_unfurl_result(profile_id, server_seq, opts)
-  end
-
-  # Both seams are looked up here, in the calling process, so a mis-shaped
-  # injection raises where it was made.
-  defp unfurl_resolution(text, opts) do
-    store_thumbnail = thumbnail_writer(opts)
-
-    case unfurl_resolver(opts) do
-      nil -> fn -> Unfurl.resolve(text, store_thumbnail: store_thumbnail) end
-      resolver -> fn -> resolver.(text, store_thumbnail) end
-    end
-  end
-
-  # A resolution past its deadline is killed along with the fetch it holds.
-  defp within_deadline(resolution, deadline_ms) do
-    task = Task.async(resolution)
-
-    case Task.yield(task, deadline_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      {:exit, reason} -> {:error, {:unfurl_exit, reason}}
-      nil -> {:error, {:unfurl_deadline, deadline_ms}}
-    end
-  end
-
-  defp unfurl_resolver(opts) do
-    override = Keyword.get(opts, :unfurl) || Application.get_env(:fermix_channels, :mobile_unfurl)
-
-    injected(override, 2, :mobile_unfurl)
-  end
-
-  defp handle_unfurl_result({:ok, previews, warnings}, profile_id, server_seq, opts)
-       when is_list(previews) and is_list(warnings) do
-    Enum.each(previews, &publish_link_preview(profile_id, server_seq, &1, opts))
-    Enum.each(warnings, &log_unfurl_error(:resolution_warning, &1))
-    :ok
-  end
-
-  defp handle_unfurl_result({:error, reason}, _profile_id, _server_seq, _opts),
-    do: log_unfurl_error(:resolution_failed, reason)
-
-  defp handle_unfurl_result(other, _profile_id, _server_seq, _opts),
-    do: log_unfurl_error(:invalid_resolver_result, other)
-
-  # The card is stored on its row before anyone hears of it: history rebuilds
-  # it from there, and `media_fetch` serves its image only through it. The
-  # phones hear the card, and the Mac that the row changed (`row_updated`),
-  # each wire only its own event.
-  defp publish_link_preview(profile_id, server_seq, preview, opts) do
-    with {:ok, card} <- link_preview_card(preview),
-         {:ok, _row} <- attach_link_preview(profile_id, server_seq, card, opts),
-         :ok <- emit_unfurl_event(profile_id, link_preview_event(server_seq, card), opts),
-         :ok <- emit_unfurl_event(profile_id, Output.row_updated(profile_id, server_seq), opts) do
-      :ok
-    else
-      {:error, reason} -> log_unfurl_error(:preview_failed, reason)
-    end
-  end
-
-  # Text is cut to its bound on a UTF-8 boundary; a url cannot be cut into a
-  # working link, so one past its bound is no preview at all.
-  defp link_preview_card(preview) do
-    with {:ok, url} <- preview_url(value(preview, :url)) do
-      {:ok,
-       %{
-         "url" => url,
-         "site" => bounded_text(value(preview, :site), @max_preview_site_bytes),
-         "title" => bounded_text(value(preview, :title), @max_preview_title_bytes)
-       }
-       |> maybe_put(
-         "description",
-         bounded_text(value(preview, :description), @max_preview_description_bytes)
-       )
-       |> maybe_put("image", preview_image(value(preview, :image)))}
-    end
-  end
-
-  defp preview_url(url) when is_binary(url) and byte_size(url) <= @max_preview_url_bytes,
-    do: {:ok, url}
-
-  defp preview_url(url) when is_binary(url),
-    do: {:error, {:link_preview_url_too_long, byte_size(url), @max_preview_url_bytes}}
-
-  defp preview_url(url), do: {:error, {:invalid_link_preview_url, url}}
-
-  defp bounded_text(text, max_bytes) when is_binary(text), do: Text.truncate_utf8(text, max_bytes)
-  defp bounded_text(other, _max_bytes), do: other
-
-  defp preview_image(nil), do: nil
-
-  defp preview_image(image) when is_map(image) do
-    ref = value(image, :ref)
-
-    %{
-      "ref" => ref,
-      "sha256" => ref,
-      "kind" => "image",
-      "mime" => value(image, :mime),
-      "size_bytes" => value(image, :size_bytes)
-    }
-  end
-
-  defp link_preview_event(server_seq, card) do
-    %{
-      "t" => "link_preview",
-      "in_reply_to" => server_seq,
-      "url" => card["url"],
-      "site" => card["site"],
-      "title" => card["title"]
-    }
-    |> maybe_put("description", card["description"])
-    |> maybe_put("image_ref", get_in(card, ["image", "ref"]))
-  end
-
-  defp emit_unfurl_event(profile_id, event, opts) do
-    case Keyword.get(opts, :event_sink) do
-      sink when is_function(sink, 2) -> sink.({:profile, profile_id}, event)
-      nil -> Fanout.announce(profile_id, event)
-    end
-  end
-
-  defp thumbnail_writer(opts) do
-    override = injected(Keyword.get(opts, :thumbnail_store), 2, :thumbnail_store)
-
-    override || (&store_unfurl_thumbnail/2)
-  end
-
-  defp attach_link_preview(profile_id, server_seq, card, opts) do
-    store_module = Keyword.get(opts, :store, store())
-
-    store_module.attach_link_preview(
-      profile_id,
-      server_seq,
-      card,
-      Keyword.get(opts, :store_opts, [])
-    )
-  end
-
-  defp store_unfurl_thumbnail(bytes, mime) do
-    MediaStore.put_bytes(MediaStore, bytes, %{kind: :image, mime_type: mime})
-  end
-
-  defp log_unfurl_error(stage, reason) do
-    Logger.warning("mobile unfurl #{stage}: #{inspect(reason)}")
     :ok
   end
 

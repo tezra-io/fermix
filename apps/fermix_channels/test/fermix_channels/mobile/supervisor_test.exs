@@ -3,7 +3,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
 
   import ExUnit.CaptureLog
 
-  alias FermixChannels.Channels.Mobile, as: MobileChannel
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Iroh
   alias FermixChannels.Mobile.Iroh.Helper
@@ -36,13 +35,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert Enum.find_index(ids, &(&1 == FermixChannels.Mobile.DeviceRegistry)) <
              Enum.find_index(ids, &(&1 == FermixChannels.Mobile.PairManager))
 
-    # MediaStore names its child by {module, instance} so two stores can run
-    # side by side; the ordering gate has to look the child up by that id.
-    media_store_id = {FermixChannels.Mobile.MediaStore, instance_names.media_store}
-
-    assert Enum.find_index(ids, &(&1 == media_store_id)) <
-             Enum.find_index(ids, &(&1 == instance_names.request_coordinator))
-
     assert Enum.find_index(ids, &(&1 == instance_names.request_coordinator)) <
              Enum.find_index(ids, &(&1 == Listener))
 
@@ -50,13 +42,11 @@ defmodule FermixChannels.Mobile.SupervisorTest do
     assert Enum.find_index(ids, &(&1 == FermixChannels.Mobile.Discovery)) <
              Enum.find_index(ids, &(&1 == Listener))
 
-    # Link previews resolve under a bounded supervisor, up before any socket.
-    assert Enum.find_index(ids, &(&1 == instance_names.unfurl_supervisor)) <
-             Enum.find_index(ids, &(&1 == Listener))
-
-    unfurls = Enum.find(children, &(&1.id == instance_names.unfurl_supervisor))
-    assert {Task.Supervisor, :start_link, [unfurl_opts]} = unfurls.start
-    assert unfurl_opts[:max_children] == MobileChannel.max_concurrent_unfurls()
+    # The media store and the link previews are the timeline's, shared with
+    # the Mac: the channels application runs them, whether or not a phone is
+    # paired, so this subtree starts neither.
+    refute Enum.any?(ids, &match?({FermixChannels.Mobile.MediaStore, _instance}, &1))
+    refute Enum.any?(children, &match?(%{start: {Task.Supervisor, _function, _args}}, &1))
   end
 
   # M51 §5.5: the candidates a phone is given are the addresses the listener
@@ -643,7 +633,6 @@ defmodule FermixChannels.Mobile.SupervisorTest do
       device_registry: Module.concat(__MODULE__, "Registry#{suffix}"),
       pair_manager: Module.concat(__MODULE__, "Pair#{suffix}"),
       media_store: Module.concat(__MODULE__, "Media#{suffix}"),
-      unfurl_supervisor: Module.concat(__MODULE__, "Unfurl#{suffix}"),
       discovery: Module.concat(__MODULE__, "Discovery#{suffix}"),
       request_coordinator: Module.concat(__MODULE__, "Coordinator#{suffix}"),
       listener: Module.concat(__MODULE__, "Listener#{suffix}"),

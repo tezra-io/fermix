@@ -697,8 +697,7 @@ Current channels:
   draw has one agent history and one queue lane, while the channel stays
   `mobile` for the phone's authorization, approval cards, stream and push.
   `Mobile.Supervisor` (`:rest_for_one`) starts, in order,
-  the device store and registry, `PairManager`, `MediaStore`, the bounded
-  link-preview task supervisor (`Mobile.UnfurlSupervisor`), the APNs
+  the device store and registry, `PairManager`, the APNs
   dispatcher when push is configured (it connects on the first push, never at
   boot, and a push waits for that connect only until its deadline), the
   transport's `RequestCoordinator`, `Mobile.Discovery` (a cached list of the
@@ -712,8 +711,19 @@ Current channels:
   memory is off or the identity, attachment manifest or trust store cannot be
   read. Whether the channel runs has one answer, `Mobile.Supervisor.running?/1`
   (the supervisor's name is registered): the management verbs and a delivered
-  row's push and link previews read it, so a job delivered while the channel
-  is off is only a row of the shared timeline.
+  row's push read it, so a job delivered while the channel is off is only a
+  row of the shared timeline.
+- The timeline's media and its link previews belong to both companion
+  transports, so the channels application starts them on every real boot,
+  whether or not the phone channel runs: `Mobile.MediaStore` (a phone's
+  attachments, the Mac's own uploads and every preview's picture; a manifest it
+  cannot read starts no store, `MediaStore.start_admitted/1`) and the bounded
+  task supervisor `LinkPreviews` resolves under. Once a row is durable,
+  `LinkPreviews.schedule/4` previews the links `FermixCore.ReplyBlocks.links/2`
+  reads from it (a reply's, less the ones its blocks draw, and a phone user's
+  own message's, never the Mac user's), the first four through `Mobile.Unfurl`,
+  stores each card on its row with the link it was read for, and announces it,
+  to the phones as `link_preview` and to the Mac as `row_updated`.
 - The two companion transports share one request path (`Companion.Requests`:
   the durable `client_msg_id` claim, the attempt fence, ingest, history, search,
   read state and cancel) and one set of turn outputs (`Companion.Output`); each

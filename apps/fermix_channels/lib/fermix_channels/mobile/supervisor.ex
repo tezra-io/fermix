@@ -2,9 +2,12 @@ defmodule FermixChannels.Mobile.Supervisor do
   @moduledoc """
   Composite lifecycle for the mobile transport.
 
-  Durable and presence state starts before pairing, media, and the listener.
-  The listener itself may be dormant until the first pairing ceremony creates
-  the gateway identity and asks it to activate.
+  Durable and presence state starts before pairing and the listener. The
+  listener itself may be dormant until the first pairing ceremony creates the
+  gateway identity and asks it to activate. The media store and the link
+  previews are the timeline's, shared with the Mac, so the channels
+  application runs them whether or not this subtree does; a manifest the store
+  cannot read still refuses this subtree, with its own word.
 
   The phone channel's switch is live (M51 §5.5, owner 2026-10-10). The
   channels application registers this subtree for the whole boot, on or off,
@@ -19,7 +22,6 @@ defmodule FermixChannels.Mobile.Supervisor do
 
   require Logger
 
-  alias FermixChannels.Channels.Mobile, as: MobileChannel
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.DeviceStore
   alias FermixChannels.Mobile.Discovery
@@ -37,7 +39,6 @@ defmodule FermixChannels.Mobile.Supervisor do
   alias FermixCore.Memory.Repo, as: MemoryRepo
 
   @default_max_media_bytes 20 * 1_024 * 1_024
-  @default_max_store_bytes 2 * 1_024 * 1_024 * 1_024
   @secret_sentinels FermixCore.Setup.SecretWriter.sentinels()
   @identity_faults [:identity_incomplete, :identity_unreadable, :invalid_identity_transaction]
   @manifest_faults [
@@ -302,12 +303,7 @@ defmodule FermixChannels.Mobile.Supervisor do
        name: names.pair_manager,
        device_store: names.device_store,
        listener: names.listener,
-       rail: names.iroh_helper},
-      {MediaStore, media_opts(opts, root, names.media_store)},
-      MobileChannel.unfurl_supervisor_spec(
-        names.unfurl_supervisor,
-        MobileChannel.max_concurrent_unfurls()
-      )
+       rail: names.iroh_helper}
     ]
 
     with {:ok, push_children} <- push_children(config, names) do
@@ -372,7 +368,6 @@ defmodule FermixChannels.Mobile.Supervisor do
       device_registry: DeviceRegistry,
       pair_manager: PairManager,
       media_store: MediaStore,
-      unfurl_supervisor: FermixChannels.Mobile.UnfurlSupervisor,
       discovery: Discovery,
       listener: Listener,
       mdns_advertiser: MdnsAdvertiser,
@@ -430,16 +425,8 @@ defmodule FermixChannels.Mobile.Supervisor do
     end
   end
 
-  defp media_opts(opts, root, name) do
-    config = Keyword.get(opts, :config, [])
-
-    [
-      root: Path.join(root, "mobile"),
-      name: name,
-      max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
-      max_store_bytes: Keyword.get(config, :media_store_max_bytes, @default_max_store_bytes)
-    ]
-  end
+  defp media_opts(opts, root, name),
+    do: MediaStore.configured(root, Keyword.get(opts, :config, []), name)
 
   defp listener_opts(opts, root, names) do
     config = Keyword.get(opts, :config, [])

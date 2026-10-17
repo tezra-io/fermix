@@ -1520,12 +1520,15 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp nonnegative_integer?(value), do: is_integer(value) and value >= 0
   defp valid_digest?(value), do: is_binary(value) and Regex.match?(@sha256, value)
 
-  # What a stored preview may hold: a url, a site and a title, text when
-  # present, and an image that is a well-formed media descriptor of its own
-  # ref. An absent field is an absent key, never a null.
+  # What a stored preview may hold: a url, a site and a title, the link the
+  # row wrote when present (a preview stored before links were kept has
+  # none), a description as text when present, and an image that is a
+  # well-formed media descriptor of its own ref. An absent field is an absent
+  # key, never a null.
   defp validate_link_preview(preview) when is_map(preview) do
     with :ok <- known_preview_keys(preview),
          :ok <- required_preview_text(preview, ~w(url site title)),
+         :ok <- optional_preview_link(preview),
          :ok <- optional_preview_text(preview, "description") do
       preview_image(Map.fetch(preview, "image"))
     end
@@ -1534,7 +1537,7 @@ defmodule FermixCore.Memory.Repo.MobileSql do
   defp validate_link_preview(_preview), do: invalid_preview(:not_a_map)
 
   defp known_preview_keys(preview) do
-    case Map.keys(preview) -- ~w(url site title description image) do
+    case Map.keys(preview) -- ~w(link url site title description image) do
       [] -> :ok
       [key | _rest] -> invalid_preview({:unknown_field, key})
     end
@@ -1544,6 +1547,16 @@ defmodule FermixCore.Memory.Repo.MobileSql do
     case Enum.find(keys, &(not nonempty_string?(Map.get(preview, &1)))) do
       nil -> :ok
       key -> invalid_preview({:invalid_field, key})
+    end
+  end
+
+  defp optional_preview_link(preview) do
+    case Map.fetch(preview, "link") do
+      :error ->
+        :ok
+
+      {:ok, link} ->
+        if nonempty_string?(link), do: :ok, else: invalid_preview({:invalid_field, "link"})
     end
   end
 
@@ -1568,11 +1581,11 @@ defmodule FermixCore.Memory.Repo.MobileSql do
 
   defp invalid_preview(reason), do: {:error, {:invalid_link_preview, reason}}
 
-  # The unfurler asks for at most two previews a row; this bounds what any
-  # caller can pile onto one row.
+  # The previewer asks for at most four previews a row, as many as this
+  # bounds any caller to; a link already previewed keeps its first card.
   defp append_link_preview(conn, profile, row, preview) do
     cond do
-      Enum.any?(row.link_previews, &(&1["url"] == preview["url"])) ->
+      Enum.any?(row.link_previews, &(preview_key(&1) == preview_key(preview))) ->
         {:ok, row}
 
       length(row.link_previews) >= @max_link_previews ->
@@ -1582,6 +1595,8 @@ defmodule FermixCore.Memory.Repo.MobileSql do
         update_link_previews(conn, profile, row, row.link_previews ++ [preview])
     end
   end
+
+  defp preview_key(preview), do: Map.get(preview, "link", preview["url"])
 
   # A row's previews are one row of their own, keyed like it; its triggers
   # index their images.

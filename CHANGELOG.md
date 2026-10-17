@@ -23,6 +23,19 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   and whether it is ready. Nothing falls back from one backend to the other,
   and the helper never asks for or reads this Mac's location.
 
+- **Links in a Mac reply get previews, phone or no phone.** Once a reply in
+  the Mac app is written, Fermix reads up to four of the pages it links, from
+  this Mac, through the same guarded fetch a phone's replies already used
+  (every address and redirect checked, a size cap and a deadline), and keeps
+  each page's title, site and picture on the reply, so the chat's link cards
+  show them. The pages a reply's place cards already stand for are never
+  fetched, and your own messages typed on the Mac are not either. The media
+  store and the previews now run whether or not a phone is paired, so the
+  Mac's uploads and previews no longer need the phone channel on. A stored
+  preview keeps the link as the reply wrote it (`link` in both companion
+  wires), which a client pairs its card with, and the previewer reads a
+  bolded markdown link whole.
+
 - **Doctor says when your provider is down.** A new `provider health` row
   judges the primary provider from the calls Fermix already made in the last
   24 hours, so it sends nothing and runs in every Doctor run, the app's

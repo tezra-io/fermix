@@ -623,9 +623,10 @@
     },
     "linkPreviewCard": {
       "type": "object",
-      "description": "A link preview the phone channel stored on its row, as its link_preview event carried it. The bounds are bytes of UTF-8 (x-max-bytes).",
+      "description": "A link preview stored on its row: link is the address the row's text wrote, which a client pairs the card with (absent on a preview stored before it was kept); url is where the page answered from after redirects. The bounds are bytes of UTF-8 (x-max-bytes).",
       "required": ["url", "site", "title"],
       "properties": {
+        "link": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048 },
         "url": { "type": "string", "minLength": 1, "maxLength": 2048, "x-max-bytes": 2048 },
         "site": { "type": "string", "minLength": 1, "maxLength": 120, "x-max-bytes": 120 },
         "title": { "type": "string", "minLength": 1, "maxLength": 300, "x-max-bytes": 300 },

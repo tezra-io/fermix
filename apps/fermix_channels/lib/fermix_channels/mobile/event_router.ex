@@ -16,9 +16,11 @@ defmodule FermixChannels.Mobile.EventRouter do
   alias FermixChannels.Companion.Fanout
   alias FermixChannels.Companion.Output
   alias FermixChannels.Companion.Requests
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.Session
   alias FermixCore.Companion.Timeline
+  alias FermixCore.ReplyBlocks
 
   # A page above the 4 KiB header travels as continuation frames; this bounds
   # the one event they carry.
@@ -161,13 +163,13 @@ defmodule FermixChannels.Mobile.EventRouter do
   defp after_user_append(profile, row, text, opts) do
     :ok = Keyword.fetch!(opts, :event_sink).({:profile, profile}, Output.row(profile, row))
 
-    schedule_user_unfurl(profile, row, text, opts)
+    schedule_previews(profile, row, text, opts)
   end
 
-  defp schedule_user_unfurl(profile, row, text, opts) do
-    Mobile.schedule_unfurl(profile, row.server_seq, text,
-      unfurl: Keyword.get(opts, :unfurl),
-      unfurl_launcher: Keyword.get(opts, :unfurl_launcher),
+  defp schedule_previews(profile, row, text, opts) do
+    LinkPreviews.schedule(profile, row.server_seq, ReplyBlocks.links(text),
+      resolver: Keyword.get(opts, :link_preview_resolver),
+      launcher: Keyword.get(opts, :link_preview_launcher),
       event_sink: Keyword.get(opts, :event_sink),
       store: store(opts),
       store_opts: Keyword.get(opts, :store_opts, [])

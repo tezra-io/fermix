@@ -18,7 +18,7 @@ defmodule FermixChannels.Channels.SendToChannelTest do
   alias FermixCore.Tools.SendToChannel
 
   @repo :send_to_channel_timeline_repo
-  @env ~w(companion_store mobile_store mobile_event_sink mobile_push mobile_push_launcher mobile_unfurl_launcher)a
+  @env ~w(companion_store mobile_store mobile_event_sink mobile_push mobile_push_launcher link_preview_launcher)a
   @text "The lease renews on 2026-11-01."
 
   # The shared timeline on this module's throwaway repo.
@@ -52,7 +52,7 @@ defmodule FermixChannels.Channels.SendToChannelTest do
     end)
 
     Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
-    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn _task -> :ok end)
+    Application.put_env(:fermix_channels, :link_preview_launcher, fn _task -> :ok end)
 
     {:ok, _owner} = Registry.register(Companion.registry(), Companion.chat_profile(), 2)
     :ok

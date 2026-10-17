@@ -496,8 +496,10 @@ A `media_refs[]` entry carries `ref`, `kind`, `mime`, and `size_bytes`, plus
 optional `sha256`, `filename`, and `caption`.
 
 A `link_previews[]` entry is a preview stored on its row, as `link_preview`
-sent it: `url`, `site`, `title`, and optional `description` and `image_ref`. A
-row carries at most 4, and has the key only when it has one.
+sent it: `url`, `site`, `title`, and optional `description` and `image_ref`,
+plus optional `link`, the address the row's text wrote (a preview stored
+before links were kept has none). A row carries at most 4, and has the key
+only when it has one.
 
 `blocks[]` are records a reply's text links, such as the places a search found
 that it recommends, which the Mac's chat draws beside the text: the shape and

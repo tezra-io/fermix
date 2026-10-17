@@ -19,6 +19,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   alias FermixChannels.Channels.Mobile
   alias FermixChannels.Companion.Approvals
   alias FermixChannels.Companion.Output
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Mobile.EventRouter
   alias FermixChannels.Mobile.MediaStore
   alias FermixChannels.Mobile.PairManager
@@ -113,9 +114,9 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
     rows = seed_rows!()
     photo = hd(rows)
 
-    Mobile.schedule_unfurl("main", photo.server_seq, "see https://example.com",
-      unfurl: fn _text, _thumbnail -> {:ok, unfurled_previews(), []} end,
-      unfurl_launcher: fn task -> task.() && :ok end,
+    LinkPreviews.schedule("main", photo.server_seq, ["https://example.com"],
+      resolver: fn _links, _thumbnail -> {:ok, unfurled_previews(), []} end,
+      launcher: fn task -> task.() && :ok end,
       event_sink: ctx.sink,
       store: RepoTimeline
     )
@@ -676,6 +677,7 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
   defp unfurled_previews do
     [
       %{
+        link: "https://example.com",
         url: "https://example.com",
         site: String.duplicate("s", 200),
         title: String.duplicate("t", 400),
@@ -683,12 +685,18 @@ defmodule FermixChannels.Mobile.LiveEmitterContractTest do
         image: nil
       },
       %{
+        link: "https://example.org/post",
         url: "https://example.org/post",
         site: "Example Org",
         title: "A post",
         image: %{ref: String.duplicate("d", 64), mime: "image/png", size_bytes: 1_024}
       },
-      %{url: "https://example.net/" <> String.duplicate("p", 2_100), site: "Net", title: "Long"}
+      %{
+        link: "https://example.net/long",
+        url: "https://example.net/" <> String.duplicate("p", 2_100),
+        site: "Net",
+        title: "Long"
+      }
     ]
   end
 

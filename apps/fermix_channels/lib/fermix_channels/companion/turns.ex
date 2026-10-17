@@ -95,6 +95,7 @@ defmodule FermixChannels.Companion.Turns do
   alias FermixChannels.Companion.Output
   alias FermixChannels.Gateway.Message
   alias FermixChannels.Gateway.Queue
+  alias FermixChannels.LinkPreviews
   alias FermixChannels.Telemetry, as: ChannelTelemetry
   alias FermixChannels.Voice.ChatMirror
   alias FermixCore.Agents.ConversationKey
@@ -526,9 +527,10 @@ defmodule FermixChannels.Companion.Turns do
   # One held reply becomes its row, fenced to the turn's attempt, with the
   # blocks its text makes of the turn's place records, and is announced at
   # that row: as the turn's `text_done` to the connections that streamed it,
-  # and as a `row` to the phones, which did not. A failed write is the
-  # operator's to read: the turn still completes, as it did in the
-  # conversation's own history. The row is the outbound message, counted as
+  # and as a `row` to the phones, which did not. Then the links no block
+  # draws are previewed, as every row's are. A failed write is the operator's
+  # to read: the turn still completes, as it did in the conversation's own
+  # history. The row is the outbound message, counted as
   # `Companion.send_message/3` counts its own.
   defp write_reply(state, turn, text, records) do
     blocks = ReplyBlocks.build(text, records)
@@ -548,7 +550,9 @@ defmodule FermixChannels.Companion.Turns do
         ChannelTelemetry.emit_message(:companion, :outbound, 1, duration_us)
         done = Output.text_done(turn.turn_id, row.server_seq, text, blocks)
         :ok = Fanout.announce(turn.profile, done, audience: :companion)
-        Fanout.announce(turn.profile, Output.row(turn.profile, row), audience: :mobile)
+        _ = Fanout.announce(turn.profile, Output.row(turn.profile, row), audience: :mobile)
+        links = ReplyBlocks.links(text, blocks)
+        LinkPreviews.schedule(turn.profile, row.server_seq, links, store: store(state, turn))
 
       {:ok, {:existing, _row}} ->
         :ok

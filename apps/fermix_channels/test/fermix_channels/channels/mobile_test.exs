@@ -13,7 +13,6 @@ defmodule FermixChannels.Channels.MobileTest do
   alias FermixChannels.Gateway.Queue
   alias FermixChannels.Mobile.DeviceRegistry
   alias FermixChannels.Mobile.MediaStore
-  alias FermixChannels.Mobile.Protocol, as: MobileProtocol
   alias FermixChannels.Mobile.SocketHandler
   alias FermixChannels.Mobile.Supervisor, as: MobileSupervisor
   alias FermixCore.Memory.ConversationStore
@@ -155,10 +154,8 @@ defmodule FermixChannels.Channels.MobileTest do
     previous_media = Application.fetch_env(:fermix_channels, :mobile_media_resolver)
     previous_push = Application.fetch_env(:fermix_channels, :mobile_push)
     previous_push_launcher = Application.fetch_env(:fermix_channels, :mobile_push_launcher)
-    previous_unfurl = Application.fetch_env(:fermix_channels, :mobile_unfurl)
-
-    previous_unfurl_launcher =
-      Application.fetch_env(:fermix_channels, :mobile_unfurl_launcher)
+    previous_resolver = Application.fetch_env(:fermix_channels, :link_preview_resolver)
+    previous_preview_launcher = Application.fetch_env(:fermix_channels, :link_preview_launcher)
 
     previous_approvals = Application.fetch_env(:fermix_channels, :companion_approvals)
     previous_approval_push = Application.fetch_env(:fermix_channels, :mobile_approval_push)
@@ -213,12 +210,13 @@ defmodule FermixChannels.Channels.MobileTest do
       :ok
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl, fn text, _store_thumbnail ->
-      send(test_pid, {:unfurl_resolve, text})
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _store_thumbnail ->
+      send(test_pid, {:previews_resolve, links})
 
       {:ok,
        [
          %{
+           link: "https://example.com",
            url: "https://example.com",
            site: "Example",
            title: "Example title",
@@ -228,7 +226,7 @@ defmodule FermixChannels.Channels.MobileTest do
        ], []}
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn task ->
+    Application.put_env(:fermix_channels, :link_preview_launcher, fn task ->
       task.()
       :ok
     end)
@@ -251,8 +249,8 @@ defmodule FermixChannels.Channels.MobileTest do
 
       restore_env(:mobile_push, previous_push)
       restore_env(:mobile_push_launcher, previous_push_launcher)
-      restore_env(:mobile_unfurl, previous_unfurl)
-      restore_env(:mobile_unfurl_launcher, previous_unfurl_launcher)
+      restore_env(:link_preview_resolver, previous_resolver)
+      restore_env(:link_preview_launcher, previous_preview_launcher)
       restore_env(:companion_approvals, previous_approvals)
       restore_env(:mobile_approval_push, previous_approval_push)
     end)
@@ -451,7 +449,7 @@ defmodule FermixChannels.Channels.MobileTest do
                     }}
 
     assert_receive {:push_notify, "main", 73, "see https://example.com"}
-    assert_receive {:unfurl_resolve, "see https://example.com"}
+    assert_receive {:previews_resolve, ["https://example.com"]}
 
     assert_receive {:mobile_event, "main",
                     %{
@@ -680,177 +678,7 @@ defmodule FermixChannels.Channels.MobileTest do
   # STB-11: the preview is the row's own card, stored on the row before the
   # phone hears of it, so a history reload rebuilds it and media_fetch serves
   # its image through it; the thumbnail is never one of the row's attachments.
-  test "a link preview is stored on its row before it goes out, its image no attachment" do
-    digest = String.duplicate("b", 64)
-
-    resolver = fn text, store_thumbnail ->
-      send(self(), {:thumbnail_resolve, text})
-      assert {:ok, ^digest} = store_thumbnail.("png-bytes", "image/png")
-
-      {:ok,
-       [
-         %{
-           url: "https://example.com",
-           site: "Example",
-           title: "Example title",
-           description: nil,
-           image: %{ref: digest, mime: "image/png", size_bytes: 9}
-         }
-       ], []}
-    end
-
-    assert :ok = schedule_preview(resolver, fn _bytes, _mime -> {:ok, digest} end)
-
-    assert_received {:preview_attached, "main", 73, stored}
-
-    assert stored == %{
-             "url" => "https://example.com",
-             "site" => "Example",
-             "title" => "Example title",
-             "image" => %{
-               "ref" => digest,
-               "sha256" => digest,
-               "kind" => "image",
-               "mime" => "image/png",
-               "size_bytes" => 9
-             }
-           }
-
-    assert_received {:preview_event, {:profile, "main"}, event}
-
-    assert event == %{
-             "t" => "link_preview",
-             "in_reply_to" => 73,
-             "url" => "https://example.com",
-             "site" => "Example",
-             "title" => "Example title",
-             "image_ref" => digest
-           }
-
-    assert {:ok, _frames} =
-             MobileProtocol.encode_server_event(
-               "link_preview",
-               Map.delete(event, "t"),
-               1,
-               <<>>,
-               []
-             )
-
-    # Then that its row changed, which only the Mac's wire carries.
-    assert_received {:preview_event, {:profile, "main"},
-                     %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 73}}
-  end
-
-  # M66: with no sink of a caller's own, each wire hears its own event: the
-  # phones the card, and the Mac's connections that the row changed.
-  test "a stored link preview reaches the phones as its card and the Mac as row_updated" do
-    {:ok, _owner} = Registry.register(Companion.registry(), "main", 3)
-
-    assert :ok = Mobile.schedule_unfurl("main", 73, "see https://example.com")
-
-    assert_receive {:preview_attached, "main", 73, %{"url" => "https://example.com"}}
-    assert_receive {:mobile_event, "main", %{"t" => "link_preview", "in_reply_to" => 73}}
-
-    assert_receive {:companion_event,
-                    %{"t" => "row_updated", "profile_id" => "main", "server_seq" => 73}}
-
-    refute_received {:mobile_event, "main", %{"t" => "row_updated"}}
-    refute_received {:companion_event, %{"t" => "link_preview"}}
-  end
-
-  # D7: the preview card's text is cut to its bounds on a UTF-8 boundary; a
-  # url past its bound cannot be cut into a working link, so it is not sent.
-  test "a link preview's text is cut to its bounds and an over-long url is not sent" do
-    long = fn bytes -> String.duplicate("é", div(bytes, 2)) <> "é" end
-    too_long_url = "https://example.com/" <> String.duplicate("a", 2_048)
-
-    resolver = fn _text, _store_thumbnail ->
-      {:ok,
-       [
-         %{
-           url: "https://example.com/ok",
-           site: long.(120),
-           title: long.(300),
-           description: long.(600),
-           image: nil
-         },
-         %{url: too_long_url, site: "Example", title: "Too long", description: nil, image: nil}
-       ], []}
-    end
-
-    log =
-      capture_log(fn ->
-        assert :ok = schedule_preview(resolver, fn _bytes, _mime -> flunk("no thumbnail") end)
-      end)
-
-    assert_received {:preview_attached, "main", 73, stored}
-    assert byte_size(stored["site"]) <= 120 and String.valid?(stored["site"])
-    assert byte_size(stored["title"]) <= 300 and String.valid?(stored["title"])
-    assert byte_size(stored["description"]) <= 600 and String.valid?(stored["description"])
-    assert_received {:preview_event, {:profile, "main"}, %{"title" => title}}
-    assert title == stored["title"]
-
-    refute_received {:preview_attached, "main", 73, %{"title" => "Too long"}}
-    refute_received {:preview_event, {:profile, "main"}, %{"title" => "Too long"}}
-    assert log =~ "link_preview_url_too_long"
-  end
-
-  # SEC-11: a slow-drip server can hold a fetch chunk by chunk forever; the
-  # whole resolution has one hard deadline, and what it holds is killed.
-  test "an unfurl past its hard deadline is stopped and sends nothing" do
-    test_pid = self()
-
-    resolver = fn _text, _store_thumbnail ->
-      send(test_pid, {:resolver, self()})
-      Process.sleep(:infinity)
-    end
-
-    log =
-      capture_log(fn ->
-        assert :ok = schedule_preview(resolver, fn _, _ -> {:ok, "x"} end, unfurl_deadline_ms: 50)
-      end)
-
-    assert_received {:resolver, resolver_pid}
-    refute Process.alive?(resolver_pid)
-    refute_received {:preview_event, _target, _event}
-    assert log =~ "unfurl_deadline"
-  end
-
-  test "unfurls past the concurrency bound are refused, never queued without limit" do
-    # The default launcher, not the inline one the other tests share.
-    Application.delete_env(:fermix_channels, :mobile_unfurl_launcher)
-    supervisor = :"unfurl_bound_#{System.unique_integer([:positive])}"
-    start_supervised!(Mobile.unfurl_supervisor_spec(supervisor, 1))
-    test_pid = self()
-
-    blocking = fn _text, _store_thumbnail ->
-      send(test_pid, :unfurl_running)
-      Process.sleep(:infinity)
-    end
-
-    opts = [unfurl: blocking, unfurl_supervisor: supervisor]
-
-    assert :ok = Mobile.schedule_unfurl("main", 73, "https://example.com", opts)
-    assert_receive :unfurl_running
-
-    log =
-      capture_log(fn ->
-        assert :ok = Mobile.schedule_unfurl("main", 74, "https://example.com", opts)
-      end)
-
-    assert log =~ "max_children"
-    refute_receive :unfurl_running, 100
-    assert Mobile.max_concurrent_unfurls() == 4
-  end
-
   test "a mis-shaped injected seam raises instead of selecting the real implementation" do
-    assert_raise ArgumentError, ~r/mobile_unfurl override/, fn ->
-      Mobile.schedule_unfurl("main", 73, "see https://example.com",
-        unfurl: fn _text -> {:ok, [], []} end,
-        unfurl_launcher: fn task -> task.() end
-      )
-    end
-
     assert :ok = Mobile.send_message("main", "seed", [])
 
     assert_raise ArgumentError, ~r/mobile_push override/, fn ->
@@ -938,8 +766,9 @@ defmodule FermixChannels.Channels.MobileTest do
   # not run is still a row of the shared timeline, and the Mac hears it; no
   # phone effect is launched, so nothing is fetched or pushed for nobody.
   # R4-5: the subtree runs while its supervisor does; a child that outlives it
-  # for a moment does not stand in for it.
-  test "a delivery while the phone subtree is not running launches no phone effect" do
+  # for a moment does not stand in for it. The row's links are the timeline's,
+  # previewed whether or not a phone is paired (M72).
+  test "a delivery while the phone subtree is not running pushes nobody, and still previews its links" do
     test_pid = self()
     {:ok, _owner} = Registry.register(Companion.registry(), "main", nil)
     stop_supervised!(:phone_subtree)
@@ -950,8 +779,8 @@ defmodule FermixChannels.Channels.MobileTest do
       :ok
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn _task ->
-      send(test_pid, :unfurl_launched)
+    Application.put_env(:fermix_channels, :link_preview_launcher, fn _task ->
+      send(test_pid, :previews_launched)
       :ok
     end)
 
@@ -959,7 +788,7 @@ defmodule FermixChannels.Channels.MobileTest do
     assert_received {:timeline_append, "main", %{content: "read https://intranet.example/report"}}
     assert_received {:companion_event, %{"t" => "row", "server_seq" => 73}}
     refute_received :push_launched
-    refute_received :unfurl_launched
+    assert_received :previews_launched
   end
 
   test "a post-commit push failure is observable and never retries timeline persistence" do
@@ -967,7 +796,9 @@ defmodule FermixChannels.Channels.MobileTest do
       {:error, :apns_down}
     end)
 
-    Application.put_env(:fermix_channels, :mobile_unfurl, fn _text, _store -> {:ok, [], []} end)
+    Application.put_env(:fermix_channels, :link_preview_resolver, fn _links, _store ->
+      {:ok, [], []}
+    end)
 
     log =
       capture_log(fn ->
@@ -1058,29 +889,6 @@ defmodule FermixChannels.Channels.MobileTest do
       )
 
     handler_id
-  end
-
-  defp schedule_preview(resolver, thumbnail_store, extra \\ []) do
-    test_pid = self()
-
-    Mobile.schedule_unfurl(
-      "main",
-      73,
-      "https://example.com",
-      [
-        unfurl: resolver,
-        unfurl_launcher: fn task ->
-          task.()
-          :ok
-        end,
-        thumbnail_store: thumbnail_store,
-        store: StoreStub,
-        event_sink: fn target, event ->
-          send(test_pid, {:preview_event, target, event})
-          :ok
-        end
-      ] ++ extra
-    )
   end
 
   # A socket past its Noise handshake, about to read the phone's hello.

@@ -1,6 +1,7 @@
 defmodule FermixChannels.Mobile.MediaStore do
   @moduledoc """
-  Single-writer content-addressed storage for mobile attachments.
+  Single-writer content-addressed storage for the timeline's media: a phone's
+  attachments, the Mac's own uploads, and every row's link preview pictures.
 
   Uploads are written to private temporary files, hashed incrementally, and
   atomically renamed into the SHA-256 namespace only after size and digest
@@ -46,6 +47,52 @@ defmodule FermixChannels.Mobile.MediaStore do
           optional(:name) => String.t() | nil,
           optional(:poster_of) => String.t() | nil
         }
+
+  @doc """
+  The store as the channels application starts it, whether or not a phone is
+  paired, since the phone and the Mac share it (M72): under the home's
+  `mobile` folder, with the caps `[fermix_channels.mobile]` sets. A manifest
+  that cannot be read starts no store, and the boot goes on without one:
+  every `media_fetch` then answers `media_missing`, and the phone subtree
+  refuses with its own word for that manifest.
+  """
+  @spec boot_child(keyword()) :: Supervisor.child_spec()
+  def boot_child(config \\ Application.get_env(:fermix_channels, :mobile, []))
+      when is_list(config) do
+    opts = configured(Path.dirname(default_root()), config)
+    %{id: __MODULE__, start: {__MODULE__, :start_admitted, [opts]}, restart: :permanent}
+  end
+
+  @doc """
+  The store's options under the Fermix home `home`, with `config`'s caps
+  (`max_media_bytes`, `media_store_max_bytes`), registered as `name`.
+  """
+  @spec configured(String.t(), keyword(), atom() | nil) :: keyword()
+  def configured(home, config, name \\ __MODULE__) when is_binary(home) and is_list(config) do
+    [
+      root: Path.join(home, "mobile"),
+      name: name,
+      max_media_bytes: Keyword.get(config, :max_media_bytes, @default_max_media_bytes),
+      max_store_bytes: Keyword.get(config, :media_store_max_bytes, @default_max_store_bytes)
+    ]
+  end
+
+  @doc """
+  Start the store once its manifest is admissible (`manifest_admissible/1`);
+  otherwise log why and start nothing (`:ignore`), rather than restart on a
+  file that will not read any better.
+  """
+  @spec start_admitted(keyword()) :: GenServer.on_start() | :ignore
+  def start_admitted(opts) when is_list(opts) do
+    case manifest_admissible(opts) do
+      :ok ->
+        start_link(opts)
+
+      {:error, reason} ->
+        Logger.error("the timeline's media store did not start: #{inspect(reason)}")
+        :ignore
+    end
+  end
 
   @spec child_spec(keyword()) :: Supervisor.child_spec()
   def child_spec(opts) when is_list(opts) do

@@ -213,10 +213,14 @@ optional `kind`, `client_msg_id`, `in_reply_to`, `metadata`,
 `link_previews[]` and `blocks[]` (see *Blocks under a reply*). A
 `media_refs[]` entry carries `ref`, `kind`, `mime`, and
 `size_bytes`, plus optional `sha256`, `filename`, and `caption`. A
-`link_previews[]` entry is a link preview the phone channel stored on the row:
-`url` (at most 2,048 bytes), `site` (120), `title` (300), and optional
-`description` (600) and `image_ref`; a row carries at most 4, and has the key
-only when it has one. `metadata` never holds a null. Internal storage columns
+`link_previews[]` entry is a link preview stored on the row once it was
+written, whichever client's row it is: `url` (at most 2,048 bytes), where the
+page answered from after redirects, `site` (120), `title` (300), and optional
+`link` (2,048), the address the row's text wrote, which is what a client pairs
+the card with (a preview stored before links were kept has none, and pairs by
+its `url`), `description` (600) and `image_ref`; a row carries at most 4, and
+has the key only when it has one. A reply's previews are of the links its
+`blocks[]` do not draw. `metadata` never holds a null. Internal storage columns
 are never shipped.
 
 A `search_results` hit carries `server_seq`, `role`, `ts`, `excerpt` (plain

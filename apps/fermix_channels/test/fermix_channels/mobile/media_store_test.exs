@@ -266,6 +266,44 @@ defmodule FermixChannels.Mobile.MediaStoreTest do
     assert_start_failure(root, :insecure_attachment_manifest)
   end
 
+  # M72: the channels application starts the store whether or not a phone is
+  # paired, so a manifest it cannot read must start nothing rather than
+  # restart under the application's own supervisor.
+  test "an admitted start starts nothing on a manifest it cannot read, and says why", %{
+    root: root
+  } do
+    assert :ok = stop_supervised({MediaStore, root})
+    manifest = Path.join(root, "attachments.json")
+    File.write!(manifest, "{")
+    File.chmod!(manifest, 0o600)
+    opts = [name: nil, root: root, max_media_bytes: 64, max_store_bytes: 128]
+
+    {result, log} = with_log(fn -> MediaStore.start_admitted(opts) end)
+    assert result == :ignore
+    assert log =~ "invalid_attachment_manifest"
+
+    File.write!(manifest, ~s({"version":1,"attachments":[]}))
+    assert {:ok, store} = MediaStore.start_admitted(opts)
+    GenServer.stop(store)
+  end
+
+  test "the application's store lives in the home's mobile folder, with the configured caps" do
+    assert MediaStore.configured("/home/fermix", max_media_bytes: 10, media_store_max_bytes: 20) ==
+             [
+               root: "/home/fermix/mobile",
+               name: MediaStore,
+               max_media_bytes: 10,
+               max_store_bytes: 20
+             ]
+
+    assert %{id: MediaStore, start: {MediaStore, :start_admitted, [opts]}} =
+             MediaStore.boot_child(max_media_bytes: 10)
+
+    assert opts[:name] == MediaStore
+    assert opts[:max_media_bytes] == 10
+    assert Path.basename(opts[:root]) == "mobile"
+  end
+
   test "a foreign media entry is skipped loudly instead of refusing the boot", %{
     root: root,
     store: store

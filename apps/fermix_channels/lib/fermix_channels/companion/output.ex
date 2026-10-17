@@ -374,7 +374,7 @@ defmodule FermixChannels.Companion.Output do
   defp preview_cards(previews) when is_list(previews) and previews != [] do
     Enum.map(previews, fn preview ->
       preview
-      |> Map.take(~w(url site title description))
+      |> Map.take(~w(link url site title description))
       |> maybe_put("image_ref", get_in(preview, ["image", "ref"]))
     end)
   end

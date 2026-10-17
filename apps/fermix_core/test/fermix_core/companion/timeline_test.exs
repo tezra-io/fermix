@@ -1139,6 +1139,30 @@ defmodule FermixCore.Companion.TimelineTest do
              )
   end
 
+  # M72: a preview keeps the link the row wrote, which a client pairs it with;
+  # two links landing on one page keep a card each, and a link previewed again
+  # keeps its first.
+  test "a link preview keeps the link the row wrote, and each link keeps its first card", %{
+    repo: repo
+  } do
+    assert {:ok, parent} =
+             Timeline.append("main", %{role: "assistant", content: "x"}, store_opts(repo))
+
+    short = Map.put(link_preview(), "link", "https://t.example/a")
+    full = Map.put(link_preview(), "link", "https://example.test/post")
+    attach = &Timeline.attach_link_preview("main", parent.server_seq, &1, store_opts(repo))
+
+    assert {:ok, %{link_previews: [^short]}} = attach.(short)
+    assert {:ok, %{link_previews: [^short, ^full]}} = attach.(full)
+    assert {:ok, %{link_previews: [^short, ^full]}} = attach.(Map.put(short, "title", "Again"))
+
+    assert {:ok, %{messages: [%{link_previews: [^short, ^full]}]}} =
+             Timeline.history_page("main", store_opts(repo, after_seq: 0, limit: 1))
+
+    assert {:error, {:invalid_link_preview, {:invalid_field, "link"}}} =
+             attach.(Map.put(link_preview(), "link", ""))
+  end
+
   test "a link preview on a request output from an older attempt is refused", %{repo: repo} do
     assert {:ok, {:claimed, _request}} = claim_request(repo, "client-preview")
     assert {:ok, {:started, %{attempt: 1}}} = start_request(repo, "client-preview")

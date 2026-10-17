@@ -284,17 +284,18 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       end,
       agent: FermixChannels.Gateway.Queue,
       agent_server: self(),
-      unfurl_launcher: fn task ->
-        send(test_pid, :unfurl_started)
+      link_preview_launcher: fn task ->
+        send(test_pid, :previews_started)
         task.()
         :ok
       end,
-      unfurl: fn text, _store_thumbnail ->
-        send(test_pid, {:unfurl_resolved, text})
+      link_preview_resolver: fn links, _store_thumbnail ->
+        send(test_pid, {:previews_resolved, links})
 
         {:ok,
          [
            %{
+             link: "https://example.com",
              url: "https://example.com",
              site: "Example",
              title: "Example title",
@@ -333,7 +334,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       decoded("msg", %{
         "client_msg_id" => "client-1",
         "profile_id" => "main",
-        "text" => "look",
+        "text" => "look at https://example.com",
         "attach_ids" => ["photo-1"]
       })
 
@@ -342,7 +343,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
 
     assert_received {:appended, "main",
                      %{
-                       content: "look",
+                       content: "look at https://example.com",
                        media_refs: [ref]
                      }}
 
@@ -372,8 +373,8 @@ defmodule FermixChannels.Mobile.EventRouterTest do
                      }, :mobile}
 
     refute approval_id =~ token
-    assert_received :unfurl_started
-    assert_received {:unfurl_resolved, "look"}
+    assert_received :previews_started
+    assert_received {:previews_resolved, ["https://example.com"]}
     assert_received {:preview_attached, "main", 12, %{"url" => "https://example.com"}}
 
     assert_received {:event, {:profile, "main"},
@@ -853,7 +854,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
     assert_received {:appended, "main", %{content: "recover"}}
     assert_received {:gateway_ingest, [message], _gateway_opts}
     assert message.metadata.mobile_attempt == 3
-    refute_received :unfurl_started
+    refute_received :previews_started
   end
 
   test "a durable duplicate is acknowledged without running Gateway twice", ctx do
@@ -1068,7 +1069,7 @@ defmodule FermixChannels.Mobile.EventRouterTest do
       media_store: GatedMediaStore,
       media_server: test_pid,
       agent_server: test_pid,
-      unfurl_launcher: fn _task -> :ok end,
+      link_preview_launcher: fn _task -> :ok end,
       event_sink: fn _target, _event -> :ok end
     ]
 

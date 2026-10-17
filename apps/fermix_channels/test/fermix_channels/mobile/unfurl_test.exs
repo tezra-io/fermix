@@ -6,7 +6,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
   @max_body_bytes 1_048_576
   @public_ip {93, 184, 216, 34}
 
-  test "resolves at most two unique links and extracts Open Graph metadata" do
+  test "resolves at most four unique links, each keeping the link it was read for, and extracts Open Graph metadata" do
     test_pid = self()
 
     request = fn pinned, opts ->
@@ -36,18 +36,19 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       {:ok, String.duplicate("a", 64)}
     end
 
-    text =
-      "See https://example.com/a, again https://example.com/a and " <>
-        "https://example.com/b plus https://example.com/c"
+    links =
+      ~w(https://example.com/a https://example.com/a https://example.com/b) ++
+        ~w(https://example.com/c https://example.com/d https://example.com/e)
 
     assert {:ok, previews, []} =
-             Unfurl.resolve(text,
+             Unfurl.resolve(links,
                resolver: resolver(),
                request: request,
                store_thumbnail: store_thumbnail
              )
 
-    assert Enum.map(previews, & &1.url) == ["https://example.com/a", "https://example.com/b"]
+    assert Enum.map(previews, & &1.link) == Enum.uniq(links) |> Enum.take(4)
+    assert Enum.map(previews, & &1.url) == Enum.map(previews, & &1.link)
 
     assert Enum.all?(previews, fn preview ->
              preview.site == "Example" and preview.title == "Fermix" and
@@ -89,7 +90,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     end
 
     assert {:ok, [%{title: "Title", image: nil}], [warning]} =
-             Unfurl.resolve("https://example.com/a",
+             Unfurl.resolve(["https://example.com/a"],
                resolver: resolver(),
                request: request,
                store_thumbnail: fn _bytes, _mime -> flunk("a non-image thumbnail was stored") end
@@ -120,8 +121,10 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       end
     end
 
-    assert {:ok, [%{url: "https://other.test/end", title: "End"}], []} =
-             Unfurl.resolve("https://example.com/start",
+    assert {:ok,
+            [%{link: "https://example.com/start", url: "https://other.test/end", title: "End"}],
+            []} =
+             Unfurl.resolve(["https://example.com/start"],
                resolver: resolver(),
                request: request
              )
@@ -150,15 +153,15 @@ defmodule FermixChannels.Mobile.UnfurlTest do
       _host -> {:ok, [@public_ip]}
     end
 
-    text = "https://good.test/a https://private.test/b https://large.test/c"
+    links = ~w(https://good.test/a https://private.test/b https://large.test/c)
 
-    assert {:ok, [%{title: "Good"}], [{"https://private.test/b", reason}]} =
-             Unfurl.resolve(text, resolver: resolver, request: request)
+    assert {:ok, [%{title: "Good"}], [{"https://private.test/b", reason}, _large]} =
+             Unfurl.resolve(links, resolver: resolver, request: request)
 
     assert reason == {:resolved_to_private_address, {127, 0, 0, 1}}
 
     assert {:ok, [], [{"https://large.test/c", :body_too_large}]} =
-             Unfurl.resolve("https://large.test/c", resolver: resolver, request: request)
+             Unfurl.resolve(["https://large.test/c"], resolver: resolver, request: request)
   end
 
   test "bounds redirects and keeps a thumbnail failure observable" do
@@ -167,7 +170,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     end
 
     assert {:ok, [], [{"https://example.com/start", :redirect_limit}]} =
-             Unfurl.resolve("https://example.com/start",
+             Unfurl.resolve(["https://example.com/start"],
                resolver: resolver(),
                request: redirect
              )
@@ -183,7 +186,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     end
 
     assert {:ok, [%{title: "Title", image: nil}], [warning]} =
-             Unfurl.resolve("https://example.com/a", resolver: resolver(), request: page)
+             Unfurl.resolve(["https://example.com/a"], resolver: resolver(), request: page)
 
     assert warning == {"https://example.com/missing.png", {:http_status, 500}}
   end
@@ -218,7 +221,7 @@ defmodule FermixChannels.Mobile.UnfurlTest do
     end
 
     assert {:ok, [%{title: "Title", image: nil}], [warning]} =
-             Unfurl.resolve("https://example.com/a",
+             Unfurl.resolve(["https://example.com/a"],
                resolver: resolver(),
                request: request,
                store_thumbnail: fn _bytes, _mime -> flunk("oversized thumbnail was stored") end

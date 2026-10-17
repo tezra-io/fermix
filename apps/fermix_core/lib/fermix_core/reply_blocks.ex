@@ -21,6 +21,9 @@ defmodule FermixCore.ReplyBlocks do
   `priv/companion/protocol.schema.json` (`place`) exports it; an Apple Maps
   place carries its `apple_place_id` too, which a Mac opens it by (M72 §14.1).
   A reply that links none gets no block.
+
+  `links/2` is the same reading's other half: the links a reply names that no
+  block draws, which are the ones its link previews are made from.
   """
 
   use GenServer
@@ -102,12 +105,28 @@ defmodule FermixCore.ReplyBlocks do
     index = url_index(records)
 
     text
-    |> links()
+    |> read_links()
     |> Enum.flat_map(&linked_record(index, &1))
     |> Enum.flat_map(&place/1)
     |> Enum.uniq_by(&{&1["name"], &1["location"]})
     |> Enum.take(@max_places)
     |> places_block()
+  end
+
+  @doc """
+  The links a reply's `text` names, in order and once each, less the ones its
+  `blocks` draw: a place's `canonical_url` or `source_url`, compared as
+  `build/2` matches them. A place's card carries what its page would preview,
+  and a listing page's picture is the listing's, so those are never fetched.
+  """
+  @spec links(String.t(), [block()]) :: [String.t()]
+  def links(text, blocks \\ []) when is_binary(text) and is_list(blocks) do
+    drawn = blocks |> Enum.flat_map(&drawn_urls/1) |> Enum.flat_map(&url_key/1) |> MapSet.new()
+
+    text
+    |> read_links()
+    |> Enum.uniq()
+    |> Enum.reject(fn link -> link |> url_key() |> Enum.any?(&MapSet.member?(drawn, &1)) end)
   end
 
   # `:clock` answers the time in milliseconds; a test injects its own.
@@ -146,7 +165,12 @@ defmodule FermixCore.ReplyBlocks do
 
   # -- building --------------------------------------------------------------
 
-  defp links(text) do
+  defp drawn_urls(%{"type" => "places", "places" => places}),
+    do: Enum.flat_map(places, &[&1["canonical_url"], &1["source_url"]])
+
+  defp drawn_urls(_block), do: []
+
+  defp read_links(text) do
     @link
     |> Regex.scan(text, capture: :all_but_first)
     |> Enum.map(&link/1)

@@ -263,4 +263,29 @@ defmodule FermixCore.ReplyBlocksTest do
       refute Map.has_key?(brave, "apple_place_id")
     end
   end
+
+  describe "the links a reply's previews are made from" do
+    test "every link the text names, in order and once each, bold and bare ones read whole" do
+      text =
+        "**[Guide](https://guide.example/soho)** and <https://news.example/a>, then " <>
+          "https://blog.example/post. Again: [Guide](https://guide.example/soho \"title\")."
+
+      assert ReplyBlocks.links(text) ==
+               ~w(https://guide.example/soho https://news.example/a https://blog.example/post)
+
+      assert ReplyBlocks.links("no links here") == []
+    end
+
+    test "less the pages a block draws, matched as a place's links are" do
+      text =
+        "[Cafe 1](HTTPS://Cafe1.Example#hours) at https://search.brave.com/local/place/2/, " <>
+          "with its [menu](https://cafe1.example/menu) and a [guide](https://guide.example/soho)."
+
+      blocks = ReplyBlocks.build(text, [record(1), record(2)])
+      assert names(blocks) == ["Cafe 1", "Cafe 2"]
+
+      assert ReplyBlocks.links(text, blocks) ==
+               ~w(https://cafe1.example/menu https://guide.example/soho)
+    end
+  end
 end

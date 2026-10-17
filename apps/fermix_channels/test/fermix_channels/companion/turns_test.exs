@@ -51,6 +51,10 @@ defmodule FermixChannels.Companion.TurnsTest do
 
     def append_proactive(p, key, a, o), do: Timeline.append_proactive(p, key, a, o ++ @opts)
     def history_page(p, o), do: Timeline.history_page(p, o ++ @opts)
+
+    def attach_link_preview(p, seq, preview, o),
+      do: Timeline.attach_link_preview(p, seq, preview, o ++ @opts)
+
     def get_client_request(p, id, o), do: Timeline.get_client_request(p, id, o ++ @opts)
     def cancel_client_request(p, id, o), do: Timeline.cancel_client_request(p, id, o ++ @opts)
     def cancel_device_requests(device, o), do: Timeline.cancel_device_requests(device, o ++ @opts)
@@ -215,7 +219,7 @@ defmodule FermixChannels.Companion.TurnsTest do
   end
 
   @app_env ~w(companion_store mobile_store mobile_event_sink mobile_push mobile_push_launcher
-              mobile_unfurl_launcher companion_approvals mobile_approval_push)a
+              link_preview_launcher link_preview_resolver companion_approvals mobile_approval_push)a
 
   setup do
     test_pid = self()
@@ -234,7 +238,7 @@ defmodule FermixChannels.Companion.TurnsTest do
     end)
 
     Application.put_env(:fermix_channels, :mobile_push_launcher, fn task -> task.() end)
-    Application.put_env(:fermix_channels, :mobile_unfurl_launcher, fn _task -> :ok end)
+    Application.put_env(:fermix_channels, :link_preview_launcher, fn _task -> :ok end)
 
     Application.put_env(:fermix_channels, :mobile_approval_push, fn profile ->
       send(test_pid, {:approval_push, profile})
@@ -348,6 +352,43 @@ defmodule FermixChannels.Companion.TurnsTest do
 
       assert {:ok, %{messages: [%{blocks: []}]}} =
                RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+    end
+
+    # With no phone paired: the links are the timeline's, previewed on every
+    # reply, less the pages its places' cards already stand for.
+    test "a Mac reply's other links are previewed on its row, never its places' pages", ctx do
+      test_pid = self()
+      Application.put_env(:fermix_channels, :link_preview_launcher, &Task.start/1)
+
+      Application.put_env(:fermix_channels, :link_preview_resolver, fn links, _thumbnail ->
+        send(test_pid, {:previewing, links})
+        guide = "https://guide.example/soho"
+        {:ok, [%{link: guide, url: guide <> "/", site: "Guide", title: "SoHo on foot"}], []}
+      end)
+
+      id = unique()
+      msg = %{type: "msg", payload: msg_payload(id, "coffee and a walk?")}
+
+      assert :ok = Requests.request(msg, companion_transport(), request_opts(ctx))
+      assert_receive {:enqueued, turn}
+      :ok = ReplyBlocks.put_places(ctx.reply_blocks, ConversationKey.from(turn), [place(1)])
+
+      reply =
+        "[Cafe 1](https://cafe1.example/) has its [menu](https://cafe1.example/menu) online, " <>
+          "and the [guide](https://guide.example/soho) has a walk from there."
+
+      assert :ok = turn.reply_fn.({:text, reply})
+      turn.turn_result_fn.({:completed})
+
+      assert_receive {:companion_event, %{"t" => "text_done", "server_seq" => seq}}
+      assert_receive {:previewing, ["https://cafe1.example/menu", "https://guide.example/soho"]}
+      assert_receive {:companion_event, %{"t" => "row_updated", "server_seq" => ^seq}}
+
+      assert {:ok, %{messages: [%{link_previews: [preview]}]}} =
+               RepoTimeline.history_page("main", after_seq: seq - 1, limit: 1)
+
+      assert preview["link"] == "https://guide.example/soho"
+      assert preview["url"] == "https://guide.example/soho/"
     end
   end
 
