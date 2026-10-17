@@ -121,7 +121,7 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       end
     end
 
-    test "ignores inbound MCP sections owned by FermixCore.MCP.Inbound.Config" do
+    test "skips the retired [mcp.inbound] sections instead of refusing the file" do
       toml = """
       [mcp.inbound]
       enabled = true
@@ -134,6 +134,19 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       """
 
       assert Config.from_toml(toml) == []
+      assert Config.document(toml) == %{}
+
+      assert Config.retired_sections(toml) ==
+               ["[mcp.inbound]", "[mcp.inbound.http]", "[mcp.inbound.tools.shell]"]
+    end
+
+    test "names no retired section in a file without one" do
+      toml = """
+      [mcp.servers.github]
+      command = "npx"
+      """
+
+      assert Config.retired_sections(toml) == []
     end
 
     test "raises on an invalid policy_class string" do

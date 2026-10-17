@@ -13,7 +13,6 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.IMessage
-  alias FermixCore.MCP.Inbound.Config, as: InboundMcpConfig
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
   alias FermixCore.Plugins.Retired
@@ -219,8 +218,9 @@ defmodule FermixCore.Setup.ConfigStore do
 
   The `[mcp.*]` blocks are not in the snapshot: the file owns them (M74 §4), so
   they are read from the file this write replaces and written back with every
-  key they held. A file that exists and cannot be read is refused rather than
-  replaced, because replacing it would drop whatever it held.
+  key they held, except a retired `[mcp.inbound*]` block, which has no reader
+  and is dropped (M73). A file that exists and cannot be read is refused rather
+  than replaced, because replacing it would drop whatever it held.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
@@ -368,30 +368,41 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # Every `:fermix_core` key the boot writes: the snapshot's sections, the sandbox
-  # (carried at the snapshot's top level), and the two MCP keys `apply_mcp_config/0`
+  # (carried at the snapshot's top level), and the MCP key `apply_mcp_config/0`
   # reads straight from the file.
   defp hydrated_keys do
-    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers, :mcp_inbound]
+    Keyword.keys(empty_runtime_config().fermix_core) ++ [:sandbox, :mcp_servers]
   end
 
   @spec apply_mcp_config() :: :ok | {:error, term()}
   def apply_mcp_config do
     case File.read(path()) do
       {:ok, contents} ->
-        servers = McpConfig.from_toml(contents)
-        inbound = InboundMcpConfig.from_toml(contents)
-        Application.put_env(:fermix_core, :mcp_servers, servers)
-        Application.put_env(:fermix_core, :mcp_inbound, inbound)
+        warn_retired_mcp_sections(contents)
+        Application.put_env(:fermix_core, :mcp_servers, McpConfig.from_toml(contents))
         :ok
 
       {:error, :enoent} ->
         Application.put_env(:fermix_core, :mcp_servers, [])
-        Application.put_env(:fermix_core, :mcp_inbound, InboundMcpConfig.default())
         :ok
 
       {:error, reason} ->
         {:error, reason}
     end
+  end
+
+  # The inbound MCP server was retired before it was ever started (M73), so a
+  # `[mcp.inbound*]` block has no reader. It is said once per load, and
+  # `mcp_document/1` leaves it out, so the next settings save drops it.
+  defp warn_retired_mcp_sections(contents) do
+    if McpConfig.retired_sections(contents) != [] do
+      Logger.warning(
+        "config.toml [mcp.inbound] is retired: this build has no inbound MCP server, so the " <>
+          "section is ignored, and the next settings save writes the file without it."
+      )
+    end
+
+    :ok
   end
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
@@ -1318,21 +1329,25 @@ defmodule FermixCore.Setup.ConfigStore do
   defp escape_char("\r"), do: "\\r"
   defp escape_char(<<byte>>), do: "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0")
 
-  # The `[mcp.*]` blocks of a settings file, by the two readers that own them:
-  # `Capabilities.MCP.Config` reads `[mcp.servers.*]` and `MCP.Inbound.Config`
-  # reads `[mcp.inbound*]`. Every key either one stored is here, the ones they
-  # ignore today included, because none of it is this module's to drop.
+  # The `[mcp.*]` blocks of a settings file, by the reader that owns them:
+  # `Capabilities.MCP.Config` reads `[mcp.servers.*]`. Every key it stored is
+  # here, the ones it ignores today included, because none of it is this
+  # module's to drop. A retired `[mcp.inbound*]` block is not read, so it is not
+  # written back (`warn_retired_mcp_sections/1`).
   defp mcp_document(contents) do
-    %{servers: McpConfig.document(contents), inbound: InboundMcpConfig.document(contents)}
+    %{servers: McpConfig.document(contents)}
   end
 
   # One order whatever order the owner wrote: servers by name, each followed by
-  # its tool blocks by tool name, then the inbound blocks; keys by name in each.
-  # The text is read back by both readers before it is written, so a value
-  # either reads back as it was read or the save refuses.
-  defp render_mcp(%{servers: servers, inbound: inbound} = mcp) do
-    server_blocks = servers |> Enum.sort_by(&elem(&1, 0)) |> Enum.flat_map(&render_mcp_server/1)
-    text = Enum.join(server_blocks ++ render_mcp_inbound(inbound), "\n\n")
+  # its tool blocks by tool name; keys by name in each. The text is read back
+  # by the reader before it is written, so a value either reads back as it was
+  # read or the save refuses.
+  defp render_mcp(%{servers: servers} = mcp) do
+    text =
+      servers
+      |> Enum.sort_by(&elem(&1, 0))
+      |> Enum.flat_map(&render_mcp_server/1)
+      |> Enum.join("\n\n")
 
     if mcp_document(text) != mcp do
       raise ArgumentError,
@@ -1343,24 +1358,16 @@ defmodule FermixCore.Setup.ConfigStore do
     text
   end
 
+  # A server block is written when the reader stored one; it stores no header
+  # alone, so a server with only tool blocks gets only those.
   defp render_mcp_server({name, blocks}) do
-    render_mcp_present(["servers", name], blocks, :server) ++
-      render_mcp_tools(["servers", name, "tools"], blocks)
-  end
+    server =
+      case Map.fetch(blocks, :server) do
+        {:ok, keys} -> [render_mcp_block(["servers", name], keys)]
+        :error -> []
+      end
 
-  defp render_mcp_inbound(blocks) do
-    render_mcp_present(["inbound"], blocks, :inbound) ++
-      render_mcp_present(["inbound", "http"], blocks, :http) ++
-      render_mcp_tools(["inbound", "tools"], blocks)
-  end
-
-  # A block is written when the reader stored it, even with no keys: the inbound
-  # reader keeps an empty tool block, and neither reader stores a header alone.
-  defp render_mcp_present(path, blocks, key) do
-    case Map.fetch(blocks, key) do
-      {:ok, keys} -> [render_mcp_block(path, keys)]
-      :error -> []
-    end
+    server ++ render_mcp_tools(["servers", name, "tools"], blocks)
   end
 
   defp render_mcp_tools(path, blocks) do

@@ -243,7 +243,7 @@ guidance, `execute/2`), with optional `advertise?/1` and `dynamic_parameters/1`
 hooks that decide per turn whether and how a tool is offered.
 
 Architecture Invariant: `Capability.execute/3` is the one invoke boundary (the
-agent loop, the realtime voice bridge, inbound MCP), and it asks
+agent loop and the realtime voice bridge), and it asks
 `Capabilities.AccessGate.admit/3` before the executor. A capability whose plugin
 manifest marks it `access_sensitive` runs there only on an attended owner turn,
 not from a shared Buzz channel (`Acp.Identity.multi_principal?/1`), that read no
@@ -486,9 +486,9 @@ A plugin's tools use one of two rails. The `http` rail runs inside the VM
 through an HTTP template interpreter, with credentials resolved outside model
 input. The `mcp` rail becomes a local stdio server (`local_stdio`) or a remote
 Streamable-HTTP endpoint (`remote_mcp`). `Capabilities.MCP.Supervisor` runs
-those servers and the operator's own `[mcp.servers.*]` in isolated subtrees. An
-inbound MCP server (`FermixCore.MCP.Inbound`) exists in the code, but nothing
-starts it.
+those servers and the operator's own `[mcp.servers.*]` in isolated subtrees.
+Fermix is only ever an MCP client: it does not expose its own tools as an MCP
+server.
 
 Architecture Invariant: MCP clients are keyed by source (`{:plugin, name}` or
 `{:operator, name}`), and a `remote_mcp` plugin loads only from a

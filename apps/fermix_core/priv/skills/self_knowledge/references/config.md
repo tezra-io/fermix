@@ -63,7 +63,7 @@ Reads and changes the same sections the Mac panes show, through the running serv
 | `[fermix_web]` | `port` (default 4030) |
 | `[sandbox]`, `[sandbox.env]`, `[sandbox.commands]` | mode and roots; child environment; command profiles |
 | `[mcp.servers.<name>]` | outbound MCP servers |
-| `[mcp.inbound]` | parsed but reserved: no inbound MCP server is started |
+| `[mcp.inbound]` | retired: Fermix is not an MCP server; the section is ignored with a warning and the next settings save drops it |
 | `[fermix_channels.<name>]` | chat channels, ACP, mobile |
 
 **Edits made outside Fermix** stop writes rather than lose them: the daemon keeps two baselines (what it booted from, what it last wrote) to tell its own writes apart. While an outside change stands, every save refuses naming the changed sections, setup shows a banner, and the one action is **Reload settings from disk** (Mac and browser setup; `fermix settings reload` in a terminal). An unreadable file is a different state, reported in the parser's words with no reload offered; fix the file first (the Mac app says "The settings file cannot be read" and offers **Open recovery**, which shows the file and the copy from before).

@@ -325,11 +325,9 @@ invocation, so none of it can ride `[:fermix, :tool, :exec]`. Every one of those
 phases emits `[:fermix, :mcp_client, :lifecycle]` through
 `FermixCore.Capabilities.MCP.Telemetry.emit_lifecycle/5` (phase, source-qualified
 server identity, optional plugin, result/`error_class`, attempt +
-`duration_ms`) — never hand-roll the event. The `mcp_client` root is deliberate:
-inbound MCP (Fermix as a *server*) owns `[:fermix, :mcp, :inbound, :tools_listed]`
-and `[:fermix, :mcp, :inbound, :call]`, and the outbound client must not share a
-prefix with server-side events. One stable name carries all eight phases; a
-`[:fermix, :mcp_client, <phase>]` tail would never be delivered.
+`duration_ms`) — never hand-roll the event. The `mcp_client` root names the side
+Fermix is on: the client of a server it connects to. One stable name carries all
+eight phases; a `[:fermix, :mcp_client, <phase>]` tail would never be delivered.
 
 The emitter **accepts no free-form metadata map**. Its metadata is an explicit
 allowlist of constructed keys (`source_id`, `plugin`, `phase`, `result`,

@@ -4,8 +4,9 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
   # snapshot. These tests hold the save to keeping them (M74 E1).
   use ExUnit.Case, async: false
 
+  import ExUnit.CaptureLog
+
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
-  alias FermixCore.MCP.Inbound.Config, as: InboundConfig
   alias FermixCore.Setup.ConfigStore
   alias FermixTestSupport.SecretWriterStub
 
@@ -39,16 +40,13 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
 
   [mcp.servers.github.tools.search_code]
   policy_class = "read_only"
+  """
 
+  # The retired inbound server's section, as an owner may still have it (M73).
+  @retired_inbound ~S"""
   [mcp.inbound]
   enabled = false
-  expose_kinds = ["builtin", "mcp"]
-  server_name = "fermix \"home\" box"
   transport = "stdio"
-
-  [mcp.inbound.http]
-  auth_token = "$env:FERMIX_MCP_ROUND_TRIP_UNSET"
-  path = "/mcp"
 
   [mcp.inbound.tools.shell]
   exposed = false
@@ -149,6 +147,29 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
     assert File.read!(config_path) == first
   end
 
+  # The inbound server was retired before it ever ran. A file that still has its
+  # section boots with the servers it names, says once that the section is
+  # ignored, and the next save writes the file without it, the way a retired
+  # provider key goes.
+  test "a retired [mcp.inbound] block boots with one warning and the next save drops it",
+       %{config_path: config_path} do
+    File.write!(config_path, @settings <> "\n" <> @mcp <> "\n" <> @retired_inbound)
+
+    log = capture_log(fn -> assert :ok = ConfigStore.bootstrap_runtime_config() end)
+
+    assert [%{name: "files"}, %{name: "github"}] =
+             Application.get_env(:fermix_core, :mcp_servers)
+
+    assert length(String.split(log, "[mcp.inbound] is retired")) == 2
+    assert log =~ "the next settings save writes the file without it"
+
+    assert :ok = ConfigStore.save_snapshot(renamed(ConfigStore.current_snapshot()))
+
+    saved = File.read!(config_path)
+    refute saved =~ "[mcp.inbound"
+    assert_mcp_kept(saved, @settings <> "\n" <> @mcp)
+  end
+
   defp renamed(snapshot),
     do: put_in(snapshot, [:fermix_core, :personalization, :user_name], "Grace")
 
@@ -157,7 +178,6 @@ defmodule FermixCore.Setup.ConfigStoreMcpTest do
 
     assert [%{name: "files"}, %{name: "github"}] = McpConfig.from_toml(saved)
     assert McpConfig.from_toml(saved) == McpConfig.from_toml(original)
-    assert InboundConfig.from_toml(saved) == InboundConfig.from_toml(original)
 
     assert String.ends_with?(saved, "\n\n" <> @mcp),
            "the [mcp.*] blocks did not survive the save byte for byte:\n\n" <> saved

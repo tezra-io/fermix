@@ -75,13 +75,25 @@ defmodule FermixCore.Capabilities.MCP.Config do
     |> elem(1)
   end
 
+  @doc """
+  The retired `[mcp.*]` section headers in `contents`, as written: today the
+  inbound server's `[mcp.inbound*]` (M73). `from_toml/1` and `document/1` skip
+  them so a file that still has one boots; the caller says so.
+  """
+  @spec retired_sections(String.t()) :: [String.t()]
+  def retired_sections(contents) when is_binary(contents) do
+    contents
+    |> String.split(~r/\r?\n/)
+    |> Enum.map(&String.trim/1)
+    |> Enum.filter(&(String.starts_with?(&1, "[") and retired_section?(header_parts(&1))))
+  end
+
   defp handle_line("", section, acc), do: {section, acc}
   defp handle_line("#" <> _comment, section, acc), do: {section, acc}
 
-  defp handle_line(<<"[", rest::binary>>, _section, acc) do
-    body = rest |> String.trim_trailing("]") |> String.trim()
-    parts = String.split(body, ".")
-    {classify_section(parts), acc}
+  defp handle_line(<<"[", _rest::binary>> = header, _section, acc) do
+    parts = header_parts(header)
+    if retired_section?(parts), do: {nil, acc}, else: {classify_section(parts), acc}
   end
 
   defp handle_line(line, section, acc) when section != nil do
@@ -93,12 +105,17 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   defp handle_line(_line, section, acc), do: {section, acc}
 
+  defp header_parts(<<"[", rest::binary>>) do
+    rest |> String.trim_trailing("]") |> String.trim() |> String.split(".")
+  end
+
+  defp retired_section?(["mcp", "inbound" | _]), do: true
+  defp retired_section?(_parts), do: false
+
   defp classify_section(["mcp", "servers", server]), do: {:server, server}
 
   defp classify_section(["mcp", "servers", server, "tools", tool]),
     do: {:tool, server, tool}
-
-  defp classify_section(["mcp", "inbound" | _]), do: nil
 
   defp classify_section(["mcp" | _] = parts) do
     raise ArgumentError,

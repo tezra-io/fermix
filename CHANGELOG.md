@@ -56,6 +56,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preview, so the app reads it again. No released Fermix.app has the chat
   window yet.
 
+### Removed
+
+- **Inbound MCP, which was never started.** Fermix connects to MCP servers
+  but does not act as one, and the unused server code is gone. An
+  `[mcp.inbound]` section in an existing config is accepted, ignored with a
+  warning, and dropped by the next settings save.
+
 ### Fixed
 
 - **Changing a setting no longer deletes the MCP servers you added by hand.**
