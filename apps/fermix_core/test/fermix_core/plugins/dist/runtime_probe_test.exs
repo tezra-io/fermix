@@ -12,7 +12,7 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbeTest do
   }
 
   describe "host runtime (vendored: false)" do
-    test "missing executable refuses with missing_host_runtime" do
+    test "a runtime not on PATH is missing" do
       assert {:error, {:missing_host_runtime, "node", "20"}} =
                RuntimeProbe.probe(@node_runtime, "/nonexistent",
                  find_executable: fn "node" -> nil end,
@@ -20,8 +20,8 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbeTest do
                )
     end
 
-    test "version below min_version refuses with missing_host_runtime" do
-      assert {:error, {:missing_host_runtime, "node", "20"}} =
+    test "a version below min_version is too old, naming the one it found" do
+      assert {:error, {:host_runtime_too_old, "node", "/usr/bin/node", "18.19.0", "20"}} =
                RuntimeProbe.probe(@node_runtime, "/nonexistent",
                  find_executable: fn "node" -> "/usr/bin/node" end,
                  version_fetch: fn "/usr/bin/node" -> {:ok, "v18.19.0\n"} end
@@ -56,17 +56,26 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbeTest do
                )
     end
 
-    test "a failed or unparseable version probe refuses" do
-      assert {:error, {:missing_host_runtime, "node", "20"}} =
-               RuntimeProbe.probe(@node_runtime, "/nonexistent",
-                 find_executable: fn "node" -> "/usr/bin/node" end,
-                 version_fetch: fn _cmd -> {:error, :spawn_failed} end
-               )
+    # A runtime on PATH that cannot say its version is there and broken, not
+    # missing: a Homebrew node whose shared library moved under it crashes on
+    # `--version`, and calling that "not installed" sends the owner to install
+    # something they already have.
+    test "a runtime that fails its version run is found but failed, naming its path" do
+      failure = {:version_probe_failed, 134, "dyld: Library not loaded"}
 
-      assert {:error, {:missing_host_runtime, "node", "20"}} =
+      assert {:error, {:host_runtime_failed, "node", "/opt/homebrew/bin/node", ^failure}} =
+               RuntimeProbe.probe(@node_runtime, "/nonexistent",
+                 find_executable: fn "node" -> "/opt/homebrew/bin/node" end,
+                 version_fetch: fn "/opt/homebrew/bin/node" -> {:error, failure} end
+               )
+    end
+
+    test "a runtime whose version output names no version is found but failed" do
+      assert {:error,
+              {:host_runtime_failed, "node", "/usr/bin/node", {:unreadable_version, "no digits"}}} =
                RuntimeProbe.probe(@node_runtime, "/nonexistent",
                  find_executable: fn "node" -> "/usr/bin/node" end,
-                 version_fetch: fn _cmd -> {:ok, "no digits here"} end
+                 version_fetch: fn _cmd -> {:ok, "no digits"} end
                )
     end
   end

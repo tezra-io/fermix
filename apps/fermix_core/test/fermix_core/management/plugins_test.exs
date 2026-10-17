@@ -42,6 +42,7 @@ defmodule FermixCore.Management.PluginsTest do
   @gated "gatedemo"
   @regional "regiondemo"
   @runtime_gated "rtgatedemo"
+  @host_runtime "nodedemo"
 
   # A target no host is, so the daemon's own probe never finds this fixture's
   # vendored binary and `mix test` cannot spawn an MCP child.
@@ -562,6 +563,62 @@ defmodule FermixCore.Management.PluginsTest do
       assert {:ok, []} = McpSource.server_specs(probe: [target: @runtime_target])
 
       assert {:ok, _row} = Plugins.disable(@runtime_gated)
+    end
+  end
+
+  # --- a host runtime the probe refused ------------------------------------
+  #
+  # A Homebrew node whose shared library moved under it crashed on `--version`,
+  # and the row said the runtime was "not on this Mac": the owner was sent to
+  # install a node they already had. One rung, three refusals, three fixes, so
+  # the row names the one the probe met.
+  describe "a plugin whose host runtime the probe refused" do
+    setup do
+      install_host_runtime_plugin()
+      Application.put_env(:fermix_core, :plugins, enabled: [@host_runtime], entries: %{})
+      :ok
+    end
+
+    test "names the runtime that is there and fails its version check" do
+      probe = [
+        find_executable: fn "node" -> "/opt/homebrew/bin/node" end,
+        version_fetch: fn _path -> {:error, {:version_probe_failed, 134, ""}} end
+      ]
+
+      row = host_runtime_row(probe)
+
+      assert row["status"] == "missing_host_runtime"
+
+      assert row["status_sentence"] ==
+               "Turned on, but `/opt/homebrew/bin/node` failed its version check."
+
+      assert row["primary_verb"] == nil
+    end
+
+    test "names the runtime that is there and too old" do
+      probe = [
+        find_executable: fn "node" -> "/usr/local/bin/node" end,
+        version_fetch: fn _path -> {:ok, "v18.19.0\n"} end
+      ]
+
+      row = host_runtime_row(probe)
+
+      assert row["status"] == "missing_host_runtime"
+
+      assert row["status_sentence"] ==
+               "Turned on, but `/usr/local/bin/node` is older than it needs."
+    end
+
+    test "says a runtime the daemon cannot find is not on this Mac" do
+      probe = [
+        find_executable: fn "node" -> nil end,
+        version_fetch: fn _path -> flunk("a runtime that is not there has no version") end
+      ]
+
+      row = host_runtime_row(probe)
+
+      assert row["status"] == "missing_host_runtime"
+      assert row["status_sentence"] == "Turned on, but the runtime it needs is not on this Mac."
     end
   end
 
@@ -1243,6 +1300,59 @@ defmodule FermixCore.Management.PluginsTest do
           status: "wrong_region"
         })
       )
+  end
+
+  defp host_runtime_row(probe) do
+    {:ok, %{"plugins" => rows}} = Plugins.list(probe: probe)
+    row(rows, @host_runtime)
+  end
+
+  defp install_host_runtime_plugin do
+    store = ConfigStore.workspace_paths().plugins
+    DistStore.ensure!(store)
+    dir = DistStore.version_dir(store, @host_runtime, "1.0.0")
+    File.mkdir_p!(dir)
+    File.write!(Path.join(dir, "plugin.json"), Jason.encode!(host_runtime_manifest()))
+    :ok = DistStore.activate(store, @host_runtime, "1.0.0")
+
+    :ok =
+      DistStore.record(store, @host_runtime, %{
+        "version" => "1.0.0",
+        "sha256" => String.duplicate("0", 64),
+        "h1" => String.duplicate("0", 64),
+        "plugin_api" => 2,
+        "min_core_version" => "0.1.0"
+      })
+  end
+
+  defp host_runtime_manifest do
+    %{
+      "schema_version" => 2,
+      "name" => @host_runtime,
+      "display_name" => "Node Demo",
+      "description" => "A local plugin that runs on the host's node.",
+      "category" => "developer",
+      "version" => "1.0.0",
+      "min_core_version" => "0.1.0",
+      "plugin_api" => 2,
+      "auth" => %{"type" => "none"},
+      "runtime" => %{
+        "kind" => "node",
+        "min_version" => "20",
+        "command" => "node",
+        "args" => ["src/index.js"],
+        "vendored" => false
+      },
+      "tools" => [
+        %{
+          "name" => "nodedemo_read",
+          "description" => "Read the thing.",
+          "read_only" => true,
+          "rail" => "mcp",
+          "parameters" => %{"type" => "object", "properties" => %{}}
+        }
+      ]
+    }
   end
 
   defp install_runtime_gated(_home) do

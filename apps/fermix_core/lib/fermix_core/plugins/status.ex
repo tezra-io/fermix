@@ -88,13 +88,43 @@ defmodule FermixCore.Plugins.Status do
   """
   @spec status(Plugin.t() | String.t(), keyword()) :: atom()
   def status(%Plugin{} = plugin, opts) when is_list(opts) do
+    {status, _refusal} = explain(plugin, opts)
+    status
+  end
+
+  def status(name, opts) when is_binary(name) and is_list(opts) do
+    case Registry.find(name) do
+      {:ok, plugin} -> status(plugin, opts)
+      :error -> absent_status(name, opts)
+      {:error, _reason} -> :error
+    end
+  end
+
+  @doc """
+  `status/2` for a plugin, with the host-runtime probe's refusal
+  when that is the rung it stops on (`nil` on every other rung).
+
+  `:missing_host_runtime` is one rung for three refusals with three fixes: no
+  runtime, one too old, one that fails its version check
+  (`t:RuntimeProbe.refusal/0`). A surface that words the rung reads which one
+  from here, out of the same probe that chose the rung, rather than probing a
+  second time and risking a different answer.
+  """
+  @spec explain(Plugin.t(), keyword()) :: {atom(), RuntimeProbe.refusal() | nil}
+  def explain(%Plugin{} = plugin, opts) when is_list(opts) do
+    if plugin.name in Config.enabled_plugins(),
+      do: from_runtime_rung(plugin, host_runtime(plugin, opts)),
+      else: {:not_configured, nil}
+  end
+
+  @spec ready?(Plugin.t()) :: boolean()
+  def ready?(%Plugin{} = plugin), do: status(plugin) == :ready
+
+  defp from_runtime_rung(_plugin, {:error, refusal}), do: {:missing_host_runtime, refusal}
+  defp from_runtime_rung(plugin, :ok), do: {configured_status(plugin), nil}
+
+  defp configured_status(plugin) do
     cond do
-      plugin.name not in Config.enabled_plugins() ->
-        :not_configured
-
-      missing_host_runtime?(plugin, opts) ->
-        :missing_host_runtime
-
       missing_required_config?(plugin) ->
         :needs_config
 
@@ -114,17 +144,6 @@ defmodule FermixCore.Plugins.Status do
         auth_status(plugin)
     end
   end
-
-  def status(name, opts) when is_binary(name) and is_list(opts) do
-    case Registry.find(name) do
-      {:ok, plugin} -> status(plugin, opts)
-      :error -> absent_status(name, opts)
-      {:error, _reason} -> :error
-    end
-  end
-
-  @spec ready?(Plugin.t()) :: boolean()
-  def ready?(%Plugin{} = plugin), do: status(plugin) == :ready
 
   @spec account_label(Plugin.t()) :: String.t() | nil
   def account_label(%Plugin{} = plugin) do
@@ -273,12 +292,11 @@ defmodule FermixCore.Plugins.Status do
     |> Enum.any?(&(&1.name == name and &1.status == :incompatible))
   end
 
-  defp missing_host_runtime?(%Plugin{runtime: runtime} = plugin, opts) when is_map(runtime) do
-    probe_opts = Keyword.get(opts, :probe, [])
-    RuntimeProbe.probe(runtime, Path.dirname(plugin.path), probe_opts) != :ok
+  defp host_runtime(%Plugin{runtime: runtime} = plugin, opts) when is_map(runtime) do
+    RuntimeProbe.probe(runtime, Path.dirname(plugin.path), Keyword.get(opts, :probe, []))
   end
 
-  defp missing_host_runtime?(_plugin, _opts), do: false
+  defp host_runtime(_plugin, _opts), do: :ok
 
   defp missing_required_config?(%Plugin{name: name, config: entries}) when is_list(entries) do
     configured = Config.plugin_settings(name)

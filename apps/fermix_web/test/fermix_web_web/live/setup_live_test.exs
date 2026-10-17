@@ -5811,14 +5811,13 @@ defmodule FermixWebWeb.SetupLiveTest do
 
   # `status_pill_class/1` + `status_pill_label/1` are the only place a status atom
   # becomes UI, and a missing clause is silent — the pill just reads "Unknown".
-  # Per the CLAUDE.md "gate on the whole feature surface" rule, the invariant is
-  # written over the WHOLE vocabulary, and its local half is read from
-  # `Plugins.Status`'s own source (via the module's compile-time path, so no repo
-  # layout is assumed) instead of being spelled out: a status added there later
-  # either joins this test or fails it.
+  # Per the AGENTS.md "gate on the whole feature surface" rule, the invariant is
+  # written over the WHOLE vocabulary, and its local half is the ladder's own
+  # published list (`Plugins.Status.statuses/0`) instead of being spelled out
+  # here: a status added there later joins this test.
   describe "status vocabulary" do
     test "no status Plugins.Status returns, and no remote status, renders as Unknown" do
-      statuses = plugins_status_returns()
+      statuses = PluginStatus.statuses()
 
       # Anchors: a silently-broken extraction would otherwise pass an empty loop.
       assert length(statuses) >= 11
@@ -5836,7 +5835,7 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "every pill label is sentence-cased" do
-      for status <- plugins_status_returns() ++ @remote_statuses do
+      for status <- PluginStatus.statuses() ++ @remote_statuses do
         label = Components.status_pill_label(status)
         first = String.first(label)
 
@@ -5851,18 +5850,6 @@ defmodule FermixWebWeb.SetupLiveTest do
                "#{inspect(status)} falls back to the generic Enable verb"
       end
     end
-  end
-
-  # Every atom `Plugins.Status` can return: each of its clause/branch returns is
-  # written `-> :atom`, so the returns are exactly the atoms in that position.
-  defp plugins_status_returns do
-    source = to_string(PluginStatus.module_info(:compile)[:source])
-    assert File.exists?(source), "Plugins.Status source not found at #{source}"
-
-    ~r/->\s*:([a-z_]+)\b/
-    |> Regex.scan(File.read!(source))
-    |> Enum.map(fn [_match, name] -> String.to_existing_atom(name) end)
-    |> Enum.uniq()
   end
 
   # Build + wire a catalog plugin artifact behind the dist stubs; returns the

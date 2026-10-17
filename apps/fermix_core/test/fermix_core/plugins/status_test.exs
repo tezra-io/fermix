@@ -243,6 +243,42 @@ defmodule FermixCore.Plugins.StatusTest do
     assert Status.status(plugin, probe: probe_missing()) == :missing_host_runtime
   end
 
+  # The rung covers three refusals with three different fixes, so the reason
+  # rides along from the same probe that chose the rung.
+  test "explain/2 carries the probe's refusal on the host-runtime rung", %{checkout: checkout} do
+    write_plugin(checkout, "obsidian", mcp_manifest())
+    put_plugins_env(["obsidian"], %{"obsidian" => [{"OBSIDIAN_VAULT_PATH", "/tmp/vault"}]})
+    plugin = load_plugin(checkout, "obsidian")
+    failure = {:version_probe_failed, 134, ""}
+
+    broken = [
+      find_executable: fn _cmd -> "/opt/homebrew/bin/node" end,
+      version_fetch: fn _cmd -> {:error, failure} end
+    ]
+
+    assert Status.explain(plugin, probe: broken) ==
+             {:missing_host_runtime,
+              {:host_runtime_failed, "node", "/opt/homebrew/bin/node", failure}}
+
+    assert Status.explain(plugin, probe: probe_missing()) ==
+             {:missing_host_runtime, {:missing_host_runtime, "node", "20"}}
+
+    assert Status.explain(plugin, probe: probe_ok()) == {:ready, nil}
+  end
+
+  test "explain/2 asks no probe of a plugin that is turned off", %{checkout: checkout} do
+    write_plugin(checkout, "obsidian", mcp_manifest())
+    put_plugins_env([], %{})
+    plugin = load_plugin(checkout, "obsidian")
+
+    unasked = [
+      find_executable: fn _cmd -> flunk("a turned-off plugin must not be probed") end,
+      version_fetch: fn _cmd -> flunk("a turned-off plugin must not be probed") end
+    ]
+
+    assert Status.explain(plugin, probe: unasked) == {:not_configured, nil}
+  end
+
   test "a required config key absent from the plugin entry yields :needs_config", %{
     checkout: checkout
   } do

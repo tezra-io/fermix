@@ -146,7 +146,9 @@ defmodule FermixCore.Management.Plugins.Row do
   One installed plugin's row.
 
   `context` carries what the caller resolved once for the whole listing:
-  `:enabled` (the enabled names), `:status` (the resolved status atom) and
+  `:enabled` (the enabled names), `:status` (the resolved status atom),
+  `:runtime_refusal` (the host-runtime probe's refusal behind a
+  `:missing_host_runtime` status, else `nil`; `Plugins.Status.explain/2`) and
   `:workspaces` (what the last discovery found).
   """
   @spec installed(Plugin.t(), map()) :: t()
@@ -225,6 +227,7 @@ defmodule FermixCore.Management.Plugins.Row do
 
     %{
       enabled: plugin.name in Map.fetch!(context, :enabled),
+      runtime_refusal: Map.fetch!(context, :runtime_refusal),
       account_label: account,
       credential_present: credential_present?(plugin, account),
       workspace_id: selection.workspace_id,
@@ -238,6 +241,7 @@ defmodule FermixCore.Management.Plugins.Row do
   defp empty_facts do
     %{
       enabled: false,
+      runtime_refusal: nil,
       account_label: nil,
       credential_present: false,
       workspace_id: nil,
@@ -374,8 +378,8 @@ defmodule FermixCore.Management.Plugins.Row do
   defp sentence(:available, _facts), do: "Not installed."
   defp sentence(:connecting, _facts), do: "Connecting."
 
-  defp sentence(:missing_host_runtime, _facts),
-    do: "Turned on, but the runtime it needs is not on this Mac."
+  defp sentence(:missing_host_runtime, %{runtime_refusal: refusal}),
+    do: runtime_sentence(refusal)
 
   defp sentence(:incompatible, _facts),
     do: "This build of Fermix cannot run it."
@@ -412,6 +416,21 @@ defmodule FermixCore.Management.Plugins.Row do
     "The account is in a different region from the sign-in client. " <>
       "Choose the account's region and sign in again."
   end
+
+  # One rung, three refusals, three fixes: a runtime that is there and broken
+  # is named by its path, because "not on this Mac" sends the owner to install
+  # what they already have. Without the probe's refusal (a check refused on the
+  # rung alone) the sentence claims only what the rung itself says.
+  defp runtime_sentence({:missing_host_runtime, _kind, _min_version}),
+    do: "Turned on, but the runtime it needs is not on this Mac."
+
+  defp runtime_sentence({:host_runtime_too_old, _kind, path, _found, _min_version}),
+    do: "Turned on, but `#{path}` is older than it needs."
+
+  defp runtime_sentence({:host_runtime_failed, _kind, path, _reason}),
+    do: "Turned on, but `#{path}` failed its version check."
+
+  defp runtime_sentence(nil), do: "Turned on, but the runtime it needs cannot be used."
 
   # A sign-in under a refused client is refused again, so a refused-client row
   # leads with the client; "Sign in again" stays one button away (`verb_list/2`).

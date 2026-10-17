@@ -65,6 +65,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **A plugin's broken runtime is no longer reported as missing.** A local
+  plugin's host runtime check failed the same way whether `node` was absent,
+  too old, or present and crashing, and the Integrations row said "the runtime
+  it needs is not on this Mac" for all three, sending the owner to install a
+  node they already had (a Homebrew node whose library was upgraded under it
+  crashes this way). The row now names the runtime it found when that one is
+  too old or fails its version check, by its path, and an install from the Mac
+  app refused for either reason says the same. A plugin whose own manifest
+  names a minimum version that is not a version is now refused when it is
+  installed.
 - **Changing a setting no longer deletes the MCP servers you added by hand.**
   Every settings save, from the Mac app, `fermix setup`, a plugin's settings or
   the agent's model routing tool, rewrote `config.toml` without its

@@ -78,6 +78,7 @@ defmodule FermixCore.Plugins.Registry do
   @config_kinds %{"text" => :text, "boolean" => :boolean}
   @config_key_regex ~r/^[A-Z][A-Z0-9_]*$/
   @runtime_kinds ~w(node python binary escript)
+  @runtime_floor_regex ~r/^\d+(\.\d+){0,2}$/
   @name_regex ~r/^[a-z][a-z0-9_]{0,63}$/
   @tool_name_regex ~r/^[A-Za-z0-9_-]{1,64}$/
   @max_tool_description_bytes 100
@@ -555,6 +556,7 @@ defmodule FermixCore.Plugins.Registry do
          :ok <- validate_scopes(plugin),
          :ok <- validate_api3(plugin),
          :ok <- validate_runtime(plugin),
+         :ok <- validate_runtime_floor(plugin),
          :ok <- validate_tools(plugin),
          :ok <- validate_skills(plugin) do
       :ok
@@ -589,6 +591,19 @@ defmodule FermixCore.Plugins.Registry do
   end
 
   defp validate_runtime_block(runtime, _plugin), do: {:error, {:invalid_runtime, runtime}}
+
+  # `min_version` is the floor `Dist.RuntimeProbe` holds the host runtime's own
+  # `--version` to on every status read, for any plugin that declares a runtime.
+  # A floor that does not read as a version is this manifest's defect, so it is
+  # refused here, at install and at load, rather than surfacing later as a broken
+  # runtime on the owner's machine.
+  defp validate_runtime_floor(%Plugin{runtime: %{"min_version" => floor} = runtime}) do
+    if is_binary(floor) and floor =~ @runtime_floor_regex,
+      do: :ok,
+      else: {:error, {:invalid_runtime, runtime}}
+  end
+
+  defp validate_runtime_floor(%Plugin{}), do: :ok
 
   # The runtime half of the `requires_setting` gate (M8 §9.3): a local plugin
   # process may gate itself on one of its own manifest's `config` keys, so an

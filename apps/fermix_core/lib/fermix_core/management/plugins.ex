@@ -188,9 +188,12 @@ defmodule FermixCore.Management.Plugins do
   end
 
   defp context(plugin, enabled, runtime, discovered, opts) do
+    {status, runtime_refusal} = resolved_status(plugin, runtime, opts)
+
     %{
       enabled: enabled,
-      status: resolved_status(plugin, runtime, opts),
+      status: status,
+      runtime_refusal: runtime_refusal,
       workspaces: Map.get(discovered, plugin.name, [])
     }
   end
@@ -200,8 +203,8 @@ defmodule FermixCore.Management.Plugins do
   # client is actually callable. Asking the table first would let a connection
   # that is merely open outrank a missing credential.
   defp resolved_status(plugin, runtime, opts) do
-    case Status.status(plugin, Keyword.take(opts, [:probe])) do
-      :ready -> live_status(plugin.name, runtime)
+    case Status.explain(plugin, Keyword.take(opts, [:probe])) do
+      {:ready, nil} -> {live_status(plugin.name, runtime), nil}
       local -> local
     end
   end
@@ -532,6 +535,12 @@ defmodule FermixCore.Management.Plugins do
 
   defp install_sentence({:missing_host_runtime, kind, _min_version}),
     do: "It needs #{kind} on this Mac, and it was not found on the daemon's PATH."
+
+  defp install_sentence({:host_runtime_too_old, kind, path, _found, _min_version}),
+    do: "It needs a newer #{kind} than the one at `#{path}`."
+
+  defp install_sentence({:host_runtime_failed, kind, path, _reason}),
+    do: "It needs #{kind}, and the one at `#{path}` failed its version check."
 
   defp install_sentence({:verification_failed, _reason}),
     do: "The download did not match the signature it was published with."

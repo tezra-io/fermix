@@ -63,10 +63,12 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
   time and again at server-spec build; `vendored: true` means the executable
   ships inside the plugin artifact under `bin/<target>/<command>`.
 
-  A failed probe is always `{:error, {:missing_host_runtime, kind,
-  min_version}}` — the installer refuses with it, and `Status` maps it to
-  `:missing_host_runtime` so the plugin is loud in doctor/setup/the prompt
-  catalog instead of crash-looping a child that can never start.
+  A failed probe names which of three things it met, because each has its own
+  fix (`t:refusal/0`): no executable at all, one older than `min_version`, or
+  one that is there and fails its version check. The installer refuses
+  with it, and `Status` puts all three on its `:missing_host_runtime` rung so
+  the plugin is loud in doctor/setup/the prompt catalog instead of
+  crash-looping a child that can never start; the row says which one it was.
 
   Seams (`opts`): `:find_executable` and `:version_fetch` funs override the
   configured `Host` module; `:target` overrides the host target used for
@@ -81,7 +83,27 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
   @version_exempt_kinds ~w(binary)
 
   @type runtime :: %{required(String.t()) => term()}
-  @type probe_error :: {:error, {:missing_host_runtime, String.t(), String.t() | nil}}
+
+  @typedoc """
+  Why a declared runtime cannot be used, one shape per fix:
+
+    * `{:missing_host_runtime, kind, min_version}`: no executable, either not
+      on `PATH` or a vendored one that is absent or not executable. Install it.
+    * `{:host_runtime_too_old, kind, path, found, min_version}`: the one at
+      `path` reports version `found`, below `min_version`. Upgrade it.
+    * `{:host_runtime_failed, kind, path, reason}`: the one at `path` failed
+      its version check: it crashed, exited non-zero, timed out or printed no
+      version. Repair it.
+
+  `min_version` itself always reads as a version: `Registry` refuses a
+  manifest whose floor does not.
+  """
+  @type refusal ::
+          {:missing_host_runtime, String.t(), String.t() | nil}
+          | {:host_runtime_too_old, String.t(), Path.t(), String.t(), String.t()}
+          | {:host_runtime_failed, String.t(), Path.t(), term()}
+
+  @type probe_error :: {:error, refusal()}
 
   @doc """
   Probe the runtime declared by a plugin manifest. `plugin_dir` is the
@@ -124,14 +146,14 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
 
   defp probe_vendored(runtime, plugin_dir, opts) do
     case vendored_command_path(runtime, plugin_dir, opts) do
-      {:ok, path} -> if executable?(path), do: :ok, else: refusal(runtime)
-      {:error, _reason} -> refusal(runtime)
+      {:ok, path} -> if executable?(path), do: :ok, else: missing(runtime)
+      {:error, _reason} -> missing(runtime)
     end
   end
 
   defp probe_host(%{"command" => command} = runtime, opts) do
     case find_fun(opts).(command) do
-      nil -> refusal(runtime)
+      nil -> missing(runtime)
       path -> check_version(runtime, path, opts)
     end
   end
@@ -139,24 +161,31 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
   defp check_version(%{"kind" => kind} = runtime, path, opts) do
     case Map.get(runtime, "min_version") do
       min when is_binary(min) and kind not in @version_exempt_kinds ->
-        compare_version(runtime, version_fetch(opts).(path), min)
+        compare_version(runtime, path, version_fetch(opts).(path), min)
 
       _none_or_exempt ->
         :ok
     end
   end
 
-  defp compare_version(runtime, {:ok, output}, min) when is_binary(output) do
-    case {parse_version(output), parse_version(min)} do
-      {{:ok, found}, {:ok, floor}} ->
-        if Version.compare(found, floor) == :lt, do: refusal(runtime), else: :ok
-
-      _unparseable ->
-        refusal(runtime)
+  defp compare_version(%{"kind" => kind}, path, {:ok, output}, min) when is_binary(output) do
+    case parse_version(output) do
+      {:ok, found} -> check_floor(kind, path, found, min)
+      :error -> {:error, {:host_runtime_failed, kind, path, {:unreadable_version, output}}}
     end
   end
 
-  defp compare_version(runtime, {:error, _reason}, _min), do: refusal(runtime)
+  defp compare_version(%{"kind" => kind}, path, {:error, reason}, _min),
+    do: {:error, {:host_runtime_failed, kind, path, reason}}
+
+  # The floor was validated with the manifest (`Registry`), so it parses.
+  defp check_floor(kind, path, found, min) do
+    {:ok, floor} = parse_version(min)
+
+    if Version.compare(found, floor) == :lt,
+      do: {:error, {:host_runtime_too_old, kind, path, to_string(found), min}},
+      else: :ok
+  end
 
   # First dotted-number token in the output ("v20.11.1", "Python 3.12.1"),
   # padded to a full semver triple so `Version.compare/2` accepts it.
@@ -183,7 +212,7 @@ defmodule FermixCore.Plugins.Dist.RuntimeProbe do
     end
   end
 
-  defp refusal(%{"kind" => kind} = runtime),
+  defp missing(%{"kind" => kind} = runtime),
     do: {:error, {:missing_host_runtime, kind, Map.get(runtime, "min_version")}}
 
   defp resolve_target(opts) do
