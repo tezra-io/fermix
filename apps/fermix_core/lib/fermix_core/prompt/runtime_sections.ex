@@ -11,7 +11,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
-  alias FermixCore.Tools.SearchCredential
+  alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.VoiceCallContext
 
   @type skill :: AgentDefinition.t()
@@ -146,10 +146,11 @@ defmodule FermixCore.Prompt.RuntimeSections do
   end
 
   # M31 §14.1: `place_search` is the first credential-gated built-in, hidden from
-  # the wire whenever the shared Brave key does not resolve. The routing rule
-  # follows the wire — steering local intent to a tool the model cannot call is
-  # the same dead end `harness_when_unusable?/1` removes below. Both ask the one
-  # credential seam every Brave consumer asks (§8.1) — but not at the same time:
+  # the wire whenever its backend in force is not ready (M72 §14.1: Brave's key,
+  # or Apple Maps' helper on a Mac). The routing rule follows the wire —
+  # steering local intent to a tool the model cannot call is the same dead end
+  # `harness_when_unusable?/1` removes below. Both ask the tool's one readiness
+  # question — but not at the same time:
   # `Advertisement.prepare/2` resolves it per turn, while this section is baked
   # into the per-epoch `RuntimeContext` cache, which a setup save does not
   # invalidate. So a key saved through web setup advertises the tool immediately
@@ -162,8 +163,8 @@ defmodule FermixCore.Prompt.RuntimeSections do
   # contract, not a tool behavior: `place_search` stays memory-blind (§10.5),
   # which is why the ordering has to live here.
   defp place_routing_rule do
-    case SearchCredential.brave() do
-      {:ok, _key} ->
+    case PlaceSearch.readiness(%{}) do
+      :ok ->
         "  - `place_search` for businesses, landmarks, addresses, and local " <>
           "recommendations; when the user names an area (\"in SoHo\", \"near " <>
           "Alexanderplatz\"), pass it as `location` (or coordinates) instead of " <>

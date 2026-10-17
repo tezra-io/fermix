@@ -5,7 +5,10 @@ defmodule FermixCore.Management.Settings.Tools do
 
   Search and images publish the key row of the backend in force rather than
   every backend's slot: asking an operator to store six keys to use one is how
-  the browser door's search tab reads today.
+  the browser door's search tab reads today. The search section also carries
+  place search's backend (M72 §14.1), offered as this host can run it (a Linux
+  host has Brave alone), and the Brave key row stands whenever web or place
+  search uses Brave.
   """
 
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -16,6 +19,8 @@ defmodule FermixCore.Management.Settings.Tools do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch.Backend, as: PlaceBackend
+  alias FermixCore.Tools.PlaceSearch.Config, as: PlaceConfig
   alias FermixCore.Tools.WebSearch
 
   @sections [
@@ -51,6 +56,8 @@ defmodule FermixCore.Management.Settings.Tools do
     "perplexity" => :perplexity_api_key,
     "firecrawl" => :firecrawl_api_key
   }
+
+  @place_labels %{"apple_maps" => "Apple Maps", "brave" => "Brave"}
 
   @image_labels %{
     "openai" => "OpenAI",
@@ -89,9 +96,14 @@ defmodule FermixCore.Management.Settings.Tools do
   @spec owns?(String.t()) :: boolean()
   def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
 
-  @doc "The rows of one owned section."
-  @spec rows(String.t(), Source.snapshot()) :: [Row.t()]
-  def rows("computer_use", snapshot) do
+  @doc """
+  The rows of one owned section. `macos?:` names the host for a test; the
+  search section's place search options are the ones this host can run.
+  """
+  @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
+  def rows(section, snapshot, opts \\ [])
+
+  def rows("computer_use", snapshot, _opts) do
     block = Source.core(snapshot, :computer_use)
     restart = Row.restart?(:computer_use)
 
@@ -111,7 +123,7 @@ defmodule FermixCore.Management.Settings.Tools do
     ]
   end
 
-  def rows("computer_history", snapshot) do
+  def rows("computer_history", snapshot, _opts) do
     block = Source.core(snapshot, :computer_history)
     restart = Row.restart?(:computer_history)
 
@@ -129,7 +141,7 @@ defmodule FermixCore.Management.Settings.Tools do
     ]
   end
 
-  def rows("harness", snapshot) do
+  def rows("harness", snapshot, _opts) do
     block = Source.core(snapshot, :harness)
     restart = Row.restart?(:harness)
 
@@ -147,9 +159,11 @@ defmodule FermixCore.Management.Settings.Tools do
     ]
   end
 
-  def rows("web_search", snapshot) do
+  def rows("web_search", snapshot, opts) do
     block = Source.tool(snapshot, :web_search)
     backend = Source.string(block, :backend, "duckduckgo")
+    macos? = PlaceBackend.macos?(opts)
+    place = place_backend(snapshot, macos?)
     restart = Row.restart?(:tools)
 
     [
@@ -157,11 +171,16 @@ defmodule FermixCore.Management.Settings.Tools do
         value: backend,
         options: search_options(),
         restart: restart
+      ),
+      Row.new("place_search_backend", :choice, "Place search",
+        value: place,
+        options: Enum.map(PlaceBackend.available(macos?), &place_option/1),
+        restart: restart
       )
-    ] ++ search_key_rows(snapshot, backend, restart)
+    ] ++ search_key_rows(snapshot, backend, place, restart)
   end
 
-  def rows("generate_image", snapshot) do
+  def rows("generate_image", snapshot, _opts) do
     block = Source.tool(snapshot, :generate_image)
     backend = Source.string(block, :backend)
     restart = Row.restart?(:tools)
@@ -181,7 +200,7 @@ defmodule FermixCore.Management.Settings.Tools do
     ] ++ image_key_row(snapshot, backend, restart)
   end
 
-  def rows("sandbox", snapshot) do
+  def rows("sandbox", snapshot, _opts) do
     config = SandboxConfig.normalize(Map.get(snapshot, :sandbox))
     restart = Row.restart?(:sandbox)
     env_restart = Row.restart?([:sandbox, :env])
@@ -283,14 +302,34 @@ defmodule FermixCore.Management.Settings.Tools do
   defp search_hint("duckduckgo"), do: "Needs no key"
   defp search_hint(_name), do: nil
 
-  # The selected backend's key, plus Brave, which also powers place search and
-  # is therefore useful with any web backend selected.
-  defp search_key_rows(snapshot, backend, restart) do
-    keys = Enum.uniq(Enum.reject([Map.get(@search_secrets, backend), :brave_api_key], &is_nil/1))
+  # The value in force, from the one resolver: the configured backend, or the
+  # platform's default when none is set.
+  defp place_backend(snapshot, macos?) do
+    snapshot
+    |> Source.tool(:place_search)
+    |> PlaceConfig.normalize()
+    |> PlaceBackend.resolve(macos?: macos?)
+    |> Map.fetch!(:name)
+    |> Atom.to_string()
+  end
+
+  defp place_option(backend) do
+    word = Atom.to_string(backend)
+    Row.option(word, Map.fetch!(@place_labels, word), hint: place_hint(backend))
+  end
+
+  defp place_hint(:apple_maps), do: "Needs no key"
+  defp place_hint(:brave), do: nil
+
+  # The selected web backend's key, plus Brave's while place search runs on
+  # Brave: one key serves both, so the row stands whenever either uses it.
+  defp search_key_rows(snapshot, backend, place, restart) do
+    place_key = if place == "brave", do: :brave_api_key
+    keys = Enum.uniq(Enum.reject([Map.get(@search_secrets, backend), place_key], &is_nil/1))
 
     Enum.map(keys, fn key ->
       Row.new(Atom.to_string(key), :secret, search_key_label(key),
-        footer: search_key_footer(key),
+        footer: search_key_footer(key, backend, place),
         present: Source.secret_present?(snapshot, key),
         restart: restart
       )
@@ -302,8 +341,9 @@ defmodule FermixCore.Management.Settings.Tools do
     "#{Map.fetch!(@search_labels, name)} key"
   end
 
-  defp search_key_footer(:brave_api_key), do: "Also powers place search."
-  defp search_key_footer(_key), do: nil
+  defp search_key_footer(:brave_api_key, "brave", "brave"), do: "Also powers place search."
+  defp search_key_footer(:brave_api_key, _web, "brave"), do: "Powers place search."
+  defp search_key_footer(_key, _web, _place), do: nil
 
   defp image_key_row(snapshot, backend, restart) do
     case Map.fetch(@image_secrets, backend) do

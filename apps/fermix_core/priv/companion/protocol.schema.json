@@ -574,13 +574,14 @@
     },
     "place": {
       "type": "object",
-      "description": "One place as the search returned it, a subset of its record under the record's own names. A field the source did not give is absent. canonical_url and source_url are HTTPS addresses exactly as returned, at least one of them present. opening_hours.current_day is today's hours as the source wrote them.",
+      "description": "One place as the search returned it, a subset of its record under the record's own names. A field the source did not give is absent. canonical_url and source_url are HTTPS addresses exactly as returned, at least one of them present. apple_place_id is Apple Maps' identifier for a place Apple Maps found, which a Mac opens the place by. opening_hours.current_day is today's hours as the source wrote them.",
       "required": ["name", "location"],
       "anyOf": [{ "required": ["canonical_url"] }, { "required": ["source_url"] }],
       "properties": {
         "name": { "type": "string", "minLength": 1 },
         "canonical_url": { "type": "string", "minLength": 1 },
         "source_url": { "type": "string", "minLength": 1 },
+        "apple_place_id": { "type": "string", "minLength": 1 },
         "location": {
           "type": "object",
           "required": ["latitude", "longitude"],

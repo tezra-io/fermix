@@ -224,5 +224,43 @@ defmodule FermixCore.ReplyBlocksTest do
       drifted = put_in(hd(blocks), ["places", Access.at(0), "location"], %{"latitude" => 1})
       refute WireSchema.errors(drifted, WireSchema.ref("replyBlock"), schema) == []
     end
+
+    # M72 §14.1: a place Apple Maps found carries its identifier into the block,
+    # which a Mac opens Apple's own place card by; its page is Apple's, so the
+    # reply links it and the card attaches.
+    test "an Apple Maps place carries its identifier, linked by Apple's page" do
+      schema = @schema_path |> File.read!() |> Jason.decode!()
+      page = "https://maps.apple.com/place?place-id=I15D3EC7F56AE8D5C"
+
+      apple = %{
+        name: "Tequila Mama Taqueria",
+        canonical_url: "https://tequilamama.com",
+        source_url: page,
+        apple_place_id: "I15D3EC7F56AE8D5C",
+        location: %{latitude: 34.0555026, longitude: -84.0647238},
+        address: "340 Town Center Ave, Suwanee, GA 30024, United States",
+        contact: %{telephone: "+1 (678) 456-3131"},
+        categories: ["restaurant"]
+      }
+
+      blocks = ReplyBlocks.build("Try [Tequila Mama](#{page}) for the patio.", [apple, record(1)])
+
+      assert [%{"type" => "places", "places" => [place]}] = blocks
+
+      assert place == %{
+               "name" => "Tequila Mama Taqueria",
+               "canonical_url" => "https://tequilamama.com",
+               "source_url" => page,
+               "apple_place_id" => "I15D3EC7F56AE8D5C",
+               "location" => %{"latitude" => 34.0555026, "longitude" => -84.0647238},
+               "address" => "340 Town Center Ave, Suwanee, GA 30024, United States",
+               "categories" => ["restaurant"]
+             }
+
+      assert WireSchema.errors(hd(blocks), WireSchema.ref("replyBlock"), schema) == []
+
+      [%{"places" => [brave]}] = ReplyBlocks.build("https://cafe1.example/", [record(1)])
+      refute Map.has_key?(brave, "apple_place_id")
+    end
   end
 end

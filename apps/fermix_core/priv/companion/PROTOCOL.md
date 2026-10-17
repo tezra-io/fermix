@@ -371,11 +371,19 @@ same `blocks`, and have the key only when the reply has one. The rules:
   record's own names: `name` and `location {latitude, longitude}`, always (a
   place without coordinates stays a link in the text); at least one of
   `canonical_url` and `source_url`, HTTPS addresses exactly as returned; and,
-  each only when the source gave it, `address`, `rating {value?, best?,
-  count?}`, `price_range`, `categories[]` (at most 5), `opening_hours
-  {current_day}` and `distance {value, units}`. The description, contact
-  details, cuisines, the other days' hours and the picture are left out. The
-  coordinates are the place's, never the person's.
+  each only when the source gave it, `apple_place_id`, `address`, `rating
+  {value?, best?, count?}`, `price_range`, `categories[]` (at most 5),
+  `opening_hours {current_day}` and `distance {value, units}`. The
+  description, contact details, cuisines, the other days' hours and the
+  picture are left out. The coordinates are the place's, never the person's.
+- **Two sources, one record.** The daemon searches Apple Maps on a Mac and
+  Brave elsewhere, or whichever its settings name. A place Apple Maps found
+  carries `apple_place_id`, Apple Maps' identifier for it, by which a Mac opens
+  Apple's own place card; its `source_url` is Apple's page for the place
+  (`https://maps.apple.com/place?place-id=` and the identifier), and it has a
+  kind and an address but no rating, price or hours. A `distance` is present
+  only when the search was anchored on coordinates. A client draws what a place
+  has, and opens a place without an identifier from its name and coordinates.
 - **Hours as given.** `opening_hours.current_day` is today's hours as the
   source wrote them (`Thursday 07:00-19:00`); a client shows it as it is and
   never works out whether the place is open now.

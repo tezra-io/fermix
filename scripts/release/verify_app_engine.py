@@ -40,6 +40,10 @@ SMOKE_CONFIG = """\
 [fermix_core.realtime]
 enabled = true
 """
+# The engine a Mac app ships searches Apple Maps through this helper (M72
+# section 14); fermix_nif's Makefile builds it on the native macOS runners.
+MAPS_HELPER_GLOB = "lib/fermix_nif-*/priv/fermix-maps"
+MAPS_HELPER_CHECK = "fermix-maps: ok"
 VERSION_PATTERN = re.compile(r"^[0-9]+\.[0-9]+\.[0-9]+(?:[+-][0-9A-Za-z.-]+)?$")
 SOURCE_COMMIT_PATTERN = re.compile(r"^[0-9A-Fa-f]{40}$")
 
@@ -59,6 +63,9 @@ class Timeouts:
     management_timeout_seconds: float = 5.0
     stop_timeout_seconds: float = 15.0
     cleanup_timeout_seconds: float = 5.0
+    # The helper's self-check touches no network; the bound is for a loaded
+    # runner, or Rosetta translating the helper on its first run.
+    helper_check_timeout_seconds: float = 30.0
 
 
 DEFAULT_TIMEOUTS = Timeouts()
@@ -133,6 +140,7 @@ def _verify_in_directories(
     manifest = _validated_manifest(
         release_root, target, version, expected_source_commit
     )
+    maps_helper = _verify_maps_helper(release_root, manifest, command_prefix, timeouts)
     fermix_home, environment = _runtime_environment(runtime_root, scratch)
     executable = release_root / "bin/fermix_app_engine"
     start_command = [*command_prefix, str(executable), "start"]
@@ -149,7 +157,8 @@ def _verify_in_directories(
             timeouts,
             log_path,
         )
-        return _runtime_result(target, version, mode, fermix_home, manifest, runtime)
+        result = _runtime_result(target, version, mode, fermix_home, manifest, runtime)
+        return {**result, "maps_helper": maps_helper}
     except VerificationError:
         raise
     except (OSError, subprocess.SubprocessError) as error:
@@ -158,6 +167,39 @@ def _verify_in_directories(
         cleanup_error = _force_cleanup(process, timeouts)
         if cleanup_error is not None:
             raise VerificationError(f"app-engine process cleanup failed: {cleanup_error}")
+
+
+def _verify_maps_helper(release_root, manifest, command_prefix, timeouts):
+    """The packaged engine carries one inventoried Apple Maps helper that runs here."""
+    helpers = sorted(release_root.glob(MAPS_HELPER_GLOB))
+    if len(helpers) != 1:
+        raise VerificationError(
+            f"the app engine must carry exactly one Apple Maps helper ({MAPS_HELPER_GLOB}), "
+            f"found {len(helpers)}"
+        )
+
+    relative = helpers[0].relative_to(release_root).as_posix()
+    listed = {entry["path"] for entry in manifest["inventory"]["entries"]}
+    if relative not in listed:
+        raise VerificationError(f"the engine manifest does not inventory {relative}")
+
+    try:
+        completed = subprocess.run(
+            [*command_prefix, str(helpers[0]), "--check"],
+            capture_output=True,
+            text=True,
+            timeout=timeouts.helper_check_timeout_seconds,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise VerificationError(f"the Apple Maps helper could not run: {error}") from error
+
+    if completed.returncode != 0 or completed.stdout.strip() != MAPS_HELPER_CHECK:
+        words = completed.stderr.strip() or completed.stdout.strip() or "no output"
+        raise VerificationError(
+            f"the Apple Maps helper self-check failed (exit {completed.returncode}): {words}"
+        )
+    return relative
 
 
 def _start_engine(command, release_root, environment, log_path):
@@ -387,6 +429,7 @@ def _validate_timeouts(timeouts):
         timeouts.management_timeout_seconds,
         timeouts.stop_timeout_seconds,
         timeouts.cleanup_timeout_seconds,
+        timeouts.helper_check_timeout_seconds,
     )
     if any(isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in integer_fields):
         raise VerificationError("timeout attempt counts must be positive integers")

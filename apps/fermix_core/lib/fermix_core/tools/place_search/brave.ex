@@ -32,8 +32,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   when a pooled socket was already dead — the family's stale-socket retry, not a
   second query.
 
-  This is not a `PlaceSearch.Backend` behaviour and must not become one — §21.6
-  rejects a shared callback while there is exactly one approved raw provider.
+  One of the two `PlaceSearch.Backend`s (M72 §14.1): it runs when
+  `[fermix_core.tools.place_search] backend` is `brave`, or unset off a Mac.
 
   `opts` is the resolved `[fermix_core.tools.web_search]` keyword (the one Brave
   credential, §8.1) plus `:context` — the same shape the `web_search` Brave
@@ -41,6 +41,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   the request contract below is re-checked here because a malformed outbound
   request must fail locally rather than buy a metered 4xx.
   """
+
+  @behaviour FermixCore.Tools.PlaceSearch.Backend
 
   alias FermixCore.Net.Guard
   alias FermixCore.Net.HttpClient
@@ -87,6 +89,17 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   @type place :: %{required(:name) => String.t(), optional(atom()) => term()}
   @type trace_metadata :: %{optional(atom()) => term()}
 
+  @impl true
+  @spec name() :: :brave
+  def name, do: :brave
+
+  @doc "Ready when the shared Brave key resolves from `opts` (§8.1)."
+  @impl true
+  @spec ready(keyword()) :: :ok | {:error, String.t()}
+  def ready(opts) when is_list(opts) do
+    with {:ok, _api_key} <- SearchCredential.brave(opts), do: :ok
+  end
+
   @doc """
   Runs one place search.
 
@@ -95,6 +108,7 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   `invalid_query`, `invalid_location`, `auth_failed`, `rate_limited`,
   `provider_error`, `parser_changed`, `response_too_large`, `network`.
   """
+  @impl true
   @spec search(request(), keyword()) ::
           {:ok, [place()], trace_metadata()} | {:error, String.t(), trace_metadata()}
   def search(request, opts) when is_map(request) and is_list(opts) do

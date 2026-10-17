@@ -287,6 +287,37 @@ defmodule FermixCore.Companion.ProtocolContractTest do
     assert section =~ "no version bump"
   end
 
+  # M72 §14.1: an Apple Maps place adds its identifier, optional and additive,
+  # and its golden is exactly what the builder makes of the search's records.
+  test "an Apple Maps place's golden carries its identifier and is the builder's own", %{
+    schema: schema,
+    protocol: protocol
+  } do
+    place = schema["$defs"]["place"]
+
+    assert place["properties"]["apple_place_id"] == %{"type" => "string", "minLength" => 1}
+    refute "apple_place_id" in place["required"]
+
+    done =
+      @server_fixtures
+      |> jsonl()
+      |> Enum.find(
+        &get_in(&1, ["blocks", Access.at(0), "places", Access.at(0), "apple_place_id"])
+      )
+
+    assert %{"type" => "text_done", "blocks" => [%{"places" => [_ | _] = places}]} = done
+    assert ReplyBlocks.build(done["text"], Enum.map(places, &record/1)) == done["blocks"]
+    assert :ok = Protocol.validate_server_payload("text_done", Map.delete(done, "type"))
+
+    for golden <- places do
+      assert golden["source_url"] ==
+               "https://maps.apple.com/place?place-id=" <> golden["apple_place_id"]
+    end
+
+    [_before, section] = String.split(protocol, "## Blocks under a reply", parts: 2)
+    assert section =~ "`apple_place_id`"
+  end
+
   test "the codec refuses blocks the export rules out" do
     place = %{"name" => "Example Coffee", "location" => %{"latitude" => 1, "longitude" => 2}}
     places = %{"type" => "places", "places" => [place]}

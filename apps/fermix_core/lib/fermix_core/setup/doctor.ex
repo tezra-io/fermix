@@ -38,6 +38,7 @@ defmodule FermixCore.Setup.Doctor do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
   alias FermixCore.Tools.PlaceSearch
+  alias FermixCore.Tools.PlaceSearch.AppleMaps, as: PlaceAppleMaps
   alias FermixCore.Tools.PlaceSearch.Brave, as: PlaceBrave
   alias FermixCore.Tools.SearchCredential
   alias FermixCore.Tools.WebSearch
@@ -89,8 +90,11 @@ defmodule FermixCore.Setup.Doctor do
           optional(:result_count) => non_neg_integer()
         }
   @type place_search_report :: %{
-          :backend => atom(),
+          :backend => :apple_maps | :brave,
+          :backend_source => :configured | :platform_default,
+          :web_backend => atom(),
           :credential_present? => boolean(),
+          :ready => :ok | {:error, String.t()},
           :advertised? => boolean(),
           optional(:probe_result) => atom(),
           optional(:probe_error) => String.t(),
@@ -580,48 +584,60 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   @doc """
-  Reports `place_search` readiness: the shared Brave key, the active `web_search`
-  backend, and whether the tool is advertised (MILESTONE_31 §14.3).
+  Reports `place_search` readiness (MILESTONE_31 §14.3, M72 §14.1): the backend
+  in force and whether configuration or the platform chose it, whether it is
+  ready, whether the tool is advertised, the shared Brave key and the active
+  `web_search` backend.
 
   Offline by default — no network call, whatever the config says. With
-  `full: true` and a present key it runs **one** metered live request against the
-  place endpoint (fixed query, `count: 1`, result discarded) and adds
-  `:probe_result` / `:probe_error` / `:result_count`. Each §10.4 failure kind
-  keeps its own tag, and no probe ever switches provider: there is one adapter
-  and no fallback. Inject `req_options`/`net_resolver` to stub the probe in
-  tests.
+  `full: true` and a ready backend it runs **one** live search on that backend
+  (fixed query, `count: 1`, result discarded): metered on Brave, free on Apple
+  Maps. It adds `:probe_result` / `:probe_error` / `:result_count`. Each §10.4
+  failure kind keeps its own tag, and no probe ever switches backend.
+  `macos?:` names the host and `apple_maps:` the helper's options for a test;
+  `req_options`/`net_resolver` stub the Brave probe.
 
-  Advertisement is asked of the tool itself so a doctor row and the runtime
-  surface cannot drift; the probe never reads the owner's saved default
-  location (§13.2 — an unattended caller may not, and a health check has no
-  business sending it).
+  Readiness and advertisement are asked of the tool itself so a doctor row and
+  the runtime surface cannot drift; the probe never reads the owner's saved
+  default location (§13.2 — an unattended caller may not, and a health check
+  has no business sending it).
   """
   @spec place_search_report(keyword()) :: place_search_report()
   def place_search_report(opts \\ []) do
     config = WebSearch.config()
-    {backend, _module} = WebSearch.active_backend(config)
-    present? = match?({:ok, _key}, SearchCredential.brave(config))
+    {web_backend, _module} = WebSearch.active_backend(config)
+    context = opts |> Keyword.take([:macos?, :apple_maps]) |> Map.new()
+    resolution = PlaceSearch.resolution(context)
+    ready = PlaceSearch.readiness(context)
 
     base = %{
-      backend: backend,
-      credential_present?: present?,
-      advertised?: PlaceSearch.advertise?(%{})
+      backend: resolution.name,
+      backend_source: resolution.source,
+      web_backend: web_backend,
+      credential_present?: match?({:ok, _key}, SearchCredential.brave(config)),
+      ready: ready,
+      advertised?: PlaceSearch.advertise?(context)
     }
 
-    if Keyword.get(opts, :full, false) and present? do
-      Map.merge(base, place_search_probe(config, opts))
+    if Keyword.get(opts, :full, false) and ready == :ok do
+      Map.merge(base, place_search_probe(resolution.name, config, opts))
     else
       base
     end
   end
 
-  defp place_search_probe(config, opts) do
-    probe_opts = Keyword.put(config, :context, probe_context(opts))
+  defp place_search_probe(:brave, config, opts),
+    do: place_probe(PlaceBrave, Keyword.put(config, :context, probe_context(opts)))
+
+  defp place_search_probe(:apple_maps, _config, opts),
+    do: place_probe(PlaceAppleMaps, Keyword.get(opts, :apple_maps, []))
+
+  defp place_probe(backend, backend_opts) do
     request = %{query: @place_probe_query, count: 1}
 
-    case PlaceBrave.search(request, probe_opts) do
+    case backend.search(request, backend_opts) do
       {:ok, places, _trace} ->
-        %{probe_result: :ok, result_count: length(places)}
+        %{probe_result: :ok, result_count: length(Enum.take(places, request.count))}
 
       {:error, reason, _trace} ->
         %{probe_result: place_probe_tag(reason), probe_error: reason, result_count: 0}

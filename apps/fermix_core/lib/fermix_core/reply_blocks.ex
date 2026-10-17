@@ -18,8 +18,9 @@ defmodule FermixCore.ReplyBlocks do
   the path. Places come in the order the text first links them, once each, at
   most ten, and a place with no usable coordinates is left out (it stays a link
   in the text). A place is a subset of the M31 record under its own names, as
-  `priv/companion/protocol.schema.json` (`place`) exports it. A reply that
-  links none gets no block.
+  `priv/companion/protocol.schema.json` (`place`) exports it; an Apple Maps
+  place carries its `apple_place_id` too, which a Mac opens it by (M72 §14.1).
+  A reply that links none gets no block.
   """
 
   use GenServer
@@ -208,6 +209,7 @@ defmodule FermixCore.ReplyBlocks do
     %{"name" => name, "location" => location}
     |> put_text("canonical_url", Map.get(record, :canonical_url))
     |> put_text("source_url", Map.get(record, :source_url))
+    |> put_text("apple_place_id", Map.get(record, :apple_place_id))
     |> put_text("address", Map.get(record, :address))
     |> put_present("rating", rating(Map.get(record, :rating)))
     |> put_text("price_range", Map.get(record, :price_range))

@@ -40,6 +40,20 @@ DISCLAIM_SRC = c_src/fermix_disclaim.c
 DISCLAIM_BIN = $(PREFIX)/disclaim
 DISCLAIM_CFLAGS = -std=c99 -O2 -Wall -Wextra -Werror
 
+# The Apple Maps helper (macOS only), one place search per process for
+# place_search's apple_maps backend (M72 section 14): a Swift EXECUTABLE built
+# with swiftc from the Command Line Tools, so only a native Darwin build makes
+# it. A cross-build (DISCLAIM_TARGET set, on Linux) has no Swift toolchain for
+# macOS and carries no helper. The deployment target is the app's floor: an API
+# newer than macOS 15 is a compile error here instead of a crash on an older
+# Mac, and a deprecation in a newer SDK stays a warning that cannot fire.
+# Keep MAPS_SWIFTFLAGS in lockstep with the ci.yml check job's "Apple Maps
+# helper (macOS)" step, which compiles it again with its own copy of the flags.
+MAPS_SRC = swift_src/fermix_maps.swift
+MAPS_BIN = $(PREFIX)/fermix-maps
+MAPS_ARCH := $(shell uname -m)
+MAPS_SWIFTFLAGS = -O -swift-version 5 -warnings-as-errors -target $(MAPS_ARCH)-apple-macos15.0
+
 ifdef DISCLAIM_TARGET
 all: $(DISCLAIM_BIN)
 
@@ -47,14 +61,18 @@ $(DISCLAIM_BIN): $(DISCLAIM_SRC)
 	mkdir -p $(PREFIX)
 	zig cc -target $(DISCLAIM_TARGET) $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
 else ifeq ($(KERNEL_NAME), Darwin)
-all: $(DISCLAIM_BIN)
+all: $(DISCLAIM_BIN) $(MAPS_BIN)
 
 $(DISCLAIM_BIN): $(DISCLAIM_SRC)
 	mkdir -p $(PREFIX)
 	cc $(DISCLAIM_CFLAGS) $(DISCLAIM_SRC) -o $(DISCLAIM_BIN)
+
+$(MAPS_BIN): $(MAPS_SRC)
+	mkdir -p $(PREFIX)
+	swiftc $(MAPS_SWIFTFLAGS) $(MAPS_SRC) -o $(MAPS_BIN)
 endif
 
 clean:
-	$(RM) $(LIB_NAME) $(DISCLAIM_BIN)
+	$(RM) $(LIB_NAME) $(DISCLAIM_BIN) $(MAPS_BIN)
 
 .PHONY: all clean

@@ -55,6 +55,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Setup.Wizard
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Transcription.Local, as: LocalTranscription
   alias FermixCore.Transcription.Local.ModelStore, as: LocalModelStore
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
@@ -1844,7 +1845,9 @@ defmodule FermixWebWeb.SetupLive do
       parallel_api_key_set: secret_set?(web_search, :parallel_api_key),
       brave_api_key_set: secret_set?(web_search, :brave_api_key),
       perplexity_api_key_set: secret_set?(web_search, :perplexity_api_key),
-      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key)
+      firecrawl_api_key_set: secret_set?(web_search, :firecrawl_api_key),
+      place_backend: PlaceSearch.resolution(%{}).name,
+      place_ready: PlaceSearch.readiness(%{}) == :ok
     }
   end
 

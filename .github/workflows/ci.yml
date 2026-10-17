@@ -66,6 +66,29 @@ jobs:
       - name: Compile (warnings as errors)
         run: mix compile --warnings-as-errors
 
+      - name: Apple Maps helper (macOS)
+        # `mix compile` above built `fermix-maps` through apps/fermix_nif's
+        # Makefile, as the app-engine release build does. This compiles it again
+        # with the flags written here, kept in lockstep with MAPS_SWIFTFLAGS, so
+        # loosening the Makefile's (dropping -warnings-as-errors, or raising the
+        # macOS 15 deployment target past the app's floor) fails this leg, then
+        # self-checks the build mix made. Its fixture requests run in the test
+        # step (Tools.PlaceSearch.HelperTest); the live MapKit search is opt-in
+        # (`--only mapkit_live`) and never runs in CI.
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          swiftc --version
+          swiftc -O -swift-version 5 -warnings-as-errors -target "$(uname -m)-apple-macos15.0" \
+            apps/fermix_nif/swift_src/fermix_maps.swift -o "${RUNNER_TEMP}/fermix-maps"
+          helper=_build/test/lib/fermix_nif/priv/fermix-maps
+          if [ ! -x "$helper" ]; then
+            echo "::error title=Apple Maps helper missing::mix compile built no ${helper}"
+            exit 1
+          fi
+          file "$helper"
+          "$helper" --check
+
       - name: Check formatting
         run: mix format --check-formatted
 

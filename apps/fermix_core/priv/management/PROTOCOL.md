@@ -414,6 +414,18 @@ Notes that the shapes alone do not carry:
   browser already running takes a new tab cap when it next starts.
   `settings.apply` refuses a value the browser would refuse at launch, in the
   browser's own sentence.
+- **`web_search` also carries place search's backend.** After
+  `web_search_backend`, the row `place_search_backend` (a choice, `Place
+  search`) is `[fermix_core.tools.place_search] backend`, and its `value` is the
+  backend in force: the one the file names, or the platform's default when it
+  names none (`apple_maps` on a Mac, `brave` elsewhere). Its options are the
+  ones this host can run: `apple_maps` (`Apple Maps`, hint `Needs no key`) and
+  `brave` (`Brave`) on a Mac, `brave` alone on Linux, where `settings.apply`
+  refuses `apple_maps` as a value the row does not publish. The `brave_api_key`
+  row stands whenever web search or place search uses Brave, its footer
+  `Also powers place search.` when both do and `Powers place search.` when only
+  place search does; with neither on Brave it is not published. A call reads
+  the section when it runs, so the row carries the section's usual `restart`.
 - **`browser.install.start` completes only once the launcher finds a
   browser.** It runs the meeting notetaker's own install step (the notetaker's
   helper, then the Chromium build that helper is pinned to, about 150 MB, and a

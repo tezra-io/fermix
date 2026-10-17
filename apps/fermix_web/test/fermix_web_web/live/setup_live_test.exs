@@ -1698,6 +1698,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "the place posture is stated whatever the web backend (M31 §13.4)", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools, web_search: [], place_search: [backend: "brave"])
+
       {:ok, view, _html} = live(conn, "/setup")
 
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
@@ -1711,7 +1713,10 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "place readiness follows the saved Brave key", %{conn: conn} do
-      Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
+      Application.put_env(:fermix_core, :tools,
+        web_search: [brave_api_key: "brave-secret"],
+        place_search: [backend: "brave"]
+      )
 
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
@@ -1721,12 +1726,31 @@ defmodule FermixWebWeb.SetupLiveTest do
     end
 
     test "place readiness reports the missing key", %{conn: conn} do
-      Application.put_env(:fermix_core, :tools, web_search: [])
+      Application.put_env(:fermix_core, :tools, web_search: [], place_search: [backend: "brave"])
 
       {:ok, view, _html} = live(conn, "/setup")
       html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
 
       assert html =~ ~s(data-place-search="unconfigured")
+    end
+
+    # M72 §14.1: Apple Maps needs no key and is not metered, so the note says so
+    # rather than asking for a Brave key. Whether it is ready is the host's
+    # (a Mac with the helper), which the tool's own suite holds with the
+    # platform named; this case holds only what the note says either way.
+    test "under Apple Maps the note asks for no key and states no metering", %{conn: conn} do
+      Application.put_env(:fermix_core, :tools,
+        web_search: [],
+        place_search: [backend: "apple_maps"]
+      )
+
+      {:ok, view, _html} = live(conn, "/setup")
+      html = view |> element("button[phx-value-tab=\"search\"]") |> render_click()
+
+      assert html =~ "Apple Maps"
+      assert html =~ "not metered"
+      refute html =~ "needs a Brave Search API key"
+      refute html =~ "metered separately"
     end
   end
 

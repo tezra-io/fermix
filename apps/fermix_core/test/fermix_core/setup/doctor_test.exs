@@ -1281,14 +1281,19 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
+  # Brave as the platform's default off a Mac (`macos?: false`) unless a case
+  # names another host or backend; M72 §14.1 made the backend the platform's.
   describe "place_search_report/1 (M31 §14.3)" do
-    test "offline reports the Brave key, the active web backend, and advertisement" do
+    test "offline reports the backend, the Brave key, the active web backend, and advertisement" do
       put_web_search(backend: :duckduckgo, brave_api_key: "brave-secret")
 
-      report = Doctor.place_search_report()
+      report = Doctor.place_search_report(macos?: false)
 
-      assert report.backend == :duckduckgo
+      assert report.backend == :brave
+      assert report.backend_source == :platform_default
+      assert report.web_backend == :duckduckgo
       assert report.credential_present? == true
+      assert report.ready == :ok
       assert report.advertised? == true
       refute Map.has_key?(report, :probe_result)
     end
@@ -1296,16 +1301,18 @@ defmodule FermixCore.Setup.DoctorTest do
     test "offline reports a missing key as hidden" do
       put_web_search(backend: :duckduckgo)
 
-      report = Doctor.place_search_report()
+      report = Doctor.place_search_report(macos?: false)
 
       assert report.credential_present? == false
+      assert {:error, "auth_failed: missing Brave API key"} = report.ready
       assert report.advertised? == false
     end
 
     test "offline treats an unresolved @keyring sentinel as missing" do
       put_web_search(brave_api_key: "@keyring")
 
-      assert %{credential_present?: false, advertised?: false} = Doctor.place_search_report()
+      assert %{credential_present?: false, advertised?: false} =
+               Doctor.place_search_report(macos?: false)
     end
 
     test "offline never reaches the network" do
@@ -1313,11 +1320,82 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "brave-secret")
 
       Doctor.place_search_report(
+        macos?: false,
         req_options: [plug: {Req.Test, id}],
         net_resolver: place_resolver()
       )
 
       refute_received {:place_probe_request, _query}
+    end
+
+    test "on a Mac with nothing set, the backend is Apple Maps, ready with its helper and no key" do
+      put_web_search(backend: :duckduckgo)
+
+      report = Doctor.place_search_report(macos?: true, apple_maps: [helper_path: "/bin/sh"])
+
+      assert report.backend == :apple_maps
+      assert report.backend_source == :platform_default
+      assert report.credential_present? == false
+      assert report.ready == :ok
+      assert report.advertised? == true
+    end
+
+    test "Apple Maps without its helper, or off a Mac, is not ready and says why" do
+      put_web_search(backend: :duckduckgo)
+
+      missing =
+        Doctor.place_search_report(
+          macos?: true,
+          apple_maps: [helper_path: "/nonexistent/fermix-maps"]
+        )
+
+      assert {:error, "provider_error: this build carries no Apple Maps helper" <> _} =
+               missing.ready
+
+      refute missing.advertised?
+
+      Application.put_env(:fermix_core, :tools,
+        web_search: [backend: :duckduckgo],
+        place_search: [backend: "apple_maps"]
+      )
+
+      off_mac = Doctor.place_search_report(macos?: false, apple_maps: [helper_path: "/bin/sh"])
+
+      assert off_mac.backend == :apple_maps
+      assert off_mac.backend_source == :configured
+
+      assert {:error, "provider_error: Apple Maps place search runs only on macOS" <> _} =
+               off_mac.ready
+    end
+
+    test "--full on Apple Maps runs one free search through the helper, never Brave" do
+      id = unique_place_plug(self())
+      put_web_search(brave_api_key: "brave-secret")
+      helper = apple_probe_helper(%{"places" => [apple_probe_place(), apple_probe_place()]})
+
+      report =
+        Doctor.place_search_report(
+          full: true,
+          macos?: true,
+          apple_maps: [helper_path: helper],
+          req_options: [plug: {Req.Test, id}],
+          net_resolver: place_resolver()
+        )
+
+      assert report.probe_result == :ok
+      assert report.result_count == 1
+      refute_received {:place_probe_request, _query}
+    end
+
+    test "--full on Apple Maps names a throttle independently" do
+      put_web_search([])
+      helper = apple_probe_helper(%{"error" => %{"message" => "GEOErrorDomain -3"}}, 66)
+
+      report =
+        Doctor.place_search_report(full: true, macos?: true, apple_maps: [helper_path: helper])
+
+      assert report.probe_result == :rate_limited
+      assert report.probe_error =~ "rate_limited"
     end
 
     test "--full probes the place endpoint once with the fixed query and count 1" do
@@ -1327,6 +1405,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          macos?: false,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1381,6 +1460,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          macos?: false,
           req_options: [plug: {Req.Test, id}],
           net_resolver: private_place_resolver()
         )
@@ -1396,6 +1476,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
+          macos?: false,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1834,9 +1915,39 @@ defmodule FermixCore.Setup.DoctorTest do
   defp full_place_report(id) do
     Doctor.place_search_report(
       full: true,
+      macos?: false,
       req_options: [plug: {Req.Test, id}],
       net_resolver: place_resolver()
     )
+  end
+
+  # A shell script standing in for `fermix-maps`: it reads the one request line
+  # and prints the canned object.
+  defp apple_probe_helper(stdout, status \\ 0) do
+    dir = FermixTestSupport.SafeRm.make_tmp_dir!("doctor-apple-maps")
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(dir) end)
+    path = Path.join(dir, "fermix-maps")
+    File.write!(Path.join(dir, "stdout"), Jason.encode!(stdout))
+
+    File.write!(path, """
+    #!/bin/sh
+    IFS= read -r line
+    cat '#{Path.join(dir, "stdout")}'
+    exit #{status}
+    """)
+
+    File.chmod!(path, 0o755)
+    path
+  end
+
+  defp apple_probe_place do
+    %{
+      "name" => "Tour Eiffel",
+      "latitude" => 48.8584,
+      "longitude" => 2.2945,
+      "identifier" => "I6E2A1C0F00000001",
+      "category" => "MKPOICategoryLandmark"
+    }
   end
 
   # Reports the query params back to the test so the probe's shape (one call,

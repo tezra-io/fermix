@@ -61,12 +61,15 @@ defmodule FermixCore.Prompt.ChannelPresentation do
 
   # Chat surfaces that are not phone-width, each with the one line it earns
   # alone, whatever the chat type: the core above is false of them. The Mac
-  # chat draws the places a reply links as cards and a map (M72).
+  # chat draws the places a reply links as cards and a map (M72). A card shows
+  # what the place's record has, which differs by backend (M72 §14.1): Brave
+  # gives ratings, hours and prices, Apple Maps a kind and an address.
   @window_lines %{
     "companion" =>
       "Presentation: this chat shows each place from `place_search` that your reply links as a " <>
-        "card with its rating, hours, price and distance, and on a map, so say in a line why " <>
-        "each place fits rather than repeating those facts, and still link every place by name."
+        "card with the facts the search returned for it (its kind, address, rating, hours or " <>
+        "distance) and on a map, so say in a line why each place fits rather than repeating " <>
+        "those facts, and still link every place by name."
   }
 
   # Chat types the channels report for a shared room (telegram: group/supergroup/

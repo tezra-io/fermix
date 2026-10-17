@@ -91,7 +91,7 @@ defmodule FermixCore.Management.Settings do
   def apply(section, values, opts \\ [])
       when is_binary(section) and is_map(values) and is_list(opts) do
     with {:ok, module} <- fetch_family(section, opts),
-         rows = module.rows(section, snapshot(opts)),
+         rows = family_rows(module, section, snapshot(opts), opts),
          {:ok, answers} <- answers(section, rows, values) do
       write(section, answers, Map.keys(values), opts)
     end
@@ -172,7 +172,7 @@ defmodule FermixCore.Management.Settings do
     snapshot = snapshot(opts)
     %{id: id, title: title} = Enum.find(family_sections(module, opts), &(&1.id == section))
 
-    %{"id" => id, "title" => title, "rows" => module.rows(section, snapshot)}
+    %{"id" => id, "title" => title, "rows" => family_rows(module, section, snapshot, opts)}
   end
 
   defp answers(section, rows, values) do
@@ -449,4 +449,11 @@ defmodule FermixCore.Management.Settings do
 
   defp family_sections(Channels, opts), do: Channels.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
+
+  # The search section offers place search's backends as this host can run
+  # them, so Tools is also handed the host.
+  defp family_rows(Tools, section, snapshot, opts),
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:macos?]))
+
+  defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

@@ -27,6 +27,7 @@ defmodule FermixCore.Setup.Wizard do
   alias FermixCore.Setup.SecretWriter
   alias FermixCore.Setup.WizardState
   alias FermixCore.SkillCuration.Delivery, as: SkillCurationDelivery
+  alias FermixCore.Tools.PlaceSearch.Config, as: PlaceSearchConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -66,6 +67,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:computer_history_enabled, boolean() | String.t()}
           | {:computer_history_apps, [String.t()] | String.t()}
           | {:web_search_backend, atom() | String.t()}
+          | {:place_search_backend, atom() | String.t()}
           | {:tavily_api_key, String.t()}
           | {:exa_api_key, String.t()}
           | {:parallel_api_key, String.t()}
@@ -777,6 +779,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_computer_use_config(answers)
       |> put_computer_history_config(answers)
       |> put_web_search_config(answers)
+      |> put_place_search_config(answers)
       |> put_image_config(answers)
       |> put_transcription_config(answers)
       |> put_telegram_bot_token(Keyword.get(answers, :telegram_bot_token))
@@ -2130,6 +2133,28 @@ defmodule FermixCore.Setup.Wizard do
       snapshot,
       :fermix_core,
       Keyword.put(fermix_core, :tools, Keyword.put(tools, :web_search, web_search))
+    )
+  end
+
+  # `[fermix_core.tools.place_search] backend` (M72 §14.1). An absent answer
+  # changes nothing; a word the section does not know raises its own sentence.
+  defp put_place_search_config(snapshot, answers) do
+    case Keyword.get(answers, :place_search_backend) do
+      nil -> snapshot
+      backend -> update_place_search_config(snapshot, backend)
+    end
+  end
+
+  defp update_place_search_config(snapshot, backend) do
+    values = [backend: backend] |> PlaceSearchConfig.normalize() |> PlaceSearchConfig.to_keyword()
+    fermix_core = Map.get(snapshot, :fermix_core, [])
+    tools = Keyword.get(fermix_core, :tools, [])
+    place_search = tools |> Keyword.get(:place_search, []) |> Keyword.merge(values)
+
+    Map.put(
+      snapshot,
+      :fermix_core,
+      Keyword.put(fermix_core, :tools, Keyword.put(tools, :place_search, place_search))
     )
   end
 

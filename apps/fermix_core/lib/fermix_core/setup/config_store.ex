@@ -28,6 +28,7 @@ defmodule FermixCore.Setup.ConfigStore do
   alias FermixCore.Setup.WebListener
   alias FermixCore.SkillCuration.Config, as: SkillCurationConfig
   alias FermixCore.Tools.Media.Registry, as: MediaRegistry
+  alias FermixCore.Tools.PlaceSearch.Config, as: PlaceSearchConfig
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
 
   require Logger
@@ -1135,6 +1136,10 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_core", "meetings"], meetings),
       render_section(["fermix_core", "tools", "web_search"], Keyword.get(tools, :web_search, [])),
       render_section(
+        ["fermix_core", "tools", "place_search"],
+        Keyword.get(tools, :place_search, [])
+      ),
+      render_section(
         ["fermix_core", "tools", "tool_search"],
         Keyword.get(tools, :tool_search, [])
       ),
@@ -1915,6 +1920,10 @@ defmodule FermixCore.Setup.ConfigStore do
       normalize_web_search_tool(lookup(config, "web_search", :web_search))
     )
     |> put_if_present(
+      :place_search,
+      normalize_place_search_tool(lookup(config, "place_search", :place_search))
+    )
+    |> put_if_present(
       :tool_search,
       normalize_tool_search(lookup(config, "tool_search", :tool_search))
     )
@@ -2104,6 +2113,16 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   defp normalize_web_search_tool(_config), do: []
+
+  # `[fermix_core.tools.place_search]` (M72 §14.1): the one backend choice. An
+  # unknown key or backend refuses the load by name (there is no backend to
+  # limp along on that the operator did not choose), and the persist path
+  # writes the string back through `to_keyword/1`, so a save round-trips.
+  defp normalize_place_search_tool(config) do
+    config
+    |> PlaceSearchConfig.normalize()
+    |> PlaceSearchConfig.to_keyword()
+  end
 
   defp normalize_web_search_backend(nil), do: nil
   defp normalize_web_search_backend(:duckduckgo), do: :duckduckgo

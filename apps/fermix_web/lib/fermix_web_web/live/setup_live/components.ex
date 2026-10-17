@@ -1704,17 +1704,18 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # `place_search` shares the ONE Brave credential (MILESTONE_31 §14.1), so its
   # readiness belongs on this pane whatever the selected web backend — Brave does
-  # not have to be the active web search backend for the tool to work. The
-  # retention posture (§13.4) is stated here because this is where the operator
-  # decides to save the key.
+  # not have to be the active web search backend for the tool to work. On a Mac
+  # it searches Apple Maps by default and needs no key (M72 §14.1), so the note
+  # follows the place backend in force. The retention posture (§13.4) is stated
+  # here because this is where the operator decides to save the key.
   defp place_search_note(assigns) do
     ~H"""
     <div
       class="rounded-box border border-base-300 bg-base-200/60 p-4 text-sm leading-6 text-base-content/70"
-      data-place-search={place_search_state(@search_form.brave_api_key_set)}
+      data-place-search={place_search_state(@search_form.place_ready)}
     >
-      <p>{place_search_status(@search_form.brave_api_key_set)}</p>
-      <p class="pt-1 text-xs">
+      <p>{place_search_status(@search_form.place_backend, @search_form.place_ready)}</p>
+      <p :if={@search_form.place_backend == :brave} class="pt-1 text-xs">
         Each web and place call is metered separately. Place results are transient; only the
         final answer persists, as ordinary chat history.
         <a
@@ -1726,6 +1727,10 @@ defmodule FermixWebWeb.SetupLive.Components do
           Brave API docs
         </a>
       </p>
+      <p :if={@search_form.place_backend == :apple_maps} class="pt-1 text-xs">
+        Apple Maps searches are not metered. Place results are transient; only the final answer
+        persists, as ordinary chat history.
+      </p>
     </div>
     """
   end
@@ -1733,13 +1738,21 @@ defmodule FermixWebWeb.SetupLive.Components do
   defp place_search_state(true), do: "ready"
   defp place_search_state(false), do: "unconfigured"
 
-  defp place_search_status(true),
+  defp place_search_status(:brave, true),
     do: "place_search is ready; it uses the saved Brave Search API key."
 
-  defp place_search_status(false),
+  defp place_search_status(:brave, false),
     do:
       "place_search (businesses, hours, ratings, contact details) needs a Brave Search API key. " <>
         "Brave does not have to be your web backend."
+
+  defp place_search_status(:apple_maps, true),
+    do: "place_search is ready; it searches Apple Maps on this Mac and needs no key."
+
+  defp place_search_status(:apple_maps, false),
+    do:
+      "place_search is set to Apple Maps, which cannot run here (Doctor says why). Set " <>
+        "[fermix_core.tools.place_search] backend = \"brave\" and save a Brave key to search Brave."
 
   defp media_pane(assigns) do
     ~H"""

@@ -860,50 +860,84 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   @doc """
-  `place_search` readiness (M31 §14.3): the shared Brave key, the active
-  `web_search` backend, and whether the tool is advertised.
+  `place_search` readiness (M31 §14.3, M72 §14.1): the backend in force, why it
+  is the one (`[fermix_core.tools.place_search] backend`, or the platform's
+  default: Apple Maps on a Mac, Brave elsewhere), and whether it is ready.
 
-  Offline, always — this check takes no `full?` flag, so the default run cannot
-  reach the network by any argument. The metered live probe is `place_probe/1`,
-  which `Fermix.CLI.Doctor` calls only from its `--full` block. Having no Brave
-  key is a normal configuration (the tool is optional and simply hidden), so it
-  reports `:ok`, not a warning.
+  Offline, always — this check reaches no network by any argument. The live
+  probe is `place_probe/1`, which `Fermix.CLI.Doctor` calls only from its
+  `--full` block. Brave with no key, as the platform's default, is a normal
+  configuration (the tool is optional and simply hidden), so it reports `:ok`;
+  a backend chosen and not ready, or Apple Maps not ready on a Mac, warns.
+  `opts` names the host (`macos?:`) and the helper (`apple_maps:`) for a test.
   """
-  @spec place_search() :: result()
-  def place_search do
-    []
+  @spec place_search(keyword()) :: result()
+  def place_search(opts \\ []) when is_list(opts) do
+    opts
+    |> Keyword.take([:macos?, :apple_maps])
     |> ProviderProbe.place_search_report()
     |> format_place_search()
   end
 
-  # Advertisement is the row's one fact: the tool answers it from the same
-  # credential seam a `place_search` call would, so the row cannot claim a
-  # readiness the runtime does not have. A missing key is a normal, optional
-  # configuration, so it reads `:ok` and says how to enable the tool.
-  defp format_place_search(%{advertised?: false} = report) do
+  # Readiness is the row's one fact: the tool answers it from the same seam a
+  # `place_search` call would, so the row cannot claim a readiness the runtime
+  # does not have.
+  defp format_place_search(%{backend: :apple_maps, ready: :ok} = report) do
     ok(
       "place search",
-      "no Brave key — place_search hidden (optional; web backend #{report.backend}). " <>
-        "Set [fermix_core.tools.web_search] brave_api_key in setup to enable it."
+      "Apple Maps (#{place_why(report)}), ready with no key; place_search advertised"
     )
+  end
+
+  defp format_place_search(%{backend: :apple_maps, ready: {:error, reason}} = report) do
+    warn(
+      "place search",
+      "Apple Maps (#{place_why(report)}) is not ready — place_search hidden: #{reason}"
+    )
+  end
+
+  defp format_place_search(%{backend: :brave, ready: {:error, _reason}} = report) do
+    place_brave_missing(report.backend_source, report)
   end
 
   defp format_place_search(report) do
     ok(
       "place search",
-      "Brave key present, place_search advertised; web backend #{report.backend}. " <>
-        "Web and place calls are metered separately."
+      "Brave (#{place_why(report)}), key present, place_search advertised; web backend " <>
+        "#{report.web_backend}. Web and place calls are metered separately."
     )
   end
 
+  defp place_brave_missing(:platform_default, report) do
+    ok(
+      "place search",
+      "Brave (#{place_why(report)}): no Brave key — place_search hidden (optional; web " <>
+        "backend #{report.web_backend}). Set [fermix_core.tools.web_search] brave_api_key " <>
+        "in setup to enable it."
+    )
+  end
+
+  defp place_brave_missing(:configured, report) do
+    warn(
+      "place search",
+      "Brave (#{place_why(report)}): no Brave key — place_search hidden (web backend " <>
+        "#{report.web_backend}). Set [fermix_core.tools.web_search] brave_api_key in setup."
+    )
+  end
+
+  defp place_why(%{backend_source: :configured}), do: "set in [fermix_core.tools.place_search]"
+  defp place_why(%{backend: :apple_maps}), do: "the default on a Mac"
+  defp place_why(%{backend: :brave}), do: "the default off a Mac"
+
   @doc """
-  One metered live request to the place endpoint (M31 §14.3), for `--full` only.
+  One live search on the place backend in force (M31 §14.3), for `--full` only:
+  metered on Brave, free on Apple Maps.
 
   Fixed innocuous query, `count: 1`, result discarded, never anchored to the
   owner's saved location. Auth, rate-limit, schema, and transport failures each
-  keep their own name, and a failure never switches provider — there is one
-  adapter and no fallback. `opts` carries the `req_options`/`net_resolver`
-  injection seam so tests stub the transport.
+  keep their own name, and a failure never switches backend. `opts` carries the
+  `req_options`/`net_resolver` seam for the Brave transport, and `macos?:` and
+  `apple_maps:` for the host and the helper, so tests stub both.
   """
   @spec place_probe(keyword()) :: result()
   def place_probe(opts \\ []) when is_list(opts) do
@@ -913,20 +947,27 @@ defmodule Fermix.CLI.Doctor.Checks do
     |> format_place_probe()
   end
 
-  defp format_place_probe(%{probe_result: :ok, result_count: count}) do
+  defp format_place_probe(%{probe_result: :ok, result_count: count} = report) do
     ok(
       "place probe",
-      "live place probe ok (#{count} result(s), discarded) — this probe is metered"
+      "live place probe ok (#{count} result(s), discarded) — #{place_probe_cost(report)}"
     )
   end
 
-  defp format_place_probe(%{probe_error: reason}) do
-    warn("place probe", "live place probe failed: #{reason} — this probe is metered")
+  defp format_place_probe(%{probe_error: reason} = report) do
+    warn("place probe", "live place probe failed: #{reason} — #{place_probe_cost(report)}")
+  end
+
+  defp format_place_probe(%{backend: :brave}) do
+    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
   end
 
   defp format_place_probe(_report) do
-    ok("place probe", "skipped — no Brave key configured, so no metered call was made")
+    ok("place probe", "skipped — Apple Maps is not ready, so no search was made")
   end
+
+  defp place_probe_cost(%{backend: :brave}), do: "this probe is metered"
+  defp place_probe_cost(%{backend: :apple_maps}), do: "Apple Maps, not metered"
 
   @doc """
   Image-generation backend health: which backend is selected and whether its
