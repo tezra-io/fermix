@@ -381,7 +381,11 @@ second resource-store process to coordinate.
 standard workspace paths (workspace, grants, bootstrap, skills, plugins,
 browser, journals, realtime, mobile, traces, logs, and `memory.db`); it keeps
 `mobile` at 0700, the only mode the phone's trust store reads. Secrets live in
-the OS keychain, named by profile rather than by home.
+the OS keychain, named by profile rather than by home. Every write of
+`config.toml` (a settings save, the web port, an MCP server write) holds one
+cross-VM lockfile from its read to its write, and the `[mcp.servers.*]` blocks
+are read, edited and checked by `Capabilities.MCP.Config` and rendered back by
+the same renderer, so no save drops an operator's servers.
 
 `Setup.Wizard` is the shared setup engine. `fermix setup` and `mix fermix.setup`
 (through `Setup.Runtime`), the setup LiveView, and the management protocol's

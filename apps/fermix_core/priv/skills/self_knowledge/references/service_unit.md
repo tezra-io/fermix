@@ -21,7 +21,7 @@ After any update the daemon keeps running the old engine until it restarts: "upg
 
 - **Install:** `curl -fsSL https://fermix.ai/install | sh` picks the package for the machine from the latest release, checks its sha256 and (when a `cosign` is present) its cosign signature, installs it with `apt`, `dnf` or `zypper` through `sudo`, then runs `fermix setup` in the terminal (under `sudo` or with no terminal it prints `fermix setup` as the next step). `.deb` for Debian and Ubuntu, `.rpm` for Fedora, RHEL and openSUSE; `x86_64` and `arm64`. The packages are release assets, not a repository: no `apt`/`dnf` source is configured, and `sudo apt install ./<file>.deb` or `sudo dnf install ./<file>.rpm` from the release page is the same result. `--standalone`, macOS, or a host with none of the three managers gets the standalone binary. An older standalone `fermix` first on `PATH` is named, and no setup starts.
 - **Unit and binding.** The package ships `/usr/lib/systemd/user/fermix.service` (runs `fermix service run`) and nothing in Fermix rewrites it. Each account's home is recorded in `~/.config/fermix/service.json` (`$XDG_CONFIG_HOME`); the service refuses to boot without it rather than guess a home.
-- **Port.** `[fermix_web] port` (1024-65535, default 4030), set with `fermix service install --port N` or in `config.toml`; restart to apply. A packaged engine refuses a `PORT` environment variable. `--port` refuses a `config.toml` holding a hand-written `[mcp.*]` block; edit the file instead.
+- **Port.** `[fermix_web] port` (1024-65535, default 4030), set with `fermix service install --port N` or in `config.toml`; restart to apply. A packaged engine refuses a `PORT` environment variable.
 
 | Verb | Does |
 |---|---|

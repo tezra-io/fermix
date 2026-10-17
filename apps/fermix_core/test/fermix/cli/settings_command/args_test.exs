@@ -89,6 +89,7 @@ defmodule Fermix.CLI.SettingsCommand.ArgsTest do
             "env:ACME_TOKEN",
             "plugin:acme",
             "oauth_client:github",
+            "mcp:files/env/GITHUB_TOKEN",
             "anthropic_setup_token"
           ] do
         assert Args.parse(["set", "providers.openai", "#{key}=sk-test-abc123"]) ==

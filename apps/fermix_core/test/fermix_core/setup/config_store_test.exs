@@ -1201,19 +1201,40 @@ defmodule FermixCore.Setup.ConfigStoreTest do
       assert ConfigStore.web_port(Path.join(home, "nowhere")) == {:ok, nil}
     end
 
-    # `[mcp.servers.*]` blocks are read by their own parser and are not in this
-    # renderer's snapshot, so re-rendering a settings file that carries one
-    # would delete it. Setting a port is not a reason to do that.
+    # `[mcp.servers.*]` blocks are read by their own parser, and the renderer
+    # writes them back from it (M74 E2), so a port write keeps an operator's
+    # MCP servers rather than refusing the file.
+    test "put_web_port keeps the [mcp.servers.*] blocks", %{home: home} do
+      kept = Path.join(home, "mcp-home")
+      File.mkdir_p!(kept)
+
+      mcp =
+        "[mcp.servers.github]\ncommand = \"npx\"\n\n[mcp.servers.github.tools.create_issue]\n" <>
+          "hidden_from_agent = true\n"
+
+      File.write!(Path.join(kept, "config.toml"), mcp)
+
+      assert :ok = ConfigStore.put_web_port(kept, 4602)
+
+      written = File.read!(Path.join(kept, "config.toml"))
+      assert written =~ "[fermix_web]\nport = 4602"
+      assert String.ends_with?(written, "\n\n" <> mcp)
+    end
+
+    # Any other section is not in this renderer's snapshot, so re-rendering a
+    # settings file that carries one would delete it. Setting a port is not a
+    # reason to do that.
     test "put_web_port refuses a settings file it cannot re-render", %{home: home} do
-      guarded = Path.join(home, "mcp-home")
+      guarded = Path.join(home, "custom-home")
       File.mkdir_p!(guarded)
-      original = "[mcp.servers.github]\ncommand = \"npx\"\n"
+      original = "[custom]\nkey = \"kept\"\n"
       File.write!(Path.join(guarded, "config.toml"), original)
 
       assert {:error, {:unrenderable_settings, sentence}} =
                ConfigStore.put_web_port(guarded, 4602)
 
-      assert sentence =~ "[mcp]"
+      assert sentence =~ "[custom]"
+      assert sentence =~ "Set the web listener port by editing config.toml."
       assert File.read!(Path.join(guarded, "config.toml")) == original
     end
 

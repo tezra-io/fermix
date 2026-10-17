@@ -305,6 +305,7 @@ defmodule Fermix.CLI.SettingsCommandTest do
             "env:ACME_TOKEN",
             "plugin:acme",
             "oauth_client:github",
+            "mcp:files/env/GITHUB_TOKEN",
             "anthropic_setup_token"
           ] do
         {status, stdout, stderr} =

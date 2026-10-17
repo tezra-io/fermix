@@ -114,7 +114,8 @@ defmodule Fermix.CLI.SettingsCommand.Args do
       String.starts_with?(key, [
         Secrets.env_prefix(),
         Secrets.plugin_prefix(),
-        Secrets.oauth_client_prefix()
+        Secrets.oauth_client_prefix(),
+        Secrets.mcp_prefix()
       ])
   end
 

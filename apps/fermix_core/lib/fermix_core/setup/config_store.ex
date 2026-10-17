@@ -9,12 +9,16 @@ defmodule FermixCore.Setup.ConfigStore do
 
   alias FermixCore.Browser.Config, as: BrowserConfig
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.ComputerHistory.Config, as: ComputerHistoryConfig
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
   alias FermixCore.IMessage
   alias FermixCore.Memory.CompactionConfig
   alias FermixCore.Net.Egress
+  alias FermixCore.Plugins.Dist.Lock
+  alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Plugins.Retired
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.ReasoningEffort
@@ -62,6 +66,11 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
+
+  # What a writer that re-renders the file from its own parse says when the
+  # file carries a section the renderer would drop.
+  @web_port_remedy "Set the web listener port by editing config.toml."
+  @mcp_remedy "Remove that section from config.toml, then change the server again."
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -221,9 +230,17 @@ defmodule FermixCore.Setup.ConfigStore do
   key they held, except a retired `[mcp.inbound*]` block, which has no reader
   and is dropped (M73). A file that exists and cannot be read is refused rather
   than replaced, because replacing it would drop whatever it held.
+
+  The whole read, change and write runs under the config lock, which every
+  writer of the file takes, so a save never lands between an MCP server write's
+  read and its write, whichever VM made either.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
+    with_config_lock(fermix_home(), fn -> write_snapshot(snapshot, opts) end)
+  end
+
+  defp write_snapshot(snapshot, opts) do
     with {:ok, contents} <- read_home_document(fermix_home()),
          mcp = mcp_document(contents),
          {:ok, persisted} <- persisted_snapshot(snapshot, opts),
@@ -380,6 +397,7 @@ defmodule FermixCore.Setup.ConfigStore do
       {:ok, contents} ->
         warn_retired_mcp_sections(contents)
         Application.put_env(:fermix_core, :mcp_servers, McpConfig.from_toml(contents))
+        warn_unread_mcp_keys(contents)
         :ok
 
       {:error, :enoent} ->
@@ -404,6 +422,118 @@ defmodule FermixCore.Setup.ConfigStore do
 
     :ok
   end
+
+  # A key the reader does not read stays in the file and is said once per load,
+  # never a refusal: refusing would turn a hand-written server that carries one
+  # into a daemon that does not boot (M74 E2).
+  defp warn_unread_mcp_keys(contents) do
+    case McpConfig.unread_keys(contents) do
+      [] ->
+        :ok
+
+      keys ->
+        Logger.warning(
+          "config.toml MCP keys Fermix does not read, kept as written: " <> Enum.join(keys, ", ")
+        )
+    end
+  end
+
+  @doc """
+  Writes MCP server `name` from `attrs`, its `[mcp.servers.<name>]` keys, and
+  applies it (M74 E2). A new server takes `attrs`; an existing one has them
+  merged over what it holds, `nil` removing a key. `McpConfig.put_server/4`
+  decides what is refused, as `{:invalid_params, field, sentence}`.
+  """
+  @spec put_mcp_server(String.t(), %{String.t() => term()}, keyword()) :: :ok | {:error, term()}
+  def put_mcp_server(name, attrs, opts \\ [])
+      when is_binary(name) and is_map(attrs) and is_list(opts) do
+    write_mcp(opts, fn servers ->
+      with {:ok, plugin_names} <- plugin_names_for(servers, name) do
+        McpConfig.put_server(servers, name, attrs, plugin_names)
+      end
+    end)
+  end
+
+  @doc """
+  Removes MCP server `name` and applies it. The values it declares are deleted
+  from the secret store first, by its declared names, so a refused delete keeps
+  the block that names what is left.
+  """
+  @spec delete_mcp_server(String.t(), keyword()) :: :ok | {:error, term()}
+  def delete_mcp_server(name, opts \\ []) when is_binary(name) and is_list(opts) do
+    write_mcp(opts, fn servers ->
+      with {:ok, rest, server} <- McpConfig.delete_server(servers, name),
+           :ok <- McpSecrets.delete_declared(server) do
+        {:ok, rest}
+      end
+    end)
+  end
+
+  @doc """
+  Switches one tool of MCP server `name` on or off and applies it. The switch
+  is not in the server's child identity, so the server keeps running and only
+  its tools register again (`McpSupervisor.reload/0`).
+  """
+  @spec put_mcp_tool(String.t(), String.t(), boolean(), keyword()) :: :ok | {:error, term()}
+  def put_mcp_tool(name, tool, enabled?, opts \\ [])
+      when is_binary(name) and is_binary(tool) and is_boolean(enabled?) and is_list(opts) do
+    write_mcp(opts, &McpConfig.put_tool(&1, name, tool, enabled?))
+  end
+
+  # The one write path (M74 E2), in this order: the outside-edit guard a
+  # settings save also asks; the config lock around the read, the edit and the
+  # write, rendered by the settings renderer; the baseline, or the next save
+  # would read this write as an outside edit; then the apply, whose reload
+  # restarts only the server whose spec changed. `:mcp_supervisor` names the
+  # module that reloads, for a test.
+  defp write_mcp(opts, edit) do
+    home = fermix_home()
+
+    with :ok <- RestartState.writable(),
+         :ok <- with_config_lock(home, fn -> commit_mcp(home, edit) end),
+         :ok <- apply_mcp_config(),
+         {:ok, _summary} <- Keyword.get(opts, :mcp_supervisor, McpSupervisor).reload() do
+      :ok
+    end
+  end
+
+  defp commit_mcp(home, edit) do
+    with {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents, @mcp_remedy),
+         {:ok, servers} <- edit.(McpConfig.document(contents)),
+         :ok <-
+           File.write(
+             home_document_path(home),
+             render_document(parse_document(contents), servers)
+           ) do
+      RestartState.record_persisted_baseline()
+    end
+  end
+
+  # Only a new name can collide with a plugin's, so only a new name reads them.
+  defp plugin_names_for(servers, name) when is_map_key(servers, name), do: {:ok, []}
+
+  defp plugin_names_for(_servers, _name) do
+    with {:ok, plugins} <- PluginRegistry.list(), do: {:ok, Enum.map(plugins, & &1.name)}
+  end
+
+  # The one config lock: every writer of `config.toml` holds it from its read to
+  # its write, and a CLI VM's `fermix setup` takes the same lockfile, so no two
+  # writes interleave. It is not reentrant, so nothing under it writes the file
+  # through another entry point.
+  defp with_config_lock(home, fun) do
+    with :ok <- File.mkdir_p(home) do
+      home
+      |> Path.join("config.toml.lock")
+      |> Lock.with_lock(fn -> {:locked, fun.()} end)
+      |> unlocked()
+    end
+  end
+
+  # `fun`'s result is wrapped, so an error it returns is never taken for the
+  # lock's own.
+  defp unlocked({:locked, result}), do: result
+  defp unlocked({:error, reason}), do: {:error, reason}
 
   @spec persistable_snapshot(runtime_config()) :: runtime_config()
   def persistable_snapshot(snapshot) do
@@ -718,23 +848,34 @@ defmodule FermixCore.Setup.ConfigStore do
   refuses rather than being replaced by a fresh one, because overwriting a
   settings file nobody could parse is how a recoverable fault becomes data loss.
 
-  The renderer emits the sections this module owns, and a settings file may also
-  carry `[mcp.*]` blocks that a different parser reads and this one never sees.
-  Re-rendering such a file would drop them, so this write **refuses** it and
-  names the section instead: setting a port is not a reason to delete an
-  operator's MCP servers.
+  The renderer emits the sections this module owns and the `[mcp.servers.*]`
+  blocks their own reader returns. A settings file carrying any other section
+  would lose it in a re-render, so this write **refuses** it and names the
+  section instead. It runs under the config lock, like every writer of the file.
   """
   @spec put_web_port(Path.t(), pos_integer()) :: :ok | {:error, term()}
   def put_web_port(home, port) when is_binary(home) and is_integer(port) do
-    with :ok <- validate_web_port(port),
-         {:ok, contents} <- read_home_document(home),
-         :ok <- renderable_document(contents),
-         :ok <- File.mkdir_p(home) do
-      document = contents |> parse_document() |> Map.put(:fermix_web, port: port)
-      snapshot = document |> persistable_snapshot() |> Map.put(:mcp, mcp_document(contents))
-
-      File.write(home_document_path(home), dump_snapshot(snapshot))
+    with :ok <- validate_web_port(port) do
+      with_config_lock(home, fn -> write_web_port(home, port) end)
     end
+  end
+
+  defp write_web_port(home, port) do
+    with {:ok, contents} <- read_home_document(home),
+         :ok <- renderable_document(contents, @web_port_remedy) do
+      document = contents |> parse_document() |> Map.put(:fermix_web, port: port)
+
+      File.write(
+        home_document_path(home),
+        render_document(document, McpConfig.document(contents))
+      )
+    end
+  end
+
+  # One settings document with its `[mcp.servers.*]` blocks, through the one
+  # renderer every save uses.
+  defp render_document(document, servers) do
+    document |> persistable_snapshot() |> Map.put(:mcp, %{servers: servers}) |> dump_snapshot()
   end
 
   defp validate_web_port(port) do
@@ -745,18 +886,18 @@ defmodule FermixCore.Setup.ConfigStore do
 
   # The top-level section names `dump_snapshot/1` can produce. A document
   # carrying anything else is one this renderer cannot round-trip.
-  @renderable_sections ~w(fermix_core sandbox fermix_channels fermix_web)
+  @renderable_sections ~w(fermix_core sandbox fermix_channels fermix_web mcp)
 
-  defp renderable_document(contents) do
+  defp renderable_document(contents, remedy) do
     case contents |> section_names() |> Enum.reject(&(&1 in @renderable_sections)) do
       [] -> :ok
-      [name | _rest] -> {:error, {:unrenderable_settings, unrenderable_sentence(name)}}
+      [name | _rest] -> {:error, {:unrenderable_settings, unrenderable_sentence(name, remedy)}}
     end
   end
 
-  defp unrenderable_sentence(name) do
+  defp unrenderable_sentence(name, remedy) do
     "the settings file carries a [#{name}] section this command cannot rewrite " <>
-      "without dropping it. Set the web listener port by editing config.toml."
+      "without dropping it. " <> remedy
   end
 
   defp section_names(contents) do
@@ -1339,23 +1480,15 @@ defmodule FermixCore.Setup.ConfigStore do
   end
 
   # One order whatever order the owner wrote: servers by name, each followed by
-  # its tool blocks by tool name; keys by name in each. The text is read back
-  # by the reader before it is written, so a value either reads back as it was
-  # read or the save refuses.
-  defp render_mcp(%{servers: servers} = mcp) do
-    text =
-      servers
-      |> Enum.sort_by(&elem(&1, 0))
-      |> Enum.flat_map(&render_mcp_server/1)
-      |> Enum.join("\n\n")
-
-    if mcp_document(text) != mcp do
-      raise ArgumentError,
-            "the [mcp] blocks would not read back as they were written; " <>
-              "the settings file was not changed"
-    end
-
-    text
+  # its tool blocks by tool name; keys by name in each. A value the reader read
+  # is written in its dialect and reads back as it was, and the MCP writers
+  # refuse a value the dialect cannot hold (`McpConfig.put_server/4`), so what
+  # is written here reads back without a second check (M74 E2).
+  defp render_mcp(%{servers: servers}) do
+    servers
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.flat_map(&render_mcp_server/1)
+    |> Enum.join("\n\n")
   end
 
   # A server block is written when the reader stored one; it stores no header

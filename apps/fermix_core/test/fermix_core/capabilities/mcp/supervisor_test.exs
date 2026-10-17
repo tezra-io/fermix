@@ -711,6 +711,104 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
       new_pid = server_child_pid(sup, "alpha")
       assert is_pid(new_pid) and new_pid != pid
     end
+
+    # M74 E2: a tool switch is not a restart. The overrides are out of the child
+    # id, so the subtree and its client (the server's own program) keep running
+    # and only the process that registers the tools is replaced; its own child
+    # spec carries the switch, so a later restart of the subtree keeps it.
+    test "a switched tool keeps the server running and leaves or rejoins the agent's tools", %{
+      cap_registry: cap_registry,
+      suffix: suffix
+    } do
+      reg_name = :"mcp_sup_retool_reg_#{suffix}"
+      client_name = :recording_anubis_client_alpha
+
+      server = %{
+        name: "alpha",
+        command: "fake-server",
+        reporter: self(),
+        discoverer: HappyDiscoverer,
+        caller: StubCaller,
+        tools_overrides: %{}
+      }
+
+      off = %{server | tools_overrides: %{"create_issue" => %{hidden_from_agent?: true}}}
+
+      opts = [
+        capability_registry: cap_registry,
+        mcp_registry: reg_name,
+        anubis_starter: RecordingAnubisStarter
+      ]
+
+      sup =
+        start_supervised!(
+          {McpSupervisor, [name: :"mcp_sup_retool_#{suffix}", servers: [server]] ++ opts},
+          id: :mcp_supervisor_retool_test
+        )
+
+      both = ["mcp_alpha_create_issue", "mcp_alpha_list_issues"]
+      assert eventually(fn -> Enum.sort(cap_names(cap_registry)) == both end, 10_000)
+      subtree = server_child_pid(sup, "alpha")
+      client = Process.whereis(client_name)
+      registration = registration_pid(subtree, "alpha")
+
+      assert {:ok, %{unchanged: ["alpha"], started: [], stopped: [], failed: []}} =
+               McpSupervisor.reload(sup, [{:servers, [off]} | opts])
+
+      assert eventually(fn -> cap_names(cap_registry) == ["mcp_alpha_list_issues"] end, 10_000)
+      assert hidden?(cap_registry, "mcp_alpha_create_issue")
+      assert server_child_pid(sup, "alpha") == subtree
+      assert Process.whereis(client_name) == client
+      assert registration_pid(subtree, "alpha") != registration
+
+      switched = registration_pid(subtree, "alpha")
+      ref = Process.monitor(client)
+      Process.exit(client, :kill)
+      assert_receive {:DOWN, ^ref, :process, ^client, :killed}
+
+      assert eventually(
+               fn ->
+                 registration_pid(subtree, "alpha") not in [nil, switched] and
+                   hidden?(cap_registry, "mcp_alpha_create_issue")
+               end,
+               10_000
+             )
+
+      assert {:ok, %{unchanged: ["alpha"], failed: []}} =
+               McpSupervisor.reload(sup, [{:servers, [server]} | opts])
+
+      assert eventually(fn -> Enum.sort(cap_names(cap_registry)) == both end, 10_000)
+      assert server_child_pid(sup, "alpha") == subtree
+    end
+
+    # The supervisor starts the TOML servers that are startable: a disabled one
+    # and an `http` one are kept in the file and not started.
+    test "only startable TOML servers are started", %{cap_registry: cap_registry, suffix: suffix} do
+      previous = Application.get_env(:fermix_core, :mcp_servers)
+      on_exit(fn -> Application.put_env(:fermix_core, :mcp_servers, previous || []) end)
+      stub = %{discoverer: HappyDiscoverer, caller: StubCaller, tools_overrides: %{}}
+
+      Application.put_env(:fermix_core, :mcp_servers, [
+        Map.merge(stub, %{name: "on", transport: :stdio, enabled?: true}),
+        Map.merge(stub, %{name: "off", transport: :stdio, enabled?: false}),
+        Map.merge(stub, %{name: "remote", transport: :http, enabled?: true})
+      ])
+
+      sup =
+        start_supervised!(
+          {McpSupervisor,
+           [
+             name: :"mcp_sup_startable_#{suffix}",
+             mcp_registry: :"mcp_sup_startable_reg_#{suffix}",
+             capability_registry: cap_registry
+           ]},
+          id: :mcp_supervisor_startable_test
+        )
+
+      assert is_pid(server_child_pid(sup, "on"))
+      assert server_child_pid(sup, "off") == nil
+      assert server_child_pid(sup, "remote") == nil
+    end
   end
 
   test "skips Anubis starter for servers without command (test/discoverer-only path)", %{
@@ -963,6 +1061,24 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
   end
 
   defp server_child_pid(sup, name), do: server_child_pid(sup, :operator, name)
+
+  defp registration_pid(subtree, name) do
+    child = {:mcp_server, name}
+
+    subtree
+    |> Supervisor.which_children()
+    |> Enum.find_value(fn
+      {^child, pid, _type, _modules} when is_pid(pid) -> pid
+      _other -> nil
+    end)
+  end
+
+  defp hidden?(cap_registry, name) do
+    case CapabilityRegistry.find(cap_registry, name) do
+      {:ok, capability} -> capability.hidden_from_agent?
+      :error -> false
+    end
+  end
 
   defp server_child_pid(sup, kind, name) do
     source_id = {kind, name}

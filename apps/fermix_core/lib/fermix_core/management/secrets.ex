@@ -45,11 +45,25 @@ defmodule FermixCore.Management.Secrets do
   referenced from `[sandbox.env.<NAME>]` by the writer's own lookup; that
   reference is what "present" means. Every rule about which names and values
   may be stored, and which entries count as stored, is `Sandbox.ExternalEnv`'s.
+
+  `mcp:<server>/env/<NAME>`, `mcp:<server>/header/<Header-Name>` and
+  `mcp:<server>/client_secret` are the sixth family (M74 E6): the values an
+  operator MCP server declares. It is open like `env:`, and an id is accepted
+  only when its server exists and declares that name; the server's block in
+  `config.toml` is the reference, so storing writes nothing else, and present
+  means the store reads the value back. A value is not in the server's spec,
+  so a reload cannot see it arrive: storing the last value an enabled server
+  was missing starts it, and storing a new one restarts it, through
+  `McpSupervisor.restart_server/2`, as a rotated plugin credential is.
+  Addressing, storage and presence are `Capabilities.MCP.Secrets`'s.
   """
 
   alias FermixCore.Auth.AnthropicLogin
   alias FermixCore.Auth.Store, as: AuthStore
   alias FermixCore.Auth.TokenSupervisor
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
+  alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Management.Auth
   alias FermixCore.Management.Settings
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -81,6 +95,8 @@ defmodule FermixCore.Management.Secrets do
   @env_line_sentence "A stored variable is one line with no null characters."
   @env_elsewhere_sentence "This variable is read from a helper command or another variable. " <>
                             "Change that in the settings file first."
+  # The open family of values an operator MCP server declares.
+  @mcp_prefix McpSecrets.prefix()
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -111,6 +127,10 @@ defmodule FermixCore.Management.Secrets do
   @spec env_prefix() :: String.t()
   def env_prefix, do: @env_prefix
 
+  @doc "The `secret.set` id prefix for one value an MCP server declares."
+  @spec mcp_prefix() :: String.t()
+  def mcp_prefix, do: @mcp_prefix
+
   defp plugin_ids do
     SecretPaths.all()
     |> Enum.filter(&Map.has_key?(&1, :plugin))
@@ -129,16 +149,23 @@ defmodule FermixCore.Management.Secrets do
 
   defp oauth_client_provider(_path), do: nil
 
-  @doc "Stores one secret and answers with its presence, never its value."
-  @spec set(String.t(), String.t()) :: {:ok, map()} | {:error, error()}
-  def set(@setup_token_id = id, value) when is_binary(value) do
+  @doc """
+  Stores one secret and answers with its presence, never its value.
+
+  `:mcp_supervisor` names the module that starts an MCP server whose values
+  are now complete, for a test; every other family takes no option.
+  """
+  @spec set(String.t(), String.t(), keyword()) :: {:ok, map()} | {:error, error()}
+  def set(id, value, opts \\ [])
+
+  def set(@setup_token_id = id, value, _opts) when is_binary(value) do
     with :ok <- validate_value(value) do
       store_setup_token(id, String.trim(value))
     end
   end
 
   # M45 §4.3 step 1: every refusal that needs no storage call comes first.
-  def set(@env_prefix <> name = id, value) when is_binary(value) do
+  def set(@env_prefix <> name = id, value, _opts) when is_binary(value) do
     with :ok <- validate_env_name(name),
          :ok <- validate_env_value(value),
          {:ok, new_entry?} <- env_storable(name) do
@@ -146,7 +173,14 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  def set(id, value) when is_binary(id) and is_binary(value) do
+  def set(@mcp_prefix <> _rest = id, value, opts) when is_binary(value) and is_list(opts) do
+    with {:ok, server, ref} <- mcp_target(id),
+         :ok <- validate_mcp_value(value) do
+      store_mcp(id, server, ref, value, opts)
+    end
+  end
+
+  def set(id, value, _opts) when is_binary(id) and is_binary(value) do
     with {:ok, key} <- fetch_key(id),
          :ok <- validate_value(value) do
       commit(id, key, fn -> Wizard.put_secret(key, value) end)
@@ -159,6 +193,10 @@ defmodule FermixCore.Management.Secrets do
 
   def clear(@env_prefix <> name = id) do
     with :ok <- validate_env_name(name), do: forget_env(id, name)
+  end
+
+  def clear(@mcp_prefix <> _rest = id) do
+    with {:ok, server, ref} <- mcp_target(id), do: forget_mcp(id, server, ref)
   end
 
   def clear(id) when is_binary(id) do
@@ -287,6 +325,127 @@ defmodule FermixCore.Management.Secrets do
       Wizard.update_sandbox_env(&ExternalEnv.drop_managed(&1, name))
     else
       {:ok, :untouched}
+    end
+  end
+
+  # The server an `mcp:` id names, from the servers this daemon applied, and the
+  # value it declares. An id for a server that does not exist, or a name it does
+  # not declare, is refused: the family is open, so the declaration is the only
+  # thing that makes an id mean something.
+  defp mcp_target(id) do
+    with {:ok, name, ref} <- parse_mcp_id(id),
+         {:ok, server} <- mcp_server(name),
+         :ok <- mcp_declared(server, ref) do
+      {:ok, server, ref}
+    end
+  end
+
+  defp parse_mcp_id(id) do
+    case McpSecrets.parse_id(id) do
+      {:ok, name, ref} ->
+        {:ok, name, ref}
+
+      :error ->
+        {:error,
+         {:invalid_params, "id",
+          "An MCP server's secret is mcp:<server>/env/<NAME>, " <>
+            "mcp:<server>/header/<Header-Name> or mcp:<server>/client_secret."}}
+    end
+  end
+
+  defp mcp_server(name) do
+    case Enum.find(McpConfig.configured(), &(&1.name == name)) do
+      nil -> {:error, {:invalid_params, "id", "There is no MCP server by that name."}}
+      server -> {:ok, server}
+    end
+  end
+
+  defp mcp_declared(server, ref) do
+    if McpSecrets.declares?(server, ref),
+      do: :ok,
+      else: {:error, {:invalid_params, "id", "This MCP server does not declare that secret."}}
+  end
+
+  defp validate_mcp_value(value) do
+    case McpSecrets.validate_value(value) do
+      :ok -> :ok
+      {:error, reason} -> {:error, {:invalid_params, "value", mcp_value_sentence(reason)}}
+    end
+  end
+
+  defp mcp_value_sentence(:empty_value), do: "A secret cannot be empty."
+
+  defp mcp_value_sentence(:value_too_large),
+    do: "A secret is at most #{McpSecrets.max_value_bytes()} bytes."
+
+  defp mcp_value_sentence(:value_not_single_line), do: "A secret is one line."
+
+  defp store_mcp(id, server, ref, value, opts) do
+    with :ok <- RestartState.writable(),
+         :ok <- McpSecrets.put(server.name, ref, value) do
+      :ok = start_when_complete(server, opts)
+      {:ok, mcp_view(id, true)}
+    else
+      {:error, reason} -> {:error, mcp_error(id, reason)}
+    end
+  end
+
+  # The value just stored is read in the transport's own `init`, so only a
+  # start reaches it. A server still missing a value, a disabled one, and one
+  # this build does not start are left as they are.
+  defp start_when_complete(server, opts) do
+    if McpConfig.startable?(server) and McpSecrets.complete?(server) do
+      supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
+      started(server.name, supervisor.restart_server({:operator, server.name}, server))
+    else
+      :ok
+    end
+  end
+
+  # The value is stored either way, so the answer is the store's; a server that
+  # did not start says why in the log and on its row.
+  defp started(_name, {:ok, _pid}), do: :ok
+
+  defp started(name, {:error, reason}) do
+    Logger.error(
+      "MCP server #{name} did not start after its secret was stored: #{inspect(reason)}"
+    )
+
+    :ok
+  end
+
+  defp forget_mcp(id, server, ref) do
+    with :ok <- RestartState.writable(),
+         :ok <- McpSecrets.delete(server.name, ref) do
+      {:ok, mcp_view(id, false)}
+    else
+      {:error, reason} -> {:error, mcp_error(id, reason)}
+    end
+  end
+
+  # The same shape as `env:`: no variable replaces an MCP server's value.
+  defp mcp_view(id, present) do
+    %{
+      "id" => id,
+      "present" => present,
+      "restart" => Settings.restart(),
+      "environment_override" => nil
+    }
+  end
+
+  # A pasted `Bearer ` with nothing after it is empty once the scheme is off.
+  defp mcp_error(_id, reason)
+       when reason in [:empty_value, :value_too_large, :value_not_single_line],
+       do: {:invalid_params, "value", mcp_value_sentence(reason)}
+
+  defp mcp_error(id, reason) do
+    case error(id, reason) do
+      {:secret_store_failed, _id, published} = failure ->
+        Logger.warning("secret #{id} failed (#{published}): #{kind(reason)}")
+        failure
+
+      refusal ->
+        refusal
     end
   end
 

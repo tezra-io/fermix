@@ -24,7 +24,14 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   desired list (TOML ++ plugin specs): new specs start, removed specs stop
   (disabling an `mcp` plugin stops its child process), and unchanged specs
   — identified by the child id `{:mcp_server_supervisor, source_id, spec_hash}`
-  — are left running untouched.
+  — are left running. The hash leaves out the spec's tool overrides (M74 E2):
+  a switched tool keeps the subtree and its client running and replaces only
+  the `MCP.Server` that registers the tools, so switching a tool never
+  cold-starts the server's program.
+
+  The TOML servers are the startable ones (`MCP.Config.startable?/1`): a
+  disabled server, and an `http` one until the remote rail takes an operator
+  endpoint, stays in the file and is not started.
 
   Child identity is **source-qualified** (M27 §7.3): `{:plugin, "acme"}` for a
   plugin-owned server, `{:operator, "acme"}` for a `[mcp.servers.acme]` TOML
@@ -42,6 +49,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
   alias FermixCore.Capabilities.MCP.AnubisStarter
   alias FermixCore.Capabilities.MCP.Caller.Remote, as: RemoteCaller
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Remote.Budget
@@ -202,9 +210,14 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       |> Enum.reject(fn {id, _server} -> id in current_ids end)
       |> Enum.map(fn {_id, server} -> start_server(supervisor, server, config) end)
 
+    retool_results =
+      desired
+      |> Enum.filter(fn {id, _server} -> id in current_ids end)
+      |> Enum.map(fn {id, server} -> retool(supervisor, id, server) end)
+
     %{
       started: for({:ok, name} <- start_results, do: name),
-      failed: for({:error, name} <- start_results, do: name),
+      failed: for({:error, name} <- start_results ++ retool_results, do: name),
       stopped: stopped,
       unchanged:
         current_ids |> Enum.filter(&MapSet.member?(desired_ids, &1)) |> Enum.map(&id_name/1)
@@ -331,15 +344,81 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
 
   defp id_name({:mcp_server_supervisor, {_kind, name}, _hash}), do: name
 
+  # A running server whose desired overrides differ from the ones its
+  # `MCP.Server` was started with gets a new `MCP.Server` carrying them. Only
+  # that child is replaced: the client and the program it runs keep running,
+  # and because the replacement's own child spec carries the new overrides, a
+  # later restart of the subtree keeps the switch too.
+  defp retool(supervisor, id, server) do
+    overrides = Map.get(server, :tools_overrides, %{})
+
+    case registration(supervisor, id, {:mcp_server, server.name}) do
+      {:ok, subtree, spec} -> replace_registration(subtree, spec, overrides, server.name)
+      :gone -> {:ok, server.name}
+    end
+  end
+
+  # The subtree can end between listing it and reading it: a server that gave
+  # up shuts its own subtree down. Then there is nothing left to switch.
+  defp registration(supervisor, id, child) do
+    with {:ok, subtree} <- subtree(supervisor, id),
+         {:ok, spec} <- :supervisor.get_childspec(subtree, child) do
+      {:ok, subtree, spec}
+    else
+      :error -> :gone
+      {:error, :not_found} -> :gone
+    end
+  catch
+    :exit, {:noproc, _call} -> :gone
+  end
+
+  defp subtree(supervisor, id) do
+    case List.keyfind(Supervisor.which_children(supervisor), id, 0) do
+      {^id, pid, _type, _modules} when is_pid(pid) -> {:ok, pid}
+      _absent -> :error
+    end
+  end
+
+  defp replace_registration(
+         subtree,
+         %{id: child, start: {mod, fun, [opts]}} = spec,
+         overrides,
+         name
+       ) do
+    if Keyword.get(opts, :tools_overrides, %{}) == overrides do
+      {:ok, name}
+    else
+      spec = %{spec | start: {mod, fun, [Keyword.put(opts, :tools_overrides, overrides)]}}
+      restart_registration(subtree, child, spec, name)
+    end
+  end
+
+  # `terminate_child/2` is the supervisor's own stop, which never triggers the
+  # subtree's `auto_shutdown`, so the client stays up while its registration
+  # process is swapped.
+  defp restart_registration(subtree, child, spec, name) do
+    with :ok <- Supervisor.terminate_child(subtree, child),
+         :ok <- Supervisor.delete_child(subtree, child),
+         {:ok, _pid} <- Supervisor.start_child(subtree, spec) do
+      {:ok, name}
+    else
+      {:error, reason} ->
+        Logger.error("MCP server #{name} kept its previous tool switches: #{inspect(reason)}")
+        {:error, name}
+    end
+  end
+
   # Child identity = source-qualified id + hash of the raw (pre-env-resolution)
-  # spec: an unchanged spec maps to the same id and is never restarted; a
-  # changed spec for the same source maps to a new id (old stops, new starts).
+  # spec without its tool overrides: an unchanged spec maps to the same id and
+  # is never restarted; a changed spec for the same source maps to a new id
+  # (old stops, new starts); a changed tool switch keeps the id (`retool/3`).
   #
   # The hash covers the non-secret spec only — the `auth_ref` is opaque, so a
   # rotated credential does NOT change this id. That is why rotation must go
   # through `stop_server/3`, never `reload/2`.
   defp server_child_id(server) do
-    {:mcp_server_supervisor, source_id(server), :erlang.phash2(server)}
+    {:mcp_server_supervisor, source_id(server),
+     :erlang.phash2(Map.delete(server, :tools_overrides))}
   end
 
   # A spec that names no source came from the operator rail: `[mcp.servers.*]`
@@ -472,7 +551,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   end
 
   defp toml_servers do
-    Application.get_env(:fermix_core, :mcp_servers, [])
+    Enum.filter(McpConfig.configured(), &McpConfig.startable?/1)
   end
 
   # Boot path: a registry that cannot even be read is a corrupt install —
