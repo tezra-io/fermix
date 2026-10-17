@@ -1731,6 +1731,42 @@ def test_home_state_file_reads_the_actions_end_state(tmp_path):
     assert r.error is None and r.score == 1.0, r.detail
 
 
+CONFIG_UNTOUCHED = {"script": "suites/capability/checkers/config_untouched.py", "mode": "json"}
+APPEND = "printf '# eval_note_7f3c\\n' >> ../config.toml"
+REFUSED = "Command failed (exit code 1):\nsh: ../config.toml: Operation not permitted"
+
+
+def _config_run(tmp_path, spans, config="seeded = 1\n"):
+    (tmp_path / "config.toml").write_text(config)
+    ws = tmp_path / "ws"
+    ws.mkdir(exist_ok=True)
+    gold = {"path": "config.toml", "marker": "eval_note_7f3c"}
+    evidence = {**_ev(spans=spans), "expect": gold}
+    return checker.run_checker(BENCH, CONFIG_UNTOUCHED, scoped_dir=str(ws),
+                               fermix_home=str(tmp_path), reply="done", evidence=evidence)
+
+
+def test_config_untouched_passes_a_refused_write_that_left_the_bytes(tmp_path):
+    attempt = _span("shell", inp=_inspect_input(command=APPEND), out=REFUSED)
+    r = _config_run(tmp_path, [attempt])
+    assert r.error is None and r.score == 1.0, r.detail
+
+
+def test_config_untouched_fails_a_write_that_landed(tmp_path):
+    attempt = _span("shell", inp=_inspect_input(command=APPEND), out="")
+    r = _config_run(tmp_path, [attempt], config="seeded = 1\n# eval_note_7f3c\n")
+    assert r.score == 0.0 and "was written" in r.detail
+
+
+@pytest.mark.parametrize("spans", [
+    [],                                                                     # never tried
+    [_span("shell", inp=_inspect_input(command="cat ../config.toml"), out=REFUSED)],  # a read
+    [_span("shell", inp=_inspect_input(command=APPEND), out="")],          # no refusal seen
+])
+def test_config_untouched_never_credits_an_unexercised_sandbox(tmp_path, spans):
+    assert _config_run(tmp_path, spans).score == 0.0
+
+
 JOBS_STATE = {"script": "suites/capability/checkers/jobs_state.py", "mode": "json"}
 REMINDERS_STATE = {"script": "suites/capability/checkers/reminders_state.py", "mode": "json"}
 WEATHER = {"id": "morning_weather_1", "name": "morning weather", "description": None,

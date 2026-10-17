@@ -4,6 +4,7 @@ defmodule FermixCore.Sandbox.CommandToolTest do
   alias FermixCore.Sandbox.CommandTool
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
   alias FermixTestSupport.RunnerCallTrace
 
@@ -83,7 +84,9 @@ defmodule FermixCore.Sandbox.CommandToolTest do
                  dump_spec(ctx.bin)
                )
 
-      assert {:ok, expected} = Env.build_command(ctx.config, [])
+      # On macOS the command also gets the tool caches pointed into the workspace.
+      assert {:ok, built} = Env.build_command(ctx.config, [])
+      expected = OsSandbox.with_cache_env(built, ctx.config)
       assert Enum.sort(env_pairs(output)) == Enum.sort(expected)
     end
 
@@ -141,9 +144,10 @@ defmodule FermixCore.Sandbox.CommandToolTest do
       assert {:ok, %{success: true}} =
                CommandTool.execute(%{"prompt" => "argv-marker"}, ctx.context, sh_spec("true"))
 
+      # On macOS the command runs under `sandbox-exec`, whose own arguments are
+      # paths; the command's argv is the tail either way.
       {executable, args, opts} = RunnerCallTrace.call_with("argv-marker")
-      assert executable == "/bin/sh"
-      assert args == ["-c", "true", "argv-marker"]
+      assert Enum.take([executable | args], -4) == ["/bin/sh", "-c", "true", "argv-marker"]
       refute Enum.any?([executable | args], &String.contains?(&1, @token))
       assert Keyword.fetch!(opts, :env_mode) == :replace
       assert {@token_name, @token} in Keyword.fetch!(opts, :env)

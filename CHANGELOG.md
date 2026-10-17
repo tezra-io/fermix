@@ -86,6 +86,37 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preview, so the app reads it again. No released Fermix.app has the chat
   window yet.
 
+### Changed
+
+- **On a Mac, the sandbox mode now holds for commands, not just the file
+  tools.** Every shell command, operator command and git run the agent starts,
+  and every program it starts in turn, runs inside a macOS sandbox built from
+  the mode. A command can write only in the mode's folders, your grants and the
+  temp folders; in `open` it can write anywhere except the protected paths. In
+  every mode a command can no longer write Fermix's own files (its workspace and
+  skills folders aside), rename its home, change its installed engine or your
+  launch agents, read its stored keys, logs or browser profiles, talk to the
+  running service, run its plugin binaries, or mount a disk image over any of
+  them. In `strict` and `standard` a command can't read your own SSH keys,
+  cloud logins or tokens either (`~/.ssh`, `~/.aws`, `~/.gnupg`, `~/.kube`,
+  `~/.docker`, `~/.npmrc`, `~/.netrc`, `~/.git-credentials`,
+  `~/.config/git/credentials`, gcloud's credentials), so `git push` over SSH,
+  signed commits, `aws` and `kubectl` from a command need `open`, and `npm`
+  runs without your `~/.npmrc` (its registry, proxy and tokens). In every mode
+  no command can write those files, so `npm login`, `gcloud auth login` and
+  saving a git password are yours to run, and `gcloud` from a command fails
+  once it needs to save a refreshed token. The file tools now refuse the new
+  files in every mode, as they already did `~/.ssh`. So a command the agent
+  was talked into can't change Fermix's settings or take its credentials;
+  before, a command started in an allowed folder could write anything your
+  account could. Tool caches (`npm`, `pip`, `uv`, `go`,
+  `yarn`, Playwright) now live in the workspace's `.cache`. If something you
+  ask for now fails with `Operation not permitted`, grant the folder or switch
+  to `open`: `brew install`, `cargo` and other tools that write outside your
+  folders need one of the two. The `codex` and `claude_code` command presets
+  and coding runs are not held yet, and Linux keeps the old behaviour until its
+  own sandbox lands. There is no setting: the mode is the setting.
+
 ### Removed
 
 - **Inbound MCP, which was never started.** Fermix connects to MCP servers

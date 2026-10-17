@@ -105,6 +105,29 @@ defmodule FermixCore.Sandbox.PathPolicyTest do
     FermixTestSupport.SafeRm.rm_rf!(home)
   end
 
+  # gh's `hosts.yml` stays reachable: gh cannot start without reading it, and on
+  # a Mac the token it guards lives in the keychain, not in the file.
+  test "credential files beside ordinary config are protected, the config beside them is not" do
+    home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-credential-files")
+    config = Config.normalize(mode: :open, os_home: home, workspace_root: home)
+
+    for file <- ~w(.npmrc .netrc .git-credentials .config/git/credentials
+                   .config/gcloud/credentials.db .config/gcloud/access_tokens.db-wal
+                   .config/gcloud/legacy_credentials/a/adc.json
+                   .config/gcloud/application_default_credentials.json) do
+      assert {:error, {:protected_path, _path}} =
+               PathPolicy.allowed_path?(Path.join(home, file), config),
+             file
+    end
+
+    for file <- ~w(.gitconfig .zshrc .config/git/config
+                   .config/gcloud/configurations/config_default .config/gh/hosts.yml) do
+      assert :ok = PathPolicy.allowed_path?(Path.join(home, file), config), file
+    end
+
+    FermixTestSupport.SafeRm.rm_rf!(home)
+  end
+
   test "allowed_path?/3 with precomputed roots matches allowed_path?/2 decisions" do
     home = FermixTestSupport.SafeRm.make_tmp_dir!("path-policy-precomputed")
     File.mkdir_p!(Path.join(home, ".ssh"))

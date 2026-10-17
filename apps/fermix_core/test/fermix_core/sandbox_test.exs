@@ -4,6 +4,7 @@ defmodule FermixCore.SandboxTest do
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.Env
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
   test "standard mode admits the request cwd for an operator context and denies it without" do
@@ -156,7 +157,9 @@ defmodule FermixCore.SandboxTest do
       assert {:ok, %{env: env}} =
                Sandbox.shell_plan("echo hi", ctx.root, %{sandbox_config: ctx.config})
 
-      assert {:ok, %{env: expected}} = Env.build(ctx.config)
+      # On macOS the plan also points the tool caches into the workspace.
+      assert {:ok, %{env: built}} = Env.build(ctx.config)
+      expected = OsSandbox.with_cache_env(built, ctx.config)
       assert Enum.sort(env) == Enum.sort(expected)
     end
 

@@ -9,6 +9,15 @@ defmodule FermixCore.Sandbox.PathPolicy do
 
   # `.config/fermix` holds a Linux service's env file, where its secrets live.
   @protected_home_dirs ~w(.ssh .aws .gnupg .docker .kube .codex .anthropic .config/fermix)
+  # Tokens that sit beside ordinary config (and gcloud's `legacy_credentials`
+  # folder), protected by name so the config next to them stays reachable. gh's
+  # `hosts.yml` is not here: gh cannot start without reading it, and on a Mac
+  # its token lives in the keychain.
+  @protected_home_files ~w(
+    .npmrc .netrc .git-credentials .config/git/credentials .config/gcloud/credentials.db
+    .config/gcloud/access_tokens.db .config/gcloud/legacy_credentials
+    .config/gcloud/application_default_credentials.json
+  )
   @os_roots ~w(/etc /usr /bin /sbin /System /Library)
 
   # The daemon's own state under FERMIX_HOME, which no agent task reads or
@@ -233,10 +242,19 @@ defmodule FermixCore.Sandbox.PathPolicy do
     fermix_home = fermix_home()
 
     (@os_roots ++
-       Enum.map(@protected_home_dirs, &Path.join(os_home, &1)) ++
-       vendor_credential_paths(os_home) ++
+       credentials(os_home) ++
        Enum.map(@protected_fermix_entries, &Path.join(fermix_home, &1)))
     |> Enum.map(&link_resolved_path/1)
+  end
+
+  @doc "The owner's credential folders and files, a subset of `protected_paths/1`."
+  @spec credential_paths(Config.t()) :: [String.t()]
+  def credential_paths(%Config{} = config),
+    do: Enum.map(credentials(config.os_home), &link_resolved_path/1)
+
+  defp credentials(os_home) do
+    Enum.map(@protected_home_dirs ++ @protected_home_files, &Path.join(os_home, &1)) ++
+      vendor_credential_paths(os_home)
   end
 
   @doc """
@@ -265,11 +283,22 @@ defmodule FermixCore.Sandbox.PathPolicy do
     end
   end
 
+  @doc """
+  `path` with its symlinks resolved and its casing kept, or the reason it could
+  not be resolved. The form the kernel sandbox's rules take
+  (`Sandbox.OsSandbox`): the kernel compares case-insensitively, but only on the
+  resolved path, so an unresolved one must refuse rather than fall back.
+  """
+  @spec resolve_links(String.t()) :: {:ok, String.t()} | {:error, term()}
+  def resolve_links(path) when is_binary(path) do
+    path |> expand_path("/") |> resolve_components(64, &keep_case/2)
+  end
+
   # A protected root needs its symlinks resolved but not its on-disk casing:
   # `protected?/2` compares on the case fold, and `real_case/2` lists every
   # directory on the way, for every root, on every sandbox decision.
   defp link_resolved_path(path) do
-    case path |> expand_path("/") |> resolve_components(64, &keep_case/2) do
+    case resolve_links(path) do
       {:ok, resolved} -> resolved
       {:error, _reason} -> Path.expand(path)
     end

@@ -1,0 +1,390 @@
+defmodule FermixCore.Sandbox.OsSandbox do
+  @moduledoc """
+  Kernel enforcement of the sandbox mode for the commands a turn runs
+  (OS_SANDBOX_ENFORCEMENT rev 2).
+
+  `FermixCore.Sandbox` decides whether a command may start and where. This
+  module asks the kernel to hold the running command, and everything it starts,
+  to the same writable roots, and to keep Fermix out of its reach in every mode:
+  Fermix's home is never writable except the workspace and skills folders, its
+  secrets are never readable, its sockets never answer, its installed code and
+  plugin binaries cannot be changed or run, and nothing can be mounted over them.
+  Outside `open`, the owner's credential folders and files are not readable
+  either.
+
+  On macOS the command runs under `sandbox-exec` with a Seatbelt profile. The
+  profile is generated with indexed parameter names only; every path travels as
+  a `-D` argument, so no path is ever spliced into it. Each path is
+  symlink-resolved first, and one that cannot be resolved refuses the command:
+  the kernel matches the path it resolved, so a rule given `/tmp/x` for
+  `/private/tmp/x` would match nothing and switch itself off in silence. Case
+  does not matter; the kernel compares without it.
+
+  Seatbelt evaluates a filtered rule ahead of an unfiltered one, and the last of
+  several filtered rules that match. Every carve-out therefore lives inside the
+  one filtered write allowance, as a `require-not`.
+
+  Linux is a later stage (Landlock); until it lands, commands there run as they
+  did before this module existed.
+  """
+
+  alias FermixCore.Browser.Bridge.HostManifest
+  alias FermixCore.Sandbox.Config
+  alias FermixCore.Sandbox.Mode
+  alias FermixCore.Sandbox.PathPolicy
+
+  @sandbox_exec "/usr/bin/sandbox-exec"
+  @darwin {:unix, :darwin}
+
+  # Fermix-home entries a command may never read: credentials, the agent's
+  # browser cookies, and the logs and traces a token can survive redaction in.
+  # `auth.json` and `memory.db` are matched with the files named after them
+  # (`.tmp.N`, `-wal`) by the read-deny patterns instead.
+  @secret_entries ~w(
+    secrets secret_key_base setup-token setup-launch-token.json acp_identities
+    mobile plugins/run chatgpt_host.json browser/profiles logs traces
+  )
+  @secret_prefixed ~w(auth.json memory.db)
+
+  # Outside Fermix's home, what a command may never write in any mode: the
+  # bootstrap record the Mac app keeps, every launch agent (a plist there runs
+  # outside any sandbox at the next login), and the scheduler and system
+  # databases setuid helpers write.
+  @home_protected ["Library/Application Support/Fermix", "Library/LaunchAgents"]
+  @system_protected ~w(/private/var/at /private/var/db)
+
+  # Ordinary scratch space, writable in every mode: the shared temp folders, the
+  # daemon's own temp folder, and every per-user `T/` and `C/` folder macOS tools
+  # write whatever `$TMPDIR` says (`mktemp`, compilers' module caches). Another
+  # account's are closed to this one by their own permissions.
+  @system_writable ~w(/private/tmp /private/var/tmp)
+  @user_temp_pattern "^/private/var/folders/[^/]+/[^/]+/(T|C)(/|$)"
+
+  # Tool caches redirected into the workspace: the owner's own caches hold code
+  # the daemon or the owner later runs (the browser tool's Chromium lives under
+  # `~/Library/Caches/ms-playwright`), so a command never gets them.
+  @cache_env [
+    {"XDG_CACHE_HOME", ""},
+    {"npm_config_cache", "npm"},
+    {"YARN_CACHE_FOLDER", "yarn"},
+    {"PIP_CACHE_DIR", "pip"},
+    {"UV_CACHE_DIR", "uv"},
+    {"GOCACHE", "go-build"},
+    {"GOMODCACHE", "go-mod"},
+    {"PLAYWRIGHT_BROWSERS_PATH", "ms-playwright"}
+  ]
+
+  @type spawn :: {String.t(), [String.t()]}
+
+  @typedoc "The path sets a profile is built from, every one symlink-resolved."
+  @type rules :: %{
+          fermix_home: String.t(),
+          writable: [String.t()],
+          writable_patterns: [String.t()],
+          fermix_writable: [String.t()],
+          protected: [String.t()],
+          protected_patterns: [String.t()],
+          ancestors: [String.t()],
+          secret: [String.t()],
+          secret_patterns: [String.t()],
+          no_exec: [String.t()]
+        }
+
+  @doc """
+  The `{executable, args}` that runs `executable args` under the kernel sandbox
+  for `config`. `request_cwd` is the turn's origin directory, which standard mode
+  admits as a root (see `Mode.effective_roots/2`); `:roots` passes those roots
+  when the caller already resolved them. `:os` is the platform seam; `:scratch`
+  replaces the temp roots and pattern (tests, whose homes live in the temp
+  folder, pass `[]`).
+  """
+  @spec wrap(String.t(), [String.t()], Config.t(), String.t() | nil, keyword()) ::
+          {:ok, spawn()} | {:error, term()}
+  def wrap(executable, args, %Config{} = config, request_cwd, opts \\ [])
+      when is_binary(executable) and is_list(args) and is_list(opts) do
+    if enforced?(opts) do
+      with {:ok, rules} <- rules(config, request_cwd, opts) do
+        {:ok, {@sandbox_exec, ["-p", profile(rules)] ++ parameters(rules) ++ [executable | args]}}
+      end
+    else
+      {:ok, {executable, args}}
+    end
+  end
+
+  @doc """
+  `env` with the tool caches pointed into the workspace, where the kernel
+  sandbox applies; a name `env` already carries (an allowed variable) wins.
+  """
+  @spec with_cache_env([{String.t(), String.t()}], Config.t(), keyword()) ::
+          [{String.t(), String.t()}]
+  def with_cache_env(env, %Config{} = config, opts \\ []) when is_list(env) and is_list(opts) do
+    if enforced?(opts) do
+      root = Path.join(config.workspace_root, ".cache")
+
+      @cache_env
+      |> Enum.reject(fn {name, _dir} -> List.keymember?(env, name, 0) end)
+      |> Enum.map(fn {name, dir} -> {name, Path.join(root, dir)} end)
+      |> Kernel.++(env)
+    else
+      env
+    end
+  end
+
+  @doc """
+  The sentence for a profile `sandbox-exec` itself refused (exit 64 or 65 with
+  its own line), or nil when the exit is the command's. Exit 71, a sandbox that
+  could not be applied, is left to the command: a command that starts a sandbox
+  of its own (`codex`, `claude`) fails the same way inside Fermix's.
+  """
+  @spec refusal(integer(), String.t()) :: String.t() | nil
+  def refusal(exit_code, "sandbox-exec: " <> _rest = output) when exit_code in [64, 65] do
+    line = output |> String.split("\n", parts: 2) |> hd()
+    "The command could not start inside Fermix's sandbox: #{line}"
+  end
+
+  def refusal(exit_code, output) when is_integer(exit_code) and is_binary(output), do: nil
+
+  @doc "The sentence for a `rules/3` error: why no command can run."
+  @spec describe(term()) :: String.t()
+  def describe({:unresolvable_path, path, reason}),
+    do: "Commands can't run: Fermix's sandbox could not resolve #{path} (#{inspect(reason)})."
+
+  def describe({:relative_path, path}),
+    do: "Commands can't run: Fermix's sandbox was given a relative path, #{path}."
+
+  def describe(:no_writable_root),
+    do: "Commands can't run: the sandbox mode leaves no folder a command may write."
+
+  defp enforced?(opts), do: Keyword.get(opts, :os, :os.type()) == @darwin
+
+  @doc "The path sets for `config`. Options as `wrap/5`."
+  @spec rules(Config.t(), String.t() | nil, keyword()) :: {:ok, rules()} | {:error, term()}
+  def rules(%Config{} = config, request_cwd, opts)
+      when (is_binary(request_cwd) or is_nil(request_cwd)) and is_list(opts) do
+    roots = Keyword.get_lazy(opts, :roots, fn -> Mode.effective_roots(config, request_cwd) end)
+    {scratch, scratch_patterns} = scratch(opts)
+
+    with {:ok, fermix_home} <- resolve_one(config.home),
+         {:ok, os_home} <- resolve_one(config.os_home),
+         {:ok, writable} <- writable(config, roots, scratch),
+         {:ok, protected} <- protected(config),
+         {:ok, fermix_writable} <- fermix_writable(config, fermix_home),
+         {:ok, own} <- resolve([config.workspace_root, Path.join(config.home, "skills")]),
+         {:ok, credentials} <- resolve(PathPolicy.credential_paths(config)),
+         {:ok, secret} <- secret(config, fermix_home, credentials),
+         {:ok, secret_patterns} <- secret_patterns(config, fermix_home, credentials) do
+      {:ok,
+       %{
+         fermix_home: fermix_home,
+         writable: writable,
+         writable_patterns: scratch_patterns,
+         fermix_writable: fermix_writable,
+         protected: protected,
+         protected_patterns: protected_patterns(os_home, credentials),
+         ancestors: Enum.uniq(ancestors([fermix_home | protected]) ++ own),
+         secret: secret,
+         secret_patterns: secret_patterns,
+         no_exec: [Path.join(fermix_home, "plugins")]
+       }}
+    end
+  end
+
+  # Open mode reaches every path the account can write, minus the protected set;
+  # the file tools keep it to the OS home. The kernel may be wider than the
+  # policy, never narrower.
+  defp writable(config, roots, scratch) do
+    mode_roots = if config.mode == :open, do: ["/"], else: []
+
+    case resolve(mode_roots ++ roots ++ scratch) do
+      {:ok, []} -> {:error, :no_writable_root}
+      result -> result
+    end
+  end
+
+  defp scratch(opts) do
+    case Keyword.fetch(opts, :scratch) do
+      {:ok, roots} when is_list(roots) -> {roots, []}
+      :error -> {@system_writable ++ [System.tmp_dir!()], [@user_temp_pattern]}
+    end
+  end
+
+  # A blocked root stays closed to commands as it is to the file tools, even in
+  # `open`, where every other folder is writable.
+  defp protected(config) do
+    code_root = List.to_string(:code.root_dir())
+    home = Enum.map(@home_protected, &Path.join(config.os_home, &1))
+
+    resolve(
+      PathPolicy.protected_paths(config) ++
+        [code_root | home] ++ @system_protected ++ config.blocked_roots
+    )
+  end
+
+  defp protected_patterns(os_home, credentials) do
+    support = Path.join(os_home, "Library/Application Support")
+    host = HostManifest.host_name() <> "."
+
+    ["^" <> escape(support) <> "/.*/NativeMessagingHosts/" <> escape(host)] ++
+      Enum.map(credentials, &siblings/1)
+  end
+
+  # Inside Fermix's home only the workspace, the skills folder and a folder the
+  # owner granted stay writable. A request or launch folder that happens to sit
+  # inside the home does not.
+  defp fermix_writable(config, fermix_home) do
+    candidates = [config.workspace_root, Path.join(config.home, "skills") | config.allowed_roots]
+
+    with {:ok, resolved} <- resolve(candidates) do
+      {:ok, Enum.filter(resolved, &inside?(&1, fermix_home))}
+    end
+  end
+
+  # `~/.config/fermix` is named on its own because `open` reads the rest of the
+  # owner's credentials.
+  defp secret(config, fermix_home, credentials) do
+    resolve(
+      Enum.map(@secret_entries, &Path.join(fermix_home, &1)) ++
+        [Path.join(config.os_home, ".config/fermix") | owner_credentials(config, credentials)]
+    )
+  end
+
+  # The owner's SSH keys, cloud logins and tokens are closed to reads in `strict`
+  # and `standard`; `open` lets a command use them (`git push` over SSH, `aws`).
+  # Every one, and every file named after one, is also protected, so no mode can
+  # rename it out from under this.
+  defp owner_credentials(%Config{mode: :open}, _credentials), do: []
+  defp owner_credentials(_config, credentials), do: credentials
+
+  # `secret_writer` stages a key being saved under
+  # `System.tmp_dir!()/fermix-secret-N/`, the same resolver read here.
+  defp secret_patterns(config, fermix_home, credentials) do
+    with {:ok, resolved} <- resolve([Path.join(System.tmp_dir!(), "fermix-secret-")]) do
+      {:ok,
+       Enum.map(@secret_prefixed, &prefix(Path.join(fermix_home, &1))) ++
+         Enum.map(resolved, &prefix/1) ++
+         Enum.map(owner_credentials(config, credentials), &siblings/1)}
+    end
+  end
+
+  # A protected path, or Fermix's home, renamed away from under its rule leaves
+  # the rule guarding nothing, so every directory above one is closed to writes
+  # on its own name (writes to the entries inside it are judged separately). The
+  # workspace and skills folders are closed the same way, so one command cannot
+  # move the only writable root away.
+  defp ancestors(paths) do
+    paths
+    |> Enum.flat_map(&parents/1)
+    |> Enum.uniq()
+  end
+
+  defp parents(path) do
+    path
+    |> Path.split()
+    |> Enum.drop(-1)
+    |> Enum.scan(&Path.join(&2, &1))
+    |> Enum.reject(&(&1 == "/"))
+  end
+
+  defp resolve(paths) do
+    paths
+    |> Enum.reduce_while([], fn path, acc ->
+      case resolve_one(path) do
+        {:ok, resolved} -> {:cont, [resolved | acc]}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+    |> case do
+      {:error, reason} -> {:error, reason}
+      resolved -> {:ok, resolved |> Enum.reverse() |> Enum.uniq()}
+    end
+  end
+
+  defp resolve_one("/" <> _rest = path) do
+    case PathPolicy.resolve_links(path) do
+      {:ok, resolved} -> {:ok, resolved}
+      {:error, reason} -> {:error, {:unresolvable_path, path, reason}}
+    end
+  end
+
+  defp resolve_one(path), do: {:error, {:relative_path, path}}
+
+  defp inside?(path, dir), do: String.starts_with?(path, dir <> "/")
+
+  defp prefix(path), do: "^" <> escape(path)
+
+  # The files named after a path (`credentials.db-journal`, `.claude.json.backup`),
+  # which `PathPolicy.protected?/2` counts as the path itself. An alternation, not
+  # a bracket: Seatbelt refuses `[.-]` as an unterminated bracket expression.
+  defp siblings(path), do: prefix(path) <> "(\\.|-)"
+
+  # Seatbelt's regex is POSIX-extended: only its metacharacters are escaped, since
+  # an escaped `-` or `:` (which `Regex.escape/1` produces) is not portable there.
+  defp escape(text), do: String.replace(text, ~r/[\\.\[\](){}*+?^$|]/, "\\\\\\0")
+
+  @doc "The Seatbelt profile for `rules`: indexed parameter names, never a path."
+  @spec profile(rules()) :: String.t()
+  def profile(rules) do
+    """
+    (version 1)
+    (allow default)
+    (deny file-write*)
+    (allow file-write*
+      (require-all
+        (require-any #{refs("W", rules.writable, "subpath")} #{refs("WX", rules.writable_patterns, "regex")})
+        #{nots("P", rules.protected, "subpath")}
+        #{nots("PX", rules.protected_patterns, "regex")}
+        #{nots("A", rules.ancestors, "literal")}
+        (require-any (require-not (subpath (param "FH"))) #{refs("FW", rules.fermix_writable, "subpath")})))
+    (allow file-write-data
+      (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty")
+      (literal "/dev/dtracehelper") (regex #"^/dev/fd/[0-9]+$"))
+    (allow pseudo-tty)
+    (allow file-read* file-write* file-ioctl (literal "/dev/ptmx"))
+    (allow file-read* file-write* file-ioctl
+      (require-all (regex #"^/dev/ttys[0-9]+$") (extension "com.apple.sandbox.pty")))
+    (deny file-read* #{refs("S", rules.secret, "subpath")} #{refs("SX", rules.secret_patterns, "regex")})
+    (deny network-outbound (remote unix-socket (path-prefix (param "FHS"))))
+    (deny process-exec #{refs("X", rules.no_exec, "subpath")})
+    (deny file-mount)
+    (allow file-mount (subpath "/Volumes"))
+    """
+  end
+
+  defp refs(prefix, paths, kind) do
+    paths
+    |> Enum.with_index()
+    |> Enum.map_join(" ", fn {_path, i} -> ~s|(#{kind} (param "#{prefix}#{i}"))| end)
+  end
+
+  defp nots(prefix, paths, kind) do
+    paths
+    |> Enum.with_index()
+    |> Enum.map_join(" ", fn {_path, i} ->
+      ~s|(require-not (#{kind} (param "#{prefix}#{i}")))|
+    end)
+  end
+
+  @doc "The `-D NAME=VALUE` arguments that bind `profile/1`'s parameters."
+  @spec parameters(rules()) :: [String.t()]
+  def parameters(rules) do
+    bindings =
+      [{"FH", rules.fermix_home}, {"FHS", rules.fermix_home <> "/"}] ++
+        indexed("W", rules.writable) ++
+        indexed("WX", rules.writable_patterns) ++
+        indexed("P", rules.protected) ++
+        indexed("PX", rules.protected_patterns) ++
+        indexed("A", rules.ancestors) ++
+        indexed("FW", rules.fermix_writable) ++
+        indexed("S", rules.secret) ++
+        indexed("SX", rules.secret_patterns) ++
+        indexed("X", rules.no_exec)
+
+    Enum.flat_map(bindings, fn {name, value} -> ["-D", "#{name}=#{value}"] end)
+  end
+
+  defp indexed(prefix, paths) do
+    paths
+    |> Enum.with_index()
+    |> Enum.map(fn {path, i} -> {"#{prefix}#{i}", path} end)
+  end
+end

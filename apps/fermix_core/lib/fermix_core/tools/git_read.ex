@@ -105,7 +105,7 @@ defmodule FermixCore.Tools.GitRead do
          git_args = Support.optional_string_list(args, "args"),
          :ok <- validate_args(git_args),
          :ok <- validate_branch_mode(command, git_args),
-         {:ok, output} <- GitCommand.run(resolved_repo, command, git_args) do
+         {:ok, output} <- GitCommand.run(resolved_repo, command, git_args, context) do
       {:ok, Tool.success(output)}
     else
       {:error, reason} -> Support.error(reason)

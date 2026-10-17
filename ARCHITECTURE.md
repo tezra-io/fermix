@@ -445,7 +445,12 @@ sets, command profiles (`bare`, `assistant`, `extended`) pick the allowed
 commands, and `Hardline` refuses catastrophic commands. `Sandbox.Env` resolves
 `[sandbox.env] allow` one name at a time, and `EnvHealth` records misses for
 readiness. The owner-gated `request_directory_access` tool plus `/confirm
-<token>` can grant a denied directory. There is no OS-level jail.
+<token>` can grant a denied directory. On macOS, `Sandbox.OsSandbox` also
+wraps every command a turn runs (the shell tool, the command tool, the git
+tools) in `sandbox-exec` with a Seatbelt profile built from the same roots, so
+the kernel holds the command to the mode and keeps Fermix's home and secrets
+out of its reach; `Sandbox.confine/3` is the one entry point. Linux has no
+kernel enforcement yet.
 
 `CommandRunner` is the entry point for spawning external commands. In the daemon
 each command runs in a temporary `CommandHost` under `CommandHost.Supervisor`,

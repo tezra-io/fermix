@@ -10,6 +10,7 @@ defmodule FermixCore.Tools.Shell do
   alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.EnvHealth
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Tools.Telemetry, as: ToolTelemetry
 
   @default_timeout_ms 30_000
@@ -111,8 +112,9 @@ defmodule FermixCore.Tools.Shell do
       }
 
       with :ok <- validate_command(command),
-           {:ok, plan} <- Sandbox.shell_plan(command, working_dir, context) do
-        run_plan(command, plan, timeout, trace)
+           {:ok, plan} <- Sandbox.shell_plan(command, working_dir, context),
+           {:ok, spawn} <- Sandbox.confine(shell_binary(), ["-c", command], context, plan.roots) do
+        run_plan(spawn, plan, timeout, trace)
       else
         {:error, reason} ->
           result = {:ok, Tool.error(format_error(reason))}
@@ -133,9 +135,9 @@ defmodule FermixCore.Tools.Shell do
   # The result is scrubbed of the allowed values first, before the notice, the
   # trace summary's cut or anything downstream can truncate it: a value split in
   # two by a cut no longer matches, and its first half would leave the machine.
-  defp run_plan(command, plan, timeout, trace) do
+  defp run_plan(spawn, plan, timeout, trace) do
     EnvHealth.record(%{resolved: plan.env_resolved, unresolved: plan.env_unresolved})
-    {result, run_trace} = run_command(command, plan.working_dir, timeout, plan.env)
+    {result, run_trace} = run_command(spawn, plan.working_dir, timeout, plan.env)
     result = redact_result(result, plan.redact_values)
 
     # The trace summary is the command's own words; the notice prefixed for
@@ -197,8 +199,9 @@ defmodule FermixCore.Tools.Shell do
 
   # The plan's list is the child's whole environment (`env_mode: :replace`),
   # handed over as port options, so no value appears in any process's argv.
-  defp run_command(command, working_dir, timeout, env) do
-    case CommandRunner.run(shell_binary(), ["-c", command],
+  # `spawn` is `sh -c <command>` as the kernel sandbox runs it.
+  defp run_command({executable, args}, working_dir, timeout, env) do
+    case CommandRunner.run(executable, args,
            cwd: working_dir,
            timeout_ms: timeout,
            env: env,
@@ -208,8 +211,7 @@ defmodule FermixCore.Tools.Shell do
         {{:ok, Tool.success(output)}, %{exit_code: 0}}
 
       {:ok, %{exit: code, stdout: output}} ->
-        {{:ok, Tool.error("Command failed (exit code #{code}):\n#{output}")},
-         %{exit_code: code, failure: "exit_nonzero"}}
+        failed(code, output)
 
       {:error, {:timeout, ms}} ->
         {{:ok, Tool.error("Command timed out after #{ms}ms")},
@@ -218,6 +220,19 @@ defmodule FermixCore.Tools.Shell do
       {:error, {:executable_not_found, path}} ->
         {{:ok, Tool.error("Shell executable missing: #{path}")},
          %{failure: "executable_not_found"}}
+    end
+  end
+
+  # `sandbox-exec` failing to start the command is not the command failing, and
+  # the trace keeps the two apart.
+  defp failed(code, output) do
+    case OsSandbox.refusal(code, output) do
+      nil ->
+        {{:ok, Tool.error("Command failed (exit code #{code}):\n#{output}")},
+         %{exit_code: code, failure: "exit_nonzero"}}
+
+      sentence ->
+        {{:ok, Tool.error(sentence)}, %{exit_code: code, failure: "os_sandbox_unavailable"}}
     end
   end
 
@@ -244,6 +259,7 @@ defmodule FermixCore.Tools.Shell do
       "Sandbox denied blocked root: #{path}. " <>
         "Run: fermix sandbox explain"
 
+  defp format_error({:os_sandbox_unavailable, sentence}), do: sentence
   defp format_error(reason) when is_binary(reason), do: reason
   defp format_error(reason), do: "Sandbox denied shell command: #{inspect(reason)}"
 
