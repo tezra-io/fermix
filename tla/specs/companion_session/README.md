@@ -64,7 +64,10 @@ ending and settlement is as before, so nothing the spec models changed. The
 re-read after M72 section 14 found a place in a block carrying an optional
 `apple_place_id` when Apple Maps found it, and the section saying which
 backend searched and what a place from each one has. A block's contents are
-read by no client rule either, so nothing the spec models changed.
+read by no client rule either, so nothing the spec models changed; nor did
+the next re-read, which found the section naming the builds rather than the
+platform (the Fermix Mac app's engine searches Apple Maps, the Homebrew and
+Linux builds Brave).
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes
