@@ -37,17 +37,42 @@ defmodule FermixCore.Capabilities.MCP.Config do
           tools_overrides: %{String.t() => tool_override()}
         }
 
+  @typedoc """
+  The `[mcp.servers.*]` blocks as written: every key of every server and tool
+  block, the ones `from_toml/1` ignores included, each value as this parser
+  reads it and before any check.
+  """
+  @type document :: %{
+          String.t() => %{
+            optional(:server) => %{String.t() => term()},
+            optional(:tools) => %{String.t() => %{String.t() => term()}}
+          }
+        }
+
   @valid_policy_strings ~w(read_only read_write exec network external_api)
 
   @spec from_toml(String.t()) :: [server_config()]
   def from_toml(contents) when is_binary(contents) do
+    contents
+    |> document()
+    |> assemble_configs()
+  end
+
+  @doc """
+  Every `[mcp.servers.*]` key in `contents`, by server, before `from_toml/1`
+  validates and assembles it.
+
+  The settings writer carries this through a save and writes it back, so a key
+  this module ignores today is still the owner's and is never dropped.
+  """
+  @spec document(String.t()) :: document()
+  def document(contents) when is_binary(contents) do
     contents
     |> String.split(~r/\r?\n/)
     |> Enum.reduce({nil, %{}}, fn raw_line, {section, acc} ->
       handle_line(String.trim(raw_line), section, acc)
     end)
     |> elem(1)
-    |> assemble_configs()
   end
 
   defp handle_line("", section, acc), do: {section, acc}

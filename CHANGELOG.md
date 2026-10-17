@@ -43,6 +43,13 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **Changing a setting no longer deletes the MCP servers you added by hand.**
+  Every settings save, from the Mac app, `fermix setup`, a plugin's settings or
+  the agent's model routing tool, rewrote `config.toml` without its
+  `[mcp.servers.*]` and `[mcp.inbound]` blocks, so a server added there was
+  gone the next time any setting changed. A save now writes those blocks back
+  with every key and value they held, the servers in name order and each one's
+  tool settings after it.
 - **Audio and video sent under an alias type keep a name their readers know.**
   An attachment's copy was named after its mime type's subtype, so an M4A or
   WAV sent as `audio/x-m4a` or `audio/x-wav` became `.x_m4a` or `.x_wav`, a

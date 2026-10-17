@@ -215,13 +215,20 @@ defmodule FermixCore.Setup.ConfigStore do
   never decides whether this write may happen. In a tree-less process there is
   no `RestartState` and the call is a no-op, so an out-of-process write is still
   detected by the daemon that did not make it.
+
+  The `[mcp.*]` blocks are not in the snapshot: the file owns them (M74 §4), so
+  they are read from the file this write replaces and written back with every
+  key they held. A file that exists and cannot be read is refused rather than
+  replaced, because replacing it would drop whatever it held.
   """
   @spec save_snapshot(runtime_config(), keyword()) :: :ok | {:error, term()}
   def save_snapshot(snapshot, opts \\ []) do
-    with {:ok, persisted} <- persisted_snapshot(snapshot, opts),
+    with {:ok, contents} <- read_home_document(fermix_home()),
+         mcp = mcp_document(contents),
+         {:ok, persisted} <- persisted_snapshot(snapshot, opts),
          :ok <- File.mkdir_p(fermix_home()),
          :ok <- ensure_workspace(),
-         :ok <- File.write(path(), dump_snapshot(persisted)) do
+         :ok <- File.write(path(), dump_snapshot(Map.put(persisted, :mcp, mcp))) do
       RestartState.record_persisted_baseline()
     end
   end
@@ -712,8 +719,9 @@ defmodule FermixCore.Setup.ConfigStore do
          :ok <- renderable_document(contents),
          :ok <- File.mkdir_p(home) do
       document = contents |> parse_document() |> Map.put(:fermix_web, port: port)
+      snapshot = document |> persistable_snapshot() |> Map.put(:mcp, mcp_document(contents))
 
-      File.write(home_document_path(home), dump_snapshot(persistable_snapshot(document)))
+      File.write(home_document_path(home), dump_snapshot(snapshot))
     end
   end
 
@@ -1146,7 +1154,8 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
       render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
-      render_section(["fermix_web"], web)
+      render_section(["fermix_web"], web),
+      render_mcp(Map.fetch!(snapshot, :mcp))
     ]
     |> List.flatten()
     |> Enum.reject(&(&1 in [nil, ""]))
@@ -1303,6 +1312,91 @@ defmodule FermixCore.Setup.ConfigStore do
   defp escape_char("\t"), do: "\\t"
   defp escape_char("\r"), do: "\\r"
   defp escape_char(<<byte>>), do: "\\u" <> String.pad_leading(Integer.to_string(byte, 16), 4, "0")
+
+  # The `[mcp.*]` blocks of a settings file, by the two readers that own them:
+  # `Capabilities.MCP.Config` reads `[mcp.servers.*]` and `MCP.Inbound.Config`
+  # reads `[mcp.inbound*]`. Every key either one stored is here, the ones they
+  # ignore today included, because none of it is this module's to drop.
+  defp mcp_document(contents) do
+    %{servers: McpConfig.document(contents), inbound: InboundMcpConfig.document(contents)}
+  end
+
+  # One order whatever order the owner wrote: servers by name, each followed by
+  # its tool blocks by tool name, then the inbound blocks; keys by name in each.
+  # The text is read back by both readers before it is written, so a value
+  # either reads back as it was read or the save refuses.
+  defp render_mcp(%{servers: servers, inbound: inbound} = mcp) do
+    server_blocks = servers |> Enum.sort_by(&elem(&1, 0)) |> Enum.flat_map(&render_mcp_server/1)
+    text = Enum.join(server_blocks ++ render_mcp_inbound(inbound), "\n\n")
+
+    if mcp_document(text) != mcp do
+      raise ArgumentError,
+            "the [mcp] blocks would not read back as they were written; " <>
+              "the settings file was not changed"
+    end
+
+    text
+  end
+
+  defp render_mcp_server({name, blocks}) do
+    render_mcp_present(["servers", name], blocks, :server) ++
+      render_mcp_tools(["servers", name, "tools"], blocks)
+  end
+
+  defp render_mcp_inbound(blocks) do
+    render_mcp_present(["inbound"], blocks, :inbound) ++
+      render_mcp_present(["inbound", "http"], blocks, :http) ++
+      render_mcp_tools(["inbound", "tools"], blocks)
+  end
+
+  # A block is written when the reader stored it, even with no keys: the inbound
+  # reader keeps an empty tool block, and neither reader stores a header alone.
+  defp render_mcp_present(path, blocks, key) do
+    case Map.fetch(blocks, key) do
+      {:ok, keys} -> [render_mcp_block(path, keys)]
+      :error -> []
+    end
+  end
+
+  defp render_mcp_tools(path, blocks) do
+    blocks
+    |> Map.get(:tools, %{})
+    |> Enum.sort_by(&elem(&1, 0))
+    |> Enum.map(fn {tool, keys} -> render_mcp_block(path ++ [tool], keys) end)
+  end
+
+  defp render_mcp_block(path, keys) do
+    header = "[" <> Enum.join(["mcp" | path], ".") <> "]"
+    lines = keys |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&render_mcp_key/1)
+    Enum.join([header | lines], "\n")
+  end
+
+  defp render_mcp_key({key, value}), do: "#{key} = #{encode_mcp_value(value)}"
+
+  # The inverse of the MCP readers' own scalar parse, which is not this module's
+  # TOML. A quoted value is unquoted with only `\"` unescaped, so a backslash is
+  # written as it was read (`encode_value/1` would double it), and with every
+  # trailing quote trimmed, so a value ending in one was read bare and is written
+  # bare. An array is decoded as JSON and is written as JSON on one line, and an
+  # inline table is split on its commas.
+  defp encode_mcp_value(value) when is_boolean(value) or is_integer(value), do: to_string(value)
+  defp encode_mcp_value(value) when is_float(value), do: :erlang.float_to_binary(value, [:short])
+
+  defp encode_mcp_value(value) when is_list(value),
+    do: "[#{Enum.map_join(value, ", ", &Jason.encode!/1)}]"
+
+  defp encode_mcp_value(value) when value == %{}, do: "{}"
+
+  defp encode_mcp_value(value) when is_map(value) do
+    pairs = value |> Enum.sort_by(&elem(&1, 0)) |> Enum.map_join(", ", &render_mcp_key/1)
+    "{ " <> pairs <> " }"
+  end
+
+  defp encode_mcp_value(value) when is_binary(value) do
+    if String.ends_with?(value, "\""),
+      do: value,
+      else: "\"" <> String.replace(value, "\"", "\\\"") <> "\""
+  end
 
   defp parse_document(contents) do
     document =

@@ -68,15 +68,31 @@ defmodule FermixCore.MCP.Inbound.Config do
     Application.get_env(:fermix_core, :mcp_inbound, default())
   end
 
+  @typedoc """
+  The `[mcp.inbound*]` blocks as written: every key, each value as this parser
+  reads it and before any check, and an empty map for a tool block with none.
+  """
+  @type document :: %{
+          optional(:inbound) => %{String.t() => term()},
+          optional(:http) => %{String.t() => term()},
+          optional(:tools) => %{String.t() => %{String.t() => term()}}
+        }
+
   @spec from_toml(String.t()) :: t()
   def from_toml(contents) when is_binary(contents) do
     contents
-    |> parse_sections()
+    |> document()
     |> assemble_config()
     |> validate_config!()
   end
 
-  defp parse_sections(contents) do
+  @doc """
+  Every `[mcp.inbound*]` key in `contents`, before `from_toml/1` validates and
+  assembles it. The settings writer carries this through a save and writes it
+  back unchanged.
+  """
+  @spec document(String.t()) :: document()
+  def document(contents) when is_binary(contents) do
     contents
     |> String.split(~r/\r?\n/)
     |> Enum.reduce({nil, %{}}, fn raw_line, {section, acc} ->
