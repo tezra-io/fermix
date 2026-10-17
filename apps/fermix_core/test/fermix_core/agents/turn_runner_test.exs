@@ -1654,13 +1654,48 @@ defmodule FermixCore.Agents.TurnRunnerTest do
              status: 401,
              kind: :auth,
              message: "invalid x-api-key"
-           }}
+           }},
+          get_env: &no_env/1
         )
 
       assert reply =~ "Anthropic"
       assert reply =~ "API key"
       refute reply =~ "fermix auth login"
       refute reply == "Sorry, I encountered an error processing your message."
+    end
+
+    # The 0.15.0 report: a sandbox exported ANTHROPIC_API_KEY=proxy-managed into
+    # every process, config/runtime.exs layered it over the stored key at every
+    # start, and every turn said to check the key in `fermix setup`, where the
+    # key had been stored correctly. The reply names the key actually used.
+    test "an API key the daemon's environment supplies is named instead of setup" do
+      env = %{"ANTHROPIC_API_KEY" => "proxy-managed"}
+
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error,
+           %{provider: :anthropic, adapter: :messages, status: 401, kind: :auth, message: "no"}},
+          get_env: &Map.get(env, &1)
+        )
+
+      assert reply ==
+               "Anthropic authentication failed with the API key from ANTHROPIC_API_KEY in the " <>
+                 "daemon's environment, which Fermix uses instead of a stored key. Correct that " <>
+                 "variable, or start the daemon without it to use the stored key, then retry."
+
+      refute reply =~ "fermix setup"
+    end
+
+    test "an override is reported only for the provider whose key it replaces" do
+      env = %{"OPENAI_API_KEY" => "sk-from-env"}
+
+      reply =
+        TurnRunner.error_reply(
+          {:provider_error, %{provider: :anthropic, status: 401, kind: :auth, message: "no"}},
+          get_env: &Map.get(env, &1)
+        )
+
+      assert reply =~ "check the Anthropic API key in `fermix setup`"
     end
 
     test "maps Anthropic OAuth auth failures to a subscription reconnect hint" do
@@ -1693,7 +1728,8 @@ defmodule FermixCore.Agents.TurnRunnerTest do
              kind: :auth,
              auth_mode: :api_key,
              message: "invalid api key"
-           }}
+           }},
+          get_env: &no_env/1
         )
 
       assert reply =~ "SpaceXAI"
@@ -3631,4 +3667,7 @@ defmodule FermixCore.Agents.TurnRunnerTest do
 
     Enum.reduce(overrides, base, fn {key, value}, acc -> Map.put(acc, key, value) end)
   end
+
+  # No variable is set: the stored key is the one in use.
+  defp no_env(_name), do: nil
 end

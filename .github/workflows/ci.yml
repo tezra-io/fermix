@@ -280,6 +280,11 @@ jobs:
     # NIF), so compile the shim here with the release-exact zig flags on every
     # push. Keep the flags in lockstep with DISCLAIM_CFLAGS in
     # apps/fermix_nif/Makefile and ZIG_VERSION with release.yml.
+    #
+    # The NIF (fermix_nif.c) is cross-compiled by zig for every release target
+    # too, so it is compiled here the same way, for all four, under the same
+    # strict flags (a superset of the Makefile's NIF CFLAGS, which this step
+    # must keep including) and against the release's OTP headers.
     name: disclaim shim cross-compile (release zig flags)
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -296,6 +301,21 @@ jobs:
             zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror \
               apps/fermix_nif/c_src/fermix_disclaim.c -o "${RUNNER_TEMP}/disclaim_${target}"
             echo "built ${target}"
+          done
+      # erl_nif.h only; the OTP the release builds with (release.yml).
+      - name: Install Erlang/OTP headers
+        uses: erlef/setup-beam@54075bcc5e249e4758d363f27d099f55d843f124 # v1.24.1
+        with:
+          otp-version: "28.4.1"
+      - name: Compile the NIF for every release target
+        run: |
+          set -euo pipefail
+          erts_include="$(erl -noshell -eval 'io:format("~s/erts-~s/include", [code:root_dir(), erlang:system_info(version)]), halt().')"
+          for target in aarch64-linux-musl x86_64-linux-musl aarch64-macos x86_64-macos; do
+            zig cc -target "$target" -std=c99 -O2 -Wall -Wextra -Werror -fPIC \
+              -I"$erts_include" -c apps/fermix_nif/c_src/fermix_nif.c \
+              -o "${RUNNER_TEMP}/fermix_nif_${target}.o"
+            echo "compiled ${target}"
           done
 
   # Aggregate gate: one stable check name (`compile · format · credo · test`),

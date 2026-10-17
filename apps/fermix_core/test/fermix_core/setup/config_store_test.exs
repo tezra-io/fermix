@@ -3737,6 +3737,67 @@ defmodule FermixCore.Setup.ConfigStoreTest do
              Keyword.get(loaded.fermix_core, :providers)
   end
 
+  # `fermix setup --openai-base-url` and its two siblings write `base_url` into
+  # the three hosted providers' blocks. Seeded with the shape a running daemon
+  # holds (the atoms the loader makes), saved and read back unchanged.
+  test "the openai, anthropic and xai blocks round-trip a base_url from the app-env shape" do
+    tmp_home =
+      Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")
+
+    providers = Application.get_env(:fermix_core, :providers)
+    on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
+    on_exit(fn -> restore_env(:fermix_core, :providers, providers) end)
+    System.put_env("FERMIX_HOME", tmp_home)
+
+    Application.put_env(:fermix_core, :providers,
+      openai: [
+        base_url: "http://127.0.0.1:18081/v1",
+        default_model: "gpt-5.5",
+        reasoning_effort: :high
+      ],
+      anthropic: [
+        auth_mode: :api_key,
+        base_url: "http://127.0.0.1:18080/v1",
+        default_model: "claude-sonnet-5-5",
+        reasoning_effort: :high,
+        primary: true
+      ],
+      xai: [auth_mode: :oauth, base_url: "http://127.0.0.1:18082/v1", default_model: "grok-4.3"]
+    )
+
+    current = ConfigStore.current_snapshot()
+    assert :ok = ConfigStore.save_snapshot(current)
+    assert {:ok, loaded} = ConfigStore.load_runtime_config(resolve_secrets: false)
+    providers = Keyword.fetch!(loaded.fermix_core, :providers)
+
+    assert providers == Keyword.fetch!(current.fermix_core, :providers)
+    assert providers[:openai][:base_url] == "http://127.0.0.1:18081/v1"
+    assert providers[:anthropic][:base_url] == "http://127.0.0.1:18080/v1"
+    assert providers[:xai][:base_url] == "http://127.0.0.1:18082/v1"
+  end
+
+  @config_exs Path.expand("../../../../../config/config.exs", __DIR__)
+
+  # A compiled default under a persisted key would be written into every
+  # config.toml by the next save, so the shipped openai block carries none.
+  test "the shipped openai block seeds no base_url, so a save from it writes none" do
+    shipped_openai =
+      @config_exs
+      |> Config.Reader.read!(env: :prod, target: :host)
+      |> Keyword.fetch!(:fermix_core)
+      |> Keyword.fetch!(:providers)
+      |> Keyword.fetch!(:openai)
+
+    persisted =
+      ConfigStore.persistable_snapshot(%{
+        fermix_core: [providers: [openai: shipped_openai]],
+        fermix_channels: [],
+        fermix_web: []
+      })
+
+    refute Keyword.has_key?(persisted.fermix_core[:providers][:openai], :base_url)
+  end
+
   test "a venice block round-trips through dump -> parse -> normalize" do
     tmp_home =
       Path.join(System.tmp_dir!(), "fermix-config-store-#{System.unique_integer([:positive])}")

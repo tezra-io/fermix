@@ -17,6 +17,11 @@ defmodule FermixCore.Management.Secrets do
   through `Plugins.Config`: a rotation into a locked keychain fails loud instead
   of reporting success while the old value survives (M34 native setup §7.4).
 
+  Every family asks the settings file's write guard (`RestartState.writable/0`)
+  before it touches a store, so a write refused for an outside edit
+  (`external_change`, `config_unreadable`) has changed nothing: the refusal is
+  the whole answer, and a stored value stays the one it was.
+
   `anthropic_setup_token` is the fourth id and the one that is a DIFFERENT
   mechanism: a `claude setup-token` value is a long-lived subscription
   credential, so it writes through `Auth.Store` under the `anthropic_oauth`
@@ -25,6 +30,12 @@ defmodule FermixCore.Management.Secrets do
   also selects the route that reads it — a stored token the runtime never calls
   would report success and change nothing — and clearing one is the same
   operation as signing out, which is where that mechanism already lives.
+
+  A registry key's result also names the environment variable this daemon
+  uses in place of the stored value, when `config/runtime.exs` layers one over
+  it (`environment_override`, else null): storing a value the next start will
+  not use is still stored, and the result says so instead of reading as a plain
+  success. The other families carry null, because no variable replaces them.
 
   `env:<NAME>` is the fifth family and the second different mechanism: a
   skill's own credential, passed to every sandboxed command as the allowed
@@ -44,6 +55,7 @@ defmodule FermixCore.Management.Secrets do
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.ExternalEnv
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.SecretPaths
   alias FermixCore.Setup.SecretStore
   alias FermixCore.Setup.SecretWriter
@@ -160,7 +172,8 @@ defmodule FermixCore.Management.Secrets do
   # The promotion is the same one every other connect runs: on a home with no
   # configured primary yet, the provider just connected becomes it.
   defp store_setup_token(id, value) do
-    with {:ok, _entry} <- AnthropicLogin.store_setup_token(value),
+    with :ok <- RestartState.writable(),
+         {:ok, _entry} <- AnthropicLogin.store_setup_token(value),
          {:ok, _report} <- Wizard.set_provider_auth_mode(:anthropic, :oauth),
          {:ok, _token} <- TokenSupervisor.reload(AuthStore.profile(:anthropic)),
          :ok <- Wizard.promote_if_first_configured(:anthropic) do
@@ -185,7 +198,12 @@ defmodule FermixCore.Management.Secrets do
   # adopted Claude Code login lives under the same profile and is a different
   # credential, reported by `setup.state.get`'s account row rather than here.
   defp setup_token_view(id) do
-    %{"id" => id, "present" => setup_token_present?(), "restart" => Settings.restart()}
+    %{
+      "id" => id,
+      "present" => setup_token_present?(),
+      "restart" => Settings.restart(),
+      "environment_override" => nil
+    }
   end
 
   defp setup_token_present? do
@@ -198,7 +216,8 @@ defmodule FermixCore.Management.Secrets do
   # Steps 2 and 3: a store that exists, then the write. A write the store
   # refused left nothing behind, so there is nothing to undo.
   defp store_env(id, name, value, new_entry?) do
-    with :ok <- env_store_available(),
+    with :ok <- RestartState.writable(),
+         :ok <- env_store_available(),
          :ok <- SecretWriter.put(ExternalEnv.key(name), value) do
       commit_env(id, name, value, new_entry?)
     else
@@ -254,7 +273,8 @@ defmodule FermixCore.Management.Secrets do
   # that names the item, never an item nothing names. A source that is not the
   # writer's own lookup is never touched.
   defp forget_env(id, name) do
-    with :ok <- SecretWriter.delete(ExternalEnv.key(name)),
+    with :ok <- RestartState.writable(),
+         :ok <- SecretWriter.delete(ExternalEnv.key(name)),
          {:ok, _report} <- drop_env_reference(name) do
       {:ok, env_view(id, name)}
     else
@@ -294,7 +314,13 @@ defmodule FermixCore.Management.Secrets do
 
   defp env_view(id, name) do
     present = ExternalEnv.source_kind(SandboxConfig.current().env, name) == :managed
-    %{"id" => id, "present" => present, "restart" => Settings.restart()}
+
+    %{
+      "id" => id,
+      "present" => present,
+      "restart" => Settings.restart(),
+      "environment_override" => nil
+    }
   end
 
   defp validate_env_name(name) do
@@ -344,11 +370,15 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
+  # `environment_override` names the variable this daemon uses in place of
+  # the stored value (`SecretPaths.env_override/2`), so a write the next start
+  # will ignore never reads as a plain success.
   defp view(id, key) do
     %{
       "id" => id,
       "present" => present?(key),
-      "restart" => Settings.restart()
+      "restart" => Settings.restart(),
+      "environment_override" => SecretPaths.env_override(key)
     }
   end
 

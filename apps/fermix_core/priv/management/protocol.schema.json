@@ -1623,7 +1623,12 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
-        "restart": { "$ref": "#/$defs/restartState" }
+        "restart": { "$ref": "#/$defs/restartState" },
+        "environment_override": {
+          "description": "The environment variable this daemon uses in place of the stored value, because a nonblank one overrides the stored value at every start; null when the stored value is the one in use. Absent from an older daemon, which reported no override.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "secret_clear_params": {
@@ -1639,7 +1644,12 @@
       "properties": {
         "id": { "type": "string" },
         "present": { "type": "boolean" },
-        "restart": { "$ref": "#/$defs/restartState" }
+        "restart": { "$ref": "#/$defs/restartState" },
+        "environment_override": {
+          "description": "The environment variable this daemon uses in place of the stored value, because a nonblank one overrides the stored value at every start; null when the stored value is the one in use. Absent from an older daemon, which reported no override.",
+          "type": ["string", "null"],
+          "minLength": 1
+        }
       }
     },
     "jobKind": {

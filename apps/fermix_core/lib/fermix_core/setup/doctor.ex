@@ -146,18 +146,17 @@ defmodule FermixCore.Setup.Doctor do
           | {:server_error, status :: pos_integer()}
           | {:network, reason :: term()}
 
-  @openai_default_url "https://api.openai.com/v1/responses"
+  @openai_default_base_url "https://api.openai.com/v1"
   # The host each voice provider's engines dial. Listing models is free and
   # sends no prompt.
   @voice_models_urls %{
     "openai" => "https://api.openai.com/v1/models",
     "xai" => "https://api.x.ai/v1/models"
   }
-  @anthropic_default_url "https://api.anthropic.com/v1/messages"
-  # xAI base_url is a ROOT (the adapter appends /responses); the probe must
-  # do the same so a configured/overlaid root base_url hits the same URL the
-  # runtime does. OpenAI/Anthropic keep full default URLs because their
-  # blocks don't persist a base_url through setup.
+  @anthropic_default_base_url "https://api.anthropic.com/v1"
+  # Every base_url is a ROOT (the adapters append /responses or /messages);
+  # the probes do the same, so a configured root base_url (`fermix setup
+  # --openai-base-url` and its siblings) hits the same URL the runtime does.
   @xai_default_base_url "https://api.x.ai/v1"
   @openrouter_default_base_url "https://openrouter.ai/api/v1"
   @mistral_default_base_url "https://api.mistral.ai/v1"
@@ -967,7 +966,7 @@ defmodule FermixCore.Setup.Doctor do
         err
 
       {:ok, bearer} ->
-        url = base_url(config, :openai, @openai_default_url)
+        url = "#{base_url(config, :openai, @openai_default_base_url)}/responses"
         model = ModelCatalog.effective_model(:openai, config)
 
         body = %{
@@ -1383,7 +1382,7 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp post_anthropic_probe(config, body_extra, headers, surface, opts) do
-    url = base_url(config, :anthropic, @anthropic_default_url)
+    url = "#{base_url(config, :anthropic, @anthropic_default_base_url)}/messages"
     model = ModelCatalog.effective_model(:anthropic, config)
 
     body =

@@ -270,6 +270,24 @@ defmodule FermixCore.Setup.RestartStateTest do
       assert RestartState.config_state(server: server) == :clear
     end
 
+    # The read cache bounds the polled banner reads; a write decision is never
+    # served from it. With the cache primed `:clear`, an outside edit made
+    # inside the window used to pass the guard, so a secret write stored its
+    # value and the commit after it refused (or reverted the edit).
+    test "the write guard reads the file even while a cached answer is warm", %{home: home} do
+      path = Path.join(home, "config.toml")
+      File.write!(path, "[fermix_core.providers.openai]\ndefault_model = \"a\"\n")
+      server = start_state(cache_ttl_ms: :timer.hours(1))
+      assert RestartState.config_state(server: server) == :clear
+
+      File.write!(path, "[fermix_core.providers.openai]\ndefault_model = \"b\"\n")
+
+      assert {:error, {:external_change, sections}} = RestartState.writable(server: server)
+      assert "providers" in sections
+      # The banner read stays within its bound, and the fresh answer refreshed it.
+      assert {:external_change, _sections} = RestartState.config_state(server: server)
+    end
+
     test "an external change is a restart reason of its own", %{home: home} do
       path = Path.join(home, "config.toml")
       File.write!(path, "[fermix_core.providers.openai]\ndefault_model = \"gpt-5.6\"\n")
@@ -401,7 +419,11 @@ defmodule FermixCore.Setup.RestartStateTest do
   # behaviour under test, and its own expiry is covered by the default.
   defp start_state(opts \\ []) do
     name = :"restart_state_#{System.unique_integer([:positive, :monotonic])}"
-    start_supervised!({RestartState, [name: name, cache_ttl_ms: 0] ++ opts}, id: name)
+
+    start_supervised!({RestartState, Keyword.merge([name: name, cache_ttl_ms: 0], opts)},
+      id: name
+    )
+
     name
   end
 

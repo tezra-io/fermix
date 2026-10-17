@@ -107,6 +107,7 @@ defmodule Fermix.CLI do
                    [--print-state] [--reconfigure] [--migrate-secrets]
                    [--secret-store keyring|file]
                    [--openai-api-key VALUE] [--anthropic-api-key VALUE] [--xai-api-key VALUE]
+                   [--openai-base-url URL] [--anthropic-base-url URL] [--xai-base-url URL]
                    [--provider #{Enum.map_join(ModelCatalog.providers(), "|", &Atom.to_string/1)}]
                    [--default-model VALUE] [--reasoning-effort none|low|medium|high|xhigh|max]
                    [--realtime-enabled] [--realtime-model VALUE] [--realtime-voice VALUE]

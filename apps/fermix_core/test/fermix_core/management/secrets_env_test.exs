@@ -239,7 +239,9 @@ defmodule FermixCore.Management.SecretsEnvTest do
 
       assert view["id"] == "env:ALPACA_API_KEY"
       assert view["present"] == true
-      assert Map.keys(view) |> Enum.sort() == ~w(id present restart)
+      assert Map.keys(view) |> Enum.sort() == ~w(environment_override id present restart)
+      # The value reaches sandboxed commands only; no variable replaces it.
+      assert view["environment_override"] == nil
 
       assert_received {:writer, :put, {:external_env, "ALPACA_API_KEY"}}
       assert_received {:writer, :get, {:external_env, "ALPACA_API_KEY"}}
@@ -456,14 +458,15 @@ defmodule FermixCore.Management.SecretsEnvTest do
       refute inspect(error) =~ "a-different-value"
     end
 
-    test "a refused commit deletes an item this call created, then returns the refusal", %{
-      home: home
-    } do
+    # The outside edit is refused before the store is asked, so a refusal
+    # changes nothing and needs no undo.
+    test "a write refused for an outside edit stores nothing", %{home: home} do
       write_outside_edit(home)
 
       assert {:error, {:external_change, _sections}} = Secrets.set("env:ALPACA_API_KEY", @value)
 
-      assert deletes_of("ALPACA_API_KEY") == 1
+      refute_received {:writer, :put, {:external_env, "ALPACA_API_KEY"}}
+      assert deletes_of("ALPACA_API_KEY") == 0
       assert SecretWriterStub.get({:external_env, "ALPACA_API_KEY"}) == {:error, :missing_secret}
     end
 
@@ -486,7 +489,25 @@ defmodule FermixCore.Management.SecretsEnvTest do
                Secrets.set("env:ALPACA_API_KEY", "rotated-value-99")
 
       assert deletes_of("ALPACA_API_KEY") == 0
-      assert {:ok, _kept} = SecretWriterStub.get({:external_env, "ALPACA_API_KEY"})
+      # The value it held, not the refused rotation.
+      assert SecretWriterStub.get({:external_env, "ALPACA_API_KEY"}) == {:ok, @value}
+      assert ExternalEnv.source_kind(SandboxConfig.current().env, "ALPACA_API_KEY") == :managed
+    end
+
+    test "a forget refused for an outside edit keeps the item and its reference", %{home: home} do
+      :ok = SecretWriterStub.put({:external_env, "ALPACA_API_KEY"}, @value)
+
+      put_env_policy(
+        allow: ["ALPACA_API_KEY"],
+        sources: %{"ALPACA_API_KEY" => ExternalEnv.managed_source("ALPACA_API_KEY")}
+      )
+
+      write_outside_edit(home)
+
+      assert {:error, {:external_change, _sections}} = Secrets.clear("env:ALPACA_API_KEY")
+
+      assert deletes_of("ALPACA_API_KEY") == 0
+      assert SecretWriterStub.get({:external_env, "ALPACA_API_KEY"}) == {:ok, @value}
       assert ExternalEnv.source_kind(SandboxConfig.current().env, "ALPACA_API_KEY") == :managed
     end
   end

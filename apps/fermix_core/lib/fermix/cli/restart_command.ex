@@ -27,6 +27,7 @@ defmodule Fermix.CLI.RestartCommand do
   """
 
   alias Fermix.CLI.Daemon.Client
+  alias Fermix.CLI.HomeOwner
   alias Fermix.CLI.MachineOutput
   alias Fermix.CLI.Service
   alias Fermix.CLI.ServiceCommand
@@ -54,6 +55,64 @@ defmodule Fermix.CLI.RestartCommand do
       build_info.app_engine?() -> restart_app_managed(deps)
       true -> restart_legacy(argv, deps)
     end
+  end
+
+  @typedoc """
+  How this home's daemon can be restarted from here: through the app, through
+  the installed background service of one scope, or not by this CLI at all,
+  because no background service runs it (a daemon started with `fermix run`).
+  """
+  @type route :: :app | {:service, :user | :system} | :foreground
+
+  @doc """
+  How this home's daemon is restarted, from the facts `run/2` acts on: the app
+  owns it (this is the app's engine, or the home answers as app-managed), a
+  background service this CLI drives is installed, or neither.
+
+  Every hint that tells an operator to restart the daemon comes from here, so a
+  hint never names `fermix restart` where that verb would refuse. Takes the
+  same `:build_info`, `:service` and `:service_opts` seams as `run/2`, and
+  `:home_owner` (default `HomeOwner`) with its `:hello`, `:marker?` and
+  `:socket_path` seams. A caller that has already asked whether the app manages
+  this home passes the answer as `:app_managed?`, and the home is not asked
+  again.
+  """
+  @spec route(keyword()) :: route()
+  def route(deps \\ []) when is_list(deps) do
+    build_info = Keyword.get(deps, :build_info, BuildInfo)
+    service = Keyword.get(deps, :service, Service)
+    opts = Keyword.get(deps, :service_opts, [])
+
+    cond do
+      build_info.app_engine?() -> :app
+      app_managed_home?(deps) -> :app
+      service.installed?(:user, opts) -> {:service, :user}
+      service.installed?(:system, opts) -> {:service, :system}
+      true -> :foreground
+    end
+  end
+
+  defp app_managed_home?(deps) do
+    case Keyword.fetch(deps, :app_managed?) do
+      {:ok, known} when is_boolean(known) ->
+        known
+
+      :error ->
+        home_owner = Keyword.get(deps, :home_owner, HomeOwner)
+        home_owner.app_managed?(Keyword.take(deps, [:hello, :marker?, :socket_path]))
+    end
+  end
+
+  @doc "The sentence that tells an operator how to restart the daemon on `route`."
+  @spec hint(route()) :: String.t()
+  def hint(:app), do: "Restart it from the Fermix app."
+  def hint({:service, :user}), do: "Restart it with `fermix restart`."
+  def hint({:service, :system}), do: "Restart it with `fermix restart --system`."
+
+  def hint(:foreground) do
+    "No Fermix background service runs this daemon, so `fermix restart` cannot restart it. " <>
+      "Stop it where it runs, such as with Ctrl+C in the terminal running `fermix run`, " <>
+      "and start it again."
   end
 
   # ── packaged ───────────────────────────────────────────────────────────────

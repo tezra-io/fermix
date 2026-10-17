@@ -364,7 +364,8 @@ defmodule FermixCore.Management.AuthTest do
                Auth.logout("xai",
                  forget: forget,
                  set_auth_mode: fn :xai, :api_key -> {:ok, %{}} end,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
 
       assert_receive :forgotten
@@ -388,7 +389,8 @@ defmodule FermixCore.Management.AuthTest do
                Auth.logout("xai",
                  forget: fn _profile -> :ok end,
                  set_auth_mode: fn :xai, :api_key -> {:ok, %{}} end,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
 
       assert_receive {:dropped, "xai", "xai_oauth"}
@@ -408,7 +410,8 @@ defmodule FermixCore.Management.AuthTest do
                Auth.logout("xai",
                  forget: fn "xai_oauth" -> :ok end,
                  set_auth_mode: route,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
 
       assert_receive :reverted
@@ -462,14 +465,16 @@ defmodule FermixCore.Management.AuthTest do
                Auth.logout("xai",
                  forget: fn _profile -> {:error, :no_auth_file} end,
                  set_auth_mode: route,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
 
       assert {:ok, _again} =
                Auth.logout("xai",
                  forget: fn _profile -> {:error, {:provider_missing, "xai_oauth"}} end,
                  set_auth_mode: route,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
     end
 
@@ -528,7 +533,12 @@ defmodule FermixCore.Management.AuthTest do
 
       logout =
         Task.async(fn ->
-          Auth.logout("xai", forget: forget, drop_live_tokens: drop, set_auth_mode: route)
+          Auth.logout("xai",
+            forget: forget,
+            drop_live_tokens: drop,
+            set_auth_mode: route,
+            writable: &settings_writable/0
+          )
         end)
 
       assert_receive :deleting
@@ -546,6 +556,33 @@ defmodule FermixCore.Management.AuthTest do
       assert {:error, {:invalid_params, "provider", _sentence}} = Auth.logout("nope")
     end
 
+    # A sign-out refused for an outside edit changes nothing. The stored session
+    # used to be deleted first and the route revert refused after it, leaving
+    # `auth_mode = "oauth"` pointing at a session that no longer exists.
+    test "a sign-out refused for an outside edit keeps the stored session", %{drop: drop} do
+      owner = self()
+
+      assert {:error, {:external_change, ["memory"]}} =
+               Auth.logout("xai",
+                 forget: fn _profile -> send(owner, :forgotten) end,
+                 set_auth_mode: fn :xai, :api_key -> flunk("the route was written") end,
+                 drop_live_tokens: drop,
+                 writable: fn -> {:error, {:external_change, ["memory"]}} end
+               )
+
+      refute_received :forgotten
+    end
+
+    # openai_codex has no route to revert, so its sign-out never writes the
+    # settings file and an outside edit does not stop it.
+    test "a sign-out that writes no settings is not refused for an outside edit" do
+      assert {:ok, _result} =
+               Auth.logout("openai_codex",
+                 chatgpt_logout: fn [] -> {:ok, %{revoked: true}} end,
+                 writable: fn -> {:error, {:external_change, ["memory"]}} end
+               )
+    end
+
     test "an outside edit during the route revert stays its own refusal", %{drop: drop} do
       changed = fn :xai, :api_key -> {:error, {:external_change, ["providers"]}} end
 
@@ -553,7 +590,8 @@ defmodule FermixCore.Management.AuthTest do
                Auth.logout("xai",
                  forget: fn _profile -> :ok end,
                  set_auth_mode: changed,
-                 drop_live_tokens: drop
+                 drop_live_tokens: drop,
+                 writable: &settings_writable/0
                )
     end
   end
@@ -678,4 +716,7 @@ defmodule FermixCore.Management.AuthTest do
       {:ok, view}
     end
   end
+
+  # The settings file as this VM last wrote it: no outside edit stands.
+  defp settings_writable, do: :ok
 end

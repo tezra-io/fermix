@@ -30,14 +30,14 @@ defmodule Fermix.CLI.AuthCommandTest do
   # registration's standing, never its tokens.
   describe "auth status" do
     test "reports not-logged-in when the auth file is missing" do
-      output = capture_out(fn -> AuthCommand.run(["status"]) end)
+      output = capture_out(fn -> run_auth(["status"]) end)
       assert output =~ "not logged in (no ChatGPT sign-in in "
     end
 
     test "prints the ChatGPT account and its state", %{dir: dir} do
       seed_chatgpt(dir)
 
-      output = capture_out(fn -> AuthCommand.run(["status", "--provider", "codex"]) end)
+      output = capture_out(fn -> run_auth(["status", "--provider", "codex"]) end)
 
       assert output ==
                "provider: openai_codex (Sign in with ChatGPT)\n" <>
@@ -47,7 +47,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "a sign-in without plan usage says what to turn on", %{dir: dir} do
       seed_chatgpt(dir, granted_scopes: ["openid", "email", "offline_access"])
 
-      output = capture_out(fn -> AuthCommand.run(["status"]) end)
+      output = capture_out(fn -> run_auth(["status"]) end)
       assert output =~ "state: plan_off\n"
       assert output =~ ChatGPT.failure_sentence(:plan_usage_off)
     end
@@ -56,7 +56,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "an old Codex-client entry is not a sign-in", %{dir: dir} do
       seed_old_codex_entry(dir)
 
-      output = capture_out(fn -> AuthCommand.run(["status"]) end)
+      output = capture_out(fn -> run_auth(["status"]) end)
       assert output =~ "not logged in"
     end
   end
@@ -233,7 +233,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "is a no-op when the auth file is missing" do
       seams = [logout: fn [] -> flunk("nothing to sign out of") end]
 
-      output = capture_out(fn -> AuthCommand.run(["logout"], seams) end)
+      output = capture_out(fn -> run_auth(["logout"], seams) end)
       assert output =~ "Already logged out (no ChatGPT sign-in in "
     end
 
@@ -245,7 +245,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       stderr =
         capture_err(fn ->
-          output = capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 0 end)
+          output = capture_out(fn -> assert run_auth(["logout"], seams) == 0 end)
 
           assert output == "Logged out of ChatGPT. Cleared its tokens in #{path}.\n"
         end)
@@ -270,7 +270,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       stderr =
         capture_err(fn ->
-          output = capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 0 end)
+          output = capture_out(fn -> assert run_auth(["logout"], seams) == 0 end)
           assert output =~ "Logged out of ChatGPT."
         end)
 
@@ -287,7 +287,7 @@ defmodule Fermix.CLI.AuthCommandTest do
       daemon = FakeDaemonSocket.serve_once(home, %{"status" => "ok"})
 
       capture_err(fn ->
-        output = capture_out(fn -> assert AuthCommand.run(["logout"]) == 0 end)
+        output = capture_out(fn -> assert run_auth(["logout"]) == 0 end)
         assert output =~ "Already logged out"
       end)
 
@@ -301,11 +301,11 @@ defmodule Fermix.CLI.AuthCommandTest do
          %{home: home} do
       path = seed_chatgpt(home)
       daemon = FakeDaemonSocket.serve_once(home, %{"status" => "error", "reason" => "wedged"})
-      seams = [logout: fn [] -> {:ok, %{revoked: true}} end]
+      seams = [logout: fn [] -> {:ok, %{revoked: true}} end, restart_route: fn -> :app end]
 
       stderr =
         capture_err(fn ->
-          capture_out(fn -> assert AuthCommand.run(["logout"], seams) == 1 end)
+          capture_out(fn -> assert run_auth(["logout"], seams) == 1 end)
         end)
 
       assert_receive {:fake_daemon_request, %{"method" => "auth_forget"}}
@@ -314,11 +314,10 @@ defmodule Fermix.CLI.AuthCommandTest do
       assert stderr =~ "fermix auth: cleared the ChatGPT tokens in #{path}"
       assert stderr =~ "the running daemon could not drop its chatgpt tokens: wedged"
 
-      # Production runs the daemon from the macOS app, so the CLI restart is
-      # offered only for a daemon the operator runs.
-      assert stderr =~
-               "Restart the daemon (from the Fermix app, or `fermix restart` for a daemon " <>
-                 "you run yourself)."
+      # Production runs the daemon from the macOS app, so an app-managed home is
+      # sent to the app, never to a CLI restart.
+      assert stderr =~ "so it keeps them until it restarts. Restart it from the Fermix app."
+      refute stderr =~ "fermix restart"
     end
   end
 
@@ -326,7 +325,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "login --setup-token stores under the anthropic_oauth profile", %{dir: dir} do
       status =
         capture_out_status(fn ->
-          AuthCommand.run(["login", "--provider", "anthropic", "--setup-token", "sk-ant-oat01"])
+          run_auth(["login", "--provider", "anthropic", "--setup-token", "sk-ant-oat01"])
         end)
 
       assert status == 0
@@ -339,6 +338,27 @@ defmodule Fermix.CLI.AuthCommandTest do
       # Never under an api-key-shaped profile (billing-flip guard, §12 #5).
       assert {:error, {:provider_missing, _}} =
                Store.read("anthropic", Path.join(dir, "auth.json"))
+    end
+
+    # A daemon no background service runs (`fermix run`) cannot be restarted by
+    # `fermix restart`, so the sign-in names the restart that works for it.
+    test "a sign-in names the restart that works for how the daemon runs" do
+      seams = [restart_route: fn -> :foreground end]
+
+      output =
+        capture_out(fn ->
+          assert 0 ==
+                   run_auth(
+                     ["login", "--provider", "anthropic", "--setup-token", "sk-ant-oat01"],
+                     seams
+                   )
+        end)
+
+      assert output =~
+               "The daemon picks up new credentials when it restarts. No Fermix background " <>
+                 "service runs this daemon, so `fermix restart` cannot restart it."
+
+      refute output =~ "Restart it with `fermix restart`"
     end
 
     test "login --setup-token wins over CLAUDE_CODE_OAUTH_TOKEN in the environment", %{dir: dir} do
@@ -354,7 +374,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run([
+                 run_auth([
                    "login",
                    "--provider",
                    "anthropic",
@@ -381,7 +401,7 @@ defmodule Fermix.CLI.AuthCommandTest do
         Task.async(fn ->
           capture_err(fn ->
             status =
-              AuthCommand.run(["login", "--provider", "anthropic", "--setup-token", "sk-ant-x"])
+              run_auth(["login", "--provider", "anthropic", "--setup-token", "sk-ant-x"])
 
             send(parent, {:status, status})
           end)
@@ -405,7 +425,7 @@ defmodule Fermix.CLI.AuthCommandTest do
         if prior, do: System.put_env("CLAUDE_CODE_OAUTH_TOKEN", prior)
       end)
 
-      output = capture_err(fn -> AuthCommand.run(["login", "--provider", "anthropic"]) end)
+      output = capture_err(fn -> run_auth(["login", "--provider", "anthropic"]) end)
       assert output =~ "--setup-token"
       assert output =~ "CLAUDE_CODE_OAUTH_TOKEN"
     end
@@ -413,7 +433,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "status and logout target the anthropic_oauth profile", %{dir: dir} do
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run([
+                 run_auth([
                    "login",
                    "--provider",
                    "anthropic",
@@ -423,14 +443,14 @@ defmodule Fermix.CLI.AuthCommandTest do
                end)
 
       status_output =
-        capture_out(fn -> AuthCommand.run(["status", "--provider", "anthropic"]) end)
+        capture_out(fn -> run_auth(["status", "--provider", "anthropic"]) end)
 
       assert status_output =~ "provider: anthropic_oauth"
       assert status_output =~ "auth_mode: setup_token"
 
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run(["logout", "--provider", "anthropic"])
+                 run_auth(["logout", "--provider", "anthropic"])
                end)
 
       assert {:error, {:provider_missing, _}} =
@@ -439,7 +459,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
     test "rejects an unknown provider" do
       output =
-        capture_err(fn -> AuthCommand.run(["login", "--provider", "gemini"]) end)
+        capture_err(fn -> run_auth(["login", "--provider", "gemini"]) end)
 
       assert output =~ "unknown login provider"
     end
@@ -462,11 +482,11 @@ defmodule Fermix.CLI.AuthCommandTest do
           path
         )
 
-      status_output = capture_out(fn -> AuthCommand.run(["status", "--provider", "xai"]) end)
+      status_output = capture_out(fn -> run_auth(["status", "--provider", "xai"]) end)
       assert status_output =~ "provider: xai_oauth"
       assert status_output =~ "auth_mode: oauth_pkce"
 
-      assert 0 == capture_out_status(fn -> AuthCommand.run(["logout", "--provider", "xai"]) end)
+      assert 0 == capture_out_status(fn -> run_auth(["logout", "--provider", "xai"]) end)
       assert {:error, {:provider_missing, _}} = Store.read("xai_oauth", path)
     end
   end
@@ -475,7 +495,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "anthropic login sets config auth_mode to oauth; logout reverts to api_key" do
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run([
+                 run_auth([
                    "login",
                    "--provider",
                    "anthropic",
@@ -486,7 +506,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert provider_auth_mode(:anthropic) == :oauth
 
-      output = capture_out(fn -> AuthCommand.run(["logout", "--provider", "anthropic"]) end)
+      output = capture_out(fn -> run_auth(["logout", "--provider", "anthropic"]) end)
 
       # The route revert is a config change the daemon reads at start, so the
       # logout says when it lands, and names no CLI restart the app-managed
@@ -513,7 +533,7 @@ defmodule Fermix.CLI.AuthCommandTest do
           Path.join(dir, "auth.json")
         )
 
-      assert 0 == capture_out_status(fn -> AuthCommand.run(["logout", "--provider", "xai"]) end)
+      assert 0 == capture_out_status(fn -> run_auth(["logout", "--provider", "xai"]) end)
       assert provider_auth_mode(:xai) == :api_key
     end
   end
@@ -551,7 +571,7 @@ defmodule Fermix.CLI.AuthCommandTest do
     test "login and logout save the route with keychain calls inline" do
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run([
+                 run_auth([
                    "login",
                    "--provider",
                    "anthropic",
@@ -565,7 +585,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run(["logout", "--provider", "anthropic"])
+                 run_auth(["logout", "--provider", "anthropic"])
                end)
 
       assert_received {:tree_less_keychain, :get, :openai_api_key}
@@ -587,7 +607,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
       assert 0 ==
                capture_out_status(fn ->
-                 AuthCommand.run([
+                 run_auth([
                    "login",
                    "--provider",
                    "anthropic",
@@ -603,13 +623,13 @@ defmodule Fermix.CLI.AuthCommandTest do
 
   describe "auth (no args)" do
     test "prints usage and returns 2" do
-      assert 2 == capture_err_status(fn -> AuthCommand.run([]) end)
+      assert 2 == capture_err_status(fn -> run_auth([]) end)
     end
   end
 
   describe "auth (unknown subcommand)" do
     test "rejects" do
-      output = capture_err(fn -> AuthCommand.run(["wat"]) end)
+      output = capture_err(fn -> run_auth(["wat"]) end)
       assert output =~ "unknown subcommand: wat"
     end
   end
@@ -670,7 +690,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
   defp run_out(argv, seams) do
     parent = self()
-    output = capture_out(fn -> send(parent, {:status, AuthCommand.run(argv, seams)}) end)
+    output = capture_out(fn -> send(parent, {:status, run_auth(argv, seams)}) end)
     assert_received {:status, status}
     {status, output}
   end
@@ -680,7 +700,7 @@ defmodule Fermix.CLI.AuthCommandTest do
 
     stderr =
       capture_err(fn ->
-        capture_out(fn -> send(parent, {:status, AuthCommand.run(argv, seams)}) end)
+        capture_out(fn -> send(parent, {:status, run_auth(argv, seams)}) end)
       end)
 
     assert_received {:status, status}
@@ -705,6 +725,12 @@ defmodule Fermix.CLI.AuthCommandTest do
   defp restore_secret_writer(value), do: Application.put_env(:fermix_core, :secret_writer, value)
 
   defp kept_model(:openai_codex, []), do: {:ok, %{model: "gpt-plan-one", changed?: false}}
+
+  # How to restart is a host fact (an installed unit, a bound service, the
+  # app's marker), so every case pins it unless it asks for its own.
+  defp run_auth(argv, seams \\ []) do
+    AuthCommand.run(argv, Keyword.put_new(seams, :restart_route, fn -> {:service, :user} end))
+  end
 
   defp capture_out(fun), do: ExUnit.CaptureIO.capture_io(:stdio, fun)
 

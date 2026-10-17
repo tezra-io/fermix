@@ -2,11 +2,19 @@ defmodule FermixNif do
   @moduledoc """
   Native (C) NIFs for the `fermix` umbrella.
 
-  Currently exposes a single POSIX `kill(2)` process-group signal shim,
-  `kill_pgid/2`, used by the subprocess-lifecycle sweep. Delivering the signal
-  as a direct syscall (rather than spawning `kill`) is deliberate: the sweep
-  runs precisely during fd/process-table exhaustion, where spawning a helper
-  process would itself fail.
+  Exposes two POSIX shims:
+
+    * `kill_pgid/2`, a `kill(2)` process-group signal used by the
+      subprocess-lifecycle sweep. Delivering the signal as a direct syscall
+      (rather than spawning `kill`) is deliberate: the sweep runs precisely
+      during fd/process-table exhaustion, where spawning a helper process
+      would itself fail.
+    * `set_stdin_echo/1`, the terminal driver's ECHO flag on stdin, used by
+      the CLI's hidden secret entry. The ERTS a shipped binary runs is built
+      without termcap, so OTP's own no-echo mode answers `:enotsup` on every
+      terminal; a port child cannot change it either, because it has no
+      controlling terminal. The VM is in the terminal's foreground process
+      group, so it flips the flag itself.
 
   The NIF is built via `elixir_make` (already a hard build dependency through
   `exqlite`) — no Rust or Rustler toolchain is involved.
@@ -49,4 +57,28 @@ defmodule FermixNif do
   @spec kill_pgid_nif(pos_integer(), :sigterm | :sigkill) ::
           :ok | {:error, :esrch | :eperm | :einval | {:errno, integer()}}
   def kill_pgid_nif(_pgid, _signal), do: :erlang.nif_error(:nif_not_loaded)
+
+  @typedoc "Why the terminal's echo flag could not be read or changed."
+  @type echo_error :: :enotty | :ebadf | :eio | :eintr | {:errno, integer()}
+
+  @doc """
+  Turns the terminal driver's ECHO flag on stdin on (`true`) or off (`false`)
+  and answers whether echo was on before, so a caller can restore exactly what
+  it found.
+
+  Only ECHO changes. Canonical line editing stays on, so the kernel still
+  assembles the line (backspace works) and Enter still ends it; nothing typed
+  is echoed while the flag is off.
+
+  `{:error, :enotty}` means stdin is not a terminal. `{:error, :eio}` is a
+  process in an orphaned background group. Any other errno arrives as
+  `{:errno, n}`. A non-boolean argument is rejected with `FunctionClauseError`
+  before anything native runs.
+  """
+  @spec set_stdin_echo(boolean()) :: {:ok, boolean()} | {:error, echo_error()}
+  def set_stdin_echo(echo?) when is_boolean(echo?), do: set_stdin_echo_nif(echo?)
+
+  @doc false
+  @spec set_stdin_echo_nif(boolean()) :: {:ok, boolean()} | {:error, echo_error()}
+  def set_stdin_echo_nif(_echo?), do: :erlang.nif_error(:nif_not_loaded)
 end

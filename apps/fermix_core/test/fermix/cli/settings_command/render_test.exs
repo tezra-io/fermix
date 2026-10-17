@@ -325,7 +325,7 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
       assert text(Render.applied(result, "realtime", ["realtime_model"])) ==
                "Saved realtime: realtime_model, realtime_engine\n" <>
                  "The engine changed to GPT-Live.\n" <>
-                 "Restart to apply (fermix restart):\n" <>
+                 "Restart to apply:\n" <>
                  "  - Voice settings changed since Fermix started.\n" <>
                  "(rows in this section changed; run `fermix settings show realtime` to see them)\n"
     end
@@ -370,12 +370,14 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
       ]
     }
 
+    # How to restart is not the renderer's to know: the verb appends the hint
+    # for how this home's daemon runs (`RestartCommand.route/1`).
     test "secret set and clear name the id and the restart reasons" do
       result = %{"id" => "openai_api_key", "present" => true, "restart" => @restart}
 
       assert text(Render.secret(result, :set)) ==
                "Stored openai_api_key.\n" <>
-                 "Restart to apply (fermix restart):\n" <>
+                 "Restart to apply:\n" <>
                  "  - Provider settings changed since Fermix started.\n"
 
       cleared = %{
@@ -386,6 +388,54 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
 
       assert text(Render.secret(cleared, :clear)) == "Cleared brave_api_key.\n"
       assert Render.secret(%{"id" => "x"}, :set) == {:error, :invalid_reply}
+    end
+
+    test "a value the daemon's environment overrides names the variable in use" do
+      result = %{
+        "id" => "anthropic_api_key",
+        "present" => true,
+        "restart" => @restart,
+        "environment_override" => "ANTHROPIC_API_KEY"
+      }
+
+      assert text(Render.secret(result, :set)) ==
+               "Stored anthropic_api_key.\n" <>
+                 "The daemon uses ANTHROPIC_API_KEY from its environment instead of the stored " <>
+                 "value. Start it without that variable to use what is stored here.\n" <>
+                 "Restart to apply:\n" <>
+                 "  - Provider settings changed since Fermix started.\n"
+
+      cleared = %{
+        result
+        | "present" => false,
+          "restart" => %{"required" => false, "reasons" => []}
+      }
+
+      assert text(Render.secret(cleared, :clear)) ==
+               "Cleared anthropic_api_key.\n" <>
+                 "The daemon keeps using ANTHROPIC_API_KEY from its environment.\n"
+    end
+
+    # An older daemon omits the field and a current one sends null: both say
+    # nothing. Anything else is not a variable name and is refused.
+    test "an absent or null override says nothing and any other value is invalid" do
+      result = %{"id" => "openai_api_key", "present" => true, "restart" => @restart}
+
+      assert Render.secret(result, :set) ==
+               Render.secret(Map.put(result, "environment_override", nil), :set)
+
+      assert Render.secret(Map.put(result, "environment_override", 7), :set) ==
+               {:error, :invalid_reply}
+
+      assert Render.secret(Map.put(result, "environment_override", ""), :set) ==
+               {:error, :invalid_reply}
+    end
+
+    test "restart_needed?/1 is true exactly when the result asks for a restart" do
+      assert Render.restart_needed?(%{"restart" => @restart})
+      assert Render.restart_needed?(%{"restart" => %{"required" => true, "reasons" => []}})
+      refute Render.restart_needed?(%{"restart" => %{"required" => false, "reasons" => []}})
+      refute Render.restart_needed?(%{})
     end
 
     test "providers prints the configured and primary columns" do
@@ -419,7 +469,7 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
 
       assert text(Render.primary(result, "openai")) ==
                "Primary provider is now openai.\n" <>
-                 "Restart to apply (fermix restart):\n" <>
+                 "Restart to apply:\n" <>
                  "  - Provider settings changed since Fermix started.\n"
     end
 
@@ -433,7 +483,7 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
 
       assert text(Render.reload(result)) ==
                "Reloaded settings from disk.\n" <>
-                 "Restart to apply (fermix restart):\n" <>
+                 "Restart to apply:\n" <>
                  "  - Provider settings changed since Fermix started.\n"
 
       assert text(Render.reload(%{result | "config_state" => "external_change"})) =~
@@ -530,24 +580,28 @@ defmodule Fermix.CLI.SettingsCommand.RenderTest do
                   remedy}
     end
 
+    # The remedy is a restart, and the verb appends how for this home's daemon.
     test "a daemon that predates the method or protocol is told to restart" do
-      assert Render.error(
-               mgmt("method_not_found", %{"method" => "settings.apply", "requires" => 2}),
-               @read
-             ) ==
-               {1,
-                "the running daemon is older than this fermix and has no settings.apply.\n" <>
-                  "Restart it with `fermix restart`."}
+      method_not_found =
+        mgmt("method_not_found", %{"method" => "settings.apply", "requires" => 2})
+
+      assert Render.error(method_not_found, @read) ==
+               {1, "the running daemon is older than this fermix and has no settings.apply."}
 
       assert Render.error(mgmt("client_too_old", %{"minimum_version" => 3}), @read) ==
                {1,
-                "the running daemon does not speak this fermix's management protocol.\n" <>
-                  "Restart it with `fermix restart` so both run the same version."}
+                "the running daemon does not speak this fermix's management protocol, " <>
+                  "so both have to run the same version."}
 
       assert Render.error(mgmt("daemon_too_old", %{}), @read) ==
-               {1,
-                "the running daemon is older than this fermix's management protocol.\n" <>
-                  "Restart it with `fermix restart`."}
+               {1, "the running daemon is older than this fermix's management protocol."}
+
+      for code <- ~w(method_not_found client_too_old daemon_too_old) do
+        assert Render.restart_remedy?(mgmt(code, %{}))
+      end
+
+      refute Render.restart_remedy?(mgmt("external_change", %{}))
+      refute Render.restart_remedy?(:not_running)
     end
 
     test "busy and unavailable use the daemon's protocol message" do

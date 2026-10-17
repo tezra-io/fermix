@@ -1,15 +1,24 @@
 // C NIF for fermix_nif. First native code in this app.
 //
-// Exposes one POSIX kill(2) process-group signal shim used by the
-// subprocess-lifecycle sweep. The sweep must not allocate an OS process
-// (spawning `kill` fails precisely under the fd/process-table exhaustion the
-// sweep exists to contain), so the signal is delivered by a direct syscall.
+// Exposes two POSIX shims:
+//
+//   * kill(2) on a process group, used by the subprocess-lifecycle sweep. The
+//     sweep must not allocate an OS process (spawning `kill` fails precisely
+//     under the fd/process-table exhaustion the sweep exists to contain), so
+//     the signal is delivered by a direct syscall.
+//   * the terminal driver's ECHO flag on stdin, used by the CLI's hidden
+//     secret entry. The ERTS a shipped binary runs is built without termcap,
+//     so OTP's own no-echo mode (`shell:start_interactive({noshell, raw})`)
+//     answers enotsup on every terminal, and a port child cannot do it either:
+//     it has no controlling terminal and sits in its own process group. The
+//     VM itself is in the terminal's foreground group, so it flips the flag.
 
-// kill(2) is POSIX, not ISO C: request the POSIX.1-2008 declarations so
-// <signal.h> declares it under -std=c99. The release build's zig cross-compile
-// for aarch64-linux hard-errors on the implicit declaration otherwise (native
-// macOS headers are lenient), which broke the v0.6.0 release build. Must precede
-// every #include so the feature macro is set before the system headers load.
+// kill(2) and the termios calls are POSIX, not ISO C: request the POSIX.1-2008
+// declarations so the headers declare them under -std=c99. The release build's
+// zig cross-compile for aarch64-linux hard-errors on an implicit declaration
+// (native macOS headers are lenient), which broke the v0.6.0 release build.
+// Must precede every #include so the feature macro is set before the system
+// headers load.
 #define _POSIX_C_SOURCE 200809L
 
 #include <erl_nif.h>
@@ -17,6 +26,8 @@
 #include <errno.h>
 #include <string.h>
 #include <sys/types.h>
+#include <termios.h>
+#include <unistd.h>
 
 static ERL_NIF_TERM mk_atom(ErlNifEnv *env, const char *name)
 {
@@ -79,8 +90,74 @@ static ERL_NIF_TERM kill_pgid_nif(ErlNifEnv *env, int argc,
     }
 }
 
+static ERL_NIF_TERM errno_error(ErlNifEnv *env, int err)
+{
+    switch (err) {
+    case ENOTTY:
+        return mk_error(env, mk_atom(env, "enotty"));
+    case EBADF:
+        return mk_error(env, mk_atom(env, "ebadf"));
+    case EIO:
+        return mk_error(env, mk_atom(env, "eio"));
+    case EINTR:
+        return mk_error(env, mk_atom(env, "eintr"));
+    default:
+        return mk_error(env, enif_make_tuple2(env, mk_atom(env, "errno"),
+                                              enif_make_int(env, err)));
+    }
+}
+
+// set_stdin_echo_nif(echo) -> {:ok, previous_echo} | {:error, reason}
+//
+// Turns the terminal driver's ECHO flag on stdin on or off and answers whether
+// it was on before, so the caller restores exactly what it found. Only ECHO
+// moves: canonical line editing stays on, so the kernel still assembles the
+// line and Enter still ends it. Callers reach this only through
+// FermixNif.set_stdin_echo/1, whose guard has already asserted a boolean.
+static ERL_NIF_TERM set_stdin_echo_nif(ErlNifEnv *env, int argc,
+                                       const ERL_NIF_TERM argv[])
+{
+    struct termios mode;
+    char echo_atom[8];
+    int echo;
+    int previous;
+
+    if (argc != 1 || !enif_get_atom(env, argv[0], echo_atom, sizeof(echo_atom),
+                                    ERL_NIF_LATIN1)) {
+        return enif_make_badarg(env);
+    }
+
+    if (strcmp(echo_atom, "true") == 0) {
+        echo = 1;
+    } else if (strcmp(echo_atom, "false") == 0) {
+        echo = 0;
+    } else {
+        return enif_make_badarg(env);
+    }
+
+    if (tcgetattr(STDIN_FILENO, &mode) != 0) {
+        return errno_error(env, errno);
+    }
+
+    previous = (mode.c_lflag & ECHO) != 0;
+
+    if (echo) {
+        mode.c_lflag |= ECHO;
+    } else {
+        mode.c_lflag &= ~(tcflag_t)ECHO;
+    }
+
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &mode) != 0) {
+        return errno_error(env, errno);
+    }
+
+    return enif_make_tuple2(env, mk_atom(env, "ok"),
+                            mk_atom(env, previous ? "true" : "false"));
+}
+
 static ErlNifFunc nif_funcs[] = {
     {"kill_pgid_nif", 2, kill_pgid_nif, 0},
+    {"set_stdin_echo_nif", 1, set_stdin_echo_nif, 0},
 };
 
 // Hot-code-upgrade acceptance. A dev recompile under a live daemon hot-swaps

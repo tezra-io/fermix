@@ -133,6 +133,117 @@ defmodule Fermix.CLI.RestartCommandTest do
     assert stderr =~ "unexpected argument: now"
   end
 
+  # The 0.15.0 report: a packaged engine run in the foreground with `fermix
+  # run` was told "Restart to apply (fermix restart)", and `fermix restart`
+  # refused because no service was bound. A hint names a restart that works for
+  # how this home's daemon actually runs, from the facts `run/2` acts on.
+  describe "route/1 and hint/1" do
+    defmodule StandaloneBuildInfo do
+      @moduledoc false
+      def distribution_identity, do: "standalone"
+      def app_engine?, do: false
+    end
+
+    defmodule AppEngineBuildInfo do
+      @moduledoc false
+      def distribution_identity, do: "macos_app"
+      def app_engine?, do: true
+    end
+
+    defmodule InstalledService do
+      @moduledoc false
+      def installed?(scope, _opts), do: scope in Process.get(:installed_scopes, [])
+    end
+
+    defmodule HomeOwnedBy do
+      @moduledoc false
+      def app_managed?(_opts), do: Process.get(:app_managed?, false)
+    end
+
+    test "a packaged engine with no bound service runs in the foreground" do
+      installed([])
+      assert route(PackagedBuildInfo) == :foreground
+    end
+
+    test "a packaged engine with its service set up restarts through it" do
+      installed([:user])
+      assert route(PackagedBuildInfo) == {:service, :user}
+    end
+
+    test "a standalone engine restarts through whichever scope is installed" do
+      installed([:user, :system])
+      assert route(StandaloneBuildInfo) == {:service, :user}
+
+      installed([:system])
+      assert route(StandaloneBuildInfo) == {:service, :system}
+
+      installed([])
+      assert route(StandaloneBuildInfo) == :foreground
+    end
+
+    test "an app engine restarts through the app" do
+      installed([:user])
+      assert route(AppEngineBuildInfo) == :app
+    end
+
+    # A formula binary pointed at a home the app runs: the app owns the daemon,
+    # so the hint never sends the operator to `fermix run`.
+    test "a home the app manages restarts through the app" do
+      installed([])
+      Process.put(:app_managed?, true)
+      assert route(StandaloneBuildInfo) == :app
+    end
+
+    test "each route names a restart that works for it" do
+      assert RestartCommand.hint({:service, :user}) == "Restart it with `fermix restart`."
+
+      assert RestartCommand.hint({:service, :system}) ==
+               "Restart it with `fermix restart --system`."
+
+      assert RestartCommand.hint(:app) =~ "Fermix app"
+
+      foreground = RestartCommand.hint(:foreground)
+      assert foreground =~ "`fermix run`"
+      assert foreground =~ "cannot restart it"
+      refute foreground =~ "Restart it with `fermix restart`"
+    end
+
+    defmodule UnaskedHomeOwner do
+      @moduledoc false
+      def app_managed?(_opts), do: raise("the home owner was asked again")
+    end
+
+    # `fermix settings` has already asked whether the app manages this home
+    # before it talks to the daemon; its restart hint must not ask again.
+    test "a caller that already knows the home's owner is not asked again" do
+      installed([])
+
+      assert RestartCommand.route(
+               build_info: StandaloneBuildInfo,
+               service: InstalledService,
+               home_owner: UnaskedHomeOwner,
+               app_managed?: false
+             ) == :foreground
+
+      assert RestartCommand.route(
+               build_info: StandaloneBuildInfo,
+               service: InstalledService,
+               home_owner: UnaskedHomeOwner,
+               app_managed?: true
+             ) == :app
+    end
+
+    defp installed(scopes), do: Process.put(:installed_scopes, scopes)
+
+    defp route(build_info),
+      do:
+        RestartCommand.route(
+          build_info: build_info,
+          service: InstalledService,
+          home_owner: HomeOwnedBy
+        )
+  end
+
   defp run(argv, deps), do: RestartCommand.run(argv, deps)
 
   defp answering(result) do

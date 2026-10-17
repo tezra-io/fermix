@@ -6,6 +6,8 @@
 
 CC ?= cc
 CFLAGS ?= -O2
+# ci.yml's disclaim-shim job compiles fermix_nif.c with zig for every release
+# target under these flags plus -Wextra -Werror; keep its flags a superset.
 CFLAGS += -Wall -std=c99 -I"$(ERTS_INCLUDE_DIR)"
 
 PREFIX = $(MIX_APP_PATH)/priv

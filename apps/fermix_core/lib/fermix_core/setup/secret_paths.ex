@@ -10,6 +10,7 @@ defmodule FermixCore.Setup.SecretPaths do
           optional(:functionality) => String.t(),
           optional(:optional?) => boolean(),
           optional(:sandbox_env) => boolean(),
+          optional(:env_overlay) => boolean(),
           optional(:plugin) => String.t()
         }
 
@@ -17,36 +18,42 @@ defmodule FermixCore.Setup.SecretPaths do
     %{
       key: :openai_api_key,
       env: "OPENAI_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :openai, :api_key],
       sandbox_env: true
     },
     %{
       key: :anthropic_api_key,
       env: "ANTHROPIC_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :anthropic, :api_key],
       sandbox_env: true
     },
     %{
       key: :xai_api_key,
       env: "XAI_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :xai, :api_key],
       sandbox_env: true
     },
     %{
       key: :openrouter_api_key,
       env: "OPENROUTER_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :openrouter, :api_key],
       sandbox_env: true
     },
     %{
       key: :mistral_api_key,
       env: "MISTRAL_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :mistral, :api_key],
       sandbox_env: true
     },
     %{
       key: :venice_api_key,
       env: "VENICE_API_KEY",
+      env_overlay: true,
       path: [:fermix_core, :providers, :venice, :api_key],
       sandbox_env: true
     },
@@ -184,36 +191,43 @@ defmodule FermixCore.Setup.SecretPaths do
     %{
       key: :whatsapp_access_token,
       env: "WHATSAPP_ACCESS_TOKEN",
+      env_overlay: true,
       path: [:fermix_channels, :whatsapp, :access_token]
     },
     %{
       key: :whatsapp_verify_token,
       env: "WHATSAPP_VERIFY_TOKEN",
+      env_overlay: true,
       path: [:fermix_channels, :whatsapp, :verify_token]
     },
     %{
       key: :whatsapp_app_secret,
       env: "WHATSAPP_APP_SECRET",
+      env_overlay: true,
       path: [:fermix_channels, :whatsapp, :app_secret]
     },
     %{
       key: :discord_bot_token,
       env: "DISCORD_BOT_TOKEN",
+      env_overlay: true,
       path: [:fermix_channels, :discord, :bot_token]
     },
     %{
       key: :slack_bot_token,
       env: "SLACK_BOT_TOKEN",
+      env_overlay: true,
       path: [:fermix_channels, :slack, :bot_token]
     },
     %{
       key: :slack_signing_secret,
       env: "SLACK_SIGNING_SECRET",
+      env_overlay: true,
       path: [:fermix_channels, :slack, :signing_secret]
     },
     %{
       key: :mobile_apns_key,
       env: "FERMIX_APNS_KEY",
+      env_overlay: true,
       path: [:fermix_channels, :mobile, :push, :key],
       functionality: "Mobile APNs push",
       optional?: true,
@@ -254,6 +268,25 @@ defmodule FermixCore.Setup.SecretPaths do
 
   @spec all() :: [secret()]
   def all, do: @secrets
+
+  @doc """
+  The environment variable the daemon uses instead of the stored value of
+  `key`, or `nil` when the stored value is the one in use.
+
+  `config/runtime.exs` layers a variable over the stored value at every start
+  for each entry marked `env_overlay`, and a blank variable counts as unset.
+  For every other entry `env` is only the label the value is stored under, so
+  an exported variable of that name overrides nothing. `get_env` is the
+  environment the answer is about, `System.get_env/1` for this process.
+  """
+  @spec env_override(atom(), (String.t() -> String.t() | nil)) :: String.t() | nil
+  def env_override(key, get_env \\ &System.get_env/1)
+      when is_atom(key) and is_function(get_env, 1) do
+    secret = fetch!(key)
+
+    if Map.get(secret, :env_overlay, false) and get_env.(secret.env) not in [nil, ""],
+      do: secret.env
+  end
 
   @spec fetch!(atom()) :: secret()
   def fetch!(key) when is_atom(key) do

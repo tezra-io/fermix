@@ -5,7 +5,9 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   Each renderer validates the reply it reads and answers `{:ok, iodata}` or
   `{:error, :invalid_reply}`, so a malformed reply is refused rather than half
   printed. `error/2` maps a failure to `{exit_code, sentence}`; the caller adds
-  the `fermix settings ...:` prefix.
+  the `fermix settings ...:` prefix. How to restart the daemon is not this
+  module's to know: `restart_needed?/1` and `restart_remedy?/1` tell the caller
+  when to append `RestartCommand.hint/1` for how this home's daemon runs.
 
   Every daemon-sourced string shown to a person is scrubbed of C0, DEL and C1
   control characters (U+009B is a one-codepoint CSI a terminal honours like
@@ -29,7 +31,6 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   @file_store_remedy "On a machine with no desktop session to unlock it, " <>
                        "store secrets in the file store instead:\n" <>
                        "  fermix settings set secrets secret_store=file"
-  @restart_hint "Restart it with `fermix restart`."
   @local_codes [
     :not_running,
     :timeout,
@@ -113,16 +114,35 @@ defmodule Fermix.CLI.SettingsCommand.Render do
 
   def applied(_result, _section, _sent), do: invalid()
 
-  @doc "A secret.set or secret.clear result."
+  @doc """
+  A secret.set or secret.clear result, and the environment variable the daemon
+  uses in place of the stored value when the result names one. An older daemon
+  omits `environment_override`, which renders as no override.
+  """
   @spec secret(map(), :set | :clear) :: rendered()
-  def secret(%{"id" => id, "present" => present, "restart" => restart}, action)
+  def secret(%{"id" => id, "present" => present, "restart" => restart} = result, action)
       when is_binary(id) and is_boolean(present) and action in [:set, :clear] do
-    with {:ok, restart_lines} <- restart(restart) do
-      {:ok, [secret_verb(action), " ", safe(id), ".\n", restart_lines]}
+    with {:ok, override_lines} <- override(Map.get(result, "environment_override"), action),
+         {:ok, restart_lines} <- restart(restart) do
+      {:ok, [secret_verb(action), " ", safe(id), ".\n", override_lines, restart_lines]}
     end
   end
 
   def secret(_result, _action), do: invalid()
+
+  @doc "Whether a write result asks for a restart, so the caller appends how."
+  @spec restart_needed?(map()) :: boolean()
+  def restart_needed?(%{"restart" => %{"required" => true}}), do: true
+  def restart_needed?(%{"restart" => %{"reasons" => [_ | _]}}), do: true
+  def restart_needed?(_result), do: false
+
+  @doc "Whether a failure's remedy is restarting the daemon, so the caller appends how."
+  @spec restart_remedy?(term()) :: boolean()
+  def restart_remedy?({:management_error, code, _message, _details})
+      when code in ["method_not_found", "client_too_old", "daemon_too_old"],
+      do: true
+
+  def restart_remedy?(_reason), do: false
 
   @doc "setup.state.get's providers as a PROVIDER/NAME/CONFIGURED/PRIMARY table."
   @spec providers(map()) :: rendered()
@@ -357,14 +377,30 @@ defmodule Fermix.CLI.SettingsCommand.Render do
   defp reason?(_reason), do: false
 
   defp restart_lines(false, []), do: []
-  defp restart_lines(true, []), do: ["Restart to apply (fermix restart).\n"]
+  defp restart_lines(true, []), do: ["Restart to apply.\n"]
 
   defp restart_lines(_required, reasons) do
-    [
-      "Restart to apply (fermix restart):\n"
-      | Enum.map(reasons, &["  - ", safe(&1["sentence"]), "\n"])
-    ]
+    ["Restart to apply:\n" | Enum.map(reasons, &["  - ", safe(&1["sentence"]), "\n"])]
   end
+
+  # The variable is a name the daemon chose from its own registry, scrubbed
+  # like every daemon string; an empty or non-string name is no name at all.
+  defp override(nil, _action), do: {:ok, []}
+
+  defp override(name, :set) when is_binary(name) and name != "" do
+    {:ok,
+     [
+       "The daemon uses ",
+       safe(name),
+       " from its environment instead of the stored value. ",
+       "Start it without that variable to use what is stored here.\n"
+     ]}
+  end
+
+  defp override(name, :clear) when is_binary(name) and name != "",
+    do: {:ok, ["The daemon keeps using ", safe(name), " from its environment.\n"]}
+
+  defp override(_name, _action), do: invalid()
 
   defp readiness(%{"status" => "ready"}), do: {:ok, []}
 
@@ -492,20 +528,18 @@ defmodule Fermix.CLI.SettingsCommand.Render do
     do: "the secret could not be stored (#{safe(reason)}); nothing was stored."
 
   defp version_skew("method_not_found", %{"method" => method}) when is_binary(method),
-    do:
-      "the running daemon is older than this fermix and has no #{safe(method)}.\n" <>
-        @restart_hint
+    do: "the running daemon is older than this fermix and has no #{safe(method)}."
 
   defp version_skew("method_not_found", _details),
-    do: "the running daemon is older than this fermix.\n" <> @restart_hint
+    do: "the running daemon is older than this fermix."
 
   defp version_skew("client_too_old", _details) do
-    "the running daemon does not speak this fermix's management protocol.\n" <>
-      "Restart it with `fermix restart` so both run the same version."
+    "the running daemon does not speak this fermix's management protocol, " <>
+      "so both have to run the same version."
   end
 
   defp version_skew("daemon_too_old", _details),
-    do: "the running daemon is older than this fermix's management protocol.\n" <> @restart_hint
+    do: "the running daemon is older than this fermix's management protocol."
 
   # A receive timeout is ambiguous: the daemon may still finish the write, so a
   # write never reads as "not saved".

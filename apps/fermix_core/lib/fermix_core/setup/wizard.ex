@@ -44,6 +44,9 @@ defmodule FermixCore.Setup.Wizard do
           | {:mistral_api_key, String.t()}
           | {:venice_api_key, String.t()}
           | {:ollama_base_url, String.t()}
+          | {:openai_base_url, String.t()}
+          | {:anthropic_base_url, String.t()}
+          | {:xai_base_url, String.t()}
           | {:anthropic_auth_mode, auth_mode() | String.t()}
           | {:xai_auth_mode, auth_mode() | String.t()}
           | {:provider, provider() | String.t()}
@@ -121,6 +124,15 @@ defmodule FermixCore.Setup.Wizard do
   @provider_auth_mode_keys FermixCore.Providers.Descriptor.all()
                            |> Enum.filter(&FermixCore.Providers.Descriptor.multi_auth_mode?/1)
                            |> Enum.map(&{&1.id, :"#{&1.id}_auth_mode"})
+
+  # The hosted providers whose `base_url` setup writes from a flag
+  # (`fermix setup --openai-base-url` and its two siblings), to point one at a
+  # relay. They are not descriptor setup fields, so no question asks for them.
+  @base_url_answer_keys [
+    openai_base_url: :openai,
+    anthropic_base_url: :anthropic,
+    xai_base_url: :xai
+  ]
 
   @realtime_true_values ~w(true yes y 1)
   @realtime_false_values ~w(false no n 0)
@@ -769,6 +781,7 @@ defmodule FermixCore.Setup.Wizard do
       state.config_snapshot
       |> drop_unanswered_env_only_secrets(answers)
       |> put_provider_field_answers(answers)
+      |> put_provider_base_url_answers(answers)
       |> put_provider_auth_mode_answers(answers)
       |> put_primary_selection(Keyword.get(answers, :provider))
       |> maybe_promote_newly_configured(blank?(Keyword.get(answers, :provider)))
@@ -933,19 +946,31 @@ defmodule FermixCore.Setup.Wizard do
 
   A keyring failure is returned, never logged and swallowed: the operator typed
   a new credential and has to be told it did not land.
+
+  The settings file's write guard (`RestartState.writable/0`) runs before the
+  store is asked, so a write refused for an outside edit changes nothing: the
+  refusal says nothing was saved, and the stored value stays the one it was.
   """
   @spec put_secret(atom(), String.t()) ::
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def put_secret(key, value) when is_atom(key) and is_binary(value) and value != "" do
     secret = SecretPaths.fetch!(key)
-    verdict = SecretWriter.probe()
 
-    # The store is asked first, as every other writer asks it: a store with
-    # nothing to answer is refused with its verdict, and a locked keyring gets
-    # the write, which raises the unlock prompt for the person saving.
-    with :ok <- attemptable_or_verdict(key, verdict),
-         :ok <- SecretWriteLog.put(key, value) do
+    # The guard `commit_snapshot/2` consults, asked before the store is touched,
+    # so a refusal never follows a write it reports as not made.
+    with :ok <- RestartState.writable(),
+         :ok <- store_secret(key, value) do
       commit_secret_reference(secret, SecretWriter.current_sentinel())
+    end
+  end
+
+  # The store is asked first, as every other writer asks it: a store with
+  # nothing to answer is refused with its verdict, and a locked keyring gets
+  # the write, which raises the unlock prompt for the person saving.
+  defp store_secret(key, value) do
+    with :ok <- attemptable_or_verdict(key, SecretWriter.probe()),
+         :ok <- SecretWriteLog.put(key, value) do
+      :ok
     else
       {:error, {:secret_store_failed, _key, _reason} = failure} -> {:error, failure}
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
@@ -1021,15 +1046,24 @@ defmodule FermixCore.Setup.Wizard do
 
   Keyring first is the order that cannot orphan a credential. A helper failure
   is reported rather than followed by dropping the reference, which would leave
-  the value on the machine with nothing naming it.
+  the value on the machine with nothing naming it. The settings file's write
+  guard runs before either, so a forget refused for an outside edit deletes
+  nothing and leaves no reference pointing at a deleted item.
   """
   @spec clear_secret(atom()) ::
           {:ok, report()} | {:error, {:secret_store_failed, atom(), term()} | term()}
   def clear_secret(key) when is_atom(key) do
     secret = SecretPaths.fetch!(key)
 
+    with :ok <- RestartState.writable(),
+         :ok <- delete_secret(key) do
+      commit_secret_reference(secret, nil)
+    end
+  end
+
+  defp delete_secret(key) do
     case SecretWriter.delete(key) do
-      :ok -> commit_secret_reference(secret, nil)
+      :ok -> :ok
       {:error, reason} -> {:error, {:secret_store_failed, key, reason}}
     end
   end
@@ -1398,6 +1432,61 @@ defmodule FermixCore.Setup.Wizard do
       "" -> snapshot
       trimmed -> update_provider_block(snapshot, provider, field.config_key, trimmed)
     end
+  end
+
+  # One writer per base URL answer, into that provider's own block whichever
+  # provider is primary. An absent answer changes nothing; a value
+  # `base_url_refusal/1` refuses raises with its sentence before anything is
+  # saved. The value is written trimmed, otherwise as given.
+  defp put_provider_base_url_answers(snapshot, answers) do
+    Enum.reduce(@base_url_answer_keys, snapshot, fn {key, provider}, acc ->
+      case Keyword.get(answers, key) do
+        nil -> acc
+        value -> update_provider_block(acc, provider, :base_url, valid_base_url!(key, value))
+      end
+    end)
+  end
+
+  defp valid_base_url!(key, value) do
+    case base_url_refusal([{key, value}]) do
+      nil -> String.trim(value)
+      sentence -> raise ArgumentError, sentence
+    end
+  end
+
+  @doc """
+  The sentence refusing the first provider base URL answer in `answers`
+  (`openai_base_url`, `anthropic_base_url`, `xai_base_url`) that is not an
+  absolute `http://` or `https://` URL with a host, or `nil` when every one
+  given is. An absent or `nil` answer is not checked. `fermix setup` asks this
+  before it writes anything, so a refused flag leaves the settings file as it
+  was. The sentence does not repeat the value.
+  """
+  @spec base_url_refusal(keyword()) :: String.t() | nil
+  def base_url_refusal(answers) when is_list(answers) do
+    Enum.find_value(@base_url_answer_keys, fn {key, provider} ->
+      value = Keyword.get(answers, key)
+      if is_nil(value) or http_url?(value), do: nil, else: base_url_sentence(key, provider)
+    end)
+  end
+
+  defp http_url?(value) when is_binary(value) do
+    case URI.new(String.trim(value)) do
+      {:ok, %URI{scheme: scheme, host: host}} ->
+        scheme in ["http", "https"] and host not in [nil, ""]
+
+      {:error, _part} ->
+        false
+    end
+  end
+
+  defp http_url?(_value), do: false
+
+  defp base_url_sentence(key, provider) do
+    flag = key |> Atom.to_string() |> String.replace("_", "-")
+
+    "--#{flag} must be an absolute http:// or https:// URL with a host, such as " <>
+      "#{Descriptor.fetch!(provider).default_base_url}."
   end
 
   defp put_provider_auth_mode_answers(snapshot, answers) do

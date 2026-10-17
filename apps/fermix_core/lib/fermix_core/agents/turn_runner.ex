@@ -53,6 +53,7 @@ defmodule FermixCore.Agents.TurnRunner do
   alias FermixCore.Providers.RouteResolver
   alias FermixCore.Realtime.RecentCalls
   alias FermixCore.Reply
+  alias FermixCore.Setup.SecretPaths
   alias FermixCore.Telemetry
   alias FermixCore.Tools.HarnessSupport
 
@@ -283,45 +284,55 @@ defmodule FermixCore.Agents.TurnRunner do
   `:chat`) only picks the variant whose advice fits where the reply is read. A
   `{:context_recovery_failed, reason}` (the in-loop compression call failed)
   prefixes the inner reason's own reply, so a provider sentence rides along.
-  Raises `ArgumentError` on an unknown option or surface.
+  `get_env:` (default `System.get_env/1`) is the daemon's environment, which an
+  API-key auth failure reads to name a key that came from it rather than from
+  the store. Raises `ArgumentError` on an unknown option or surface.
   """
   @spec error_reply(term()) :: String.t()
-  @spec error_reply(term(), [{:surface, reply_surface()}]) :: String.t()
+  @spec error_reply(term(), [
+          {:surface, reply_surface()} | {:get_env, (String.t() -> String.t() | nil)}
+        ]) :: String.t()
   def error_reply(reason, opts \\ []) when is_list(opts) do
-    reply_for(reason, reply_surface!(opts))
+    reply_for(reason, reply_context!(opts))
   end
 
-  defp reply_surface!(opts) do
-    case Keyword.validate!(opts, surface: :chat)[:surface] do
-      surface when surface in [:chat, :job] ->
-        surface
+  defp reply_context!(opts) do
+    opts = Keyword.validate!(opts, surface: :chat, get_env: &System.get_env/1)
 
-      other ->
-        raise ArgumentError, "error_reply surface must be :chat or :job, got: #{inspect(other)}"
+    case {opts[:surface], opts[:get_env]} do
+      {surface, get_env} when surface in [:chat, :job] and is_function(get_env, 1) ->
+        %{surface: surface, get_env: get_env}
+
+      {surface, _get_env} when surface not in [:chat, :job] ->
+        raise ArgumentError, "error_reply surface must be :chat or :job, got: #{inspect(surface)}"
+
+      {_surface, other} ->
+        raise ArgumentError,
+              "error_reply get_env must be a 1-arity function, got: #{inspect(other)}"
     end
   end
 
-  defp reply_for({:all_routes_failed, [{_provider, _reason} | _rest] = attempted}, surface) do
+  defp reply_for({:all_routes_failed, [{_provider, _reason} | _rest] = attempted}, ctx) do
     providers = Enum.map_join(attempted, ", ", fn {provider, _reason} -> to_string(provider) end)
     {_last_provider, last_reason} = List.last(attempted)
 
     "All configured providers failed (tried: #{providers}). Last error: " <>
-      reply_for(last_reason, surface)
+      reply_for(last_reason, ctx)
   end
 
   # A route that cannot take a part of the turn (M67): failover tried the rest
   # of the chain first, so this sentence shows only when none could.
-  defp reply_for({:attachment_unsupported, :image, provider, model}, _surface) do
+  defp reply_for({:attachment_unsupported, :image, provider, model}, _ctx) do
     "That message includes an image, but the current model (#{provider}/#{model}) can't accept " <>
       "images. Switch to a vision-capable model, or send text only."
   end
 
-  defp reply_for({:attachment_unsupported, {:image_format, mime}, provider, model}, _surface) do
+  defp reply_for({:attachment_unsupported, {:image_format, mime}, provider, model}, _ctx) do
     "That message includes a #{mime} picture, which the current model (#{provider}/#{model}) " <>
       "can't accept. Send it as a JPEG or PNG, or switch models."
   end
 
-  defp reply_for({:attachment_unsupported, :document, provider, model}, _surface) do
+  defp reply_for({:attachment_unsupported, :document, provider, model}, _ctx) do
     readers =
       Descriptor.all()
       |> Enum.filter(& &1.documents?)
@@ -333,28 +344,28 @@ defmodule FermixCore.Agents.TurnRunner do
 
   # The summarizer's own refusals are atoms (`:empty_summary`, `:too_deep`)
   # with no sentence of their own; a provider reason gets its reply.
-  defp reply_for({:context_recovery_failed, reason}, _surface) when is_atom(reason) do
+  defp reply_for({:context_recovery_failed, reason}, _ctx) when is_atom(reason) do
     "The context filled and I couldn't compress earlier results " <>
       "(the summarizer returned nothing usable: #{reason})."
   end
 
-  defp reply_for({:context_recovery_failed, reason}, surface) do
-    "The context filled and I couldn't compress earlier results: " <> reply_for(reason, surface)
+  defp reply_for({:context_recovery_failed, reason}, ctx) do
+    "The context filled and I couldn't compress earlier results: " <> reply_for(reason, ctx)
   end
 
-  defp reply_for(:context_overflow_after_compaction, surface),
-    do: overflow_after_compaction_reply(surface)
+  defp reply_for(:context_overflow_after_compaction, ctx),
+    do: overflow_after_compaction_reply(ctx.surface)
 
-  defp reply_for(reason, surface) do
+  defp reply_for(reason, ctx) do
     cond do
       context_length_error?(reason) ->
-        context_length_reply(surface)
+        context_length_reply(ctx.surface)
 
       reply = chatgpt_plan_reply(reason) ->
         reply
 
       auth_error?(reason) ->
-        auth_reply(reason)
+        auth_reply(reason, ctx.get_env)
 
       max_iterations_error?(reason) ->
         "I hit the investigation step limit before finishing that request. " <>
@@ -364,7 +375,7 @@ defmodule FermixCore.Agents.TurnRunner do
         reply
 
       true ->
-        generic_reply(surface)
+        generic_reply(ctx.surface)
     end
   end
 
@@ -931,43 +942,65 @@ defmodule FermixCore.Agents.TurnRunner do
   # The hint keys on how the route authenticates: subscription OAuth gets a
   # reconnect verb, API-key modes get key advice, and Codex-shaped reasons
   # (token errors, refresh failures, bare strings) keep `fermix auth login`.
-  defp auth_reply({:provider_error, %{provider: :anthropic, auth_mode: :oauth}}) do
+  defp auth_reply({:provider_error, %{provider: :anthropic, auth_mode: :oauth}}, _get_env) do
     "Claude subscription authentication failed — reconnect with " <>
       "`fermix auth login --provider anthropic` and retry."
   end
 
   # xAI 403 in OAuth mode is tier/entitlement denial, not a stale token —
   # re-login won't fix it (design doc §6.5).
-  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}) do
+  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth, status: 403}}, _get_env) do
     "SpaceXAI subscription access denied — the Grok plan may not include API access. " <>
       "Switch to an API key in `fermix setup`, or check the plan tier."
   end
 
-  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}) do
+  defp auth_reply({:provider_error, %{provider: :xai, auth_mode: :oauth}}, _get_env) do
     "SpaceXAI subscription authentication failed — reconnect with " <>
       "`fermix auth login --provider xai` and retry."
   end
 
   # Codex is OAuth-only — "check the API key" advice would mislead.
-  defp auth_reply({:provider_error, %{provider: :openai_codex}}) do
+  defp auth_reply({:provider_error, %{provider: :openai_codex}}, _get_env) do
     "Authentication failed — run `fermix auth login` from the host and try again."
   end
 
   # Any other OAuth-tagged auth failure gets reconnect advice, never API-key
   # advice (provider design §13 note 11 — dispatch on auth_mode, not a
   # per-provider allowlist).
-  defp auth_reply({:provider_error, %{provider: provider, auth_mode: :oauth}}) do
+  defp auth_reply({:provider_error, %{provider: provider, auth_mode: :oauth}}, _get_env) do
     "#{ProviderError.provider_label(provider)} authentication failed — reconnect with " <>
       "`fermix auth login --provider #{provider}` and retry."
   end
 
-  defp auth_reply({:provider_error, %{provider: provider}}) when is_atom(provider) do
+  # config/runtime.exs layers a nonblank `<PROVIDER>_API_KEY` over the stored
+  # key at every start, so "check the key in setup" would send the operator to
+  # a key the daemon is not using.
+  defp auth_reply({:provider_error, %{provider: provider}}, get_env) when is_atom(provider) do
     label = ProviderError.provider_label(provider)
-    "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
+
+    case provider_key_override(provider, get_env) do
+      nil ->
+        "#{label} authentication failed — check the #{label} API key in `fermix setup` and retry."
+
+      env ->
+        "#{label} authentication failed with the API key from #{env} in the daemon's " <>
+          "environment, which Fermix uses instead of a stored key. Correct that variable, " <>
+          "or start the daemon without it to use the stored key, then retry."
+    end
   end
 
-  defp auth_reply(_reason) do
+  defp auth_reply(_reason, _get_env) do
     "Authentication failed — run `fermix auth login` from the host and try again."
+  end
+
+  defp provider_key_override(provider, get_env) do
+    case Enum.find(
+           SecretPaths.all(),
+           &(&1.path == [:fermix_core, :providers, provider, :api_key])
+         ) do
+      %{key: key} -> SecretPaths.env_override(key, get_env)
+      nil -> nil
+    end
   end
 
   # OpenAI Codex's ChatGPT plan route names each refusal (M57 §8), and those

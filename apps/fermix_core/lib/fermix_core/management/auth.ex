@@ -37,6 +37,7 @@ defmodule FermixCore.Management.Auth do
   alias FermixCore.Plugins.Plugin
   alias FermixCore.Plugins.Registry, as: PluginRegistry
   alias FermixCore.Setup.LiveModel
+  alias FermixCore.Setup.RestartState
   alias FermixCore.Setup.Wizard
 
   require Logger
@@ -143,10 +144,16 @@ defmodule FermixCore.Management.Auth do
   @doc """
   Forgets one provider's local session, drops its live tokens, and reverts the
   route it fed.
+
+  A provider whose route is reverted writes the settings file, so the file's
+  write guard (`:writable`, default `RestartState.writable/0`) runs before the
+  session is forgotten: a sign-out refused for an outside edit changes nothing,
+  rather than deleting the session and leaving the route pointing at it.
   """
   @spec logout(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
   def logout(provider, opts \\ []) when is_binary(provider) and is_list(opts) do
     with {:ok, id, profile} <- fetch_signed_in(provider),
+         :ok <- route_writable(id, opts),
          :ok <- sign_out(id, provider, profile, opts),
          :ok <- revert_route(id, opts) do
       {:ok, %{"restart" => Settings.restart()}}
@@ -430,6 +437,11 @@ defmodule FermixCore.Management.Auth do
   end
 
   defp revert_route(_id, _opts), do: :ok
+
+  defp route_writable(id, opts) when id in @reverting_providers,
+    do: Keyword.get(opts, :writable, &RestartState.writable/0).()
+
+  defp route_writable(_id, _opts), do: :ok
 
   # A request-path refusal names a capability, not a sentence, so the reason is
   # logged rather than dropped: the wire has nowhere to carry it and losing it

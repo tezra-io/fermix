@@ -8,6 +8,7 @@ defmodule FermixCore.Plugins.ConfigTest do
   alias FermixCore.Auth.TokenSupervisor
   alias FermixCore.Plugins.Config
   alias FermixCore.Setup.ConfigStore
+  alias FermixCore.Setup.RestartState
 
   # Deletes fail, everything else behaves like the shared stub. It reports the
   # persisted config it saw at delete time so the test can pin that the
@@ -239,6 +240,28 @@ defmodule FermixCore.Plugins.ConfigTest do
     # Scoped to the discord row: a whole-file scan also fails on any unrelated
     # credential another module leaked, which says nothing about this deletion.
     refute File.read!(Path.join(home, "config.toml")) =~ ~r/^discord = .*@keyring/m
+  end
+
+  # A forget refused for an outside edit must change nothing: the keychain item
+  # used to be deleted before the settings-file guard ran, leaving the
+  # `@keyring` reference pointing at nothing for the next start.
+  test "a forget refused for an outside edit keeps the keychain item", %{home: home} do
+    checkout = write_api_key_plugin("discord")
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+    assert {:ok, _snapshot} = Config.set_plugin_secret("discord", "xoxb-secret")
+
+    # The write above re-recorded the baseline; recording again empties the
+    # restart state's read cache, so the edit below is seen on the next read.
+    :ok = RestartState.record_persisted_baseline()
+    path = Path.join(home, "config.toml")
+    File.write!(path, File.read!(path) <> "\n[fermix_core.memory]\nreview_interval_hours = 12\n")
+
+    Application.put_env(:fermix_core, :plugins, dev_local: checkout)
+
+    assert {:error, {:external_change, _sections}} = Config.forget_plugin_secret("discord")
+
+    assert {:ok, "xoxb-secret"} =
+             FermixTestSupport.SecretWriterStub.get(:discord_plugin_secret)
   end
 
   test "a failed keychain delete leaves the reference intact and reports the error" do

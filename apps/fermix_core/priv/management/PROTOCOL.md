@@ -198,8 +198,8 @@ daemon onto anything else.
 | `settings.get` | `section` | One section's rows. Exactly one section per call, which is what keeps every result inside the published depth budget. Minimum version `2`. |
 | `settings.apply` | `section`, `values` | Applies the changed keys of one section and answers with what landed, the restart state, a readiness summary, and the changes the operator did not type. Minimum version `2`. |
 | `settings.reload` | none | Re-reads the settings file, pushes it into the running configuration, and re-records the baseline. The one action behind `Reload settings from disk`. Minimum version `2`. |
-| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value. Minimum version `2`. |
-| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Minimum version `2`. |
+| `secret.set` | `id`, `value` | Stores one secret and answers with its presence, never its value, and the environment variable that overrides it, if any. Minimum version `2`. |
+| `secret.clear` | `id` | Forgets one secret: the keyring item, the reference that reads it, and the value in force. Answers with the environment variable still in use, if any. Minimum version `2`. |
 | `setup.detect` | `targets` | One row per target asked for: whether this Mac already has it, and a short detail where there is one. The harness target also reports vendor installation, version and authentication status, with guidance. The `meetbot` target reports whether both halves of the meeting notetaker are installed, its detail carries the state of the notetaker's Google sign-in as a sentence, and `signed_in` carries the same state as a boolean, null while the notetaker is absent. Never a credential value. Minimum version `2`. |
 | `providers.set_primary` | `provider` | Makes one configured provider the primary and answers with the restart state and any change the operator did not type. Minimum version `2`. |
 | `providers.models.list` | `provider`, `live`, `query`, `cursor`, `limit` | One page of models, from the catalog this build ships or from the provider's own live listing, with the cursor for the next page. Minimum version `2`. |
@@ -630,6 +630,15 @@ Notes that the shapes alone do not carry:
   sits at that key's own path, never "the keyring holds an item": a key stored
   without its reference is never read back, so calling it present would describe
   a credential the runtime cannot use.
+- **A stored value is not always the value in use.** For the provider API
+  keys, the WhatsApp, Discord and Slack channel secrets and the APNs key, a
+  nonblank environment variable of the key's own name (`ANTHROPIC_API_KEY`,
+  `DISCORD_BOT_TOKEN`, …) in the daemon's environment overrides the stored value
+  at every start. `secret.set` and `secret.clear` name that variable in
+  `environment_override` (null when the stored value is the one in use, and
+  null for every other family), so storing a value the daemon will not use
+  still succeeds and says so. The field is optional: an older daemon omits it,
+  which a client renders as no override reported.
 - **`id` names one of five families.** A bare registry key (`openai_api_key`,
   `telegram_bot_token`, …), `plugin:<name>` for a plugin's own token,
   `oauth_client:<provider>` for a sign-in client's secret,

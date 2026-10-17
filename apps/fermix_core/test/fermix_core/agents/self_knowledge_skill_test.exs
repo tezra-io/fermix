@@ -97,6 +97,27 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     end
   end
 
+  # A sandbox that exported ANTHROPIC_API_KEY into every process made the
+  # stored key unused, and a daemon run with `fermix run` cannot be restarted by
+  # `fermix restart`: the agent has to know both to answer "why is my key
+  # ignored" and "how do I restart".
+  test "documents the environment overrides of stored secrets and a restart that fits the daemon" do
+    reference = File.read!(config_reference_path())
+
+    for required <- ["ANTHROPIC_API_KEY", "overrides the stored value", "blank", "fermix run"] do
+      assert reference =~ required, "config self-knowledge does not mention #{required}"
+    end
+
+    settings_line =
+      self_knowledge_path()
+      |> File.read!()
+      |> String.split("\n")
+      |> Enum.find(&String.starts_with?(&1, "- Settings:"))
+
+    assert settings_line =~ "fermix run"
+    refute settings_line =~ "`config.toml`, then `fermix restart`."
+  end
+
   test "documents the mobile companion setup and its v1 boundaries" do
     body = File.read!(self_knowledge_path())
     reference = File.read!(mobile_reference_path())

@@ -981,6 +981,72 @@ defmodule FermixCore.Setup.WizardTest do
     assert contents =~ ~s(base_url = "http://tail.example:11434/v1")
   end
 
+  # `fermix setup --openai-base-url` and its two siblings: answers with no
+  # descriptor setup field, so the wizard never asks for them, each written into
+  # its own provider's block whichever provider is primary.
+  test "save_answers writes each hosted provider's base URL answer into its own block" do
+    start_memory_repo!()
+
+    assert {:ok, _report} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               provider: "anthropic",
+               anthropic_api_key: "sk-ant-test",
+               openai_base_url: "http://127.0.0.1:18081/v1",
+               anthropic_base_url: " http://127.0.0.1:18080/v1 ",
+               xai_base_url: "https://xai-relay.example/v1"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.fetch!(persisted.fermix_core, :providers)
+
+    assert providers[:openai][:base_url] == "http://127.0.0.1:18081/v1"
+    assert providers[:anthropic][:base_url] == "http://127.0.0.1:18080/v1"
+    assert providers[:xai][:base_url] == "https://xai-relay.example/v1"
+    assert providers[:anthropic][:primary] == true
+    refute providers[:openai][:primary] == true
+    refute providers[:xai][:primary] == true
+  end
+
+  test "save_answers refuses a base URL that is not an absolute http(s) URL with a host" do
+    start_memory_repo!()
+
+    for value <- [
+          "",
+          "ftp://relay.example/v1",
+          "localhost:18080/v1",
+          "127.0.0.1:18080/v1",
+          "http://",
+          "http:relay.example",
+          "/v1"
+        ] do
+      error =
+        assert_raise ArgumentError, fn ->
+          Wizard.save_answers(Wizard.report().wizard, anthropic_base_url: value)
+        end
+
+      assert error.message =~
+               "--anthropic-base-url must be an absolute http:// or https:// URL with a host"
+    end
+
+    refute File.exists?(ConfigStore.path())
+  end
+
+  test "no setup or reconfigure question asks for a hosted provider's base URL" do
+    keys = [:openai_base_url, :anthropic_base_url, :xai_base_url]
+    state = Wizard.report().wizard
+
+    asked =
+      for provider <- ["openai", "anthropic", "xai"],
+          prompt <-
+            Wizard.prompts(state, provider: provider) ++
+              Wizard.reconfigure_prompts(state, provider: provider),
+          prompt.key in keys,
+          do: prompt.key
+
+    assert asked == []
+  end
+
   test "M15 image fields persist: generate_image backend + model + google key (sentinel)" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-m15-image")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)

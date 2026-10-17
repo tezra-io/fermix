@@ -88,6 +88,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   preview, so the app reads it again. No released Fermix.app has the chat
   window yet.
 
+- **`fermix setup` can point OpenAI, Anthropic or SpaceXAI at a relay.**
+  `--openai-base-url URL`, `--anthropic-base-url URL` and `--xai-base-url URL`
+  write that provider's `base_url` (a root such as `http://127.0.0.1:18080/v1`)
+  into `config.toml`, so a host whose provider traffic must go through a local
+  reverse proxy, such as a cloud sandbox, no longer needs a hand edit. Each
+  flag writes its own provider's block whichever provider `--provider` names,
+  a later `fermix setup` without the flag keeps it, and the wizard never asks
+  for one. A value that is not an absolute `http://` or `https://` URL with a
+  host fails setup and writes nothing. An `openai` block now accepts
+  `base_url`, which it used to refuse at load; OpenAI pointed anywhere but
+  `https://api.openai.com` uses Chat Completions rather than Responses. Doctor's
+  OpenAI and Anthropic probes now add `/responses` and `/messages` to a
+  configured `base_url` as the turns do, instead of posting to the bare root.
+
 ### Changed
 
 - **On a Mac, the sandbox mode now holds for commands, not just the file
@@ -203,6 +217,40 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   plain success and the default model was left unchecked. The sign-in still
   completes, and its result now says the model was not checked and why
   (`model_warning`), as `fermix auth login` already did.
+- **A secret can be typed without echo on a real terminal again.** The Linux
+  packages and the Homebrew binary run an Erlang runtime built without
+  terminal-capability support, so `fermix settings secret set` and
+  `fermix plugins auth set` refused masked entry on every terminal while
+  `--stdin` refused the same terminal too, leaving no way to type a key. Both
+  now ask one fact, whether stdin is a terminal, and hide the typed value by
+  turning the terminal's own echo off for the read and restoring it after.
+  The terminal wizard (`fermix setup`) hides its secret questions the same
+  way; it used to show every key and token as it was typed or pasted. A
+  hidden prompt now ends by showing how many characters arrived, never what
+  they were, so a paste that missed is plain to see.
+- **A key the daemon's environment overrides says so.** For the provider API
+  keys, the WhatsApp, Discord and Slack channel secrets and the APNs key, a
+  variable of the key's own name in the daemon's environment (such as
+  `ANTHROPIC_API_KEY`) is used instead of the stored value at every start.
+  `fermix settings secret set` and `secret clear` now say which variable is in
+  use, and an API-key authentication failure names that variable instead of
+  pointing at `fermix setup`. Exported empty, `OPENAI_API_KEY`,
+  `WHATSAPP_ACCESS_TOKEN`, `WHATSAPP_VERIFY_TOKEN`, `WHATSAPP_APP_SECRET`,
+  `DISCORD_BOT_TOKEN`, `SLACK_BOT_TOKEN` and `SLACK_SIGNING_SECRET` now keep
+  the stored value instead of blanking it, as every other key's variable
+  already did.
+- **Restart hints name a restart that works for how the daemon runs.** After a
+  settings change, a sign-in or a failed sign-out, Fermix said
+  `fermix restart`, which refuses a daemon no background service runs. The
+  hint now names `fermix restart` for an installed service, the Fermix app for
+  a home the app manages, and stopping `fermix run` and running it again
+  otherwise.
+- **A save refused for an outside edit changes nothing.** When `config.toml`
+  had been edited outside Fermix, `fermix settings secret set` said "nothing
+  was saved" but had already replaced the stored secret, and a refused
+  `secret clear`, plugin key removal or Anthropic or SpaceXAI sign-out had
+  already deleted the stored credential. The settings file is now checked,
+  fresh, before anything is written.
 
 ## [0.15.0] - 2026-10-13
 

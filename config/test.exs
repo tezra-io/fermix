@@ -141,7 +141,6 @@ config :fermix_core, :prompt_bootstrap,
 config :fermix_core,
   providers: [
     openai: [
-      base_url: "https://api.openai.com/v1",
       default_model: "gpt-5.4-mini",
       api_key: "test-key"
     ]

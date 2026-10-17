@@ -19,12 +19,16 @@ defmodule Fermix.CLI.SettingsCommand do
 
   Dependencies come in through `opts`: `:client` (default
   `Client.request_v1/3`), `:stdout`, `:stderr`, `:secret_input` (a keyword list
-  handed to `SecretInput`) and `:app_managed?` (a zero-arity predicate, default
-  `HomeOwner.app_managed?/0`). One request per call, no retries.
+  handed to `SecretInput`), `:app_managed?` (a zero-arity predicate, default
+  `HomeOwner.app_managed?/0`) and `:restart_route` (a zero-arity function,
+  default `RestartCommand.route/1` told the home is not app-managed, which the
+  guard has already established; called only when the output tells the
+  operator to restart). One request per call, no retries.
   """
 
   alias Fermix.CLI.Daemon.Client
   alias Fermix.CLI.HomeOwner
+  alias Fermix.CLI.RestartCommand
   alias Fermix.CLI.SecretInput
   alias Fermix.CLI.SettingsCommand.Args
   alias Fermix.CLI.SettingsCommand.Render
@@ -184,17 +188,30 @@ defmodule Fermix.CLI.SettingsCommand do
     0
   end
 
-  defp succeed(_result, text, false, deps) do
+  defp succeed(result, text, false, deps) do
     IO.write(deps.stdout, text)
+    if Render.restart_needed?(result), do: IO.puts(deps.stdout, restart_hint(deps))
     0
   end
 
   defp refuse(reason, json?, ctx, deps) do
     {status, sentence} = Render.error(reason, ctx)
-    IO.puts(deps.stderr, [ctx.prefix, ": ", sentence])
+    IO.puts(deps.stderr, [ctx.prefix, ": ", sentence | restart_remedy(reason, deps)])
     json_error(json?, reason, deps)
     status
   end
+
+  # How to restart depends on how this home's daemon runs, which only a probe
+  # of the host answers, so it is resolved only when a line needs it.
+  defp restart_remedy(reason, deps) do
+    if Render.restart_remedy?(reason), do: ["\n", restart_hint(deps)], else: []
+  end
+
+  defp restart_hint(deps), do: RestartCommand.hint(deps.restart_route.())
+
+  # Every output that needs a route is past `guarded/2`, which has already found
+  # the home not app-managed, so the route is not left to ask the home again.
+  defp known_home_route, do: RestartCommand.route(app_managed?: false)
 
   defp usage(reason, json?, deps) do
     IO.write(deps.stderr, Render.usage(reason))
@@ -226,7 +243,8 @@ defmodule Fermix.CLI.SettingsCommand do
       stdout: Keyword.get(opts, :stdout, :stdio),
       stderr: Keyword.get(opts, :stderr, :stderr),
       secret_input: Keyword.get(opts, :secret_input, []),
-      app_managed?: Keyword.get(opts, :app_managed?, &HomeOwner.app_managed?/0)
+      app_managed?: Keyword.get(opts, :app_managed?, &HomeOwner.app_managed?/0),
+      restart_route: Keyword.get(opts, :restart_route, &known_home_route/0)
     }
   end
 end

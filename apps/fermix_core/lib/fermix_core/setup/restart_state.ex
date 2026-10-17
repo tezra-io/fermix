@@ -147,11 +147,17 @@ defmodule FermixCore.Setup.RestartState do
   VM; it refuses while an outside change stands and names the sections that
   changed. An unreadable file refuses with the parser's own sentence, never with
   a reload the operator cannot escape.
+
+  It reads the file every time and never answers from the read cache, which
+  only bounds the polled banner reads: a cached `:clear` would let a write that
+  stores a secret first pass an outside edit made inside the window, and then
+  be refused by the commit after the store was written. The fresh answer also
+  refreshes the cache.
   """
   @spec writable(keyword()) ::
           :ok | {:error, {:external_change, [String.t()]} | {:config_unreadable, String.t()}}
   def writable(opts \\ []) when is_list(opts) do
-    case config_state(opts) do
+    case call(opts, :fresh_config_state, :clear) do
       :clear -> :ok
       {:external_change, sections} -> {:error, {:external_change, sections}}
       {:config_unreadable, sentence} -> {:error, {:config_unreadable, sentence}}
@@ -247,6 +253,11 @@ defmodule FermixCore.Setup.RestartState do
     {:reply, answer.config_state, state}
   end
 
+  def handle_call(:fresh_config_state, _from, state) do
+    {answer, state} = state |> rebind_home() |> compute()
+    {:reply, answer.config_state, state}
+  end
+
   def handle_call(:record_persisted_baseline, _from, state) do
     {:reply, :ok, record(state)}
   end
@@ -284,10 +295,10 @@ defmodule FermixCore.Setup.RestartState do
   # re-record never fires; a process that outlives a home change has no baseline
   # for the new file, and reporting every section of a freshly pointed-at home as
   # an outside change would invent a fact rather than admit there is none.
-  defp refresh(state) do
-    state = if ConfigStore.path() == state.baseline_path, do: state, else: record(state)
-    answer_or_compute(state)
-  end
+  defp refresh(state), do: state |> rebind_home() |> answer_or_compute()
+
+  defp rebind_home(state),
+    do: if(ConfigStore.path() == state.baseline_path, do: state, else: record(state))
 
   defp answer_or_compute(%{cache: {answer, recorded_ms}} = state) do
     if monotonic_ms() - recorded_ms < state.cache_ttl_ms do

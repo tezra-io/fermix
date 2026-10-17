@@ -81,4 +81,61 @@ defmodule FermixCore.Setup.SecretPathsTest do
     refute Map.get(secret, :sandbox_env, false)
     refute :meetings_zoom_client_secret in Enum.map(SecretPaths.sandbox_env_eligible(), & &1.key)
   end
+
+  describe "env_override/2" do
+    @runtime_exs Path.expand("../../../../../config/runtime.exs", __DIR__)
+
+    # A variable `config/runtime.exs` layers over the stored value wins at every
+    # start, so the daemon reports it wherever the stored value is shown as the
+    # one in use. The registry flag is what the report reads; this pins it to
+    # the file that actually does the layering, so neither can move alone.
+    test "flags exactly the registry secrets config/runtime.exs overlays" do
+      overlaid =
+        ~r/put_env_overlay\.\(:\w+, "([A-Z0-9_]+)"\)/
+        |> Regex.scan(File.read!(@runtime_exs), capture: :all_but_first)
+        |> MapSet.new(&hd/1)
+
+      registry = MapSet.new(SecretPaths.all(), & &1.env)
+
+      flagged =
+        SecretPaths.all()
+        |> Enum.filter(&Map.get(&1, :env_overlay, false))
+        |> MapSet.new(& &1.env)
+
+      assert flagged == MapSet.intersection(overlaid, registry)
+      assert "ANTHROPIC_API_KEY" in flagged
+      refute "TELEGRAM_BOT_TOKEN" in flagged
+    end
+
+    # One rule for every secret: `put_env_overlay`, where a blank variable is
+    # unset. A secret read any other way escapes both that rule and the flag
+    # above, as `System.get_env(NAME) || stored` once let an exported empty
+    # variable blank the stored secret.
+    test "config/runtime.exs reads no registry secret from the environment but by the one rule" do
+      source = File.read!(@runtime_exs)
+
+      for %{env: env} <- SecretPaths.all() do
+        refute source =~ ~s|System.get_env("#{env}")|,
+               "#{env} is read outside put_env_overlay, so a blank variable is not unset"
+      end
+    end
+
+    test "names the variable when it is set and nonblank for an overlaid secret" do
+      env = %{"ANTHROPIC_API_KEY" => "proxy-managed"}
+
+      assert SecretPaths.env_override(:anthropic_api_key, &Map.get(env, &1)) ==
+               "ANTHROPIC_API_KEY"
+    end
+
+    test "answers nil for an unset or blank variable" do
+      assert SecretPaths.env_override(:anthropic_api_key, fn _name -> nil end) == nil
+      assert SecretPaths.env_override(:anthropic_api_key, fn _name -> "" end) == nil
+    end
+
+    # TELEGRAM_BOT_TOKEN is the keychain label only: runtime.exs never reads it,
+    # so an exported one overrides nothing and must not be reported as if it did.
+    test "answers nil for a secret runtime.exs never reads from the environment" do
+      assert SecretPaths.env_override(:telegram_bot_token, fn _name -> "123:abc" end) == nil
+    end
+  end
 end

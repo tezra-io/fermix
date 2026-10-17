@@ -131,6 +131,22 @@ defmodule FermixCore.Setup.DoctorTest do
       assert is_integer(ms) and ms >= 0
     end
 
+    # `fermix setup --openai-base-url` writes a root, as the adapter reads it.
+    test "probes a configured root base_url at the /responses endpoint (matches the adapter)" do
+      put_provider(:openai, api_key: "sk-test", base_url: "http://127.0.0.1:18081/v1")
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:probed, conn.host, conn.port, conn.request_path})
+        Plug.Conn.send_resp(conn, 200, ~s({"ok": true}))
+      end
+
+      assert {:ok, %{provider: :openai}} =
+               Doctor.probe_provider(:openai, req_options: [plug: plug])
+
+      assert_received {:probed, "127.0.0.1", 18_081, "/v1/responses"}
+    end
+
     test "returns auth_scope_mismatch on 401" do
       put_provider(:openai, api_key: "sk-bad")
 
@@ -410,6 +426,22 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert {:ok, %{provider: :anthropic, model: "claude-sonnet-4-6"}} =
                Doctor.probe_provider(:anthropic, req_options: [plug: plug])
+    end
+
+    # `fermix setup --anthropic-base-url` writes a root, as the adapter reads it.
+    test "probes a configured root base_url at the /messages endpoint (matches the adapter)" do
+      put_provider(:anthropic, api_key: "sk-ant-test", base_url: "http://127.0.0.1:18080/v1")
+      test_pid = self()
+
+      plug = fn conn ->
+        send(test_pid, {:probed, conn.host, conn.port, conn.request_path})
+        Plug.Conn.send_resp(conn, 200, ~s({"id":"x"}))
+      end
+
+      assert {:ok, %{provider: :anthropic}} =
+               Doctor.probe_provider(:anthropic, req_options: [plug: plug])
+
+      assert_received {:probed, "127.0.0.1", 18_080, "/v1/messages"}
     end
 
     test "returns auth_scope_mismatch on 401 with anthropic-specific hint" do

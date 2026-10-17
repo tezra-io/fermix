@@ -48,7 +48,6 @@ config :phoenix,
 config :fermix_core,
   providers: [
     openai: [
-      base_url: "https://api.openai.com/v1",
       default_model: "gpt-5.4-mini",
       default_temperature: 0.7
     ]

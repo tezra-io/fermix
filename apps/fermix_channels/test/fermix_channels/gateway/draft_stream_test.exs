@@ -1347,7 +1347,11 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
     # its first open until they are queued behind it, so the write that opens the
     # 60 ms window already has them waiting, however late this process runs.
     # Unheld, a stall here past the window let a tick pass with only the thought
-    # pending, and the bubble then rightly opened first.
+    # pending, and the bubble then rightly opened first. The answer is queued
+    # ahead of the thought for the same reason on the engine's side: an engine
+    # stalled past the window after its open decides on each push as it takes
+    # it, and a thought taken first, with the answer still unread, rightly opens
+    # the bubble.
     test "the status bubble never writes on a tick that flushed answer content" do
       test_pid = self()
       release = make_ref()
@@ -1374,8 +1378,8 @@ defmodule FermixChannels.Gateway.DraftStreamTest do
 
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer."})
       assert_receive {:held_open, ^pid}
-      DraftStream.push(pid, {:reasoning_done, "**Deferred thought**\n\nbody"})
       DraftStream.push(pid, {:text_delta, "First snapshot of the answer. Second half."})
+      DraftStream.push(pid, {:reasoning_done, "**Deferred thought**\n\nbody"})
       send(pid, release)
 
       assert_receive {:open, {:bubble, 1}, "First snapshot of the answer."}
