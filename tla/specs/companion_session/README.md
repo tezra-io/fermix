@@ -67,7 +67,14 @@ backend searched and what a place from each one has. A block's contents are
 read by no client rule either, so nothing the spec models changed; nor did
 the next re-read, which found the section naming the builds rather than the
 platform (the Fermix Mac app's engine searches Apple Maps, the Homebrew and
-Linux builds Brave).
+Linux builds Brave). The re-read after every reply's links became previewed
+(`LinkPreviews`, 5e9ec545) found `Turns` scheduling a reply's previews once
+its row is written and announced, and `Companion.send_message/3` scheduling a
+delivery's after its push; each preview is stored on that row later and
+announced as `row_updated`, which the header already leaves out (no seq, no
+cursor), and `PROTOCOL.md` naming a stored preview's optional `link`. Every
+row, seq, ending and settlement is as before, so nothing the spec models
+changed.
 
 **The Queue is one abstract process.** The runner takes one `.tla` per spec,
 and `turn_queue` proves the Queue's rules against `queue.ex`, so this spec takes

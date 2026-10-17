@@ -374,6 +374,13 @@ counterexample, run `tla/bin/check.py reminder_delivery` and open
   behaving as designed: the request has left Fermix, and no process change can
   recall it.
 
+Re-read on 2026-10-17 after every row's links became previewed (5e9ec545):
+`mobile.ex` moved its preview code to `LinkPreviews` and previews a delivered
+row whether or not the phone subtree runs, `mobile_sql.ex` keeps a preview's
+optional `link`, and `output.ex` carries it. The proactive dedupe the spec
+cites (`output.ex:257-259`, `mobile_sql.ex:377-387`) is unchanged, and no
+reminder platform is either channel, so nothing the spec models changed.
+
 ## Code and doc drift
 
 - `delivery_worker.ex:173-176` says a claim past the validity boundary "cannot

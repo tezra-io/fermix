@@ -155,7 +155,10 @@ none of the three. What it changed around them:
   for one that did not. A request settles on one of the two paths, so a row
   has one task.
 - A proactive row is pushed only while the phone subtree runs
-  (`phone_effects`). The spec models the channel switched on.
+  (`delivered_effects`, `phone_effects` until 5e9ec545). The spec models the
+  channel switched on. Since 5e9ec545 the same function previews the row's
+  links whether or not the subtree runs (`LinkPreviews`), which no push rule
+  reads, so nothing the spec models changed.
 - An approval is now pushed too, with no content, in one attempt, and
   suppressed while any device of the profile has a socket
   (`push.ex:133-151`). The spec does not model approvals (see "Not
