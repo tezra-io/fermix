@@ -21,10 +21,13 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
   program is the absolute path `LoginPath.resolve/3` answers, run in `cwd`.
 
   **Stderr.** A port gives one stream back, and stdout is the protocol's, so
-  the program is started by `/bin/sh` with its stderr sent to a file of its own
-  under the logs folder, emptied at each start. When the program exits, the
-  last lines of that file, bounded in lines and bytes (`tail/1`), go into its
-  status. That shell sets `PWD` and `SHLVL` for the program as it starts it.
+  the program is started by `/bin/sh` with its stderr appended to a file of its
+  own under the logs folder, emptied at each start. That shell sets `PWD` and
+  `SHLVL` for the program as it starts it. Every 30 s the file's size is
+  checked; past 1 MB its last lines are carried in this process and the file
+  is emptied, so a server that talks for days holds the disk to about that
+  size. When the program exits, the carry and what the file holds then,
+  bounded in lines and bytes, go into its status.
 
   **Status.** This process holds the program, so it is the source's
   `RuntimeStatus` owner, as `Remote.Owner` is for a remote source: registering
@@ -57,10 +60,14 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
 
   @base_env ~w(HOME LOGNAME SHELL TERM USER)
   @shell "/bin/sh"
-  @launch ~s(stderr_file=$1; shift; exec "$@" 2>"$stderr_file")
+  # Appended, so emptying the file under a running program leaves its next
+  # write at the new end instead of at the old offset.
+  @launch ~s(stderr_file=$1; shift; exec "$@" 2>>"$stderr_file")
   @tail_bytes 4_096
   @tail_lines 20
   @stop_grace_ms 2_000
+  @stderr_check_ms 30_000
+  @stderr_cap_bytes 1_048_576
 
   @typedoc "What the transport needs of the server's spec: names and the command, no value."
   @type spec :: %{
@@ -81,6 +88,9 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
           | {:runtime_status, GenServer.server() | nil}
           | {:login_path, GenServer.server()}
           | {:stderr_dir, Path.t()}
+          # Test seams for the stderr bound; the daemon keeps the defaults.
+          | {:stderr_check_ms, pos_integer()}
+          | {:stderr_cap_bytes, pos_integer()}
 
   # --- the line framing the client parses replies with: Anubis's own ---------
 
@@ -184,6 +194,9 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
       generation: register(runtime_status, {kind, name}),
       login_path: Keyword.get(opts, :login_path, LoginPath),
       stderr_file: Path.join(stderr_dir, "#{kind}-#{name}.stderr"),
+      stderr_carry: [],
+      stderr_check_ms: Keyword.get(opts, :stderr_check_ms, @stderr_check_ms),
+      stderr_cap_bytes: Keyword.get(opts, :stderr_cap_bytes, @stderr_cap_bytes),
       port: nil,
       os_pid: nil
     }
@@ -207,6 +220,7 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
          {:ok, env} <- environment(spec, state.login_path),
          {:ok, port} <- open(program, spec, env, state.stderr_file) do
       GenServer.cast(state.client, :initialize)
+      :ok = check_stderr_later(state)
       {:noreply, %{state | port: port, os_pid: os_pid(port)}}
     else
       {:error, reason} -> refuse(state, reason)
@@ -241,11 +255,19 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
   end
 
   def handle_info({port, {:exit_status, status}}, %{port: port} = state) do
-    lines = tail(state.stderr_file)
+    lines = last_of(state.stderr_carry ++ tail(state.stderr_file))
     # What the program left behind in its group (the `node` an `npx` started).
     signal(state.os_pid, :sigkill)
     _ = put_exited(state, lines)
     {:stop, {:mcp_server_exited, status}, %{state | port: nil, os_pid: nil}}
+  end
+
+  def handle_info(:check_stderr, %{port: nil} = state), do: {:noreply, state}
+
+  def handle_info(:check_stderr, state) do
+    state = bound_stderr(state)
+    :ok = check_stderr_later(state)
+    {:noreply, state}
   end
 
   def handle_info({:EXIT, port, reason}, %{port: port} = state) do
@@ -393,6 +415,56 @@ defmodule FermixCore.Capabilities.MCP.StdioTransport do
     Logger.warning("MCP server #{inspect(state.source_id)} did not start: #{inspect(reason)}")
     {:stop, :normal, state}
   end
+
+  # --- the stderr bound --------------------------------------------------------
+
+  defp check_stderr_later(state) do
+    _timer = Process.send_after(self(), :check_stderr, state.stderr_check_ms)
+    :ok
+  end
+
+  # Past the cap, the file's last lines move into the carry and the file is
+  # emptied. A line written between the read and the emptying is lost, which
+  # the exit sentence can spare: it holds the last lines, not every line.
+  defp bound_stderr(state) do
+    case File.stat(state.stderr_file) do
+      {:ok, %File.Stat{size: size}} when size > state.stderr_cap_bytes ->
+        carry = last_of(state.stderr_carry ++ tail(state.stderr_file))
+        :ok = empty_stderr(state.stderr_file)
+        %{state | stderr_carry: carry}
+
+      {:ok, %File.Stat{}} ->
+        state
+
+      {:error, reason} ->
+        Logger.warning(
+          "MCP server stderr at #{state.stderr_file} is unreadable: #{inspect(reason)}"
+        )
+
+        state
+    end
+  end
+
+  defp empty_stderr(path) do
+    case File.write(path, "") do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.warning("MCP server stderr at #{path} could not be emptied: #{inspect(reason)}")
+        :ok
+    end
+  end
+
+  # The exit sentence's bound, over the carry and the file together: the last
+  # `@tail_lines` lines, and of those the last that fit in `@tail_bytes` bytes.
+  defp last_of(lines), do: lines |> Enum.take(-@tail_lines) |> within_bytes()
+
+  defp within_bytes([_dropped | rest] = lines) do
+    if Enum.sum_by(lines, &byte_size/1) > @tail_bytes, do: within_bytes(rest), else: lines
+  end
+
+  defp within_bytes([]), do: []
 
   # --- ending ----------------------------------------------------------------
 

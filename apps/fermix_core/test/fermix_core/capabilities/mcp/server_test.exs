@@ -358,6 +358,54 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
       Process.exit(pid, :shutdown)
     end
 
+    # A first `npx -y` or `uvx` start downloads its package before it answers
+    # (M74 E3): an operator's stdio server is retried until its first-connection
+    # window closes, not for the five quick attempts a plugin's server gets.
+    test "an operator's stdio server is retried through its first-connection window", ctx do
+      tools = [%{name: "create_issue", description: "x", input_schema: %{}}]
+
+      :ok =
+        StubDiscoverer.script(
+          List.duplicate({:error, :transport_closed}, 7) ++ [{:gate, self(), {:ok, tools}}]
+        )
+
+      {:ok, pid} = start_retrying(ctx, source_id: {:operator, "github"})
+
+      assert_receive {:discovery_attempt, 8, ^pid}, 10_000
+      send(pid, :discovery_release)
+
+      assert :sys.get_state(pid).discovery_attempts == 0
+
+      assert [%{name: "mcp_github_create_issue"}] =
+               CapabilityRegistry.list(ctx.cap_registry, kind: :mcp)
+
+      Process.unlink(pid)
+      Process.exit(pid, :shutdown)
+    end
+
+    test "a plugin's stdio server still gives up after its attempts", ctx do
+      :ok = StubDiscoverer.script([{:error, :transport_closed}])
+      {:ok, pid} = start_retrying(ctx, source_id: {:plugin, "github"})
+      ref = Process.monitor(pid)
+
+      assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
+      assert :ets.lookup(:mcp_server_test_discoverer, :attempts) == [{:attempts, 5}]
+    end
+
+    test "an operator's stdio server that never answers gives up as its window closes", ctx do
+      :ok = StubDiscoverer.script([{:error, :transport_closed}])
+
+      capture_log(fn ->
+        {:ok, pid} =
+          start_retrying(ctx, source_id: {:operator, "github"}, first_connection_ms: 50)
+
+        ref = Process.monitor(pid)
+        assert_receive {:DOWN, ^ref, :process, ^pid, :normal}, 10_000
+      end)
+
+      assert CapabilityRegistry.list(ctx.cap_registry, kind: :mcp) == []
+    end
+
     test "tool_overrides win for policy_class and hidden_from_agent?", %{
       cap_registry: cap_registry,
       mcp_registry: mcp_registry
@@ -534,6 +582,23 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert_receive {:invalidated, :plugins_changed}
     end
+  end
+
+  # A discovery server on the scripted discoverer, retrying on a 1 ms base so
+  # its doubling backoff spends milliseconds, not seconds.
+  defp start_retrying(ctx, opts) do
+    McpServer.start_link(
+      [
+        server_name: "github",
+        discoverer: StubDiscoverer,
+        caller: StubCaller,
+        capability_registry: ctx.cap_registry,
+        mcp_registry: ctx.mcp_registry,
+        main_agent: nil,
+        realtime_supervisor: nil,
+        retry_base_ms: 1
+      ] ++ opts
+    )
   end
 
   defp write_skill(skills_dir, name) do

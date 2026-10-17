@@ -367,7 +367,8 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     # discovery retries once, its whole subtree (client + discovery) is torn down
     # and NOT respawned until an explicit reload. `:permanent` re-ran discovery
     # ~4x (until the sub-supervisor's restart intensity tripped); the fix stops
-    # it after the first cycle.
+    # it after the first cycle. Obsidian is a plugin, whose server is bounded by
+    # its attempts (an operator's has a first-connection window instead).
     Process.flag(:trap_exit, true)
     sup_name = :"mcp_sup_giveup_#{suffix}"
     reporter = self()
@@ -381,6 +382,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
           %{name: "github", discoverer: HappyDiscoverer, caller: StubCaller},
           %{
             name: "broken",
+            source_id: {:plugin, "broken"},
             discoverer: CountingSadDiscoverer,
             caller: StubCaller,
             client: reporter,
@@ -397,7 +399,7 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     refute_receive :broken_discovery_attempt, 300
 
     # The broken subtree is gone; the healthy peer and top supervisor are intact.
-    assert server_child_pid(sup_name, "broken") == nil
+    assert server_child_pid(sup_name, :plugin, "broken") == nil
     assert Process.alive?(sup_pid)
     assert eventually(fn -> "mcp_github_create_issue" in cap_names(cap_registry) end)
   end

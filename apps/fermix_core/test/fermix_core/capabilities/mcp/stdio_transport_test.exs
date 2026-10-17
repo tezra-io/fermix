@@ -199,6 +199,41 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
       File.write!(path, Enum.map(1..30, &"line #{&1}\n"))
       assert StdioTransport.tail(path) == Enum.map(11..30, &"line #{&1}")
     end
+
+    # A server that talks for days must not fill the disk: past its cap the
+    # file's last lines are carried and the file emptied, and the exit sentence
+    # reads the carry and then what the file holds.
+    test "the file is held under its cap, and the last lines still reach the exit", ctx do
+      name = "chatty#{ctx.suffix}"
+      cap = 2_048
+      bound = [stderr_cap_bytes: cap, stderr_check_ms: 20]
+      %{client: client} = start_server(ctx, spec(ctx, name, "chatty"), transport: bound)
+      transport = Module.concat(client, "Transport")
+
+      # The 400 lines are written before the fixture answers `initialize`, but
+      # a check may land while they are being written; the one that matters
+      # carries the last of them.
+      assert eventually(fn ->
+               List.last(:sys.get_state(transport).stderr_carry) == "fixture chatty line 400"
+             end)
+
+      %{stderr_file: file, stderr_carry: carry} = :sys.get_state(transport)
+      assert File.stat!(file).size <= cap
+      assert carry == Enum.map(381..400, &"fixture chatty line #{&1}")
+
+      capture_log(fn ->
+        ref = Process.monitor(transport)
+        # The call never gets its answer: the program exits instead.
+        _caller = spawn(fn -> Anubis.Client.call_tool(client, "finish", %{}) end)
+        assert_receive {:DOWN, ^ref, :process, _pid, {:mcp_server_exited, 4}}, @bound_ms
+      end)
+
+      assert {:ok, %{detail: :exited, stderr_tail: tail}} = fetch(ctx, {:operator, name})
+
+      assert tail ==
+               Enum.map(384..400, &"fixture chatty line #{&1}") ++
+                 Enum.map(1..3, &"fixture last words #{&1}")
+    end
   end
 
   describe "status" do
@@ -234,7 +269,9 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
       spec = spec(ctx, name, "silent")
 
       capture_log(fn ->
-        %{subtree: subtree} = start_server(ctx, spec, await: false, discovery: true, attempts: 1)
+        %{subtree: subtree} =
+          start_server(ctx, spec, await: false, discovery: true, first_connection_ms: 300)
+
         ref = Process.monitor(subtree)
         assert_receive {:DOWN, ^ref, :process, _pid, _reason}, @bound_ms
       end)
@@ -312,6 +349,8 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
     %{children: children, client_name: client} =
       AnubisStarter.Default.child_specs_for(spec, config)
 
+    transport_opts = Keyword.get(opts, :transport, [])
+    children = Enum.map(children, &with_transport_opts(&1, transport_opts))
     children = children ++ discovery(ctx, spec, client, opts)
 
     subtree =
@@ -333,21 +372,28 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
     %{client: client, subtree: subtree}
   end
 
+  # The stderr bound's seams, put into the transport's own start options.
+  defp with_transport_opts(%{id: {:stdio_transport, _source}} = child, extra) do
+    update_in(child.start, fn {module, fun, [opts]} -> {module, fun, [opts ++ extra]} end)
+  end
+
+  defp with_transport_opts(child, _extra), do: child
+
   defp discovery(ctx, spec, client, opts) do
     if Keyword.get(opts, :discovery, false) do
       on_exit(fn -> Enum.each(~w(echo refuse), &Naming.unregister("mcp_#{spec.name}_#{&1}")) end)
 
-      server_opts = [
-        server_name: spec.name,
-        source_id: spec.source_id,
-        client: client,
-        capability_registry: ctx.cap_registry,
-        runtime_status: ctx.status,
-        main_agent: nil,
-        realtime_supervisor: nil,
-        max_discovery_attempts: Keyword.get(opts, :attempts, 8),
-        retry_base_ms: 200
-      ]
+      server_opts =
+        [
+          server_name: spec.name,
+          source_id: spec.source_id,
+          client: client,
+          capability_registry: ctx.cap_registry,
+          runtime_status: ctx.status,
+          main_agent: nil,
+          realtime_supervisor: nil,
+          retry_base_ms: 200
+        ] ++ Keyword.take(opts, [:first_connection_ms])
 
       [
         Supervisor.child_spec({McpServer, server_opts},

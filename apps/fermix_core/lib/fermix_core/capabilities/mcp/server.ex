@@ -86,6 +86,11 @@ defmodule FermixCore.Capabilities.MCP.Server do
           | {:main_agent, GenServer.server() | nil}
           | {:realtime_supervisor, GenServer.server() | nil}
 
+  # How long an operator's stdio server has to answer its first `initialize`
+  # and `tools/list`: the initialize timeout MCP clients give, long enough for
+  # a first `npx -y` or `uvx` start to download its package.
+  @first_connection_ms 60_000
+
   @spec start_link([opt()]) :: GenServer.on_start()
   def start_link(opts) do
     case Keyword.get(opts, :name) do
@@ -154,11 +159,28 @@ defmodule FermixCore.Capabilities.MCP.Server do
       discovery_attempts: 0,
       max_discovery_attempts: Keyword.get(opts, :max_discovery_attempts, 5),
       retry_base_ms: Keyword.get(opts, :retry_base_ms, 500),
+      first_connection_deadline: first_connection_deadline(opts, source_id),
       fail_fast?: Keyword.get(opts, :fail_fast?, false)
     }
 
     %{state | generation: pin_generation(state)}
   end
+
+  # An operator's stdio server is retried until its first-connection window
+  # closes rather than for `max_discovery_attempts`: a first `npx -y` or `uvx`
+  # start downloads its package before it answers anything. A remote source is
+  # bounded by its owner's startup budget, a plugin's stdio server by its
+  # attempts. `:first_connection_ms` is a test seam.
+  defp first_connection_deadline(opts, {:operator, _name}) do
+    case Keyword.get(opts, :contract) do
+      nil -> now_ms() + Keyword.get(opts, :first_connection_ms, @first_connection_ms)
+      _signed -> nil
+    end
+  end
+
+  defp first_connection_deadline(_opts, _source_id), do: nil
+
+  defp now_ms, do: System.monotonic_time(:millisecond)
 
   # A remote source without a compilable signed contract is an invalid install,
   # not a server to start with weaker rules than the ones that were signed.
@@ -349,7 +371,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
     attempts = state.discovery_attempts + 1
     state = %{state | discovery_attempts: attempts}
 
-    if attempts >= state.max_discovery_attempts or terminal_contract_error?(reason) do
+    if out_of_tries?(state) or terminal_contract_error?(reason) do
       Logger.error(
         "MCP server #{state.server_name} discovery failed #{attempts} times, giving up: " <>
           RuntimeStatus.describe(RuntimeStatus.classify(reason))
@@ -357,12 +379,35 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
       {:stop, :normal, record_terminal(state, give_up_reason(state, reason))}
     else
-      delay = state.retry_base_ms * round(:math.pow(2, attempts - 1))
-      log_retry(reason, state.server_name, attempts, state.max_discovery_attempts, delay)
+      delay = retry_delay(state, attempts)
+      log_retry(reason, state.server_name, tries(state, attempts), delay)
       Process.send_after(self(), :retry_discovery, delay)
       {:noreply, state}
     end
   end
+
+  defp out_of_tries?(%{first_connection_deadline: nil} = state),
+    do: state.discovery_attempts >= state.max_discovery_attempts
+
+  defp out_of_tries?(state), do: window_left_ms(state) == 0
+
+  # Doubling from `retry_base_ms`; inside a first-connection window the last
+  # retry lands as it closes, never after.
+  defp retry_delay(state, attempts) do
+    backoff = state.retry_base_ms * round(:math.pow(2, attempts - 1))
+
+    case state.first_connection_deadline do
+      nil -> backoff
+      _deadline -> min(backoff, window_left_ms(state))
+    end
+  end
+
+  defp window_left_ms(state), do: max(state.first_connection_deadline - now_ms(), 0)
+
+  defp tries(%{first_connection_deadline: nil} = state, attempts),
+    do: "attempt #{attempts}/#{state.max_discovery_attempts}"
+
+  defp tries(_state, attempts), do: "attempt #{attempts}, within its first-connection window"
 
   # A contract mismatch or a name collision cannot become success by repetition:
   # the same signed hashes will disagree with the same live descriptors next
@@ -384,9 +429,9 @@ defmodule FermixCore.Capabilities.MCP.Server do
   # so a noisy `npx`-backed startup doesn't surface as a red flag to the
   # operator. Real errors (transport closed, unexpected response shape,
   # tool schema errors) keep the warning level.
-  defp log_retry(reason, server_name, attempts, max_attempts, delay) do
+  defp log_retry(reason, server_name, tries, delay) do
     message =
-      "MCP server #{server_name} discovery failed (attempt #{attempts}/#{max_attempts}); " <>
+      "MCP server #{server_name} discovery failed (#{tries}); " <>
         "retrying in #{delay}ms: #{inspect(error_class(reason))}"
 
     if expected_startup_error?(reason),

@@ -16,6 +16,9 @@
 #   * `crash`: writes 30 numbered lines to stderr and exits with status 3
 #     before it reads anything.
 #   * `silent`: reads its input and never answers.
+#   * `chatty`: writes 400 numbered lines to stderr before it reads anything,
+#     then serves, with one more tool, `finish`, which writes three last lines
+#     to stderr and exits with status 4.
 #
 # Standard library only; it exits when stdin closes.
 
@@ -50,6 +53,12 @@ defmodule McpStdioFixture do
     }
   ]
 
+  @finish_tool %{
+    "name" => "finish",
+    "description" => "Writes its last lines to stderr and exits.",
+    "inputSchema" => %{"type" => "object", "properties" => %{}}
+  }
+
   def run(_protocol_version, "crash") do
     Enum.each(1..30, &IO.puts(:stderr, "fixture stderr line #{&1}"))
     System.halt(3)
@@ -59,9 +68,17 @@ defmodule McpStdioFixture do
     :stdio |> IO.stream(:line) |> Stream.run()
   end
 
+  def run(protocol_version, "chatty") do
+    Enum.each(1..400, &IO.puts(:stderr, "fixture chatty line #{&1}"))
+    serve(protocol_version, @tools ++ [@finish_tool])
+  end
+
   def run(protocol_version, mode) do
     tools = if mode == "probe", do: @tools ++ @probe_tools, else: @tools
+    serve(protocol_version, tools)
+  end
 
+  defp serve(protocol_version, tools) do
     :stdio
     |> IO.stream(:line)
     |> Enum.each(&handle_line(&1, protocol_version, tools))
@@ -103,6 +120,11 @@ defmodule McpStdioFixture do
 
   defp answer("tools/call", %{"name" => "environment"}, _protocol_version, _tools) do
     text_result(JSON.encode!(System.get_env()))
+  end
+
+  defp answer("tools/call", %{"name" => "finish"}, _protocol_version, _tools) do
+    Enum.each(1..3, &IO.puts(:stderr, "fixture last words #{&1}"))
+    System.halt(4)
   end
 
   defp answer("tools/call", %{"name" => "cwd"}, _protocol_version, _tools) do
