@@ -12,7 +12,9 @@ CPU load (one `yes` per core), so the change that wrote a flaky test is the one
 that sees it. Each run is one `mix test` per app, since from the umbrella root
 a file path runs only in its own app, and each run draws a fresh seed and
 writes its own log, so a step killed mid-run still leaves every finished run on
-disk.
+disk. The load starts when a run's tests start and stops when the run ends:
+Mix's start and the app's boot, which every run repeats, take about a minute
+under load and a few seconds without it.
 
 Runs go round-robin, every app once per round, so a slow app cannot starve the
 rest of their first run under load. `--budget-s` bounds the wall clock from the
@@ -31,6 +33,7 @@ there is then no change to name.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import re
 import subprocess
@@ -38,9 +41,9 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Callable, Iterator
 
-from mix_test_retry import Failure, clean, escape, is_summary, parse_run, parse_summary, run_teed
+from mix_test_retry import Failure, clean, escape, is_seed_line, is_summary, parse_run, parse_summary, run_teed
 
 REPEATS = 20
 MANY_FILES = 30
@@ -150,7 +153,8 @@ def run_once(state: AppStress, repeats: int, log_dir: Path) -> str:
     log = log_dir / f"stress-{state.app}-{number}.log"
     command = ["mix", "test", "--warnings-as-errors", "--max-failures", "1", *state.files]
     print(f"\n== {state.app}: {len(state.files)} file(s), run {number} of up to {repeats} under load ==", flush=True)
-    code = run_teed(command, log)
+    with load_from_first_test() as on_line:
+        code = run_teed(command, log, on_line)
     text = log.read_text(errors="replace")
     run = parse_run(text, state.app)
     for failure in run.failures:
@@ -220,6 +224,21 @@ def stop(burners: list[subprocess.Popen]) -> None:
         burner.wait()
 
 
+@contextlib.contextmanager
+def load_from_first_test() -> Iterator[Callable[[str], None]]:
+    """A line hook for one run that starts the burners at ExUnit's seed line; they stop when the block exits."""
+    burners: list[subprocess.Popen] = []
+
+    def on_line(line: str) -> None:
+        if not burners and is_seed_line(line):
+            burners.extend(start_burners())
+
+    try:
+        yield on_line
+    finally:
+        stop(burners)
+
+
 def main(argv: list[str], clock: Callable[[], float] = time.monotonic) -> int:
     args = parse_args(argv)
     files, skipped = changed_test_files(args.base)
@@ -231,16 +250,11 @@ def main(argv: list[str], clock: Callable[[], float] = time.monotonic) -> int:
         return 0
     repeats = repeats_for(len(files))
     args.log_dir.mkdir(parents=True, exist_ok=True)
-    burners = start_burners()
-    try:
-        start = clock()
-        states = round_robin(
-            by_app(files), repeats, args.budget_s, lambda state: run_once(state, repeats, args.log_dir), clock
-        )
-        elapsed_s = clock() - start
-    finally:
-        stop(burners)
-    return report(states, repeats, args.budget_s, elapsed_s)
+    start = clock()
+    states = round_robin(
+        by_app(files), repeats, args.budget_s, lambda state: run_once(state, repeats, args.log_dir), clock
+    )
+    return report(states, repeats, args.budget_s, clock() - start)
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

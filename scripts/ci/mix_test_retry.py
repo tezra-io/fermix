@@ -83,6 +83,11 @@ def is_summary(line: str) -> bool:
     return bool(_SUMMARY.search(line))
 
 
+def is_seed_line(line: str) -> bool:
+    """Whether `line` is ExUnit's seed line, printed as an app's tests start."""
+    return bool(_SEED.search(line))
+
+
 def clean(line: str) -> str:
     return _PREFIX.sub("", line.rstrip("\n"), count=1)
 
@@ -212,11 +217,13 @@ def summary_markdown(failures: list[Failure], seed: str) -> str:
 Runner = Callable[[list[str], Path], int]
 
 
-def run_teed(command: list[str], log: Path) -> int:
+def run_teed(command: list[str], log: Path, on_line: Callable[[str], None] | None = None) -> int:
     """Run `command` with MIX_ENV=test, streaming its output to stdout and `log`.
 
     Each line is flushed to both as it arrives: under Actions both are block
     buffered, and a step killed by its timeout would lose every line still held.
+    `on_line` sees each line once it is in the log; if it raises, the command
+    is killed before the error propagates.
     """
     env = {**os.environ, "MIX_ENV": "test"}
     with log.open("w", encoding="utf-8", buffering=1) as sink:
@@ -224,10 +231,17 @@ def run_teed(command: list[str], log: Path) -> int:
             command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=env, text=True, errors="replace"
         )
         assert proc.stdout is not None
-        for line in proc.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            sink.write(line)
+        try:
+            for line in proc.stdout:
+                sys.stdout.write(line)
+                sys.stdout.flush()
+                sink.write(line)
+                if on_line is not None:
+                    on_line(line)
+        except BaseException:
+            proc.kill()
+            proc.wait()
+            raise
         return proc.wait()
 
 

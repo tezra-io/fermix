@@ -9,6 +9,7 @@ import contextlib
 import io
 import json
 import os
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -235,6 +236,40 @@ class RunTeedTest(unittest.TestCase):
             self.assertEqual(code, 0, out.getvalue())
             self.assertEqual(log.read_text(), "first line\nseen in the log\n")
             self.assertEqual(out.getvalue(), "first line\nseen in the log\n")
+
+    def test_the_line_hook_sees_each_line_once_it_is_in_the_log(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            log = Path(tmp) / "run.log"
+            seen = []
+            with contextlib.redirect_stdout(io.StringIO()):
+                code = retry.run_teed(
+                    [sys.executable, "-c", "print('one'); print('two')"],
+                    log,
+                    lambda line: seen.append((line, log.read_text())),
+                )
+            self.assertEqual(code, 0)
+            self.assertEqual(seen, [("one\n", "one\n"), ("two\n", "one\ntwo\n")])
+
+    def test_a_line_hook_that_raises_kills_the_command(self):
+        started = []
+        real_popen = subprocess.Popen
+
+        def popen(*args, **kwargs):
+            proc = real_popen(*args, **kwargs)
+            started.append(proc)
+            self.addCleanup(proc.wait)
+            self.addCleanup(proc.kill)
+            return proc
+
+        def hook(_line):
+            raise RuntimeError("the hook failed")
+
+        child = "import time; print('up', flush=True); time.sleep(600)"
+        with tempfile.TemporaryDirectory() as tmp, mock.patch.object(
+            retry.subprocess, "Popen", popen
+        ), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
+            retry.run_teed([sys.executable, "-c", child], Path(tmp) / "run.log", hook)
+        self.assertIsNotNone(started[0].poll(), "the command outlived the hook that failed")
 
 
 class MainTest(unittest.TestCase):

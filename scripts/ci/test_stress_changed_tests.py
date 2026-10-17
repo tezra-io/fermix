@@ -273,21 +273,66 @@ class RunOnceTest(unittest.TestCase):
         self.log_dir = Path(self.tmp.name)
         self.commands = []
         self.logs = []
+        # Each line the run prints, and when the load goes on and off between them.
+        self.events = []
+        self.burner = mock.Mock()
+        self.burner.kill.side_effect = lambda: self.events.append("load off")
 
     def tearDown(self):
         self.tmp.cleanup()
 
+    def start_burners(self):
+        self.events.append("load on")
+        return [self.burner]
+
     def run_app(self, code, text, runs_before=0):
-        def fake(command, log):
+        def fake(command, log, on_line):
             self.commands.append(command)
             self.logs.append(log)
             log.write_text(text)
+            for line in text.splitlines(keepends=True):
+                self.events.append(line.strip())
+                on_line(line)
             return code
 
+        return self.run_once(fake, runs_before)
+
+    def run_once(self, fake, runs_before=0):
         state = stress.AppStress("fermix_core", ["apps/fermix_core/test/x_test.exs"], runs_before)
-        with mock.patch.object(stress, "run_teed", fake), contextlib.redirect_stdout(io.StringIO()) as out:
+        with mock.patch.object(stress, "run_teed", fake), mock.patch.object(
+            stress, "start_burners", self.start_burners
+        ), contextlib.redirect_stdout(io.StringIO()) as out:
             outcome = stress.run_once(state, 20, self.log_dir)
         return outcome, out.getvalue()
+
+    def test_the_load_runs_from_the_first_test_to_the_end_of_the_run(self):
+        self.run_app(0, GREEN_RUN)
+
+        self.assertEqual(
+            self.events,
+            [
+                "==> fermix_core",
+                "Running ExUnit with seed: 11, max_cases: 8",
+                "load on",
+                "3 tests, 0 failures",
+                "load off",
+            ],
+        )
+
+    def test_a_run_that_never_reaches_its_tests_never_loads_the_cpu(self):
+        self.run_app(1, "==> fermix_core\n** (Mix) could not compile\n")
+
+        self.assertNotIn("load on", self.events)
+
+    def test_the_load_stops_when_a_run_raises(self):
+        def fake(_command, _log, on_line):
+            on_line("Running ExUnit with seed: 11, max_cases: 8\n")
+            raise RuntimeError("boom")
+
+        with self.assertRaises(RuntimeError):
+            self.run_once(fake)
+
+        self.assertEqual(self.events, ["load on", "load off"])
 
     def test_runs_the_files_once_into_a_log_of_their_own(self):
         outcome, _ = self.run_app(0, GREEN_RUN, runs_before=2)
@@ -334,11 +379,13 @@ class MainTest(unittest.TestCase):
     def run_main(self, files, seconds, results=None, budget="720"):
         """main() over fake runs: `seconds[app]` per run, `results[app]` the (exit code, log) of each."""
 
-        def fake(command, log):
+        def fake(command, log, on_line):
             app = command[-1].split("/")[1]
             self.clock.now += seconds[app]
             code, text = (results or {}).get(app, (0, GREEN_RUN))
             log.write_text(text)
+            for line in text.splitlines(keepends=True):
+                on_line(line)
             return code
 
         argv = ["--base", "abc", "--budget-s", budget, "--log-dir", str(self.log_dir)]
@@ -370,7 +417,7 @@ class MainTest(unittest.TestCase):
             sorted(p.name for p in self.log_dir.iterdir()),
             ["stress-fermix_core-1.log", "stress-fermix_core-2.log", "stress-fermix_web-1.log"],
         )
-        self.burner.kill.assert_called_once()
+        self.assertEqual(self.burner.kill.call_count, 3, "each run has its own load")
 
     def test_an_app_the_budget_never_reached_fails_the_step(self):
         files = ["apps/fermix_core/test/a_test.exs", "apps/fermix_web/test/b_test.exs"]
@@ -380,23 +427,12 @@ class MainTest(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertIn("::error title=Stress budget spent::fermix_web never ran under load", out)
 
-    def test_one_failing_app_fails_the_step_and_the_burners_are_stopped(self):
+    def test_one_failing_app_fails_the_step(self):
         files = ["apps/fermix_core/test/a_test.exs", "apps/fermix_web/test/b_test.exs"]
 
         code, _ = self.run_main(files, {"fermix_core": 1, "fermix_web": 1}, {"fermix_web": (2, FAILED_RUN)})
 
         self.assertEqual(code, 1)
-        self.burner.kill.assert_called_once()
-
-    def test_the_burners_are_stopped_when_a_run_raises(self):
-        with mock.patch.object(
-            stress, "changed_test_files", return_value=(["apps/fermix_core/test/a_test.exs"], "")
-        ), mock.patch.object(stress, "start_burners", return_value=[self.burner]), mock.patch.object(
-            stress, "run_teed", side_effect=RuntimeError("boom")
-        ), contextlib.redirect_stdout(io.StringIO()), self.assertRaises(RuntimeError):
-            stress.main(["--base", "abc", "--budget-s", "720", "--log-dir", str(self.log_dir)], clock=self.clock)
-
-        self.burner.kill.assert_called_once()
 
     def test_the_budget_is_required_and_positive(self):
         for argv in (["--log-dir", "x"], ["--log-dir", "x", "--budget-s", "0"]):
