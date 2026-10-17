@@ -163,6 +163,17 @@ defmodule FermixCore.Capabilities.MCP.SecretsTest do
     end
   end
 
+  # A file may name a server `GitHub` from before the name rule; it loads, and
+  # no id addresses it, so it holds nothing to read or to delete.
+  test "a server named before the rule holds no value" do
+    legacy = %{@stdio | name: "GitHub"}
+
+    assert Secrets.fetch("GitHub", {:env, "GITHUB_TOKEN"}) == {:error, :unaddressable_server}
+    assert %{env: [{"GITHUB_TOKEN", false}, {"API_KEY", false}]} = Secrets.presence(legacy)
+    refute Secrets.complete?(legacy)
+    assert :ok = Secrets.delete_declared(legacy)
+  end
+
   describe "deleting" do
     test "every declared value is deleted, and only those" do
       assert :ok = Secrets.put("files", {:env, "GITHUB_TOKEN"}, "t")

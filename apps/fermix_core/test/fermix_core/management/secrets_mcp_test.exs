@@ -144,6 +144,34 @@ defmodule FermixCore.Management.SecretsMcpTest do
       refute_received {:restart_server, _source_id, _name}
     end
 
+    # The id grammar holds only names the rules allow, so a server named before
+    # them stores no secret; the answer says how to get one that can.
+    test "a server named before the rules is told to be added again under a lowercase name", %{
+      home: home
+    } do
+      path = Path.join(home, "config.toml")
+
+      File.write!(
+        path,
+        File.read!(path) <>
+          "\n[mcp.servers.GitHub]\ncommand = \"npx\"\n" <>
+          "env_secrets = [\"GITHUB_TOKEN\"]\n"
+      )
+
+      :ok = ConfigStore.apply_mcp_config()
+      :ok = RestartState.record_persisted_baseline()
+
+      for result <- [
+            Secrets.set("mcp:GitHub/env/GITHUB_TOKEN", "v", @opts),
+            Secrets.clear("mcp:GitHub/env/GITHUB_TOKEN")
+          ] do
+        assert {:error, {:invalid_params, "id", sentence}} = result
+        assert sentence =~ "Remove the server and add it again under a lowercase name."
+      end
+
+      refute_received {:restart_server, _source_id, _name}
+    end
+
     test "an empty value, or a Bearer scheme with nothing after it, is refused by field" do
       assert {:error, {:invalid_params, "value", _}} =
                Secrets.set("mcp:files/env/GITHUB_TOKEN", "", @opts)

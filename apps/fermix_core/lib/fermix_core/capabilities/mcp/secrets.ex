@@ -19,6 +19,10 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
   are both not present, because either way the server cannot be given the
   value. `fetch/2` is the read the stdio transport makes in its own `init`, so a
   value is never in a child spec.
+
+  The grammar holds only names a new server may take. A server a file named
+  before that rule (`GitHub`) keeps loading, but no id addresses it, so it holds
+  no value: nothing is read for it and nothing is left to delete.
   """
 
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
@@ -72,6 +76,13 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
   end
 
   def parse_id(id) when is_binary(id), do: :error
+
+  @doc """
+  The server an `mcp:` id is about, read up to its first `/` whether or not the
+  rest is valid: what a refusal names.
+  """
+  @spec server_of(String.t()) :: String.t()
+  def server_of(@prefix <> rest), do: rest |> String.split("/", parts: 2) |> hd()
 
   defp checked(server, ref, valid_ref?) do
     if valid_ref? and McpConfig.valid_name?(server), do: {:ok, server, ref}, else: :error
@@ -137,7 +148,11 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
 
   @doc "Reads one value: the read a server's transport makes when it starts."
   @spec fetch(String.t(), ref()) :: {:ok, String.t()} | {:error, term()}
-  def fetch(server, ref) when is_binary(server), do: SecretWriter.get(key(server, ref))
+  def fetch(server, ref) when is_binary(server) do
+    if McpConfig.valid_name?(server),
+      do: SecretWriter.get(key(server, ref)),
+      else: {:error, :unaddressable_server}
+  end
 
   @doc "Forgets one value. Forgetting one that is not stored succeeds."
   @spec delete(String.t(), ref()) :: :ok | {:error, term()}
@@ -145,10 +160,15 @@ defmodule FermixCore.Capabilities.MCP.Secrets do
 
   @doc """
   Forgets every value `server` declares, stopping at the first the store
-  refuses, so a refusal leaves the declarations that name what is left.
+  refuses, so a refusal leaves the declarations that name what is left. A
+  server no id addresses holds none.
   """
   @spec delete_declared(McpConfig.server_config()) :: :ok | {:error, term()}
   def delete_declared(%{name: name} = server) do
+    if McpConfig.valid_name?(name), do: delete_each(server), else: :ok
+  end
+
+  defp delete_each(%{name: name} = server) do
     server
     |> declared()
     |> Enum.reduce_while(:ok, fn ref, :ok ->

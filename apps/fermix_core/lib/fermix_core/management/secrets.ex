@@ -97,6 +97,10 @@ defmodule FermixCore.Management.Secrets do
                             "Change that in the settings file first."
   # The open family of values an operator MCP server declares.
   @mcp_prefix McpSecrets.prefix()
+  @mcp_id_sentence "An MCP server's secret is mcp:<server>/env/<NAME>, " <>
+                     "mcp:<server>/header/<Header-Name> or mcp:<server>/client_secret."
+  @mcp_legacy_sentence "Fermix keeps no secrets for a server with this name. " <>
+                         "Remove the server and add it again under a lowercase name."
 
   @type error ::
           {:invalid_params, String.t(), String.t()}
@@ -346,11 +350,16 @@ defmodule FermixCore.Management.Secrets do
         {:ok, name, ref}
 
       :error ->
-        {:error,
-         {:invalid_params, "id",
-          "An MCP server's secret is mcp:<server>/env/<NAME>, " <>
-            "mcp:<server>/header/<Header-Name> or mcp:<server>/client_secret."}}
+        {:error, {:invalid_params, "id", mcp_id_sentence(McpSecrets.server_of(id))}}
     end
+  end
+
+  # A server a file named before the name rule loads and runs, and no id can
+  # address it: the way to a secret is a name the rule allows.
+  defp mcp_id_sentence(name) do
+    if not McpConfig.valid_name?(name) and Enum.any?(McpConfig.configured(), &(&1.name == name)),
+      do: @mcp_legacy_sentence,
+      else: @mcp_id_sentence
   end
 
   defp mcp_server(name) do

@@ -300,16 +300,42 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
     end
   end
 
-  describe "names" do
-    test "a name outside the pattern is refused" do
-      for name <- ["GitHub", "1files", "files.local", String.duplicate("a", 33)] do
-        toml = "[mcp.servers.#{name}]\ncommand = \"npx\"\n"
+  # A hand-written file must never stop the daemon over a name: the rules §4
+  # adds (the pattern, at most 32 servers, one tool prefix per name) are named
+  # at load and enforced only when a server is added. Only a dot, which the
+  # reader has always refused, still refuses the file.
+  describe "names at load" do
+    test "a name outside the pattern loads, and is named with the rule it breaks" do
+      long = String.duplicate("a", 40)
 
-        assert_raise ArgumentError, fn -> Config.from_toml(toml) end
+      toml = """
+      [mcp.servers.GitHub]
+      command = "npx"
+
+      [mcp.servers.#{long}]
+      command = "uvx"
+
+      [mcp.servers.files]
+      command = "node"
+      """
+
+      servers = Config.from_toml(toml)
+      assert Enum.map(servers, & &1.name) == ["GitHub", long, "files"]
+      assert Enum.all?(servers, &Config.startable?/1)
+
+      assert Config.rule_breaks(servers) == [
+               "[mcp.servers.GitHub] and [mcp.servers.#{long}]: a server name is lowercase " <>
+                 "letters, digits, - and _, starts with a letter, and is at most 32 characters"
+             ]
+    end
+
+    test "a dot in a name still refuses the file, as it always has" do
+      assert_raise ArgumentError, ~r/Unknown MCP section header/, fn ->
+        Config.from_toml("[mcp.servers.files.local]\ncommand = \"npx\"\n")
       end
     end
 
-    test "two names that give their tools one prefix are refused" do
+    test "two names that give their tools one prefix both load, and are named" do
       toml = """
       [mcp.servers.foo-bar]
       command = "a"
@@ -318,20 +344,27 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
       command = "b"
       """
 
-      assert_raise ArgumentError, ~r/give their tools the same names \(mcp_foo_bar_\)/, fn ->
-        Config.from_toml(toml)
-      end
+      servers = Config.from_toml(toml)
+      assert [%{name: "foo-bar"}, %{name: "foo_bar"}] = servers
+
+      assert Config.rule_breaks(servers) == [
+               "[mcp.servers.foo-bar] and [mcp.servers.foo_bar]: their tools share the " <>
+                 "names mcp_foo_bar_…"
+             ]
     end
 
-    test "at most 32 servers" do
+    test "more than 32 servers all load, and the count is named" do
       toml =
         Enum.map_join(1..33, "\n", fn n -> "[mcp.servers.s#{n}]\ncommand = \"npx\"\n" end)
 
-      assert_raise ArgumentError, ~r/names 33 MCP servers; Fermix holds at most 32/, fn ->
-        Config.from_toml(toml)
-      end
+      servers = Config.from_toml(toml)
+      assert length(servers) == 33
+      assert Config.rule_breaks(servers) == ["33 servers: Fermix holds at most 32"]
+    end
 
-      assert length(Config.from_toml(toml |> String.split("[mcp.servers.s33]") |> hd())) == 32
+    test "a file within the rules breaks none" do
+      toml = "[mcp.servers.files]\ncommand = \"npx\"\n\n[mcp.servers.notes]\ncommand = \"node\"\n"
+      assert Config.rule_breaks(Config.from_toml(toml)) == []
     end
   end
 
@@ -467,6 +500,30 @@ defmodule FermixCore.Capabilities.MCP.ConfigTest do
                Config.put_server(full, "one-more", @stdio, [])
 
       assert {:ok, _} = Config.put_server(full, "s1", %{"enabled" => false}, [])
+    end
+  end
+
+  # The owner must be able to manage and remove what a file already holds, so
+  # the name rules bind only a new name.
+  describe "a server named before the rules" do
+    @legacy %{"GitHub" => %{server: %{"command" => "npx", "env_secrets" => ["TOKEN"]}}}
+
+    test "can be updated, switched and removed" do
+      assert {:ok, updated} = Config.put_server(@legacy, "GitHub", %{"enabled" => false}, [])
+      assert updated["GitHub"].server["enabled"] == false
+
+      assert {:ok, switched} = Config.put_tool(@legacy, "GitHub", "create_issue", false)
+      assert switched["GitHub"].tools == %{"create_issue" => %{"hidden_from_agent" => true}}
+
+      assert {:ok, %{}, %{name: "GitHub"}} = Config.delete_server(@legacy, "GitHub")
+    end
+
+    test "is not a name a new server may take" do
+      assert {:error, {:invalid_params, "name", _}} =
+               Config.put_server(@legacy, "GitLab", %{"command" => "npx"}, [])
+
+      assert {:error, {:invalid_params, "name", _}} =
+               Config.put_server(@legacy, "github", %{"command" => "npx"}, [])
     end
   end
 

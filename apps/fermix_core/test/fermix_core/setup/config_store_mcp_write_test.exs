@@ -299,6 +299,52 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     assert length(String.split(log, "[mcp.servers.files] timeout")) == 2
   end
 
+  # A file written before §4's name rules boots as it did: each rule a server
+  # breaks is named in one warning, and every server loads.
+  describe "a file whose names the rules would refuse" do
+    test "boots with GitHub, with 33 servers, and with foo-bar beside foo_bar", %{path: path} do
+      for {toml, names, named} <- [
+            {~s([mcp.servers.GitHub]\ncommand = "npx"\n), ["GitHub"], "[mcp.servers.GitHub]"},
+            {Enum.map_join(1..33, "\n", &"[mcp.servers.s#{&1}]\ncommand = \"npx\"\n"),
+             Enum.sort(Enum.map(1..33, &"s#{&1}")), "33 servers: Fermix holds at most 32"},
+            {~s([mcp.servers.foo-bar]\ncommand = "a"\n\n[mcp.servers.foo_bar]\ncommand = "b"\n),
+             ["foo-bar", "foo_bar"], "[mcp.servers.foo-bar] and [mcp.servers.foo_bar]"}
+          ] do
+        File.write!(path, toml)
+
+        log = capture_log(fn -> assert :ok = ConfigStore.bootstrap_runtime_config() end)
+
+        assert Enum.map(McpConfig.configured(), & &1.name) == names
+        assert log =~ "MCP servers Fermix loaded as before but would not add today: "
+        assert log =~ named
+        assert length(String.split(log, "would not add today")) == 2
+      end
+    end
+
+    test "a server named before the rules can be updated, switched and removed", %{path: path} do
+      File.write!(path, """
+      [mcp.servers.GitHub]
+      command = "npx"
+      env_secrets = ["GITHUB_TOKEN"]
+
+      [mcp.servers.files]
+      command = "node"
+      """)
+
+      :ok = RestartState.record_persisted_baseline()
+
+      assert :ok = ConfigStore.put_mcp_server("GitHub", %{"enabled" => false}, @recording)
+      assert :ok = ConfigStore.put_mcp_tool("GitHub", "create_issue", false, @recording)
+
+      assert [%{name: "GitHub", enabled?: false, tools_overrides: %{"create_issue" => _}}, _] =
+               McpConfig.configured()
+
+      assert :ok = ConfigStore.delete_mcp_server("GitHub", @recording)
+      assert [%{name: "files"}] = McpConfig.from_toml(File.read!(path))
+      refute File.read!(path) =~ "GitHub"
+    end
+  end
+
   describe "delete_mcp_server/2" do
     test "removes the server and every value it declares, and nothing else", %{path: path} do
       attrs = Map.put(@files, "env_secrets", ["GITHUB_TOKEN", "API_KEY"])

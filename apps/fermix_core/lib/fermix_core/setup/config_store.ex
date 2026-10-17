@@ -396,8 +396,10 @@ defmodule FermixCore.Setup.ConfigStore do
     case File.read(path()) do
       {:ok, contents} ->
         warn_retired_mcp_sections(contents)
-        Application.put_env(:fermix_core, :mcp_servers, McpConfig.from_toml(contents))
+        servers = McpConfig.from_toml(contents)
+        Application.put_env(:fermix_core, :mcp_servers, servers)
         warn_unread_mcp_keys(contents)
+        warn_mcp_rule_breaks(servers)
         :ok
 
       {:error, :enoent} ->
@@ -434,6 +436,21 @@ defmodule FermixCore.Setup.ConfigStore do
       keys ->
         Logger.warning(
           "config.toml MCP keys Fermix does not read, kept as written: " <> Enum.join(keys, ", ")
+        )
+    end
+  end
+
+  # The name rules bind a server being added; a file that already breaks them
+  # loads as it did before them, and the load says once what it breaks.
+  defp warn_mcp_rule_breaks(servers) do
+    case McpConfig.rule_breaks(servers) do
+      [] ->
+        :ok
+
+      breaks ->
+        Logger.warning(
+          "config.toml MCP servers Fermix loaded as before but would not add today: " <>
+            Enum.join(breaks, "; ")
         )
     end
   end

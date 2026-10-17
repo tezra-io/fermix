@@ -13,11 +13,15 @@ defmodule FermixCore.Capabilities.MCP.Config do
   http server adds `url`, `auth` (`:auto`, `:header` or `:none`),
   `header_secrets`, `key_header` and `oauth_client_id`.
 
-  A name is `^[a-z][a-z0-9_-]{0,31}$`, there are at most 32 servers, and no
-  two names share a tool prefix: `foo-bar` and `foo_bar` both name tools
-  `mcp_foo_bar_…`. A key this reader does not read, a key of the other
-  transport included, is kept in the file and named by `unread_keys/1` so the
-  caller can say so; it never refuses the file.
+  A new server's name is `^[a-z][a-z0-9_-]{0,31}$`, there are at most 32
+  servers, and no two names share a tool prefix: `foo-bar` and `foo_bar` both
+  name tools `mcp_foo_bar_…`. Those rules bind a server being added
+  (`put_server/4`); a file that already breaks them loads as it always did, and
+  `rule_breaks/1` names what it breaks, because a name the owner wrote must
+  never stop the daemon. Only a dot in a name, which this reader has always
+  refused, refuses the file. A key this reader does not read, a key of the
+  other transport included, is kept in the file and named by `unread_keys/1`
+  so the caller can say so; it never refuses the file either.
 
   This parser is a small purpose-built TOML reader scoped to the MCP block. It
   supports:
@@ -110,8 +114,8 @@ defmodule FermixCore.Capabilities.MCP.Config do
   @writable_keys ~w(transport enabled origin command args cwd env_secrets url auth key_header header_secrets oauth_client_id)
   @required_keys %{stdio: "command", http: "url"}
 
-  @name_sentence "A server name is lowercase letters, digits, - and _, starts with a letter, " <>
-                   "and is at most 32 characters."
+  @name_rule "server name is lowercase letters, digits, - and _, starts with a letter, " <>
+               "and is at most 32 characters"
 
   @spec from_toml(String.t()) :: [server_config()]
   def from_toml(contents) when is_binary(contents) do
@@ -203,7 +207,49 @@ defmodule FermixCore.Capabilities.MCP.Config do
   @spec max_servers() :: pos_integer()
   def max_servers, do: @max_servers
 
-  @doc "Whether `name` may name an operator server."
+  @doc """
+  The §4 name rules the loaded `servers` break, one sentence per rule: a name
+  outside the pattern, more than 32 servers, names that give their tools one
+  prefix. The servers still load; the caller says so once.
+  """
+  @spec rule_breaks([server_config()]) :: [String.t()]
+  def rule_breaks(servers) when is_list(servers) do
+    names = Enum.map(servers, & &1.name)
+    pattern_breaks(names) ++ count_breaks(names) ++ prefix_breaks(names)
+  end
+
+  defp pattern_breaks(names) do
+    case Enum.reject(names, &valid_name?/1) do
+      [] -> []
+      broken -> ["#{listed(broken)}: a #{@name_rule}"]
+    end
+  end
+
+  defp count_breaks(names) when length(names) > @max_servers,
+    do: ["#{length(names)} servers: Fermix holds at most #{@max_servers}"]
+
+  defp count_breaks(_names), do: []
+
+  defp prefix_breaks(names) do
+    names
+    |> Enum.group_by(&Naming.sanitize_segment/1)
+    |> Enum.filter(fn {_prefix, group} -> length(group) > 1 end)
+    |> Enum.sort()
+    |> Enum.map(fn {prefix, group} ->
+      "#{listed(group)}: their tools share the names mcp_#{prefix}_…"
+    end)
+  end
+
+  defp listed(names) do
+    sections = Enum.map(names, &"[mcp.servers.#{&1}]")
+
+    case sections do
+      [one] -> one
+      _many -> Enum.join(Enum.drop(sections, -1), ", ") <> " and " <> List.last(sections)
+    end
+  end
+
+  @doc "Whether `name` may name a new operator server."
   @spec valid_name?(String.t()) :: boolean()
   def valid_name?(name) when is_binary(name), do: Regex.match?(@name_pattern, name)
 
@@ -219,13 +265,13 @@ defmodule FermixCore.Capabilities.MCP.Config do
   @doc """
   One server block, checked and typed, without its tool blocks: the reader's
   rule for every server, and the check every edit's result passes. A refusal
-  names the key it is about.
+  names the key it is about. The name is not checked here: a loaded server
+  keeps the name it has, and `put_server/4` checks a new one.
   """
   @spec server(String.t(), %{String.t() => term()}) ::
           {:ok, server_config()} | {:error, refusal()}
   def server(name, block) when is_binary(name) and is_map(block) do
-    with :ok <- validate_name(name),
-         :ok <- reject_removed_server_key(name, block),
+    with :ok <- reject_removed_server_key(name, block),
          {:ok, transport} <- transport(block),
          {:ok, enabled?} <- optional_bool(block, "enabled", true),
          {:ok, origin} <- optional_string(block, "origin"),
@@ -252,8 +298,10 @@ defmodule FermixCore.Capabilities.MCP.Config do
   `attrs` does not name is carried. Refused: a name that is not valid, a key
   the daemon does not write, a value the reader's dialect cannot hold, a
   changed transport, a server without its command or URL, and, for a new
-  server, a 33rd one or a name whose tool prefix another
-  operator server or one of `plugin_names` already gives.
+  server, a name outside the pattern, a 33rd one, or a name whose tool prefix
+  another operator server or one of `plugin_names` already gives. A server the
+  file already holds keeps its name, whatever the rules say of it, so the owner
+  can still change or remove it.
   """
   @spec put_server(document(), String.t(), %{String.t() => term()}, [String.t()]) ::
           {:ok, document()} | {:error, refusal()}
@@ -262,12 +310,11 @@ defmodule FermixCore.Capabilities.MCP.Config do
     sections = Map.get(document, name, %{})
     block = merge_block(Map.get(sections, :server, %{}), attrs)
 
-    with :ok <- validate_name(name),
+    with :ok <- room_for(document, name, plugin_names),
          :ok <- writable(attrs),
          :ok <- same_transport(Map.get(sections, :server), attrs),
          {:ok, server} <- server(name, block),
-         :ok <- required(server, block),
-         :ok <- room_for(document, name, plugin_names) do
+         :ok <- required(server, block) do
       {:ok, Map.put(document, name, Map.put(sections, :server, block))}
     end
   end
@@ -399,6 +446,9 @@ defmodule FermixCore.Capabilities.MCP.Config do
 
   defp room_for(document, name, plugin_names) do
     cond do
+      not valid_name?(name) ->
+        refuse("name", "A #{@name_rule}.")
+
       map_size(document) >= @max_servers ->
         refuse("name", "Fermix holds at most #{@max_servers} MCP servers. Remove one first.")
 
@@ -471,14 +521,10 @@ defmodule FermixCore.Capabilities.MCP.Config do
   end
 
   defp assemble_configs(by_name) do
-    configs =
-      by_name
-      |> Map.to_list()
-      |> Enum.sort_by(fn {name, _} -> name end)
-      |> Enum.map(fn {name, sections} -> assemble_one(name, sections) end)
-
-    check_servers!(configs)
-    configs
+    by_name
+    |> Map.to_list()
+    |> Enum.sort_by(fn {name, _} -> name end)
+    |> Enum.map(fn {name, sections} -> assemble_one(name, sections) end)
   end
 
   defp assemble_one(name, sections) do
@@ -489,27 +535,6 @@ defmodule FermixCore.Capabilities.MCP.Config do
       {:error, {:invalid_params, _field, sentence}} ->
         raise ArgumentError, "[mcp.servers.#{name}] #{sentence}"
     end
-  end
-
-  defp check_servers!(configs) do
-    if length(configs) > @max_servers do
-      raise ArgumentError,
-            "config.toml names #{length(configs)} MCP servers; Fermix holds at most #{@max_servers}."
-    end
-
-    names = Enum.map(configs, & &1.name)
-
-    for name <- names, other <- names, name < other, same_prefix?(name, other) do
-      raise ArgumentError,
-            "[mcp.servers.#{name}] and [mcp.servers.#{other}] give their tools the same names " <>
-              "(mcp_#{Naming.sanitize_segment(name)}_); rename one."
-    end
-
-    :ok
-  end
-
-  defp validate_name(name) do
-    if valid_name?(name), do: :ok, else: refuse("name", @name_sentence)
   end
 
   defp reject_removed_server_key(name, block) do
