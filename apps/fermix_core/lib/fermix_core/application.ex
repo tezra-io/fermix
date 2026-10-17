@@ -17,6 +17,7 @@ defmodule FermixCore.Application do
   alias FermixCore.BootProfile
   alias FermixCore.BuildInfo
   alias FermixCore.Capabilities.BuiltinSeeder
+  alias FermixCore.Capabilities.MCP.LoginPath, as: McpLoginPath
   alias FermixCore.Capabilities.MCP.RuntimeStatus, as: McpRuntimeStatus
   alias FermixCore.Capabilities.MCP.Supervisor, as: McpSupervisor
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
@@ -183,6 +184,9 @@ defmodule FermixCore.Application do
         # is `:temporary`, so a status table living inside it would vanish
         # exactly when it holds the only explanation of why the client is gone.
         McpRuntimeStatus,
+        # The login shell's PATH, read the first time an operator stdio server
+        # starts, never at boot: most homes have none.
+        McpLoginPath,
         {McpSupervisor, capability_registry: CapabilityRegistry},
         Repo,
         # Prompt-template reconciliation (M43 §9.3) runs here and nowhere else:

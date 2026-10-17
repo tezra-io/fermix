@@ -86,7 +86,13 @@ defmodule FermixCore.Capabilities.MCP.AnubisStdioTest do
   # release them, so the test does.
   defp start_stdio_server(ctx, name, protocol_version \\ "2025-11-25") do
     on_exit(fn -> Enum.each(~w(echo refuse), &Naming.unregister("mcp_#{name}_#{&1}")) end)
-    server = %{name: name, command: ctx.elixir, args: [@fixture, protocol_version]}
+
+    server = %{
+      name: name,
+      source_id: {:plugin, name},
+      command: ctx.elixir,
+      args: [@fixture, protocol_version]
+    }
 
     %{children: [client_spec], client_name: client} =
       AnubisStarter.Default.child_specs_for(server, %{})

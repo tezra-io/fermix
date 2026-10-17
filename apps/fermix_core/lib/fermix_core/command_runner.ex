@@ -381,11 +381,19 @@ defmodule FermixCore.CommandRunner do
   defp put_env(port_opts, :overlay, env) when is_list(env),
     do: [{:env, encode_env(env)} | port_opts]
 
-  # The port starts from the emulator's own environment and applies `:env` on
-  # top, and `{name, false}` is its one way to remove a variable. So the
-  # replacement is the supplied list plus an unset for every other variable the
-  # emulator holds now: read here, at spawn, by the process that opens the port.
-  defp put_env(port_opts, :replace, env) when is_list(env) do
+  defp put_env(port_opts, :replace, env) when is_list(env),
+    do: [{:env, replacement_env(env)} | port_opts]
+
+  @doc """
+  The `Port.open/2` `:env` value that makes `env` a child's whole environment.
+
+  The port starts from the emulator's own environment and applies `:env` on
+  top, and `{name, false}` is its one way to remove a variable. So the
+  replacement is the supplied list plus an unset for every other variable the
+  emulator holds now: read at spawn, by the process that opens the port.
+  """
+  @spec replacement_env([{String.t(), String.t()}]) :: [{charlist(), charlist() | false}]
+  def replacement_env(env) when is_list(env) do
     supplied = encode_env(env)
     kept = MapSet.new(supplied, &elem(&1, 0))
 
@@ -395,7 +403,7 @@ defmodule FermixCore.CommandRunner do
       |> Enum.reject(&MapSet.member?(kept, &1))
       |> Enum.map(&{&1, false})
 
-    [{:env, supplied ++ unset} | port_opts]
+    supplied ++ unset
   end
 
   defp encode_env(env) do

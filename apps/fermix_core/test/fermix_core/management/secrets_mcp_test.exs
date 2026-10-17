@@ -20,14 +20,20 @@ defmodule FermixCore.Management.SecretsMcpTest do
   alias FermixTestSupport.SafeRm
   alias FermixTestSupport.SecretWriterStub
 
-  # Stands in for `McpSupervisor`: reports each start to the calling process,
-  # which is the test's, because `secret.set` runs in it.
+  # Stands in for `McpSupervisor`: reports each start and stop to the calling
+  # process, which is the test's, because `secret.set` and `secret.clear` run
+  # in it.
   defmodule RecordingSupervisor do
     @moduledoc false
 
     def restart_server(source_id, spec) do
       send(self(), {:restart_server, source_id, spec.name})
       {:ok, self()}
+    end
+
+    def stop_server(source_id) do
+      send(self(), {:stop_server, source_id})
+      :ok
     end
   end
 
@@ -138,7 +144,7 @@ defmodule FermixCore.Management.SecretsMcpTest do
           ] do
         assert {:error, {:invalid_params, "id", text}} = Secrets.set(id, "v", @opts)
         assert text =~ sentence
-        assert {:error, {:invalid_params, "id", _text}} = Secrets.clear(id)
+        assert {:error, {:invalid_params, "id", _text}} = Secrets.clear(id, @opts)
       end
 
       refute_received {:restart_server, _source_id, _name}
@@ -199,10 +205,21 @@ defmodule FermixCore.Management.SecretsMcpTest do
     test "the item is deleted and the answer says it is gone" do
       assert {:ok, _view} = Secrets.set("mcp:files/env/GITHUB_TOKEN", "t", @opts)
 
-      assert {:ok, view} = Secrets.clear("mcp:files/env/GITHUB_TOKEN")
+      assert {:ok, view} = Secrets.clear("mcp:files/env/GITHUB_TOKEN", @opts)
       assert view["present"] == false
       assert answer_shape(view) == answer_shape(fixture_result("secret_clear_external_env"))
       assert McpSecrets.fetch("files", {:env, "GITHUB_TOKEN"}) == {:error, :missing_secret}
+    end
+
+    # The program keeps the environment it started with, so the value is still
+    # in use until the server stops.
+    test "a server this build starts is stopped; one it does not start is left alone" do
+      assert {:ok, _view} = Secrets.clear("mcp:files/env/API_KEY", @opts)
+      assert_received {:stop_server, {:operator, "files"}}
+
+      assert {:ok, _view} = Secrets.clear("mcp:notes/env/NOTES_KEY", @opts)
+      assert {:ok, _view} = Secrets.clear("mcp:linear/header/Authorization", @opts)
+      refute_received {:stop_server, _source_id}
     end
   end
 

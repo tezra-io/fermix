@@ -55,7 +55,10 @@ defmodule FermixCore.Management.Secrets do
   so a reload cannot see it arrive: storing the last value an enabled server
   was missing starts it, and storing a new one restarts it, through
   `McpSupervisor.restart_server/2`, as a rotated plugin credential is.
-  Addressing, storage and presence are `Capabilities.MCP.Secrets`'s.
+  Forgetting a value a running server was started with stops it, through the
+  same supervisor's `stop_server/1`, so the value is no longer in use; it
+  starts again once the value is stored. Addressing, storage and presence are
+  `Capabilities.MCP.Secrets`'s.
   """
 
   alias FermixCore.Auth.AnthropicLogin
@@ -191,19 +194,26 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  @doc "Forgets one secret, keyring item first, then the reference that reads it."
-  @spec clear(String.t()) :: {:ok, map()} | {:error, error()}
-  def clear(@setup_token_id = id), do: forget_setup_token(id)
+  @doc """
+  Forgets one secret, keyring item first, then the reference that reads it.
 
-  def clear(@env_prefix <> name = id) do
+  `:mcp_supervisor` names the module that stops an MCP server running with
+  the value, for a test, as for `set/3`; every other family takes no option.
+  """
+  @spec clear(String.t(), keyword()) :: {:ok, map()} | {:error, error()}
+  def clear(id, opts \\ [])
+
+  def clear(@setup_token_id = id, _opts), do: forget_setup_token(id)
+
+  def clear(@env_prefix <> name = id, _opts) do
     with :ok <- validate_env_name(name), do: forget_env(id, name)
   end
 
-  def clear(@mcp_prefix <> _rest = id) do
-    with {:ok, server, ref} <- mcp_target(id), do: forget_mcp(id, server, ref)
+  def clear(@mcp_prefix <> _rest = id, opts) when is_list(opts) do
+    with {:ok, server, ref} <- mcp_target(id), do: forget_mcp(id, server, ref, opts)
   end
 
-  def clear(id) when is_binary(id) do
+  def clear(id, _opts) when is_binary(id) do
     with {:ok, key} <- fetch_key(id) do
       commit(id, key, fn -> Wizard.clear_secret(key) end)
     end
@@ -399,11 +409,11 @@ defmodule FermixCore.Management.Secrets do
     end
   end
 
-  # The value just stored is read in the transport's own `init`, so only a
-  # start reaches it. A server still missing a value, a disabled one, and one
-  # this build does not start are left as they are.
+  # The value just stored is read by the server's transport as it starts, so
+  # only a start reaches it. A server still missing a value, a disabled one,
+  # and one this build does not start are left as they are.
   defp start_when_complete(server, opts) do
-    if McpConfig.startable?(server) and McpSecrets.complete?(server) do
+    if McpSupervisor.runs?(server) do
       supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
       started(server.name, supervisor.restart_server({:operator, server.name}, server))
     else
@@ -423,13 +433,37 @@ defmodule FermixCore.Management.Secrets do
     :ok
   end
 
-  defp forget_mcp(id, server, ref) do
+  defp forget_mcp(id, server, ref, opts) do
     with :ok <- RestartState.writable(),
          :ok <- McpSecrets.delete(server.name, ref) do
+      :ok = stop_when_started(server, opts)
       {:ok, mcp_view(id, false)}
     else
       {:error, reason} -> {:error, mcp_error(id, reason)}
     end
+  end
+
+  # A server this build starts may be running with the value just forgotten,
+  # and its program keeps the environment it started with, so it is stopped.
+  # Stopping one that is not running is already done.
+  defp stop_when_started(server, opts) do
+    if McpConfig.startable?(server) do
+      supervisor = Keyword.get(opts, :mcp_supervisor, McpSupervisor)
+      stopped(server.name, supervisor.stop_server({:operator, server.name}))
+    else
+      :ok
+    end
+  end
+
+  # The value is gone either way, so the answer is the store's.
+  defp stopped(_name, :ok), do: :ok
+
+  defp stopped(name, {:error, reason}) do
+    Logger.error(
+      "MCP server #{name} could not be stopped after its secret was cleared: #{inspect(reason)}"
+    )
+
+    :ok
   end
 
   # The same shape as `env:`: no variable replaces an MCP server's value.

@@ -24,7 +24,10 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   When the supervisor supplies a source-qualified identity and a
   `RuntimeStatus` sink, this process also writes the generation-qualified
-  `:ready` and classified terminal statuses for that source. It pins its
+  `:ready` (with how many tools the server listed) and classified terminal
+  statuses for that source, into the generation its owner installed: the
+  remote owner, or an operator stdio server's `StdioTransport`. A stdio
+  source that gives up on discovery is `retries_exhausted`. It pins its
   generation once, at init: if a replacement owner is installed mid-discovery,
   every write from this process is refused as stale rather than overwriting the
   replacement's status.
@@ -294,7 +297,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
          :ok <- watch_upstream(state),
          {:ok, descriptors} <- list_tools(state),
          {:ok, state} <- register_tools(descriptors, state) do
-      {:ok, complete_registration(%{state | discovery_attempts: 0})}
+      {:ok, complete_registration(%{state | discovery_attempts: 0}, length(descriptors))}
     end
   end
 
@@ -334,8 +337,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   # The shared registration-completion point: the agent's tool list is only now
   # what the registry says it is.
-  defp complete_registration(state) do
-    _ = put_status(state, :ready, nil, nil)
+  defp complete_registration(state, tool_count) do
+    _ = put_ready(state, tool_count)
     emit_lifecycle(state, :ready, :ok, 0, 1)
     if state.proxy, do: Proxy.resume(state.proxy, state.contract)
     refresh_runtime_context(state)
@@ -352,7 +355,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
           RuntimeStatus.describe(RuntimeStatus.classify(reason))
       )
 
-      {:stop, :normal, record_terminal(state, reason)}
+      {:stop, :normal, record_terminal(state, give_up_reason(state, reason))}
     else
       delay = state.retry_base_ms * round(:math.pow(2, attempts - 1))
       log_retry(reason, state.server_name, attempts, state.max_discovery_attempts, delay)
@@ -368,6 +371,13 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   defp terminal_contract_error?({class, _detail}) when class in @terminal_classes, do: true
   defp terminal_contract_error?(_reason), do: false
+
+  # A remote source's last failure is already classified by its rail. A stdio
+  # program's is whatever its client said while it never answered, so the
+  # status names what happened: the attempts ran out (the log line above keeps
+  # the client's class).
+  defp give_up_reason(%{contract: nil}, _reason), do: :retries_exhausted
+  defp give_up_reason(_state, reason), do: reason
 
   # `Server capabilities not set` is the expected response while the MCP
   # client is still racing through `initialize` — log at debug, not warning,
@@ -658,7 +668,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
   defp current_generation(state) do
     case RuntimeStatus.owner(state.runtime_status, state.source_id) do
       {:ok, _owner, generation} -> generation
-      # No owner: a stdio server has none, so it has no live status to write.
+      # No owner: a plugin's stdio server has none, so it has no live status to
+      # write.
       :error -> nil
     end
   end
@@ -672,6 +683,20 @@ defmodule FermixCore.Capabilities.MCP.Server do
     end
 
     state
+  end
+
+  defp put_ready(%{generation: nil}, _tool_count), do: :no_status_sink
+
+  defp put_ready(state, tool_count) do
+    case RuntimeStatus.put_ready(
+           state.runtime_status,
+           state.source_id,
+           state.generation,
+           tool_count
+         ) do
+      :ok -> :ok
+      {:error, :stale_generation} -> :stale_generation
+    end
   end
 
   defp put_status(%{generation: nil}, _status, _detail, _subject), do: :no_status_sink

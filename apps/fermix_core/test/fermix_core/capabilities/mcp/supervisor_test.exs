@@ -786,7 +786,13 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     test "only startable TOML servers are started", %{cap_registry: cap_registry, suffix: suffix} do
       previous = Application.get_env(:fermix_core, :mcp_servers)
       on_exit(fn -> Application.put_env(:fermix_core, :mcp_servers, previous || []) end)
-      stub = %{discoverer: HappyDiscoverer, caller: StubCaller, tools_overrides: %{}}
+
+      stub = %{
+        discoverer: HappyDiscoverer,
+        caller: StubCaller,
+        tools_overrides: %{},
+        env_secrets: []
+      }
 
       Application.put_env(:fermix_core, :mcp_servers, [
         Map.merge(stub, %{name: "on", transport: :stdio, enabled?: true}),

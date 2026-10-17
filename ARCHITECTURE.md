@@ -496,6 +496,10 @@ through an HTTP template interpreter, with credentials resolved outside model
 input. The `mcp` rail becomes a local stdio server (`local_stdio`) or a remote
 Streamable-HTTP endpoint (`remote_mcp`). `Capabilities.MCP.Supervisor` runs
 those servers and the operator's own `[mcp.servers.*]` in isolated subtrees.
+An operator stdio server runs over `Capabilities.MCP.StdioTransport`, which
+reads its secrets in its own process, builds its environment, finds its program
+on the login shell's `PATH` (`Capabilities.MCP.LoginPath`) and is its
+`RuntimeStatus` owner; a plugin's `local_stdio` server runs over Anubis's own.
 Fermix is only ever an MCP client: it does not expose its own tools as an MCP
 server.
 

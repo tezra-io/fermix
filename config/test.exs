@@ -212,6 +212,11 @@ config :fermix_core, :plugin_provenance_verifier, FermixTestSupport.DistVerifier
 # default; tests stub success per-call via :find_executable / :version_fetch.
 config :fermix_core, :runtime_probe_host, FermixTestSupport.HostRuntimeStub
 
+# Hermetic default: the suite never runs the owner's login shell. The PATH an
+# operator stdio MCP server runs with (`Capabilities.MCP.LoginPath`) is the
+# suite's own; a test of the reading injects its own.
+config :fermix_core, :mcp_login_shell, FermixTestSupport.LoginShellStub
+
 # A real daemon captures prompt/response/tool bodies in traces (resolved in
 # config/runtime.exs, which honours this value). The suite pins the LEAN posture
 # instead of inheriting the product default, so a test asserting on captured

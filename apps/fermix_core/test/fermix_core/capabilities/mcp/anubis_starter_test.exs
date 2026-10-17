@@ -9,14 +9,15 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarterTest do
   # advertising the same name then crashes on the first `tools/list` reply
   # (`:ets.delete_all_objects/1` with insufficient access rights), which is how
   # the tesla helper failed discovery every 31 s beside the obsidian child.
-  # The identity Fermix advertises must therefore be unique per server.
+  # The identity Fermix advertises must therefore be unique per server, and per
+  # source: an operator server may share a plugin's name (M74 E3).
   describe "child_specs_for/2 stdio" do
-    test "every server gets its own client identity, derived from the server name" do
+    test "every server gets its own client identity, derived from its source" do
       tesla = client_info_for("tesla")
       obsidian = client_info_for("obsidian")
 
-      assert tesla["name"] == "fermix-tesla"
-      assert obsidian["name"] == "fermix-obsidian"
+      assert tesla["name"] == "fermix-plugin-tesla"
+      assert obsidian["name"] == "fermix-plugin-obsidian"
       refute tesla["name"] == obsidian["name"]
       assert is_binary(tesla["version"]) and tesla["version"] != ""
     end
@@ -25,7 +26,14 @@ defmodule FermixCore.Capabilities.MCP.AnubisStarterTest do
   defp client_info_for(server_name) do
     %{children: [spec]} =
       AnubisStarter.Default.child_specs_for(
-        %{name: server_name, command: "/bin/true", args: [], env: %{}, cwd: "/"},
+        %{
+          name: server_name,
+          source_id: {:plugin, server_name},
+          command: "/bin/true",
+          args: [],
+          env: %{},
+          cwd: "/"
+        },
         %{}
       )
 

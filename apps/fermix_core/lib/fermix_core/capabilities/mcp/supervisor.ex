@@ -29,9 +29,12 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   the `MCP.Server` that registers the tools, so switching a tool never
   cold-starts the server's program.
 
-  The TOML servers are the startable ones (`MCP.Config.startable?/1`): a
-  disabled server, and an `http` one until the remote rail takes an operator
-  endpoint, stays in the file and is not started.
+  The TOML servers are the ones `runs?/1` answers for: startable by their
+  configuration (`MCP.Config.startable?/1`: a disabled server, and an `http`
+  one until the remote rail takes an operator endpoint, stays in the file and
+  is not started), with every value they declare in the secret store
+  (`MCP.Secrets.complete?/1`). An operator stdio server's environment is built
+  by its own `StdioTransport`, never resolved into its spec here.
 
   Child identity is **source-qualified** (M27 §7.3): `{:plugin, "acme"}` for a
   plugin-owned server, `{:operator, "acme"}` for a `[mcp.servers.acme]` TOML
@@ -50,11 +53,13 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   alias FermixCore.Capabilities.MCP.AnubisStarter
   alias FermixCore.Capabilities.MCP.Caller.Remote, as: RemoteCaller
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.LoginPath
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Remote.Budget
   alias FermixCore.Capabilities.MCP.Remote.Owner, as: RemoteOwner
   alias FermixCore.Capabilities.MCP.RuntimeStatus
+  alias FermixCore.Capabilities.MCP.Secrets, as: McpSecrets
   alias FermixCore.Capabilities.MCP.Server, as: McpServer
   alias FermixCore.Plugins.Dist.McpSource
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -74,6 +79,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
           | {:capability_registry, GenServer.server()}
           | {:mcp_registry, GenServer.server() | nil}
           | {:runtime_status, GenServer.server() | nil}
+          | {:login_path, GenServer.server()}
           | {:anubis_starter, module()}
 
   @type reload_summary :: %{
@@ -172,6 +178,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
         Keyword.get(opts, :capability_registry, FermixCore.Capabilities.Registry),
       mcp_registry: mcp_registry,
       runtime_status: Keyword.get(opts, :runtime_status, RuntimeStatus),
+      login_path: Keyword.get(opts, :login_path, LoginPath),
       budget: Keyword.get(opts, :budget, budget_name(mcp_registry)),
       anubis_starter: Keyword.get(opts, :anubis_starter, AnubisStarter.Default)
     }
@@ -266,8 +273,10 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     end
   end
 
-  # Only a remote source has an owner registered in `RuntimeStatus`; a stdio
-  # subtree has nothing to say goodbye with.
+  # The owner registered in `RuntimeStatus` answers `:teardown`: a remote owner
+  # closes its authenticated session, an operator stdio server's transport ends
+  # its program. A plugin's stdio subtree has no owner and nothing to say
+  # goodbye with.
   defp owner_pid(source_id, opts) do
     status_server = Keyword.get(opts, :runtime_status, RuntimeStatus)
 
@@ -433,7 +442,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     # The id hashes the raw spec — env resolution mixes in ambient sandbox
     # env and must not perturb child identity across reloads.
     id = server_child_id(server)
-    server = resolve_server_env!(server)
+    server = server |> Map.put(:source_id, source_id(server)) |> resolve_server_env!()
 
     %{children: anubis_children, client_name: anubis_client} =
       config.anubis_starter.child_specs_for(server, config)
@@ -531,6 +540,10 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
         )
   end
 
+  # An operator stdio server's `StdioTransport` builds its environment in its
+  # own process, so no value it reads is ever in this spec (M74 E3).
+  defp resolve_server_env!(%{transport: :stdio} = server), do: server
+
   defp resolve_server_env!(server) do
     pass_env = Map.get(server, :pass_env, [])
     literal_env = Map.get(server, :env, %{})
@@ -550,9 +563,17 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
     end
   end
 
-  defp toml_servers do
-    Enum.filter(McpConfig.configured(), &McpConfig.startable?/1)
-  end
+  @doc """
+  Whether the daemon runs this operator server now: its configuration starts
+  it (`MCP.Config.startable?/1`) and every value it declares is in the secret
+  store. A value is read by the server's transport, not carried in its spec,
+  so one that is missing keeps the server from starting rather than starting
+  it without.
+  """
+  @spec runs?(McpConfig.server_config()) :: boolean()
+  def runs?(server), do: McpConfig.startable?(server) and McpSecrets.complete?(server)
+
+  defp toml_servers, do: Enum.filter(McpConfig.configured(), &runs?/1)
 
   # Boot path: a registry that cannot even be read is a corrupt install —
   # fail loud at the boundary rather than booting with half the surface.
