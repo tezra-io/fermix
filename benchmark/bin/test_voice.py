@@ -739,6 +739,33 @@ def test_a_clip_after_task_running_waits_for_the_running_frame(daemon):
     assert all(g.passed for g in gates), [g.detail for g in gates]
 
 
+def test_a_microphone_running_late_still_ends_each_clip_when_its_audio_ends(daemon, monkeypatch):
+    # The loop wakes 150 ms late before the last clip's final chunk, as on a
+    # busy runner, then catches up; the silence that ends the clip still goes
+    # out on schedule, and the reply to it must not read as said mid-clip.
+    real_chunk = voice._Mic.chunk
+    stalled = []
+
+    def chunk(mic, at_ms, call):
+        pcm = real_chunk(mic, at_ms, call)
+        last = len(mic._clips) - 1
+        if (not stalled and mic._index == last and mic._offset is not None
+                and len(mic._clips[last].pcm) - mic._offset <= voice.CHUNK_BYTES):
+            stalled.append(at_ms)
+            time.sleep(0.15)
+        return pcm
+
+    monkeypatch.setattr(voice._Mic, "chunk", chunk)
+    fake = daemon(mode="pending")
+
+    evidence = voice.drive(fake.home, _plan("task_running"), timeout_s=30)
+
+    assert evidence.ok, evidence.error
+    assert stalled, "the stall never ran"
+    gates = voice.wire_gates(evidence, {"spoke_while_task_running": True})
+    assert all(g.passed for g in gates), [g.detail for g in gates]
+
+
 def test_a_spoken_correction_reads_superseded_then_completed(daemon):
     fake = daemon(mode="correct")
 

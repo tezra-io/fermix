@@ -618,17 +618,21 @@ class _Mic:
     def last_end(self) -> float | None:
         return self.played[-1]["end_ms"] if self.played else None
 
-    def chunk(self, now_ms: float, call: "_Call") -> bytes:
+    def chunk(self, at_ms: float, call: "_Call") -> bytes:
+        """The next chunk. `at_ms` is when it is due on the microphone's own
+        schedule, not when it is sent, so a clip ends when its audio does: a
+        loop that wakes late and catches up cannot send the silence after a
+        clip before the clip's recorded end."""
         if self._offset is None and not self.done():
-            self._maybe_start(now_ms, call)
+            self._maybe_start(at_ms, call)
         if self._offset is None:
             return bytes(CHUNK_BYTES)
         clip = self._clips[self._index]
         piece = clip.pcm[self._offset:self._offset + CHUNK_BYTES]
         self._offset += CHUNK_BYTES
         if self._offset >= len(clip.pcm):
-            self.played[-1]["end_ms"] = round(now_ms + CHUNK_MS, 1)
-            self._offset, self._since, self._ready_at = None, now_ms + CHUNK_MS, None
+            self.played[-1]["end_ms"] = round(at_ms + CHUNK_MS, 1)
+            self._offset, self._since, self._ready_at = None, at_ms + CHUNK_MS, None
             self._index += 1
         return piece + bytes(CHUNK_BYTES - len(piece))
 
@@ -766,7 +770,7 @@ def _converse(conn: Connection, plan: Plan, call: _Call, mic: _Mic, sink: Playba
         for _ in range(_MAX_CATCH_UP):
             if now < next_chunk:
                 break
-            pcm = mic.chunk(_ms(origin), call)
+            pcm = mic.chunk((next_chunk - origin) * 1000.0, call)
             conn.send({"type": "audio_chunk", "audio": base64.b64encode(pcm).decode("ascii")})
             next_chunk += CHUNK_MS / 1000.0
         _send_reports(conn, sink.tick(_ms(origin)), evidence)
