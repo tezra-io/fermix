@@ -1,6 +1,7 @@
 defmodule FermixCore.Tools.FileWriteTest do
   use ExUnit.Case, async: true
 
+  alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.FileWrite
@@ -174,7 +175,12 @@ defmodule FermixCore.Tools.FileWriteTest do
 
       assert result.success == false
       assert result.error =~ "outside roots"
-      assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(outside)}"
+
+      assert String.ends_with?(
+               result.error,
+               Sandbox.grant_hint(PathPolicy.canonical_path(outside))
+             )
+
       refute File.exists?(path)
 
       FermixTestSupport.SafeRm.rm_rf!(outside)

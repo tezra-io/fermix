@@ -164,6 +164,27 @@ defmodule FermixCore.Sandbox.OsSandboxTest do
       assert staging in rules.secret_patterns
     end
 
+    test "unreadable/1 names each read rule and how far it reaches", ctx do
+      ssh = {resolved(Path.join(ctx.os_home, ".ssh")), :named}
+      fermix_home = resolved(ctx.fermix_home)
+
+      for mode <- [:strict, :standard, :open] do
+        assert {:ok, entries} = OsSandbox.unreadable(config(ctx, mode))
+        assert {resolved(Path.join(ctx.fermix_home, "secrets")), :tree} in entries
+        assert {Path.join(fermix_home, "auth.json"), :prefix} in entries
+        staging = Path.join(resolved(System.tmp_dir!()), "fermix-secret-")
+        assert {staging, :prefix} in entries
+        assert ssh in entries == (mode != :open), "#{mode}"
+        paths = Enum.map(entries, &elem(&1, 0))
+        assert paths == Enum.uniq(paths), "#{mode}: a path named twice"
+      end
+    end
+
+    test "the kernel holds commands on macOS and not elsewhere yet" do
+      assert OsSandbox.enforcement(os: @darwin) == "held by the kernel (Seatbelt)"
+      assert OsSandbox.enforcement(os: {:unix, :linux}) == "not held by the kernel on this system"
+    end
+
     test "a blocked root stays closed to commands, even in open", ctx do
       blocked = Path.join(ctx.base, "blocked")
       File.mkdir_p!(blocked)

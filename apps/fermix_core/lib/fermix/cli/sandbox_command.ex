@@ -7,6 +7,7 @@ defmodule Fermix.CLI.SandboxCommand do
   alias FermixCore.Sandbox.ConfigMutation
   alias FermixCore.Sandbox.Env
   alias FermixCore.Sandbox.Mode
+  alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
   @spec run([String.t()]) :: non_neg_integer()
@@ -64,6 +65,10 @@ defmodule Fermix.CLI.SandboxCommand do
 
     protected paths:
     #{format_list(PathPolicy.protected_paths(config))}
+
+    commands: #{OsSandbox.enforcement()}
+    commands cannot read:
+    #{format_unreadable(config)}
 
     env names:
     #{format_list(config.env.allow)}
@@ -197,6 +202,17 @@ defmodule Fermix.CLI.SandboxCommand do
 
   defp format_list([]), do: "  (none)"
   defp format_list(values), do: Enum.map_join(values, "\n", &"  - #{&1}")
+
+  # A rule that reaches every path beginning with its own ends in `*`.
+  defp format_unreadable(config) do
+    case OsSandbox.unreadable(config) do
+      {:ok, entries} -> entries |> Enum.map(&unreadable_line/1) |> format_list()
+      {:error, reason} -> "  " <> OsSandbox.describe(reason)
+    end
+  end
+
+  defp unreadable_line({path, :prefix}), do: path <> "*"
+  defp unreadable_line({path, _reach}), do: path
 
   defp format_roots([]), do: "  (none)"
 

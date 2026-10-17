@@ -105,6 +105,17 @@ defmodule FermixCore.Sandbox do
   def pre_execution_denial(_other), do: nil
 
   @doc """
+  What a refusal outside the roots tells the model to do about `path`: ask the
+  owner. A grant changes Fermix's own config, which a command cannot write, so
+  the model is never told to run one.
+  """
+  @spec grant_hint(String.t()) :: String.t()
+  def grant_hint(path) when is_binary(path) do
+    "Call the request_directory_access tool to ask the owner to approve it. Only the owner " <>
+      "can grant a folder: /grant path #{path} in chat, or fermix grant path #{path} in their own terminal."
+  end
+
+  @doc """
   `executable args` as the kernel runs it for the turn `context` names
   (`Sandbox.OsSandbox`): built from the same config and request directory as
   every decision in this module, so the kernel is never narrower than the

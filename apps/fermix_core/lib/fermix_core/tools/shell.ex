@@ -246,8 +246,7 @@ defmodule FermixCore.Tools.Shell do
   defp format_error({:outside_root, path}),
     do:
       "Sandbox denied shell working_dir outside roots: #{path}. " <>
-        "To allow this directory, run: fermix grant path #{path}, " <>
-        "or call the request_directory_access tool to ask the owner to approve it."
+        Sandbox.grant_hint(path)
 
   defp format_error({:protected_path, path}),
     do:

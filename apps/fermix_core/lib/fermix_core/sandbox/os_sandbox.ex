@@ -76,6 +76,14 @@ defmodule FermixCore.Sandbox.OsSandbox do
 
   @type spawn :: {String.t(), [String.t()]}
 
+  @typedoc """
+  A path a command may never read and how far its rule reaches: `:tree` is the
+  path and everything under it, `:prefix` every path that begins with it, and
+  `:named` the path, everything under it and the files named after it
+  (`credentials.db-wal`).
+  """
+  @type unreadable :: {String.t(), :tree | :prefix | :named}
+
   @typedoc "The path sets a profile is built from, every one symlink-resolved."
   @type rules :: %{
           fermix_home: String.t(),
@@ -155,6 +163,14 @@ defmodule FermixCore.Sandbox.OsSandbox do
   def describe(:no_writable_root),
     do: "Commands can't run: the sandbox mode leaves no folder a command may write."
 
+  @doc "Whether the kernel holds commands to the sandbox here, as `fermix sandbox explain` says it."
+  @spec enforcement(keyword()) :: String.t()
+  def enforcement(opts \\ []) when is_list(opts) do
+    if enforced?(opts),
+      do: "held by the kernel (Seatbelt)",
+      else: "not held by the kernel on this system"
+  end
+
   defp enforced?(opts), do: Keyword.get(opts, :os, :os.type()) == @darwin
 
   @doc "The path sets for `config`. Options as `wrap/5`."
@@ -171,8 +187,7 @@ defmodule FermixCore.Sandbox.OsSandbox do
          {:ok, fermix_writable} <- fermix_writable(config, fermix_home),
          {:ok, own} <- resolve([config.workspace_root, Path.join(config.home, "skills")]),
          {:ok, credentials} <- resolve(PathPolicy.credential_paths(config)),
-         {:ok, secret} <- secret(config, fermix_home, credentials),
-         {:ok, secret_patterns} <- secret_patterns(config, fermix_home, credentials) do
+         {:ok, unreadable} <- unreadable(config) do
       {:ok,
        %{
          fermix_home: fermix_home,
@@ -182,8 +197,8 @@ defmodule FermixCore.Sandbox.OsSandbox do
          protected: protected,
          protected_patterns: protected_patterns(os_home, credentials),
          ancestors: Enum.uniq(ancestors([fermix_home | protected]) ++ own),
-         secret: secret,
-         secret_patterns: secret_patterns,
+         secret: for({path, reach} <- unreadable, reach != :prefix, do: path),
+         secret_patterns: Enum.flat_map(unreadable, &read_pattern/1),
          no_exec: [Path.join(fermix_home, "plugins")]
        }}
     end
@@ -239,13 +254,31 @@ defmodule FermixCore.Sandbox.OsSandbox do
     end
   end
 
-  # `~/.config/fermix` is named on its own because `open` reads the rest of the
-  # owner's credentials.
-  defp secret(config, fermix_home, credentials) do
-    resolve(
-      Enum.map(@secret_entries, &Path.join(fermix_home, &1)) ++
-        [Path.join(config.os_home, ".config/fermix") | owner_credentials(config, credentials)]
-    )
+  @doc """
+  What a command may never read under `config`, every path symlink-resolved:
+  Fermix's secrets in every mode, and outside `open` the owner's credentials.
+  `~/.config/fermix` is named on its own because `open` reads the rest of the
+  owner's credentials. `secret_writer` stages a key being saved under
+  `System.tmp_dir!()/fermix-secret-N/`, the same resolver read here.
+  """
+  @spec unreadable(Config.t()) :: {:ok, [unreadable()]} | {:error, term()}
+  def unreadable(%Config{} = config) do
+    with {:ok, fermix_home} <- resolve_one(config.home),
+         {:ok, trees} <-
+           resolve(
+             Enum.map(@secret_entries, &Path.join(fermix_home, &1)) ++
+               [Path.join(config.os_home, ".config/fermix")]
+           ),
+         {:ok, staging} <- resolve([Path.join(System.tmp_dir!(), "fermix-secret-")]),
+         {:ok, named} <- resolve(owner_credentials(config, PathPolicy.credential_paths(config))) do
+      prefixed = Enum.map(@secret_prefixed, &Path.join(fermix_home, &1)) ++ staging
+      # A path the owner's credentials also name keeps their wider rule.
+      trees = Enum.reject(trees, &(&1 in named))
+
+      {:ok,
+       Enum.map(trees, &{&1, :tree}) ++
+         Enum.map(prefixed, &{&1, :prefix}) ++ Enum.map(named, &{&1, :named})}
+    end
   end
 
   # The owner's SSH keys, cloud logins and tokens are closed to reads in `strict`
@@ -255,16 +288,9 @@ defmodule FermixCore.Sandbox.OsSandbox do
   defp owner_credentials(%Config{mode: :open}, _credentials), do: []
   defp owner_credentials(_config, credentials), do: credentials
 
-  # `secret_writer` stages a key being saved under
-  # `System.tmp_dir!()/fermix-secret-N/`, the same resolver read here.
-  defp secret_patterns(config, fermix_home, credentials) do
-    with {:ok, resolved} <- resolve([Path.join(System.tmp_dir!(), "fermix-secret-")]) do
-      {:ok,
-       Enum.map(@secret_prefixed, &prefix(Path.join(fermix_home, &1))) ++
-         Enum.map(resolved, &prefix/1) ++
-         Enum.map(owner_credentials(config, credentials), &siblings/1)}
-    end
-  end
+  defp read_pattern({path, :prefix}), do: [prefix(path)]
+  defp read_pattern({path, :named}), do: [siblings(path)]
+  defp read_pattern({_path, :tree}), do: []
 
   # A protected path, or Fermix's home, renamed away from under its rule leaves
   # the rule guarding nothing, so every directory above one is closed to writes

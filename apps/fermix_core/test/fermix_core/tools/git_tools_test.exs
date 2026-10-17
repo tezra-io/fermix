@@ -3,6 +3,7 @@ defmodule FermixCore.Tools.GitToolsTest do
 
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.Sandbox
   alias FermixCore.Sandbox.Config
   alias FermixCore.Sandbox.PathPolicy
   alias FermixCore.Tools.GitRead
@@ -182,7 +183,7 @@ defmodule FermixCore.Tools.GitToolsTest do
 
     assert result.success == false
     assert result.error =~ "outside roots"
-    assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(outside)}"
+    assert String.ends_with?(result.error, Sandbox.grant_hint(PathPolicy.canonical_path(outside)))
 
     FermixTestSupport.SafeRm.rm_rf!(outside)
   end
@@ -204,7 +205,7 @@ defmodule FermixCore.Tools.GitToolsTest do
     assert result.success == false
     assert result.error =~ "outside roots"
     assert result.error =~ "resolved from input #{PathPolicy.canonical_path(nested)}"
-    assert result.error =~ "fermix grant path #{PathPolicy.canonical_path(dir)}"
+    assert String.ends_with?(result.error, Sandbox.grant_hint(PathPolicy.canonical_path(dir)))
   end
 
   describe "git_write cannot read a file the sandbox never authorized" do

@@ -40,7 +40,7 @@ On a Mac, every `shell` command, operator command (`[sandbox.commands]`, the `de
 
 - Mac app and browser setup changes to mode and profile need a restart; variable changes apply to the next command. Chat changes apply at once (after `/confirm` where one is asked). A terminal edit reaches a running daemon only after a restart; on an app-managed home it also makes the app refuse saves until **Reload settings from disk**, so on a Mac use the app or chat.
 - The Mac pane's one-line mode hints are approximate; the table above is what each mode reaches.
-- Inspect: `/sandbox status|explain`, `fermix sandbox status`, `fermix sandbox explain` (each root marked `(granted)` or `(mode)`, plus the protected paths).
+- Inspect: `/sandbox status|explain` in chat (the mode, each root marked `(granted)` or `(mode)`, the variable names); `fermix sandbox status|explain` in a terminal, whose `explain` adds the protected paths, whether this system holds commands, and what a command cannot read in the current mode (an entry ending in `*` covers every file whose name begins with it).
 
 ## What needs `/confirm`
 

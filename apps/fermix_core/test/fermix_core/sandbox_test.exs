@@ -7,6 +7,15 @@ defmodule FermixCore.SandboxTest do
   alias FermixCore.Sandbox.OsSandbox
   alias FermixCore.Sandbox.PathPolicy
 
+  test "a refusal outside the roots sends the model to the owner, never to run a grant itself" do
+    hint = Sandbox.grant_hint("/work/repo")
+
+    assert hint =~ "Call the request_directory_access tool"
+    assert hint =~ "/grant path /work/repo in chat"
+    assert hint =~ "fermix grant path /work/repo in their own terminal"
+    refute hint =~ "run: fermix grant"
+  end
+
   test "standard mode admits the request cwd for an operator context and denies it without" do
     os_home = FermixTestSupport.SafeRm.make_tmp_dir!("sandbox-request-cwd")
     request_dir = Path.join(os_home, "repos/project")

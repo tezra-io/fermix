@@ -118,6 +118,16 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   folders need one of the two. The `codex` and `claude_code` command presets
   and coding runs are not held yet, and Linux keeps the old behaviour until its
   own sandbox lands. There is no setting: the mode is the setting.
+- **`fermix sandbox explain` shows what a command cannot read.** Beside the
+  roots and protected paths it now lists every path no command may read in the
+  current mode (an entry ending in `*` covers every file whose name begins
+  with it), and says whether this system's kernel holds commands at all.
+- **A refusal outside the roots sends the agent to you.** When a file tool,
+  `shell`, `git_write` or an operator command is refused a folder, the agent
+  is told to ask you through `request_directory_access`, and that only you
+  grant a folder (`/grant path` in chat, `fermix grant path` in your terminal).
+  It was told to run `fermix grant` itself: a grant is not the agent's to
+  give, and on a Mac a command cannot write one.
 
 ### Removed
 
