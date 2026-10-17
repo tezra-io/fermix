@@ -3150,6 +3150,10 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute contents =~ "xai-voice-key"
 
       assert {:ok, "xai-voice-key"} = FermixTestSupport.SecretWriterStub.get(:xai_api_key)
+
+      # A voice key never makes its provider the primary chat provider.
+      xai = :fermix_core |> Application.get_env(:providers, []) |> Keyword.get(:xai, [])
+      refute Keyword.get(xai, :primary) == true
     end
   end
 

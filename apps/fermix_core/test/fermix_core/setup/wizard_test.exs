@@ -1239,6 +1239,42 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(providers[:openai], :api_key) == "sk-realtime"
   end
 
+  # M70: the voice key is the key of the provider the voice model dials, so with
+  # Grok it fills SpaceXAI's slot, and like every voice key it promotes no one.
+  test "a voice key saved with the Grok model fills the SpaceXAI slot and promotes no one" do
+    realtime_engine_home!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(
+               realtime_enabled: "true",
+               realtime_model: "grok-voice-3.0",
+               realtime_api_key: "xai-voice-key"
+             )
+
+    assert {:ok, persisted} = ConfigStore.load_runtime_config()
+    providers = Keyword.get(persisted.fermix_core, :providers, [])
+
+    assert Keyword.get(providers[:xai], :api_key) == "xai-voice-key"
+    refute Keyword.get(providers[:xai], :primary) == true
+    assert providers |> Keyword.get(:openai, []) |> Keyword.get(:api_key) == nil
+  end
+
+  test "the voice-key prompt asks for the key of the voice model's own provider" do
+    realtime_engine_home!()
+
+    assert {:ok, _} =
+             Wizard.report().wizard
+             |> Wizard.save_answers(realtime_enabled: "true", realtime_model: "grok-voice-3.0")
+
+    prompt =
+      Wizard.report().wizard
+      |> Wizard.reconfigure_prompts(realtime_enabled: true)
+      |> Enum.find(&(&1.key == :realtime_api_key))
+
+    assert %{provider: :xai, label: "SpaceXAI API key for Grok voice"} = prompt
+  end
+
   test "a genuine OpenAI API-key save still auto-promotes openai" do
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-openai-promote")
     on_exit(fn -> FermixTestSupport.SafeRm.rm_rf!(tmp_home) end)
@@ -1749,7 +1785,8 @@ defmodule FermixCore.Setup.WizardTest do
     assert Keyword.get(realtime, :engine) == "openai_live"
     assert Keyword.get(realtime, :voice) == "marin"
     assert Keyword.get(realtime, :conversation) == "private"
-    assert Keyword.get(realtime, :screen_share) == false
+    # Leaving Grok drops the screen-sharing switch its move turned off.
+    assert Keyword.get(realtime, :screen_share) == true
   end
 
   test "save_answers moving from Grok to Realtime drops the conversation and restores effort" do

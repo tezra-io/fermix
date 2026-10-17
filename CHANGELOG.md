@@ -16,9 +16,11 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   task over through one function and keeps talking with you while it runs; a
   correction replaces the running task and a spoken "stop that" cancels it.
   It needs a SpaceXAI API key (a SpaceXAI sign-in covers chat only), which
-  Settings > Voice asks for when Grok is picked; picking it also sets its own
-  voice (Eve by default) and turns screen sharing off, which Grok does not
-  have. Grok bills by connected time plus each line of chat context Fermix
+  Settings > Voice asks for when Grok is picked (`fermix setup` and its
+  `--realtime-api-key` store it as SpaceXAI's key when Grok is the model);
+  picking it also sets its own voice (Eve by default) and turns screen sharing
+  off, which Grok does not have, and picking an OpenAI model again turns
+  screen sharing back on. Grok bills by connected time plus each line of chat context Fermix
   sends it, so a call's cost is Fermix's own estimate, marked incomplete, and
   a call lasts at most two hours. Computer history reaches Grok only when
   SpaceXAI is granted it; granting OpenAI says nothing about SpaceXAI. Calls

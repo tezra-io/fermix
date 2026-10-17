@@ -541,8 +541,10 @@ defmodule FermixCore.Setup.Runtime do
     end
   end
 
-  defp irrelevant_prompt?(%{key: :realtime_api_key}, answers) do
-    realtime_enabled_answer(answers) == false or selected_provider(answers) == :openai
+  # The voice key is the voice provider's own key: when that provider is the one
+  # just set up, its key prompt has already asked for it.
+  defp irrelevant_prompt?(%{key: :realtime_api_key, provider: provider}, answers) do
+    realtime_enabled_answer(answers) == false or selected_provider(answers) == provider
   end
 
   defp irrelevant_prompt?(%{key: key}, answers)

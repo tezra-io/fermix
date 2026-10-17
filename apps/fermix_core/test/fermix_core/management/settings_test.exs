@@ -935,7 +935,8 @@ defmodule FermixCore.Management.SettingsTest do
       assert Keyword.get(back, :engine) == "openai_realtime"
       assert Keyword.get(back, :voice) == "marin"
       assert Keyword.get(back, :reasoning_effort) == "low"
-      assert Keyword.get(back, :screen_share) == false
+      # Grok's move turned screen sharing off; the move back puts it on again.
+      assert Keyword.get(back, :screen_share) == true
       refute Keyword.has_key?(back, :conversation)
       assert Keyword.get(back, :max_session_minutes) == 30
       assert Keyword.get(back, :persist_transcripts) == true
@@ -952,7 +953,8 @@ defmodule FermixCore.Management.SettingsTest do
                "The engine changed to Realtime, integrated tools.",
                "The voice changed to marin.",
                "Reasoning effort was restored because this engine uses it.",
-               "Whether voice calls join the chat was reset because this engine does not use it."
+               "Whether voice calls join the chat was reset because this engine does not use it.",
+               "Screen sharing during calls was turned back on."
              ]
 
       assert {:ok, reloaded} = ConfigStore.load_runtime_config()
@@ -964,6 +966,23 @@ defmodule FermixCore.Management.SettingsTest do
     # The combined menu is the whole value space, so a slug no engine ships is
     # still refused against the published options rather than reaching the
     # configuration boundary.
+    # Leaving Grok drops the switch its move turned off, whatever engine comes
+    # next; Live takes no images, so the switch coming back is not news there.
+    test "Grok to Live drops Grok's screen-sharing override without announcing it" do
+      Application.put_env(:fermix_core, :realtime,
+        enabled: true,
+        engine: "xai_realtime",
+        model: "grok-voice-3.0",
+        voice: "eve",
+        screen_share: false
+      )
+
+      assert {:ok, result} = Settings.apply("realtime", %{"realtime_model" => "gpt-live-1"})
+
+      assert Keyword.get(Application.get_env(:fermix_core, :realtime), :screen_share) == true
+      refute Enum.any?(result["side_effects"], &(&1 =~ "Screen sharing"))
+    end
+
     test "a model no engine ships is refused against the published options" do
       Application.put_env(:fermix_core, :realtime, enabled: true, engine: "openai_realtime")
 

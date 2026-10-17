@@ -381,7 +381,7 @@ defmodule FermixCore.Management.Settings do
         Keyword.has_key?(previous, :conversation),
         Keyword.has_key?(now, :conversation)
       ) ++
-      screen_share_sentence(screen_share?(previous), screen_share?(now))
+      screen_share_sentence(screen_share?(previous), screen_share?(now), realtime_engine(now))
   end
 
   # The model is what the operator picked, so naming it back would only repeat
@@ -412,11 +412,19 @@ defmodule FermixCore.Management.Settings do
   defp conversation_sentence(_previous, _now), do: []
 
   # Grok has no continuous screen perception, so the journey onto it turns the
-  # switch off; the return journey leaves it off for the owner to turn back on.
-  defp screen_share_sentence(true, false),
+  # switch off and the journey off it turns it back on. Only Realtime shares the
+  # screen, so the switch coming back on is news only there: a task engine
+  # takes no images whatever it says.
+  defp screen_share_sentence(true, false, _engine),
     do: ["Screen sharing during calls was turned off because this engine does not support it."]
 
-  defp screen_share_sentence(_previous, _now), do: []
+  defp screen_share_sentence(false, true, engine) do
+    if RealtimeConfig.hands_off_tasks?(%RealtimeConfig{engine: engine}),
+      do: [],
+      else: ["Screen sharing during calls was turned back on."]
+  end
+
+  defp screen_share_sentence(_previous, _now, _engine), do: []
 
   # An absent key is the struct default, which is on.
   defp screen_share?(block),

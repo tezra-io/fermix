@@ -296,7 +296,6 @@ defmodule FermixCore.Setup.Wizard do
       model_unset?: model_unset?,
       effort_unset?: effort_unset?,
       field_unset: field_unset,
-      realtime_api_key_unset?: canonical_openai_api_key_unpersisted?(persisted),
       realtime_unconfigured?: not ConfigStore.realtime_configured?(),
       default_model: ModelCatalog.default_model_for(prompt_provider)
     }
@@ -461,16 +460,15 @@ defmodule FermixCore.Setup.Wizard do
     ]
   end
 
-  defp realtime_prompts(%{
-         persisted: persisted,
-         realtime_api_key_unset?: realtime_api_key_unset?,
-         realtime_unconfigured?: realtime_unconfigured?
-       }) do
+  defp realtime_prompts(%{persisted: persisted, realtime_unconfigured?: realtime_unconfigured?}) do
     config =
       persisted
       |> Map.get(:fermix_core, [])
       |> Keyword.get(:realtime, [])
       |> RealtimeConfig.normalize()
+
+    voice_provider = voice_provider(config.engine)
+    voice_key_unset? = provider_api_key_unpersisted?(persisted, voice_provider)
 
     [
       %{
@@ -481,8 +479,9 @@ defmodule FermixCore.Setup.Wizard do
       },
       %{
         key: :realtime_api_key,
-        label: realtime_api_key_label(realtime_api_key_unset?),
-        required?: realtime_api_key_unset?
+        provider: voice_provider,
+        label: voice_api_key_label(voice_provider, voice_key_unset?),
+        required?: voice_key_unset?
       },
       %{
         key: :realtime_voice,
@@ -516,11 +515,17 @@ defmodule FermixCore.Setup.Wizard do
   defp yes_no(true), do: "yes"
   defp yes_no(false), do: "no"
 
-  defp realtime_api_key_label(true),
-    do: "OpenAI API key for Realtime (only OpenAI is supported in V1)"
+  # The voice key is the key of the provider the voice model dials, so the
+  # prompt names that provider (`put_voice_api_key/2` writes its slot).
+  defp voice_api_key_label(:openai, true), do: "OpenAI API key for voice"
 
-  defp realtime_api_key_label(false),
-    do: "OpenAI API key for Realtime (blank = use the existing OpenAI provider key)"
+  defp voice_api_key_label(:openai, false),
+    do: "OpenAI API key for voice (blank = use the existing OpenAI provider key)"
+
+  defp voice_api_key_label(:xai, true), do: "SpaceXAI API key for Grok voice"
+
+  defp voice_api_key_label(:xai, false),
+    do: "SpaceXAI API key for Grok voice (blank = use the existing SpaceXAI provider key)"
 
   defp realtime_setup_followup?(%{key: :realtime_api_key, required?: required?}, specs, answers) do
     required? and realtime_resolves_enabled?(specs, answers)
@@ -749,7 +754,7 @@ defmodule FermixCore.Setup.Wizard do
   end
 
   # Derived from the registry, not hand-listed, plus the one answer key that is
-  # not its own secret key: the Realtime prompt writes the OpenAI provider key.
+  # not its own secret key: the voice key writes the voice provider's key.
   defp secret_answer_keys do
     MapSet.new([:realtime_api_key | Enum.map(SecretPaths.all(), & &1.key)])
   end
@@ -765,12 +770,8 @@ defmodule FermixCore.Setup.Wizard do
       |> drop_unanswered_env_only_secrets(answers)
       |> put_provider_field_answers(answers)
       |> put_provider_auth_mode_answers(answers)
-      |> put_openai_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_primary_selection(Keyword.get(answers, :provider))
-      |> maybe_promote_newly_configured(
-        blank?(Keyword.get(answers, :provider)),
-        promotion_excluded_providers(answers)
-      )
+      |> maybe_promote_newly_configured(blank?(Keyword.get(answers, :provider)))
       |> put_default_model(Keyword.get(answers, :default_model), target)
       |> put_subagent_model(Keyword.get(answers, :subagent_model))
       |> put_harness_default_vendor(Keyword.get(answers, :harness_default_vendor))
@@ -779,6 +780,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_compaction_config(answers)
       |> put_memory_config(answers)
       |> put_realtime_config(answers)
+      |> put_voice_api_key(Keyword.get(answers, :realtime_api_key))
       |> put_computer_use_config(answers)
       |> put_computer_history_config(answers)
       |> put_web_search_config(answers)
@@ -1096,17 +1098,17 @@ defmodule FermixCore.Setup.Wizard do
   # code at all — primary promotion is a setup-save decision only. Codex
   # never trips this diff (its credentials live in the auth store, not the
   # snapshot); it becomes primary via the explicit provider answer.
-  defp maybe_promote_newly_configured(snapshot, false, _excluded), do: snapshot
+  defp maybe_promote_newly_configured(snapshot, false), do: snapshot
 
   # Auto-promote ONLY during initial setup, i.e. when no primary has been chosen
   # yet — the first provider configured becomes primary. Once a primary exists,
   # a newly configured provider stays a FALLBACK; promotion is then an explicit
   # "Set primary" action (which sends a :provider answer -> put_primary_selection).
-  defp maybe_promote_newly_configured(snapshot, true, excluded) do
+  defp maybe_promote_newly_configured(snapshot, true) do
     if primary_established?(snapshot) do
       snapshot
     else
-      case newly_configured_providers(snapshot, excluded) do
+      case newly_configured_providers(snapshot) do
         [] -> snapshot
         # Catalog order — deterministic when one save configures several.
         [provider | _rest] -> mark_primary_provider(snapshot, provider)
@@ -1132,24 +1134,11 @@ defmodule FermixCore.Setup.Wizard do
     end
   end
 
-  # The Realtime key shares the OpenAI provider api_key slot (put_openai_api_key
-  # at the :realtime_api_key step). A realtime-only save therefore makes :openai
-  # *look* newly configured without being a provider-tab decision, so it must not
-  # steal an existing primary. A genuine :openai_api_key answer is unaffected.
-  defp promotion_excluded_providers(answers) do
-    if answered?(answers, :realtime_api_key) and not answered?(answers, :openai_api_key) do
-      [:openai]
-    else
-      []
-    end
-  end
-
-  defp newly_configured_providers(snapshot, excluded) do
+  defp newly_configured_providers(snapshot) do
     persisted = persisted_snapshot()
 
     Enum.filter(ModelCatalog.providers(), fn provider ->
-      provider not in excluded and
-        Selection.configured?(provider, provider_config(snapshot, provider)) and
+      Selection.configured?(provider, provider_config(snapshot, provider)) and
         not Selection.configured?(provider, provider_config(persisted, provider))
     end)
   end
@@ -1303,9 +1292,9 @@ defmodule FermixCore.Setup.Wizard do
     |> Keyword.get(provider, [])
   end
 
-  defp canonical_openai_api_key_unpersisted?(persisted) do
+  defp provider_api_key_unpersisted?(persisted, provider) do
     persisted
-    |> provider_config(:openai)
+    |> provider_config(provider)
     |> Keyword.get(:api_key)
     |> blank?()
   end
@@ -1417,19 +1406,39 @@ defmodule FermixCore.Setup.Wizard do
     end)
   end
 
-  # The Realtime key shares the OpenAI provider api_key slot
-  # (docs/MILESTONE_9_1_REALTIME_VOICE.md — Realtime V1 is OpenAI-only).
-  defp put_openai_api_key(snapshot, value) when value in [nil, ""], do: snapshot
+  # The voice key is the api_key of the provider the voice model dials: OpenAI's
+  # for both OpenAI engines, SpaceXAI's for Grok. It is written after the
+  # realtime answers, so the engine it reads is the one this save leaves (a model
+  # picked in the same save decides), and after primary promotion, so a voice key
+  # never makes its provider the primary chat provider.
+  defp put_voice_api_key(snapshot, value) when value in [nil, ""], do: snapshot
 
-  defp put_openai_api_key(snapshot, api_key) do
-    sentinel = secret_snapshot_value(:openai_api_key, api_key)
+  defp put_voice_api_key(snapshot, api_key) do
+    provider =
+      snapshot
+      |> Map.get(:fermix_core, [])
+      |> Keyword.get(:realtime, [])
+      |> realtime_engine()
+      |> voice_provider()
+
+    sentinel = secret_snapshot_value(voice_key_slot(provider), api_key)
 
     if is_nil(sentinel) do
       snapshot
     else
-      update_provider_block(snapshot, :openai, :api_key, sentinel)
+      update_provider_block(snapshot, provider, :api_key, sentinel)
     end
   end
+
+  defp voice_provider(engine) do
+    case RealtimeConfig.provider_for_engine(engine) do
+      "openai" -> :openai
+      "xai" -> :xai
+    end
+  end
+
+  defp voice_key_slot(:openai), do: :openai_api_key
+  defp voice_key_slot(:xai), do: :xai_api_key
 
   # blank/nil → no-op; an invalid value raises rather than silently dropping
   # (a bad auth_mode would leave the route on api_key and confuse the operator).
@@ -1864,12 +1873,21 @@ defmodule FermixCore.Setup.Wizard do
   defp switch_realtime_engine(existing, nil), do: existing
 
   defp switch_realtime_engine(existing, engine) do
-    if realtime_engine(existing) == engine do
+    from = realtime_engine(existing)
+
+    if from == engine do
       existing
     else
-      move_realtime_engine(existing, engine)
+      existing |> leave_realtime_engine(from) |> move_realtime_engine(engine)
     end
   end
+
+  # The move onto Grok turned screen sharing off, so the move off it puts the
+  # default back: otherwise only a hand edit of config.toml could restore it.
+  defp leave_realtime_engine(existing, "xai_realtime"),
+    do: Keyword.delete(existing, :screen_share)
+
+  defp leave_realtime_engine(existing, _from), do: existing
 
   defp move_realtime_engine(existing, "openai_live") do
     existing

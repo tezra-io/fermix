@@ -362,13 +362,11 @@ defmodule FermixWebWeb.SetupLive do
   end
 
   def handle_event("save_realtime", %{"realtime_form" => params} = root, socket) do
-    form = socket.assigns.realtime_form
-
     answers =
       []
       |> maybe_put_string(:realtime_enabled, params["enabled"])
-      |> maybe_put_string(realtime_key_answer(params, form), params["api_key"])
-      |> realtime_model_answers(params, form)
+      |> maybe_put_string(:realtime_api_key, params["api_key"])
+      |> realtime_model_answers(params, socket.assigns.realtime_form)
       |> maybe_put_string(:realtime_voice, params["voice"])
       |> maybe_put_string(:realtime_max_session_minutes, params["max_session_minutes"])
       |> maybe_put_string(:realtime_max_cost_cents, params["max_cost_cents"])
@@ -1642,19 +1640,6 @@ defmodule FermixWebWeb.SetupLive do
     do: maybe_put_string(answers, :realtime_reasoning_effort, params["reasoning_effort"])
 
   defp realtime_effort_answer(answers, _task_engine, _params), do: answers
-
-  # The key field writes the slot of the provider the chosen model dials:
-  # `realtime_api_key` is the OpenAI provider key for both OpenAI engines (and
-  # never promotes OpenAI to primary), Grok takes the SpaceXAI provider's own.
-  defp realtime_key_answer(params, form) do
-    {:ok, engine} =
-      params["model"] |> realtime_model_or(form.model) |> RealtimeConfig.engine_for_model()
-
-    case RealtimeConfig.provider_for_engine(engine) do
-      "openai" -> :realtime_api_key
-      "xai" -> :xai_api_key
-    end
-  end
 
   defp build_realtime_form(snapshot) do
     config = snapshot |> get_fermix_core(:realtime) |> RealtimeConfig.normalize()
