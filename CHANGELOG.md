@@ -81,6 +81,12 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
   every plugin listing; when that check failed, the plugin list failed with
   it, and so did startup. An installed retired plugin is now left unread; its
   files stay where they are.
+- **The catalog offers Obsidian 1.0.4, which accepts a vault path written
+  from your home folder.** A path such as `~/Documents/Vault` reached the
+  plugin as typed, nothing expanded the `~`, and the plugin stopped at start
+  with "OBSIDIAN_VAULT_PATH does not exist". A new install gets 1.0.4; an
+  installed copy moves with `fermix plugins upgrade obsidian`, and the Mac app
+  has no plugin update yet, so there an absolute vault path is the fix.
 - **Changing a setting no longer deletes the MCP servers you added by hand.**
   Every settings save, from the Mac app, `fermix setup`, a plugin's settings or
   the agent's model routing tool, rewrote `config.toml` without its
