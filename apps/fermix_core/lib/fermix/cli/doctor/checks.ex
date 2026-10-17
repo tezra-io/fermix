@@ -861,20 +861,22 @@ defmodule Fermix.CLI.Doctor.Checks do
 
   @doc """
   `place_search` readiness (M31 §14.3, M72 §14.1): the backend in force, why it
-  is the one (`[fermix_core.tools.place_search] backend`, or the platform's
-  default: Apple Maps on a Mac, Brave elsewhere), and whether it is ready.
+  is the one (`[fermix_core.tools.place_search] backend`, or this build's
+  default: Apple Maps where the build carries its helper, the Fermix Mac app's
+  engine, Brave in the Homebrew and Linux builds), and whether it is ready.
 
   Offline, always — this check reaches no network by any argument. The live
   probe is `place_probe/1`, which `Fermix.CLI.Doctor` calls only from its
-  `--full` block. Brave with no key, as the platform's default, is a normal
+  `--full` block. Brave with no key, as the build's default, is a normal
   configuration (the tool is optional and simply hidden), so it reports `:ok`;
-  a backend chosen and not ready, or Apple Maps not ready on a Mac, warns.
-  `opts` names the host (`macos?:`) and the helper (`apple_maps:`) for a test.
+  a backend chosen and not ready, or Apple Maps not ready where the build
+  defaults to it, warns. `opts` names the build (`host:`) and the helper
+  (`apple_maps:`) for a test.
   """
   @spec place_search(keyword()) :: result()
   def place_search(opts \\ []) when is_list(opts) do
     opts
-    |> Keyword.take([:macos?, :apple_maps])
+    |> Keyword.take([:host, :apple_maps])
     |> ProviderProbe.place_search_report()
     |> format_place_search()
   end
@@ -908,7 +910,7 @@ defmodule Fermix.CLI.Doctor.Checks do
     )
   end
 
-  defp place_brave_missing(:platform_default, report) do
+  defp place_brave_missing(:build_default, report) do
     ok(
       "place search",
       "Brave (#{place_why(report)}): no Brave key — place_search hidden (optional; web " <>
@@ -926,8 +928,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   end
 
   defp place_why(%{backend_source: :configured}), do: "set in [fermix_core.tools.place_search]"
-  defp place_why(%{backend: :apple_maps}), do: "the default on a Mac"
-  defp place_why(%{backend: :brave}), do: "the default off a Mac"
+  defp place_why(%{backend_source: :build_default}), do: "the default in this build"
 
   @doc """
   One live search on the place backend in force (M31 §14.3), for `--full` only:
@@ -936,8 +937,8 @@ defmodule Fermix.CLI.Doctor.Checks do
   Fixed innocuous query, `count: 1`, result discarded, never anchored to the
   owner's saved location. Auth, rate-limit, schema, and transport failures each
   keep their own name, and a failure never switches backend. `opts` carries the
-  `req_options`/`net_resolver` seam for the Brave transport, and `macos?:` and
-  `apple_maps:` for the host and the helper, so tests stub both.
+  `req_options`/`net_resolver` seam for the Brave transport, and `host:` and
+  `apple_maps:` for the build and the helper, so tests stub both.
   """
   @spec place_probe(keyword()) :: result()
   def place_probe(opts \\ []) when is_list(opts) do

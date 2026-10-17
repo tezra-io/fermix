@@ -5,9 +5,10 @@ defmodule FermixCore.Tools.PlaceSearch do
 
   The tool owns the provider-visible schema (§10.1) and the anchor decision
   (§10.5). `PlaceSearch.Backend.resolve/2` picks the backend once per call:
-  `[fermix_core.tools.place_search] backend` when set, otherwise Apple Maps on
-  macOS (`PlaceSearch.AppleMaps`, the `fermix-maps` helper, no key) and Brave
-  elsewhere (`PlaceSearch.Brave`). The backend owns the request, the parser
+  `[fermix_core.tools.place_search] backend` when set, otherwise the build's
+  default: Apple Maps where the build carries the `fermix-maps` helper (the
+  Fermix Mac app's engine; `PlaceSearch.AppleMaps`, no key), Brave in the
+  Homebrew and Linux builds (`PlaceSearch.Brave`). The backend owns the request, the parser
   and the tagged failures (§10.2–§10.4), and both yield the one record. Nothing
   here falls back to web search, a browser, or the other backend: a failure is
   returned with its tag.
@@ -49,7 +50,8 @@ defmodule FermixCore.Tools.PlaceSearch do
 
   This is the first credential-gated built-in (§14.1). `advertise?/1` hides the
   tool whenever the backend in force is not ready (Brave with no resolvable
-  key; Apple Maps without its helper, or off a Mac), and `execute/2` repeats
+  key; Apple Maps on a build without its helper, or missing a part it should
+  carry), and `execute/2` repeats
   the guard: advertisement is a readiness signal, never the only barrier.
   """
 
@@ -221,8 +223,8 @@ defmodule FermixCore.Tools.PlaceSearch do
       %{
         tag: "provider_error",
         description:
-          "the place provider failed or is not ready (an unexpected HTTP status, the Apple " <>
-            "Maps helper missing or off a Mac)"
+          "the place provider failed or is not ready (an unexpected HTTP status, Apple Maps " <>
+            "on a build without its helper)"
       },
       %{
         tag: "parser_changed",
@@ -241,10 +243,10 @@ defmodule FermixCore.Tools.PlaceSearch do
       config_path: "[fermix_core.tools.web_search] brave_api_key",
       description:
         "A Brave Search API key, needed only while place_search runs on Brave " <>
-          "(`[fermix_core.tools.place_search] backend`, Brave by default off a Mac; a Mac " <>
-          "searches Apple Maps with no key). One key serves both consumers: web_search's " <>
-          "Brave backend and place_search. Brave does not have to be the active web " <>
-          "backend, and each endpoint call is separately metered."
+          "(`[fermix_core.tools.place_search] backend`: the Homebrew and Linux builds use " <>
+          "Brave, and the Fermix Mac app searches Apple Maps with no key). One key serves " <>
+          "both consumers: web_search's Brave backend and place_search. Brave does not have " <>
+          "to be the active web backend, and each endpoint call is separately metered."
     }
   end
 
@@ -254,12 +256,14 @@ defmodule FermixCore.Tools.PlaceSearch do
 
   @doc """
   Advertise the tool only when the backend in force is ready (§14.1, M72
-  §14.1): Brave's key resolves, or Apple Maps' helper is on disk on a Mac.
+  §14.1): Brave's key resolves, or the Apple Maps helper can be spawned on a
+  build that carries it.
 
   Discovered via `function_exported?` at `AgentLoop.build_state`. A daemon
   whose every call would refuse never shows the tool; `execute/2` repeats the
   guard, so this is readiness, not the security barrier. `context` may name
-  the host as `:macos?` and the helper's options as `:apple_maps` for a test.
+  the host as `:host` (`BootProfile.host/0`'s shape) and the helper's options
+  as `:apple_maps` for a test.
   """
   @spec advertise?(map()) :: boolean()
   def advertise?(context) when is_map(context), do: readiness(context) == :ok
@@ -274,7 +278,7 @@ defmodule FermixCore.Tools.PlaceSearch do
   @doc "The backend `context` resolves to (`PlaceSearch.Backend.resolve/2`)."
   @spec resolution(map()) :: Backend.resolution()
   def resolution(context) when is_map(context),
-    do: Backend.resolve(Config.current(), platform(context))
+    do: Backend.resolve(Config.current(), host(context))
 
   @impl true
   @spec execute(map(), Tool.context()) :: {:ok, Tool.tool_result()}
@@ -308,7 +312,7 @@ defmodule FermixCore.Tools.PlaceSearch do
   end
 
   # Brave reads the one shared key from its opts (§8.1); Apple Maps reads the
-  # helper's options a test names, and the host for its platform check.
+  # helper's options a test names, and the host for its build check.
   defp backend_opts(%{name: :brave}, context) do
     case SearchCredential.brave() do
       {:ok, api_key} -> [brave_api_key: api_key, context: context]
@@ -317,11 +321,11 @@ defmodule FermixCore.Tools.PlaceSearch do
   end
 
   defp backend_opts(%{name: :apple_maps}, context) do
-    [context: context] ++ platform(context) ++ Map.get(context, :apple_maps, [])
+    [context: context] ++ host(context) ++ Map.get(context, :apple_maps, [])
   end
 
-  defp platform(%{macos?: macos?}) when is_boolean(macos?), do: [macos?: macos?]
-  defp platform(_context), do: []
+  defp host(%{host: %{profile: _profile, os: _os} = host}), do: [host: host]
+  defp host(_context), do: []
 
   # Truncated to `count` BEFORE encoding: the provider may return more than it
   # was asked for, and the model must never be handed rows the caller capped out.

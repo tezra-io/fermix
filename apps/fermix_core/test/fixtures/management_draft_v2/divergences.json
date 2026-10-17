@@ -790,7 +790,7 @@
       "method": "settings.get:web_search",
       "field": "rows:place_search_backend",
       "kind": "engine_only",
-      "why": "M72 section 14 makes place search's backend a choice (Apple Maps on a Mac, Brave elsewhere) after the draft was written, and publishes it in this section after the web backend. It is the ordinary choice row with the options this host can run, so the app draws it through the descriptor form with no Swift work; the Brave key row now stands only while web or place search uses Brave."
+      "why": "M72 section 14 makes place search's backend a choice (Apple Maps in the Fermix Mac app, Brave in the Homebrew and Linux builds) after the draft was written, and publishes it in this section after the web backend. It is the ordinary choice row with the options this host can run, so the app draws it through the descriptor form with no Swift work; the Brave key row now stands only while web or place search uses Brave."
     },
     {
       "method": "plugins.list",

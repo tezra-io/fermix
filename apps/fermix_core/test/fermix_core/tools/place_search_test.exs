@@ -13,6 +13,9 @@ defmodule FermixCore.Tools.PlaceSearchTest do
   alias FermixTestSupport.SafeRm
 
   @key "brave-secret"
+  @mac_app %{profile: :app_engine, os: :darwin}
+  @linux %{profile: :linux_package_cli, os: :linux}
+  @brew_mac %{profile: :standalone_cli, os: :darwin}
   @conversation {"test", "place-search", :root}
 
   # This suite drives the one global config section `place_search` reads — the
@@ -673,7 +676,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
   # M72 §14: the second backend. A shell script stands in for `fermix-maps`
   # (named through the context's `:apple_maps` options) and the host is named
-  # as `:macos?`, so every case here runs the same on a Mac and on Linux.
+  # as `:host`, so every case here runs the same on a Mac and on Linux.
   describe "the Apple Maps backend (M72 §14)" do
     setup do
       dir = SafeRm.make_tmp_dir!("place-search-apple-maps")
@@ -681,7 +684,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       %{dir: dir}
     end
 
-    test "unset on a Mac, a search runs on Apple Maps with no key", %{dir: dir} do
+    test "unset in the Mac app, a search runs on Apple Maps with no key", %{dir: dir} do
       put_tools(nil, nil)
       holder = reply_blocks()
       handler = attach_tool_telemetry()
@@ -707,7 +710,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       assert [%{apple_place_id: "I15D3EC7F56AE8D5C"}] = ReplyBlocks.take(holder, @conversation)
     end
 
-    test "unset off a Mac, the same call runs on Brave", %{dir: dir} do
+    test "unset on Linux, the same call runs on Brave", %{dir: dir} do
       put_tools(@key, nil)
       helper = fake_maps(dir, %{"places" => []}, 0)
       test_pid = self()
@@ -719,14 +722,14 @@ defmodule FermixCore.Tools.PlaceSearchTest do
             send(test_pid, :brave_request)
             json(conn, %{"results" => []})
           end,
-          %{macos?: false, apple_maps: [helper_path: helper]}
+          %{host: @linux, apple_maps: [helper_path: helper]}
         )
 
       assert_received :brave_request
       refute File.exists?(Path.join(dir, "request")), "the helper ran off a Mac"
     end
 
-    test "brave set on a Mac runs Brave and never spawns the helper", %{dir: dir} do
+    test "brave set in the Mac app runs Brave and never spawns the helper", %{dir: dir} do
       put_tools(@key, "brave")
       helper = fake_maps(dir, %{"places" => [apple_place_fixture()]}, 0)
       handler = attach_tool_telemetry()
@@ -739,7 +742,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
             send(test_pid, :brave_request)
             json(conn, %{"results" => []})
           end,
-          %{macos?: true, apple_maps: [helper_path: helper]}
+          %{host: @mac_app, apple_maps: [helper_path: helper]}
         )
 
       assert_received :brave_request
@@ -748,23 +751,47 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       :telemetry.detach(handler)
     end
 
-    test "apple_maps set off a Mac is not ready: hidden, and refused before any spawn", %{
-      dir: dir
-    } do
+    test "apple_maps set on a build without the helper is not ready: hidden, refused before any spawn",
+         %{dir: dir} do
       put_tools(@key, "apple_maps")
       helper = fake_maps(dir, %{"places" => []}, 0)
-      context = %{macos?: false, apple_maps: [helper_path: helper]}
 
-      refute PlaceSearch.advertise?(context)
-      assert {:error, reason} = PlaceSearch.readiness(context)
-      assert reason =~ "runs only on macOS"
+      for {host, build} <- [{@linux, "the Linux package"}, {@brew_mac, "Homebrew"}] do
+        context = %{host: host, apple_maps: [helper_path: helper]}
 
-      result = no_request(%{"query" => "tacos", "location" => "Suwanee, GA"}, context)
-      assert_refused(result, "provider_error")
-      refute File.exists?(Path.join(dir, "request"))
+        refute PlaceSearch.advertise?(context)
+        assert {:error, reason} = PlaceSearch.readiness(context)
+        assert reason =~ build
+        assert reason =~ "carries no Apple Maps helper; the Fermix Mac app does"
+
+        result = no_request(%{"query" => "tacos", "location" => "Suwanee, GA"}, context)
+        assert_refused(result, "provider_error")
+        refute File.exists?(Path.join(dir, "request"))
+      end
     end
 
-    test "Apple Maps without its helper is not advertised and refuses", %{dir: dir} do
+    test "unset on Homebrew on a Mac, the same call runs on Brave and never the helper", %{
+      dir: dir
+    } do
+      put_tools(@key, nil)
+      helper = fake_maps(dir, %{"places" => []}, 0)
+      test_pid = self()
+
+      {:ok, %{success: true}} =
+        execute(
+          %{"query" => "tacos", "location" => "Suwanee, GA"},
+          fn conn ->
+            send(test_pid, :brave_request)
+            json(conn, %{"results" => []})
+          end,
+          %{host: @brew_mac, apple_maps: [helper_path: helper]}
+        )
+
+      assert_received :brave_request
+      refute File.exists?(Path.join(dir, "request")), "the helper ran on a Homebrew build"
+    end
+
+    test "the Mac app without its helper does not advertise the tool, and refuses", %{dir: dir} do
       put_tools(nil, nil)
       context = apple_context(Path.join(dir, "absent/fermix-maps"), %{})
 
@@ -772,10 +799,10 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
       {:ok, result} = PlaceSearch.execute(%{"query" => "tacos", "location" => "Suwanee"}, context)
       assert result.success == false
-      assert result.error =~ "provider_error: this build carries no Apple Maps helper"
+      assert result.error =~ "provider_error: the Apple Maps helper (fermix-maps) is missing"
     end
 
-    test "a helper on disk advertises the tool on a Mac, keyless", %{dir: dir} do
+    test "a helper on disk advertises the tool in the Mac app, keyless", %{dir: dir} do
       put_tools(nil, nil)
       context = apple_context(fake_maps(dir, %{"places" => []}, 0), %{})
 
@@ -785,8 +812,8 @@ defmodule FermixCore.Tools.PlaceSearchTest do
 
     test "the schema publishes country and language only under Brave" do
       put_tools(nil, nil)
-      apple = PlaceSearch.dynamic_parameters(%{macos?: true})
-      brave = PlaceSearch.dynamic_parameters(%{macos?: false})
+      apple = PlaceSearch.dynamic_parameters(%{host: @mac_app})
+      brave = PlaceSearch.dynamic_parameters(%{host: @linux})
 
       refute Map.has_key?(apple.properties, :country)
       refute Map.has_key?(apple.properties, :language)
@@ -1041,7 +1068,7 @@ defmodule FermixCore.Tools.PlaceSearchTest do
       agent_name: "test_agent",
       conversation_key: @conversation,
       reply_blocks: Map.get_lazy(overrides, :reply_blocks, &reply_blocks/0),
-      macos?: true,
+      host: @mac_app,
       apple_maps: [helper_path: helper]
     }
     |> Map.merge(overrides)

@@ -1,14 +1,15 @@
 # Place discovery — MILESTONE_31 §12 (tool routing) and §18 rows "Routing eval".
 #
 # PRECONDITIONS — READ BEFORE BLAMING THE MODEL. `place_search` is advertised
-# only while its backend in force is ready (M31 §14.1, M72 §14.1). On a Mac the
-# backend is Apple Maps unless `[fermix_core.tools.place_search] backend` says
-# otherwise: it needs no key and no metered plan, only the `fermix-maps` helper
-# the daemon's build carries (a dev build from a Mac checkout makes it; the
-# Homebrew build has none). Off a Mac, or with `backend = "brave"`, it needs a
-# resolvable Brave key (`[fermix_core.tools.web_search] brave_api_key`, and a
-# Brave plan that includes Place Search). When the backend is not ready the tool
-# is never advertised and the model cannot reach it. Every discovery case then
+# only while its backend in force is ready (M31 §14.1, M72 §14.1). In the Mac
+# app's engine and a dev build from a Mac checkout, which carry the
+# `fermix-maps` helper, the backend is Apple Maps unless
+# `[fermix_core.tools.place_search] backend` says otherwise: it needs no key and
+# no metered plan. In the Homebrew and Linux builds, or with `backend =
+# "brave"`, it needs a resolvable Brave key (`[fermix_core.tools.web_search]
+# brave_api_key`, and a Brave plan that includes Place Search). When the
+# backend is not ready the tool is never advertised and the model cannot reach
+# it. Every discovery case then
 # fails at `tools_any` — a real posture difference, not a skip, so read the
 # `place search` row of `fermix doctor` (it names the backend, why, and whether
 # it is ready) before blaming the model — and, worse, the safety scenario
@@ -20,7 +21,7 @@
 #
 # WHICH BACKEND RAN. The tool span's metadata carries `backend` (`apple_maps`
 # or `brave`), but no gate here reads span metadata and a case cannot set the
-# eval home's config, so "Brave set on a Mac never spawns the helper" is held by
+# eval home's config, so "Brave never spawns the helper" is held by
 # ExUnit (`PlaceSearchTest`, the Apple Maps block) rather than by a case here.
 # The rubrics and `reply_urls_in_evidence` hold for both backends: an Apple
 # Maps place's returned URL is Apple's page for it (`maps.apple.com/place?...`)
@@ -53,7 +54,7 @@
 # of checking, so the rubric clause is backed by the deterministic inventory
 # gate on every discovery case.
 #
-# COST. On a Mac, one Apple Maps search per invocation, unmetered; under Brave,
+# COST. Under Apple Maps, one search per invocation, unmetered; under Brave,
 # one metered Brave Place Search request. Neither makes a detail follow-up call.
 # Model spend is a normal short research turn.
 suite: places

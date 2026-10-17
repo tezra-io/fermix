@@ -80,8 +80,8 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
 
   @shim_missing "provider_error: macOS disclaim shim is not built — rebuild fermix " <>
                   "(mix compile) or reinstall"
-  @helper_missing "provider_error: this build carries no Apple Maps helper (fermix-maps); " <>
-                    "set [fermix_core.tools.place_search] backend = \"brave\" to search through Brave"
+  @helper_missing "provider_error: the Apple Maps helper (fermix-maps) is missing from this " <>
+                    "build — rebuild fermix (mix compile) or reinstall"
 
   @impl true
   @spec name() :: :apple_maps
@@ -92,13 +92,14 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   def helper_path, do: Application.app_dir(:fermix_nif, "priv/fermix-maps")
 
   @doc """
-  Ready when the helper is on disk. `:helper_path` names another one for a
-  test; nothing here runs it.
+  Ready when the spawn a search would make can be made: the helper on disk
+  and, on macOS, the disclaim shim beside it. `:helper_path`, `:shim_path` and
+  `:os_type` name others for a test; nothing here runs the helper.
   """
   @impl true
   @spec ready(keyword()) :: :ok | {:error, String.t()}
   def ready(opts) when is_list(opts) do
-    with {:ok, _helper} <- helper(opts), do: :ok
+    with {:ok, _plan} <- plan(opts), do: :ok
   end
 
   @doc """
@@ -110,8 +111,7 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
           {:ok, [Backend.place()], Backend.trace_metadata()}
           | {:error, String.t(), Backend.trace_metadata()}
   def search(%{query: query} = request, opts) when is_binary(query) and is_list(opts) do
-    with {:ok, helper} <- helper(opts),
-         {:ok, {executable, args}} <- spawn_plan(helper, os_type(opts), shim_path(opts)),
+    with {:ok, {executable, args}} <- plan(opts),
          {:ok, stdout} <- run(executable, args, request_line(request), timeout(opts)),
          {:ok, raw} <- decode(stdout),
          {:ok, places} <- places(raw, request) do
@@ -175,6 +175,12 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMaps do
   defp anchor(_request), do: %{"kind" => "query_only"}
 
   # -- the process -----------------------------------------------------------
+
+  # The one spawn `ready/1` and `search/2` both build, so a call is never
+  # advertised and then refused for a part that was never there.
+  defp plan(opts) do
+    with {:ok, helper} <- helper(opts), do: spawn_plan(helper, os_type(opts), shim_path(opts))
+  end
 
   defp helper(opts) do
     path = Keyword.get_lazy(opts, :helper_path, &helper_path/0)

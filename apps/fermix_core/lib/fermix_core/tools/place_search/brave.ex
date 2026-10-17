@@ -33,7 +33,8 @@ defmodule FermixCore.Tools.PlaceSearch.Brave do
   second query.
 
   One of the two `PlaceSearch.Backend`s (M72 §14.1): it runs when
-  `[fermix_core.tools.place_search] backend` is `brave`, or unset off a Mac.
+  `[fermix_core.tools.place_search] backend` is `brave`, or unset on a build
+  without the Apple Maps helper (Homebrew, Linux).
 
   `opts` is the resolved `[fermix_core.tools.web_search]` keyword (the one Brave
   credential, §8.1) plus `:context` — the same shape the `web_search` Brave

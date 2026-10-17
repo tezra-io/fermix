@@ -6,9 +6,9 @@ defmodule FermixCore.Management.Settings.Tools do
   Search and images publish the key row of the backend in force rather than
   every backend's slot: asking an operator to store six keys to use one is how
   the browser door's search tab reads today. The search section also carries
-  place search's backend (M72 §14.1), offered as this host can run it (a Linux
-  host has Brave alone), and the Brave key row stands whenever web or place
-  search uses Brave.
+  place search's backend (M72 §14.1), offered as this build can run it (Brave
+  alone where the build carries no Apple Maps helper), and the Brave key row
+  stands whenever web or place search uses Brave.
   """
 
   alias FermixCore.Harness.Config, as: HarnessConfig
@@ -97,8 +97,9 @@ defmodule FermixCore.Management.Settings.Tools do
   def owns?(section) when is_binary(section), do: Enum.any?(@sections, &(&1.id == section))
 
   @doc """
-  The rows of one owned section. `macos?:` names the host for a test; the
-  search section's place search options are the ones this host can run.
+  The rows of one owned section. `host:` (`BootProfile.host/0`'s shape) names
+  the build for a test; the search section's place search options are the ones
+  this build can run.
   """
   @spec rows(String.t(), Source.snapshot(), keyword()) :: [Row.t()]
   def rows(section, snapshot, opts \\ [])
@@ -162,8 +163,8 @@ defmodule FermixCore.Management.Settings.Tools do
   def rows("web_search", snapshot, opts) do
     block = Source.tool(snapshot, :web_search)
     backend = Source.string(block, :backend, "duckduckgo")
-    macos? = PlaceBackend.macos?(opts)
-    place = place_backend(snapshot, macos?)
+    host = PlaceBackend.host(opts)
+    place = place_backend(snapshot, host)
     restart = Row.restart?(:tools)
 
     [
@@ -174,7 +175,7 @@ defmodule FermixCore.Management.Settings.Tools do
       ),
       Row.new("place_search_backend", :choice, "Place search",
         value: place,
-        options: Enum.map(PlaceBackend.available(macos?), &place_option/1),
+        options: Enum.map(PlaceBackend.available(host), &place_option/1),
         restart: restart
       )
     ] ++ search_key_rows(snapshot, backend, place, restart)
@@ -303,12 +304,12 @@ defmodule FermixCore.Management.Settings.Tools do
   defp search_hint(_name), do: nil
 
   # The value in force, from the one resolver: the configured backend, or the
-  # platform's default when none is set.
-  defp place_backend(snapshot, macos?) do
+  # build's default when none is set.
+  defp place_backend(snapshot, host) do
     snapshot
     |> Source.tool(:place_search)
     |> PlaceConfig.normalize()
-    |> PlaceBackend.resolve(macos?: macos?)
+    |> PlaceBackend.resolve(host: host)
     |> Map.fetch!(:name)
     |> Atom.to_string()
   end

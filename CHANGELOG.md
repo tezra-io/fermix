@@ -8,21 +8,20 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
-- **Place search works on a Mac with no key, through Apple Maps.** On a Mac,
-  `place_search` now searches Apple Maps through a small helper the Mac app's
-  engine carries, so "quiet coffee shops in SoHo" finds real places without a
-  Brave Search API key or a metered plan. Each place comes back with its
-  address, phone, kind, coordinates, its own site and Apple's page for it,
-  which the Mac chat's cards open in Maps; Apple Maps has no ratings, prices
-  or hours to give. Linux keeps Brave. A new Place search choice in the Search
-  settings (`[fermix_core.tools.place_search] backend`, `apple_maps` or
-  `brave`) picks one on purpose, Linux offers Brave alone, and the Brave key
-  row shows whenever web or place search uses Brave. Doctor's place search row
-  says which backend is in force, why, and whether it is ready. Nothing falls
-  back from one backend to the other, and the helper never asks for or reads
-  this Mac's location. The Homebrew build, made off a Mac, carries no helper:
-  on a Mac it reads Apple Maps as not ready, and choosing Brave with a key
-  keeps place search working there.
+- **Place search works in the Mac app with no key, through Apple Maps.** In
+  the Fermix Mac app, `place_search` now searches Apple Maps through a small
+  helper the app's engine carries, so "quiet coffee shops in SoHo" finds real
+  places without a Brave Search API key or a metered plan. Each place comes
+  back with its address, phone, kind, coordinates, its own site and Apple's
+  page for it, which the Mac chat's cards open in Maps; Apple Maps has no
+  ratings, prices or hours to give. The Homebrew and Linux builds keep Brave.
+  A new Place search choice in the Search settings
+  (`[fermix_core.tools.place_search] backend`, `apple_maps` or `brave`) picks
+  one on purpose where the build carries both, the Homebrew and Linux builds
+  offer Brave alone, and the Brave key row shows whenever web or place search
+  uses Brave. Doctor's place search row says which backend is in force, why,
+  and whether it is ready. Nothing falls back from one backend to the other,
+  and the helper never asks for or reads this Mac's location.
 
 - **Doctor says when your provider is down.** A new `provider health` row
   judges the primary provider from the calls Fermix already made in the last

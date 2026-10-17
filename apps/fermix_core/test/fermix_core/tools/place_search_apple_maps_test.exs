@@ -299,12 +299,27 @@ defmodule FermixCore.Tools.PlaceSearch.AppleMapsTest do
       missing = Path.join(ctx.dir, "absent/fermix-maps")
 
       assert {:error, reason} = AppleMaps.ready(helper_path: missing)
-      assert reason =~ "provider_error: this build carries no Apple Maps helper"
+      assert reason =~ "provider_error: the Apple Maps helper (fermix-maps) is missing"
+      assert reason =~ "reinstall"
       assert {:error, ^reason, %{}} = AppleMaps.search(named(), helper_path: missing)
     end
 
     test "a helper on disk is ready", ctx do
       assert :ok = AppleMaps.ready(helper_path: fake_helper(ctx.dir, %{"places" => []}, 0))
+    end
+
+    # Readiness is the spawn a search would make: on a Mac a helper without the
+    # disclaim shim is not ready, rather than advertised and then refused by
+    # every call.
+    test "on a Mac a helper without the disclaim shim is not ready", ctx do
+      helper = fake_helper(ctx.dir, %{"places" => []}, 0)
+      opts = [helper_path: helper, os_type: {:unix, :darwin}, shim_path: nil]
+
+      assert {:error, reason} = AppleMaps.ready(opts)
+      assert reason =~ "provider_error: macOS disclaim shim is not built"
+      assert {:error, ^reason, %{}} = AppleMaps.search(named(), opts)
+
+      assert :ok = AppleMaps.ready(helper_path: helper, os_type: {:unix, :linux}, shim_path: nil)
     end
   end
 

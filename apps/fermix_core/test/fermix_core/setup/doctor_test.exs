@@ -1281,16 +1281,22 @@ defmodule FermixCore.Setup.DoctorTest do
     end
   end
 
-  # Brave as the platform's default off a Mac (`macos?: false`) unless a case
-  # names another host or backend; M72 §14.1 made the backend the platform's.
+  # Builds by what they carry (M72 §14.1): the Mac app's engine has the Apple
+  # Maps helper; a Linux package has none.
+  @mac_app %{profile: :app_engine, os: :darwin}
+  @linux %{profile: :linux_package_cli, os: :linux}
+  @brew_mac %{profile: :standalone_cli, os: :darwin}
+
+  # Brave as the Linux build's default (`host: @linux`) unless a case names
+  # another build or backend; M72 §14.1 made the backend the build's.
   describe "place_search_report/1 (M31 §14.3)" do
     test "offline reports the backend, the Brave key, the active web backend, and advertisement" do
       put_web_search(backend: :duckduckgo, brave_api_key: "brave-secret")
 
-      report = Doctor.place_search_report(macos?: false)
+      report = Doctor.place_search_report(host: @linux)
 
       assert report.backend == :brave
-      assert report.backend_source == :platform_default
+      assert report.backend_source == :build_default
       assert report.web_backend == :duckduckgo
       assert report.credential_present? == true
       assert report.ready == :ok
@@ -1301,7 +1307,7 @@ defmodule FermixCore.Setup.DoctorTest do
     test "offline reports a missing key as hidden" do
       put_web_search(backend: :duckduckgo)
 
-      report = Doctor.place_search_report(macos?: false)
+      report = Doctor.place_search_report(host: @linux)
 
       assert report.credential_present? == false
       assert {:error, "auth_failed: missing Brave API key"} = report.ready
@@ -1312,7 +1318,7 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "@keyring")
 
       assert %{credential_present?: false, advertised?: false} =
-               Doctor.place_search_report(macos?: false)
+               Doctor.place_search_report(host: @linux)
     end
 
     test "offline never reaches the network" do
@@ -1320,7 +1326,7 @@ defmodule FermixCore.Setup.DoctorTest do
       put_web_search(brave_api_key: "brave-secret")
 
       Doctor.place_search_report(
-        macos?: false,
+        host: @linux,
         req_options: [plug: {Req.Test, id}],
         net_resolver: place_resolver()
       )
@@ -1328,28 +1334,28 @@ defmodule FermixCore.Setup.DoctorTest do
       refute_received {:place_probe_request, _query}
     end
 
-    test "on a Mac with nothing set, the backend is Apple Maps, ready with its helper and no key" do
+    test "in the Mac app with nothing set, the backend is Apple Maps, ready with its helper and no key" do
       put_web_search(backend: :duckduckgo)
 
-      report = Doctor.place_search_report(macos?: true, apple_maps: [helper_path: "/bin/sh"])
+      report = Doctor.place_search_report(host: @mac_app, apple_maps: [helper_path: "/bin/sh"])
 
       assert report.backend == :apple_maps
-      assert report.backend_source == :platform_default
+      assert report.backend_source == :build_default
       assert report.credential_present? == false
       assert report.ready == :ok
       assert report.advertised? == true
     end
 
-    test "Apple Maps without its helper, or off a Mac, is not ready and says why" do
+    test "Apple Maps without its helper, or on a build without one, is not ready and says why" do
       put_web_search(backend: :duckduckgo)
 
       missing =
         Doctor.place_search_report(
-          macos?: true,
+          host: @mac_app,
           apple_maps: [helper_path: "/nonexistent/fermix-maps"]
         )
 
-      assert {:error, "provider_error: this build carries no Apple Maps helper" <> _} =
+      assert {:error, "provider_error: the Apple Maps helper (fermix-maps) is missing" <> _} =
                missing.ready
 
       refute missing.advertised?
@@ -1359,13 +1365,29 @@ defmodule FermixCore.Setup.DoctorTest do
         place_search: [backend: "apple_maps"]
       )
 
-      off_mac = Doctor.place_search_report(macos?: false, apple_maps: [helper_path: "/bin/sh"])
+      off_mac = Doctor.place_search_report(host: @linux, apple_maps: [helper_path: "/bin/sh"])
 
       assert off_mac.backend == :apple_maps
       assert off_mac.backend_source == :configured
 
-      assert {:error, "provider_error: Apple Maps place search runs only on macOS" <> _} =
+      assert {:error, "provider_error: this build (the Linux package) carries no Apple Maps" <> _} =
                off_mac.ready
+
+      brew = Doctor.place_search_report(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert {:error, reason} = brew.ready
+      assert reason =~ "the standalone Fermix that Homebrew installs"
+    end
+
+    test "Homebrew on a Mac defaults to Brave, the build's default, and asks for its key" do
+      put_web_search(backend: :duckduckgo)
+
+      report = Doctor.place_search_report(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert report.backend == :brave
+      assert report.backend_source == :build_default
+      assert {:error, "auth_failed: missing Brave API key"} = report.ready
+      refute report.advertised?
     end
 
     test "--full on Apple Maps runs one free search through the helper, never Brave" do
@@ -1376,7 +1398,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
-          macos?: true,
+          host: @mac_app,
           apple_maps: [helper_path: helper],
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
@@ -1392,7 +1414,7 @@ defmodule FermixCore.Setup.DoctorTest do
       helper = apple_probe_helper(%{"error" => %{"message" => "GEOErrorDomain -3"}}, 66)
 
       report =
-        Doctor.place_search_report(full: true, macos?: true, apple_maps: [helper_path: helper])
+        Doctor.place_search_report(full: true, host: @mac_app, apple_maps: [helper_path: helper])
 
       assert report.probe_result == :rate_limited
       assert report.probe_error =~ "rate_limited"
@@ -1405,7 +1427,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
-          macos?: false,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1460,7 +1482,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
-          macos?: false,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: private_place_resolver()
         )
@@ -1476,7 +1498,7 @@ defmodule FermixCore.Setup.DoctorTest do
       report =
         Doctor.place_search_report(
           full: true,
-          macos?: false,
+          host: @linux,
           req_options: [plug: {Req.Test, id}],
           net_resolver: place_resolver()
         )
@@ -1915,7 +1937,7 @@ defmodule FermixCore.Setup.DoctorTest do
   defp full_place_report(id) do
     Doctor.place_search_report(
       full: true,
-      macos?: false,
+      host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: place_resolver()
     )

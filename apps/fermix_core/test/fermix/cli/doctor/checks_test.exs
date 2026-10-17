@@ -881,6 +881,12 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     end
   end
 
+  # Builds by what they carry (M72 §14.1): the Mac app's engine has the Apple
+  # Maps helper; a Linux package has none.
+  @mac_app %{profile: :app_engine, os: :darwin}
+  @linux %{profile: :linux_package_cli, os: :linux}
+  @brew_mac %{profile: :standalone_cli, os: :darwin}
+
   describe "place_search/0 (M31 §14.3)" do
     setup do
       original = Application.get_env(:fermix_core, :tools, [])
@@ -893,11 +899,11 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         web_search: [backend: :duckduckgo, brave_api_key: "brave-secret"]
       )
 
-      result = Checks.place_search(macos?: false)
+      result = Checks.place_search(host: @linux)
 
       assert result.name == "place search"
       assert result.status == :ok
-      assert result.detail =~ "Brave (the default off a Mac)"
+      assert result.detail =~ "Brave (the default in this build)"
       assert result.detail =~ "advertised"
       assert result.detail =~ "duckduckgo"
       assert result.detail =~ "metered"
@@ -907,7 +913,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
     test "reports a missing key as hidden and optional, not a warning" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(macos?: false)
+      result = Checks.place_search(host: @linux)
 
       assert result.status == :ok
       assert result.detail =~ "hidden"
@@ -920,20 +926,20 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
         place_search: [backend: "brave"]
       )
 
-      result = Checks.place_search(macos?: true)
+      result = Checks.place_search(host: @mac_app)
 
       assert result.status == :warn
       assert result.detail =~ "Brave (set in [fermix_core.tools.place_search])"
       assert result.detail =~ "brave_api_key"
     end
 
-    test "reports Apple Maps on a Mac as ready with no key, the platform's default" do
+    test "reports Apple Maps in the Mac app as ready with no key, the build's default" do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
-      result = Checks.place_search(macos?: true, apple_maps: [helper_path: "/bin/sh"])
+      result = Checks.place_search(host: @mac_app, apple_maps: [helper_path: "/bin/sh"])
 
       assert result.status == :ok
-      assert result.detail =~ "Apple Maps (the default on a Mac), ready with no key"
+      assert result.detail =~ "Apple Maps (the default in this build), ready with no key"
       assert result.detail =~ "advertised"
     end
 
@@ -941,28 +947,39 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
 
       missing =
-        Checks.place_search(macos?: true, apple_maps: [helper_path: "/nonexistent/fermix-maps"])
+        Checks.place_search(host: @mac_app, apple_maps: [helper_path: "/nonexistent/fermix-maps"])
 
       assert missing.status == :warn
-      assert missing.detail =~ "no Apple Maps helper"
-      assert missing.detail =~ ~s(backend = "brave")
+      assert missing.detail =~ "the Apple Maps helper (fermix-maps) is missing"
+      assert missing.detail =~ "reinstall"
 
       Application.put_env(:fermix_core, :tools,
         web_search: [backend: :duckduckgo],
         place_search: [backend: "apple_maps"]
       )
 
-      linux = Checks.place_search(macos?: false, apple_maps: [helper_path: "/bin/sh"])
+      linux = Checks.place_search(host: @linux, apple_maps: [helper_path: "/bin/sh"])
 
       assert linux.status == :warn
       assert linux.detail =~ "Apple Maps (set in [fermix_core.tools.place_search]) is not ready"
-      assert linux.detail =~ "runs only on macOS"
+      assert linux.detail =~ "carries no Apple Maps helper; the Fermix Mac app does"
+      assert linux.detail =~ ~s(backend = "brave")
+    end
+
+    test "Homebrew on a Mac with no key is ok, Brave the build's default and the tool hidden" do
+      Application.put_env(:fermix_core, :tools, web_search: [backend: :duckduckgo])
+
+      result = Checks.place_search(host: @brew_mac, apple_maps: [helper_path: "/bin/sh"])
+
+      assert result.status == :ok
+      assert result.detail =~ "Brave (the default in this build): no Brave key"
+      assert result.detail =~ "hidden"
     end
 
     test "the default check reports no probe outcome" do
       Application.put_env(:fermix_core, :tools, web_search: [brave_api_key: "brave-secret"])
 
-      result = Checks.place_search(macos?: false)
+      result = Checks.place_search(host: @linux)
 
       refute result.detail =~ "probe"
     end
@@ -3158,7 +3175,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
 
   defp place_probe_opts(id) do
     [
-      macos?: false,
+      host: @linux,
       req_options: [plug: {Req.Test, id}],
       net_resolver: fn "api.search.brave.com" -> {:ok, [{93, 184, 216, 34}]} end
     ]

@@ -21,6 +21,26 @@ defmodule FermixCore.BootProfileTest do
     assert BootProfile.select("linux_package", fn -> false end) == :source
   end
 
+  # The application's own start recorded what it selected; under `mix test` a
+  # source checkout, never a Burrito wrapper or an app engine.
+  test "boot remembers the profile it selected, and the host pairs it with the system" do
+    assert BootProfile.current() == :source
+
+    {_family, os} = :os.type()
+    assert BootProfile.host() == %{profile: :source, os: os}
+  end
+
+  test "remember/1 is what current/0 reads, and nothing remembered raises" do
+    before = Application.fetch_env!(:fermix_core, :boot_profile)
+    on_exit(fn -> BootProfile.remember(before) end)
+
+    :ok = BootProfile.remember(:standalone_cli)
+    assert BootProfile.current() == :standalone_cli
+
+    Application.delete_env(:fermix_core, :boot_profile)
+    assert_raise ArgumentError, ~r/boot_profile/, fn -> BootProfile.current() end
+  end
+
   test "preparing the packaged Linux CLI opens the same daemon surfaces" do
     endpoint_before = Application.get_env(:fermix_web, FermixWebWeb.Endpoint)
     daemon_before = Application.get_env(:fermix_core, :daemon_socket_enabled)

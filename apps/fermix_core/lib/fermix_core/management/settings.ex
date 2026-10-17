@@ -450,10 +450,10 @@ defmodule FermixCore.Management.Settings do
   defp family_sections(Channels, opts), do: Channels.sections(opts)
   defp family_sections(module, _opts), do: module.sections()
 
-  # The search section offers place search's backends as this host can run
-  # them, so Tools is also handed the host.
+  # The search section offers place search's backends as this build can run
+  # them, so Tools is also handed the build's host value when a caller names it.
   defp family_rows(Tools, section, snapshot, opts),
-    do: Tools.rows(section, snapshot, Keyword.take(opts, [:macos?]))
+    do: Tools.rows(section, snapshot, Keyword.take(opts, [:host]))
 
   defp family_rows(module, section, snapshot, _opts), do: module.rows(section, snapshot)
 end

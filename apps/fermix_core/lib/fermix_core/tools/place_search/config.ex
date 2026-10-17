@@ -6,8 +6,9 @@ defmodule FermixCore.Tools.PlaceSearch.Config do
       [fermix_core.tools.place_search]
       backend = "apple_maps"   # or "brave"; absent, the platform decides
 
-  `backend` absent leaves the choice to `PlaceSearch.Backend.resolve/2`: Apple
-  Maps on macOS, Brave elsewhere. The file spells the backend as a string;
+  `backend` absent leaves the choice to `PlaceSearch.Backend.resolve/2`: the
+  build's default, Apple Maps in the Fermix Mac app and Brave in the Homebrew
+  and Linux builds. The file spells the backend as a string;
   `normalize/1` reads it into an atom and refuses any other word or key, so a
   typo stops the load naming the key rather than quietly running another
   backend. `to_keyword/1` is the inverse the persist path writes, so a save

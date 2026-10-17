@@ -147,7 +147,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   # M31 §14.1: `place_search` is the first credential-gated built-in, hidden from
   # the wire whenever its backend in force is not ready (M72 §14.1: Brave's key,
-  # or Apple Maps' helper on a Mac). The routing rule follows the wire —
+  # or Apple Maps' helper in a build that carries it). The routing rule follows the wire —
   # steering local intent to a tool the model cannot call is the same dead end
   # `harness_when_unusable?/1` removes below. Both ask the tool's one readiness
   # question — but not at the same time:

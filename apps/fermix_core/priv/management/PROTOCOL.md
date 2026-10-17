@@ -417,11 +417,13 @@ Notes that the shapes alone do not carry:
 - **`web_search` also carries place search's backend.** After
   `web_search_backend`, the row `place_search_backend` (a choice, `Place
   search`) is `[fermix_core.tools.place_search] backend`, and its `value` is the
-  backend in force: the one the file names, or the platform's default when it
-  names none (`apple_maps` on a Mac, `brave` elsewhere). Its options are the
-  ones this host can run: `apple_maps` (`Apple Maps`, hint `Needs no key`) and
-  `brave` (`Brave`) on a Mac, `brave` alone on Linux, where `settings.apply`
-  refuses `apple_maps` as a value the row does not publish. The `brave_api_key`
+  backend in force: the one the file names, or the build's default when it
+  names none (`apple_maps` in the Fermix Mac app's engine, which carries the
+  Apple Maps helper, `brave` in the Homebrew and Linux builds). Its options are
+  the ones this build can run: `apple_maps` (`Apple Maps`, hint `Needs no key`)
+  and `brave` (`Brave`) where the build carries the helper, `brave` alone
+  everywhere else, where `settings.apply` refuses `apple_maps` as a value the
+  row does not publish. The `brave_api_key`
   row stands whenever web search or place search uses Brave, its footer
   `Also powers place search.` when both do and `Powers place search.` when only
   place search does; with neither on Brave it is not published. A call reads

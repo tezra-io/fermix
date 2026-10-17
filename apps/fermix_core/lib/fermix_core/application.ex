@@ -74,6 +74,7 @@ defmodule FermixCore.Application do
         &BurritoUtil.running_standalone?/0
       )
 
+    :ok = BootProfile.remember(profile)
     start_profile(profile)
   end
 

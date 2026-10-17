@@ -376,8 +376,8 @@ same `blocks`, and have the key only when the reply has one. The rules:
   `opening_hours {current_day}` and `distance {value, units}`. The
   description, contact details, cuisines, the other days' hours and the
   picture are left out. The coordinates are the place's, never the person's.
-- **Two sources, one record.** The daemon searches Apple Maps on a Mac and
-  Brave elsewhere, or whichever its settings name. A place Apple Maps found
+- **Two sources, one record.** The Fermix Mac app's engine searches Apple
+  Maps and the Homebrew and Linux builds Brave, or whichever its settings name. A place Apple Maps found
   carries `apple_place_id`, Apple Maps' identifier for it, by which a Mac opens
   Apple's own place card; its `source_url` is Apple's page for the place
   (`https://maps.apple.com/place?place-id=` and the identifier), and it has a

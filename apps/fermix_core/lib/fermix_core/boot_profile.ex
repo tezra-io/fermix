@@ -5,11 +5,20 @@ defmodule FermixCore.BootProfile do
   App-engine ownership comes only from immutable build identity. Burrito
   detection remains relevant to standalone artifacts and is never consulted to
   identify an app engine.
+
+  The profile boot selected is remembered (`remember/1`) and read back with
+  `current/0`, so a later question about this build (which place search
+  backend it carries, say) asks the one answer boot already gave rather than
+  selecting again. `host/0` pairs it with the operating system: the one host
+  value a caller hands on, and a test names.
   """
 
   alias FermixCore.Boot.PathBaseline
 
+  @profiles [:app_engine, :standalone_cli, :linux_package_cli, :source]
+
   @type profile :: :app_engine | :standalone_cli | :linux_package_cli | :source
+  @type host :: %{profile: profile(), os: atom()}
 
   @doc "Selects a boot profile while giving app identity strict precedence."
   @spec select(String.t(), (-> boolean())) :: profile()
@@ -24,6 +33,25 @@ defmodule FermixCore.BootProfile do
   # packaged CLI the distribution package installs.
   def select("linux_package", detector) when is_function(detector, 0) do
     if detector.(), do: :linux_package_cli, else: :source
+  end
+
+  @doc "Records the profile boot selected, before anything reads it."
+  @spec remember(profile()) :: :ok
+  def remember(profile) when profile in @profiles,
+    do: Application.put_env(:fermix_core, :boot_profile, profile)
+
+  @doc """
+  The profile boot selected. Raises when boot recorded none: a reader outside
+  a started application has no build to describe.
+  """
+  @spec current() :: profile()
+  def current, do: Application.fetch_env!(:fermix_core, :boot_profile)
+
+  @doc "This build's profile and the operating system it runs on (`:darwin`, `:linux`)."
+  @spec host() :: host()
+  def host do
+    {_family, os} = :os.type()
+    %{profile: current(), os: os}
   end
 
   @doc """

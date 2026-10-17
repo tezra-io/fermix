@@ -10,16 +10,22 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
 
   `resolve/2` is the only place the choice is made.
   `[fermix_core.tools.place_search] backend` wins when it is set; unset, the
-  backend is Apple Maps on macOS and Brave elsewhere, and the resolution says
-  which of the two decided, so Doctor can say why. The host is injected as
-  `macos?:` (a test crossing the platform gate names the platform it means).
+  build decides: Apple Maps where the build carries the helper (the Fermix Mac
+  app's engine, and a checkout built on a Mac), Brave in the Homebrew and Linux
+  builds. The resolution says which of the two decided, so Doctor can say why.
+  The build is the host value `FermixCore.BootProfile.host/0` answers (the
+  profile boot selected, and the operating system), injected as `host:`, so a
+  test names the build it means. It is never a look at the helper file.
 
   Nothing falls back. A backend that is not ready refuses with its own reason
-  (`ready/2`): Brave without a resolvable key, Apple Maps without its helper or
-  off a Mac. A search that fails returns its own tag and is never retried on
-  the other backend (M31 §21.7); `brave` on a Mac never spawns the helper.
+  (`ready/2`): Brave without a resolvable key; Apple Maps on a build that
+  carries no helper, naming the build; Apple Maps whose helper or disclaim shim
+  is missing from a build that should carry them, saying reinstall. A search
+  that fails returns its own tag and is never retried on the other backend
+  (M31 §21.7); `brave` never spawns the helper.
   """
 
+  alias FermixCore.BootProfile
   alias FermixCore.Tools.PlaceSearch.AppleMaps
   alias FermixCore.Tools.PlaceSearch.Brave
   alias FermixCore.Tools.PlaceSearch.Config
@@ -36,7 +42,7 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
         }
   @type place :: %{required(:name) => String.t(), optional(atom()) => term()}
   @type trace_metadata :: %{optional(atom()) => term()}
-  @type source :: :configured | :platform_default
+  @type source :: :configured | :build_default
   @type resolution :: %{name: Config.backend(), module: module(), source: source()}
 
   @doc "The backend's configuration word, as `[fermix_core.tools.place_search] backend` spells it."
@@ -51,11 +57,10 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
 
   @modules %{apple_maps: AppleMaps, brave: Brave}
 
-  @off_mac "provider_error: Apple Maps place search runs only on macOS; set " <>
-             "[fermix_core.tools.place_search] backend = \"brave\" to search through Brave"
+  @set_brave "Set [fermix_core.tools.place_search] backend = \"brave\" to search through Brave"
 
   @doc """
-  The backend in force for a section (`Config.t()`) on this host.
+  The backend in force for a section (`Config.t()`) on this build.
 
   Pure: the section and the host come in, so a tool, a readiness probe and a
   settings row ask the same question and get the same answer.
@@ -63,34 +68,56 @@ defmodule FermixCore.Tools.PlaceSearch.Backend do
   @spec resolve(Config.t(), keyword()) :: resolution()
   def resolve(%{backend: configured}, opts) when is_list(opts) do
     case configured do
-      nil -> resolution(platform_default(macos?(opts)), :platform_default)
+      nil -> resolution(build_default(host(opts)), :build_default)
       name -> resolution(name, :configured)
     end
   end
 
-  @doc "The backends a host can run, in the order a choice lists them: Linux has Brave alone."
-  @spec available(boolean()) :: [Config.backend()]
-  def available(true), do: Config.backends()
-  def available(false), do: [:brave]
+  @doc """
+  The backends a build can run, in the order a choice lists them: Brave alone
+  where the build carries no Apple Maps helper.
+  """
+  @spec available(BootProfile.host()) :: [Config.backend()]
+  def available(%{profile: _profile, os: _os} = host) do
+    if carries_helper?(host), do: Config.backends(), else: [:brave]
+  end
 
   @doc """
-  Whether the resolved backend could search now. Apple Maps off a Mac is the
-  refusal a misconfiguration gets, loud and named, before any spawn.
+  Whether the resolved backend could search now. Apple Maps on a build that
+  carries no helper is the refusal a misconfiguration gets, loud and naming the
+  build, before any spawn.
   """
   @spec ready(resolution(), keyword()) :: :ok | {:error, String.t()}
   def ready(%{name: :apple_maps, module: module}, opts) when is_list(opts) do
-    if macos?(opts), do: module.ready(opts), else: {:error, @off_mac}
+    host = host(opts)
+    if carries_helper?(host), do: module.ready(opts), else: {:error, no_helper(host)}
   end
 
   def ready(%{module: module}, opts) when is_list(opts), do: module.ready(opts)
 
-  @doc "The host this resolves for: `macos?:` when the caller names it, the real one otherwise."
-  @spec macos?(keyword()) :: boolean()
-  def macos?(opts) when is_list(opts),
-    do: Keyword.get_lazy(opts, :macos?, fn -> :os.type() == {:unix, :darwin} end)
+  @doc "The host this resolves for: `host:` when the caller names it, this build's otherwise."
+  @spec host(keyword()) :: BootProfile.host()
+  def host(opts) when is_list(opts), do: Keyword.get_lazy(opts, :host, &BootProfile.host/0)
 
-  defp platform_default(true), do: :apple_maps
-  defp platform_default(false), do: :brave
+  # Which builds carry the helper is a fact of the build, never a look at the
+  # helper file: the Mac app's engine ships it, and a checkout on a Mac makes
+  # it with `mix compile`. The Homebrew and Linux builds are made off a Mac and
+  # carry none. An app engine missing it is a broken install, which `ready/2`
+  # names, not a different default.
+  defp carries_helper?(%{profile: :app_engine}), do: true
+  defp carries_helper?(%{profile: :source, os: :darwin}), do: true
+  defp carries_helper?(%{profile: _profile, os: _os}), do: false
+
+  defp build_default(host), do: if(carries_helper?(host), do: :apple_maps, else: :brave)
+
+  defp no_helper(%{profile: profile}) do
+    "provider_error: this build (#{build_name(profile)}) carries no Apple Maps helper; " <>
+      "the Fermix Mac app does. " <> @set_brave
+  end
+
+  defp build_name(:standalone_cli), do: "the standalone Fermix that Homebrew installs"
+  defp build_name(:linux_package_cli), do: "the Linux package"
+  defp build_name(:source), do: "a source build off a Mac"
 
   defp resolution(name, source),
     do: %{name: name, module: Map.fetch!(@modules, name), source: source}

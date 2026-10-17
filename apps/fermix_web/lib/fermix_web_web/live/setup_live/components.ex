@@ -1704,9 +1704,9 @@ defmodule FermixWebWeb.SetupLive.Components do
 
   # `place_search` shares the ONE Brave credential (MILESTONE_31 §14.1), so its
   # readiness belongs on this pane whatever the selected web backend — Brave does
-  # not have to be the active web search backend for the tool to work. On a Mac
-  # it searches Apple Maps by default and needs no key (M72 §14.1), so the note
-  # follows the place backend in force. The retention posture (§13.4) is stated
+  # not have to be the active web search backend for the tool to work. In the
+  # Fermix Mac app it searches Apple Maps by default and needs no key (M72
+  # §14.1), so the note follows the place backend in force. The retention posture (§13.4) is stated
   # here because this is where the operator decides to save the key.
   defp place_search_note(assigns) do
     ~H"""
@@ -1747,11 +1747,11 @@ defmodule FermixWebWeb.SetupLive.Components do
         "Brave does not have to be your web backend."
 
   defp place_search_status(:apple_maps, true),
-    do: "place_search is ready; it searches Apple Maps on this Mac and needs no key."
+    do: "place_search is ready; it searches Apple Maps and needs no key."
 
   defp place_search_status(:apple_maps, false),
     do:
-      "place_search is set to Apple Maps, which cannot run here (Doctor says why). Set " <>
+      "place_search is set to Apple Maps, which this build cannot run (Doctor says why). Set " <>
         "[fermix_core.tools.place_search] backend = \"brave\" and save a Brave key to search Brave."
 
   defp media_pane(assigns) do

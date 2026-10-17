@@ -91,7 +91,7 @@ defmodule FermixCore.Setup.Doctor do
         }
   @type place_search_report :: %{
           :backend => :apple_maps | :brave,
-          :backend_source => :configured | :platform_default,
+          :backend_source => :configured | :build_default,
           :web_backend => atom(),
           :credential_present? => boolean(),
           :ready => :ok | {:error, String.t()},
@@ -594,7 +594,7 @@ defmodule FermixCore.Setup.Doctor do
   (fixed query, `count: 1`, result discarded): metered on Brave, free on Apple
   Maps. It adds `:probe_result` / `:probe_error` / `:result_count`. Each §10.4
   failure kind keeps its own tag, and no probe ever switches backend.
-  `macos?:` names the host and `apple_maps:` the helper's options for a test;
+  `host:` names the build and `apple_maps:` the helper's options for a test;
   `req_options`/`net_resolver` stub the Brave probe.
 
   Readiness and advertisement are asked of the tool itself so a doctor row and
@@ -606,7 +606,7 @@ defmodule FermixCore.Setup.Doctor do
   def place_search_report(opts \\ []) do
     config = WebSearch.config()
     {web_backend, _module} = WebSearch.active_backend(config)
-    context = opts |> Keyword.take([:macos?, :apple_maps]) |> Map.new()
+    context = opts |> Keyword.take([:host, :apple_maps]) |> Map.new()
     resolution = PlaceSearch.resolution(context)
     ready = PlaceSearch.readiness(context)
 
