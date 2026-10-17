@@ -397,6 +397,59 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
       assert_status_error(503, "provider_error")
     end
 
+    test "Brave's invalid-token answer is auth_failed whatever its status" do
+      handler =
+        brave_error(
+          422,
+          "SUBSCRIPTION_TOKEN_INVALID",
+          "The provided subscription token is invalid."
+        )
+
+      assert {:error, reason, _meta} = search(%{query: "coffee"}, handler)
+      assert reason =~ "auth_failed: HTTP 422 SUBSCRIPTION_TOKEN_INVALID"
+    end
+
+    test "a refusal carries Brave's code, detail and the fields it rejected, never its body" do
+      meta = %{
+        "errors" => [
+          %{
+            "loc" => ["query", "location"],
+            "msg" => "<b>secret</b> body text",
+            "type" => "value_error"
+          }
+        ]
+      }
+
+      handler = brave_error(400, "VALIDATION", "Unable to validate request parameter(s).", meta)
+
+      assert {:error, reason, _meta} = search(%{query: "coffee"}, handler)
+
+      assert reason ==
+               "provider_error: HTTP 400 VALIDATION: Unable to validate request parameter(s). (location)"
+
+      refute reason =~ "secret"
+    end
+
+    test "a long detail is cut, and markup in it is never carried" do
+      detail = "<script>x</script>" <> String.duplicate("word ", 200)
+
+      assert {:error, reason, _meta} =
+               search(%{query: "coffee"}, brave_error(400, "OPTION_NOT_IN_PLAN", detail))
+
+      assert reason =~ "provider_error: HTTP 400 OPTION_NOT_IN_PLAN: "
+      refute reason =~ "<script>"
+      assert byte_size(reason) <= 300
+    end
+
+    test "an error body that is not Brave's says only its status" do
+      assert {:error, reason, _meta} =
+               search(%{query: "coffee"}, fn conn ->
+                 Plug.Conn.resp(conn, 400, "<html>bad gateway page</html>")
+               end)
+
+      assert reason == "provider_error: HTTP 400"
+    end
+
     test "an over-cap body is refused while streaming" do
       assert {:error, reason, _meta} =
                search(%{query: "coffee"}, fn conn ->
@@ -474,6 +527,20 @@ defmodule FermixCore.Tools.PlaceSearch.BraveTest do
              end)
 
     assert reason =~ tag
+  end
+
+  # Brave's ErrorResponse, as the live API answers a refused request.
+  defp brave_error(status, code, detail, meta \\ %{}) do
+    body = %{
+      "type" => "ErrorResponse",
+      "error" => %{"code" => code, "detail" => detail, "meta" => meta, "status" => status}
+    }
+
+    fn conn ->
+      conn
+      |> Plug.Conn.put_resp_content_type("application/json")
+      |> Plug.Conn.resp(status, Jason.encode!(body))
+    end
   end
 
   defp context(test_id, extra_options) do
