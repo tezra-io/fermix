@@ -1,0 +1,36 @@
+{"name": "challenge", "def": "challenge", "source": "contract_example", "direction": "server", "value": {"t": "challenge", "nonce": "M0i82vpXvQFgwhv7e1zClgVSTWAVubNvwGUAOzqoeg8"}}
+{"name": "hello", "def": "hello", "source": "contract_example", "direction": "client", "value": {"t": "hello", "protocol_version": 1, "signature": "Cez82cOL446kjuWjFD21x6fwyfOQSspqZDXbgjDMBU2mU-Byg7jQlZlRsCymYhEE9vBfyerKQJJNFv67YhzhCA", "capabilities": {"final_only": true, "max_result_bytes": 16384}}}
+{"name": "ready", "def": "ready", "source": "contract_example", "direction": "server", "value": {"t": "ready", "session_ttl_s": 900, "max_assignment_bytes": 32768, "max_result_bytes": 16384}}
+{"name": "receipt_accepted", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "accepted"}}
+{"name": "receipt_rejected_bad_signature", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "bad_signature"}}
+{"name": "receipt_rejected_wrong_instance", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "wrong_instance"}}
+{"name": "receipt_rejected_stale_generation", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "stale_generation"}}
+{"name": "receipt_rejected_expired", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "expired"}}
+{"name": "receipt_rejected_malformed", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "malformed"}}
+{"name": "receipt_rejected_over_cap", "def": "receipt", "source": "contract_example", "direction": "client", "value": {"t": "receipt", "assignment_id": "as_01j9x3k2m4n5p6q7", "outcome": "rejected", "reason": "over_cap"}}
+{"name": "start", "def": "start", "source": "contract_example", "direction": "client", "value": {"t": "start", "assignment_id": "as_01j9x3k2m4n5p6q7"}}
+{"name": "start_ok", "def": "start_ok", "source": "contract_example", "direction": "server", "value": {"t": "start_ok", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "deadline_at": "2026-10-16T05:00:47Z"}}
+{"name": "start_refused_expired", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "expired"}}
+{"name": "start_refused_cancelled", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "cancelled"}}
+{"name": "start_refused_suppressed", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "suppressed"}}
+{"name": "start_refused_stale_generation", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "stale_generation"}}
+{"name": "start_refused_unknown_assignment", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "unknown_assignment"}}
+{"name": "start_refused_already_settled", "def": "start_refused", "source": "contract_example", "direction": "server", "value": {"t": "start_refused", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "already_settled"}}
+{"name": "result_ack", "def": "result_ack", "source": "contract_example", "direction": "server", "value": {"t": "result_ack", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1}}
+{"name": "result_rejected_conflict", "def": "result_rejected", "source": "contract_example", "direction": "server", "value": {"t": "result_rejected", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "reason": "conflict"}}
+{"name": "result_rejected_too_long", "def": "result_rejected", "source": "contract_example", "direction": "server", "value": {"t": "result_rejected", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "reason": "too_long"}}
+{"name": "result_rejected_invalid", "def": "result_rejected", "source": "contract_example", "direction": "server", "value": {"t": "result_rejected", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "reason": "invalid"}}
+{"name": "result_rejected_stale_attempt", "def": "result_rejected", "source": "contract_example", "direction": "server", "value": {"t": "result_rejected", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "reason": "stale_attempt"}}
+{"name": "result_rejected_unknown_assignment", "def": "result_rejected", "source": "contract_example", "direction": "server", "value": {"t": "result_rejected", "assignment_id": "as_01j9x3k2m4n5p6q7", "attempt": 1, "reason": "unknown_assignment"}}
+{"name": "cancel_expired", "def": "cancel", "source": "contract_example", "direction": "server", "value": {"t": "cancel", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "expired"}}
+{"name": "cancel_suppressed", "def": "cancel", "source": "contract_example", "direction": "server", "value": {"t": "cancel", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "suppressed"}}
+{"name": "cancel_unlinked", "def": "cancel", "source": "contract_example", "direction": "server", "value": {"t": "cancel", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "unlinked"}}
+{"name": "cancel_revoked", "def": "cancel", "source": "contract_example", "direction": "server", "value": {"t": "cancel", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "revoked"}}
+{"name": "cancel_operator", "def": "cancel", "source": "contract_example", "direction": "server", "value": {"t": "cancel", "assignment_id": "as_01j9x3k2m4n5p6q7", "reason": "operator"}}
+{"name": "cancel_ack", "def": "cancel_ack", "source": "contract_example", "direction": "client", "value": {"t": "cancel_ack", "assignment_id": "as_01j9x3k2m4n5p6q7"}}
+{"name": "close_4400", "def": "close", "source": "contract_example", "value": {"code": 4400, "reason": "malformed frame"}}
+{"name": "close_4401", "def": "close", "source": "contract_example", "value": {"code": 4401, "reason": "authentication failed"}}
+{"name": "close_4408", "def": "close", "source": "contract_example", "value": {"code": 4408, "reason": "hello not received"}}
+{"name": "close_4409", "def": "close", "source": "contract_example", "value": {"code": 4409, "reason": "replaced by a newer connection"}}
+{"name": "close_4429", "def": "close", "source": "contract_example", "value": {"code": 4429, "reason": "rate limited"}}
+{"name": "close_1012", "def": "close", "source": "contract_example", "value": {"code": 1012, "reason": "restarting"}}

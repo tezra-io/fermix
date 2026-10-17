@@ -1,0 +1,207 @@
+# The shared X handle (M63), graded through the real agent path.
+#
+# WHAT ROTS HERE. The shared X handle is a channel, `x`, through Fermix
+# Connect, Tezra's hosted service: a person mentions Fermix's own X account and
+# their own Fermix answers, routed by the author's verified numeric X id, with
+# Connect the only thing that posts. It is not the X plugin, an X turn runs as a
+# guest, publishing stays in shadow mode until X's written approval, and today
+# no app can pair a Fermix with Connect and no hosted Connect runs. None of that
+# is general X knowledge; a model left to itself answers with the plugin, a bot
+# token or a scraper. It lives in the `self-knowledge` skill's `x` reference,
+# which the model has to actually reach and read. ExUnit proves the sentences
+# are in the file; this suite proves the model finds them when an owner asks in
+# their own words.
+#
+# WHY BEHAVIORAL AND NOT CAPABILITY. A live X turn needs a paired Connect, a
+# linked X account and a public reply, which is `external_write`, and the
+# capability runner refuses that risk. The answer is advice, so there is no end
+# state to score; the channel itself is proven by ExUnit against a stub Connect
+# and, later, by the owner's canary (M63 §5, stage 5). The boundary scenarios on
+# an `x_connect` drive come with the channel's own stage, not here.
+#
+# ROUTE ASSERTIONS. Exactly one — the labelled sanity case below. Everything
+# else gates on the outcome and lets the model reach it however it likes.
+#
+# FLOORS AND WRONG-ANSWER GATES. Each case's floor is the one proper noun every
+# correct answer must contain: `Connect`, case-sensitive, so the ordinary verb
+# "connect" never satisfies it. The rubric owns correctness.
+# `reply_not_matches` names only answers that have no place in a correct reply
+# in any polarity: an X API token pasted into a config line, a scraping or
+# browser-automation library, an invented `--x-…` setup flag, and, only where a
+# correct answer would never name it, the X plugin's posting and mention tools.
+# The two cases about posting and about the plugin may rightly name the
+# plugin's tools while explaining the difference, so they do not gate on them.
+# "Bot token", "developer account" and "scraping" are left out on purpose: a
+# correct reply says the channel needs none of them.
+#
+# NO NEW CONSENT GATE. Nothing here is gated on a human decision, so
+# `bin/seed_capability_home.py` needs no pre-grant for this suite, and every
+# case is `host_readonly`.
+#
+# THE DAEMON UNDER TEST IS STANDALONE. `~/.fermix-dev` is a formula/dev install,
+# so every prompt states its own premise (the Mac app, or a Linux box).
+suite: x_channel
+risk: host_readonly
+title: "Shared X handle — reaching Fermix by a mention, silent mentions, posting, and the plugin"
+description: >
+  Ordinary owner questions about the shared X handle: how to let mentions of
+  Fermix's X account reach their own Fermix, why a mention went unanswered,
+  whether Fermix can post on X by itself, and whether this is the X plugin. Each
+  case gates on a phrasing-independent floor plus wrong-answer refusals; the
+  rubric owns the wording. One labelled sanity case pins that the answer comes
+  from the self-knowledge skill rather than from the model's own guess about how
+  an X bot usually works.
+defaults:
+  timeout_ms: 180000
+  judge: true
+  expect:
+    status: ok
+    no_tool_errors: true
+
+scenarios:
+  - id: x_channel_setup
+    title: "Letting mentions of the Fermix X account reach your own Fermix"
+    severity: normal
+    risk: host_readonly
+    tags: [channels, x, self-knowledge]
+    cases:
+      # SANITY CASE — the one route assertion in this suite. Fermix Connect, the
+      # guest rules and "not available yet" are known only from the skill, so
+      # this case pins that the model opened it.
+      - id: reach_fermix_by_mention_sanity
+        query: >
+          I use the Fermix Mac app. I heard you can mention the Fermix account
+          on X and get an answer from your own Fermix. How do I set that up for
+          me?
+        expect:
+          tools_any: [skill_view]
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(--x-[a-z]|\bx_create_post\b|\bx_mentions\b|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_tool_calls: 8
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says this is the shared X handle, a channel that works through Fermix
+          Connect, Tezra's hosted service: Connect watches the account's
+          mentions, sends each one to the paired Fermix of the person who wrote
+          it, and posts the one reply. Says that setting it up means turning
+          the channel on and pairing this Fermix with Connect, and that today
+          neither the Mac app nor the Linux app has a pairing sheet and no
+          hosted Connect runs yet, so it cannot be set up now. Saying plainly
+          that it is not available yet is correct behavior and must never be
+          penalized. Does not tell the user to connect the X plugin, create an
+          X developer app, paste an API token into a config file, or run a
+          scraper.
+      - id: reach_fermix_by_mention_linux
+        query: >
+          My Fermix runs on a Linux box at home. Can my friends reach my Fermix
+          by mentioning the Fermix account on X? What would I need to turn on?
+        expect:
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(--x-[a-z]|\bx_create_post\b|\bx_mentions\b|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says a mention is routed by its author's own verified X account to
+          that author's own paired Fermix, so the user's friends reach their
+          own Fermix (if they have one) and never the user's, and the user's
+          Fermix answers only the user's own mentions. Says it works through
+          Fermix Connect and needs the channel turned on plus a pairing with
+          Connect. Says that no app can pair yet and no hosted Connect runs
+          yet; stating that is correct behavior and must never be penalized.
+          Does not offer a way to let other people's mentions reach the user's
+          Fermix, and does not suggest the X plugin, an API token or a scraper
+          as a substitute.
+
+  - id: x_channel_unanswered
+    title: "Why a mention of the Fermix X account got no reply"
+    severity: normal
+    risk: host_readonly
+    tags: [channels, x, self-knowledge]
+    cases:
+      - id: own_mention_unanswered
+        query: >
+          My Fermix runs on my Mac at home. I mentioned the Fermix account on X
+          under a post and asked it to sum up the thread, and no reply ever
+          showed up. What could have happened?
+        expect:
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(\bx_create_post\b|\bx_mentions\b|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says that no app can pair a Fermix with Fermix Connect yet and no
+          hosted Connect runs yet, so no mention is answered today; stating
+          that is correct behavior and must never be penalized. Also names the
+          reasons a mention goes unanswered with no public reply once it runs,
+          including that the Mac was asleep, off or offline and the request
+          expired (after about 15 minutes), and that publishing stays in
+          shadow mode, so results are recorded but not posted. Naming the
+          other reasons too (this Fermix is not paired, the channel is off or
+          was turned on without a restart, Connect is down and the account
+          then stays silent by design) is correct. Does not tell the user to
+          re-connect or re-sign-in the X plugin, schedule a job to read
+          mentions, or run a scraper.
+      - id: friend_mention_unanswered
+        query: >
+          A friend of mine mentioned the Fermix account on X asking my Fermix a
+          question, and nothing answered. Why not?
+        expect:
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(\bx_create_post\b|\bx_mentions\b|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says a mention reaches the Fermix of the person who wrote it, chosen
+          by that person's verified X account, so a friend's mention never
+          reaches the user's Fermix: it goes to the friend's own paired Fermix
+          if the friend has linked one, and an author who is not linked is
+          ignored with no reply. Says this routing is done by Fermix Connect.
+          Saying that no app can pair yet and no hosted Connect runs yet is
+          correct behavior and must never be penalized. Does not offer a way
+          to make other people's mentions reach the user's Fermix.
+
+  - id: x_channel_limits
+    title: "Whether Fermix posts on X by itself, and how this differs from the X plugin"
+    severity: normal
+    risk: host_readonly
+    tags: [channels, x, self-knowledge]
+    cases:
+      - id: post_by_itself
+        query: >
+          If someone mentions the Fermix account on X, can my Fermix post on X
+          by itself, like reply a few times in the thread or put up a new post?
+        expect:
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(--x-[a-z]|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no: the user's Fermix never posts on X itself. It hands back one
+          result, and Fermix Connect alone publishes at most one reply under
+          the post that mentioned the account, of at most 280 characters; no
+          extra replies and no new posts. Says the X plugin is not used for
+          this. Says publishing is off (shadow mode) until X's written approval
+          is on record, so today nothing is posted; stating that is correct
+          behavior and must never be penalized. Does not describe a way to make
+          Fermix post more, such as a scheduled job or the plugin posting as
+          the shared account.
+      - id: same_as_x_plugin
+        query: >
+          I already connected the X plugin in Fermix. Is this mention-the-Fermix-account
+          thing just the same as that plugin?
+        expect:
+          reply_matches: '\bConnect\b'
+          reply_not_matches: '(?i)(--x-[a-z]|\b(snscrape|twint|nitter|tweepy|selenium|puppeteer)\b|\b(bearer|consumer|access)_(token|secret|key)\s*=)'
+          max_cost_usd: 1.2
+          max_duration_ms: 160000
+        rubric: >
+          Says no, they are separate: the X plugin's tools read and post as the
+          user's own X account through the user's own sign-in, while the
+          shared handle is a channel where mentions of Fermix's account reach
+          the user's Fermix through Fermix Connect, which alone posts the one
+          reply; the channel never uses the plugin and the plugin never posts
+          as the shared account. Saying the two can both be used, and that the
+          shared handle cannot be paired yet, is correct behavior and must
+          never be penalized. Does not say that connecting the plugin turns
+          the shared handle on.

@@ -9,6 +9,7 @@ defmodule FermixCore.Memory.Repo do
   alias FermixCore.Agents.IterationLimits
   alias FermixCore.Memory.Config
   alias FermixCore.Memory.Repo.ComputerHistorySql
+  alias FermixCore.Memory.Repo.ConnectSql
   alias FermixCore.Memory.Repo.MeetingsSql
   alias FermixCore.Memory.Repo.MobileSql
   alias FermixCore.Memory.Repo.TemporalSql
@@ -55,6 +56,7 @@ defmodule FermixCore.Memory.Repo do
   @voice_calls_migration_version 37
   @voice_call_gist_taint_migration_version 38
   @phone_joins_chat_migration_version 39
+  @x_assignments_migration_version 40
   @reply_blocks_migration_version 41
   @sqlite_open_intent :readwritecreate
 
@@ -1174,6 +1176,7 @@ defmodule FermixCore.Memory.Repo do
   @type job_run_row :: map()
   @type meeting_row :: map()
   @type voice_call_row :: map()
+  @type x_assignment_row :: map()
   @type memory_source_row :: map()
   @type harness_run_attrs :: map()
   @type harness_run_row :: map()
@@ -3119,6 +3122,182 @@ defmodule FermixCore.Memory.Repo do
     end)
   end
 
+  # --- X channel assignments (MILESTONE_63, priv/connect/PROTOCOL.md §6) ---
+  #
+  # One row per assignment Fermix Connect handed this installation. Every
+  # transition is a compare-and-set on the row's status (and on its attempt
+  # where an earlier attempt must not settle a later one): a write that finds
+  # the row elsewhere changes nothing and answers `{:error, :not_found}`.
+
+  @doc """
+  Claims a verified assignment as `accepted`, before its receipt goes out
+  (I7). `attrs`: `%{assignment_id, interaction_id, tenant_id, instance_id,
+  requester_x_user_id, conversation_id, request_sha256, jws, expires_at,
+  claimed_at}`, the instants as `DateTime`s. A second claim of the same id
+  stores nothing and answers the row as it stands, as `{:duplicate, row}`.
+  """
+  @spec x_claim_assignment(map(), keyword()) ::
+          {:ok, {:claimed | :duplicate, x_assignment_row()}} | {:error, term()}
+  def x_claim_assignment(attrs, opts \\ []) when is_map(attrs) do
+    with {:ok, params} <- ConnectSql.normalize_claim(attrs),
+         {:ok, {kind, row}} <- call({:x_claim_assignment, params}, opts),
+         {:ok, decoded} <- ConnectSql.decode(row) do
+      {:ok, {kind, decoded}}
+    end
+  end
+
+  @doc "One assignment's row, or `{:error, :not_found}`."
+  @spec x_assignment(String.t(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_assignment(assignment_id, opts \\ []) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id) do
+      x_row_call({:x_assignment, id}, opts)
+    end
+  end
+
+  @doc "Records when the receipt for a stored assignment first went out."
+  @spec x_mark_receipt_sent(String.t(), DateTime.t(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_mark_receipt_sent(assignment_id, now, opts \\ []) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, now) do
+      x_row_call({:x_mark_receipt_sent, id, stamp}, opts)
+    end
+  end
+
+  @doc """
+  `accepted` → `running` under Connect's start grant: `grant` is `%{attempt,
+  runner_epoch, deadline_at, now}`, the epoch naming the boot that runs it.
+  """
+  @spec x_start_assignment(String.t(), map(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_start_assignment(assignment_id, grant, opts \\ []) when is_map(grant) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, params} <- ConnectSql.normalize_start(grant) do
+      x_row_call({:x_start_assignment, id, params}, opts)
+    end
+  end
+
+  @doc "Stages a running turn's reply text on its row; the last text staged wins."
+  @spec x_stage_reply(String.t(), String.t(), DateTime.t(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_stage_reply(assignment_id, text, now, opts \\ []) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, text} <- ConnectSql.normalize_reply(text),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, now) do
+      x_row_call({:x_stage_reply, id, text, stamp}, opts)
+    end
+  end
+
+  @doc """
+  `running` → `completed` for `attempt` only, with its result: `result` is
+  `%{decision, result_sha256, result_json, now}`, the JSON being the frame as
+  it is sent and resent.
+  """
+  @spec x_complete_assignment(String.t(), pos_integer(), map(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_complete_assignment(assignment_id, attempt, result, opts \\ []) when is_map(result) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, attempt} <- ConnectSql.normalize_attempt(attempt),
+         {:ok, params} <- ConnectSql.normalize_result(result),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, Map.get(result, :now)) do
+      x_row_call({:x_complete_assignment, id, attempt, params, stamp}, opts)
+    end
+  end
+
+  @doc """
+  `from` (`:accepted`, `:running` or `:completed`) → `failed`: `failure` is
+  `%{from, reason, result, now}`, `result` being the `failed` result an
+  attempt that ran owes Connect (`%{decision, result_sha256, result_json}`),
+  or `nil` for an assignment that never ran.
+  """
+  @spec x_fail_assignment(String.t(), map(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_fail_assignment(assignment_id, failure, opts \\ []) when is_map(failure) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, from} <- ConnectSql.normalize_failable(Map.get(failure, :from)),
+         {:ok, reason} <- ConnectSql.normalize_reason(Map.get(failure, :reason)),
+         {:ok, result} <- ConnectSql.normalize_result(Map.get(failure, :result)),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, Map.get(failure, :now)) do
+      x_row_call({:x_fail_assignment, id, from, reason, result, stamp}, opts)
+    end
+  end
+
+  @doc """
+  An assignment not yet settled (`accepted` or `running`) → `cancelled`:
+  `cancellation` is `%{reason, now}`.
+  """
+  @spec x_cancel_assignment(String.t(), map(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_cancel_assignment(assignment_id, cancellation, opts \\ []) when is_map(cancellation) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, reason} <- ConnectSql.normalize_reason(Map.get(cancellation, :reason)),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, Map.get(cancellation, :now)) do
+      x_row_call({:x_cancel_assignment, id, reason, stamp}, opts)
+    end
+  end
+
+  @doc "Every `accepted` assignment whose `expires_at` is past `now` → `expired`; their ids."
+  @spec x_expire_assignments(DateTime.t(), keyword()) :: {:ok, [String.t()]} | {:error, term()}
+  def x_expire_assignments(now, opts \\ []) do
+    with {:ok, stamp} <- ConnectSql.normalize_stamp(:now, now) do
+      call({:x_expire_assignments, stamp}, opts)
+    end
+  end
+
+  @doc "Connect acknowledged `attempt`'s result: it is no longer resent."
+  @spec x_ack_result(String.t(), pos_integer(), DateTime.t(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_ack_result(assignment_id, attempt, now, opts \\ []) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, attempt} <- ConnectSql.normalize_attempt(attempt),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, now) do
+      x_row_call({:x_ack_result, id, attempt, stamp}, opts)
+    end
+  end
+
+  @doc """
+  Connect refused `attempt`'s result, which ends its resending. A `conflict`
+  leaves the row's own record as it is; any other refusal fails the attempt.
+  The reason is kept as `result_rejected:<reason>`.
+  """
+  @spec x_reject_result(String.t(), pos_integer(), atom(), DateTime.t(), keyword()) ::
+          {:ok, x_assignment_row()} | {:error, :not_found | term()}
+  def x_reject_result(assignment_id, attempt, reason, now, opts \\ []) when is_atom(reason) do
+    with {:ok, id} <- ConnectSql.normalize_id(assignment_id),
+         {:ok, attempt} <- ConnectSql.normalize_attempt(attempt),
+         {:ok, reason} <- ConnectSql.normalize_reason("result_rejected:#{reason}"),
+         {:ok, stamp} <- ConnectSql.normalize_stamp(:now, now) do
+      x_row_call({:x_reject_result, id, attempt, reason, stamp}, opts)
+    end
+  end
+
+  @doc """
+  The rows a boot or a reconnection picks up, oldest claim first, at most
+  `ConnectSql.recoverable_limit/0`: assignments waiting for a start, attempts
+  that were running (under any epoch; the caller compares), and results
+  Connect has not answered.
+  """
+  @spec x_recoverable_assignments(keyword()) :: {:ok, [x_assignment_row()]} | {:error, term()}
+  def x_recoverable_assignments(opts \\ []) do
+    with {:ok, rows} <- call(:x_recoverable_assignments, opts) do
+      decode_x_assignments(rows)
+    end
+  end
+
+  defp x_row_call(request, opts) do
+    with {:ok, row} <- call(request, opts), do: ConnectSql.decode(row)
+  end
+
+  defp decode_x_assignments(rows) do
+    Enum.reduce_while(rows, {:ok, []}, fn row, {:ok, acc} ->
+      case ConnectSql.decode(row) do
+        {:ok, decoded} -> {:cont, {:ok, acc ++ [decoded]}}
+        {:error, reason} -> {:halt, {:error, reason}}
+      end
+    end)
+  end
+
   @spec migrate(keyword()) :: :ok | {:error, term()}
   def migrate(opts \\ []) do
     call(:migrate, opts)
@@ -4187,6 +4366,66 @@ defmodule FermixCore.Memory.Repo do
     {:reply, reply, state}
   end
 
+  def handle_call({:x_claim_assignment, params}, _from, state) do
+    reply = with_connection(state, &ConnectSql.claim(&1, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_assignment, id}, _from, state) do
+    reply = with_connection(state, &ConnectSql.fetch(&1, id))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_mark_receipt_sent, id, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.mark_receipt_sent(&1, id, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_start_assignment, id, params}, _from, state) do
+    reply = with_connection(state, &ConnectSql.start(&1, id, params))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_stage_reply, id, text, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.stage_reply(&1, id, text, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_complete_assignment, id, attempt, params, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.complete(&1, id, attempt, params, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_fail_assignment, id, from, reason, result, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.fail(&1, id, from, reason, result, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_cancel_assignment, id, reason, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.cancel(&1, id, reason, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_expire_assignments, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.expire(&1, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_ack_result, id, attempt, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.ack_result(&1, id, attempt, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call({:x_reject_result, id, attempt, reason, now}, _from, state) do
+    reply = with_connection(state, &ConnectSql.reject_result(&1, id, attempt, reason, now))
+    {:reply, reply, state}
+  end
+
+  def handle_call(:x_recoverable_assignments, _from, state) do
+    reply = with_connection(state, &ConnectSql.recoverable/1)
+    {:reply, reply, state}
+  end
+
   # Every request is served in order by this one process, so a call waits
   # behind every request ahead of it. A timed-out call exits its caller unless
   # the caller passed `on_timeout: :error` (`periodic_opts/2`). The request
@@ -4291,6 +4530,7 @@ defmodule FermixCore.Memory.Repo do
          :ok <- apply_voice_calls_migration(conn, versions),
          :ok <- apply_voice_call_gist_taint_migration(conn, versions),
          :ok <- apply_phone_joins_chat_migration(conn, versions),
+         :ok <- apply_x_assignments_migration(conn, versions),
          :ok <- apply_reply_blocks_migration(conn, versions) do
       :ok
     end
@@ -4308,6 +4548,24 @@ defmodule FermixCore.Memory.Repo do
         BEGIN;
         #{MobileSql.reply_blocks_schema_sql()}
         INSERT INTO schema_migrations(version) VALUES (#{@reply_blocks_migration_version});
+        COMMIT;
+        """
+      )
+    end
+  end
+
+  # The X channel's durable assignments (MILESTONE_63, `priv/connect/PROTOCOL.md`
+  # §6), its table and version in one transaction.
+  defp apply_x_assignments_migration(conn, versions) do
+    if Enum.member?(versions, @x_assignments_migration_version) do
+      :ok
+    else
+      Sqlite3.execute(
+        conn,
+        """
+        BEGIN;
+        #{ConnectSql.schema_sql()}
+        INSERT INTO schema_migrations(version) VALUES (#{@x_assignments_migration_version});
         COMMIT;
         """
       )

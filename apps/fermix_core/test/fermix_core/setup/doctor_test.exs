@@ -1,6 +1,7 @@
 defmodule FermixCore.Setup.DoctorTest do
   use ExUnit.Case, async: false
 
+  alias Fermix.CLI.Doctor.Checks
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.Setup.Doctor
@@ -1023,6 +1024,31 @@ defmodule FermixCore.Setup.DoctorTest do
       refute_received {:channel_health_checked, :healthy}
     end
 
+    # M63: the shared X handle's health check reads `X.Pump`, which runs only
+    # in the daemon, so the tree-less VM would report a phantom `:not_running`.
+    # Its row is `Checks.x_channel/1`, from the config and the pairing files.
+    test "skips an enabled channel admitted by a Connect assignment" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "assigned",
+          config_key: :assigned_channel,
+          adapter: HealthyChannel,
+          remote?: true,
+          ingress_auth: :connect_assignment,
+          commands?: false,
+          transport: :gateway,
+          child: nil
+        }
+      ])
+
+      Application.put_env(:fermix_channels, :assigned_channel, enabled: true)
+      on_exit(fn -> Application.delete_env(:fermix_channels, :assigned_channel) end)
+
+      assert Doctor.channel_probe_specs() == []
+      assert Doctor.probe_channels(test_pid: self()) == []
+      refute_received {:channel_health_checked, :healthy}
+    end
+
     # `fermix doctor --full` runs in a tree-less CLI VM. `Channels.Mobile`'s
     # health check `GenServer.call`s daemon-only named processes, so probing it
     # here red-fails a healthy host with a phantom `listener_unavailable`. The
@@ -1048,6 +1074,12 @@ defmodule FermixCore.Setup.DoctorTest do
   end
 
   defmodule NoStreamAdapter do
+  end
+
+  # The shared X handle's shape: it owns its terminal result and declares no
+  # stream tier, so the gateway never streams it.
+  defmodule FinalOnlyAdapter do
+    def terminal_error_capability, do: :turn_result
   end
 
   describe "streaming_config_report/0" do
@@ -1149,6 +1181,39 @@ defmodule FermixCore.Setup.DoctorTest do
 
       assert %{channel: :plain_channel, streaming: "block", capability: :none} =
                Enum.find(report, &(&1.channel == :plain_channel))
+    end
+  end
+
+  describe "streaming_config_report/0 for a final-only channel" do
+    test "reports streaming off, whatever its config says" do
+      Application.put_env(:fermix_channels, :channel_registry, [
+        %{
+          name: "final",
+          config_key: :final_channel,
+          adapter: FinalOnlyAdapter,
+          remote?: true,
+          transport: :gateway,
+          child: nil
+        }
+      ])
+
+      on_exit(fn ->
+        Application.delete_env(:fermix_channels, :channel_registry)
+        Application.delete_env(:fermix_channels, :final_channel)
+      end)
+
+      Application.put_env(:fermix_channels, :final_channel, enabled: true)
+
+      assert [%{channel: :final_channel, streaming: "off", derived: "off", explicit?: false}] =
+               Doctor.streaming_config_report()
+
+      Application.put_env(:fermix_channels, :final_channel, enabled: true, streaming: "draft")
+
+      assert [%{streaming: "off", derived: "off", explicit?: true, capability: :none}] =
+               Doctor.streaming_config_report()
+
+      assert Checks.streaming_config(Doctor.streaming_config_report()).detail ==
+               "off (no configured channel streams)"
     end
   end
 

@@ -16,6 +16,8 @@ defmodule FermixCore.Readiness do
   alias FermixCore.Config
   alias FermixCore.IMessage.HelperInstaller
   alias FermixCore.Management.Settings.Channels.Inventory
+  alias FermixCore.Management.X, as: ManagementX
+  alias FermixCore.Net.Egress
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Providers.PrimaryConfig
   alias FermixCore.Providers.Selection
@@ -105,7 +107,7 @@ defmodule FermixCore.Readiness do
           personalization_failure()
         ],
         &is_nil/1
-      ) ++ sandbox_env_failures()
+      ) ++ x_failures() ++ sandbox_env_failures()
 
     %{
       status: status_for(failures),
@@ -147,6 +149,9 @@ defmodule FermixCore.Readiness do
           multiple_primary_action(),
           invalid_auth_mode_action("provider:anthropic", "subscription"),
           imessage_helper_row(),
+          x_refusal_row(:not_paired),
+          x_refusal_row(:pairing_invalid),
+          x_refusal_row(:proxy_unsupported),
           realtime_provider_row(),
           realtime_key_row()
         ],
@@ -460,6 +465,70 @@ defmodule FermixCore.Readiness do
       %{component: "channel:imessage", action: @imessage_helper_action},
       "channels",
       "channel:imessage:helper"
+    )
+  end
+
+  @doc """
+  The shared X handle's rows (M63): switched on with no usable pairing is a
+  named refusal (`x.status`'s `not_paired`, or `pairing_invalid` for a record
+  or key that cannot be read), and a proxy that would carry its socket is a
+  second one, each in `Management.X`'s own words. Advisory: the channel ships
+  off, and nothing else waits on it.
+
+  It reads the pairing the channel would load, through the channels app,
+  which core does not compile against; everything else about the channel is
+  the daemon's, on `x.status`. Seams: `enabled?:`, `pairing:` (an
+  `X.Supervisor.paired/1` answer) and `egress:`.
+  """
+  @spec x_failures(keyword()) :: [failure()]
+  def x_failures(opts \\ []) when is_list(opts) do
+    if Keyword.get_lazy(opts, :enabled?, &x_enabled?/0) do
+      pairing = Keyword.get_lazy(opts, :pairing, &x_pairing/0)
+      egress = Keyword.get_lazy(opts, :egress, &Egress.active/0)
+      Enum.reject([x_pairing_row(pairing), x_proxy_row(pairing, egress)], &is_nil/1)
+    else
+      []
+    end
+  end
+
+  defp x_enabled?, do: Keyword.get(channel_block(:x), :enabled, false) == true
+
+  # Without the channels app there is no X channel to report on.
+  defp x_pairing do
+    supervisor = Module.concat(["FermixChannels", "X", "Supervisor"])
+
+    if Code.ensure_loaded?(supervisor),
+      do: apply(supervisor, :paired, [[]]),
+      else: :no_channel
+  end
+
+  defp x_pairing_row({:ok, _record, _public_key}), do: nil
+  defp x_pairing_row(:no_channel), do: nil
+  defp x_pairing_row({:error, :unpaired}), do: x_refusal_row(:not_paired)
+  defp x_pairing_row({:error, _unusable}), do: x_refusal_row(:pairing_invalid)
+
+  # The socket dials the paired origin, or the daemon's own Connect for the
+  # pairing still to come; the route is the host's.
+  defp x_proxy_row(:no_channel, _egress), do: nil
+
+  defp x_proxy_row(pairing, egress) do
+    origin =
+      case pairing do
+        {:ok, record, _public_key} -> record.origin
+        {:error, _unpaired} -> ManagementX.default_origin()
+      end
+
+    case Egress.ensure_direct(origin, egress) do
+      :ok -> nil
+      {:error, :proxy_unsupported_transport} -> x_refusal_row(:proxy_unsupported)
+    end
+  end
+
+  defp x_refusal_row(reason) do
+    advisory(
+      %{component: "channel:x", action: ManagementX.refusal_sentence(reason)},
+      "channels",
+      "channel:x:#{reason}"
     )
   end
 

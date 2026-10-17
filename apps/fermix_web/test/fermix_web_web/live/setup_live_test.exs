@@ -57,6 +57,32 @@ defmodule FermixWebWeb.SetupLiveTest do
     def claude_code_available?(_opts \\ []), do: true
   end
 
+  # Stands in for the X channel's management facade behind `Management.X`
+  # (its `:provider` seam, reached through `:x_management_opts`): one handler
+  # per function, held in an Agent a case starts and rewrites as the pairing
+  # it drives moves. The handlers answer the provider's atom-keyed facts.
+  defmodule XManagementStub do
+    use Agent
+
+    def start_link(handlers) when is_map(handlers),
+      do: Agent.start_link(fn -> handlers end, name: __MODULE__)
+
+    def put(name, handler) when is_atom(name) and is_function(handler),
+      do: Agent.update(__MODULE__, &Map.put(&1, name, handler))
+
+    def status(_opts), do: handle(:status, [])
+    def pair_start(origin, _opts), do: handle(:pair_start, [origin])
+    def pair_get(session_id, _opts), do: handle(:pair_get, [session_id])
+    def pair_paste(session_id, url, _opts), do: handle(:pair_paste, [session_id, url])
+    def pair_cancel(session_id, _opts), do: handle(:pair_cancel, [session_id])
+    def unpair(_opts), do: handle(:unpair, [])
+
+    defp handle(name, args) do
+      handler = Agent.get(__MODULE__, &Map.fetch!(&1, name))
+      apply(handler, args)
+    end
+  end
+
   # The transport module double `Remote.Session` exposes: canned responses in
   # order. No socket, no TLS chain, no DNS answer.
   defmodule FakeRemoteTransport do
@@ -177,6 +203,8 @@ defmodule FermixWebWeb.SetupLiveTest do
     imessage_macos? = Application.get_env(:fermix_web, :imessage_macos?)
     imessage_grant_impl = Application.get_env(:fermix_web, :imessage_grant_impl)
     imessage_confirm_impl = Application.get_env(:fermix_web, :imessage_confirm_impl)
+    x = Application.fetch_env(:fermix_channels, :x)
+    x_management_opts = Application.get_env(:fermix_web, :x_management_opts)
     fermix_home = System.get_env("FERMIX_HOME")
 
     tmp_home = FermixTestSupport.SafeRm.make_tmp_dir!("setup-live")
@@ -244,6 +272,11 @@ defmodule FermixWebWeb.SetupLiveTest do
     Application.put_env(:fermix_web, :imessage_macos?, false)
     Application.delete_env(:fermix_web, :imessage_grant_impl)
     Application.delete_env(:fermix_web, :imessage_confirm_impl)
+    # The shared X handle ships off, and the card's own cases stand a stub in
+    # for the channel; every other case reads the real facade, which finds
+    # nothing paired under the temporary home.
+    Application.put_env(:fermix_channels, :x, enabled: false)
+    Application.delete_env(:fermix_web, :x_management_opts)
     Application.delete_env(:fermix_web, :local_installer)
     # A machine this build pins an on-device speech sidecar for, whichever one
     # the suite runs on; the cases about a machine with none say so themselves.
@@ -291,6 +324,8 @@ defmodule FermixWebWeb.SetupLiveTest do
       restore_env(:fermix_web, :imessage_macos?, imessage_macos?)
       restore_env(:fermix_web, :imessage_grant_impl, imessage_grant_impl)
       restore_env(:fermix_web, :imessage_confirm_impl, imessage_confirm_impl)
+      restore_env(:fermix_channels, :x, x)
+      restore_env(:fermix_web, :x_management_opts, x_management_opts)
 
       case fermix_home do
         nil -> System.delete_env("FERMIX_HOME")
@@ -3055,7 +3090,15 @@ defmodule FermixWebWeb.SetupLiveTest do
     test "renders a selectable card per channel with status", %{conn: conn} do
       {:ok, _view, html} = live(conn, "/setup?tab=channels")
 
-      for title <- ["Telegram", "WhatsApp", "Discord", "Slack", "Signal", "ACP"] do
+      for title <- [
+            "Telegram",
+            "WhatsApp",
+            "Discord",
+            "Slack",
+            "Signal",
+            "X (shared handle)",
+            "ACP"
+          ] do
         assert html =~ title
       end
 
@@ -3354,6 +3397,285 @@ defmodule FermixWebWeb.SetupLiveTest do
       refute html =~ ~s(name="channels_form[telegram_bot_token]")
     end
   end
+
+  # M63: the shared X handle's card is the pane the management contract
+  # describes, in the shape of the ChatGPT sign-in: the switch saves with the
+  # form, and the pairing acts on the daemon at once through `Management.X`,
+  # whose provider is the stub here. The poll is driven by hand, never waited
+  # for.
+  describe "X (shared handle) card (M63)" do
+    @x_origin "https://connect.example.test"
+    @x_confirm_url "https://connect.example.test/confirm/t0k3n?response_type=code&client_id=k9cf"
+
+    setup do
+      start_supervised!({XManagementStub, x_handlers()})
+      Application.put_env(:fermix_web, :x_management_opts, provider: XManagementStub)
+      :ok
+    end
+
+    test "renders the switch and the pairing panel, and saves the switch for a restart", %{
+      conn: conn
+    } do
+      {view, html} = open_x_card(conn)
+
+      assert html =~ ~s(name="channels_form[x_enabled]")
+      assert html =~ "Answer mentions of the shared X account"
+      assert html =~ "Not paired"
+      assert html =~ ~s(name="origin")
+      assert html =~ ~s(value="https://connect.fermix.ai")
+      assert has_element?(view, ~s(button[form="x-pair-start-form"]), "Pair with Fermix Connect")
+      refute html =~ ~s(name="channels_form[telegram_bot_token]")
+      refute html =~ "Unpair"
+
+      html =
+        view
+        |> form(~s(form[phx-submit="save_channels"]), channels_form: %{x_enabled: "true"})
+        |> render_submit()
+
+      assert html =~ "Channels saved."
+      assert html =~ "Apply &amp; restart"
+      assert Keyword.get(Application.get_env(:fermix_channels, :x, []), :enabled) == true
+    end
+
+    test "Pair opens the link once, reads the session until it ends, and names the account", %{
+      conn: conn
+    } do
+      parent = self()
+
+      XManagementStub.put(:pair_start, fn origin ->
+        send(parent, {:x_pair_started, origin})
+        {:ok, %{session: x_session(:awaiting_browser), confirm_url: @x_confirm_url}}
+      end)
+
+      {view, _html} = open_x_card(conn)
+
+      view |> form("#x-pair-start-form", %{origin: " #{@x_origin} "}) |> render_submit()
+
+      assert_receive {:x_pair_started, @x_origin}
+      html = render_async(view)
+      assert_push_event(view, "x-pair-open", %{url: @x_confirm_url})
+
+      assert html =~ "Opening Fermix Connect."
+      assert html =~ "Waiting for your browser"
+      assert has_element?(view, ~s(a[href="#{@x_confirm_url}"]), "Open Fermix Connect")
+      assert html =~ ~s(name="callback_url")
+      assert has_element?(view, ~s(button[phx-click="x_pair_cancel"]), "Cancel")
+      refute html =~ "Pair with Fermix Connect"
+
+      # The browser came back: the next read is terminal and the status paired.
+      XManagementStub.put(:pair_get, fn "ps_1" -> {:ok, x_session(:approved)} end)
+      XManagementStub.put(:status, fn -> {:ok, x_status(paired: x_paired())} end)
+      send(view.pid, :x_pair_poll)
+
+      html = render(view)
+      assert html =~ "Paired with Fermix Connect as @mara."
+      assert html =~ "Paired as"
+      assert html =~ "@mara"
+      assert html =~ "Key ab12 cd34"
+      assert html =~ "The channel is off."
+      assert html =~ "Turn on &quot;Answer mentions of the shared X account&quot; above"
+      assert has_element?(view, ~s(button[phx-click="x_unpair"]), "Unpair")
+      refute html =~ @x_confirm_url
+      refute html =~ "Waiting for your browser"
+    end
+
+    test "a pasted address reaches the waiting session, and an empty one is refused", %{
+      conn: conn
+    } do
+      parent = self()
+      pasted = "http://127.0.0.1:50123/callback?code=c0de&state=st4te"
+
+      XManagementStub.put(:pair_start, fn _origin ->
+        {:ok, %{session: x_session(:awaiting_browser), confirm_url: @x_confirm_url}}
+      end)
+
+      XManagementStub.put(:pair_paste, fn session_id, url ->
+        send(parent, {:x_pasted, session_id, url})
+        {:ok, x_session(:awaiting_browser)}
+      end)
+
+      {view, _html} = open_x_card(conn)
+      view |> form("#x-pair-start-form", %{origin: ""}) |> render_submit()
+      render_async(view)
+
+      html =
+        view |> form("#x-pair-paste-form", %{callback_url: "  #{pasted} "}) |> render_submit()
+
+      assert_receive {:x_pasted, "ps_1", ^pasted}
+      assert html =~ "Checking the pasted address."
+
+      html = view |> form("#x-pair-paste-form", %{callback_url: "   "}) |> render_submit()
+      assert html =~ "Paste the address your browser ended on."
+      refute_receive {:x_pasted, _session_id, _url}, 50
+    end
+
+    test "Cancel closes the waiting session and offers a new start", %{conn: conn} do
+      XManagementStub.put(:pair_start, fn _origin ->
+        {:ok, %{session: x_session(:awaiting_browser), confirm_url: @x_confirm_url}}
+      end)
+
+      XManagementStub.put(:pair_cancel, fn "ps_1" -> {:ok, x_session(:cancelled)} end)
+
+      {view, _html} = open_x_card(conn)
+      view |> form("#x-pair-start-form", %{origin: ""}) |> render_submit()
+      render_async(view)
+
+      view |> element(~s(button[phx-click="x_pair_cancel"])) |> render_click()
+      html = render_async(view)
+
+      assert html =~ "Pairing cancelled."
+      assert html =~ "Pair with Fermix Connect"
+      refute html =~ "Waiting for your browser"
+      refute html =~ @x_confirm_url
+    end
+
+    test "a start Connect refuses shows the daemon's sentence and opens nothing", %{conn: conn} do
+      XManagementStub.put(:pair_start, fn _origin -> {:error, :connect_unreachable} end)
+
+      {view, _html} = open_x_card(conn)
+      view |> form("#x-pair-start-form", %{origin: @x_origin}) |> render_submit()
+      html = render_async(view)
+
+      assert html =~ "Fermix Connect could not be reached. Try again later."
+      assert html =~ "Pair with Fermix Connect"
+      refute_push_event(view, "x-pair-open", %{})
+    end
+
+    test "an address that is not a Connect origin is refused before anything is dialed", %{
+      conn: conn
+    } do
+      XManagementStub.put(:pair_start, fn origin -> flunk("dialed #{origin}") end)
+
+      {view, _html} = open_x_card(conn)
+
+      view
+      |> form("#x-pair-start-form", %{origin: "http://connect.example.test/path"})
+      |> render_submit()
+
+      html = render_async(view)
+
+      assert html =~
+               "The Fermix Connect address must be an https address with a host and no path."
+
+      refute_push_event(view, "x-pair-open", %{})
+    end
+
+    test "a paired Fermix names the account and unpairs on request", %{conn: conn} do
+      parent = self()
+      XManagementStub.put(:status, fn -> {:ok, x_status(paired: x_paired())} end)
+
+      XManagementStub.put(:unpair, fn ->
+        send(parent, :x_unpaired)
+        XManagementStub.put(:status, fn -> {:ok, x_status()} end)
+        {:ok, %{instance_id: "inst_1"}}
+      end)
+
+      {view, html} = open_x_card(conn)
+
+      assert html =~ "@mara"
+      assert html =~ "since 2026-10-16 19:21 UTC"
+      assert has_element?(view, ~s(button[phx-click="x_unpair"]), "Unpair")
+      refute html =~ "Pair with Fermix Connect"
+
+      view |> element(~s(button[phx-click="x_unpair"])) |> render_click()
+      assert_receive :x_unpaired
+      html = render_async(view)
+
+      assert html =~ "This Fermix is no longer paired with Fermix Connect."
+      assert html =~ "Pair with Fermix Connect"
+      refute html =~ "@mara"
+    end
+
+    test "a session already open when the page opens is resumed without its link", %{
+      conn: conn
+    } do
+      XManagementStub.put(:status, fn ->
+        {:ok, x_status(pairing: %{session_id: "ps_1", state: :awaiting_browser})}
+      end)
+
+      {view, html} = open_x_card(conn)
+
+      assert html =~ "Waiting for your browser"
+      assert html =~ ~s(name="callback_url")
+      refute html =~ "Open Fermix Connect"
+      refute_push_event(view, "x-pair-open", %{})
+
+      XManagementStub.put(:pair_get, fn "ps_1" -> {:ok, x_session(:denied)} end)
+      send(view.pid, :x_pair_poll)
+
+      html = render(view)
+      assert html =~ "Pairing was denied in the browser. Nothing changed."
+      assert html =~ "Pair with Fermix Connect"
+    end
+  end
+
+  defp open_x_card(conn) do
+    {:ok, view, _html} = live(conn, "/setup?tab=channels")
+
+    html =
+      view
+      |> element(~s(button[phx-click="select_channel"][phx-value-channel="x"]))
+      |> render_click()
+
+    {view, html}
+  end
+
+  # Nothing paired, no session, and every pairing call a case does not
+  # expect fails the case by name.
+  defp x_handlers do
+    %{
+      status: fn -> {:ok, x_status()} end,
+      pair_start: fn origin -> flunk("pair_start was not expected: #{origin}") end,
+      pair_get: fn _session_id -> {:ok, x_session(:awaiting_browser)} end,
+      pair_paste: fn _session_id, url -> flunk("pair_paste was not expected: #{url}") end,
+      pair_cancel: fn session_id -> flunk("pair_cancel was not expected: #{session_id}") end,
+      unpair: fn -> flunk("unpair was not expected") end
+    }
+  end
+
+  defp x_status(overrides \\ []) do
+    Map.merge(
+      %{
+        enabled: false,
+        paired: nil,
+        connection: :off,
+        refusal: nil,
+        pending: 0,
+        running: 0,
+        last_failure: nil,
+        pairing: nil
+      },
+      Map.new(overrides)
+    )
+  end
+
+  defp x_paired do
+    %{
+      instance_id: "inst_1",
+      handle: "@mara",
+      fingerprint:
+        "ab12 cd34 ef56 0718 9a2b 3c4d 5e6f 7081 92a3 b4c5 d6e7 f809 1a2b 3c4d 5e6f 7081",
+      origin: @x_origin,
+      tenant_generation: 1,
+      paired_at: "2026-10-16T19:21:07Z"
+    }
+  end
+
+  defp x_session(:awaiting_browser) do
+    %{
+      session_id: "ps_1",
+      state: :awaiting_browser,
+      ttl_ms: 600_000,
+      origin: @x_origin,
+      handle: nil,
+      failure: nil
+    }
+  end
+
+  defp x_session(:approved),
+    do: %{x_session(:awaiting_browser) | state: :approved, ttl_ms: nil, handle: "@mara"}
+
+  defp x_session(state), do: %{x_session(:awaiting_browser) | state: state, ttl_ms: nil}
 
   describe "primary provider cards" do
     setup do

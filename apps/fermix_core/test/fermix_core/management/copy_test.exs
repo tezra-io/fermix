@@ -21,6 +21,7 @@ defmodule FermixCore.Management.CopyTest do
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Settings
+  alias FermixCore.Management.X
   alias FermixCore.Providers.Descriptor
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
@@ -222,6 +223,15 @@ defmodule FermixCore.Management.CopyTest do
     test "every phone pairing sentence obeys the rules" do
       for sentence <- Mobile.sentences() do
         assert_clean(sentence, :prose, [], "mobile sentence")
+        assert internal_terms(sentence) == []
+      end
+    end
+
+    # The shared X handle's refusals, failures and pairing sentences are each
+    # produced only by the fault they name, so the adapter publishes the set.
+    test "every shared X handle sentence obeys the rules" do
+      for sentence <- X.sentences() do
+        assert_clean(sentence, :prose, [], "x sentence")
         assert internal_terms(sentence) == []
       end
     end

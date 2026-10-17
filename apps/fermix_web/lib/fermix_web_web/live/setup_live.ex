@@ -25,6 +25,7 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Settings, as: ManagementSettings
   alias FermixCore.Management.Settings.Voice, as: VoiceSettings
+  alias FermixCore.Management.X, as: XManagement
   alias FermixCore.Meetings
   alias FermixCore.Meetings.BrowserInstall
   alias FermixCore.Meetings.Config, as: MeetingsConfig
@@ -61,6 +62,8 @@ defmodule FermixWebWeb.SetupLive do
   alias FermixCore.Transcription.Local.SidecarInstaller, as: LocalSttInstaller
   alias FermixCore.Transcription.Registry, as: TranscriptionRegistry
   alias FermixWebWeb.SetupLive.Components
+
+  require Logger
 
   # Computer use is a core feature, not a plugin whose branding we receive, so its
   # card name + logo are owned here. The SVG is inlined as a data URI at compile
@@ -157,8 +160,14 @@ defmodule FermixWebWeb.SetupLive do
     :imessage_allowed_sender_ids,
     # The ACP listener is a supervised transport child started at boot, so
     # flipping it needs a restart before the socket appears (or disappears).
-    :acp_enabled
+    :acp_enabled,
+    # The shared X handle's switch is read when the channels application
+    # starts (M63), so flipping it needs a restart too.
+    :x_enabled
   ]
+  # How often the card reads a pairing session that waits on the browser: the
+  # cadence the management contract recommends to a pane.
+  @x_pair_poll_ms 1_000
   # `default_vendor` gates which run tool advertises AND feeds the runtime prompt
   # steer (rendered from the cached profile), so a change wants a daemon restart
   # to fully take effect. Consent (`approved`) is read live at execute time AND
@@ -226,7 +235,12 @@ defmodule FermixWebWeb.SetupLive do
       |> assign(:resource_picker, nil)
       |> assign(:computer_history_picker, nil)
       |> assign(:meetings_config_open?, false)
+      |> assign(:x_pair_session, nil)
+      |> assign(:x_pair_url, nil)
+      |> assign(:x_pair_busy?, false)
+      |> assign(:x_origin, XManagement.default_origin())
       |> assign_report(report)
+      |> resume_x_pairing()
 
     {:ok, socket}
   end
@@ -400,6 +414,7 @@ defmodule FermixWebWeb.SetupLive do
       |> maybe_put_string(:signal_owner_user_id, params["signal_owner_user_id"])
       |> put_imessage_answers(params, imessage_available?())
       |> maybe_put_string(:acp_enabled, params["acp_enabled"])
+      |> maybe_put_string(:x_enabled, params["x_enabled"])
 
     socket =
       save_answers(socket, answers, "Channels saved.", Map.get(root, "__nav"),
@@ -414,6 +429,22 @@ defmodule FermixWebWeb.SetupLive do
   def handle_event("select_channel", %{"channel" => channel}, socket) do
     channel = parse_channel_field(channel, socket.assigns.channels_form.editing)
     {:noreply, assign(socket, :channels_form, %{socket.assigns.channels_form | editing: channel})}
+  end
+
+  def handle_event("x_pair_start", params, socket) when is_map(params) do
+    {:noreply, start_x_pairing(socket, String.trim(Map.get(params, "origin", "")))}
+  end
+
+  def handle_event("x_pair_paste", %{"callback_url" => url}, socket) when is_binary(url) do
+    {:noreply, paste_x_callback(socket, String.trim(url))}
+  end
+
+  def handle_event("x_pair_cancel", _params, socket) do
+    {:noreply, cancel_x_pairing(socket)}
+  end
+
+  def handle_event("x_unpair", _params, socket) do
+    {:noreply, start_x_unpair(socket)}
   end
 
   def handle_event("search_changed", %{"search_form" => params}, socket) do
@@ -946,6 +977,10 @@ defmodule FermixWebWeb.SetupLive do
     {:noreply, assign(socket, :local_install, installing(local_progress_message(event)))}
   end
 
+  def handle_info(:x_pair_poll, socket) do
+    {:noreply, poll_x_pairing(socket)}
+  end
+
   def handle_info({ref, result}, socket) when is_reference(ref) do
     {:noreply, finish_task(socket, ref, result)}
   end
@@ -992,6 +1027,24 @@ defmodule FermixWebWeb.SetupLive do
 
   def handle_async(:imessage_policy_confirm, {:exit, reason}, socket),
     do: {:noreply, on_imessage_card(socket, &imessage_confirm_flash(&1, {:error, reason}))}
+
+  def handle_async(:x_pair_start, {:ok, result}, socket),
+    do: {:noreply, finish_x_pair_start(socket, result)}
+
+  def handle_async(:x_pair_start, {:exit, reason}, socket),
+    do: {:noreply, finish_x_pair_start(socket, {:exit, reason})}
+
+  def handle_async(:x_pair_cancel, {:ok, result}, socket),
+    do: {:noreply, finish_x_pair_cancel(socket, result)}
+
+  def handle_async(:x_pair_cancel, {:exit, reason}, socket),
+    do: {:noreply, finish_x_pair_cancel(socket, {:exit, reason})}
+
+  def handle_async(:x_unpair, {:ok, result}, socket),
+    do: {:noreply, finish_x_unpair(socket, result)}
+
+  def handle_async(:x_unpair, {:exit, reason}, socket),
+    do: {:noreply, finish_x_unpair(socket, {:exit, reason})}
 
   def handle_async({:resource_discovery, name}, {:ok, result}, socket) do
     {:noreply, finish_resource_discovery(socket, name, result)}
@@ -1100,6 +1153,7 @@ defmodule FermixWebWeb.SetupLive do
       active_tab={@active_tab}
       embed?={@embed?}
       channels_form={@channels_form}
+      x_pairing={x_pairing_view(@x_status, @x_pair_session, @x_pair_url, @x_pair_busy?, @x_origin)}
       doctor_result={@doctor_result}
       memory_form={@memory_form}
       personalization_form={@personalization_form}
@@ -1195,6 +1249,7 @@ defmodule FermixWebWeb.SetupLive do
     |> assign(:anthropic_import_available?, anthropic_import_available?(snapshot))
     |> assign(:realtime_form, build_realtime_form(snapshot))
     |> assign(:channels_form, build_channels_form(snapshot))
+    |> assign(:x_status, x_status())
     |> assign(:search_form, build_search_form(snapshot))
     |> assign(:image_form, build_image_form(snapshot))
     |> assign(:transcription_form, build_transcription_form(snapshot))
@@ -1743,6 +1798,7 @@ defmodule FermixWebWeb.SetupLive do
       slack: slack_form(channels),
       signal: signal_form(channels),
       imessage: imessage_form(channels),
+      x: x_form(channels),
       acp: acp_form(channels),
       imessage_available?: imessage_available?()
     }
@@ -1820,6 +1876,13 @@ defmodule FermixWebWeb.SetupLive do
   # actually running rather than offering to turn off something already on.
   defp acp_form(channels) do
     %{enabled: channel_enabled?(Keyword.get(channels, :acp, []), true)}
+  end
+
+  # The shared X handle carries no credential and no owner id (Fermix Connect
+  # holds the account's grant), so the switch is the whole form; the pairing
+  # beside it is a runtime fact the card acts on directly.
+  defp x_form(channels) do
+    %{enabled: channel_enabled?(Keyword.get(channels, :x, []), false)}
   end
 
   defp build_sandbox_form(snapshot) do
@@ -3780,6 +3843,248 @@ defmodule FermixWebWeb.SetupLive do
 
   defp xai_auth_summary, do: oauth_profile_summary(Store.profile(:xai))
 
+  # --- The shared X handle (M63): pairing with Fermix Connect ----------------
+  # The card is the pane the management contract describes: `x.pair.start`
+  # answers the sign-in link once, the browser comes back to the engine's own
+  # loopback, and the pane reads the session until it is terminal. Every call
+  # goes through `Management.X`, which owns the sentences; `:x_management_opts`
+  # is the test seam (its `:provider`). One pairing call runs at a time.
+
+  defp x_opts, do: Application.get_env(:fermix_web, :x_management_opts, [])
+
+  # `nil` when the channel could not answer at all; the card says so.
+  defp x_status do
+    case XManagement.status(x_opts()) do
+      {:ok, status} -> status
+      {:error, _refusal} -> nil
+    end
+  end
+
+  defp x_pairing_view(status, session, url, busy?, origin) do
+    %{status: status, session: session, url: url, busy?: busy?, origin: origin}
+  end
+
+  # A session the daemon still has open when the page opens (another pane
+  # started it, or this one was reloaded) is picked up here: its link was
+  # answered once and is gone, so the paste box is the way back in.
+  defp resume_x_pairing(
+         %{assigns: %{x_status: %{"pairing" => %{"state" => "awaiting_browser"} = pairing}}} =
+           socket
+       ) do
+    case XManagement.pair_get(pairing["session_id"], x_opts()) do
+      {:ok, session} ->
+        socket |> assign(:x_pair_session, session) |> schedule_x_pair_poll()
+
+      {:error, refusal} ->
+        Logger.warning("setup x pairing: the open session could not be read: #{inspect(refusal)}")
+        socket
+    end
+  end
+
+  defp resume_x_pairing(socket), do: socket
+
+  defp start_x_pairing(%{assigns: %{x_pair_busy?: true}} = socket, _origin),
+    do: flash_info(socket, "Pairing is already open.")
+
+  defp start_x_pairing(
+         %{assigns: %{x_pair_session: %{"state" => "awaiting_browser"}}} = socket,
+         _
+       ) do
+    flash_info(socket, "Pairing is already open.")
+  end
+
+  # An empty address is the daemon's default origin.
+  defp start_x_pairing(socket, origin) do
+    opts = x_opts()
+    requested = if origin == "", do: nil, else: origin
+
+    socket
+    |> assign(:x_pair_busy?, true)
+    |> assign(:x_origin, requested || XManagement.default_origin())
+    |> start_async(:x_pair_start, fn -> XManagement.pair_start(requested, opts) end)
+  end
+
+  # The link is shown while the attempt that minted it waits, then dropped: it
+  # carries a one-use token and no later read repeats it.
+  defp finish_x_pair_start(socket, {:ok, %{"confirm_url" => url} = view}) when is_binary(url) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> assign(:x_pair_session, Map.delete(view, "confirm_url"))
+    |> assign(:x_pair_url, url)
+    |> schedule_x_pair_poll()
+    |> flash_info("Opening Fermix Connect.")
+    |> push_event("x-pair-open", %{url: url})
+  end
+
+  # Nothing was opened: a `failed` view carrying the daemon's sentence.
+  defp finish_x_pair_start(socket, {:ok, %{"state" => "failed"} = view}) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> assign(:x_pair_session, Map.delete(view, "confirm_url"))
+    |> flash_error(x_failure_sentence(view))
+  end
+
+  # Another pane opened a session meanwhile: pick it up rather than refuse.
+  defp finish_x_pair_start(socket, {:error, {:busy, _operation}}) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> assign(:x_status, x_status())
+    |> resume_x_pairing()
+    |> flash_info("Pairing is already open.")
+  end
+
+  defp finish_x_pair_start(socket, outcome) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> flash_error(x_refusal_sentence(outcome, "Pairing could not start. See the daemon log."))
+  end
+
+  defp paste_x_callback(socket, ""),
+    do: flash_error(socket, "Paste the address your browser ended on.")
+
+  # The address reaches the session's own wait; what it settles shows on the
+  # next read, within the poll's second.
+  defp paste_x_callback(
+         %{assigns: %{x_pair_session: %{"state" => "awaiting_browser"} = session}} = socket,
+         url
+       ) do
+    case XManagement.pair_paste(session["session_id"], url, x_opts()) do
+      {:ok, view} ->
+        socket |> assign(:x_pair_session, view) |> flash_info("Checking the pasted address.")
+
+      outcome ->
+        sentence =
+          x_refusal_sentence(outcome, "The address could not be checked. See the daemon log.")
+
+        flash_error(socket, sentence)
+    end
+  end
+
+  defp paste_x_callback(socket, _url),
+    do: flash_error(socket, "No pairing is waiting. Pair with Fermix Connect first.")
+
+  # A click while a pairing call is in flight does nothing; so does a cancel
+  # with no session waiting.
+  defp cancel_x_pairing(%{assigns: %{x_pair_busy?: true}} = socket), do: socket
+
+  defp cancel_x_pairing(
+         %{assigns: %{x_pair_session: %{"state" => "awaiting_browser"} = session}} = socket
+       ) do
+    id = session["session_id"]
+    opts = x_opts()
+
+    socket
+    |> assign(:x_pair_busy?, true)
+    |> start_async(:x_pair_cancel, fn -> XManagement.pair_cancel(id, opts) end)
+  end
+
+  defp cancel_x_pairing(socket), do: socket
+
+  # The terminal view the cancel answers is the session's real ending: a
+  # proof Connect accepted meanwhile is `approved`, not cancelled.
+  defp finish_x_pair_cancel(socket, {:ok, view}) when is_map(view) do
+    socket |> assign(:x_pair_busy?, false) |> settle_x_pairing(view)
+  end
+
+  defp finish_x_pair_cancel(socket, outcome) do
+    sentence = x_refusal_sentence(outcome, "Pairing could not be cancelled. See the daemon log.")
+    socket |> assign(:x_pair_busy?, false) |> flash_error(sentence)
+  end
+
+  defp schedule_x_pair_poll(socket) do
+    Process.send_after(self(), :x_pair_poll, @x_pair_poll_ms)
+    socket
+  end
+
+  # One read per tick while the session waits on the browser; the first
+  # terminal read settles the card and stops the clock. A session the daemon
+  # no longer has (it restarted) is dropped, and the card offers a new start.
+  defp poll_x_pairing(
+         %{assigns: %{x_pair_session: %{"state" => "awaiting_browser"} = session}} = socket
+       ) do
+    case XManagement.pair_get(session["session_id"], x_opts()) do
+      {:ok, %{"state" => "awaiting_browser"} = view} ->
+        socket |> assign(:x_pair_session, view) |> schedule_x_pair_poll()
+
+      {:ok, view} ->
+        settle_x_pairing(socket, view)
+
+      outcome ->
+        socket
+        |> assign(:x_pair_session, nil)
+        |> assign(:x_pair_url, nil)
+        |> flash_error(
+          x_refusal_sentence(outcome, "The pairing could not be read. See the daemon log.")
+        )
+    end
+  end
+
+  defp poll_x_pairing(socket), do: socket
+
+  defp settle_x_pairing(socket, view) do
+    socket
+    |> assign(:x_pair_session, view)
+    |> assign(:x_pair_url, nil)
+    |> assign(:x_status, x_status())
+    |> flash_x_ending(view)
+  end
+
+  defp flash_x_ending(socket, %{"state" => "approved"} = view),
+    do: flash_info(socket, Components.x_session_ending(view))
+
+  defp flash_x_ending(socket, %{"state" => "cancelled"} = view),
+    do: flash_info(socket, Components.x_session_ending(view))
+
+  defp flash_x_ending(socket, view), do: flash_error(socket, Components.x_session_ending(view))
+
+  defp start_x_unpair(%{assigns: %{x_pair_busy?: true}} = socket), do: socket
+
+  defp start_x_unpair(socket) do
+    opts = x_opts()
+
+    socket
+    |> assign(:x_pair_busy?, true)
+    |> start_async(:x_unpair, fn -> XManagement.unpair(opts) end)
+  end
+
+  defp finish_x_unpair(socket, {:ok, %{"unpaired" => true}}) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> assign(:x_pair_session, nil)
+    |> assign(:x_status, x_status())
+    |> flash_info("This Fermix is no longer paired with Fermix Connect.")
+  end
+
+  defp finish_x_unpair(socket, outcome) do
+    socket
+    |> assign(:x_pair_busy?, false)
+    |> assign(:x_status, x_status())
+    |> flash_error(x_refusal_sentence(outcome, "Unpairing failed. See the daemon log."))
+  end
+
+  defp x_failure_sentence(%{"failure" => %{"sentence" => sentence}}) when is_binary(sentence),
+    do: sentence
+
+  defp x_failure_sentence(_view), do: "Pairing failed. See the daemon log."
+
+  # The daemon's own sentence when the refusal carries one; `fallback` is for
+  # the refusals that do not (the channel could not answer at all) and for a
+  # call that exited, whose reason stays in the log.
+  defp x_refusal_sentence({:error, {:invalid_params, _field, sentence}}, _fallback), do: sentence
+
+  defp x_refusal_sentence({:error, {:unavailable, _capability, sentence}}, _fallback),
+    do: sentence
+
+  defp x_refusal_sentence({:error, {:unknown_pairing_session, _id}}, _fallback),
+    do: "This pairing is no longer open. Pair with Fermix Connect again."
+
+  defp x_refusal_sentence({:exit, reason}, fallback) do
+    Logger.error("setup x pairing: a call exited: #{Redaction.format(reason)}")
+    fallback
+  end
+
+  defp x_refusal_sentence(_outcome, fallback), do: fallback
+
   # --- Sign in with ChatGPT (M57): how OpenAI Codex signs in -----------------
   # One sign-in at a time. `Auth.ChatGPT` owns every rule (consent, the plan
   # scope, revocation, the sentences) and `Setup.LiveModel` the model check;
@@ -4100,6 +4405,7 @@ defmodule FermixWebWeb.SetupLive do
   defp parse_channel_field("slack", _default), do: :slack
   defp parse_channel_field("signal", _default), do: :signal
   defp parse_channel_field("imessage", _default), do: :imessage
+  defp parse_channel_field("x", _default), do: :x
   defp parse_channel_field("acp", _default), do: :acp
   defp parse_channel_field(_, default), do: default
 

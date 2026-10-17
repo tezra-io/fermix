@@ -98,12 +98,26 @@ defmodule FermixChannels.Gateway do
   # surface appends exact deltas to its own wire, so the chat-shaped streaming
   # knob does not apply to it. Its spec is a deliberately plain map — the queue
   # matches on it and drives the callback with no DraftStream engine.
+  #
+  # A final-only channel is decided before the config consult too: one that
+  # takes its terminal result through its own callback and declares no stream
+  # tier (the shared X handle, M63) renders nothing but that result, so no
+  # setting can make it stream.
   defp build_stream_spec(channel, %Message{} = message, reply_fn) do
-    if raw_stream?(channel) do
-      %{mode: :raw, callback: channel.build_raw_stream_callback(message)}
-    else
-      configured_stream_spec(channel, message, reply_fn)
+    cond do
+      raw_stream?(channel) ->
+        %{mode: :raw, callback: channel.build_raw_stream_callback(message)}
+
+      final_only?(channel) ->
+        nil
+
+      true ->
+        configured_stream_spec(channel, message, reply_fn)
     end
+  end
+
+  defp final_only?(channel) do
+    terminal_error_owner?(channel) and not function_exported?(channel, :stream_capability, 0)
   end
 
   defp configured_stream_spec(channel, %Message{} = message, reply_fn) do
@@ -429,7 +443,8 @@ defmodule FermixChannels.Gateway do
       approval_ingress_context: ingress_context,
       activity_callback: build_activity_callback(channel, message),
       turn_result_fn: build_turn_result_fn(channel, message),
-      terminal_error_owner?: terminal_error_owner?(channel)
+      terminal_error_owner?: terminal_error_owner?(channel),
+      final_only?: final_only?(channel)
     }
   end
 
@@ -566,12 +581,19 @@ defmodule FermixChannels.Gateway do
     |> maybe_put_callback(:activity_callback, closures.activity_callback)
     |> maybe_put_callback(:turn_result_fn, closures.turn_result_fn)
     |> maybe_put_terminal_error_owner(closures.terminal_error_owner?)
+    |> maybe_put_final_only(closures.final_only?)
   end
 
   defp maybe_put_terminal_error_owner(message, true),
     do: Map.put(message, :terminal_error_owner?, true)
 
   defp maybe_put_terminal_error_owner(message, false), do: message
+
+  # The queue reads `:final_only?` to send nothing but the turn's own reply:
+  # a final-only channel's text closure stages its one result (M63), so a
+  # canned sentence the queue sent through it would become that result.
+  defp maybe_put_final_only(message, true), do: Map.put(message, :final_only?, true)
+  defp maybe_put_final_only(message, false), do: message
 
   defp agent_alive?(pid) when is_pid(pid), do: Process.alive?(pid)
 

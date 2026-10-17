@@ -162,6 +162,21 @@ defmodule FermixChannels.Gateway.QueueTest do
     def error_reply(_reason), do: "error reply"
   end
 
+  # Reports the message core receives, then completes with nothing to say.
+  defmodule CoreMessageRunner do
+    def run(msg, turn_state, _deliver) do
+      send(turn_state.test_pid, {:core_message, msg})
+      {:ok, "", 0}
+    end
+
+    def commit(_msg, turn_state, response, _context_tokens) do
+      send(turn_state.test_pid, {:committed, response})
+      :ok
+    end
+
+    def error_reply(_reason), do: "error reply"
+  end
+
   # Stands in for ConversationStore, capturing the marker the queue appends to
   # close an emoji-only / attachment-only empty turn (§7). Bypasses the real
   # last-message-user? guard, which is ConversationStore's own tested concern.
@@ -1883,6 +1898,71 @@ defmodule FermixChannels.Gateway.QueueTest do
         assert_receive {:turn_result, {:failed, {:crashed, _reason}}}, 5_000
         refute_receive {:reply, _text}, 300
       end)
+    end
+  end
+
+  # M63: a final-only channel's text closure stages the turn's one result (the
+  # shared X handle's public reply), so nothing but the turn's own reply may go
+  # through it. The turn-result callback still closes the turn, and each text
+  # would have been sent before it from the same turn task, so receiving the
+  # result first proves no text went out.
+  describe "final-only turns" do
+    defp final_only(msg, test_pid) do
+      msg
+      |> with_turn_result(test_pid)
+      |> with_terminal_error_owner()
+      |> Map.put(:final_only?, true)
+    end
+
+    test "an empty completion sends no text, still completes, and never reaches core", ctx do
+      queue = start_queue(ctx, turn_runner: CoreMessageRunner)
+
+      Queue.enqueue(queue, final_only(make_msg("anything", "cx", ctx.test_pid), ctx.test_pid))
+
+      assert_receive {:core_message, core_message}, 5_000
+      refute Map.has_key?(core_message, :final_only?)
+      assert_receive {:turn_result, {:completed}}, 5_000
+      refute_received {:reply, _text}
+      refute_received {:committed, _response}
+    end
+
+    test "a compacted commit sends the reply and no notice", ctx do
+      queue = start_queue(ctx)
+
+      Queue.enqueue(queue, final_only(make_msg("compact_me", "cx", ctx.test_pid), ctx.test_pid))
+      assert_receive {:turn_started, "compact_me", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+
+      assert_receive {:reply, "reply:compact_me"}, 5_000
+      assert_receive {:committed, "reply:compact_me"}, 5_000
+      assert_receive {:turn_result, {:completed}}, 5_000
+      refute_received {:reply, _notice}
+    end
+
+    # The phone's shape: it owns its terminal errors and declares a stream
+    # tier, so it is not final-only and keeps both sentences.
+    test "a terminal owner that is not final-only still gets both sentences", ctx do
+      queue = start_queue(ctx)
+
+      owner = fn content ->
+        content
+        |> make_msg("cm", ctx.test_pid)
+        |> with_turn_result(ctx.test_pid)
+        |> with_terminal_error_owner()
+      end
+
+      Queue.enqueue(queue, owner.("anything"))
+      assert_receive {:turn_started, "anything", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :empty})
+      assert_receive {:reply, "I didn't get a response — please try again."}, 5_000
+      assert_receive {:turn_result, {:completed}}, 5_000
+
+      Queue.enqueue(queue, owner.("compact_me"))
+      assert_receive {:turn_started, "compact_me", turn_pid}, 5_000
+      send(turn_pid, {:proceed, :reply})
+      assert_receive {:reply, "reply:compact_me"}, 5_000
+      assert_receive {:reply, notice}, 5_000
+      assert notice =~ "Trimmed older conversation history"
     end
   end
 

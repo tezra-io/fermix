@@ -19,6 +19,10 @@ defmodule FermixChannels.Gateway.Authorizer do
   - A paired device (the phone's transport proof) is the operator
     while the mobile trust store still holds it, so work a revoked
     device already submitted is refused when it reaches ingest.
+  - A Connect assignment (the X channel's transport proof) is a guest
+    while its stored row is `running` and unexpired: the turn the
+    channel was granted a start for, never the owner and never an
+    operator. Anything else about the row is denied.
   - Missing sender id, unknown sender, or unknown channel string:
     denied.
 
@@ -40,6 +44,8 @@ defmodule FermixChannels.Gateway.Authorizer do
   alias FermixChannels.Gateway.Source
   alias FermixChannels.Mobile.DeviceStore
   alias FermixCore.Config
+  alias FermixCore.Memory.Config, as: MemoryConfig
+  alias FermixCore.Memory.Repo
 
   @spec resolve(Source.t()) ::
           {:ok, Authorization.t()} | {:error, :unauthorized | :unknown_channel}
@@ -51,6 +57,10 @@ defmodule FermixChannels.Gateway.Authorizer do
   end
 
   defp resolve_registered_ingress(source, :paired_device), do: resolve_paired_device(source)
+
+  defp resolve_registered_ingress(source, :connect_assignment),
+    do: resolve_connect_assignment(source)
+
   defp resolve_registered_ingress(source, nil), do: resolve_sender(source)
 
   defp resolve_paired_device(%Source{transport_auth: {:mobile_device, device_id}})
@@ -73,6 +83,42 @@ defmodule FermixChannels.Gateway.Authorizer do
     case Process.whereis(DeviceStore) do
       nil -> {:error, :device_store_not_running}
       store -> DeviceStore.fetch(store, device_id)
+    end
+  end
+
+  defp resolve_connect_assignment(%Source{transport_auth: {:connect_assignment, assignment_id}})
+       when is_binary(assignment_id) and assignment_id != "" do
+    case connect_assignment(assignment_id) do
+      {:ok, %{status: :running, expires_at: %DateTime{} = expires_at}} ->
+        running_assignment(assignment_id, expires_at)
+
+      {:ok, %{status: status}} ->
+        Logger.warning("X assignment #{assignment_id} is #{status}, not running; refused")
+        {:error, :unauthorized}
+
+      {:error, reason} ->
+        Logger.warning("X assignment #{assignment_id} could not be read: #{inspect(reason)}")
+        {:error, :unauthorized}
+    end
+  end
+
+  defp resolve_connect_assignment(%Source{}), do: {:error, :unauthorized}
+
+  # The store runs with core; one that is not running or is disabled holds no
+  # assignment, so none is authorized. A slow store refuses rather than exits.
+  defp connect_assignment(assignment_id) do
+    case Repo.enabled_server(MemoryConfig.repo_server()) do
+      nil -> {:error, :memory_unavailable}
+      server -> Repo.x_assignment(assignment_id, server: server, on_timeout: :error)
+    end
+  end
+
+  defp running_assignment(assignment_id, expires_at) do
+    if DateTime.compare(expires_at, DateTime.utc_now()) == :gt do
+      {:ok, %Authorization{role: :guest, trust: :guest}}
+    else
+      Logger.warning("X assignment #{assignment_id} expired at #{expires_at}; refused")
+      {:error, :unauthorized}
     end
   end
 

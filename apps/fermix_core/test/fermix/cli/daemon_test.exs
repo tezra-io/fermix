@@ -124,6 +124,31 @@ defmodule Fermix.CLI.DaemonTest do
     end
   end
 
+  # The shared X handle's v1 provider functions the owner-decision gate stands
+  # in front of (M63). Every call is reported and refused, so a case can tell
+  # whether the gate let it through.
+  defmodule TestXProvider do
+    def status(_opts), do: call(:status, [], {:error, :surprise})
+    def pair_start(origin, _opts), do: call(:pair_start, [origin], {:error, :pairing_active})
+
+    def pair_get(session_id, _opts),
+      do: call(:pair_get, [session_id], {:error, :unknown_pairing_session})
+
+    def pair_paste(session_id, url, _opts),
+      do: call(:pair_paste, [session_id, url], {:error, :unknown_pairing_session})
+
+    def pair_cancel(session_id, _opts),
+      do: call(:pair_cancel, [session_id], {:error, :unknown_pairing_session})
+
+    def unpair(_opts), do: call(:unpair, [], {:error, :not_paired})
+
+    defp call(operation, args, result) do
+      test_pid = Application.fetch_env!(:fermix_core, :daemon_test_pid)
+      send(test_pid, {:x_provider_call, operation, args})
+      result
+    end
+  end
+
   setup do
     previous_bridge = Application.get_env(:fermix_core, :cli_channel_bridge)
     previous_pid = Application.get_env(:fermix_core, :daemon_test_pid)
@@ -916,6 +941,86 @@ defmodule Fermix.CLI.DaemonTest do
     end
 
     defp golden_error_details(name) do
+      :fermix_core
+      |> Application.app_dir("priv/management/fixtures/errors.jsonl")
+      |> File.stream!()
+      |> Enum.map(&Jason.decode!/1)
+      |> Enum.find(&(&1["name"] == name))
+      |> get_in(["response", "error", "details"])
+    end
+  end
+
+  # M63: pairing this installation with Fermix Connect binds it to the owner's
+  # X account, and unpairing revokes it, so both are the owner's decisions under
+  # the same placement the phone's are, each refused with its own sentence.
+  describe "owner decisions on the shared X handle" do
+    @x_owner_v1 [
+      {"x.pair.start", %{}, :pair_start},
+      {"x.pair.paste", %{"session_id" => "xs-1", "url" => "http://127.0.0.1:1/callback"},
+       :pair_paste},
+      {"x.pair.cancel", %{"session_id" => "xs-1"}, :pair_cancel},
+      {"x.unpair", %{}, :unpair}
+    ]
+
+    setup do
+      previous = Application.get_env(:fermix_core, :x_management_provider)
+      Application.put_env(:fermix_core, :x_management_provider, TestXProvider)
+      on_exit(fn -> restore_app_env(:x_management_provider, previous) end)
+      :ok
+    end
+
+    test "a process the daemon started is refused before the provider" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+      assert_x_owner_decisions_refused(socket_path)
+    end
+
+    test "a caller the daemon cannot place is refused before the provider" do
+      socket_path = start_peer_daemon(os: {:win32, :nt})
+      assert_x_owner_decisions_refused(socket_path)
+    end
+
+    test "a process the daemon did not start reaches the provider", %{socket_path: socket_path} do
+      for {method, params, operation} <- @x_owner_v1 do
+        assert {:error, {:management_error, _code, _message, _details}} =
+                 Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+
+        assert_received {:x_provider_call, ^operation, _args}
+      end
+    end
+
+    test "reading a session stays open to every caller" do
+      socket_path = start_peer_daemon(daemon_os_pid: ParentProcess.os_pid())
+
+      assert {:error, {:management_error, "unknown_pairing_session", _message, _details}} =
+               Client.request_v1("x.pair.get", %{"session_id" => "xs-1"},
+                 socket_path: socket_path,
+                 timeout: 1_000
+               )
+
+      assert_received {:x_provider_call, :pair_get, ["xs-1"]}
+    end
+
+    defp assert_x_owner_decisions_refused(socket_path) do
+      sentence =
+        "Only the owner can pair this Fermix with Fermix Connect or unpair it, " <>
+          "from their own app or terminal."
+
+      golden = golden_x_error_details("unavailable_owner_decision_x")
+      assert golden == %{"capability" => "x", "sentence" => sentence}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          for {method, params, _operation} <- @x_owner_v1 do
+            assert {:error, {:management_error, "unavailable", _message, ^golden}} =
+                     Client.request_v1(method, params, socket_path: socket_path, timeout: 5_000)
+          end
+        end)
+
+      assert log =~ "only the owner may"
+      refute_received {:x_provider_call, _operation, _args}
+    end
+
+    defp golden_x_error_details(name) do
       :fermix_core
       |> Application.app_dir("priv/management/fixtures/errors.jsonl")
       |> File.stream!()

@@ -235,6 +235,12 @@ daemon onto anything else.
 | `imessage.permissions.get` | none | The Fermix Messages helper's non-prompting state: whether it is installed, its version, Full Disk Access, the Messages database, Automation, whether Messages runs and is signed in, the user session, the confirmed recipient policy, whether that policy is exactly the saved settings, and when it was read. Minimum version `2`. |
 | `imessage.grant.start` | `service` (`automation` or `full_disk_access`) | Asks for one grant: `automation` raises the one system prompt, `full_disk_access` registers the helper, opens the Full Disk Access pane and reveals the helper for drag-in. A job that completes with the permissions view. Minimum version `2`. |
 | `imessage.policy.confirm` | none | Asks the helper to confirm the saved recipients; when they differ from the ones it holds, the helper shows its own dialog naming every handle. A job that completes with the permissions view plus `outcome`. Minimum version `2`. |
+| `x.status` | none | The shared X handle channel as it stands: whether it is enabled, this installation's pairing with Fermix Connect (instance id, the linked X handle, the key fingerprint, the origin, the tenant generation, when it was paired), the connection to Connect, why it was refused when it was, the mentions pending and running, the newest failure in the daemon's words, and the pairing session open or newest retained. Answers with the channel off. Minimum version `2`. |
+| `x.pair.start` | `origin` (optional) | Opens a pairing session with Fermix Connect at `origin` (`https://` and a host, no path; absent means `https://connect.fermix.ai`) and answers with the session view plus, once, the authorization link as `confirm_url`, which the pane opens in the browser. `busy` while a session is open. Minimum version `2`. |
+| `x.pair.get` | `session_id` | The pairing session as it stands. The pane polls it until the session is terminal. Minimum version `2`. |
+| `x.pair.paste` | `session_id`, `url` | Hands a waiting session the address the browser ended on, for a machine whose browser is elsewhere; the engine reads it as its loopback reads the browser's return, and an address that is not this attempt's changes nothing. Answers the session as it stands. Minimum version `2`. |
+| `x.pair.cancel` | `session_id` | Closes the session and answers the terminal view. Cancelling a finished session is a no-op, not an error. Minimum version `2`. |
+| `x.unpair` | none | Revokes this installation at Connect, deletes its key and its pairing record, stops the channel, and answers with the instance id and `unpaired: true`. Minimum version `2`. |
 
 Notes that the shapes alone do not carry:
 
@@ -394,6 +400,70 @@ Notes that the shapes alone do not carry:
   channels-inventory entry, because the phone channel has no credential.
   `setup.state.get` carries a `mobile` channel row after the inventory
   channels, always `configured`, with mode `listener` while it is enabled.
+- **A shared X handle pairing session** (M63) has the shape of a provider
+  sign-in, and it binds this installation to its owner's X account at Fermix
+  Connect. `x.pair.start` creates the installation's key on first use, enrolls
+  it with Connect, opens a listener on `127.0.0.1` and answers with
+  `confirm_url`: Connect's confirmation link carrying an OAuth authorization
+  request with PKCE whose redirect is that listener. The pane opens it in the
+  browser, where the owner signs in with X and approves; the browser returns
+  to the engine's loopback with a one-use code, and the engine proves its key
+  to Connect with it and ends `approved` (a channel already switched on then
+  starts without a restart). Nothing is decided in the pane and no
+  fingerprint is compared. On a machine whose browser is elsewhere the return
+  fails to load, and the pane takes the address the browser ended on and sends
+  it with `x.pair.paste` {`session_id`, `url`}. The pane reads `x.pair.get`
+  (every 1000 ms is the recommended cadence) until the session is terminal.
+  One session is open at a time (`busy` {`operation`: `x.pair`} for a second
+  start); finished sessions are retained for reading, and a `session_id` this
+  daemon does not retain answers `unknown_pairing_session`. Connect's
+  enrollment lives ten minutes, which is the session's one clock; `ttl_ms` is
+  relative and null once the session is terminal.
+- **An X pairing session's `state` is the switch.** It is one of
+  `awaiting_browser` (the owner has not finished in the browser, or the
+  engine is proving its key), `approved` (`handle` names the X account
+  Connect paired; null in every other state), `denied` (in the browser),
+  `expired`, `cancelled` and `failed`. There is no `request`. `failure` is set
+  on `failed`, with the daemon's own sentence and a `code` of `unavailable`,
+  `refused` or `internal_error`. A start refused for a reason the operator can
+  act on (Connect could not be reached or would not start pairing, this
+  installation is already paired, Connect speaks another protocol, the key
+  could not be created, no local port could be opened for the browser to
+  return to) answers a `failed` view with a null `session_id` and a null
+  `confirm_url`: nothing was opened and there is nothing to poll. A paste to
+  a session no longer waiting is `invalid_params` with the daemon's sentence.
+  An `origin` that is not `https://` and a host alone is `invalid_params` on
+  `origin` with the daemon's sentence, and nothing is dialed.
+- **`x.pair.start` returns the authorization link once**, as `confirm_url`, on
+  the call that opens the session. It carries a one-use token, so it is never
+  logged, never traced and never retained, and no later read repeats it.
+- **`x.status` answers with the channel off**, so a pane can always read the
+  state. `enabled` is the switch. `connection` is `off` while the channel is
+  not running, `refused` when it could not start, with `refusal` naming the
+  reason and the daemon's sentence (`not_paired`, `pairing_invalid`,
+  `memory_disabled`, `proxy_unsupported`, `revoked`), `connecting`,
+  `connected` while the socket to Connect is up (which says nothing about
+  whether every route is healthy), or `down` while it retries. `pending` counts
+  mentions accepted and not started, `running` the one being answered, and
+  `last_failure` is the newest failure with when it happened and the daemon's
+  sentence for it. Readiness carries the channel's refusals as advisory rows
+  in pane `channels`, component `channel:x`, in the same sentences:
+  `channel:x:not_paired`, `channel:x:pairing_invalid` and
+  `channel:x:proxy_unsupported`. `x.unpair` with nothing paired, or with
+  Connect out of reach, is `unavailable` {`capability`: `x`} with the
+  daemon's sentence; `unavailable` {`capability`: `x`} with no `sentence`
+  means the channel could not answer at all.
+- **Pairing and unpairing the shared X handle are the owner's decisions.**
+  `x.pair.start`, `x.pair.paste`, `x.pair.cancel` and `x.unpair` answer
+  `unavailable` {`capability`: `x`, `sentence`: "Only the owner can pair this
+  Fermix with Fermix Connect or unpair it, from their own app or terminal."} to
+  the same callers the phone's decisions refuse, and the daemon log says so.
+  Reading a session and the status stay open to every caller.
+- **`channels.x` is the shared X handle channel's settings section**: one
+  switch, `x_enabled`, off by default and boot-bound (its row's `restart` is
+  true). The pairing, the connection and the Connect origin are runtime facts
+  on `x.status`, never rows, and the section has no credential: Fermix Connect
+  holds the X account's grant.
 - **`browser` is the managed task browser's section**, under pane `browser`,
   published on every install. Its first row, `browser_executable`, is read-only
   and says which browser the launcher would start for a task: `value` is that
@@ -805,12 +875,16 @@ one, is `details.sentence`. Three codes carry one:
   "A secret cannot be empty.", "Install this plugin before using it.", "Add this
   provider's sign-in client secret first.", "This setting is a switch: send true
   or false.", "No phone is waiting for a decision.", "No paired phone has that
-  id.", and every settings validation refusal. A refusal with nothing to
+  id.", "This pairing is no longer waiting for the browser.", and every settings
+  validation refusal. A refusal with nothing to
   add carries `field` alone.
 - `config_unreadable` — `details.sentence` is the parser's own message.
-- `unavailable` — only when the phone channel refuses a pairing or forgetting
-  decision from a caller that is not the owner: "Only the owner can pair or
-  forget a phone; run this from your own terminal."
+- `unavailable` — when the phone channel or the shared X handle refuses a
+  pairing, forgetting or unpairing decision from a caller that is not the
+  owner ("Only the owner can pair or forget a phone; run this from your own
+  terminal.", "Only the owner can pair this Fermix with Fermix Connect or
+  unpair it, from their own app or terminal."), and when `x.unpair` has nothing
+  to unpair or cannot reach Fermix Connect.
 
 **A client that renders `message` alone renders "Request parameters are
 invalid." for that whole family**, which is the one sentence in the catalog that
@@ -837,7 +911,8 @@ Operation-specific bounds, owned by the operation rather than the envelope: a
 262144 encoded bytes, with a 256-character search and a 64-character subsystem;
 a `diagnostics.build` object carries at most 500 log entries; `mobile.devices.list`
 carries at most 64 devices, each string a phone sends in a pairing request is
-at most 128 bytes, and a pairing `uri` is at most 2048 bytes.
+at most 128 bytes, and a pairing `uri` is at most 2048 bytes; an X pairing
+`origin` is at most 256 bytes and its `confirm_url` at most 2048 bytes.
 
 ## Vendoring into `fermix-macos`
 
@@ -851,8 +926,8 @@ own client tests against the same golden frames the daemon is tested against.
 - `fixtures/success.jsonl` — one full success envelope per method, for
   `settings.get` one per section, because a section with no golden result is a
   pane whose row keys nothing on the far side is held to, for
-  `mobile.pair.get` one per session state, and for `job.get` a browser download
-  both completed and failed.
+  `mobile.pair.get` and `x.pair.get` one per session state, and for `job.get` a
+  browser download both completed and failed.
 - `fixtures/errors.jsonl` — one full error envelope per published code,
   including the fixed `message` text. `method_not_found` appears twice: once
   for a method this daemon does not serve at all, and once as

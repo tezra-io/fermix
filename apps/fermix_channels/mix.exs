@@ -29,6 +29,9 @@ defmodule FermixChannels.MixProject do
       {:fermix_nif, in_umbrella: true},
       {:req, "~> 0.5"},
       {:jason, "~> 1.4"},
+      # Verifies Fermix Connect's signed assignments (`X.Assignment`). Already
+      # locked through pigeon's joken; named here because this app calls it.
+      {:jose, "~> 1.11"},
       {:plug, "~> 1.16"},
       {:websockex, "~> 0.4"},
       {:bandit, "~> 1.10"},

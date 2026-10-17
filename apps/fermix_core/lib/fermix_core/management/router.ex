@@ -27,6 +27,7 @@ defmodule FermixCore.Management.Router do
   alias FermixCore.Management.Secrets
   alias FermixCore.Management.Settings
   alias FermixCore.Management.SetupState
+  alias FermixCore.Management.X
   alias FermixCore.Setup.AccessToken
   alias FermixCore.Setup.Endpoint
 
@@ -37,6 +38,7 @@ defmodule FermixCore.Management.Router do
     settings.sections settings.reload job.list plugins.list meetings.signin.start
     computer_use.grant.start computer_use.permissions.get mobile.status mobile.pair.start
     mobile.devices.list browser.install.start imessage.permissions.get imessage.policy.confirm
+    x.status x.unpair
   )
   @lease_params ~w(lease_id)
   @doctor_session_params ~w(session_id)
@@ -60,6 +62,9 @@ defmodule FermixCore.Management.Router do
   @mobile_decide_params ~w(session_id approved)
   @mobile_device_params ~w(device_id)
   @imessage_grant_params ~w(service)
+  @x_start_params ~w(origin)
+  @x_session_params ~w(session_id)
+  @x_paste_params ~w(session_id url)
   # A published name, an opaque workspace id and a display label are all bounded
   # strings; the widest of them is the workspace id's own 256-byte bound.
   @max_text_bytes 256
@@ -69,6 +74,9 @@ defmodule FermixCore.Management.Router do
   # One section per call, and a section id is a published name, so the bound is
   # the widest name this daemon can serve rather than a round number.
   @max_section_bytes 128
+  # The address a browser ended on after a shared X handle pairing, bounded as
+  # the authorization link it answers is.
+  @max_callback_url_bytes 2_048
 
   @type route_result :: Protocol.route_result()
 
@@ -188,6 +196,13 @@ defmodule FermixCore.Management.Router do
 
   defp route_known("imessage.policy.confirm", %{}, opts),
     do: operation_result(IMessage.policy_confirm(operation_opts(opts)))
+
+  defp route_known("x.status", %{}, opts), do: operation_result(X.status(x_opts(opts)))
+  defp route_known("x.pair.start", params, opts), do: x_start(params, opts)
+  defp route_known("x.pair.get", params, opts), do: x_session(:get, params, opts)
+  defp route_known("x.pair.paste", params, opts), do: x_paste(params, opts)
+  defp route_known("x.pair.cancel", params, opts), do: x_session(:cancel, params, opts)
+  defp route_known("x.unpair", %{}, opts), do: operation_result(X.unpair(x_opts(opts)))
 
   defp setup_detect(params, opts) do
     with :ok <- reject_unknown_params(params, @detect_params),
@@ -395,6 +410,55 @@ defmodule FermixCore.Management.Router do
     end
   end
 
+  # An absent origin is the daemon's own Connect, which is what a client that
+  # names none asks for; a present one is refused here only for its type and
+  # size, and the operation says in its own sentence what an origin must be.
+  defp x_start(params, opts) do
+    with :ok <- reject_unknown_params(params, @x_start_params),
+         {:ok, origin} <- fetch_origin(params) do
+      operation_result(X.pair_start(origin, x_opts(opts)))
+    end
+  end
+
+  defp x_session(action, params, opts) do
+    with {:ok, session_id} <- fetch_string(params, "session_id", @x_session_params) do
+      result =
+        case action do
+          :get -> X.pair_get(session_id, x_opts(opts))
+          :cancel -> X.pair_cancel(session_id, x_opts(opts))
+        end
+
+      operation_result(result)
+    end
+  end
+
+  # The address is refused here only for its type and size: the session reads
+  # it by its loopback's own rules, and one that settles nothing changes nothing.
+  defp x_paste(params, opts) do
+    with {:ok, session_id} <- fetch_string(params, "session_id", @x_paste_params),
+         {:ok, url} <- fetch_callback_url(params) do
+      operation_result(X.pair_paste(session_id, url, x_opts(opts)))
+    end
+  end
+
+  defp fetch_callback_url(params) do
+    case Map.get(params, "url") do
+      url
+      when is_binary(url) and byte_size(url) > 0 and byte_size(url) <= @max_callback_url_bytes ->
+        {:ok, url}
+
+      _invalid ->
+        invalid_params("url")
+    end
+  end
+
+  defp fetch_origin(params) do
+    case Map.get(params, "origin") do
+      nil -> {:ok, nil}
+      _present -> fetch_text(params, "origin", 1)
+    end
+  end
+
   defp fetch_boolean(params, field) do
     case Map.get(params, field) do
       value when is_boolean(value) -> {:ok, value}
@@ -419,6 +483,7 @@ defmodule FermixCore.Management.Router do
   defp operation_opts(opts), do: Keyword.get(opts, :operation_opts, [])
   defp jobs_opts(opts), do: opts |> operation_opts() |> Keyword.get(:jobs, [])
   defp mobile_opts(opts), do: opts |> operation_opts() |> Keyword.get(:mobile, [])
+  defp x_opts(opts), do: opts |> operation_opts() |> Keyword.get(:x, [])
 
   defp settings_sections(opts) do
     inventory =
@@ -488,6 +553,9 @@ defmodule FermixCore.Management.Router do
 
   defp operation_result({:error, {:unavailable, capability}}),
     do: {:error, :unavailable, %{"capability" => capability}}
+
+  defp operation_result({:error, {:unavailable, capability, sentence}}),
+    do: {:error, :unavailable, %{"capability" => capability, "sentence" => sentence}}
 
   defp operation_result({:error, {:invalid_params, field, sentence}}),
     do: {:error, :invalid_params, %{"field" => field, "sentence" => sentence}}

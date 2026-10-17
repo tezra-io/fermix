@@ -39,6 +39,10 @@ defmodule FermixChannels.Application do
       FermixChannels.Mobile.Management
     )
 
+    # The shared X handle's `x.*` management methods (M63) resolve their
+    # provider the same way: core never compiles against the channel.
+    Application.put_env(:fermix_core, :x_management_provider, FermixChannels.X.Management)
+
     # `/health` reports the Telegram poller's degraded posture. Core must not
     # compile-depend on channels, so the poller registers itself here; the
     # provider is present iff this application runs.
@@ -71,6 +75,10 @@ defmodule FermixChannels.Application do
          serve?: daemon_boot?(), settle?: settles?(), boot_epoch: request_boot_epoch},
         # The Fermix app's browser host socket; it runs whenever the daemon does.
         {BrowserHost.Supervisor, serve?: daemon_boot?()},
+        # The X pairing session (M63) runs on every boot, the channel on or
+        # off, because pairing is what the channel waits for. It holds nothing
+        # until a session starts, so a test tree runs it the same way.
+        FermixChannels.X.PairSession,
         FermixChannels.Gateway.BackgroundSupervisor,
         FermixChannels.Gateway.Commands.Sandbox.Confirmations,
         FermixChannels.Gateway.Commands.Soul.Confirmations,

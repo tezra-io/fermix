@@ -109,6 +109,7 @@ defmodule FermixCore.Setup.Wizard do
           | {:mobile_port, pos_integer()}
           | {:mobile_bind, String.t()}
           | {:mobile_advertise_mdns, boolean() | String.t()}
+          | {:x_enabled, boolean() | String.t()}
           | {:user_name, String.t()}
           | {:timezone, String.t()}
           | {:communication_style, String.t()}
@@ -792,6 +793,7 @@ defmodule FermixCore.Setup.Wizard do
       |> put_acp_config(answers)
       |> put_network_config(answers)
       |> put_mobile_config(answers)
+      |> put_x_config(answers)
       |> put_channel_owner_user_ids(answers)
       |> put_personalization(answers)
       |> put_skill_curation_enabled(Keyword.get(answers, :skill_curation_enabled))
@@ -2547,6 +2549,17 @@ defmodule FermixCore.Setup.Wizard do
 
   defp refuse_mobile_bind,
     do: raise(ArgumentError, "Listen on must be an IP address, such as `0.0.0.0`.")
+
+  # The shared X handle channel's one operator setting (M63): its switch, merged
+  # into `[fermix_channels.x]`. The pairing is a key file and a record under the
+  # Fermix home, never a setting, so nothing else is written here, and an
+  # absent answer changes nothing.
+  defp put_x_config(snapshot, answers) do
+    case normalize_realtime_bool(Keyword.get(answers, :x_enabled), :x_enabled) do
+      nil -> snapshot
+      enabled? -> put_channel_key(snapshot, :x, :enabled, enabled?)
+    end
+  end
 
   # A real enable switch, and it runs AFTER the credential writers on purpose:
   # `put_channel_config/4` turns a channel on whenever a credential arrives, so

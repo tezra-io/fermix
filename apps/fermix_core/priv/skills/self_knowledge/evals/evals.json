@@ -88,6 +88,14 @@
         "invokes skill self_knowledge",
         "says no phone app is released yet, and that the phone channel's turns run in the Mac chat's one agent conversation: one history, so what is said on either is read by the next turn on the other (a voice call's tasks in the chat included), and one turn queue, so a message from one waits for a running turn from the other; a cancel stops only its own request, and /new from either starts the conversation afresh for both"
       ]
+    },
+    {
+      "name": "shared_x_handle_not_the_plugin",
+      "prompt": "Can people mention the Fermix account on X and get an answer from their own Fermix? Is that the same as the X plugin I already connected?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "says the shared X handle is a separate channel through Fermix Connect, Tezra's hosted service, which routes each mention by its author's verified X identity to that person's own paired Fermix and is the only thing that posts (one reply of at most 280 characters, in shadow mode until X's approval), that it is not the X plugin, whose tools act as the owner's own account, and that no app can pair with it yet and no hosted Connect runs yet"
+      ]
     }
   ]
 }

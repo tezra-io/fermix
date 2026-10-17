@@ -39,7 +39,7 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
   alias FermixCore.Config
 
   @type trust :: :local_operator
-  @type ingress_auth :: :paired_device
+  @type ingress_auth :: :paired_device | :connect_assignment
   @type platform :: :macos
 
   @type channel :: %{
@@ -170,6 +170,22 @@ defmodule FermixChannels.Gateway.ChannelRegistry do
       child: FermixChannels.Mobile.Supervisor,
       # The child reads `enabled` itself, so the switch is live (M51 §5.5).
       live_switch: true
+    },
+    # The shared X handle (M63). The supervised child dials OUT to Fermix
+    # Connect over an authenticated WebSocket, like Discord's gateway, so the
+    # transport is `:gateway`; nothing listens on this machine. A turn is
+    # admitted by the Connect assignment the channel verified and stored
+    # (`ingress_auth`), never by a sender list, and runs as a guest. Its hard
+    # rules are code: no slash commands here, and the adapter is final-only.
+    %{
+      name: "x",
+      config_key: :x,
+      adapter: FermixChannels.Channels.X,
+      remote?: true,
+      ingress_auth: :connect_assignment,
+      commands?: false,
+      transport: :gateway,
+      child: FermixChannels.X.Supervisor
     },
     %{
       name: "cli",

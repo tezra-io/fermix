@@ -63,6 +63,7 @@ defmodule FermixCore.Setup.ConfigStore do
 
   @mobile_keys ~w(enabled iroh mode port bind advertise_mdns streaming max_media_bytes media_store_max_bytes push)
   @mobile_push_keys ~w(enabled team_id key_id key topic environment)
+  @x_keys ~w(enabled)
 
   @type runtime_config :: %{
           fermix_core: keyword(),
@@ -150,7 +151,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: Application.get_env(:fermix_channels, :signal, []),
         acp: Application.get_env(:fermix_channels, :acp, []),
         mobile: Application.get_env(:fermix_channels, :mobile, []),
-        imessage: Application.get_env(:fermix_channels, :imessage, [])
+        imessage: Application.get_env(:fermix_channels, :imessage, []),
+        x: Application.get_env(:fermix_channels, :x, [])
       ],
       fermix_web: Application.get_env(:fermix_web, :listener, [])
     }
@@ -281,6 +283,7 @@ defmodule FermixCore.Setup.ConfigStore do
     apply_channel_config(:acp, Keyword.get(persisted.fermix_channels, :acp, []))
     apply_channel_config(:mobile, Keyword.get(persisted.fermix_channels, :mobile, []))
     apply_channel_config(:imessage, Keyword.get(persisted.fermix_channels, :imessage, []))
+    apply_channel_config(:x, Keyword.get(persisted.fermix_channels, :x, []))
     apply_web_config(Map.get(persisted, :fermix_web, []))
   end
 
@@ -559,7 +562,12 @@ defmodule FermixCore.Setup.ConfigStore do
           snapshot
           |> Map.get(:fermix_channels, [])
           |> Keyword.get(:imessage, [])
-          |> normalize_imessage()
+          |> normalize_imessage(),
+        x:
+          snapshot
+          |> Map.get(:fermix_channels, [])
+          |> Keyword.get(:x, [])
+          |> normalize_x()
       ],
       fermix_web: snapshot |> Map.get(:fermix_web, []) |> normalize_web() |> web_to_keyword()
     }
@@ -675,7 +683,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: [],
         acp: [],
         mobile: [],
-        imessage: []
+        imessage: [],
+        x: []
       ],
       fermix_web: []
     }
@@ -1159,6 +1168,7 @@ defmodule FermixCore.Setup.ConfigStore do
       render_section(["fermix_channels", "acp"], Keyword.get(channels, :acp, [])),
       render_mobile(Keyword.get(channels, :mobile, [])),
       render_section(["fermix_channels", "imessage"], Keyword.get(channels, :imessage, [])),
+      render_section(["fermix_channels", "x"], Keyword.get(channels, :x, [])),
       render_section(["fermix_web"], web),
       render_mcp(Map.fetch!(snapshot, :mcp))
     ]
@@ -1478,7 +1488,8 @@ defmodule FermixCore.Setup.ConfigStore do
         signal: normalize_signal(get_in(document, ["fermix_channels", "signal"])),
         acp: normalize_acp(get_in(document, ["fermix_channels", "acp"])),
         mobile: normalize_mobile(get_in(document, ["fermix_channels", "mobile"])),
-        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"]))
+        imessage: normalize_imessage(get_in(document, ["fermix_channels", "imessage"])),
+        x: normalize_x(get_in(document, ["fermix_channels", "x"]))
       ],
       fermix_web: normalize_web(get_in(document, ["fermix_web"]))
     }
@@ -2811,6 +2822,21 @@ defmodule FermixCore.Setup.ConfigStore do
     end
 
     fields
+  end
+
+  # The shared X handle channel (M63): `enabled` is the whole block. The Connect
+  # origin and the pairing are a record under the Fermix home rather than
+  # settings, so any other key refuses the load by name instead of being kept.
+  # One boolean normalizes to itself, so the block needs no `to_keyword/1`.
+  defp normalize_x(nil), do: []
+
+  defp normalize_x(config) when is_map(config) or is_list(config) do
+    validate_mobile_keys!(config, @x_keys, "x")
+    put_if_present([], :enabled, normalize_mobile_boolean(config, :enabled, "x"))
+  end
+
+  defp normalize_x(config) do
+    raise ArgumentError, "invalid x config #{inspect(config)}; expected a table"
   end
 
   defp normalize_mobile(nil), do: []

@@ -1135,6 +1135,211 @@ defmodule FermixCore.Management.RouterTest do
     end
   end
 
+  # The parameter checks and the refusal mapping for the shared X handle's
+  # pairing (M63): the provider is a fake, so nothing here dials Fermix Connect.
+  @x_callback_url "http://127.0.0.1:53682/callback?code=EXAMPLE&state=EXAMPLE"
+
+  describe "x operations" do
+    test "every method answers through the provider it is handed" do
+      session = x_session(:awaiting_browser)
+      url = "https://connect.fermix.ai/confirm/EXAMPLE?response_type=code&state=EXAMPLE"
+
+      assert {:ok, %{"state" => "awaiting_browser", "confirm_url" => ^url}} =
+               Router.route(v2("x.pair.start"), x({:ok, %{session: session, confirm_url: url}}))
+
+      for {method, params} <- [
+            {"x.pair.get", %{"session_id" => "xs-1"}},
+            {"x.pair.paste", %{"session_id" => "xs-1", "url" => @x_callback_url}},
+            {"x.pair.cancel", %{"session_id" => "xs-1"}}
+          ] do
+        assert {:ok, %{"session_id" => "xs-1", "state" => "awaiting_browser"}} =
+                 Router.route(v2(method, params), x({:ok, session})),
+               "#{method} did not answer the session view"
+      end
+
+      assert {:ok, %{"instance_id" => "ins_1", "unpaired" => true}} =
+               Router.route(v2("x.unpair"), x({:ok, %{instance_id: "ins_1"}}))
+
+      assert {:ok, %{"connection" => "off"}} = Router.route(v2("x.status"), x({:ok, x_status()}))
+    end
+
+    test "a start takes an optional origin and nothing else" do
+      reply = x({:ok, %{session: x_session(:awaiting_browser), confirm_url: "https://c/p"}})
+      staging = %{"origin" => "https://staging.connect.fermix.ai"}
+
+      assert {:ok, %{"origin" => "https://connect.fermix.ai"}} =
+               Router.route(v2("x.pair.start"), reply)
+
+      assert {:ok, _view} = Router.route(v2("x.pair.start", staging), reply)
+
+      for origin <- [1, "", %{}, String.duplicate("a", 257)] do
+        assert {:error, :invalid_params, %{"field" => "origin"}} =
+                 Router.route(v2("x.pair.start", %{"origin" => origin}), reply),
+               "#{inspect(origin)} was taken as an origin"
+      end
+
+      assert {:error, :invalid_params,
+              %{"field" => "origin", "sentence" => "The Fermix Connect address" <> _rest}} =
+               Router.route(v2("x.pair.start", %{"origin" => "http://example.com"}), reply)
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("x.pair.start", %{"extra" => 1}), reply)
+    end
+
+    test "the no-parameter methods refuse parameters rather than ignoring them" do
+      for method <- ~w(x.status x.unpair) do
+        assert {:error, :invalid_params, %{"method" => ^method}} =
+                 Router.route(v2(method, %{"extra" => 1}), x({:ok, x_status()})),
+               "#{method} ignored an unexpected parameter"
+      end
+    end
+
+    test "a session method needs its id and nothing else" do
+      for method <- ~w(x.pair.get x.pair.cancel) do
+        assert {:error, :invalid_params, %{"field" => "session_id"}} =
+                 Router.route(v2(method, %{}), x({:ok, x_session(:expired)}))
+
+        assert {:error, :invalid_params, %{"field" => "extra"}} =
+                 Router.route(
+                   v2(method, %{"session_id" => "xs-1", "extra" => 1}),
+                   x({:ok, x_session(:expired)})
+                 )
+      end
+    end
+
+    test "a paste needs a session id and an address, and nothing else" do
+      session = x({:ok, x_session(:awaiting_browser)})
+
+      assert {:error, :invalid_params, %{"field" => "session_id"}} =
+               Router.route(v2("x.pair.paste", %{"url" => @x_callback_url}), session)
+
+      for url <- [nil, "", 1, String.duplicate("a", 2_049)] do
+        params = %{"session_id" => "xs-1", "url" => url}
+
+        assert {:error, :invalid_params, %{"field" => "url"}} =
+                 Router.route(v2("x.pair.paste", params), session),
+               "#{inspect(url)} was taken as an address"
+      end
+
+      long = "http://127.0.0.1:1/callback?code=" <> String.duplicate("a", 2_015)
+      assert byte_size(long) == 2_048
+
+      assert {:ok, _view} =
+               Router.route(v2("x.pair.paste", %{"session_id" => "xs-1", "url" => long}), session)
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(
+                 v2("x.pair.paste", %{
+                   "session_id" => "xs-1",
+                   "url" => @x_callback_url,
+                   "extra" => 1
+                 }),
+                 session
+               )
+    end
+
+    test "a second session is busy, and an unretained one answers its own code" do
+      assert {:error, :busy, %{"operation" => "x.pair"}} =
+               Router.route(v2("x.pair.start"), x({:error, :pairing_active}))
+
+      for {method, params} <- [
+            {"x.pair.get", %{"session_id" => "xs-gone"}},
+            {"x.pair.paste", %{"session_id" => "xs-gone", "url" => @x_callback_url}},
+            {"x.pair.cancel", %{"session_id" => "xs-gone"}}
+          ] do
+        assert {:error, :unknown_pairing_session, %{"session_id" => "xs-gone"}} =
+                 Router.route(v2(method, params), x({:error, :unknown_pairing_session}))
+      end
+    end
+
+    test "a refusal with a sentence rides its own code with the sentence" do
+      params = %{"session_id" => "xs-1", "url" => @x_callback_url}
+
+      assert {:error, :invalid_params,
+              %{
+                "field" => "session_id",
+                "sentence" => "This pairing is no longer waiting for the browser."
+              }} = Router.route(v2("x.pair.paste", params), x({:error, :pairing_not_waiting}))
+
+      assert {:error, :unavailable,
+              %{
+                "capability" => "x",
+                "sentence" => "This Fermix is not paired with Fermix Connect."
+              }} = Router.route(v2("x.unpair"), x({:error, :not_paired}))
+    end
+
+    test "a start the operator can act on is a failed view, not an envelope" do
+      assert {:ok, view} = Router.route(v2("x.pair.start"), x({:error, :already_paired}))
+
+      assert %{"state" => "failed", "session_id" => nil, "confirm_url" => nil} = view
+      assert %{"code" => "refused", "sentence" => sentence} = view["failure"]
+      assert sentence =~ "already paired"
+    end
+
+    test "a provider that is absent or exits names the capability, never the reason" do
+      exits = fn -> exit(:noproc) end
+
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, :unavailable, %{"capability" => "x"}} =
+                 Router.route(v2("x.status"), operation_opts: [x: [provider: nil]])
+
+        assert {:error, :unavailable, %{"capability" => "x"}} =
+                 Router.route(v2("x.unpair"), x(exits))
+      end)
+    end
+
+    test "every x method is refused on a v1 session with the version it requires" do
+      for method <- ~w(x.status x.pair.start x.pair.get x.pair.paste x.pair.cancel x.unpair) do
+        assert {:error, :method_not_found, %{"method" => ^method, "requires" => 2}} =
+                 Router.route(request(method), x({:ok, x_status()}))
+      end
+    end
+  end
+
+  defmodule FakeXProvider do
+    @moduledoc false
+
+    def status(opts), do: answer(opts)
+    def pair_start(_origin, opts), do: answer(opts)
+    def pair_get(_session_id, opts), do: answer(opts)
+    def pair_paste(_session_id, _url, opts), do: answer(opts)
+    def pair_cancel(_session_id, opts), do: answer(opts)
+    def unpair(opts), do: answer(opts)
+
+    defp answer(opts) do
+      case Keyword.fetch!(opts, :reply) do
+        reply when is_function(reply, 0) -> reply.()
+        reply -> reply
+      end
+    end
+  end
+
+  defp x(reply), do: [operation_opts: [x: [provider: FakeXProvider, reply: reply]]]
+
+  defp x_session(state) do
+    %{
+      session_id: "xs-1",
+      state: state,
+      ttl_ms: nil,
+      origin: "https://connect.fermix.ai",
+      handle: nil,
+      failure: nil
+    }
+  end
+
+  defp x_status do
+    %{
+      enabled: false,
+      paired: nil,
+      connection: :off,
+      refusal: nil,
+      pending: 0,
+      running: 0,
+      last_failure: nil,
+      pairing: nil
+    }
+  end
+
   defmodule FakeMobileProvider do
     @moduledoc false
 

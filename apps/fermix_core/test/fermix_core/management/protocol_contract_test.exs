@@ -704,7 +704,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # no seam at all: it reads and writes nothing, so the shape under test is
       # the live projection rather than an injected stand-in.
       {"plugins.list", %{}, []}
-    ] ++ settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases()
+    ] ++ settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases() ++ x_cases()
   end
 
   # Facts in the shape the phone channel hands over. `pair_get` answers a phone
@@ -818,6 +818,79 @@ defmodule FermixCore.Management.ProtocolContractTest do
       {"mobile.pair.cancel", session, opts},
       {"mobile.devices.list", %{}, opts},
       {"mobile.devices.revoke", %{"device_id" => "3f4a1a55-69a0-4f8a-9132-17d6ac728f84"}, opts}
+    ]
+  end
+
+  # Facts in the shape the shared X handle channel hands over (M63). Each answer
+  # is the state the first golden for its method illustrates: a paired,
+  # connected channel, a session waiting for the owner's browser on start, and
+  # one waiting for the owner's decision on a read.
+  defmodule FakeXProvider do
+    @moduledoc false
+
+    @session_id "9a1d4c7e-2b3f-4e5a-8c6d-0f1e2d3c4b5a"
+    @instance_id "ins_5c8e1a2b9d40"
+    @fingerprint "3f9a 1c2e 7b4d 05a8 9e61 c4b2 0d7f 5a33 81e6 2f0c 9b47 d15e 6a08 c3f2 47b9 e05d"
+
+    def status(_opts) do
+      {:ok,
+       %{
+         enabled: true,
+         paired: %{
+           instance_id: @instance_id,
+           handle: "@sam_at_home",
+           fingerprint: @fingerprint,
+           origin: "https://connect.fermix.ai",
+           tenant_generation: 1,
+           paired_at: "2026-10-16T05:00:00Z"
+         },
+         connection: :connected,
+         refusal: nil,
+         pending: 1,
+         running: 1,
+         last_failure: %{at: "2026-10-16T04:58:12Z", reason: :connection_lost},
+         pairing: %{session_id: @session_id, state: :approved}
+       }}
+    end
+
+    def pair_start(_origin, _opts) do
+      {:ok,
+       %{
+         session: session(:awaiting_browser, 600_000, nil),
+         confirm_url: "https://connect.fermix.ai/confirm/EXAMPLE-ONE-USE-TOKEN?response_type=code"
+       }}
+    end
+
+    def pair_get(_session_id, _opts), do: {:ok, session(:awaiting_browser, 412_000, nil)}
+    def pair_paste(_session_id, _url, _opts), do: {:ok, session(:awaiting_browser, 398_000, nil)}
+    def pair_cancel(_session_id, _opts), do: {:ok, session(:cancelled, nil, nil)}
+    def unpair(_opts), do: {:ok, %{instance_id: @instance_id}}
+
+    defp session(state, ttl_ms, handle) do
+      %{
+        session_id: @session_id,
+        state: state,
+        ttl_ms: ttl_ms,
+        origin: "https://connect.fermix.ai",
+        handle: handle,
+        failure: nil
+      }
+    end
+  end
+
+  # The six shared X handle methods against the fake above.
+  defp x_cases do
+    opts = [operation_opts: [x: [provider: FakeXProvider]]]
+    session = %{"session_id" => "9a1d4c7e-2b3f-4e5a-8c6d-0f1e2d3c4b5a"}
+
+    [
+      {"x.status", %{}, opts},
+      {"x.pair.start", %{}, opts},
+      {"x.pair.get", session, opts},
+      {"x.pair.paste", Map.put(session, "url", "http://127.0.0.1:53682/callback?code=EXAMPLE"),
+       opts},
+      {"x.pair.cancel", session, opts},
+      {"x.unpair", %{}, opts}
     ]
   end
 

@@ -470,6 +470,82 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
     assert presentation =~ "iMessage"
   end
 
+  # M63: the shared X handle is a channel through Fermix Connect, not the X
+  # plugin, and nothing an owner can install pairs with it yet. The body and
+  # the reference must both say what it is, that it is not the plugin, how it
+  # is switched and paired, the guest rules of an X turn and shadow mode, and
+  # that no sheet and no hosted Connect exist yet. The refutations name the
+  # claims that would walk an owner into a pairing that cannot happen, or into
+  # the plugin, and a dotted version number, which the skill never carries.
+  test "documents the shared X handle: Connect, not the plugin, guest turns, and not yet available" do
+    paragraph = x_paragraph()
+    reference = "x" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    assert paragraph != "", "self-knowledge never mentions the shared X handle"
+    assert paragraph =~ ~s(file: "x")
+    assert channels_paragraph() =~ "the shared X handle"
+
+    for text <- [paragraph, reference] do
+      for required <- [
+            "Fermix Connect",
+            "not the X plugin",
+            "[fermix_channels.x]",
+            "channels.x",
+            "x.*",
+            "x.unpair",
+            "guest",
+            "USER.md",
+            "MEMORY.md",
+            "280 characters",
+            "shadow mode",
+            "No Mac or Linux sheet",
+            "no hosted Connect runs yet",
+            "never walk"
+          ] do
+        assert text =~ required, "shared X handle self-knowledge does not mention #{required}"
+      end
+
+      refute text =~ ~r/\bv?\d+\.\d+(\.\d+)?\b/, "shared X handle self-knowledge names a version"
+      refute text =~ "x_create_post"
+      refute text =~ "fermix plugins auth login x"
+      refute text =~ ~r/(?i)pairing (works|is available) today/
+      # The ceremony the loopback sign-in replaced: a local decision after the
+      # owner compared a fingerprint.
+      refute text =~ "x.pair.decide"
+      refute text =~ "awaiting_decision"
+      refute text =~ "start, decide, cancel or undo"
+    end
+
+    for required <- [
+          "Only the owner can pair this Fermix with Fermix Connect or unpair it, " <>
+            "from their own app or terminal.",
+          "https://connect.fermix.ai",
+          "x.pair.start",
+          "x.pair.paste",
+          "x.pair.get",
+          "x.status",
+          "awaiting_browser",
+          "loopback",
+          "Connect account page",
+          "not_paired",
+          "revoked",
+          "15 minutes",
+          "FERMIX_HOME/x/instance_key",
+          "unlinked",
+          "send_to_channel"
+        ] do
+      assert reference =~ required, "the x reference does not mention #{required}"
+    end
+  end
+
+  defp x_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.starts_with?(&1, "**Shared X handle**"))
+    |> Enum.join("\n\n")
+  end
+
   defp channels_paragraph do
     self_knowledge_path()
     |> File.read!()

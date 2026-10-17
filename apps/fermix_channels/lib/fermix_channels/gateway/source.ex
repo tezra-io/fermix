@@ -25,7 +25,7 @@ defmodule FermixChannels.Gateway.Source do
     :transport_auth
   ]
 
-  @type transport_auth :: {:mobile_device, String.t()}
+  @type transport_auth :: {:mobile_device, String.t()} | {:connect_assignment, String.t()}
 
   @type t :: %__MODULE__{
           channel: String.t(),
@@ -65,6 +65,16 @@ defmodule FermixChannels.Gateway.Source do
     case String.trim(device_id) do
       "" -> nil
       normalized -> {:mobile_device, normalized}
+    end
+  end
+
+  # The X channel's pump passes the assignment it verified, stored and was
+  # granted a start for; the Authorizer reads that row again before trusting it.
+  defp normalize_transport_auth("x", %{transport: :x, assignment_id: assignment_id})
+       when is_binary(assignment_id) do
+    case String.trim(assignment_id) do
+      "" -> nil
+      normalized -> {:connect_assignment, normalized}
     end
   end
 

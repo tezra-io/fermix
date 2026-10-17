@@ -46,6 +46,7 @@ defmodule Fermix.CLI.Daemon do
   alias FermixCore.Management.Protocol, as: ManagementProtocol
   alias FermixCore.Management.Router, as: ManagementRouter
   alias FermixCore.Management.Text
+  alias FermixCore.Management.X, as: ManagementX
   alias FermixCore.Observability
   alias FermixCore.Plugins.Runtime, as: PluginsRuntime
   alias FermixCore.SocketPath
@@ -73,9 +74,13 @@ defmodule Fermix.CLI.Daemon do
   @max_profile_bytes 256
   # The owner's decisions on the phone channel, in both protocol versions:
   # opening a pairing window (its link carries the pairing secret), deciding
-  # on the phone that asked, closing the window, and forgetting a phone.
+  # on the phone that asked, closing the window, and forgetting a phone. The
+  # shared X handle's pairing with Fermix Connect is the same kind of decision
+  # (M63): its authorization link, and the address a browser pasted back,
+  # bind this machine to the owner's X account.
   @owner_decisions_v1 ~w(mobile.pair.start mobile.pair.decide mobile.pair.cancel
-                         mobile.devices.revoke)
+                         mobile.devices.revoke x.pair.start x.pair.paste x.pair.cancel
+                         x.unpair)
   @owner_decisions_v0 ~w(mobile_pair_begin mobile_pair_decide mobile_pair_cancel
                          mobile_device_revoke)
 
@@ -324,7 +329,7 @@ defmodule Fermix.CLI.Daemon do
     result =
       case owner_caller(request.method, @owner_decisions_v1, conn, state) do
         :ok -> route_management_request(request, state)
-        {:error, _verdict} -> owner_decision_refusal()
+        {:error, _verdict} -> owner_decision_refusal(request.method)
       end
 
     response = management_response(request.request_id, result)
@@ -344,8 +349,13 @@ defmodule Fermix.CLI.Daemon do
 
   # The same code as a channel that cannot answer, with its own sentence: the
   # channel is fine and doctor says so, so "not running" would send the
-  # operator after the wrong fault.
-  defp owner_decision_refusal do
+  # operator after the wrong fault. Each family names its own capability.
+  defp owner_decision_refusal("x." <> _rest) do
+    {:error, :unavailable,
+     %{"capability" => "x", "sentence" => ManagementX.owner_only_sentence()}}
+  end
+
+  defp owner_decision_refusal(_method) do
     {:error, :unavailable,
      %{"capability" => "mobile", "sentence" => ManagementMobile.owner_only_sentence()}}
   end
@@ -354,7 +364,7 @@ defmodule Fermix.CLI.Daemon do
 
   defp placed_owner(method, verdict) do
     Logger.warning(
-      "Refused #{method}: only the owner may pair or forget a phone, " <>
+      "Refused #{method}: only the owner may make this pairing decision, " <>
         "and the caller was placed as #{inspect(verdict)}"
     )
 

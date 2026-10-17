@@ -4,6 +4,8 @@ defmodule FermixCore.ReadinessTest do
   alias FermixCore.Auth.ChatGPT
   alias FermixCore.Auth.Store
   alias FermixCore.IMessage.HelperInstaller
+  alias FermixCore.Management.X, as: ManagementX
+  alias FermixCore.Net.Egress
   alias FermixCore.Readiness
   alias FermixCore.Sandbox.Config, as: SandboxConfig
   alias FermixCore.Sandbox.Env
@@ -265,6 +267,80 @@ defmodule FermixCore.ReadinessTest do
 
     defp restore(app, key, {:ok, value}), do: Application.put_env(app, key, value)
     defp restore(app, key, :error), do: Application.delete_env(app, key)
+  end
+
+  # M63: the shared X handle ships off; switched on with no usable pairing it
+  # is a named refusal and a row, never a silent no-op, and a proxy that would
+  # carry its socket is a second row. Every world is injected: core does not
+  # compile against the channel that reads the pairing.
+  describe "x" do
+    @paired {:ok, %{origin: "https://connect.fermix.example"}, <<0::256>>}
+    @direct %Egress{}
+
+    defp proxied(bypass \\ []),
+      do: Egress.new(proxy: "http://proxy.fermix.example:3128", proxy_bypass: bypass)
+
+    defp x_rows(opts), do: Readiness.x_failures(opts)
+
+    test "off is never a row, whatever the pairing" do
+      assert x_rows(enabled?: false, pairing: {:error, :unpaired}, egress: proxied()) == []
+    end
+
+    test "on and unpaired is the not_paired refusal, in the daemon's sentence" do
+      assert [row] = x_rows(enabled?: true, pairing: {:error, :unpaired}, egress: @direct)
+
+      assert row == %{
+               component: "channel:x",
+               action: ManagementX.refusal_sentence(:not_paired),
+               gating: false,
+               pane: "channels",
+               detail_key: "channel:x:not_paired"
+             }
+    end
+
+    test "on with a record or key that cannot be read is the pairing_invalid refusal" do
+      for pairing <- [{:error, {:invalid_record, :not_json}}, {:error, {:instance_key, :gone}}] do
+        assert [%{detail_key: "channel:x:pairing_invalid", action: action}] =
+                 x_rows(enabled?: true, pairing: pairing, egress: @direct)
+
+        assert action == ManagementX.refusal_sentence(:pairing_invalid)
+      end
+    end
+
+    test "on and paired with a direct route is no row" do
+      assert x_rows(enabled?: true, pairing: @paired, egress: @direct) == []
+    end
+
+    test "a proxy that would carry the socket adds its own row" do
+      assert [%{detail_key: "channel:x:proxy_unsupported", action: action}] =
+               x_rows(enabled?: true, pairing: @paired, egress: proxied())
+
+      assert action == ManagementX.refusal_sentence(:proxy_unsupported)
+
+      # Unpaired, the route judged is the daemon's own Connect, and both rows show.
+      assert ["channel:x:not_paired", "channel:x:proxy_unsupported"] =
+               [enabled?: true, pairing: {:error, :unpaired}, egress: proxied()]
+               |> x_rows()
+               |> Enum.map(& &1.detail_key)
+
+      # A host the operator lists as reached directly is no row.
+      assert x_rows(
+               enabled?: true,
+               pairing: @paired,
+               egress: proxied(["connect.fermix.example"])
+             ) == []
+    end
+
+    test "without the channels app there is no channel to report on" do
+      assert x_rows(enabled?: true, pairing: :no_channel, egress: proxied()) == []
+    end
+
+    test "its sentences are published for the copy gate" do
+      keys = Enum.map(Readiness.published_actions(), &elem(&1, 0))
+
+      for key <- ~w(channel:x:not_paired channel:x:pairing_invalid channel:x:proxy_unsupported),
+          do: assert(key in keys)
+    end
   end
 
   describe "personalization_failure/0" do

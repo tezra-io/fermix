@@ -8,11 +8,13 @@ defmodule FermixTestSupport.WireSchema do
   extending a schema with an unsupported keyword breaks the test that reads it
   instead of quietly weakening the gate. `x-max-bytes` is enforced (a bound in
   bytes of UTF-8, which `maxLength` cannot say); every other `x-` keyword is
-  an annotation.
+  an annotation. `additionalProperties` sees only the `properties` beside it in
+  the same schema object, as JSON Schema defines it: `false` refuses every
+  other key, and a schema checks each other key's value.
   """
 
   @inert_keywords ~w($schema $id $defs title description contentMediaType)
-  @checked_elsewhere ~w(if then contentSchema)
+  @checked_elsewhere ~w(if then contentSchema additionalProperties)
 
   @doc """
   The problems `value` has against `schema`, resolving `$ref`s in `root`.
@@ -22,6 +24,7 @@ defmodule FermixTestSupport.WireSchema do
   def errors(value, schema, root) when is_map(schema) and is_map(root) do
     conditional_errors(schema, value, root) ++
       content_errors(schema, value, root) ++
+      additional_errors(schema, value, root) ++
       Enum.flat_map(Map.drop(schema, @checked_elsewhere), &keyword_errors(&1, value, root))
   end
 
@@ -91,6 +94,23 @@ defmodule FermixTestSupport.WireSchema do
   end
 
   defp content_errors(_schema, _value, _root), do: []
+
+  # The keys a sibling `properties` does not name, checked against the rule.
+  defp additional_errors(%{"additionalProperties" => rule} = schema, value, root)
+       when is_map(value) do
+    named = schema |> Map.get("properties", %{}) |> Map.keys()
+    extra = value |> Map.keys() |> Enum.reject(&(&1 in named)) |> Enum.sort()
+
+    Enum.flat_map(extra, &additional_key_errors(rule, &1, Map.fetch!(value, &1), root))
+  end
+
+  defp additional_errors(_schema, _value, _root), do: []
+
+  defp additional_key_errors(true, _key, _value, _root), do: []
+  defp additional_key_errors(false, key, _value, _root), do: ["unexpected #{key}"]
+
+  defp additional_key_errors(rule, key, value, root) when is_map(rule),
+    do: Enum.map(errors(value, rule, root), &"#{key}: #{&1}")
 
   defp keyword_errors({"$ref", "#/$defs/" <> name}, value, root),
     do: errors(value, Map.fetch!(root["$defs"], name), root)

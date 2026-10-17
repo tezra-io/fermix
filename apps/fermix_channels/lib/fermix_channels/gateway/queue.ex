@@ -451,7 +451,8 @@ defmodule FermixChannels.Gateway.Queue do
             :stream_spec,
             :activity_callback,
             :turn_result_fn,
-            :terminal_error_owner?
+            :terminal_error_owner?,
+            :final_only?
           ])
           |> Map.put(:__runtime_context_cache_status, cache_status)
 
@@ -549,7 +550,7 @@ defmodule FermixChannels.Gateway.Queue do
 
         core_msg
         |> runner.commit(turn_state, response, context_tokens)
-        |> maybe_notify_compacted(turn.deliver, VoiceCall.from_message(core_msg))
+        |> maybe_notify_compacted(turn, VoiceCall.from_message(core_msg))
 
         {:completed}
     end
@@ -724,7 +725,7 @@ defmodule FermixChannels.Gateway.Queue do
     case side_effect_marker(turn) do
       nil ->
         emit_empty_completion_telemetry(turn)
-        turn.deliver.({:text, @empty_completion_reply})
+        deliver_notice(turn, @empty_completion_reply)
 
       marker ->
         append_marker(turn, marker)
@@ -778,19 +779,27 @@ defmodule FermixChannels.Gateway.Queue do
   # Live hand-off (M56 §4.1): its reply route is the call's spoken result, so
   # the notice would be spoken after the answer. The trusted voice context
   # decides, the same gate as the stopped-marker store.
-  defp maybe_notify_compacted(:compacted, _deliver, {:ok, _voice_call}), do: :ok
+  #
+  # Neither this notice nor the empty-completion retry reaches a final-only
+  # channel (`:final_only?`, the shared X handle): its text closure stages the
+  # turn's one result, so either sentence would become the published reply.
+  # An empty turn reaches it as `{:completed}` with nothing staged.
+  defp maybe_notify_compacted(:compacted, _turn, {:ok, _voice_call}), do: :ok
 
-  defp maybe_notify_compacted(:compacted, deliver, :none) when is_function(deliver, 1) do
-    deliver.(
-      {:text,
-       "🗜️ Trimmed older conversation history to stay within the context window — " <>
-         "long-term memory is kept."}
+  defp maybe_notify_compacted(:compacted, turn, :none) do
+    deliver_notice(
+      turn,
+      "🗜️ Trimmed older conversation history to stay within the context window — " <>
+        "long-term memory is kept."
     )
 
     :ok
   end
 
-  defp maybe_notify_compacted(_result, _deliver, _voice_call), do: :ok
+  defp maybe_notify_compacted(_result, _turn, _voice_call), do: :ok
+
+  defp deliver_notice(%{msg: %{final_only?: true}}, _text), do: :ok
+  defp deliver_notice(turn, text), do: turn.deliver.({:text, text})
 
   # The log line and the `agent_unavailable` event are operator diagnostics and
   # fire for every channel. Only the canned user-facing text is suppressed for a

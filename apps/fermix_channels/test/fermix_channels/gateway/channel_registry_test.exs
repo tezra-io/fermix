@@ -117,13 +117,15 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       assert ChannelRegistry.commands?("matrix")
     end
 
-    test "the shipped opt-outs are exactly the machine surfaces" do
+    # The shared X handle (M63) opts out too: its turns are public mentions, and
+    # no mention may reach daemon administration.
+    test "the shipped opt-outs are exactly the machine surfaces and the shared X handle" do
       opted_out =
         ChannelRegistry.channels()
         |> Enum.reject(&ChannelRegistry.commands?(&1.name))
         |> Enum.map(& &1.name)
 
-      assert opted_out == ["acp", "voice"]
+      assert opted_out == ["acp", "voice", "x"]
     end
 
     test "false only when the entry opts out" do
@@ -188,7 +190,7 @@ defmodule FermixChannels.Gateway.ChannelRegistryTest do
       # ingress check may name. Whether its transport runs is the platform
       # gate's question (`transport_children/2`), not this list's.
       assert Enum.sort(remote) ==
-               [:acp, :discord, :imessage, :mobile, :signal, :slack, :telegram, :whatsapp]
+               [:acp, :discord, :imessage, :mobile, :signal, :slack, :telegram, :whatsapp, :x]
 
       refute nil in remote
     end

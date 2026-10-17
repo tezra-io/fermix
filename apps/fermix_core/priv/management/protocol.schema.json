@@ -121,7 +121,13 @@
     "browser.install.start": 2,
     "imessage.permissions.get": 2,
     "imessage.grant.start": 2,
-    "imessage.policy.confirm": 2
+    "imessage.policy.confirm": 2,
+    "x.status": 2,
+    "x.pair.start": 2,
+    "x.pair.get": 2,
+    "x.pair.paste": 2,
+    "x.pair.cancel": 2,
+    "x.unpair": 2
   },
   "$defs": {
     "request": {
@@ -185,7 +191,13 @@
             "browser.install.start",
             "imessage.permissions.get",
             "imessage.grant.start",
-            "imessage.policy.confirm"
+            "imessage.policy.confirm",
+            "x.status",
+            "x.pair.start",
+            "x.pair.get",
+            "x.pair.paste",
+            "x.pair.cancel",
+            "x.unpair"
           ]
         },
         "params": { "type": "object" }
@@ -534,6 +546,48 @@
             "properties": { "method": { "const": "imessage.policy.confirm" } }
           },
           "then": { "properties": { "params": { "$ref": "#/$defs/imessage_policy_confirm_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.status" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_status_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.pair.start" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_pair_start_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.pair.get" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_pair_get_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.pair.paste" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_pair_paste_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.pair.cancel" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_pair_cancel_params" } } }
+        },
+        {
+          "if": {
+            "required": ["method"],
+            "properties": { "method": { "const": "x.unpair" } }
+          },
+          "then": { "properties": { "params": { "$ref": "#/$defs/x_unpair_params" } } }
         }
       ]
     },
@@ -648,7 +702,13 @@
         { "$ref": "#/$defs/browser_install_start_result" },
         { "$ref": "#/$defs/imessage_permissions_get_result" },
         { "$ref": "#/$defs/imessage_grant_start_result" },
-        { "$ref": "#/$defs/imessage_policy_confirm_result" }
+        { "$ref": "#/$defs/imessage_policy_confirm_result" },
+        { "$ref": "#/$defs/x_status_result" },
+        { "$ref": "#/$defs/x_pair_start_result" },
+        { "$ref": "#/$defs/x_pair_get_result" },
+        { "$ref": "#/$defs/x_pair_paste_result" },
+        { "$ref": "#/$defs/x_pair_cancel_result" },
+        { "$ref": "#/$defs/x_unpair_result" }
       ]
     },
     "hello_params": { "type": "object", "maxProperties": 0, "additionalProperties": false },
@@ -2557,6 +2617,160 @@
       "properties": {
         "device_id": { "type": "string" },
         "revoked": { "const": true }
+      }
+    },
+    "xPairingSession": {
+      "type": "object",
+      "description": "Every field is always present, null where it does not apply. `state` is the switch: `awaiting_browser` while the owner signs in with X and approves in the browser and the engine waits for the browser to return to its loopback (or for `x.pair.paste`), then `approved` (`handle` names the X account Connect paired), `denied`, `expired`, `cancelled` or `failed` (`failure` is set, with the daemon's sentence). `ttl_ms` is relative and null once the session is terminal. `origin` is the Fermix Connect the session dials.",
+      "required": ["session_id", "state", "ttl_ms", "origin", "handle", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": ["string", "null"], "maxLength": 256 },
+        "state": { "enum": ["awaiting_browser", "approved", "denied", "expired", "cancelled", "failed"] },
+        "ttl_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "origin": { "type": "string", "maxLength": 256 },
+        "handle": { "type": ["string", "null"], "maxLength": 64 },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/pairingFailure" }, { "type": "null" }] }
+      }
+    },
+    "xStatus": {
+      "type": "object",
+      "description": "The shared X handle channel as it stands, answered with the channel off too. `enabled` is the switch. `paired` is this installation's pairing with Fermix Connect, or null. `connection` is `off` (the channel is not running), `refused` (it could not start: `refusal` says why), `connecting`, `connected` (the socket to Connect is up, which is not the same as every route being healthy) or `down` (lost, retrying). `pending` counts mentions accepted and not yet started, `running` the one being answered. `last_failure` is the newest failure in the daemon's words. `pairing` is the open pairing session, else the newest retained one, else null.",
+      "required": ["enabled", "paired", "connection", "refusal", "pending", "running", "last_failure", "pairing"],
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "paired": {
+          "oneOf": [
+            {
+              "type": "object",
+              "description": "`fingerprint` is the SHA-256 of this installation's public key, lowercase hex in 16 groups of four. `tenant_generation` grows when Connect re-links the owner's X account.",
+              "required": ["instance_id", "handle", "fingerprint", "origin", "tenant_generation", "paired_at"],
+              "additionalProperties": false,
+              "properties": {
+                "instance_id": { "type": "string", "maxLength": 256 },
+                "handle": { "type": "string", "maxLength": 64 },
+                "fingerprint": { "type": "string", "pattern": "^[0-9a-f]{4}( [0-9a-f]{4}){15}$" },
+                "origin": { "type": "string", "maxLength": 256 },
+                "tenant_generation": { "type": "integer", "minimum": 1 },
+                "paired_at": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "connection": { "enum": ["off", "refused", "connecting", "connected", "down"] },
+        "refusal": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["reason", "sentence"],
+              "additionalProperties": false,
+              "properties": {
+                "reason": { "enum": ["not_paired", "pairing_invalid", "memory_disabled", "proxy_unsupported", "revoked"] },
+                "sentence": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "pending": { "type": "integer", "minimum": 0 },
+        "running": { "type": "integer", "minimum": 0 },
+        "last_failure": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["at", "sentence"],
+              "additionalProperties": false,
+              "properties": {
+                "at": { "type": "string" },
+                "sentence": { "type": "string" }
+              }
+            },
+            { "type": "null" }
+          ]
+        },
+        "pairing": {
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["session_id", "state"],
+              "additionalProperties": false,
+              "properties": {
+                "session_id": { "type": "string", "maxLength": 256 },
+                "state": { "enum": ["awaiting_browser", "approved", "denied", "expired", "cancelled", "failed"] }
+              }
+            },
+            { "type": "null" }
+          ]
+        }
+      }
+    },
+    "x_status_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "x_status_result": { "$ref": "#/$defs/xStatus" },
+    "x_pair_start_params": {
+      "type": "object",
+      "description": "`origin` names the Fermix Connect to pair with: `https://` and a host, no path. Absent means the daemon's own, `https://connect.fermix.ai`.",
+      "required": [],
+      "additionalProperties": false,
+      "properties": { "origin": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "x_pair_start_result": {
+      "type": "object",
+      "description": "The session view plus the authorization link, returned once, on the call that opens the session; a later read carries the session view alone. `confirm_url` is Fermix Connect's confirmation link with this attempt's authorization request appended, whose redirect is the engine's own loopback; the pane opens it in the browser. It carries a one-use token, so it is never logged and never retained. A start that opened nothing answers `failed` with a null `session_id` and a null `confirm_url`.",
+      "required": ["session_id", "state", "ttl_ms", "origin", "handle", "failure", "confirm_url"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": ["string", "null"], "maxLength": 256 },
+        "state": { "enum": ["awaiting_browser", "approved", "denied", "expired", "cancelled", "failed"] },
+        "ttl_ms": { "type": ["integer", "null"], "minimum": 0 },
+        "origin": { "type": "string", "maxLength": 256 },
+        "handle": { "type": ["string", "null"], "maxLength": 64 },
+        "failure": { "oneOf": [{ "$ref": "#/$defs/pairingFailure" }, { "type": "null" }] },
+        "confirm_url": { "type": ["string", "null"], "maxLength": 2048 }
+      }
+    },
+    "x_pair_get_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "x_pair_get_result": { "$ref": "#/$defs/xPairingSession" },
+    "x_pair_paste_params": {
+      "type": "object",
+      "description": "`url` is the address the browser ended on, for a machine whose browser is elsewhere: the engine reads it by its loopback's own rules, and one that is not this attempt's changes nothing.",
+      "required": ["session_id", "url"],
+      "additionalProperties": false,
+      "properties": {
+        "session_id": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "url": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "x_pair_paste_result": { "$ref": "#/$defs/xPairingSession" },
+    "x_pair_cancel_params": {
+      "type": "object",
+      "required": ["session_id"],
+      "additionalProperties": false,
+      "properties": { "session_id": { "type": "string", "minLength": 1, "maxLength": 256 } }
+    },
+    "x_pair_cancel_result": { "$ref": "#/$defs/xPairingSession" },
+    "x_unpair_params": {
+      "type": "object",
+      "required": [],
+      "additionalProperties": false
+    },
+    "x_unpair_result": {
+      "type": "object",
+      "required": ["instance_id", "unpaired"],
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": { "type": "string", "maxLength": 256 },
+        "unpaired": { "const": true }
       }
     },
     "logEntry": {

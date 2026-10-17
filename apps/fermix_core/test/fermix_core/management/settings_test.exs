@@ -52,7 +52,7 @@ defmodule FermixCore.Management.SettingsTest do
     :secret_writer,
     :secret_store
   ]
-  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage]
+  @channel_keys [:telegram, :whatsapp, :discord, :slack, :signal, :acp, :mobile, :imessage, :x]
 
   @row_fields ~w(
     key kind label footer info advanced value present options min max step restart read_only
@@ -1460,6 +1460,54 @@ defmodule FermixCore.Management.SettingsTest do
   # The managed task browser's pane. Its first row is the launcher's answer,
   # injected here so the host's own Chrome never decides a verdict; the other
   # three are the `[fermix_core.browser]` keys a person sets.
+  # The shared X handle channel (M63) has one switch and no credential: Fermix
+  # Connect holds the X account's grant, and the pairing is a key file and a
+  # record under the Fermix home rather than a setting.
+  describe "the shared X handle section" do
+    test "publishes one boot-bound switch, off by default, under the channels pane" do
+      Application.delete_env(:fermix_channels, :x)
+
+      assert %{id: "channels.x", pane: "channels", title: "X (shared handle)"} in Settings.sections()
+
+      assert [row] = rows("channels.x")
+
+      assert %{
+               "key" => "x_enabled",
+               "kind" => "toggle",
+               "label" => "Answer mentions of the shared X account",
+               "footer" =>
+                 "Needs pairing with Fermix Connect. Takes effect the next time Fermix starts.",
+               "value" => false,
+               "restart" => true,
+               "read_only" => false,
+               "advanced" => false
+             } = row
+    end
+
+    test "a write lands in the settings file and the running configuration", %{home: home} do
+      Application.put_env(:fermix_channels, :x, enabled: false)
+
+      assert {:ok, result} = Settings.apply("channels.x", %{"x_enabled" => true})
+
+      assert result["applied"] == ["x_enabled"]
+      assert Application.get_env(:fermix_channels, :x) == [enabled: true]
+      assert row("channels.x", "x_enabled")["value"] == true
+      assert settings_file(home) =~ ~r/\[fermix_channels\.x\]\nenabled = true\n/
+    end
+
+    test "a value that is not a switch is refused and leaves the block as it was" do
+      Application.put_env(:fermix_channels, :x, enabled: false)
+
+      assert {:error, {:invalid_params, "x_enabled", _sentence}} =
+               Settings.apply("channels.x", %{"x_enabled" => 1})
+
+      assert {:error, {:invalid_params, "x_origin", _sentence}} =
+               Settings.apply("channels.x", %{"x_origin" => "https://connect.fermix.ai"})
+
+      assert Application.get_env(:fermix_channels, :x) == [enabled: false]
+    end
+  end
+
   describe "the browser section" do
     test "publishes the browser in force and three live settings with their defaults" do
       Application.delete_env(:fermix_core, :browser)
@@ -1790,6 +1838,32 @@ defmodule FermixCore.Management.SettingsTest do
 
       assert Enum.sort(mobile[:push]) ==
                Enum.sort(enabled: false, team_id: "TEAM123456", topic: "ai.fermix.app")
+    end
+
+    # One boolean normalizes to itself, so the X block needs no `to_keyword/1`;
+    # what has to hold is that a write from the live shape loads back the same
+    # and that a key the block does not have refuses the load by name.
+    test "a shared X handle section write survives being written and read back", %{home: home} do
+      Application.put_env(:fermix_channels, :x, enabled: false)
+
+      assert {:ok, _result} = Settings.apply("channels.x", %{"x_enabled" => true})
+
+      assert {:ok, reloaded} = ConfigStore.load_runtime_config()
+      assert reloaded |> Map.get(:fermix_channels, []) |> Keyword.get(:x) == [enabled: true]
+
+      path = Path.join(home, "config.toml")
+      block = "[fermix_channels.x]\nenabled = true\n"
+      written = File.read!(path)
+      assert written =~ block
+
+      File.write!(
+        path,
+        String.replace(written, block, block <> "origin = \"https://connect.fermix.ai\"\n")
+      )
+
+      assert_raise ArgumentError, ~r/invalid x config; unknown key\(s\): origin/, fn ->
+        ConfigStore.load_runtime_config()
+      end
     end
 
     test "a second save on top of a loaded file is stable" do

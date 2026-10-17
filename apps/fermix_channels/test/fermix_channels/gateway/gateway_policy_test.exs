@@ -264,10 +264,13 @@ defmodule FermixChannels.Gateway.PolicyTest do
       assert :ok = ingest("hello", RawChannel)
       assert_receive {:agent_message, owning_message}
       assert owning_message.terminal_error_owner? == true
+      # It streams (raw), so it is not final-only: the queue's sentences reach it.
+      refute Map.has_key?(owning_message, :final_only?)
 
       assert :ok = ingest("hello", PlainChannel)
       assert_receive {:agent_message, plain_message}
       refute Map.has_key?(plain_message, :terminal_error_owner?)
+      refute Map.has_key?(plain_message, :final_only?)
     end
 
     test "a plain adapter carries none of the optional keys" do

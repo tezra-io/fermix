@@ -9,6 +9,7 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
   alias FermixCore.Auth.Store
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.Management.X, as: ManagementX
   alias FermixCore.Net.Egress
   alias FermixCore.Setup.ConfigStore
 
@@ -2141,6 +2142,25 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.detail =~ "whatsapp=owner missing (sole allowed id runs as guest)"
     end
 
+    # M63: a Connect assignment is the shared X handle's own authority, as a
+    # paired phone is the mobile channel's, so it never has an owner to set.
+    test "treats a Connect assignment as its channel's own command authority" do
+      report = [
+        %{
+          channel: :x,
+          enabled: true,
+          owner_user_id: nil,
+          sole_allowed_id?: false,
+          command_allowlist: []
+        }
+      ]
+
+      result = Checks.command_owner_config(report)
+
+      assert result.status == :ok
+      assert result.detail == "x=connect-assignment authority, enabled=true, allowlist=0"
+    end
+
     test "treats paired-device mobile ingress as its own command authority" do
       for channel <- [:telegram, :whatsapp, :discord, :slack, :signal] do
         Application.put_env(:fermix_channels, channel, enabled: false)
@@ -2153,6 +2173,90 @@ defmodule Fermix.CLI.Doctor.ChecksTest do
       assert result.status == :ok
       assert result.detail =~ "mobile=paired-device authority"
       refute result.detail =~ "owner_user_id not set for enabled channels: mobile"
+    end
+  end
+
+  # M63: the X channel's row, from what `X.Management.status/1` answers. The
+  # tree-less world that call reads is the channels app's own test; here each
+  # answer it can give is rendered.
+  describe "x_channel/1" do
+    @x_paired %{
+      instance_id: "ins_7f3c2a9e1b4d",
+      handle: "@sujeeth",
+      fingerprint:
+        "2a1e d79c 35b7 a963 7370 487b 7fee 27f8 1ba6 d553 c7c0 f76d 6c33 ff97 921a a61f",
+      origin: "https://connect.fermix.ai",
+      tenant_generation: 1,
+      paired_at: "2026-10-16T05:00:00Z"
+    }
+
+    defp x_status(overrides) do
+      {:ok,
+       Map.merge(
+         %{
+           enabled: false,
+           paired: nil,
+           connection: :off,
+           refusal: nil,
+           pending: 0,
+           running: 0,
+           last_failure: nil,
+           pairing: nil
+         },
+         overrides
+       )}
+    end
+
+    defp x_row(overrides), do: Checks.x_channel(status: x_status(overrides))
+
+    test "off, paired or not, is fine and says which" do
+      assert %{name: "x channel", status: :ok, detail: "off; not paired with Fermix Connect"} =
+               x_row(%{})
+
+      assert %{status: :ok, detail: detail} = x_row(%{paired: @x_paired})
+
+      assert detail ==
+               "off; paired as @sujeeth with https://connect.fermix.ai, key " <>
+                 @x_paired.fingerprint
+    end
+
+    test "on and refused warns in the daemon's own sentence" do
+      for reason <- [
+            :not_paired,
+            :pairing_invalid,
+            :memory_disabled,
+            :proxy_unsupported,
+            :revoked
+          ] do
+        assert %{status: :warn, detail: detail} =
+                 x_row(%{enabled: true, connection: :refused, refusal: reason})
+
+        assert detail == ManagementX.refusal_sentence(reason)
+      end
+    end
+
+    test "on and paired names the pairing and, inside the daemon, the connection" do
+      on = %{enabled: true, paired: @x_paired}
+
+      assert %{status: :ok, detail: "on; paired as @sujeeth" <> rest} = x_row(on)
+      refute rest =~ ";" <> " conn"
+
+      assert %{status: :ok, detail: connected} = x_row(Map.put(on, :connection, :connected))
+      assert String.ends_with?(connected, "; connected")
+
+      assert %{status: :ok, detail: down} = x_row(Map.put(on, :connection, :down))
+      assert String.ends_with?(down, "; connection lost, retrying")
+    end
+
+    test "a socket another one replaced warns that only a restart dials again" do
+      assert %{status: :warn, detail: detail} =
+               x_row(%{enabled: true, paired: @x_paired, connection: :refused})
+
+      assert detail =~ "replaced this one, restart Fermix"
+    end
+
+    test "without the channels app the row does not apply" do
+      assert %{status: :not_applicable} = Checks.x_channel(status: :no_channel)
     end
   end
 

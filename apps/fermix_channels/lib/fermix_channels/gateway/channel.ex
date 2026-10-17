@@ -131,7 +131,13 @@ defmodule FermixChannels.Gateway.Channel do
   """
   @callback build_turn_result(message()) :: (term() -> any())
 
-  @doc "Whether the turn-result callback exclusively owns terminal error delivery."
+  @doc """
+  Whether the turn-result callback exclusively owns terminal error delivery.
+
+  A channel that answers `:turn_result` and declares no `stream_capability/0`
+  is final-only: the gateway never streams its turns, whatever its config says,
+  and the turn's one result is all the channel renders.
+  """
   @callback terminal_error_capability() :: :turn_result | :legacy
 
   @doc "Create the live draft message. Returns a handle for later edits."

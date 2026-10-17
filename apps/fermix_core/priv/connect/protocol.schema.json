@@ -1,0 +1,595 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://fermix.sh/connect/protocol.schema.json",
+  "title": "Fermix Connect protocol",
+  "description": "The wire contract between a Fermix installation (the x channel) and Fermix Connect: the HTTPS enrollment calls, the WebSocket frames and the signed assignment. See PROTOCOL.md. An optional field is absent, never null. Everything the installation sends, everything a signature covers, the pairing record and the proof answer that seeds it are closed (additionalProperties false). Other server answers and server frames name what they require and stay open to the additive optional fields section 7 allows, so an installation ignores a field it does not know.",
+  "x-protocol-version": 1,
+  "x-websocket-subprotocol": "fermix-connect.v1",
+  "x-limits": {
+    "session_ttl_s": 900,
+    "max_assignment_bytes": 32768,
+    "max_result_bytes": 16384,
+    "hello_deadline_s": 5,
+    "enrollment_ttl_s": 600,
+    "signed_request_skew_s": 60,
+    "issued_at_skew_s": 60,
+    "max_context_posts": 8,
+    "max_context_text_chars": 12000,
+    "max_public_text_weighted_chars": 280
+  },
+  "$defs": {
+    "opaqueId": {
+      "description": "An identifier Connect mints (enrollment, instance, assignment, interaction, Connect key). Opaque to the installation.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{1,64}$"
+    },
+    "xId": {
+      "description": "An X numeric id as a decimal string.",
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$"
+    },
+    "handle": {
+      "type": "string",
+      "pattern": "^@[A-Za-z0-9_]{1,15}$"
+    },
+    "timestamp": {
+      "description": "RFC 3339 in UTC with a Z suffix.",
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,6})?Z$"
+    },
+    "origin": {
+      "description": "The scheme and host the installation dialed: https, a lowercase host, an optional port, no path and no trailing slash.",
+      "type": "string",
+      "pattern": "^https://[a-z0-9]([a-z0-9-]*[a-z0-9])?(\\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*(:[0-9]{1,5})?$"
+    },
+    "generation": {
+      "description": "A positive integer that only ever grows.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "attempt": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "publicKey": {
+      "description": "A raw 32-byte Ed25519 public key, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "nonce": {
+      "description": "32 random bytes, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "signature": {
+      "description": "A 64-byte Ed25519 signature, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{86}$"
+    },
+    "keyId": {
+      "description": "\"k\" followed by the first 16 hex characters of SHA-256 of the instance public key.",
+      "type": "string",
+      "pattern": "^k[0-9a-f]{16}$"
+    },
+    "fingerprint": {
+      "description": "The full SHA-256 of the instance public key, lowercase hex in 16 groups of four separated by single spaces. Shown to the owner, never sent by the installation.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{4}( [0-9a-f]{4}){15}$"
+    },
+    "sha256Hex": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "authorizationCode": {
+      "description": "The one-use code Connect mints when the owner approves in the browser: 32 random bytes, base64url without padding.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{43}$"
+    },
+    "codeVerifier": {
+      "description": "The PKCE verifier (RFC 7636): 43 to 128 unreserved characters the installation keeps and never sends to a browser.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9._~-]{43,128}$"
+    },
+    "authorizationState": {
+      "description": "The value the installation chooses for one authorization attempt and its loopback checks on the callback.",
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]{16,128}$"
+    },
+    "pairingRecord": {
+      "description": "FERMIX_HOME/x/pairing.json, written once the key proof is accepted and deleted on unpair. Not a setting: every value is checked against Connect's own state.",
+      "type": "object",
+      "required": [
+        "version",
+        "origin",
+        "instance_id",
+        "tenant_id",
+        "handle",
+        "key_id",
+        "key_generation",
+        "tenant_generation",
+        "connect_key_id",
+        "connect_public_key",
+        "paired_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "version": { "const": 1 },
+        "origin": { "$ref": "#/$defs/origin" },
+        "instance_id": { "$ref": "#/$defs/opaqueId" },
+        "tenant_id": { "$ref": "#/$defs/xId" },
+        "handle": { "$ref": "#/$defs/handle" },
+        "key_id": { "$ref": "#/$defs/keyId" },
+        "key_generation": { "$ref": "#/$defs/generation" },
+        "tenant_generation": { "$ref": "#/$defs/generation" },
+        "connect_key_id": { "$ref": "#/$defs/opaqueId" },
+        "connect_public_key": { "$ref": "#/$defs/publicKey" },
+        "paired_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "enrollmentCreateRequest": {
+      "description": "POST /v1/enrollments body.",
+      "type": "object",
+      "required": ["protocol_version", "public_key", "key_id", "label"],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "public_key": { "$ref": "#/$defs/publicKey" },
+        "key_id": { "$ref": "#/$defs/keyId" },
+        "label": {
+          "description": "How the confirmation page names the installation: no control characters and no space at either end. Connect trims it and counts at most 64 graphemes; this bound is in code points, which are never fewer.",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64
+        }
+      }
+    },
+    "enrollmentCreateAnswer": {
+      "description": "POST /v1/enrollments, 201. `confirm_url` is `<origin>/confirm/<token>` with no query or fragment: the installation appends the authorization request (section 2.1) as its query.",
+      "type": "object",
+      "required": ["enrollment_id", "confirm_url", "expires_at"],
+      "properties": {
+        "enrollment_id": { "$ref": "#/$defs/opaqueId" },
+        "confirm_url": { "type": "string", "pattern": "^https://[^/?#]+/confirm/[A-Za-z0-9_-]+$" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "authorizationRequest": {
+      "description": "The query the installation appends to `confirm_url` and opens in the owner's browser (section 2.1; RFC 6749 section 4.1.1 with RFC 7636 PKCE). `client_id` is the enrollment's `key_id`; `redirect_uri` is the installation's own loopback on any port from 1 to 65535; `scope` is empty, and Connect ignores it.",
+      "type": "object",
+      "required": ["response_type", "client_id", "redirect_uri", "scope", "code_challenge", "code_challenge_method", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "response_type": { "const": "code" },
+        "client_id": { "$ref": "#/$defs/keyId" },
+        "redirect_uri": {
+          "type": "string",
+          "pattern": "^http://127\\.0\\.0\\.1:(6553[0-5]|655[0-2][0-9]|65[0-4][0-9]{2}|6[0-4][0-9]{3}|[1-5][0-9]{4}|[1-9][0-9]{0,3})/callback$"
+        },
+        "scope": { "const": "" },
+        "code_challenge": {
+          "description": "BASE64URL(SHA-256(code_verifier)).",
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]{43}$"
+        },
+        "code_challenge_method": { "const": "S256" },
+        "state": { "$ref": "#/$defs/authorizationState" }
+      }
+    },
+    "authorizationCallback": {
+      "description": "The query of the loopback request Connect's 303 sends the browser to: `code` and the attempt's `state` on approval, `error` `access_denied` and the `state` on denial, never both. The installation reads a pasted address by the same rules.",
+      "type": "object",
+      "required": ["state"],
+      "properties": {
+        "code": { "$ref": "#/$defs/authorizationCode" },
+        "error": { "const": "access_denied" },
+        "state": { "$ref": "#/$defs/authorizationState" }
+      },
+      "oneOf": [{ "required": ["code"] }, { "required": ["error"] }]
+    },
+    "proveRequest": {
+      "description": "POST /v1/enrollments/{enrollment_id}/prove body: the code the browser delivered, the verifier it was minted against, and Ed25519 over `fermix-connect-enroll|<origin>|<enrollment_id>|<code>`.",
+      "type": "object",
+      "required": ["code", "code_verifier", "signature"],
+      "additionalProperties": false,
+      "properties": {
+        "code": { "$ref": "#/$defs/authorizationCode" },
+        "code_verifier": { "$ref": "#/$defs/codeVerifier" },
+        "signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "proveAnswer": {
+      "description": "POST /v1/enrollments/{enrollment_id}/prove, 200. Seeds the pairing record.",
+      "type": "object",
+      "required": [
+        "instance_id",
+        "tenant_id",
+        "handle",
+        "key_generation",
+        "tenant_generation",
+        "connect_key_id",
+        "connect_public_key"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "instance_id": { "$ref": "#/$defs/opaqueId" },
+        "tenant_id": { "$ref": "#/$defs/xId" },
+        "handle": { "$ref": "#/$defs/handle" },
+        "key_generation": { "$ref": "#/$defs/generation" },
+        "tenant_generation": { "$ref": "#/$defs/generation" },
+        "connect_key_id": { "$ref": "#/$defs/opaqueId" },
+        "connect_public_key": { "$ref": "#/$defs/publicKey" }
+      }
+    },
+    "httpError": {
+      "description": "Every enrollment and instance call's error body, with the HTTP status it belongs to. The sentence never says whether an id exists.",
+      "type": "object",
+      "required": ["error"],
+      "properties": {
+        "error": {
+          "type": "object",
+          "required": ["code", "sentence"],
+          "properties": {
+            "code": { "type": "string", "pattern": "^[a-z][a-z0-9_]*$" },
+            "sentence": { "type": "string", "minLength": 1 }
+          }
+        }
+      }
+    },
+    "signedRequestHeaders": {
+      "description": "The Fermix headers on DELETE /v1/instances/{instance_id}. The signature is Ed25519 over `fermix-connect-request|<origin>|DELETE|/v1/instances/<instance_id>|<timestamp>`.",
+      "type": "object",
+      "required": ["X-Fermix-Instance", "X-Fermix-Key-Id", "X-Fermix-Timestamp", "X-Fermix-Signature"],
+      "properties": {
+        "X-Fermix-Instance": { "$ref": "#/$defs/opaqueId" },
+        "X-Fermix-Key-Id": { "$ref": "#/$defs/keyId" },
+        "X-Fermix-Timestamp": { "$ref": "#/$defs/timestamp" },
+        "X-Fermix-Signature": { "$ref": "#/$defs/signature" }
+      }
+    },
+    "socketUpgradeHeaders": {
+      "description": "The Fermix headers on GET /v1/connect. No secret travels in the upgrade.",
+      "type": "object",
+      "required": ["X-Fermix-Instance", "X-Fermix-Key-Id", "Sec-WebSocket-Protocol"],
+      "properties": {
+        "X-Fermix-Instance": { "$ref": "#/$defs/opaqueId" },
+        "X-Fermix-Key-Id": { "$ref": "#/$defs/keyId" },
+        "Sec-WebSocket-Protocol": { "const": "fermix-connect.v1" }
+      }
+    },
+    "close": {
+      "description": "A WebSocket close from Connect. The reason text is informational; the code is what a client switches on.",
+      "type": "object",
+      "required": ["code"],
+      "properties": {
+        "code": { "enum": [4400, 4401, 4408, 4409, 4429, 1012] },
+        "reason": { "type": "string", "x-max-bytes": 123 }
+      }
+    },
+    "serverFrame": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": {
+          "enum": [
+            "challenge",
+            "ready",
+            "assignment",
+            "start_ok",
+            "start_refused",
+            "result_ack",
+            "result_rejected",
+            "cancel"
+          ]
+        }
+      },
+      "allOf": [
+        { "if": { "properties": { "t": { "const": "challenge" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/challenge" } },
+        { "if": { "properties": { "t": { "const": "ready" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/ready" } },
+        { "if": { "properties": { "t": { "const": "assignment" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/assignment" } },
+        { "if": { "properties": { "t": { "const": "start_ok" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/start_ok" } },
+        { "if": { "properties": { "t": { "const": "start_refused" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/start_refused" } },
+        { "if": { "properties": { "t": { "const": "result_ack" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/result_ack" } },
+        { "if": { "properties": { "t": { "const": "result_rejected" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/result_rejected" } },
+        { "if": { "properties": { "t": { "const": "cancel" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/cancel" } }
+      ]
+    },
+    "clientFrame": {
+      "type": "object",
+      "required": ["t"],
+      "properties": {
+        "t": { "enum": ["hello", "receipt", "start", "result", "cancel_ack"] }
+      },
+      "allOf": [
+        { "if": { "properties": { "t": { "const": "hello" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/hello" } },
+        { "if": { "properties": { "t": { "const": "receipt" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/receipt" } },
+        { "if": { "properties": { "t": { "const": "start" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/start" } },
+        { "if": { "properties": { "t": { "const": "result" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/result" } },
+        { "if": { "properties": { "t": { "const": "cancel_ack" } }, "required": ["t"] }, "then": { "$ref": "#/$defs/cancel_ack" } }
+      ]
+    },
+    "challenge": {
+      "description": "Server, first frame.",
+      "type": "object",
+      "required": ["t", "nonce"],
+      "properties": {
+        "t": { "const": "challenge" },
+        "nonce": { "$ref": "#/$defs/nonce" }
+      }
+    },
+    "ready": {
+      "description": "Server, after a hello it accepts.",
+      "type": "object",
+      "required": ["t", "session_ttl_s", "max_assignment_bytes", "max_result_bytes"],
+      "properties": {
+        "t": { "const": "ready" },
+        "session_ttl_s": { "type": "integer", "minimum": 1 },
+        "max_assignment_bytes": { "type": "integer", "minimum": 1 },
+        "max_result_bytes": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "assignment": {
+      "description": "One assignment as a compact JWS (section 4). Resent on every connection until a receipt names it.",
+      "type": "object",
+      "required": ["t", "jws"],
+      "properties": {
+        "t": { "const": "assignment" },
+        "jws": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$",
+          "x-max-bytes": 32768
+        }
+      }
+    },
+    "start_ok": {
+      "type": "object",
+      "required": ["t", "assignment_id", "attempt", "deadline_at"],
+      "properties": {
+        "t": { "const": "start_ok" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt": { "$ref": "#/$defs/attempt" },
+        "deadline_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "start_refused": {
+      "description": "No attempt. Terminal for the installation.",
+      "type": "object",
+      "required": ["t", "assignment_id", "reason"],
+      "properties": {
+        "t": { "const": "start_refused" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "reason": {
+          "enum": ["expired", "cancelled", "suppressed", "stale_generation", "unknown_assignment", "already_settled"]
+        }
+      }
+    },
+    "result_ack": {
+      "type": "object",
+      "required": ["t", "assignment_id", "attempt"],
+      "properties": {
+        "t": { "const": "result_ack" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt": { "$ref": "#/$defs/attempt" }
+      }
+    },
+    "result_rejected": {
+      "description": "Terminal.",
+      "type": "object",
+      "required": ["t", "assignment_id", "attempt", "reason"],
+      "properties": {
+        "t": { "const": "result_rejected" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt": { "$ref": "#/$defs/attempt" },
+        "reason": { "enum": ["conflict", "too_long", "invalid", "stale_attempt", "unknown_assignment"] }
+      }
+    },
+    "cancel": {
+      "type": "object",
+      "required": ["t", "assignment_id", "reason"],
+      "properties": {
+        "t": { "const": "cancel" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "reason": { "enum": ["expired", "suppressed", "unlinked", "revoked", "operator"] }
+      }
+    },
+    "hello": {
+      "description": "Client, within hello_deadline_s of the challenge, its only frame before ready. The signature is Ed25519 over `fermix-connect-session|<origin>|<instance_id>|<nonce>|<protocol_version>`.",
+      "type": "object",
+      "required": ["t", "protocol_version", "signature", "capabilities"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "const": "hello" },
+        "protocol_version": { "const": 1 },
+        "signature": { "$ref": "#/$defs/signature" },
+        "capabilities": {
+          "type": "object",
+          "required": ["final_only", "max_result_bytes"],
+          "additionalProperties": false,
+          "properties": {
+            "final_only": { "const": true },
+            "max_result_bytes": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "receipt": {
+      "description": "Durable local responsibility (`accepted`), or a verification failure (`rejected`, which names its reason). Idempotent.",
+      "type": "object",
+      "required": ["t", "assignment_id", "outcome"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "const": "receipt" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "outcome": { "enum": ["accepted", "rejected"] },
+        "reason": {
+          "enum": ["bad_signature", "wrong_instance", "stale_generation", "expired", "malformed", "over_cap"]
+        }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "outcome": { "const": "rejected" } }, "required": ["outcome"] },
+          "then": { "required": ["reason"] }
+        },
+        {
+          "if": { "properties": { "outcome": { "const": "accepted" } }, "required": ["outcome"] },
+          "then": {
+            "properties": { "t": {}, "assignment_id": {}, "outcome": {} },
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "start": {
+      "type": "object",
+      "required": ["t", "assignment_id"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "const": "start" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "result": {
+      "description": "The one terminal result of an attempt (section 5). `public_text` is present exactly when `decision` is `public_reply`, at most 280 characters as X weighs them (a URL counts 23 whatever its length), so the bound is an annotation rather than maxLength. `result_sha256` is SHA-256 of `decision` + newline + `public_text` (empty when absent).",
+      "type": "object",
+      "required": ["t", "assignment_id", "attempt", "request_sha256", "decision", "result_sha256"],
+      "additionalProperties": false,
+      "x-max-frame-bytes": 16384,
+      "properties": {
+        "t": { "const": "result" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "attempt": { "$ref": "#/$defs/attempt" },
+        "request_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "decision": { "enum": ["public_reply", "private_only", "no_reply", "failed"] },
+        "public_text": { "type": "string", "minLength": 1, "x-max-weighted-characters": 280 },
+        "result_sha256": { "$ref": "#/$defs/sha256Hex" }
+      },
+      "allOf": [
+        {
+          "if": { "properties": { "decision": { "const": "public_reply" } }, "required": ["decision"] },
+          "then": { "required": ["public_text"] }
+        },
+        {
+          "if": {
+            "properties": { "decision": { "enum": ["private_only", "no_reply", "failed"] } },
+            "required": ["decision"]
+          },
+          "then": {
+            "properties": {
+              "t": {},
+              "assignment_id": {},
+              "attempt": {},
+              "request_sha256": {},
+              "decision": {},
+              "result_sha256": {}
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    },
+    "cancel_ack": {
+      "type": "object",
+      "required": ["t", "assignment_id"],
+      "additionalProperties": false,
+      "properties": {
+        "t": { "const": "cancel_ack" },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "jwsHeader": {
+      "description": "The assignment's protected header. The verifier pins the algorithm and matches kid to the pairing record's connect_key_id; it never reads an algorithm, key or key URL from the token.",
+      "type": "object",
+      "required": ["alg", "kid"],
+      "additionalProperties": false,
+      "properties": {
+        "alg": { "const": "EdDSA" },
+        "kid": { "$ref": "#/$defs/opaqueId" }
+      }
+    },
+    "assignmentPayload": {
+      "description": "The signed claims of one assignment (section 4). Nothing in it names a policy, a tool, a path or a prompt.",
+      "type": "object",
+      "required": [
+        "protocol_version",
+        "assignment_id",
+        "interaction_id",
+        "tenant_id",
+        "tenant_generation",
+        "instance_id",
+        "key_generation",
+        "bot_user_id",
+        "requester_x_user_id",
+        "invoking_post_id",
+        "conversation_id",
+        "request_text",
+        "request_sha256",
+        "context",
+        "issued_at",
+        "expires_at"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "protocol_version": { "const": 1 },
+        "assignment_id": { "$ref": "#/$defs/opaqueId" },
+        "interaction_id": { "$ref": "#/$defs/opaqueId" },
+        "tenant_id": { "$ref": "#/$defs/xId" },
+        "tenant_generation": { "$ref": "#/$defs/generation" },
+        "instance_id": { "$ref": "#/$defs/opaqueId" },
+        "key_generation": { "$ref": "#/$defs/generation" },
+        "bot_user_id": { "$ref": "#/$defs/xId" },
+        "requester_x_user_id": { "$ref": "#/$defs/xId" },
+        "invoking_post_id": { "$ref": "#/$defs/xId" },
+        "conversation_id": { "$ref": "#/$defs/xId" },
+        "request_text": { "type": "string", "minLength": 1 },
+        "request_sha256": { "$ref": "#/$defs/sha256Hex" },
+        "context": {
+          "type": "object",
+          "required": ["posts", "truncated"],
+          "additionalProperties": false,
+          "x-max-total-text-chars": 12000,
+          "properties": {
+            "posts": { "type": "array", "maxItems": 8, "items": { "$ref": "#/$defs/contextPost" } },
+            "truncated": { "type": "boolean" }
+          }
+        },
+        "issued_at": { "$ref": "#/$defs/timestamp" },
+        "expires_at": { "$ref": "#/$defs/timestamp" }
+      }
+    },
+    "contextPost": {
+      "description": "One public post the turn may read. A post that could not be read is present with `missing: true` and no `text`, so the model is told what it is not seeing; every other post carries its text, author and time.",
+      "type": "object",
+      "required": ["id", "role"],
+      "additionalProperties": false,
+      "properties": {
+        "id": { "$ref": "#/$defs/xId" },
+        "author_id": { "$ref": "#/$defs/xId" },
+        "author_handle": { "$ref": "#/$defs/handle" },
+        "role": { "enum": ["invoking", "parent", "ancestor", "quoted"] },
+        "text": { "type": "string" },
+        "created_at": { "$ref": "#/$defs/timestamp" },
+        "missing": { "const": true }
+      },
+      "anyOf": [{ "required": ["text"] }, { "required": ["missing"] }],
+      "allOf": [
+        {
+          "if": { "required": ["text"] },
+          "then": { "required": ["author_id", "author_handle", "created_at"] }
+        },
+        {
+          "if": { "required": ["missing"] },
+          "then": {
+            "properties": {
+              "id": {},
+              "author_id": {},
+              "author_handle": {},
+              "role": {},
+              "created_at": {},
+              "missing": {}
+            },
+            "additionalProperties": false
+          }
+        }
+      ]
+    }
+  }
+}

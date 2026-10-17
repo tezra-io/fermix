@@ -505,6 +505,32 @@ defmodule FermixCore.Setup.Doctor do
   end
 
   defp channel_streaming_entry(key, name, config, adapter) do
+    if final_only?(adapter),
+      do: final_only_entry(key, name, config),
+      else: streaming_entry(key, name, config, adapter)
+  end
+
+  # The gateway never streams a final-only channel (one that takes its turn's
+  # terminal result through its own callback and declares no stream tier, the
+  # shared X handle), whatever its config says, so its streaming is off.
+  defp final_only_entry(key, name, config) do
+    %{
+      channel: key,
+      name: name,
+      streaming: "off",
+      derived: "off",
+      explicit?: Keyword.has_key?(config, :streaming),
+      capability: :none
+    }
+  end
+
+  defp final_only?(adapter) when is_atom(adapter) do
+    Code.ensure_loaded?(adapter) and function_exported?(adapter, :terminal_error_capability, 0) and
+      adapter.terminal_error_capability() == :turn_result and
+      not function_exported?(adapter, :stream_capability, 0)
+  end
+
+  defp streaming_entry(key, name, config, adapter) do
     capability = adapter_stream_capability(adapter)
     derived = default_streaming(capability)
 
@@ -855,6 +881,12 @@ defmodule FermixCore.Setup.Doctor do
   # `Fermix.CLI.Doctor.Checks.mobile/1` owns that answer: it asks the running
   # daemon over the control socket, which is the only world that can answer it.
   defp enabled_probe_channel?(%{transport: :listener}), do: false
+
+  # The shared X handle (M63) dials out, but its adapter's health check reads
+  # `X.Pump`, a daemon-only process, so the tree-less VM would answer
+  # `:not_running` for a healthy channel. `Checks.x_channel/1` owns that row,
+  # from the config and the pairing files.
+  defp enabled_probe_channel?(%{ingress_auth: :connect_assignment}), do: false
 
   defp enabled_probe_channel?(%{config_key: key} = channel) when is_atom(key) do
     case FermixCore.Config.channel(key) do

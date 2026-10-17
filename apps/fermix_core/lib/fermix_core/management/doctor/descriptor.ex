@@ -168,6 +168,9 @@ defmodule FermixCore.Management.Doctor.Descriptor do
       spec("acp", :capability, :info, :configured, &Checks.acp/0),
       # M54 §10.4: both read without prompting (the probe asks TCC with
       # `askUserIfNeeded: false`), so both belong in the local catalog.
+      # M63: config and the pairing files, so it reads the same in the daemon
+      # and in the tree-less `fermix doctor` VM.
+      spec("x_channel", :capability, :warning, :configured, &Checks.x_channel/0),
       spec("imessage_helper", :capability, :warning, :platform, &Checks.imessage_helper/0),
       spec(
         "imessage_permissions",

@@ -17,7 +17,7 @@ defmodule FermixCore.Config do
   ]
 
   @type config_error :: {:error, :not_configured}
-  @type ingress_authority :: :config_allowlist | :paired_device | :none
+  @type ingress_authority :: :config_allowlist | :paired_device | :connect_assignment | :none
 
   @spec provider(atom()) :: {:ok, keyword()} | config_error()
   def provider(name) when is_atom(name) do
@@ -115,6 +115,9 @@ defmodule FermixCore.Config do
   @doc "Names the trust source for inbound channel connections."
   @spec channel_ingress_authority(atom()) :: ingress_authority()
   def channel_ingress_authority(:mobile), do: :paired_device
+  # The shared X handle (M63): a turn is admitted by the Connect assignment its
+  # channel verified and stored, never by a sender list.
+  def channel_ingress_authority(:x), do: :connect_assignment
 
   def channel_ingress_authority(name) when is_atom(name) do
     if Keyword.has_key?(@channel_ingress_keys, name), do: :config_allowlist, else: :none

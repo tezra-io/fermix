@@ -14,6 +14,7 @@ defmodule FermixWebWeb.SetupLive.Components do
     {:slack, "Slack"},
     {:signal, "Signal"},
     {:imessage, "iMessage"},
+    {:x, "X (shared handle)"},
     {:acp, "ACP (editors & agent clients)"}
   ]
 
@@ -22,6 +23,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   # dress — transparent ground, label-only rail, unboxed pane, -sm controls.
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
+  # The X card's pairing half: `x.status`, the session in flight, its link
+  # while it waits, whether a pairing call is in flight, and the origin box.
+  attr :x_pairing, :map, required: true
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -132,6 +136,7 @@ defmodule FermixWebWeb.SetupLive.Components do
               active_tab={@active_tab}
               embed?={@embed?}
               channels_form={@channels_form}
+              x_pairing={@x_pairing}
               xai_auth={@xai_auth}
               xai_auth_running?={@xai_auth_running?}
               xai_auth_url={@xai_auth_url}
@@ -286,6 +291,9 @@ defmodule FermixWebWeb.SetupLive.Components do
   attr :active_tab, :string, required: true
   attr :embed?, :boolean, default: false
   attr :channels_form, :map, required: true
+  # The X card's pairing half: `x.status`, the session in flight, its link
+  # while it waits, whether a pairing call is in flight, and the origin box.
+  attr :x_pairing, :map, required: true
   attr :xai_auth, :map, required: true
   attr :xai_auth_running?, :boolean, required: true
   attr :xai_auth_url, :string, default: nil
@@ -1358,13 +1366,232 @@ defmodule FermixWebWeb.SetupLive.Components do
       <form phx-submit="save_channels" class="mt-6 space-y-5">
         <.integration_panel title={@editing_section.title} status={@editing_section.status}>
           <.channel_field :for={field <- @editing_section.fields} field={field} />
+          <.x_pairing_panel :if={@editing == :x} x_pairing={@x_pairing} />
         </.integration_panel>
 
         <.form_actions active_tab={@active_tab} tabs={@tabs} save_label="Save channel" />
       </form>
+      <%!-- The pairing controls sit inside the channel form, so they join these
+            two through their `form` attributes: forms cannot nest. --%>
+      <form :if={@editing == :x} id="x-pair-start-form" phx-submit="x_pair_start"></form>
+      <form :if={@editing == :x} id="x-pair-paste-form" phx-submit="x_pair_paste"></form>
     </div>
     """
   end
+
+  # The pairing half of the X card (M63): what `x.status` says, and the one
+  # ceremony the management contract describes, in the shape of the ChatGPT
+  # sign-in: one button, the link while it waits, a paste box for a browser
+  # elsewhere, and Cancel. Paired, it names the account and offers Unpair.
+  attr :x_pairing, :map, required: true
+
+  defp x_pairing_panel(assigns) do
+    assigns = assign(assigns, :mode, x_pairing_mode(assigns.x_pairing))
+
+    ~H"""
+    <section
+      data-x-pairing-panel="true"
+      class="rounded-field border border-base-300 bg-base-200/40 p-3 @xl:col-span-2"
+    >
+      <div class="flex flex-wrap items-start justify-between gap-3">
+        <p class="text-sm font-medium">Fermix Connect</p>
+        <span class={x_pairing_badge_class(@mode)}>{x_pairing_badge_label(@mode)}</span>
+      </div>
+      <.x_pairing_body mode={@mode} x_pairing={@x_pairing} />
+    </section>
+    """
+  end
+
+  attr :mode, :atom, required: true
+  attr :x_pairing, :map, required: true
+
+  defp x_pairing_body(%{mode: :unavailable} = assigns) do
+    ~H"""
+    <p class="mt-1 text-xs leading-5 text-warning">
+      The X channel could not be read. See the daemon log.
+    </p>
+    """
+  end
+
+  defp x_pairing_body(%{mode: :waiting} = assigns) do
+    ~H"""
+    <p class="mt-1 text-xs leading-5 text-base-content/60">
+      Waiting for your browser. Sign in with X at Fermix Connect and approve this Fermix there.
+    </p>
+    <div
+      :if={@x_pairing.url}
+      class="mt-3 flex flex-wrap items-center justify-between gap-2 rounded-field border border-base-300 bg-base-100/70 px-3 py-2 text-xs text-base-content/65"
+    >
+      <span>If the Fermix Connect tab did not open, use the fallback link.</span>
+      <a
+        class="link link-primary font-medium"
+        href={@x_pairing.url}
+        target="_blank"
+        rel="noopener noreferrer"
+      >
+        Open Fermix Connect
+      </a>
+    </div>
+    <div class="mt-3">
+      <p id="x-pair-paste-caption" class="pb-1 text-xs leading-5 text-base-content/60">
+        If your browser shows that it can't reach 127.0.0.1, copy the address from its address bar and paste it here.
+      </p>
+      <div class="flex flex-wrap gap-2">
+        <input
+          type="text"
+          name="callback_url"
+          form="x-pair-paste-form"
+          aria-describedby="x-pair-paste-caption"
+          autocomplete="off"
+          placeholder="http://127.0.0.1:…/callback?code=…"
+          class="input input-bordered input-sm min-w-0 flex-1 bg-base-100 font-mono"
+        />
+        <button type="submit" form="x-pair-paste-form" class="btn btn-outline btn-sm">
+          Use this address
+        </button>
+      </div>
+    </div>
+    <div class="mt-3">
+      <button
+        type="button"
+        class="btn btn-ghost btn-sm"
+        phx-click="x_pair_cancel"
+        disabled={@x_pairing.busy?}
+      >
+        Cancel
+      </button>
+    </div>
+    """
+  end
+
+  defp x_pairing_body(%{mode: :paired} = assigns) do
+    assigns = assign(assigns, :paired, assigns.x_pairing.status["paired"])
+
+    ~H"""
+    <p class="mt-1 text-xs text-base-content/70">
+      Paired as <span class="font-medium">{@paired["handle"]}</span>
+      at {@paired["origin"]} since {x_paired_at(@paired["paired_at"])}.
+    </p>
+    <p class="mt-1 font-mono text-[11px] text-base-content/50">Key {@paired["fingerprint"]}</p>
+    <p class={["mt-2 text-xs", x_connection_class(@x_pairing.status)]}>
+      {x_connection_text(@x_pairing.status)}
+    </p>
+    <p :if={not @x_pairing.status["enabled"]} class="mt-2 text-xs text-base-content/60">
+      Turn on "Answer mentions of the shared X account" above and save to start answering.
+    </p>
+    <div class="mt-3">
+      <button
+        type="button"
+        class="btn btn-outline btn-sm"
+        phx-click="x_unpair"
+        data-confirm="Unpair this Fermix from Fermix Connect? Your mentions stop reaching it until it is paired again."
+        disabled={@x_pairing.busy?}
+      >
+        Unpair
+      </button>
+    </div>
+    """
+  end
+
+  defp x_pairing_body(%{mode: :unpaired} = assigns) do
+    assigns = assign(assigns, :ending, x_session_ending(assigns.x_pairing.session))
+
+    ~H"""
+    <p class="mt-1 text-xs leading-5 text-base-content/60">
+      Not paired. Sign in with X at Fermix Connect to link this Fermix to your X account; the
+      mentions you make of the shared account are then answered here.
+    </p>
+    <p :if={@ending} class="mt-2 text-xs text-warning">{@ending}</p>
+    <p :if={@x_pairing.status["refusal"]} class="mt-2 text-xs text-warning">
+      {@x_pairing.status["refusal"]["sentence"]}
+    </p>
+    <div class="mt-3 flex flex-wrap items-end gap-2">
+      <label class="form-control min-w-0 flex-1">
+        <span class="label pb-1 text-xs font-medium">Fermix Connect address</span>
+        <input
+          type="text"
+          name="origin"
+          form="x-pair-start-form"
+          value={@x_pairing.origin}
+          autocomplete="off"
+          class="input input-bordered input-sm w-full bg-base-100 font-mono"
+        />
+      </label>
+      <button
+        type="submit"
+        form="x-pair-start-form"
+        data-auth-trigger="true"
+        class="btn btn-primary btn-sm"
+        disabled={@x_pairing.busy?}
+      >
+        Pair with Fermix Connect
+      </button>
+    </div>
+    """
+  end
+
+  @doc """
+  The sentence for a pairing session's ending, as the card and the flash say
+  it; `nil` for a session still open, or none.
+  """
+  @spec x_session_ending(map() | nil) :: String.t() | nil
+  def x_session_ending(%{"state" => "approved", "handle" => handle}) when is_binary(handle),
+    do: "Paired with Fermix Connect as #{handle}."
+
+  def x_session_ending(%{"state" => "approved"}), do: "Paired with Fermix Connect."
+
+  def x_session_ending(%{"state" => "denied"}),
+    do: "Pairing was denied in the browser. Nothing changed."
+
+  def x_session_ending(%{"state" => "expired"}),
+    do: "Pairing expired before the browser came back. Start it again."
+
+  def x_session_ending(%{"state" => "cancelled"}), do: "Pairing cancelled."
+
+  def x_session_ending(%{"state" => "failed", "failure" => %{"sentence" => sentence}})
+      when is_binary(sentence),
+      do: sentence
+
+  def x_session_ending(%{"state" => "failed"}), do: "Pairing failed. See the daemon log."
+  def x_session_ending(_session), do: nil
+
+  defp x_pairing_mode(%{status: nil}), do: :unavailable
+  defp x_pairing_mode(%{session: %{"state" => "awaiting_browser"}}), do: :waiting
+  defp x_pairing_mode(%{status: %{"paired" => paired}}) when is_map(paired), do: :paired
+  defp x_pairing_mode(_x_pairing), do: :unpaired
+
+  defp x_pairing_badge_class(:paired), do: "badge badge-success badge-sm"
+  defp x_pairing_badge_class(:waiting), do: "badge badge-info badge-sm"
+  defp x_pairing_badge_class(:unavailable), do: "badge badge-warning badge-sm"
+  defp x_pairing_badge_class(:unpaired), do: "badge badge-ghost badge-sm"
+
+  defp x_pairing_badge_label(:paired), do: "Paired"
+  defp x_pairing_badge_label(:waiting), do: "Waiting for browser"
+  defp x_pairing_badge_label(:unavailable), do: "Unavailable"
+  defp x_pairing_badge_label(:unpaired), do: "Not paired"
+
+  # A refusal has the daemon's sentence; otherwise the connection word.
+  defp x_connection_text(%{"refusal" => %{"sentence" => sentence}}), do: sentence
+  defp x_connection_text(%{"connection" => "connected"}), do: "Connected to Fermix Connect."
+  defp x_connection_text(%{"connection" => "connecting"}), do: "Connecting to Fermix Connect."
+
+  defp x_connection_text(%{"connection" => "down"}),
+    do: "The connection to Fermix Connect is down; Fermix is retrying."
+
+  defp x_connection_text(%{"connection" => "off", "enabled" => true}),
+    do: "The channel starts at the next restart."
+
+  defp x_connection_text(_status), do: "The channel is off."
+
+  defp x_connection_class(%{"refusal" => %{}}), do: "text-warning"
+  defp x_connection_class(%{"connection" => "connected"}), do: "text-success"
+  defp x_connection_class(_status), do: "text-base-content/60"
+
+  # `2026-10-16T19:21:07Z` reads as `2026-10-16 19:21 UTC`.
+  defp x_paired_at(<<date::binary-size(10), "T", hour_minute::binary-size(5), _rest::binary>>),
+    do: "#{date} #{hour_minute} UTC"
+
+  defp x_paired_at(_paired_at), do: "an unknown time"
 
   defp plugins_pane(assigns) do
     ~H"""
@@ -4194,6 +4421,21 @@ defmodule FermixWebWeb.SetupLive.Components do
       action_field("Grant Full Disk Access", "imessage_grant", "full_disk_access"),
       action_field("Grant Messages automation", "imessage_grant", "automation"),
       action_field("Confirm who Fermix may message", "imessage_policy_confirm", nil)
+    ]
+  end
+
+  # The switch is the whole form (M63): Fermix Connect holds the account's
+  # grant, so there is no credential and no owner id to save. The pairing is
+  # the panel beside it, which acts on the daemon at once.
+  defp channel_fields(:x, form) do
+    [
+      toggle_field(
+        "Answer mentions of the shared X account",
+        "x_enabled",
+        form.enabled,
+        "People who mention Fermix's X account get an answer from their own Fermix. " <>
+          "Read when Fermix starts, so a change needs a restart."
+      )
     ]
   end
 

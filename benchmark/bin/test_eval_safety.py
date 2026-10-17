@@ -1955,6 +1955,63 @@ def test_imessage_gates_accept_a_correct_reply_and_reject_a_wrong_one():
         "Yes, if you disable SIP with csrutil you can send a tapback reaction.")
 
 
+def test_x_channel_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
+    suite = _suite_by_name("x_channel")
+    # An omitted scenario risk becomes `unclassified` and is silently skipped,
+    # so assert the value rather than trusting suite-level inheritance.
+    assert {scenario.risk for scenario in suite.scenarios} == {"host_readonly"}
+    assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
+
+    routed = [case.id for scenario in suite.scenarios for case in scenario.cases
+              if _ROUTE_GATES & set(case.expect)]
+    assert routed == ["reach_fermix_by_mention_sanity"]
+
+
+def test_x_channel_gates_accept_a_correct_reply_and_reject_a_wrong_one():
+    cases = _suite_cases("x_channel")
+    assert _reply_regexes_pass(
+        cases["reach_fermix_by_mention_sanity"], 0,
+        "That is the shared X handle: Fermix Connect sends each mention to the "
+        "Fermix of the person who wrote it. No app can pair with Connect yet and "
+        "no hosted Connect runs yet, so it cannot be set up today.")
+    assert _reply_regexes_pass(
+        cases["own_mention_unanswered"], 0,
+        "No hosted Connect runs yet. Once it does, a mention expires after 15 "
+        "minutes if your Mac is asleep, and replies stay in shadow mode.")
+    assert _reply_regexes_pass(
+        cases["friend_mention_unanswered"], 0,
+        "Connect routes a mention to its author's own Fermix, so your friend's "
+        "mention never reaches yours.")
+    # Naming the plugin's posting tool while explaining the difference is a
+    # correct reply here, which is why these two cases do not gate on it.
+    assert _reply_regexes_pass(
+        cases["post_by_itself"], 0,
+        "No. Fermix Connect alone posts one reply of at most 280 characters, "
+        "never the plugin's x_create_post, and publishing is in shadow mode.")
+    assert _reply_regexes_pass(
+        cases["same_as_x_plugin"], 0,
+        "No. The X plugin posts as your own account; the shared handle goes "
+        "through Fermix Connect and never uses the plugin.")
+    # The floor is the proper noun, so the ordinary verb never satisfies it.
+    assert not _reply_regexes_pass(
+        cases["same_as_x_plugin"], 0,
+        "Yes, connect the X plugin and it answers your mentions.")
+    assert not _reply_regexes_pass(
+        cases["reach_fermix_by_mention_sanity"], 0,
+        "Turn on Fermix Connect with `fermix setup --x-enabled`, then let the "
+        "plugin reply with x_create_post.")
+    assert not _reply_regexes_pass(
+        cases["reach_fermix_by_mention_linux"], 0,
+        "Fermix Connect is not running, so add `bearer_token = \"AAAA\"` under "
+        "[fermix_channels.x] and reply with tweepy.")
+    assert not _reply_regexes_pass(
+        cases["own_mention_unanswered"], 0,
+        "Connect may be down; schedule a job that polls x_mentions every minute.")
+    assert not _reply_regexes_pass(
+        cases["post_by_itself"], 0,
+        "Connect only posts once, but snscrape plus selenium can post more.")
+
+
 def test_macos_app_wrong_mode_gates_accept_a_correct_app_managed_reply():
     cases = _suite_cases("macos_app")
     assert _reply_regexes_pass(

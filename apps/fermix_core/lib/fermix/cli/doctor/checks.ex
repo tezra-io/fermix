@@ -37,6 +37,7 @@ defmodule Fermix.CLI.Doctor.Checks do
   alias FermixCore.IMessage
   alias FermixCore.IMessage.Control, as: IMessageControl
   alias FermixCore.IMessage.HelperInstaller, as: IMessageHelper
+  alias FermixCore.Management.X, as: ManagementX
   alias FermixCore.Meetings.Config, as: MeetingsConfig
   alias FermixCore.Memory.Config, as: MemoryConfig
   alias FermixCore.Net.Egress
@@ -1613,6 +1614,70 @@ defmodule Fermix.CLI.Doctor.Checks do
   defp rtms_lane(false), do: "zoom rtms not configured"
 
   @doc """
+  The shared X handle channel (M63): off, on and paired (the handle, the
+  Connect origin and the key fingerprint), or on and refused in the daemon's
+  own sentence (`Management.X`), never a silent no-op. It reads through
+  `X.Management.status/1`, which needs nothing running: from the tree-less
+  `fermix doctor` VM it reads the config and the pairing files and judges the
+  memory store by its setting, and inside the daemon the same call also reads
+  the live connection. Without the channels app there is no channel to check.
+
+  Seam: `status:` (an `X.Management.status/1` answer, or `:no_channel`).
+  """
+  @spec x_channel(keyword()) :: result()
+  def x_channel(opts \\ []) when is_list(opts) do
+    opts |> Keyword.get_lazy(:status, &x_status/0) |> x_channel_row()
+  end
+
+  defp x_status do
+    provider = Module.concat(["FermixChannels", "X", "Management"])
+
+    if Code.ensure_loaded?(provider),
+      do: apply(provider, :status, [[admit: [memory: &memory_configured/0]]]),
+      else: :no_channel
+  end
+
+  # The tree-less VM runs no store; the setting is what the daemon starts.
+  defp memory_configured do
+    if MemoryConfig.enabled?(), do: :ok, else: {:error, :memory_unavailable}
+  end
+
+  defp x_channel_row(:no_channel),
+    do: not_applicable("x channel", "the X channel is not part of this build")
+
+  defp x_channel_row({:ok, %{enabled: false, paired: paired}}),
+    do: ok("x channel", "off; " <> x_pairing_detail(paired))
+
+  defp x_channel_row({:ok, %{refusal: reason}}) when is_atom(reason) and not is_nil(reason),
+    do: warn("x channel", ManagementX.refusal_sentence(reason))
+
+  # Refused with no reason of its own: another socket for this instance took
+  # it over (`4409`), and only a restart dials again.
+  defp x_channel_row({:ok, %{connection: :refused, paired: paired}}) do
+    warn(
+      "x channel",
+      "on; " <>
+        x_pairing_detail(paired) <>
+        "; another connection for this Fermix replaced this one, restart Fermix to dial again"
+    )
+  end
+
+  defp x_channel_row({:ok, %{paired: paired, connection: connection}}),
+    do: ok("x channel", "on; " <> x_pairing_detail(paired) <> x_connection_detail(connection))
+
+  defp x_pairing_detail(nil), do: "not paired with Fermix Connect"
+
+  defp x_pairing_detail(paired),
+    do: "paired as #{paired.handle} with #{paired.origin}, key #{paired.fingerprint}"
+
+  # `off` while on and paired: the tree-less VM runs nothing, or the switch was
+  # turned on since the last start. Either way the daemon has the answer.
+  defp x_connection_detail(:off), do: ""
+  defp x_connection_detail(:connecting), do: "; connecting"
+  defp x_connection_detail(:connected), do: "; connected"
+  defp x_connection_detail(:down), do: "; connection lost, retrying"
+
+  @doc """
   The Fermix Messages helper (M54 §10.4): whether it is installed, the version
   this build pins, and the `codesign --verify --deep --strict` plus Team ID
   check the installer itself runs. Never spawns the helper. Off a Mac the
@@ -2628,10 +2693,8 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
-  @spec command_owner_config() :: result()
-  def command_owner_config do
-    report = ProviderProbe.command_owner_report()
-
+  @spec command_owner_config([FermixCore.Setup.Doctor.command_owner_report()]) :: result()
+  def command_owner_config(report \\ ProviderProbe.command_owner_report()) do
     missing =
       report
       |> Enum.filter(&missing_command_owner?/1)
@@ -2656,9 +2719,14 @@ defmodule Fermix.CLI.Doctor.Checks do
     end
   end
 
+  # A paired phone and a Connect assignment are each their channel's own
+  # authority, so neither channel has an owner id to set.
   defp missing_command_owner?(entry) do
     entry.enabled and is_nil(entry.owner_user_id) and
-      CoreConfig.channel_ingress_authority(entry.channel) != :paired_device
+      CoreConfig.channel_ingress_authority(entry.channel) not in [
+        :paired_device,
+        :connect_assignment
+      ]
   end
 
   @doc """
@@ -3193,6 +3261,9 @@ defmodule Fermix.CLI.Doctor.Checks do
     cond do
       CoreConfig.channel_ingress_authority(channel) == :paired_device ->
         "paired-device authority"
+
+      CoreConfig.channel_ingress_authority(channel) == :connect_assignment ->
+        "connect-assignment authority"
 
       sole_allowed_id? ->
         "owner missing (sole allowed id runs as guest)"
