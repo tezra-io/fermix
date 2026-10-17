@@ -78,6 +78,18 @@ def text_of(field) -> str:
     return str(field)
 
 
+# The manifest a turn with attachments composes under the user's words (M67,
+# `FermixCore.Attachments.Manifest`): a blank line, then this header.
+_MANIFEST_HEADER = "[attachments]\n"
+
+
+def _user_words(text: str) -> str:
+    """The user's own words of a turn's input, without its attachment manifest."""
+    if text.startswith(_MANIFEST_HEADER):
+        return ""
+    return text.partition("\n\n" + _MANIFEST_HEADER)[0]
+
+
 def _chat_id(thread_id: str | None) -> str | None:
     if not thread_id or ":" not in thread_id:
         return thread_id
@@ -293,7 +305,8 @@ class OpikClient:
         Each `fermix ask --session S` turn becomes one `agent:main` trace under
         thread_id `<channel>:S`. Multi-turn cases reuse S. A match is accepted only
         when the normalized input is exact; a sole or merely-containing candidate
-        is not enough. Once Fermix exports eval metadata, `correlation` must contain
+        is not enough. A turn with attachments is matched on the words above its
+        `[attachments]` manifest. Once Fermix exports eval metadata, `correlation` must contain
         exact `eval_run_id`, `case_id`, and `turn_index` values.
         """
         _validate_correlation(correlation)
@@ -319,7 +332,7 @@ class OpikClient:
                 continue
             if not _matches_correlation(t, correlation):
                 continue
-            inp = " ".join(text_of(t.get("input")).split()).strip().lower()
+            inp = " ".join(_user_words(text_of(t.get("input"))).split()).strip().lower()
             if inp == qn:
                 candidates.append(t)
 

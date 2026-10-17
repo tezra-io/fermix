@@ -361,6 +361,26 @@ def test_filtered_turn_still_requires_unique_exact_local_match(monkeypatch, rows
     assert (found["id"] if found else None) == expected
 
 
+_MANIFEST = ("\n\n[attachments]\n1. red_square.png · image · 132 bytes · attached as image 1"
+             "\n\n[text]\nquestion")
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("question" + _MANIFEST, "t1"),
+    ("question plus more" + _MANIFEST, None),
+    ("[attachments]\n1. red_square.png · image · 132 bytes", None),
+    ("other\n\nquestion" + _MANIFEST, None),
+])
+def test_turn_with_attachments_matches_the_words_above_its_manifest(monkeypatch, text,
+                                                                    expected):
+    """M67 composes an `[attachments]` manifest (and any inlined text) under the
+    user's words; the turn is still matched exactly on those words."""
+    client = OpikClient("http://opik", "eval")
+    monkeypatch.setattr(client, "_get", lambda *_a: {"content": [_trace(query=text)]})
+    found = client.find_turn_trace("session", "question", None, set())
+    assert (found["id"] if found else None) == expected
+
+
 def test_turn_polled_before_the_first_trace_creates_the_project_is_not_found_yet(monkeypatch):
     """Opik creates a project with its first trace and 404s the project until then.
 

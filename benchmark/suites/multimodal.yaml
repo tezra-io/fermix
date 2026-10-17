@@ -256,14 +256,14 @@ scenarios:
     severity: normal
     tags: [multimodal, attachments, text, automated]
     cases:
-      - id: barrier_code
+      - id: meeting_bay
         image: fixtures/attachments/notes_delta.txt
-        query: "What's the car park barrier code in my picnic notes?"
+        query: "Which car park bay are we meeting at, according to my picnic notes?"
         expect:
           main_model_matches: "."
           reply_matches: "\\b55\\b"
           reply_not_matches: "(?i)(looks|is) empty|no (file|note|attachment)s? (was |were )?(attached|included|received|sent)"
-        rubric: "Gives the barrier code DELTA 55 from the attached notes."
+        rubric: "Gives bay 55 in the north car park, from the attached notes."
       - id: bakery_name
         image: fixtures/attachments/notes_delta.txt
         query: "Which bakery is the cake from, according to this list?"
@@ -287,10 +287,13 @@ scenarios:
           main_model_matches: "."
           reply_not_matches: "(?i)(looks|is) empty|no (file|attachment)s? (was |were )?(attached|included|received|sent)"
         rubric: >
-          Passes only if the reply does both: (1) it tells the user that the
-          attached file payload.bin could not be read or opened, and (2) it
-          states no contents of that file. It fails if it describes what the file
-          contains, or says the message or the attachment is empty or missing.
+          Passes only if the reply does both: (1) it names payload.bin, or plainly
+          refers to the attached file, and tells the user it is not a readable
+          document, picture or text file, or that it could not be read; (2)
+          anything it says about the file's contents comes from tool_evidence
+          that inspected the saved copy. It fails if it says the message or the
+          attachment is empty or missing, or presents words, a picture or a
+          document as what the file says.
       - id: binary_file_reworded
         image: fixtures/attachments/payload.bin
         query: "What's in this attachment?"
@@ -298,8 +301,10 @@ scenarios:
           reply_not_matches: "(?i)(looks|is) empty|no (file|attachment)s? (was |were )?(attached|included|received|sent)"
         rubric: >
           Passes only if the reply tells the user the attached file payload.bin
-          could not be opened and describes none of its contents. It fails if it
-          states what the file contains, or calls the attachment empty or missing.
+          is not a readable document, picture or text file, or that it could not
+          be opened, and states its contents only as far as tool_evidence
+          inspected the saved copy. It fails if it calls the attachment empty or
+          missing, or presents words, a picture or a document as what it says.
 
   - id: image_described
     risk: external_write
