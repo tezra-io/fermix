@@ -20,6 +20,11 @@ defmodule FermixCore.Jobs.RunnerTest do
   # file server) can take seconds to get there.
   @runner_exit_ms 10_000
 
+  # How long an adapter hangs in a test whose watchdog must end the run. Only
+  # the watchdog's kill ends it early; a hang a stall can outlast lets the
+  # adapter answer first, and a loaded runner stalled past 180 ms that way.
+  @adapter_hang_ms 30_000
+
   defmodule RecordingAdapter do
     @behaviour FermixCore.Providers.Adapter
 
@@ -707,7 +712,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       inactivity_timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -751,7 +756,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         notify: parent,
         capability_registry: capability_registry,
         adapter: ToolThenSilentAdapter,
-        adapter_opts: [test_pid: parent, silence_ms: 5_000],
+        adapter_opts: [test_pid: parent, silence_ms: @adapter_hang_ms],
         output_base_dir: output_base_dir,
         inactivity_timeout_ms: 1_000,
         network_readiness_enabled: false
@@ -785,7 +790,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       default_timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -814,7 +819,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       timeout_ms: nil,
-      adapter_opts: [sleep_ms: 5_000],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -844,7 +849,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       inactivity_timeout_ms: nil,
-      adapter_opts: [sleep_ms: 5_000],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -873,7 +878,7 @@ defmodule FermixCore.Jobs.RunnerTest do
       capability_registry: capability_registry,
       output_base_dir: output_base_dir,
       timeout_ms: 20,
-      adapter_opts: [sleep_ms: 200],
+      adapter_opts: [sleep_ms: @adapter_hang_ms],
       script: [%{content: "too late"}]
     )
 
@@ -2491,7 +2496,7 @@ defmodule FermixCore.Jobs.RunnerTest do
         capability_registry: capability_registry,
         output_base_dir: output_base_dir,
         inactivity_timeout_ms: 20,
-        adapter_opts: [sleep_ms: 200],
+        adapter_opts: [sleep_ms: @adapter_hang_ms],
         delivery_adapter: RecordingDelivery,
         delivery_opts: [test_pid: self()],
         script: [%{content: "too late"}]
