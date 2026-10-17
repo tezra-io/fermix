@@ -1,0 +1,49 @@
+#!/bin/bash
+# Docker Sandboxes startup hook (lifecycle@1), run in the background on every
+# boot: keeps the provider relay up, Caddy on loopback with one port per
+# provider (fermix-relay.Caddyfile). Fermix reaches each provider through it,
+# and it reaches the provider through the sandbox's credential proxy, which
+# writes the stored key into the request.
+#
+# The restart rule is fermix-sandbox-loop's: five starts, five seconds apart.
+set -uo pipefail
+
+# The kit installs these files together in /usr/lib/fermix/sandbox.
+sandbox_dir="$(cd "$(dirname "$0")" && pwd -P)"
+readonly sandbox_dir
+readonly burst=5
+readonly pause_seconds=5
+
+exec </dev/null >>"$HOME/.fermix-relay.log" 2>&1
+echo "fermix-sandbox-relay: boot at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+# The sandbox sets the credential proxy only once a provider secret exists.
+# Without it the relay would send Fermix's placeholder to the provider as is.
+if [ -z "${HTTPS_PROXY:-}" ]; then
+  echo "fermix-sandbox-relay: HTTPS_PROXY is not set, so this sandbox has no credential proxy" \
+    "and no provider key. On your machine run sbx --cloud secret set <provider>" \
+    "(sbx secret set <provider> for a local sandbox), then create the sandbox again."
+  exit 1
+fi
+
+# A cloud stop is a pause, so the relay from an earlier boot can still be up.
+exec 9>"$HOME/.fermix-relay.lock"
+if ! flock -n 9; then
+  echo "fermix-sandbox-relay: the relay is already running"
+  exit 0
+fi
+
+starts=0
+while ((starts < burst)); do
+  starts=$((starts + 1))
+  "$sandbox_dir/caddy" run --config "$sandbox_dir/fermix-relay.Caddyfile" --adapter caddyfile
+  status=$?
+  echo "fermix-sandbox-relay: caddy exited with status ${status} (start ${starts} of ${burst})"
+  if ((starts < burst)); then
+    sleep "$pause_seconds"
+  fi
+done
+
+echo "fermix-sandbox-relay: caddy exited ${burst} times, so the relay stays stopped." \
+  "Read ~/.fermix-relay.log, then run: setsid $sandbox_dir/fermix-sandbox-relay &"
+exit 1

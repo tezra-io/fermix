@@ -1,0 +1,77 @@
+#!/bin/bash
+# Docker Sandboxes startup hook (lifecycle@1), run in the background on every
+# boot. The first boot writes Fermix's settings once with the headless setup;
+# every boot then hands over to fermix-sandbox-loop, which keeps `fermix run` up.
+#
+# The provider key in the environment is the sandbox's placeholder, never the
+# key itself: Fermix sends each provider request to the kit's relay on
+# loopback (fermix-sandbox-relay), and the sandbox's credential proxy behind it
+# writes the real key into the request, so the key stays with Docker and out
+# of this VM.
+set -euo pipefail
+
+# The kit installs these scripts together in /usr/lib/fermix/sandbox.
+sandbox_dir="$(cd "$(dirname "$0")" && pwd -P)"
+readonly sandbox_dir
+readonly settings="$HOME/.fermix-sandbox"
+readonly setup_done="$HOME/.fermix-sandbox-setup-done"
+
+# No one answers a hook: setup takes each default at end-of-input.
+exec </dev/null >>"$HOME/.fermix-sandbox-boot.log" 2>&1
+echo "fermix-sandbox-boot: boot at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+fail() {
+  echo "fermix-sandbox-boot: $*"
+  exit 1
+}
+
+[ -r "$settings" ] || fail "$settings is missing: the kit writes it on create"
+# Read, never sourced: the file sits in the agent's home.
+provider="$(sed -n 's/^PROVIDER=//p' "$settings")"
+case "$provider" in
+  openai | anthropic | xai) ;;
+  *) fail "$settings must name one PROVIDER, openai, anthropic or xai, not '$provider'" ;;
+esac
+readonly provider
+
+run_setup() {
+  local key_var key
+  key_var="$(printf '%s' "$provider" | tr '[:lower:]' '[:upper:]')_API_KEY"
+  key="${!key_var:-}"
+  [ -n "$key" ] || fail "$key_var is not set, so the kit gave this sandbox no $provider credential"
+
+  # No auth probe: the key here is a placeholder whatever the host holds, so a
+  # probe tests the host's secret, not this setup, and a failure would leave
+  # the sandbox without a daemon. The first turn reports a missing secret.
+  local args=(setup --cli --no-service --skip-probe --secret-store file
+    --provider "$provider" "--$provider-api-key" "$key")
+  # Claude runs on Haiku 5.5, which costs a fraction of Fermix's Sonnet
+  # default; OpenAI and xAI take Fermix's own default model.
+  if [ "$provider" = anthropic ]; then
+    args+=(--default-model claude-haiku-5-5)
+  fi
+  # Every provider goes through its relay port (fermix-relay.Caddyfile), never
+  # through the credential proxy itself: Erlang/OTP refuses that proxy's
+  # certificate. All three are set whichever provider comes first, so a later
+  # `fermix settings primary <provider>` finds its relay ready.
+  args+=(--anthropic-base-url http://127.0.0.1:18080/v1
+    --openai-base-url http://127.0.0.1:18081/v1
+    --xai-base-url http://127.0.0.1:18082/v1)
+
+  # Only a setup that ended well marks the first boot done; a failed one runs
+  # again on the next boot.
+  fermix "${args[@]}" || fail "fermix setup failed, so Fermix stays stopped." \
+    "Fix what it says above, then run: setsid $sandbox_dir/fermix-sandbox-boot &"
+  touch "$setup_done"
+}
+
+[ -e "$setup_done" ] || run_setup
+
+# A cloud stop is a pause, so the daemon and its loop can outlive the boot that
+# runs this hook again; a second loop would only fail five times beside them.
+if fermix status >/dev/null 2>&1; then
+  echo "fermix-sandbox-boot: Fermix is already running; its loop keeps it up"
+  exit 0
+fi
+
+exec "$sandbox_dir/fermix-sandbox-loop"

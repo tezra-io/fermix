@@ -1,0 +1,109 @@
+# syntax=docker/sandbox-kit:3
+# Fermix in Docker Sandboxes (M64): a workload kit that sets Fermix up headless
+# on first boot and keeps `fermix run` up. Provider keys stay with Docker:
+# Fermix sends provider requests to the kit's relay on loopback, and the
+# sandbox's credential proxy behind it writes the key into each request.
+#
+#   packaging/sbx/fetch_packages.sh <version>
+#   docker buildx build packaging/sbx -f packaging/sbx/fermix-kit.yaml \
+#     --platform linux/amd64,linux/arm64 -t docker.io/<namespace>/fermix-kit:<version> --push
+#   sbx --cloud run -d --name fermix --cpus 1 --memory 2g --ttl 24h --on-timeout stop \
+#     docker.io/<namespace>/fermix-kit:<version>
+schemaVersion: "3"
+kind: workload
+displayName: Fermix
+description: Fermix, a personal AI daemon, set up headless with its provider keys kept outside the sandbox
+sourceUrl: https://fermix.ai
+dockerfile: ./fermix-kit.dockerfile
+
+args:
+  provider:
+    default: anthropic
+    enum: [openai, anthropic, xai]
+    description: The provider Fermix uses first. Store its key with `sbx secret set <provider>`.
+
+capabilities:
+  - type: com.docker.sandbox/sbx@1
+
+  # A local sandbox stays up after its terminal closes (sbx 0.47 and later).
+  # Optional on purpose: the cloud refuses a kit that requires it.
+  - type: com.docker.sandbox/long-running@1
+    optional: true
+
+  - type: com.docker.sandbox/network-policy@1
+    config:
+      runtime:
+        # The three providers, web search's default backend, the chat channels
+        # with their attachment hosts, and GitHub for release and plugin
+        # downloads. Nothing else (D2).
+        allow:
+          - api.openai.com
+          - api.anthropic.com
+          - api.x.ai
+          - html.duckduckgo.com
+          - api.telegram.org
+          - discord.com
+          - gateway.discord.gg
+          - cdn.discordapp.com
+          - slack.com
+          - files.slack.com
+          - graph.facebook.com
+          - lookaside.fbsbx.com
+          - github.com
+          - "*.githubusercontent.com"
+
+  # Optional: a cloud sandbox injects by destination host from
+  # `sbx --cloud secret set <provider>` and may skip kit credential bindings.
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: OpenAI API access for Fermix
+    config:
+      service: openai
+      phase: runtime
+      apiKey:
+        name: OPENAI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.openai.com, header: Authorization, format: "Bearer %s"}
+
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: Anthropic API access for Fermix
+    config:
+      service: anthropic
+      phase: runtime
+      apiKey:
+        name: ANTHROPIC_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.anthropic.com, header: x-api-key, format: "%s"}
+
+  - type: com.docker.sandbox/credential@1
+    optional: true
+    description: xAI API access for Fermix
+    config:
+      service: xai
+      phase: runtime
+      apiKey:
+        name: XAI_API_KEY
+        proxyManaged: true
+        inject:
+          - {domain: api.x.ai, header: Authorization, format: "Bearer %s"}
+
+  - type: com.docker.sandbox/lifecycle@1
+    config:
+      files:
+        - path: /home/agent/.fermix-sandbox
+          content: "PROVIDER=${{ kit.args.provider }}\n"
+          mode: "0644"
+          description: The provider the boot hook sets up
+      startup:
+        - command: [/usr/lib/fermix/sandbox/fermix-sandbox-relay]
+          background: true
+          env: [HTTPS_PROXY]
+          description: Keep the provider relay up, which reaches each provider through the sandbox's credential proxy
+        - command: [/usr/lib/fermix/sandbox/fermix-sandbox-boot]
+          background: true
+          env: [OPENAI_API_KEY, ANTHROPIC_API_KEY, XAI_API_KEY]
+          description: Set Fermix up on first boot, then keep fermix run up
+      interactive: [--shell]

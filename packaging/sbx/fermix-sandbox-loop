@@ -1,0 +1,29 @@
+#!/bin/bash
+# Keeps `fermix run` up inside a Docker sandbox, which has no service manager.
+#
+# The rule is the packaged systemd unit's (packaging/linux/systemd/fermix.service):
+# Restart=always with RestartSec=5, and StartLimitBurst=5 under
+# StartLimitIntervalSec=infinity, so the fifth exit is the last one. Apply &
+# restart exits the daemon on purpose and counts as one of the five, as it does
+# under systemd.
+set -uo pipefail
+
+readonly burst=5
+readonly pause_seconds=5
+
+starts=0
+while ((starts < burst)); do
+  starts=$((starts + 1))
+  # The daemon writes its log to stdout and to ~/.fermix/logs/fermix.log; only
+  # what it says on stderr, such as a crash before its logger starts, is kept.
+  fermix run >/dev/null
+  status=$?
+  echo "fermix-sandbox-loop: fermix run exited with status ${status} (start ${starts} of ${burst})" >&2
+  if ((starts < burst)); then
+    sleep "$pause_seconds"
+  fi
+done
+
+echo "fermix-sandbox-loop: fermix run exited ${burst} times, so it stays stopped." \
+  "Read ~/.fermix-sandbox-boot.log and ~/.fermix/logs/fermix.log, then run: setsid $0 &" >&2
+exit 1
