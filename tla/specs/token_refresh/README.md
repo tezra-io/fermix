@@ -13,7 +13,7 @@ its refresh began (`mark_reauthorization_required`). Logout deletes the entry,
 then has the profile's manager forget its tokens and stops it (plugin logout,
 `plugins/auth.ex:66-89` → `TokenSupervisor.forget_signed_out`,
 `token_supervisor.ex:131-153`) or only forgets them (the provider sign-out of
-anthropic and xai, `management/auth.ex:147-154`, `:394-398`). A logout from a
+anthropic and xai, `management/auth.ex:153-161`, `:401-405`). A logout from a
 tree-less CLI VM deletes the entry the same way, then has a running daemon let
 go of the profile over the control socket (`auth_forget`,
 `cli/daemon.ex:852-882` → `TokenSupervisor.forget_signed_out`).
@@ -24,7 +24,7 @@ writes instead of deleting: under the profile lock it revokes the session
 upstream and writes the entry back with no token, then calls
 `TokenSupervisor.forget_signed_out` (`auth/chatgpt/logout.ex:35-49`, `:71-86`).
 It is reached through `ChatGPT.logout` from the app's `auth.logout`
-(`management/auth.ex:385-392`), `fermix auth logout` (`auth_command.ex:284-310`)
+(`management/auth.ex:392-399`), `fermix auth logout` (`auth_command.ex:297-323`)
 and the web setup. Every reader treats an entry with no token as gone:
 `Store.read` refuses it as `:missing_access_token` (`store.ex:345-354`), and a
 manager maps that to signed out exactly as it maps a deleted entry
@@ -96,11 +96,11 @@ Each refresher may start two refreshes. Tokens are written R0, R1, … below.
   (delete, then `forget`), not the plugin logout (delete, then
   `forget_signed_out`: forget, then `stop_profile`), which ChatGPT's sign-out
   also ends in. The provider sign-out goes on to `forget` even when the entry
-  is already gone (`management/auth.ex:403-412`). The in-daemon plugin logout
+  is already gone (`management/auth.ex:410-419`). The in-daemon plugin logout
   stops at the failed delete (`plugins/auth.ex:70-72`, `:84-88`). ChatGPT's
   sign-out writes nothing when it finds no registration and goes on to
   `forget_signed_out` (`chatgpt/logout.ex:71-77`). Both CLI logouts go on to
-  their notice (`auth_command.ex:289-291`, `:326-330`, `:389-392`;
+  their notice (`auth_command.ex:302-304`, `:339-343`, `:401-404`;
   `plugins_command.ex:269-273`). Every entry starts stored, and with
   `MergesOnWrite` on (as in every check with `LogoutFromCli`) only the logout
   deletes one, so a CLI logout never finds its entry already gone.
@@ -125,7 +125,7 @@ least one check):
   logout and ChatGPT's sign-out have it forget its tokens and stop it
   (`plugins/auth.ex:73`, `chatgpt/logout.ex:46` →
   `token_supervisor.ex:149-153`), the provider sign-out of anthropic and xai
-  has it forget them (`management/auth.ex:396`, `:421` →
+  has it forget them (`management/auth.ex:403`, `:428` →
   `token_supervisor.ex:123-129` → `token_manager.ex:196-199`).
 - `PluginLogoutForgets`: the in-daemon plugin logout calls
   `forget_signed_out`, the same call as a CLI logout's notice, so the manager
@@ -153,7 +153,7 @@ least one check):
   `entry_from_state` did before the fix.
 - `CliLogoutReachesDaemon`: after its delete, or ChatGPT's write, a CLI logout
   sends a running daemon `auth_forget` for the profile (`plugins_command.ex:262`,
-  `:504-529`; `auth_command.ex:284-310`, `:317-335`, `:361-377`;
+  `:504-529`; `auth_command.ex:297-323`, `:330-348`, `:374-389`;
   `cli/daemon/client.ex:60-74`). The daemon has the profile's manager forget
   its tokens, which also deletes its plugin child's token file, then stops it
   (`cli/daemon.ex:628`, `:852-882`; `token_supervisor.ex:131-153`). Off, the
@@ -514,11 +514,11 @@ describes, and the **Fix** bullets cite the code as it is now.
   authoritative `:not_running` answer.
   - **The CLI side.** After the delete, `fermix plugins auth logout` and
     `fermix auth logout` send `auth_forget` with the profile
-    (`plugins_command.ex:262`, `:504-529`; `auth_command.ex:317-335`,
-    `:361-377`; `cli/daemon/client.ex:60-74`); `fermix auth logout` for codex
-    sends it after ChatGPT's sign-out (`auth_command.ex:284-310`). Both also
-    send it when the entry was already gone (`auth_command.ex:289-291`,
-    `:326-330`, `:389-392`; `plugins_command.ex:269-273`), so rerunning the
+    (`plugins_command.ex:262`, `:504-529`; `auth_command.ex:330-348`,
+    `:374-389`; `cli/daemon/client.ex:60-74`); `fermix auth logout` for codex
+    sends it after ChatGPT's sign-out (`auth_command.ex:297-323`). Both also
+    send it when the entry was already gone (`auth_command.ex:302-304`,
+    `:339-343`, `:401-404`; `plugins_command.ex:269-273`), so rerunning the
     logout after a failed notice reaches the daemon.
   - **No daemon.** The output is exactly the local logout's.
   - **The daemon answers ok.** One more stderr line.
@@ -569,7 +569,7 @@ describes, and the **Fix** bullets cite the code as it is now.
 None open. The one this spec raised, whether importing a Codex CLI sign-in ends
 the Codex CLI's session and then Fermix's, closed when that import was retired
 (9336d149): `auth.import.start` now refuses `codex_cli`
-(`management/auth.ex:132-133`).
+(`management/auth.ex:133-134`).
 
 ## Outside this model
 
@@ -580,7 +580,7 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
   meet a manager that is itself waiting up to 10 s for the profile lock (held
   by a CLI refresh, say); the management caller then exits first, the socket
   turns that into `internal_error` (`cli/daemon.ex:364-374`), and
-  `revert_route` (`management/auth.ex:151`) never runs. The in-daemon plugin
+  `revert_route` (`management/auth.ex:158`) never runs. The in-daemon plugin
   logout's forget (`forget_signed_out`, `plugins/auth.ex:73`) and ChatGPT's
   sign-out's (`chatgpt/logout.ex:46`) are the same call and can meet the same
   wait. Their caller then exits after the delete or the write: the forget still
@@ -646,6 +646,12 @@ the Codex CLI's session and then Fermix's, closed when that import was retired
 - **A daemon older than the CLI** answers `auth_forget` with `unknown method`.
   The CLI reports that and exits 1, with the entry already removed, and asks
   for a restart onto the new engine.
+- **A provider sign-out the settings file refuses.** The sign-out of anthropic
+  and xai first asks the settings file's write guard (`route_writable`,
+  `management/auth.ex:156`, `:441-444`), because reverting the route writes
+  `config.toml`. Refused for an outside edit, it returns before the delete and
+  the forget, so it changes nothing the model tracks: it is a logout that
+  never ran.
 
 ## Assumptions
 

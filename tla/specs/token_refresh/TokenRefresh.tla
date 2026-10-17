@@ -87,14 +87,14 @@
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/oauth_flow.ex @ 39434a9831b7
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/auth.ex @ 8bf2d738a4e0
 \* SOURCE: apps/fermix_core/lib/fermix_core/plugins/dist/lock.ex @ db28568d0c53
-\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ e0892e7c3e8b
+\* SOURCE: apps/fermix_core/lib/fermix_core/management/auth.ex @ e74bec56ce22
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt.ex#logout @ 2f34e631693b
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/login.ex @ 0d2545361498
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/logout.ex @ 53141064392c
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/refresh.ex @ 235dc7b35088
 \* SOURCE: apps/fermix_core/lib/fermix_core/auth/chatgpt/registration.ex#read,signed_out,@profile @ 8a05570f216c
 \* SOURCE: apps/fermix_core/lib/fermix/cli/plugins_command.ex @ 7dce15e18d94
-\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 2c8153907866
+\* SOURCE: apps/fermix_core/lib/fermix/cli/auth_command.ex @ 01985f2dba08
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon.ex @ 668c59db129a
 \* SOURCE: apps/fermix_core/lib/fermix/cli/daemon/client.ex @ fd0cff9607dc
 EXTENDS Naturals, FiniteSets
@@ -118,12 +118,12 @@ CONSTANTS
     ReadsDiskBeforeRefresh, \* latest_entry re-reads auth.json before each refresh (token_manager.ex:501-505)
     OneCallbackPerManager,  \* one process per profile, one callback at a time (see "Who refreshes")
     MergesOnWrite,          \* Store.write re-reads the file and replaces only its own entry (store.ex:427-435, :519-550)
-    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout, ChatGPT sign-out), or forget (provider sign-out) (plugins/auth.ex:73, chatgpt/logout.ex:46, management/auth.ex:396)
+    LogoutReachesManager,   \* logout reaches the live manager: forget, then stop (plugin logout, ChatGPT sign-out), or forget (provider sign-out) (plugins/auth.ex:73, chatgpt/logout.ex:46, management/auth.ex:403)
     PluginLogoutForgets,    \* the plugin logout forgets before it stops (plugins/auth.ex:73 -> token_supervisor.ex:149-153)
     StoreLock,              \* auth.json.lock around every Store.write and delete_provider (store.ex:150-156, :166-174)
     ProfileLock,            \* the profile's lock over one refresh, read to write, and over a delete (store.ex:191-197)
     RefusesMissingEntry,    \* a manager whose entry is gone drops its tokens (token_manager.ex:320-328, :381-405)
-    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:361-377, plugins_command.ex:504-529, cli/daemon.ex:852-882)
+    CliLogoutReachesDaemon  \* a CLI logout then has a running daemon let go of the profile (auth_command.ex:374-389, plugins_command.ex:504-529, cli/daemon.ex:852-882)
 
 ASSUME /\ CliProfile \in Profiles /\ LogoutProfile \in Profiles
        /\ MaxAttempts \in Nat \ {0} /\ Rounds \in Nat
@@ -456,7 +456,7 @@ RefreshStep(a) ==
 (* back with no token under the profile lock instead, then calls           *)
 (* forget_signed_out too. Every reader takes that entry for a deleted one  *)
 (* (SignedOut), so the delete below stands for both. The provider sign-out *)
-(* of anthropic and xai (management/auth.ex:394-398) deletes, then forgets.*)
+(* of anthropic and xai (management/auth.ex:401-405) deletes, then forgets.*)
 
 \* delete_provider (store.ex:166-174) takes the profile lock, then the store
 \* lock, then read_existing (:437-441, :496-512). ChatGPT's sign-out takes
@@ -467,9 +467,9 @@ RefreshStep(a) ==
 \* same fold. With no entry, the in-daemon plugin logout fails and stops
 \* there (plugins/auth.ex:70-72, :84-88); the provider sign-out treats
 \* :provider_missing as done and goes on to forget (management/auth.ex:
-\* 403-412); ChatGPT's sign-out writes nothing and goes on to
+\* 410-419); ChatGPT's sign-out writes nothing and goes on to
 \* forget_signed_out (chatgpt/logout.ex:71-77); and both CLI logouts go on
-\* to their notice (auth_command.ex:289-291, :326-330, :389-392;
+\* to their notice (auth_command.ex:302-304, :339-343, :401-404;
 \* plugins_command.ex:269-273). Init stores every entry, and with
 \* MergesOnWrite on (every check with LogoutFromCli) only the logout deletes
 \* one, so the entry is never already gone here: the LogoutFromCli disjunct
@@ -522,7 +522,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*      (token_supervisor.ex:123-129, :163-170, :172-187). After its delete
 \*      or its write, every CLI logout tells a running daemon to let go of
 \*      the profile (plugins_command.ex:262, :504-529; auth_command.ex:
-\*      277-310, :317-335, :361-377): an `auth_forget` request on the
+\*      290-323, :330-348, :374-389): an `auth_forget` request on the
 \*      control socket (cli/daemon/client.ex:60-74), answered by
 \*      forget_signed_out (cli/daemon.ex:628, :852-882). Without
 \*      CliLogoutReachesDaemon, or when the daemon does not answer "ok"
@@ -537,7 +537,7 @@ Freed(h) == IF h \in Actors /\ Killed(h) THEN None ELSE h
 \*    it dies at once, mid-callback if one is running, and its plugin
 \*    child's token file stays on disk.
 \*  - forget, the provider sign-out of anthropic and xai (management/auth.ex:
-\*    396, :421 -> token_supervisor.ex:123-129 -> token_manager.ex:72,
+\*    403, :428 -> token_supervisor.ex:123-129 -> token_manager.ex:72,
 \*    :196-199): a GenServer.call, so it waits behind any refresh callback in
 \*    flight, then drops the tokens and sets state.refusal (drop_tokens,
 \*    :393-405).
