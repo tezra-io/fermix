@@ -8,6 +8,18 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Added
 
+- **Fermix knows which Fermix it is, and the machine it runs on.** Every
+  conversation with you, voice calls included, is now told whether this is
+  the Mac app, a standalone install on a Mac, the Linux package (and whether the
+  Fermix desktop app was installed when it started), a standalone Linux
+  binary or a development run, and which version of macOS or which Linux
+  distribution it runs on, on which processor. So "how do I…" is answered for
+  the install you have, without asking which one: a Mac app owner gets the
+  app's own settings, a Linux desktop app owner that app's pages and panes,
+  and a package or standalone install the `fermix` command and browser setup.
+  Fermix reads no machine name, account name, serial number or address for
+  it, and a guest you let talk to Fermix is told none of it. A desktop app
+  installed after Fermix started is known at its next restart.
 - **MCP servers you add yourself, managed over the management socket (engine
   side).** The daemon now owns the MCP servers you add, so the Mac app can
   offer them with no terminal and no hand edit: add one by its URL, with a key
@@ -183,6 +195,10 @@ uses [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ### Fixed
 
+- **What Fermix says about itself is current again.** It no longer tells a
+  Mac app owner that the app has no chat window, and it names iMessage among
+  the places a reminder can go, and among the inboxes it picks from when no
+  reminder target is set.
 - **A plugin's broken runtime is no longer reported as missing.** A local
   plugin's host runtime check failed the same way whether `node` was absent,
   too old, or present and crashing, and the Integrations row said "the runtime

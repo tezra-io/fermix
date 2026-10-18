@@ -2,7 +2,7 @@
 
 The Mac app's chat: a local, owner-only channel named `companion` that the app on the same Mac speaks to the running daemon. Fermix owns its versioned wire contract; the app vendors it.
 
-**Availability: no released Fermix.app has the chat window yet.** The socket is the daemon half, shipped first. Tell an owner who wants to chat from the Mac app exactly that, point them at the channels that work today, and never walk them to a chat window that is not there.
+**Where it shows:** the Fermix app's chat window, **Chat** in the app's sidebar, is its client; the socket is the daemon half.
 
 ## The socket and its trust
 

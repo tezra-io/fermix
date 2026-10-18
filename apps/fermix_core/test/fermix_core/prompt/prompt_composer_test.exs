@@ -4,6 +4,7 @@ defmodule FermixCore.Prompt.PromptComposerTest do
   import ExUnit.CaptureLog
 
   alias FermixCore.Capabilities.Capability
+  alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.Defaults
@@ -69,6 +70,33 @@ defmodule FermixCore.Prompt.PromptComposerTest do
     assert memory_context =~ "MEMORY (agent's working notes)"
     assert memory_context =~ "memory content"
     assert memory_context =~ "</memory-context>"
+  end
+
+  # M76 §4.2: `## This Fermix` is the owner's install and machine, so it rides
+  # the operator runtime section rather than the base every trust shares; the
+  # composer's own runtime part is the operator's, realtime sessions included.
+  test "carries ## This Fermix in the runtime part ahead of the contract, never in the base", %{
+    agent_id: agent_id
+  } do
+    write_bootstrap(agent_id, "FERMIX.md", "agents content")
+
+    assert {:ok, base} = PromptComposer.compose_base_with_metadata(agent_id: agent_id)
+    refute Enum.any?(base.parts, &(&1.content =~ "## This Fermix"))
+
+    for opts <- [[], [realtime?: true]] do
+      assert {:ok, composition} =
+               PromptComposer.compose_with_metadata(
+                 [agent_id: agent_id, available_skills: []] ++ opts
+               )
+
+      refute Enum.any?(composition.parts, &(&1.name == :host))
+      runtime = Enum.find(composition.parts, &(&1.name == :runtime))
+
+      assert String.starts_with?(
+               runtime.content,
+               HostFacts.prompt_section() <> "\n\n## Runtime Contract\n"
+             )
+    end
   end
 
   test "export_split/1 partitions parts into stable and volatile tiers", %{agent_id: agent_id} do

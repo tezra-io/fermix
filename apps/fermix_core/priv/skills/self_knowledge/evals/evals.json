@@ -88,6 +88,22 @@
         "invokes skill self_knowledge",
         "says no phone app is released yet, and that the phone channel's turns run in the Mac chat's one agent conversation: one history, so what is said on either is read by the next turn on the other (a voice call's tasks in the chat included), and one turn queue, so a message from one waits for a running turn from the other; a cancel stops only its own request, and /new from either starts the conversation afresh for both"
       ]
+    },
+    {
+      "name": "linux_app_change_provider",
+      "prompt": "I use the Fermix desktop app on my Ubuntu laptop. How do I switch Fermix to Anthropic instead of OpenAI?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "answers with the Linux desktop app's own labels: Settings > Providers, connect Anthropic there and choose Make primary from its row's menu, then restart when Fermix asks (Restart Fermix…), and does not send the person to fermix setup, another CLI verb or config.toml for what the app has a control for"
+      ]
+    },
+    {
+      "name": "answers_for_this_install",
+      "prompt": "How do I update you?",
+      "expectations": [
+        "invokes skill self_knowledge",
+        "answers for the one install the prompt's ## This Fermix section names (the Mac app's Check for Updates…, the Linux package's installer run again then fermix restart, a Homebrew formula's brew upgrade fermix then fermix restart, or a standalone binary's fermix upgrade) and does not ask the person which install they have or list the others"
+      ]
     }
   ]
 }

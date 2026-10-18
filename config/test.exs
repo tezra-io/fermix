@@ -201,6 +201,11 @@ config :fermix_core, :prompt_seeder, FermixTestSupport.PromptSeederStub
 # zone, the account's full name) must not come from the host running the suite.
 config :fermix_core, :machine_facts, FermixTestSupport.MachineFactsStub
 
+# Hermetic default: the host facts boot reads for the prompt's `## This Fermix`
+# section (the OS version, whether the Linux desktop app is installed) must not
+# come from the host running the suite.
+config :fermix_core, :host_facts_reader, FermixTestSupport.HostFactsStub
+
 # The remote_mcp provenance gate under test. DENY-BY-DEFAULT: a test that wants a
 # remote plugin to load must allow-list it explicitly (DistVerifierStub.allow/2),
 # so a gate that stopped verifying fails here instead of passing quietly. Never

@@ -4,6 +4,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
   alias FermixCore.Agents.VoiceCall
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.HostFacts
   alias FermixCore.Prompt.BootstrapPaths
   alias FermixCore.Prompt.CurrentDate
   alias FermixCore.Prompt.Defaults
@@ -31,12 +32,16 @@ defmodule FermixCore.Realtime.LivePromptTest do
     %{agent_id: "main", bootstrap_dir: bootstrap_dir}
   end
 
+  @host_section "## This Fermix\n- Install: the Fermix app on this Mac.\n" <>
+                  "- Machine: macOS 26.1 on Apple silicon (arm64)."
+
   # What a call is told about the owner when nothing is known: the date only.
   # A private call, so nothing about the chat is added either.
   @bare %{
     agent_id: "main",
     assistant_name: nil,
     personalization: [],
+    host_section: @host_section,
     date_note: "Current date: Friday, 2026-10-02 (UTC).",
     prompt_memory: %{user: nil, memory: nil},
     conversation: "private"
@@ -106,6 +111,8 @@ defmodule FermixCore.Realtime.LivePromptTest do
                  "\n\n" <>
                  VoicePresence.text() <>
                  "\n\n" <>
+                 @host_section <>
+                 "\n\n" <>
                  @bare.date_note <>
                  "\n\nBackend tools:\n- File & Code: read_file\n- Web: web_search\n- Memory: recall"
     end
@@ -113,7 +120,9 @@ defmodule FermixCore.Realtime.LivePromptTest do
     # M56 §4.3 (D5): who the owner is, what day it is and the memory files,
     # generated after LIVE.md and the presence text and before the tools, in
     # this order. SOUL.md is not among them: LIVE.md is the voice's persona.
-    test "names the assistant, the owner, the date and the memory, in that order" do
+    # Which Fermix this is (M76 D12) follows the presence text: the same
+    # `## This Fermix` section a typed turn's prompt carries.
+    test "names this Fermix, the assistant, the owner, the date and the memory, in that order" do
       context = %{
         @bare
         | assistant_name: "Nova",
@@ -130,6 +139,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       sections = [
         @title,
         VoicePresence.text(),
+        @host_section,
         "Your name is Nova.",
         "## The owner\n\n- Name: Sujeeth\n- Time zone: Europe/London\n" <>
           "- Communication style: Balanced",
@@ -211,22 +221,25 @@ defmodule FermixCore.Realtime.LivePromptTest do
       refute user_only =~ memory
       assert byte_size(user_only) <= max
 
-      # Room for neither: the frame goes, LIVE.md and the presence text stay.
+      # Room for neither: the frame goes, LIVE.md, the presence text and this
+      # Fermix stay.
       tight = @title <> "\n" <> String.duplicate("p", max - base - 200)
       neither = LivePrompt.compose(tight, [], context)
       refute neither =~ "<memory-context>"
       assert neither =~ tight
       assert neither =~ VoicePresence.text()
+      assert neither =~ @host_section
       assert byte_size(neither) <= max
     end
 
-    test "LIVE.md and the presence text are never cut, however long" do
+    test "LIVE.md, the presence text and this Fermix are never cut, however long" do
       huge = @title <> "\n" <> String.duplicate("p", LivePrompt.instructions_max_bytes())
 
       prompt = LivePrompt.compose(huge, [], %{@bare | prompt_memory: %{user: "- u", memory: nil}})
 
       assert prompt =~ huge
       assert prompt =~ VoicePresence.text()
+      assert prompt =~ @host_section
       refute prompt =~ "<memory-context>"
     end
   end
@@ -276,6 +289,7 @@ defmodule FermixCore.Realtime.LivePromptTest do
       assert context.conversation == "chat"
       assert context.assistant_name == "Nova"
       assert context.personalization == [user_name: "Sujeeth", timezone: "UTC"]
+      assert context.host_section == HostFacts.prompt_section()
       assert context.date_note == CurrentDate.note()
 
       assert context.prompt_memory == %{

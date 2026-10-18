@@ -2,6 +2,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   use ExUnit.Case, async: true
 
   alias FermixCore.Agents.SkillRegistry
+  alias FermixCore.Delivery.OwnerInbox
+  alias FermixCore.Temporal.Registry, as: TemporalRegistry
 
   test "bundled self-knowledge skill loads as a core skill with no tools" do
     local =
@@ -202,8 +204,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
   end
 
   # The companion socket has no setting, so the runtime self-reference must not
-  # invent one, and it must say the app half has not shipped: an owner is never
-  # walked to a chat window that is not there.
+  # invent one. The app half shipped with the Mac app's chat window, so the
+  # skill must no longer tell an owner it has not (M76 §8).
   test "documents the companion chat socket, its boundaries and its reads" do
     paragraph = companion_paragraph()
     # The reference is hard-wrapped; a phrase may span a line break.
@@ -216,7 +218,8 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
       assert text =~ "0600"
       assert text =~ "client message id"
       assert text =~ ~s(delivery_mode: "origin")
-      assert text =~ "No released Fermix.app" or text =~ "no released Fermix.app"
+      assert text =~ "the Fermix app's chat window"
+      refute text =~ ~r/(?i)no released Fermix\.app has the chat/
       refute text =~ "[fermix_channels.companion]"
     end
 
@@ -232,6 +235,102 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
         ] do
       assert reference =~ required, "companion self-knowledge does not mention #{required}"
     end
+  end
+
+  # M76 §4.10: the prompt's `## This Fermix` section says which install this
+  # is, so "how do I…" keys on it: the model answers for that one and never
+  # asks, where it used to guess and give a Mac app owner `fermix setup`.
+  test "answers for the install the prompt's ## This Fermix section names, never asking which" do
+    paragraph = install_paragraph()
+
+    assert paragraph != "", "self-knowledge never says which install it answers for"
+    assert paragraph =~ "`## This Fermix`"
+    assert paragraph =~ "answer for that one and never ask the person which they have"
+    assert paragraph =~ ~s(file: "linux_app")
+
+    # The map of what each kind owns stays, with the Linux desktop app on it.
+    for kind <- [
+          "Fermix.app",
+          "Linux `.deb`/`.rpm` package",
+          "standalone binary",
+          "io.tezra.Fermix"
+        ] do
+      assert paragraph =~ kind, "the install paragraph does not name #{kind}"
+    end
+  end
+
+  # M76 §4.10: the Linux desktop app's own labels, read from tezra-io/fermix-linux
+  # (`desktop/core/src/settings.rs` PANES, `desktop/app/src/shell.rs` PAGES, Home's
+  # switches, the tray, `desktop/io.tezra.Fermix.yml`). A Linux app owner is
+  # answered with them for anything the app has a control for.
+  test "the linux_app reference names the Linux app's pages, panes and controls" do
+    reference = "linux_app" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    panes =
+      ~w(Providers Personality Memory Channels Integrations Voice Meetings Computer) ++
+        ["Coding agents"] ++ ~w(Search Images Secrets Sandbox Permissions)
+
+    assert reference =~ Enum.join(panes, ", "),
+           "linux_app reference does not list the fourteen panes in order"
+
+    for label <- [
+          "**Chat**",
+          "**Pet**",
+          "**Home**",
+          "**Doctor**",
+          "**Logs**",
+          "**Settings**",
+          "**Run in the background**",
+          "**Open at login**",
+          "**Begin voice call**",
+          "**New conversation**",
+          "**Restart Fermix…**",
+          "**Run Doctor**"
+        ] do
+      assert reference =~ label, "linux_app reference does not name #{label}"
+    end
+
+    for fact <- [
+          "io.tezra.Fermix",
+          "daemon.sock",
+          "acp.sock",
+          "realtime.sock",
+          "fermix.service",
+          "No Phone pane",
+          "read-only"
+        ] do
+      assert reference =~ fact, "linux_app reference does not say #{fact}"
+    end
+
+    refute reference =~ "fermix-desktop"
+  end
+
+  # The reference drifted from the code twice over (M76 §8): it named five
+  # reminder platforms and a three-channel derived order while the registry
+  # had six and `OwnerInbox` four. Both are read from the code here, so the
+  # next platform fails this test until the reference names it.
+  test "the events_reminders reference names every reminder platform and the derived order" do
+    reference =
+      "events_reminders" |> reference_path() |> File.read!() |> String.replace(~r/\s+/, " ")
+
+    [_sentence, listed] =
+      {:unsupported_delivery_platform, "x"}
+      |> TemporalRegistry.describe_error()
+      |> String.split("Configure one of: ")
+
+    platforms = listed |> String.trim_trailing(".") |> String.split(", ")
+    assert "imessage" in platforms
+
+    {last, init} = platforms |> Enum.map(&platform_name/1) |> List.pop_at(-1)
+    assert reference =~ Enum.join(init, ", ") <> " or " <> last
+
+    derived =
+      [configured_owners: Map.new(platforms, &{&1, "owner-1"})]
+      |> OwnerInbox.derived_candidates()
+      |> Enum.map_join(", then ", &platform_name(&1.platform))
+
+    assert derived =~ "iMessage"
+    assert reference =~ "(" <> derived <> ")"
   end
 
   # M34 §4 changes what a whole family of CLI verbs does on an app-managed
@@ -521,6 +620,29 @@ defmodule FermixCore.Agents.SelfKnowledgeSkillTest do
 
   defp service_unit_reference_path do
     Path.expand("../../../priv/skills/self_knowledge/references/service_unit.md", __DIR__)
+  end
+
+  defp install_paragraph do
+    self_knowledge_path()
+    |> File.read!()
+    |> String.split("\n\n")
+    |> Enum.filter(&String.contains?(&1, "installs three ways"))
+    |> Enum.join("\n\n")
+  end
+
+  # A reminder platform's name as people write it; a new one fails loud here.
+  defp platform_name(platform) do
+    Map.fetch!(
+      %{
+        "telegram" => "Telegram",
+        "slack" => "Slack",
+        "discord" => "Discord",
+        "signal" => "Signal",
+        "whatsapp" => "WhatsApp",
+        "imessage" => "iMessage"
+      },
+      platform
+    )
   end
 
   defp app_managed_paragraph do

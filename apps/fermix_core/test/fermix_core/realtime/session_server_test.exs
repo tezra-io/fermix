@@ -5,6 +5,7 @@ defmodule FermixCore.Realtime.SessionServerTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.HostFacts
   alias FermixCore.Jobs.Registry
   alias FermixCore.Memory.Repo
   alias FermixCore.Realtime.Config
@@ -531,6 +532,32 @@ defmodule FermixCore.Realtime.SessionServerTest do
     # silently drop the rules again.
     assert {:ok, _summary} = SessionServer.reload_runtime(server)
     assert :sys.get_state(server).session_update_event.session.instructions =~ "act in silence"
+  end
+
+  # M76 D12: a voice call is the owner's, so the production prompt carries the
+  # operator runtime section's `## This Fermix`, once, through the same path as
+  # REALTIME.md above (no `prompt_loader`).
+  test "the production voice prompt tells the call which Fermix this is" do
+    fixture = runtime_session_fixture([])
+
+    {:ok, server} =
+      SessionServer.start_link(
+        companion: self(),
+        config: Config.normalize(enabled: true),
+        openai_client: FakeOpenAIClient,
+        api_key: "sk-test",
+        safety_identifier: "safe-id",
+        capability_registry: fixture.capability_registry,
+        skill_registry: fixture.skill_registry
+      )
+
+    assert :ok = SessionServer.call_start(server)
+
+    [event] = server |> SessionServer.openai_pid() |> FakeOpenAIClient.events()
+    section = HostFacts.prompt_section()
+
+    assert [_before, _after] = String.split(event.session.instructions, section)
+    assert event.session.instructions =~ section <> "\n\n## Runtime Contract\n"
   end
 
   test "skill reload does not mutate an active realtime session snapshot" do

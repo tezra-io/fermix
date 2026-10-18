@@ -27,6 +27,7 @@ defmodule FermixCore.Application do
   alias FermixCore.ComputerUse
   alias FermixCore.ComputerUse.Supervisor, as: ComputerUseSupervisor
   alias FermixCore.Harness.Supervisor, as: HarnessSupervisor
+  alias FermixCore.HostFacts
   alias FermixCore.Jobs.RunnerSupervisor, as: JobRunnerSupervisor
   alias FermixCore.Jobs.Scheduler, as: JobScheduler
   alias FermixCore.Log.RedactingFormatter
@@ -150,6 +151,7 @@ defmodule FermixCore.Application do
   end
 
   defp start_supervision_tree do
+    :ok = HostFacts.remember()
     remember_launch_cwd()
     :ok = ConfigStore.ensure_workspace()
     :ok = BootstrapRename.run()

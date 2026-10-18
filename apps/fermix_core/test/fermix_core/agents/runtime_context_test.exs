@@ -5,6 +5,7 @@ defmodule FermixCore.Agents.RuntimeContextTest do
   alias FermixCore.Agents.RuntimeContext
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
+  alias FermixCore.HostFacts
   alias FermixCore.Memory.PromptFiles
   alias FermixCore.Prompt.BootstrapPaths
 
@@ -293,6 +294,51 @@ defmodule FermixCore.Agents.RuntimeContextTest do
     assert :user in operator_names and :memory in operator_names
     refute :user in guest_names or :memory in guest_names
     assert List.last(guest_names) == :runtime
+  end
+
+  # M76 §4.2: `## This Fermix` names the owner's install, OS version and
+  # architecture, which a guest is kept from like the owner's memory. It rides
+  # the operator's runtime section, built once per trust for the server epoch,
+  # so it stays in the cached stable prefix of every owner turn.
+  test "a guest turn is never sent ## This Fermix; an owner's turn carries it once", %{
+    agent_id: agent_id,
+    registry: registry
+  } do
+    write_bootstrap(agent_id, "IDENTITY.md", "identity content")
+    :ok = CapabilityRegistry.register(registry, cap("read_tool"))
+
+    build = fn ->
+      {:ok, ctx} =
+        RuntimeContext.build(
+          agent_id: agent_id,
+          available_skills: [],
+          capability_registry: registry
+        )
+
+      ctx
+    end
+
+    ctx = build.()
+    user_message = %{role: "user", content: "what are you running on?"}
+    section = HostFacts.prompt_section()
+
+    guest_profiles = [
+      ctx.guest_profile,
+      RuntimeContext.profile_for(ctx, :guest, registry, harness_tools?: false)
+    ]
+
+    for profile <- guest_profiles do
+      guest = RuntimeContext.messages_for(ctx, profile, [], user_message)
+      refute Enum.any?(guest, &(&1.content =~ "## This Fermix"))
+    end
+
+    operator = RuntimeContext.messages_for(ctx, ctx.operator_profile, [], user_message)
+    assert [carrier] = Enum.filter(operator, &(&1.content =~ "## This Fermix"))
+    assert carrier == ctx.operator_profile.runtime_message
+    assert carrier.content =~ section
+
+    # A cache-prefix invariant: a second build sends the owner the same bytes.
+    assert build.().operator_profile.runtime_message == ctx.operator_profile.runtime_message
   end
 
   test "build_profile/4 defers plugin schemas from the wire but keeps them dispatchable", %{

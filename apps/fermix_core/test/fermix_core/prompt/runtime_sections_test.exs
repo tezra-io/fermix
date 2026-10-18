@@ -6,6 +6,7 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   alias FermixCore.Capabilities.Builtin
   alias FermixCore.Capabilities.Capability
   alias FermixCore.Capabilities.Registry
+  alias FermixCore.HostFacts
   alias FermixCore.Prompt.RuntimeSections
   alias FermixTestSupport.LazyTool
   alias FermixTestSupport.LazyTool.Unloader
@@ -25,6 +26,24 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   setup do
     on_exit(&Unloader.reload!/0)
     :ok
+  end
+
+  # M76 §4.2: the owner's install, OS version and architecture lead an
+  # operator's section, ahead of the contract's OS-specific rules; a guest's
+  # section names none of them.
+  test "build/2 leads an operator's section with ## This Fermix and gives a guest none" do
+    operator = RuntimeSections.build([], capabilities: [], trust: :operator)
+    guest = RuntimeSections.build([], capabilities: [], trust: :guest)
+
+    assert String.starts_with?(
+             operator,
+             HostFacts.prompt_section() <> "\n\n## Runtime Contract\n"
+           )
+
+    assert RuntimeSections.build([], capabilities: []) == operator
+    assert String.starts_with?(guest, "## Runtime Contract\n")
+    refute guest =~ "## This Fermix"
+    refute guest =~ HostFacts.prompt_section()
   end
 
   test "build/1 renders runtime guidance and an empty skill snapshot" do
@@ -144,7 +163,12 @@ defmodule FermixCore.Prompt.RuntimeSectionsTest do
   end
 
   test "build/1 does not mandate a Sources section on an answer that did no research" do
-    [contract | _rest] = String.split(RuntimeSections.build([]), "\n\n## ")
+    # The operator's section leads with `## This Fermix`; the contract is the
+    # part under its own heading.
+    contract =
+      RuntimeSections.build([])
+      |> String.split("\n\n## ")
+      |> Enum.find(&String.starts_with?(&1, "Runtime Contract\n"))
 
     assert contract =~ "An answer you did not look up gets no `Sources` section"
 

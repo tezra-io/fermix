@@ -1979,6 +1979,14 @@ def test_macos_app_wrong_mode_gates_accept_a_correct_app_managed_reply():
         "The app will not start while the Homebrew launch agent is there. Run "
         "`fermix migrate-to-app --yes`: it retires the formula and that agent, "
         "keeps your home, and opens the copy already in Applications.")
+    assert _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Open Settings > Providers, add Anthropic with Add key…, then its "
+        "Details… > Use as primary, and restart when the app asks.")
+    assert _reply_regexes_pass(
+        cases["update_from_the_app"], 0,
+        "Choose Check for Updates… in the Fermix menu and Install, then quit and "
+        "reopen; `brew upgrade --cask tezra-io/tap/fermix` also works for a cask.")
 
 
 def test_macos_app_wrong_mode_gates_reject_the_standalone_answer():
@@ -2006,6 +2014,91 @@ def test_macos_app_wrong_mode_gates_reject_the_standalone_answer():
         cases["brew_uninstall_alone"], 0,
         "That is fine on systemd hosts: `systemctl --user disable fermix`, then "
         "`fermix migrate-to-app` later if you want.")
+    # M76 stage 1: the standalone answer to an app owner's "how do I", each
+    # still naming the floor, so only the wrong-mode gate refuses it.
+    assert not _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Run `fermix setup --provider anthropic`, then check Settings > Providers.")
+    assert not _reply_regexes_pass(
+        cases["switch_primary_provider"], 0,
+        "Run `fermix auth login anthropic`; it then shows in Providers.")
+    assert not _reply_regexes_pass(
+        cases["update_from_the_app"], 0,
+        "Skip Check for Updates and pull the release yourself with "
+        "`curl -fsSL https://fermix.ai/install | sh`.")
+
+
+def test_linux_app_scenarios_declare_risk_and_keep_one_labelled_route_assertion():
+    suite = _suite_by_name("linux_app")
+    # An omitted scenario risk becomes `unclassified` and is silently skipped,
+    # so assert the value rather than trusting suite-level inheritance.
+    assert {scenario.risk for scenario in suite.scenarios} == {"host_readonly"}
+    assert all(len(scenario.cases) >= 2 for scenario in suite.scenarios)
+
+    routed = [case.id for scenario in suite.scenarios for case in scenario.cases
+              if _ROUTE_GATES & set(case.expect)]
+    assert routed == ["switch_provider_sanity"]
+
+
+def test_linux_app_gates_accept_the_app_answer():
+    cases = _suite_cases("linux_app")
+    correct = {
+        "switch_provider_sanity":
+            "In the desktop app open Settings > Providers, sign in on the Anthropic "
+            "row, choose Make primary from its menu, and restart when asked. You "
+            "do not need `fermix setup` for this.",
+        "add_openrouter_key":
+            "Settings > Providers > OpenRouter > Use an API key…, then Make primary. "
+            "The key goes to your keyring, not a settings file.",
+        "keep_running_after_logout":
+            "Turn on Run in the background on Home: it turns on linger and keeps "
+            "fermix.service running after you close the window or log out.",
+        "open_app_at_login":
+            "Yes: switch on Open at login on Home and the app opens in the tray "
+            "when you log in.",
+        "fresh_conversation_new_did_nothing":
+            "Slash commands do not run in the app's chat; New conversation at the "
+            "top of the Chat page starts a fresh one.",
+        "clear_chat_like_telegram":
+            "Use New conversation at the top of Chat: /new is not run there.",
+        "stopped_answering":
+            "Check Home for what needs attention, then open Doctor and Run checks; "
+            "Logs follows the daemon log. `journalctl --user -u fermix` says why a "
+            "service will not start.",
+        "restart_after_change":
+            "Click Restart Fermix… in the window's header; `fermix restart` in a "
+            "terminal does the same.",
+    }
+    assert set(correct) == set(cases)
+    for case_id, reply in correct.items():
+        assert _reply_regexes_pass(cases[case_id], 0, reply), case_id
+
+
+def test_linux_app_gates_reject_the_wrong_surface():
+    cases = _suite_cases("linux_app")
+    # Each wrong answer still names its case's floor where it has a wrong-surface
+    # gate, which isolates the refusal to that gate.
+    wrong = {
+        "switch_provider_sanity":
+            "Run `fermix setup --provider anthropic`, then look at Settings > Providers.",
+        "add_openrouter_key":
+            "Run `fermix auth login openrouter`; it then shows under Providers.",
+        "keep_running_after_logout":
+            "Turn on Run in the background, then `launchctl load` the agent.",
+        "open_app_at_login":
+            "Open at login is flaky, so write ~/.config/autostart/fermix.desktop.",
+        "fresh_conversation_new_did_nothing":
+            "Type /new again, it works there too.",
+        "clear_chat_like_telegram":
+            "Yes, /new works the same in the app.",
+        "stopped_answering":
+            "Open Doctor, then run `brew services restart fermix`.",
+        "restart_after_change":
+            "Restart Fermix with `launchctl kickstart -k gui/$UID/io.tezra.fermix`.",
+    }
+    assert set(wrong) == set(cases)
+    for case_id, reply in wrong.items():
+        assert not _reply_regexes_pass(cases[case_id], 0, reply), case_id
 
 
 def test_only_stream_span_operator_cases_require_telegram_streaming():

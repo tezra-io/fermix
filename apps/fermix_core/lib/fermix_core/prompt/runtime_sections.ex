@@ -11,6 +11,7 @@ defmodule FermixCore.Prompt.RuntimeSections do
   alias FermixCore.Capabilities.Registry, as: CapabilityRegistry
   alias FermixCore.ComputerUse.Config, as: ComputerUseConfig
   alias FermixCore.Harness.Config, as: HarnessConfig
+  alias FermixCore.HostFacts
   alias FermixCore.Tools.PlaceSearch
   alias FermixCore.Tools.VoiceCallContext
 
@@ -71,16 +72,27 @@ defmodule FermixCore.Prompt.RuntimeSections do
 
   @spec build([skill()], keyword()) :: String.t()
   def build(available_skills, opts \\ []) when is_list(available_skills) and is_list(opts) do
+    trust = Keyword.get(opts, :trust, :operator)
+
     [
+      this_fermix(trust),
       runtime_contract(),
       sub_agent_orchestration(opts),
       capability_summary_from_opts(opts),
       plugin_index_from_opts(opts),
-      skill_catalog(available_skills, Keyword.get(opts, :trust, :operator))
+      skill_catalog(available_skills, trust)
     ]
     |> Enum.reject(&(&1 in [nil, ""]))
     |> Enum.join("\n\n")
   end
+
+  # Which Fermix this is and the machine it runs on (M76 §4.2), read once at
+  # boot. It leads the Runtime Contract, whose rules name the OS they hold on
+  # (`open -a`, AppleScript on macOS), so the model reads the machine first.
+  # It is the owner's install, OS version and architecture, so a guest's
+  # profile carries none, as a guest turn carries none of the owner's memory.
+  defp this_fermix(:operator), do: HostFacts.prompt_section()
+  defp this_fermix(:guest), do: nil
 
   defp capability_summary_from_opts(opts) do
     case Keyword.fetch(opts, :capabilities) do
