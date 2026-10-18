@@ -38,11 +38,16 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
   `classify/1`, not a status, because every status is published in the plugin
   row's vocabulary.
 
-  Two facts ride beside a status, each written with it and cleared by the
-  next write: `tool_count`, how many tools the server listed (`put_ready/4`),
-  and `stderr_tail`, the last lines a stdio program wrote to its stderr before
-  it exited (`put_exited/4`). That text is the program's own, bounded by its
-  transport; it is published on the owner's row and never logged.
+  Two facts ride beside a status. `stderr_tail`, the last lines a stdio
+  program wrote to its stderr before it exited (`put_exited/4`), is written
+  with its status and cleared by the next write; that text is the program's
+  own, bounded by its transport, published on the owner's row and never
+  logged. `discovery`, what the last discovery found (`put_ready/4`: how many
+  tools the server listed, its `serverInfo` and its tools described, M74 E9),
+  is the one place a discovery's result is kept: it outlives the statuses and
+  the generations that follow it, so a server that is turned off or starting
+  again still shows what it last listed, and only the next discovery or
+  `clear/2` replaces it.
 
   ## Why `detail` is an atom, and what `subject` may hold
 
@@ -71,6 +76,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
 
   use GenServer
 
+  alias FermixCore.Capabilities.MCP.Discoverer
   alias FermixCore.Capabilities.MCP.Telemetry
 
   @statuses [
@@ -100,7 +106,7 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
           status: status(),
           detail: atom() | nil,
           subject: subject(),
-          tool_count: non_neg_integer() | nil,
+          discovery: Discoverer.discovery() | nil,
           stderr_tail: [String.t()],
           generation: generation(),
           owner: pid() | nil,
@@ -108,9 +114,9 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
           updated_at: integer()
         }
 
-  # The facts a write carries beside its status; a write that names neither
-  # clears both.
-  @no_facts %{tool_count: nil, stderr_tail: []}
+  # The fact a write carries beside its status, cleared by a write that names
+  # none. `discovery` is not among them: only a discovery replaces it.
+  @no_facts %{stderr_tail: []}
 
   @typedoc "The capability a refusal names, when it names one."
   @type subject :: String.t() | nil
@@ -195,13 +201,13 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     GenServer.call(server, {:put, source_id, generation, write})
   end
 
-  @doc "`put/6` of `:ready`, with how many tools the server listed."
-  @spec put_ready(GenServer.server(), source_id(), generation(), non_neg_integer()) ::
+  @doc "`put/6` of `:ready`, with what the discovery found (`Discoverer.discovery/2`)."
+  @spec put_ready(GenServer.server(), source_id(), generation(), Discoverer.discovery()) ::
           :ok | {:error, :stale_generation}
-  def put_ready(server, {kind, name} = source_id, generation, tool_count)
+  def put_ready(server, {kind, name} = source_id, generation, %{tool_count: count} = discovery)
       when is_atom(kind) and is_binary(name) and is_reference(generation) and
-             is_integer(tool_count) and tool_count >= 0 do
-    write = {:ready, nil, nil, %{@no_facts | tool_count: tool_count}}
+             is_integer(count) and count >= 0 do
+    write = {:ready, nil, nil, Map.put(@no_facts, :discovery, discovery)}
     GenServer.call(server, {:put, source_id, generation, write})
   end
 
@@ -451,11 +457,14 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     {:noreply, drop_waiter(state, source_id, waiter_id, {:error, :timeout})}
   end
 
+  # A new generation starts over at `:connecting` and keeps what the last
+  # discovery found, which only the next one replaces.
   defp install(state, source_id, owner, plugin, generation) do
     ref = Process.monitor(owner)
 
     entry =
       Map.merge(@no_facts, %{
+        discovery: last_discovery(Map.get(state.entries, source_id)),
         status: :connecting,
         detail: nil,
         subject: nil,
@@ -473,16 +482,19 @@ defmodule FermixCore.Capabilities.MCP.RuntimeStatus do
     }
   end
 
+  defp last_discovery(%{discovery: discovery}), do: discovery
+  defp last_discovery(nil), do: nil
+
   defp write(state, source_id, entry, {status, detail, subject, facts}) do
-    entry = %{
+    entry =
       entry
-      | status: status,
+      |> Map.merge(facts)
+      |> Map.merge(%{
+        status: status,
         detail: detail,
         subject: subject,
-        tool_count: facts.tool_count,
-        stderr_tail: facts.stderr_tail,
         updated_at: System.system_time(:millisecond)
-    }
+      })
 
     %{state | entries: Map.put(state.entries, source_id, entry)}
     |> settle(source_id, entry)

@@ -134,6 +134,20 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
   end
 
   @doc """
+  Discoverer callback: the `serverInfo` the owned session's `initialize`
+  answered with, or `nil` while there is no session (M74 E9).
+  """
+  @impl Discoverer
+  def server_info(owner) do
+    GenServer.call(owner, :server_info, Timeouts.mcp_remote_startup() + 5_000)
+  catch
+    # Same contract as `list_tools/1`: a torn-down owner has no session, and its
+    # classified status is the explanation.
+    :exit, {reason, {GenServer, :call, _args}} when reason in [:noproc, :normal, :shutdown] ->
+      nil
+  end
+
+  @doc """
   Discoverer callback: report upstream tool-list changes to `listener`.
 
   The listener is the registration owner (`MCP.Server`), and it re-arms the
@@ -234,6 +248,12 @@ defmodule FermixCore.Capabilities.MCP.Remote.Owner do
 
   def handle_call(:list_tools, _from, state) do
     {:reply, discover(state), state}
+  end
+
+  def handle_call(:server_info, _from, %{session: nil} = state), do: {:reply, nil, state}
+
+  def handle_call(:server_info, _from, state) do
+    {:reply, state.session_module.server_info(state.session), state}
   end
 
   def handle_call({:watch_tools, listener}, _from, state) do

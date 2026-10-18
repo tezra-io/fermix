@@ -46,6 +46,9 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
   defmodule StubDiscoverer do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
+    @impl true
+    def server_info(_client), do: nil
+
     @table :mcp_server_test_discoverer
 
     def set_tools(tools), do: :persistent_term.put({__MODULE__, :tools}, tools)
@@ -111,6 +114,40 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
         {:error, reason} -> {:error, reason}
         tools when is_list(tools) -> {:ok, tools}
       end
+    end
+  end
+
+  # A server that says who it is and what each tool does (M74 E9).
+  defmodule DescribingDiscoverer do
+    @behaviour FermixCore.Capabilities.MCP.Discoverer
+
+    alias FermixCore.Capabilities.MCP.Discoverer
+
+    @impl true
+    def server_info(_client),
+      do: %{"name" => "linear", "title" => "Linear", "version" => "1.4.2", "icons" => []}
+
+    @impl true
+    def list_tools(_client) do
+      {:ok,
+       [
+         Discoverer.normalize(%{
+           "name" => "create_issue",
+           "title" => "Create issue",
+           "description" => "Creates an issue.",
+           "inputSchema" => %{},
+           "annotations" => %{"destructiveHint" => true}
+         }),
+         Discoverer.normalize(%{
+           "name" => "list_issues",
+           "inputSchema" => %{},
+           "annotations" => %{
+             "title" => "List issues",
+             "readOnlyHint" => true,
+             "destructiveHint" => true
+           }
+         })
+       ]}
     end
   end
 
@@ -455,6 +492,56 @@ defmodule FermixCore.Capabilities.MCP.ServerTest do
 
       assert {:ok, %{status: :reauthorization_required, detail: :key_refused}} =
                RuntimeStatus.fetch(status, {:operator, "linear"})
+    end
+
+    # M74 E9: the one place a discovery lands keeps what the owner reads about
+    # the server and its tools, in the server's order.
+    test "a discovery keeps the server's serverInfo and each tool described", ctx do
+      status = start_supervised!({RuntimeStatus, name: :"mcp_server_described_#{ctx.test}"})
+      owner = spawn_link(fn -> receive do: (:stop -> :ok) end)
+      {:ok, _generation} = RuntimeStatus.register_owner(status, {:operator, "linear"}, owner)
+
+      {:ok, _pid} =
+        start_supervised(
+          {McpServer,
+           [
+             server_name: "linear",
+             source_id: {:operator, "linear"},
+             discoverer: DescribingDiscoverer,
+             caller: StubCaller,
+             capability_registry: ctx.cap_registry,
+             mcp_registry: ctx.mcp_registry,
+             runtime_status: status,
+             main_agent: nil,
+             realtime_supervisor: nil,
+             fail_fast?: true
+           ]},
+          id: :mcp_server_described
+        )
+
+      assert {:ok, %{status: :ready, discovery: discovery}} =
+               RuntimeStatus.fetch(status, {:operator, "linear"})
+
+      assert discovery == %{
+               tool_count: 2,
+               server_info: %{name: "linear", title: "Linear", version: "1.4.2"},
+               tools: [
+                 %{
+                   name: "create_issue",
+                   title: "Create issue",
+                   description: "Creates an issue.",
+                   read_only: false,
+                   destructive: true
+                 },
+                 %{
+                   name: "list_issues",
+                   title: "List issues",
+                   description: nil,
+                   read_only: true,
+                   destructive: false
+                 }
+               ]
+             }
     end
 
     test "tool_overrides win for policy_class and hidden_from_agent?", %{

@@ -102,6 +102,13 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   end
 
   @doc """
+  The `serverInfo` the server answered `initialize` with, as it sent it, or
+  `nil` when it sent none (M74 E9).
+  """
+  @spec server_info(GenServer.server()) :: map() | nil
+  def server_info(session), do: GenServer.call(session, :server_info)
+
+  @doc """
   Best-effort authenticated session teardown, then close.
 
   Teardown uses the same pinned origin, bearer, protocol-version header, and
@@ -143,6 +150,7 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
         notify: Keyword.get(opts, :notify),
         session_id: nil,
         protocol_version: nil,
+        server_info: nil,
         next_id: 1
       }
 
@@ -213,12 +221,19 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
 
   defp finish_initialize(state, result, headers, deadline) do
     with {:ok, version} <- check_negotiated_version(result, state.endpoint),
-         {:ok, state} <- adopt_session_id(%{state | protocol_version: version}, headers) do
+         {:ok, state} <- adopt_session_id(initialized(state, version, result), headers) do
       send_initialized(state, deadline)
     else
       {:error, reason} -> {:error, state, reason}
     end
   end
+
+  defp initialized(state, version, result) do
+    %{state | protocol_version: version, server_info: server_info_of(result)}
+  end
+
+  defp server_info_of(%{"serverInfo" => info}) when is_map(info), do: info
+  defp server_info_of(_result), do: nil
 
   # Only an operator URL can name a server on the older transport: a manifest
   # declares and signs `streamable_http`.
@@ -295,6 +310,8 @@ defmodule FermixCore.Capabilities.MCP.Remote.Session do
   def handle_call(:teardown, _from, state) do
     {:reply, delete_session(state), state}
   end
+
+  def handle_call(:server_info, _from, state), do: {:reply, state.server_info, state}
 
   defp reply({:ok, state, result, _headers}), do: {:reply, {:ok, result}, state}
   defp reply({:error, state, reason}), do: {:reply, {:error, reason}, state}

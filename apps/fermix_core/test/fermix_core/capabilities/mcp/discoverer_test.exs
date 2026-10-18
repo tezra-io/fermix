@@ -156,12 +156,75 @@ defmodule FermixCore.Capabilities.MCP.Discoverer.AnubisTest do
       assert from_normalized == from_wire
     end
 
+    test "carries the tool's title beside the fields the signature covers" do
+      assert Discoverer.normalize(Map.put(@wire, "title", "List workspaces")).title ==
+               "List workspaces"
+
+      assert Discoverer.normalize(@wire).title == nil
+    end
+
     test "an omitted field is nil, so omission hashes like an explicit null" do
       omitted = Discoverer.normalize(Map.drop(@wire, ["annotations"]))
       explicit = Discoverer.normalize(Map.put(@wire, "annotations", nil))
 
       assert omitted.annotations == nil
       assert explicit.annotations == nil
+    end
+  end
+
+  # M74 E9: what a discovery found, as the owner reads it.
+  describe "discovery/2" do
+    alias FermixCore.Capabilities.MCP.Discoverer
+
+    test "counts every tool and describes the first 256, in the server's order" do
+      tools = for n <- 1..300, do: Discoverer.normalize(%{"name" => "tool_#{n}"})
+
+      assert %{tool_count: 300, tools: described, server_info: nil} =
+               Discoverer.discovery(tools, nil)
+
+      assert length(described) == 256
+      assert hd(described).name == "tool_1" and List.last(described).name == "tool_256"
+    end
+
+    test "a hint is what the server declared, and text is bounded in characters" do
+      long = String.duplicate("é", 600)
+
+      tool =
+        Discoverer.normalize(%{
+          "name" => "wipe",
+          "title" => "  ",
+          "description" => long,
+          "annotations" => %{
+            "title" => "Wipe",
+            "readOnlyHint" => false,
+            "destructiveHint" => true
+          }
+        })
+
+      quiet =
+        Discoverer.normalize(%{"name" => "look", "annotations" => %{"readOnlyHint" => "yes"}})
+
+      reader =
+        Discoverer.normalize(%{
+          "name" => "read",
+          "annotations" => %{"readOnlyHint" => true, "destructiveHint" => true}
+        })
+
+      assert %{tools: [wipe, look, read]} = Discoverer.discovery([tool, quiet, reader], nil)
+      assert %{read_only: true, destructive: false} = read
+
+      assert %{title: "Wipe", read_only: false, destructive: true} = wipe
+      assert String.length(wipe.description) == 512
+      assert %{title: nil, description: nil, read_only: false, destructive: false} = look
+    end
+
+    test "serverInfo keeps its name, title and version, each bounded" do
+      info = %{"name" => "fs", "version" => String.duplicate("1", 200), "icons" => []}
+
+      assert %{server_info: %{name: "fs", title: nil, version: version}} =
+               Discoverer.discovery([], info)
+
+      assert String.length(version) == 128
     end
   end
 end

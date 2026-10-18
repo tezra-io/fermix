@@ -144,6 +144,25 @@ defmodule FermixCore.Capabilities.MCP.Remote.OwnerTest do
   end
 
   describe "connect → initialize → discover" do
+    # M74 E9: the owner keeps what `initialize` said about the server.
+    test "reports the serverInfo its session's initialize answered", %{status: status} do
+      info = %{"name" => "acme-mcp", "title" => "Acme", "version" => "2.0.1"}
+
+      initialize =
+        json(
+          200,
+          rpc_result(1, %{
+            "protocolVersion" => "2025-06-18",
+            "capabilities" => %{},
+            "serverInfo" => info
+          })
+        )
+
+      owner = start_owner(owner_opts(status, start_agent([initialize, accepted()])))
+
+      assert Owner.server_info(owner) == info
+    end
+
     test "a started owner is an initialized session that can list tools", %{status: status} do
       agent =
         start_agent([

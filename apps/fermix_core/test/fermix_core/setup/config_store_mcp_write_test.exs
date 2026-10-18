@@ -63,6 +63,9 @@ defmodule FermixCore.Setup.ConfigStoreMcpWriteTest do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
     @impl true
+    def server_info(_client), do: nil
+
+    @impl true
     def list_tools(_client) do
       {:ok,
        [

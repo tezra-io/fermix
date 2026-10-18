@@ -251,7 +251,7 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
       assert owner == Process.whereis(transport)
 
       assert eventually(fn -> match?({:ok, %{status: :ready}}, fetch(ctx, source)) end)
-      assert {:ok, %{tool_count: 2}} = fetch(ctx, source)
+      assert {:ok, %{discovery: %{tool_count: 2}}} = fetch(ctx, source)
 
       capture_log(fn ->
         ref = Process.monitor(transport)
@@ -259,7 +259,7 @@ defmodule FermixCore.Capabilities.MCP.StdioTransportTest do
         assert_receive {:DOWN, ^ref, :process, _pid, {:mcp_server_exited, _status}}, @bound_ms
       end)
 
-      assert {:ok, %{status: :remote_unreachable, detail: :exited, tool_count: nil}} =
+      assert {:ok, %{status: :remote_unreachable, detail: :exited, discovery: %{tool_count: 2}}} =
                fetch(ctx, source)
     end
 

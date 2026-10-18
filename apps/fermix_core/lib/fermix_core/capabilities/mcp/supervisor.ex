@@ -56,6 +56,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   alias FermixCore.Capabilities.MCP.Caller.OperatorRemote, as: OperatorRemoteCaller
   alias FermixCore.Capabilities.MCP.Caller.Remote, as: RemoteCaller
   alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.Discoverer.Anubis, as: AnubisDiscoverer
   alias FermixCore.Capabilities.MCP.LoginPath
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
@@ -170,6 +171,37 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
       when is_atom(kind) and is_binary(name) and is_map(spec) and is_list(opts) do
     with :ok <- stop_server(supervisor, source_id, opts) do
       Supervisor.start_child(supervisor, child_spec_for(spec, collaborators(opts)))
+    end
+  end
+
+  @doc """
+  Whether `source_id`'s subtree is running. A server whose last status is a
+  failure is being started again while its subtree runs, and has stopped
+  trying once the subtree is gone: one status read cannot tell those apart
+  (M74 E3).
+  """
+  @spec subtree_alive?(source_id()) :: boolean()
+  def subtree_alive?(source_id), do: subtree_alive?(__MODULE__, source_id)
+
+  @spec subtree_alive?(Supervisor.supervisor(), source_id()) :: boolean()
+  def subtree_alive?(supervisor, {kind, name} = source_id) when is_atom(kind) and is_binary(name),
+    do: find_child(supervisor, source_id) != :error
+
+  @doc """
+  Asks a running server for its tool list once more, through the discoverer
+  its subtree was started with and the client it published: what a check
+  measures. A server not running has no client to ask.
+  """
+  @spec list_tools(source_id(), map()) :: {:ok, [map()]} | {:error, term()}
+  def list_tools(source_id, server), do: list_tools(source_id, server, [])
+
+  @spec list_tools(source_id(), map(), keyword()) :: {:ok, [map()]} | {:error, term()}
+  def list_tools({kind, name} = source_id, server, opts)
+      when is_atom(kind) and is_binary(name) and is_map(server) and is_list(opts) do
+    registry = Keyword.get(opts, :mcp_registry, McpRegistry)
+
+    with {:ok, client} <- McpRegistry.lookup_client(registry, source_id) do
+      discoverer_for(server).list_tools(client)
     end
   end
 
@@ -519,7 +551,7 @@ defmodule FermixCore.Capabilities.MCP.Supervisor do
   defp discoverer_for(%{transport: remote}) when remote in [:streamable_http, :http],
     do: RemoteOwner
 
-  defp discoverer_for(_server), do: nil
+  defp discoverer_for(_server), do: AnubisDiscoverer
 
   # A remote plugin source dispatches through its allowlisted proxy, never a raw
   # client (M27 §7.6). The signed spec itself is the contract enforcer's input.

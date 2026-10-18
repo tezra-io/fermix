@@ -1178,6 +1178,62 @@ defmodule FermixCore.Management.RouterTest do
     }
   end
 
+  # M74 §5: the methods for the MCP servers the owner adds. Each refusal here
+  # is answered before anything is read or written.
+  describe "MCP server operations" do
+    test "the listing takes no parameters" do
+      assert {:error, :invalid_params, %{"method" => "mcp.servers.list"}} =
+               Router.route(v2("mcp.servers.list", %{"name" => "fetch"}))
+    end
+
+    test "every name-only verb refuses a request that names nothing, or more" do
+      for method <- ~w(
+            mcp.servers.get mcp.servers.remove mcp.servers.enable mcp.servers.disable
+            mcp.servers.check.start
+          ) do
+        assert {:error, :invalid_params, %{"field" => "name"}} = Router.route(v2(method, %{})),
+               "#{method} answered a request with no server named"
+
+        assert {:error, :invalid_params, %{"field" => "extra"}} =
+                 Router.route(v2(method, %{"name" => "fetch", "extra" => 1}))
+      end
+    end
+
+    test "a server's fields are a closed set, and a refusal names the field with a sentence" do
+      for method <- ~w(mcp.servers.add mcp.servers.update) do
+        assert {:error, :invalid_params, %{"field" => "draft_id"}} =
+                 Router.route(v2(method, %{"name" => "fetch", "draft_id" => "draft:1"}))
+      end
+
+      params = %{"name" => "fetch", "transport" => "stdio", "url" => "https://x.dev/mcp"}
+
+      assert {:error, :invalid_params, %{"field" => "url", "sentence" => sentence}} =
+               Router.route(v2("mcp.servers.add", params))
+
+      assert sentence == "A server on this Mac does not take this."
+    end
+
+    test "a tool switch names its server, its tool and a boolean" do
+      complete = %{"name" => "linear", "tool" => "create_issue", "enabled" => false}
+
+      for field <- ~w(name tool enabled) do
+        assert {:error, :invalid_params, %{"field" => ^field}} =
+                 Router.route(v2("mcp.servers.tool.set", Map.delete(complete, field)))
+      end
+
+      assert {:error, :invalid_params, %{"field" => "enabled"}} =
+               Router.route(v2("mcp.servers.tool.set", %{complete | "enabled" => "off"}))
+
+      assert {:error, :invalid_params, %{"field" => "extra"}} =
+               Router.route(v2("mcp.servers.tool.set", Map.put(complete, "extra", 1)))
+    end
+
+    test "a protocol-1 session is told the methods need version 2" do
+      assert {:error, :method_not_found, %{"method" => "mcp.servers.list", "requires" => 2}} =
+               Router.route(request("mcp.servers.list"))
+    end
+  end
+
   defp v2(method, params \\ %{}), do: %{request(method, params) | protocol_version: 2}
 
   defp request(method, params \\ %{}) do

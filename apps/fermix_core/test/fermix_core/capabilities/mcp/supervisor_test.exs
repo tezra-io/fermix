@@ -18,6 +18,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
     @impl true
+    def server_info(_client), do: nil
+
+    @impl true
     def list_tools(_client) do
       {:ok,
        [
@@ -31,6 +34,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
     @impl true
+    def server_info(_client), do: nil
+
+    @impl true
     def list_tools(_client), do: {:error, :transport_closed}
   end
 
@@ -38,6 +44,9 @@ defmodule FermixCore.Capabilities.MCP.SupervisorTest do
   # a test count how many times discovery re-runs before the subtree quarantines.
   defmodule CountingSadDiscoverer do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
+
+    @impl true
+    def server_info(_client), do: nil
 
     @impl true
     def list_tools(reporter) when is_pid(reporter) do

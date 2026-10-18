@@ -112,7 +112,16 @@ defmodule FermixCore.Management.ProtocolTest do
              "browser.install.start",
              "imessage.permissions.get",
              "imessage.grant.start",
-             "imessage.policy.confirm"
+             "imessage.policy.confirm",
+             "mcp.servers.list",
+             "mcp.servers.get",
+             "mcp.servers.add",
+             "mcp.servers.update",
+             "mcp.servers.remove",
+             "mcp.servers.enable",
+             "mcp.servers.disable",
+             "mcp.servers.tool.set",
+             "mcp.servers.check.start"
            ]
 
     assert Protocol.error_codes() == [

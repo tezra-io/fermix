@@ -11,6 +11,8 @@ defmodule FermixCore.Management.ProtocolContractTest do
   use ExUnit.Case, async: true
 
   alias Fermix.CLI.Daemon.Client
+  alias FermixCore.Capabilities.MCP.Config, as: McpConfig
+  alias FermixCore.Capabilities.MCP.RuntimeStatus
   alias FermixCore.Management.Detect
   alias FermixCore.Management.Doctor
   alias FermixCore.Management.Doctor.Descriptor
@@ -18,6 +20,7 @@ defmodule FermixCore.Management.ProtocolContractTest do
   alias FermixCore.Management.Jobs
   alias FermixCore.Management.Lifecycle
   alias FermixCore.Management.Logs
+  alias FermixCore.Management.McpServers.Row, as: McpRow
   alias FermixCore.Management.Plugins.Row, as: PluginRow
   alias FermixCore.Management.Protocol
   alias FermixCore.Management.Router
@@ -33,6 +36,66 @@ defmodule FermixCore.Management.ProtocolContractTest do
   @successes Application.app_dir(:fermix_core, "priv/management/fixtures/success.jsonl")
   @errors Application.app_dir(:fermix_core, "priv/management/fixtures/errors.jsonl")
   @compatibility Application.app_dir(:fermix_core, "priv/management/fixtures/compatibility.jsonl")
+
+  @mcp_router_toml ~S"""
+  [mcp.servers.filesystem]
+  command = "/bin/sh"
+  args = ["serve.sh"]
+  origin = "added"
+
+  [mcp.servers.linear]
+  transport = "http"
+  url = "https://mcp.linear.app/mcp"
+  auth = "none"
+  origin = "added"
+  """
+
+  # The servers the golden rows illustrate, as a hand edit would hold them.
+  @mcp_golden_toml ~S"""
+  [mcp.servers.context7]
+  transport = "http"
+  url = "https://mcp.context7.com/mcp"
+  auth = "header"
+  key_header = "CONTEXT7_API_KEY"
+  header_secrets = ["CONTEXT7_API_KEY"]
+  origin = "added"
+
+  [mcp.servers.filesystem]
+  command = "npx"
+  args = ["-y", "@modelcontextprotocol/server-filesystem", "/Users/owner/Documents"]
+  origin = "added"
+
+  [mcp.servers.github]
+  transport = "http"
+  url = "https://api.githubcopilot.com/mcp/"
+  origin = "added"
+
+  [mcp.servers.linear]
+  transport = "http"
+  url = "https://mcp.linear.app/mcp"
+  auth = "header"
+  key_header = "Authorization"
+  header_secrets = ["Authorization"]
+  origin = "added"
+
+  [mcp.servers.linear.tools.delete_comment]
+  hidden_from_agent = true
+
+  [mcp.servers.linear.tools.update_project]
+  hidden_from_agent = true
+
+  [mcp.servers.notes]
+  command = "node"
+  args = ["index.js"]
+  cwd = "/Users/owner/mcp/notes-server"
+  enabled = false
+
+  [mcp.servers.postgres]
+  command = "uvx"
+  args = ["postgres-mcp", "--access-mode=restricted"]
+  env_secrets = ["DATABASE_URI"]
+  origin = "added"
+  """
 
   setup_all do
     raw = File.read!(@schema_path)
@@ -559,6 +622,83 @@ defmodule FermixCore.Management.ProtocolContractTest do
     assert published["setting_kinds"] == PluginRow.setting_kinds()
   end
 
+  # An MCP server row's closed sets are published once, beside the plugin
+  # vocabulary, and pinned to the builder that mints them (M74 §5).
+  test "the schema's MCP server vocabulary matches the row builder", %{schema: schema} do
+    published = schema["x-mcp-server-vocabulary"]
+    defs = schema["$defs"]
+
+    assert published["statuses"] == Enum.map(McpRow.statuses(), &Atom.to_string/1)
+    assert published["actions"] == McpRow.actions()
+    assert published["auth_states"] == McpRow.auth_states()
+    assert defs["mcpServerAction"]["enum"] == McpRow.actions()
+
+    assert defs["mcpServerRow"]["properties"]["auth"]["properties"]["state"]["enum"] ==
+             McpRow.auth_states()
+  end
+
+  # The row is "every field always present" and the schema closes it, so a
+  # field added in Elixir and not declared is a frame the app refuses. `tools`
+  # is the one field only `mcp.servers.get` carries.
+  test "the schema declares exactly the fields an MCP server row carries", %{schema: schema} do
+    row_def = schema["$defs"]["mcpServerRow"]
+    tool_def = schema["$defs"]["mcpServerTool"]
+    [server] = McpConfig.from_toml(@mcp_router_toml) |> Enum.filter(&(&1.name == "linear"))
+    tools = [%{name: "t", title: nil, description: nil, read_only: false, destructive: false}]
+
+    entry = %{
+      mcp_entry(:ready, nil)
+      | discovery: %{tool_count: 1, server_info: nil, tools: tools}
+    }
+
+    row = McpRow.build(server, mcp_facts(%{entry: entry}), tools?: true)
+    fields = row |> Map.delete("tools") |> Map.keys() |> Enum.sort()
+
+    assert row_def["additionalProperties"] == false
+    assert Enum.sort(row_def["required"]) == fields
+    assert row_def["properties"] |> Map.keys() |> Enum.sort() == Enum.sort(["tools" | fields])
+    assert Enum.sort(tool_def["required"]) == row["tools"] |> hd() |> Map.keys() |> Enum.sort()
+  end
+
+  # The golden rows are what the builder writes for the facts they illustrate,
+  # sentences included, so a word changed in Elixir fails here rather than
+  # reaching an app that renders the golden's.
+  test "the golden MCP server rows are the ones the row builder writes" do
+    servers = Map.new(McpConfig.from_toml(@mcp_golden_toml), &{&1.name, &1})
+    get = named_fixture_result("mcp_servers_get")["server"]
+    facts = mcp_golden_facts(Enum.map(get["tools"], &tool_metadata/1))
+    build = fn name, opts -> McpRow.build(servers[name], facts[name], opts) end
+
+    assert named_fixture_result("mcp_servers_list")["servers"] ==
+             Enum.map(~w(filesystem github linear notes postgres), &build.(&1, []))
+
+    assert get == build.("linear", tools?: true)
+    assert named_fixture_result("mcp_servers_add_remote_key")["server"] == build.("context7", [])
+  end
+
+  test "every golden MCP server row routes on its own closed actions", %{schema: schema} do
+    published = schema["$defs"]["mcpServerAction"]["enum"]
+    rows = golden_mcp_rows()
+
+    assert length(rows) >= 10
+
+    for row <- rows do
+      assert Enum.all?(row["actions"], &(&1 in published)), row["name"]
+      assert is_nil(row["primary_action"]) or row["primary_action"] in row["actions"], row["name"]
+    end
+  end
+
+  defp golden_mcp_rows do
+    @successes
+    |> fixtures()
+    |> Enum.filter(&String.starts_with?(&1["method"], "mcp.servers."))
+    |> Enum.flat_map(&mcp_rows_in(&1["response"]["result"]))
+  end
+
+  defp mcp_rows_in(%{"servers" => rows}) when is_list(rows), do: rows
+  defp mcp_rows_in(%{"server" => row}) when is_map(row), do: [row]
+  defp mcp_rows_in(_result), do: []
+
   # A word is not a routing key. Every golden row therefore carries an action id
   # beside every verb word, in the same order and from the schema's closed set,
   # so a client paints `verbs[i]` and routes on `actions[i]` instead of deriving
@@ -732,7 +872,48 @@ defmodule FermixCore.Management.ProtocolContractTest do
       # no seam at all: it reads and writes nothing, so the shape under test is
       # the live projection rather than an injected stand-in.
       {"plugins.list", %{}, []}
-    ] ++ settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases()
+    ] ++
+      settings_cases() ++ job_view_cases() ++ flow_cases() ++ mobile_cases() ++ mcp_cases()
+  end
+
+  # Stands in for the MCP tree: every server's subtree runs and answers one
+  # tool. Nothing else is asked of it by a read or a check of a ready server.
+  defmodule FakeMcpTree do
+    @moduledoc false
+
+    def subtree_alive?(_source_id), do: true
+    def list_tools(_source_id, _server), do: {:ok, [%{name: "create_issue"}]}
+  end
+
+  # The three MCP reads and the check against servers whose declared values are
+  # none, so no store is read, and a status table of this case's own in which
+  # both servers have connected. The four writes answer from a home and are
+  # pinned to their goldens in `McpServersTest`.
+  defp mcp_cases do
+    status = start_supervised!({RuntimeStatus, name: :"contract_mcp_status_#{unique()}"})
+
+    tools = [
+      %{name: "create_issue", title: nil, description: nil, read_only: false, destructive: true}
+    ]
+
+    info = %{name: "linear", title: "Linear", version: "1.4.2"}
+
+    for name <- ~w(filesystem linear) do
+      owner = spawn_link(fn -> receive do: (:stop -> :ok) end)
+      {:ok, generation} = RuntimeStatus.register_owner(status, {:operator, name}, owner)
+      discovery = %{tool_count: 1, server_info: info, tools: tools}
+      :ok = RuntimeStatus.put_ready(status, {:operator, name}, generation, discovery)
+    end
+
+    servers = McpConfig.from_toml(@mcp_router_toml)
+    sources = [servers: fn -> servers end, runtime_status: status, mcp_supervisor: FakeMcpTree]
+
+    [
+      {"mcp.servers.list", %{}, [operation_opts: sources]},
+      {"mcp.servers.get", %{"name" => "linear"}, [operation_opts: sources]},
+      {"mcp.servers.check.start", %{"name" => "linear"},
+       [operation_opts: [jobs: jobs()] ++ sources]}
+    ]
   end
 
   # Facts in the shape the phone channel hands over. `pair_get` answers a phone
@@ -1154,6 +1335,86 @@ defmodule FermixCore.Management.ProtocolContractTest do
   defp shape(_value), do: :scalar
 
   defp port, do: [port: 4030]
+
+  # What the daemon holds about each golden server: what is stored, its live
+  # status and discovery, whether its subtree runs and where its command is.
+  defp mcp_golden_facts(linear_tools) do
+    linear = %{
+      tool_count: 23,
+      server_info: info("linear", "Linear", "1.4.2"),
+      tools: linear_tools
+    }
+
+    fs_info = info("secure-filesystem-server", nil, "0.6.2")
+    stopped = mcp_entry(:remote_unreachable, :shutdown)
+
+    notes_discovery = %{
+      tool_count: 4,
+      server_info: info("notes-server", "Notes", "0.3.0"),
+      tools: []
+    }
+
+    %{
+      "context7" =>
+        mcp_facts(%{
+          presence: %{env: [], headers: [{"CONTEXT7_API_KEY", false}], client_secret: false}
+        }),
+      "filesystem" =>
+        mcp_facts(%{
+          entry: %{
+            mcp_entry(:ready, nil)
+            | discovery: %{tool_count: 11, server_info: fs_info, tools: []}
+          },
+          alive?: true,
+          resolution: {:ok, "/opt/homebrew/bin/npx"}
+        }),
+      "github" => mcp_facts(%{entry: mcp_entry(:reauthorization_required, :sign_in_required)}),
+      "linear" =>
+        mcp_facts(%{
+          presence: %{env: [], headers: [{"Authorization", true}], client_secret: false},
+          entry: %{mcp_entry(:ready, nil) | discovery: linear},
+          alive?: true
+        }),
+      "notes" =>
+        mcp_facts(%{
+          entry: %{stopped | discovery: notes_discovery},
+          resolution: {:ok, "/opt/homebrew/bin/node"}
+        }),
+      "postgres" =>
+        mcp_facts(%{
+          presence: %{env: [{"DATABASE_URI", true}], headers: [], client_secret: false},
+          entry: mcp_entry(:invalid_remote_config, :command_not_found),
+          resolution: {:error, {:command_not_found, "uvx"}}
+        })
+    }
+  end
+
+  defp mcp_facts(facts) do
+    Map.merge(
+      %{
+        presence: %{env: [], headers: [], client_secret: false},
+        entry: nil,
+        alive?: false,
+        resolution: nil
+      },
+      facts
+    )
+  end
+
+  defp mcp_entry(status, detail),
+    do: %{status: status, detail: detail, subject: nil, discovery: nil, stderr_tail: []}
+
+  defp info(name, title, version), do: %{name: name, title: title, version: version}
+
+  defp tool_metadata(tool) do
+    %{
+      name: tool["name"],
+      title: tool["title"],
+      description: tool["description"],
+      read_only: tool["read_only"],
+      destructive: tool["destructive"]
+    }
+  end
 
   defp engine_identity do
     %{

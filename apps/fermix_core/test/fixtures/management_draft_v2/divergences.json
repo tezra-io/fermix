@@ -1283,6 +1283,282 @@
       "field": "environment_override",
       "kind": "engine_only",
       "why": "The daemon names the environment variable it uses in place of the stored value (null when the stored value is the one in use), because config/runtime.exs layers a nonblank provider key, channel secret or APNs key from the daemon's environment over the stored one at every start; without it a write the next start ignores reads as a plain success. The field is optional and an older daemon omits it, so a decoder that ignores unknown keys is unaffected; the app shows it when it re-vendors."
+    },
+    {
+      "method": "(schema)",
+      "field": "job_kinds:mcp_check",
+      "kind": "engine_only",
+      "why": "M74: an MCP server check connects the server and lists its tools once, so it is a job of its own kind with a 15000 ms budget and the phases connecting and listing. The draft predates the kind; a client that has not re-vendored never starts one."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.add",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.check.start",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.disable",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.enable",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.get",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.list",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.remove",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.tool.set",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "methods:mcp.servers.update",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. They list, read, add, change, remove, switch and check the MCP servers the owner adds, and switch one tool. Added under minimum version 2 with no protocol bump, so a client that has not re-vendored never calls them; the app finds them in hello's methods."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.add=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.check.start=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.disable=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.enable=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.get=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.list=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.remove=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.tool.set=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "minimum_versions:mcp.servers.update=2",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "(schema)",
+      "field": "x-extensions:x-mcp-server-vocabulary",
+      "kind": "engine_only",
+      "why": "M74: the closed sets an MCP server row draws on (statuses, action ids, sign-in states), published beside the plugin vocabulary so a reader can enumerate them. The draft predates the row."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.add",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.check.start",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.disable",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.enable",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.get",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.list",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.remove",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.tool.set",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "hello",
+      "field": "capabilities.minimum_versions.mcp.servers.update",
+      "kind": "engine_only",
+      "why": "The MCP server methods are published with minimum version 2 in the whole-table minimum versions, as every v2 method is. The draft predates them, so its table has no entry; the addition is additive and needs no protocol bump."
+    },
+    {
+      "method": "job.get",
+      "field": "result.tool_count",
+      "kind": "engine_only",
+      "why": "M74: a finished `mcp_check` job's result carries `tool_count` beside `latency_ms`, how many tools the server listed. The draft predates the kind, and a job result is a flat map of scalars a client reads by key."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:auth",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:command_line",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:key_header",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:transport",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.add",
+      "field": "params:url",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.check.start",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.disable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.enable",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.get",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.remove",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:enabled",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.tool.set",
+      "field": "params:tool",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.update",
+      "field": "params:command_line",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
+    },
+    {
+      "method": "mcp.servers.update",
+      "field": "params:name",
+      "kind": "engine_only",
+      "why": "M74: the MCP server methods postdate the draft. A server is written as the fields a form holds (`command_line` or `url`, `auth`, `key_header` and the rest), and every other method takes the server's name, plus a tool and a switch for `mcp.servers.tool.set`."
     }
   ]
 }

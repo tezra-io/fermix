@@ -273,7 +273,7 @@ defmodule FermixCore.Capabilities.MCP.OperatorRemoteTest do
     ready? =
       eventually(fn ->
         match?(
-          {:ok, %{status: :ready, tool_count: 2}},
+          {:ok, %{status: :ready, discovery: %{tool_count: 2}}},
           RuntimeStatus.fetch(@opts[:runtime_status], @source)
         )
       end)

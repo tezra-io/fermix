@@ -22,6 +22,9 @@ defmodule FermixCore.Capabilities.MCP.ServerContractTest do
   defmodule StubDiscoverer do
     @behaviour FermixCore.Capabilities.MCP.Discoverer
 
+    @impl true
+    def server_info(_client), do: nil
+
     # A hold nobody releases is a broken test, not a suite that hangs.
     @hold_timeout 5_000
 

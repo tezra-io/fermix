@@ -505,6 +505,12 @@ plugin, one `Remote.Owner` and `Remote.Session`, with its endpoint from the URL
 the owner typed (`Remote.Endpoint.operator/1`, checked under `Net.Guard`'s
 owner policy) and its headers from `Capabilities.MCP.Secrets`; with no signed
 contract, its tools register as a stdio server's do.
+The owner manages operator servers over `daemon.sock` (`mcp.servers.*`,
+`Management.McpServers`): every write goes through the one `ConfigStore` MCP
+writer, and `Management.McpServers.Row` is the one owner of a server's row,
+composed from its block, its stored values, its `RuntimeStatus` entry (which
+keeps what its last discovery found, the server's `serverInfo` and its tools
+described) and whether its subtree still runs.
 Fermix is only ever an MCP client: it does not expose its own tools as an MCP
 server.
 

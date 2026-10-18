@@ -24,7 +24,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   When the supervisor supplies a source-qualified identity and a
   `RuntimeStatus` sink, this process also writes the generation-qualified
-  `:ready` (with how many tools the server listed) and classified terminal
+  `:ready` (with what the discovery found: the tools counted and described and
+  the server's `serverInfo`, M74 E9) and classified terminal
   statuses for that source, into the generation its owner installed: the
   remote owner, or an operator stdio server's `StdioTransport`. A stdio
   source that gives up on discovery is `retries_exhausted`. It pins its
@@ -56,6 +57,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
   alias FermixCore.Agents.MainAgent
   alias FermixCore.Agents.SkillRegistry
   alias FermixCore.Capabilities.MCP.Capability, as: McpCapability
+  alias FermixCore.Capabilities.MCP.Discoverer
   alias FermixCore.Capabilities.MCP.Naming
   alias FermixCore.Capabilities.MCP.Registry, as: McpRegistry
   alias FermixCore.Capabilities.MCP.Remote.Budget
@@ -321,7 +323,7 @@ defmodule FermixCore.Capabilities.MCP.Server do
          :ok <- watch_upstream(state),
          {:ok, descriptors} <- list_tools(state),
          {:ok, state} <- register_tools(descriptors, state) do
-      {:ok, complete_registration(%{state | discovery_attempts: 0}, length(descriptors))}
+      {:ok, complete_registration(%{state | discovery_attempts: 0}, descriptors)}
     end
   end
 
@@ -361,8 +363,8 @@ defmodule FermixCore.Capabilities.MCP.Server do
 
   # The shared registration-completion point: the agent's tool list is only now
   # what the registry says it is.
-  defp complete_registration(state, tool_count) do
-    _ = put_ready(state, tool_count)
+  defp complete_registration(state, descriptors) do
+    _ = put_ready(state, descriptors)
     emit_lifecycle(state, :ready, :ok, 0, 1)
     if state.proxy, do: Proxy.resume(state.proxy, state.contract)
     refresh_runtime_context(state)
@@ -733,14 +735,17 @@ defmodule FermixCore.Capabilities.MCP.Server do
     state
   end
 
-  defp put_ready(%{generation: nil}, _tool_count), do: :no_status_sink
+  defp put_ready(%{generation: nil}, _descriptors), do: :no_status_sink
 
-  defp put_ready(state, tool_count) do
+  # The `serverInfo` is asked for only where a status will carry it.
+  defp put_ready(state, descriptors) do
+    discovery = Discoverer.discovery(descriptors, state.discoverer.server_info(state.client))
+
     case RuntimeStatus.put_ready(
            state.runtime_status,
            state.source_id,
            state.generation,
-           tool_count
+           discovery
          ) do
       :ok -> :ok
       {:error, :stale_generation} -> :stale_generation
