@@ -205,7 +205,33 @@ defmodule FermixCore.NativeHost.LinkTest do
     assert await_current(ctx.host, &(not &1.attached))
   end
 
-  test "a press on an action is read, logged and dropped", ctx do
+  # A press on Snooze 10 minutes is the owner's own act on a reminder that rang
+  # here, applied with no model turn through the one snooze path.
+  test "a press on Snooze 10 minutes snoozes that reminder by ten minutes", ctx do
+    test = self()
+
+    snooze = fn reminder_id, minutes, _opts ->
+      send(test, {:snoozed, reminder_id, minutes})
+      {:ok, %{}}
+    end
+
+    restart_with_link_opts(ctx, snooze: snooze)
+    app = attach(ctx.socket_path)
+    link = attached_link(ctx.host)
+
+    send_line(app, %{
+      "type" => "notification.action",
+      "reminder_id" => "rem_1",
+      "action" => "snooze_10m"
+    })
+
+    assert_receive {:snoozed, "rem_1", 10}, 2_000
+    assert {:ok, _status} = round_trip(app, link)
+  end
+
+  test "a snooze the registry refuses is logged with its sentence, and the link goes on", ctx do
+    snooze = fn _reminder_id, _minutes, _opts -> {:error, :not_rung_on_this_computer} end
+    restart_with_link_opts(ctx, snooze: snooze)
     app = attach(ctx.socket_path)
     link = attached_link(ctx.host)
 
@@ -220,7 +246,8 @@ defmodule FermixCore.NativeHost.LinkTest do
         assert {:ok, _status} = round_trip(app, link)
       end)
 
-    assert log =~ "native host dropped notification.action for reminder rem_1"
+    assert log =~ "reminder rem_1 was not snoozed from its notification"
+    assert log =~ "That reminder was not delivered to this computer"
   end
 
   test "protocol violations are answered once and close the connection", ctx do
@@ -261,6 +288,12 @@ defmodule FermixCore.NativeHost.LinkTest do
 
   # One more request answered, so everything the app wrote before it has been
   # read: the link reads the app's lines in order.
+  defp restart_with_link_opts(ctx, link_opts) do
+    stop_supervised!(ctx.opts[:name])
+    opts = Keyword.put(ctx.opts, :link_opts, link_opts)
+    start_supervised!({NativeHostSupervisor, opts}, id: opts[:name])
+  end
+
   defp round_trip(app, link) do
     status = Task.async(fn -> Link.request(link, "host.status", %{}, 10_000) end)
     assert %{"id" => id, "type" => "host.status"} = recv(app)

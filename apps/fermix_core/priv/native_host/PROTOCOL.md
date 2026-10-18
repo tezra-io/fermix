@@ -163,7 +163,7 @@ An event carries `type` and no `id`. `attached` and the first
 |---|---|---|
 | `attached` | `host_version` | Ends the attach step. |
 | `capabilities` | `notifications` | The app's grants. Sent at attach and on every change. |
-| `notification.action` | `reminder_id`, `action` | The person pressed `action` (`snooze_10m`) on the notification for `reminder_id`. |
+| `notification.action` | `reminder_id`, `action` | The person pressed `action` (`snooze_10m`) on the notification for `reminder_id`. The daemon snoozes that reminder ten minutes as the owner's own act, with no model turn; there is no answer on the wire. |
 | `host_stopping` | — | The app is quitting. Final for this connection: see *Quit*. |
 
 ## Errors
@@ -213,6 +213,7 @@ daemon -> app:  { id: 1, type: "notifications.post", reminder_id: "rem_8Kf2xQ1vT
                   actions: [{ id: "snooze_10m", title: "Snooze 10 minutes" }] }
 app -> daemon:  { id: 1, ok: true, result: { notification_id: "7E1A…" } }
 app -> daemon:  notification.action { reminder_id: "rem_8Kf2xQ1vT0w", action: "snooze_10m" }
+daemon:         snoozes the reminder ten minutes; it rings again at 16:15
 ```
 
 ### The grant, asked from the Mac chat

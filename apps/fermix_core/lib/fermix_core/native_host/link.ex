@@ -46,6 +46,7 @@ defmodule FermixCore.NativeHost.Link do
   alias FermixCore.Native.HostAvailability
   alias FermixCore.NativeHost.Protocol
   alias FermixCore.SocketPeer
+  alias FermixCore.Temporal.Registry
   alias FermixCore.Trace
 
   @handover_timeout_ms 5_000
@@ -53,6 +54,8 @@ defmodule FermixCore.NativeHost.Link do
   # rather than queued behind an app that stopped answering.
   @max_pending 64
   @max_error_message 500
+  # What each notification action does: the one in v1 is Snooze 10 minutes.
+  @snooze_minutes %{"snooze_10m" => 10}
 
   @typedoc """
   What a request is answered with: the app's result or its error, or, when no
@@ -93,7 +96,8 @@ defmodule FermixCore.NativeHost.Link do
       next_id: 1,
       pending: %{},
       daemon_os_pid: Keyword.get(opts, :daemon_os_pid, String.to_integer(System.pid())),
-      os: Keyword.get(opts, :os, :os.type())
+      os: Keyword.get(opts, :os, :os.type()),
+      snooze: Keyword.get(opts, :snooze, &Registry.snooze_from_notification/3)
     }
 
     {:ok, state, @handover_timeout_ms}
@@ -211,9 +215,8 @@ defmodule FermixCore.NativeHost.Link do
   defp dispatch({:event, "capabilities", payload}, state), do: capabilities(payload, state)
   defp dispatch({:event, "host_stopping", _payload}, state), do: host_stopping(state)
 
-  defp dispatch({:event, type, payload}, state)
-       when type == "notification.action",
-       do: dispatch_notification_event(type, payload, state)
+  defp dispatch({:event, "notification.action", payload}, state),
+    do: notification_action(payload, state)
 
   defp dispatch({:response, id, outcome}, state), do: answered(id, outcome, state)
 
@@ -287,14 +290,24 @@ defmodule FermixCore.NativeHost.Link do
     write_request("host.stop_ack", %{}, nil, %{state | stopping: true})
   end
 
-  # The person's press on a notification's action, or their opening of one,
-  # validated by the codec. Where it goes is decided here; nothing in this
-  # engine acts on either yet, so each is logged and dropped.
-  defp dispatch_notification_event(type, payload, state) do
-    Logger.warning(
-      "native host dropped #{type} for reminder #{payload["reminder_id"]}: " <>
-        "nothing in this engine acts on it"
-    )
+  # The person's press on a notification's action, validated by the codec:
+  # Snooze 10 minutes on a reminder that rang here, the owner's own act,
+  # applied through the one snooze path with no model turn (M76 D6). The press
+  # has no answer on the wire, so a snooze the registry refuses is logged with
+  # its own sentence, and the connection goes on.
+  defp notification_action(%{"reminder_id" => reminder_id, "action" => action}, state) do
+    minutes = Map.fetch!(@snooze_minutes, action)
+
+    case state.snooze.(reminder_id, minutes, []) do
+      {:ok, _snoozed} ->
+        Logger.info("reminder #{reminder_id} snoozed #{minutes} minutes from its notification")
+
+      {:error, reason} ->
+        Logger.warning(
+          "reminder #{reminder_id} was not snoozed from its notification: " <>
+            Registry.describe_error(reason)
+        )
+    end
 
     {:cont, state}
   end
